@@ -1,0 +1,9 @@
+[package]
+name = "self_dep_crate"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[dev-dependencies]
+self_dep_crate = { path = "." }

@@ -1,0 +1,3 @@
+[workspace]
+members = ["self_dep_crate"]
+resolver = "2"

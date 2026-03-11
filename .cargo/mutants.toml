@@ -1,0 +1,24 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+examine_globs = ["crates/**"]
+exclude_globs = ["crates/testing_aids/**"]
+all_features = true
+cap_lints = true
+profile = "mutants"
+
+# Only run unit tests and integration tests, not doctests, benchmarks or examples.
+additional_cargo_test_args = [ "--locked", "--tests" ]
+
+exclude_re = [
+    # There are no API contracts for what these must return because they
+    # are for human-readable stringification. No purpose mutating them.
+    "impl Debug",
+    "impl fmt::Debug",
+    "impl std::fmt::Debug",
+    "impl core::fmt::Debug",
+    "impl data_privacy::Redactor",
+    "impl data_privacy::RedactedDebug",
+    "impl data_privacy::RedactedDisplay",
+    "impl data_privacy::RedactedToString",
+]
