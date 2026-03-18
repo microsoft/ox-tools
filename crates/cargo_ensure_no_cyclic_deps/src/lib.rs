@@ -1,20 +1,54 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! A cargo sub-command to detect cyclic dependencies in workspace crates.
+//! A cargo subcommand that detects cyclic dependencies between crates in a workspace. This is useful if you
+//! want to prevent dev-dependencies from creating dependency cycles as that can cause issues,
+//! e.g. for [`cargo-release`](https://github.com/crate-ci/cargo-release).
 //!
 //! # Usage
 //!
-//! After installation, run in any cargo workspace:
+//! Run this command in a cargo workspace:
 //!
 //! ```bash
 //! cargo ensure-no-cyclic-deps
 //! ```
 //!
-//! Or specify a manifest path:
+//! The command will:
+//! * Analyze all workspace crates
+//! * Check for cyclic dependencies (including dev-dependencies)
+//! * Report any cycles found
+//! * Exit with code 1 if cycles are detected, 0 otherwise
+//!
+//! # Installation
 //!
 //! ```bash
-//! cargo ensure-no-cyclic-deps --manifest-path path/to/Cargo.toml
+//! cargo install --path .
+//! ```
+//!
+//! Or from within the workspace:
+//!
+//! ```bash
+//! cargo install cargo-ensure-no-cyclic-deps
+//! ```
+//!
+//! # Example Output
+//!
+//! When cycles are detected:
+//!
+//! ```text
+//! Error: Cyclic dependencies detected!
+//!
+//! Cycle 1:
+//!   crate_a -> crate_b -> crate_c -> crate_a
+//!
+//! Cycle 2:
+//!   crate_x -> crate_y -> crate_x
+//! ```
+//!
+//! When no cycles are found:
+//!
+//! ```text
+//! No cyclic dependencies found.
 //! ```
 //!
 //! The tool will exit with code 0 if no cycles are found, or code 1 if cycles are detected.
@@ -49,7 +83,7 @@ enum Command {
 }
 
 /// Main entry point for the library, called from the binary crate
-/// 
+///
 /// # Errors
 /// Returns an error if cargo metadata cannot be loaded or processed
 pub fn run() -> Result<()> {
