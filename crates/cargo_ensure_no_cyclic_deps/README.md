@@ -13,7 +13,7 @@
 
 </div>
 
-A cargo subcommand that detects cyclic dependencies between crates in a workspace. This is useful if you
+A cargo sub-command that detects cyclic dependencies between crates in a workspace. This is useful if you
 want to prevent dev-dependencies from creating dependency cycles as that can cause issues,
 e.g. for [`cargo-release`][__link0].
 
