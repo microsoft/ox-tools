@@ -49,6 +49,9 @@ enum Command {
 }
 
 /// Main entry point for the library, called from the binary crate
+/// 
+/// # Errors
+/// Returns an error if cargo metadata cannot be loaded or processed
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
 

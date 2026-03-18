@@ -11,7 +11,7 @@ edition = "2024"
 
 [dependencies]
 argh = "0.1"
-ohno = { path = "../crates/ohno", features = ["app-err"] }
+ohno = { version = "0.3", features = ["app-err"] }
 ---
 
 use std::fs;
