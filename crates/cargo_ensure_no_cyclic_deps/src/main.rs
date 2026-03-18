@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 //! A cargo sub-command to detect cyclic dependencies in workspace crates.
 //!
 //! # Usage
