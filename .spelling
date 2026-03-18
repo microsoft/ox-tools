@@ -265,6 +265,7 @@ Symcrypt
 sys
 syscall
 sysinfo
+Tarjan's
 tdnf
 testability
 timestamp

@@ -1,4 +1,4 @@
-//! A cargo subcommand to detect cyclic dependencies in workspace crates.
+//! A cargo sub-command to detect cyclic dependencies in workspace crates.
 //!
 //! # Usage
 //!
