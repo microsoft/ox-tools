@@ -8,7 +8,7 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2024"
 rust-version = "1.88"
-authors = ["The Ox-Tools Project Authors"]
+authors = ["The Oxidizer Project Authors"]
 license = "MIT"
 homepage = "https://github.com/microsoft/ox-tools"
 
