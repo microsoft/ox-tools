@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! A cargo subcommand that detects cyclic dependencies between crates in a workspace. This is useful if you
+//! A cargo sub-command that detects cyclic dependencies between crates in a workspace. This is useful if you
 //! want to prevent dev-dependencies from creating dependency cycles as that can cause issues,
 //! e.g. for [`cargo-release`](https://github.com/crate-ci/cargo-release).
 //!
