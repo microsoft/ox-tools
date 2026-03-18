@@ -15,6 +15,11 @@ homepage = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ensure-
 keywords = ["cargo", "subcommand", "dependencies", "cycles"]
 categories = ["development-tools::cargo-plugins"]
 
+[package.metadata.cargo_check_external_types]
+# TODO: remove when anyhow is replaced by ohno, or cargo doc does not fail with bin-only crates.
+# https://github.com/rust-lang/cargo/issues/15231
+allowed_external_types = ["anyhow::Result"]
+
 [[bin]]
 name = "cargo-ensure-no-cyclic-deps"
 path = "src/main.rs"

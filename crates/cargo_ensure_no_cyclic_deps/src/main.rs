@@ -21,5 +21,7 @@
 use anyhow::Result;
 
 fn main() -> Result<()> {
+    // TODO: This could be a main.rs only crate, but CI complains when processing bin-only crates:
+    //  https://github.com/rust-lang/cargo/issues/15231.
     cargo_ensure_no_cyclic_deps::run()
 }
