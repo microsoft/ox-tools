@@ -21,7 +21,6 @@ homepage = "https://github.com/microsoft/ox-tools"
 #   is found to allow cycles, we pre-emptively disallow them.
 
 [workspace.dependencies]
-
 # local dependencies
 
 # external dependencies
