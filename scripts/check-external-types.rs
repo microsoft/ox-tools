@@ -1,6 +1,3 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-
 #!/usr/bin/env -S cargo +nightly -Zscript
 ---
 # Copyright (c) Microsoft Corporation.
