@@ -1,0 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[workspace]
+members = ["self_dep_crate"]
+resolver = "2"

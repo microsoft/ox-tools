@@ -1,0 +1,39 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-ensure-no-cyclic-deps"
+version = "0.2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors = ["Martin Kolinek"]
+description = "A cargo subcommand to detect cyclic dependencies in workspace crates"
+readme = "README.md"
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ensure-no-cyclic-deps"
+homepage = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ensure-no-cyclic-deps"
+keywords = ["cargo", "subcommand", "dependencies", "cycles"]
+categories = ["development-tools::cargo-plugins"]
+
+[package.metadata.cargo_check_external_types]
+# TODO: remove when anyhow is replaced by ohno, or cargo doc does not fail with bin-only crates.
+# https://github.com/rust-lang/cargo/issues/15231
+allowed_external_types = ["anyhow::Result"]
+
+[[bin]]
+name = "cargo-ensure-no-cyclic-deps"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { version = "1.0.100", default-features = false }
+cargo_metadata = { version = "0.18", default-features = false }
+clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
+petgraph = { version = "0.6", default-features = false }
+
+[dev-dependencies]
+assert_cmd = { version = "2.0", default-features = false }
+predicates = { version = "3.1", default-features = false }
+tempfile = { version = "3.13", default-features = false }
+
+[lints]
+workspace = true
