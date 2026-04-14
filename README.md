@@ -28,6 +28,7 @@ These are the primary crates built out of this repo:
 - [`anyspawn`](./crates/anyspawn/README.md) - A generic task spawner compatible with any async runtime.
 - [`bytesbuf`](./crates/bytesbuf/README.md) - Types for creating and manipulating byte sequences.
 - [`bytesbuf_io`](./crates/bytesbuf_io/README.md) - Asynchronous I/O abstractions expressed via `bytesbuf` types.
+- [`cargo_heather`](./crates/cargo_heather/README.md) -  A cargo subcommand to validate license headers in Rust and TOML source files
 - [`data_privacy`](./crates/data_privacy/README.md) - Mechanisms to classify, manipulate, and redact sensitive data.
 - [`fundle`](./crates/fundle/README.md) - Compile-time safe dependency injection for Rust.
 - [`layered`](./crates/layered/README.md) - A foundational service abstraction for building composable, middleware-driven systems.

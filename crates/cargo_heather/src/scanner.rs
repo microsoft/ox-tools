@@ -1,0 +1,259 @@
+// Licensed under the MIT License.
+
+//! File scanner for discovering source files in a project.
+//!
+//! Walks the project directory tree, collecting all supported source files
+//! (`.rs` and `.toml`) while skipping build artifacts and hidden directories.
+
+use std::path::{Path, PathBuf};
+
+use walkdir::WalkDir;
+
+use crate::comment::CommentStyle;
+
+/// Directories to always skip when scanning.
+const SKIP_DIRS: &[&str] = &[
+    "target",
+    ".git",
+    ".github",
+    ".vscode",
+    ".idea",
+    "node_modules",
+];
+
+/// Discover all supported source files in the given project directory.
+///
+/// Finds files with extensions supported by [`CommentStyle`] (`.rs`, `.toml`).
+/// Skips hidden directories, build artifacts (`target/`), and other
+/// non-source directories. Returns a sorted list of absolute paths.
+///
+/// If `exclude` is provided, any path matching it will be omitted from results.
+#[must_use]
+pub fn find_source_files(project_dir: &Path, exclude: Option<&Path>) -> Vec<PathBuf> {
+    let exclude = exclude.and_then(|p| std::fs::canonicalize(p).ok());
+
+    let mut files: Vec<PathBuf> = WalkDir::new(project_dir)
+        .into_iter()
+        .filter_entry(|entry| !should_skip_dir(entry))
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.file_type().is_file()
+                && CommentStyle::from_path(entry.path()).is_some()
+        })
+        .map(walkdir::DirEntry::into_path)
+        .filter(|path| {
+            if let Some(ref excl) = exclude {
+                std::fs::canonicalize(path).ok().as_ref() != Some(excl)
+            } else {
+                true
+            }
+        })
+        .collect();
+
+    files.sort();
+    files
+}
+
+/// Returns `true` if a directory entry should be skipped entirely.
+fn should_skip_dir(entry: &walkdir::DirEntry) -> bool {
+    if !entry.file_type().is_dir() {
+        return false;
+    }
+
+    let name = entry.file_name().to_string_lossy();
+
+    // Skip hidden directories (except the root which might be ".")
+    if entry.depth() > 0 && name.starts_with('.') {
+        return true;
+    }
+
+    // Skip known non-source directories
+    SKIP_DIRS.iter().any(|skip| name == *skip)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn create_file(dir: &Path, relative: &str) {
+        let path = dir.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&path, "// placeholder\n").unwrap();
+    }
+
+    #[test]
+    fn finds_rs_files_in_src() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "src/main.rs");
+        create_file(dir.path(), "src/lib.rs");
+        create_file(dir.path(), "src/utils/mod.rs");
+
+        let files = find_source_files(dir.path(), None);
+        let rs_files: Vec<_> = files
+            .iter()
+            .filter(|f| f.extension().is_some_and(|e| e == "rs"))
+            .collect();
+        assert_eq!(rs_files.len(), 3);
+    }
+
+    #[test]
+    fn finds_toml_files() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "Cargo.toml");
+        create_file(dir.path(), "deny.toml");
+
+        let files = find_source_files(dir.path(), None);
+        let toml_files: Vec<_> = files
+            .iter()
+            .filter(|f| f.extension().is_some_and(|e| e == "toml"))
+            .collect();
+        assert_eq!(toml_files.len(), 2);
+    }
+
+    #[test]
+    fn finds_both_rs_and_toml() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "src/main.rs");
+        create_file(dir.path(), "Cargo.toml");
+
+        let files = find_source_files(dir.path(), None);
+        assert_eq!(files.len(), 2);
+    }
+
+    #[test]
+    fn excludes_specified_file() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "src/main.rs");
+        create_file(dir.path(), "Cargo.toml");
+        create_file(dir.path(), ".cargo-heather.toml");
+
+        let exclude = dir.path().join(".cargo-heather.toml");
+        let files = find_source_files(dir.path(), Some(&exclude));
+        assert!(files.iter().all(|f| !f.ends_with(".cargo-heather.toml")));
+    }
+
+    #[test]
+    fn finds_rs_files_in_tests_and_examples() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "src/main.rs");
+        create_file(dir.path(), "tests/test_one.rs");
+        create_file(dir.path(), "examples/demo.rs");
+        create_file(dir.path(), "benches/bench.rs");
+
+        let files = find_source_files(dir.path(), None);
+        let rs_files: Vec<_> = files
+            .iter()
+            .filter(|f| f.extension().is_some_and(|e| e == "rs"))
+            .collect();
+        assert_eq!(rs_files.len(), 4);
+    }
+
+    #[test]
+    fn skips_target_directory() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "src/main.rs");
+        create_file(dir.path(), "target/debug/build/generated.rs");
+
+        let files = find_source_files(dir.path(), None);
+        let rs_files: Vec<_> = files
+            .iter()
+            .filter(|f| f.extension().is_some_and(|e| e == "rs"))
+            .collect();
+        assert_eq!(rs_files.len(), 1);
+    }
+
+    #[test]
+    fn skips_hidden_directories() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "src/main.rs");
+        create_file(dir.path(), ".hidden/something.rs");
+
+        let files = find_source_files(dir.path(), None);
+        let rs_files: Vec<_> = files
+            .iter()
+            .filter(|f| f.extension().is_some_and(|e| e == "rs"))
+            .collect();
+        assert_eq!(rs_files.len(), 1);
+    }
+
+    #[test]
+    fn ignores_unsupported_files() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "src/main.rs");
+        create_file(dir.path(), "src/readme.md");
+        create_file(dir.path(), "data.json");
+
+        let files = find_source_files(dir.path(), None);
+        assert!(files.iter().all(|f| {
+            let ext = f.extension().and_then(|e| e.to_str());
+            ext == Some("rs") || ext == Some("toml")
+        }));
+    }
+
+    #[test]
+    fn empty_directory_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let files = find_source_files(dir.path(), None);
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn returns_sorted_paths() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "src/z.rs");
+        create_file(dir.path(), "src/a.rs");
+        create_file(dir.path(), "src/m.rs");
+
+        let files = find_source_files(dir.path(), None);
+        let names: Vec<&str> = files
+            .iter()
+            .filter_map(|p| p.file_name()?.to_str())
+            .collect();
+        assert_eq!(names, vec!["a.rs", "m.rs", "z.rs"]);
+    }
+
+    #[test]
+    fn finds_build_rs_at_root() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "build.rs");
+        create_file(dir.path(), "src/main.rs");
+
+        let files = find_source_files(dir.path(), None);
+        let rs_files: Vec<_> = files
+            .iter()
+            .filter(|f| f.extension().is_some_and(|e| e == "rs"))
+            .collect();
+        assert_eq!(rs_files.len(), 2);
+    }
+
+    #[test]
+    fn should_skip_dir_skips_target() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("target")).unwrap();
+
+        let walker = WalkDir::new(dir.path());
+        for entry in walker {
+            let entry = entry.unwrap();
+            if entry.file_name() == "target" {
+                assert!(should_skip_dir(&entry));
+            }
+        }
+    }
+
+    #[test]
+    fn should_skip_dir_does_not_skip_src() {
+        let dir = TempDir::new().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+
+        let walker = WalkDir::new(dir.path());
+        for entry in walker {
+            let entry = entry.unwrap();
+            if entry.file_name() == "src" {
+                assert!(!should_skip_dir(&entry));
+            }
+        }
+    }
+}
