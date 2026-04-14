@@ -30,10 +30,32 @@ struct RawConfig {
 #[derive(Debug, Deserialize)]
 struct CargoManifest {
     package: Option<CargoPackage>,
+    workspace: Option<WorkspaceSection>,
 }
 
 #[derive(Debug, Deserialize)]
 struct CargoPackage {
+    license: Option<LicenseField>,
+}
+
+/// The `license` field in `Cargo.toml` can be either a plain string
+/// (`license = "MIT"`) or a workspace reference (`license.workspace = true`).
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum LicenseField {
+    Plain(String),
+    Workspace { workspace: bool },
+}
+
+/// The `[workspace]` table in a workspace root `Cargo.toml`.
+#[derive(Debug, Deserialize)]
+struct WorkspaceSection {
+    package: Option<WorkspacePackage>,
+}
+
+/// The `[workspace.package]` table.
+#[derive(Debug, Deserialize)]
+struct WorkspacePackage {
     license: Option<String>,
 }
 
@@ -129,10 +151,17 @@ fn resolve_config(raw: RawConfig) -> Result<HeatherConfig, HeatherError> {
     }
 }
 
-/// Try to extract a license header config from `Cargo.toml`'s `[package].license` field.
+/// Try to extract a license header config from `Cargo.toml`.
 ///
-/// Returns `Ok(None)` if the field is absent. Returns `Err` if the file can't
-/// be parsed or the SPDX identifier is unrecognized.
+/// Checks, in order:
+/// 1. `[package].license` — plain string (`license = "MIT"`)
+/// 2. `[package].license` — workspace reference (`license.workspace = true`),
+///    resolved from the workspace root's `[workspace.package].license`
+/// 3. `[workspace.package].license` — for workspace-only manifests that have
+///    no `[package]` section
+///
+/// Returns `Ok(None)` if no license can be determined. Returns `Err` if the
+/// file can't be parsed or the SPDX identifier is unrecognized.
 fn try_load_from_cargo_toml(path: &Path) -> Result<Option<HeatherConfig>, HeatherError> {
     let content = std::fs::read_to_string(path).map_err(|e| HeatherError::FileRead {
         path: path.to_path_buf(),
@@ -144,15 +173,122 @@ fn try_load_from_cargo_toml(path: &Path) -> Result<Option<HeatherConfig>, Heathe
         message: e.to_string(),
     })?;
 
-    let spdx_id = match manifest.package.and_then(|p| p.license) {
-        Some(id) if !id.trim().is_empty() => id,
-        _ => return Ok(None),
-    };
+    // Try [package].license first.
+    if let Some(field) = manifest.package.and_then(|p| p.license) {
+        return match field {
+            LicenseField::Plain(id) if !id.trim().is_empty() => {
+                let header_text = license::header_for_license(&id)?;
+                Ok(Some(HeatherConfig {
+                    header_text: header_text.to_owned(),
+                }))
+            }
+            LicenseField::Plain(_) => Ok(None),
+            LicenseField::Workspace { workspace: true } => resolve_workspace_license(path),
+            LicenseField::Workspace { workspace: false } => Ok(None),
+        };
+    }
 
-    let header_text = license::header_for_license(&spdx_id)?;
-    Ok(Some(HeatherConfig {
-        header_text: header_text.to_owned(),
-    }))
+    // No [package] or no license in it — try [workspace.package].license directly.
+    // This covers workspace-root manifests that only have a [workspace] section.
+    if let Some(id) = manifest
+        .workspace
+        .and_then(|w| w.package)
+        .and_then(|p| p.license)
+        .filter(|id| !id.trim().is_empty())
+    {
+        let header_text = license::header_for_license(&id)?;
+        return Ok(Some(HeatherConfig {
+            header_text: header_text.to_owned(),
+        }));
+    }
+
+    Ok(None)
+}
+
+/// Resolve `license.workspace = true` by finding the workspace root `Cargo.toml`
+/// and reading its `[workspace.package].license` field.
+fn resolve_workspace_license(package_cargo_toml: &Path) -> Result<Option<HeatherConfig>, HeatherError> {
+    let workspace_root = find_workspace_root(package_cargo_toml)?;
+
+    let content = std::fs::read_to_string(&workspace_root).map_err(|e| HeatherError::FileRead {
+        path: workspace_root.clone(),
+        source: e,
+    })?;
+
+    let manifest: CargoManifest =
+        toml::from_str(&content).map_err(|e| HeatherError::ConfigParse {
+            path: workspace_root,
+            message: e.to_string(),
+        })?;
+
+    let spdx_id = manifest
+        .workspace
+        .and_then(|w| w.package)
+        .and_then(|p| p.license)
+        .filter(|id| !id.trim().is_empty());
+
+    match spdx_id {
+        Some(id) => {
+            let header_text = license::header_for_license(&id)?;
+            Ok(Some(HeatherConfig {
+                header_text: header_text.to_owned(),
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Walk up from a package `Cargo.toml` to find the workspace root `Cargo.toml`
+/// (one that contains a `[workspace]` table).
+///
+/// First checks the package's own `Cargo.toml` (it may itself be the workspace
+/// root), then walks parent directories.
+fn find_workspace_root(package_cargo_toml: &Path) -> Result<PathBuf, HeatherError> {
+    // Start from the directory containing the package Cargo.toml, then go up.
+    let start_dir = package_cargo_toml
+        .parent()
+        .ok_or_else(|| {
+            HeatherError::ConfigInvalid(format!(
+                "cannot determine parent directory of '{}'",
+                package_cargo_toml.display()
+            ))
+        })?;
+
+    let mut current = start_dir;
+
+    loop {
+        let candidate = current.join("Cargo.toml");
+        if candidate.exists() {
+            if cargo_toml_has_workspace(&candidate)? {
+                return Ok(candidate);
+            }
+        }
+
+        match current.parent() {
+            Some(parent) if parent != current => current = parent,
+            _ => break,
+        }
+    }
+
+    Err(HeatherError::ConfigInvalid(format!(
+        "license.workspace = true in '{}' but no workspace root Cargo.toml found",
+        package_cargo_toml.display()
+    )))
+}
+
+/// Check whether a `Cargo.toml` file contains a `[workspace]` table.
+fn cargo_toml_has_workspace(path: &Path) -> Result<bool, HeatherError> {
+    let content = std::fs::read_to_string(path).map_err(|e| HeatherError::FileRead {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+
+    let manifest: CargoManifest = toml::from_str(&content).map_err(|e| HeatherError::ConfigParse {
+        path: path.to_path_buf(),
+        message: e.to_string(),
+    })?;
+
+    Ok(manifest.workspace.is_some())
 }
 
 /// Build the expected commented header lines for a `.rs` file.
@@ -309,6 +445,97 @@ mod tests {
 
         let err = load_config(dir.path()).unwrap_err();
         assert!(err.to_string().contains("FAKE-1.0"));
+    }
+
+    #[test]
+    fn fallback_workspace_license_inheritance() {
+        // Simulate a workspace: parent dir has workspace Cargo.toml,
+        // child dir has package Cargo.toml with license.workspace = true
+        let dir = TempDir::new().unwrap();
+
+        // Workspace root Cargo.toml
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/my_crate\"]\n\n[workspace.package]\nlicense = \"MIT\"\n",
+        )
+        .unwrap();
+
+        // Package directory
+        let pkg_dir = dir.path().join("crates").join("my_crate");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("Cargo.toml"),
+            "[package]\nname = \"my_crate\"\nlicense.workspace = true\n",
+        )
+        .unwrap();
+
+        let config = load_config(&pkg_dir).unwrap();
+        assert_eq!(config.header_text, "Licensed under the MIT License.");
+    }
+
+    #[test]
+    fn fallback_workspace_license_same_dir() {
+        // The workspace root and the package are in the same Cargo.toml
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = []\n\n[workspace.package]\nlicense = \"Apache-2.0\"\n\n[package]\nname = \"mono\"\nlicense.workspace = true\n",
+        )
+        .unwrap();
+
+        let config = load_config(dir.path()).unwrap();
+        assert!(config.header_text.contains("Apache License, Version 2.0"));
+    }
+
+    #[test]
+    fn fallback_workspace_no_license_in_workspace_root() {
+        let dir = TempDir::new().unwrap();
+
+        // Workspace root without license
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"pkg\"]\n\n[workspace.package]\n",
+        )
+        .unwrap();
+
+        let pkg_dir = dir.path().join("pkg");
+        std::fs::create_dir_all(&pkg_dir).unwrap();
+        std::fs::write(
+            pkg_dir.join("Cargo.toml"),
+            "[package]\nname = \"pkg\"\nlicense.workspace = true\n",
+        )
+        .unwrap();
+
+        let err = load_config(&pkg_dir).unwrap_err();
+        assert!(err.to_string().contains("config file not found"));
+    }
+
+    #[test]
+    fn fallback_workspace_false_treated_as_absent() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"test\"\nlicense.workspace = false\n",
+        )
+        .unwrap();
+
+        let err = load_config(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("config file not found"));
+    }
+
+    #[test]
+    fn fallback_workspace_root_only_manifest() {
+        // A workspace root Cargo.toml with no [package] section at all,
+        // only [workspace.package].license — common for pure workspace roots.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("Cargo.toml"),
+            "[workspace]\nmembers = [\"crates/*\"]\n\n[workspace.package]\nlicense = \"MIT\"\n",
+        )
+        .unwrap();
+
+        let config = load_config(dir.path()).unwrap();
+        assert_eq!(config.header_text, "Licensed under the MIT License.");
     }
 
     #[test]
