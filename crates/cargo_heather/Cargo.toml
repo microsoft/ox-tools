@@ -27,7 +27,6 @@ all-features = true
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
 ohno = { workspace = true, features = ["app-err"] }
 serde = { workspace = true, features = ["derive"] }
-thiserror = { workspace = true, features = ["std"] }
 toml = { workspace = true, features = ["parse", "display"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt"] }

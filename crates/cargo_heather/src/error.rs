@@ -3,15 +3,13 @@
 
 //! Error types for `cargo-heather`.
 
+use std::fmt;
 use std::path::PathBuf;
 
-use thiserror::Error;
-
 /// Errors that can occur during `cargo-heather` operation.
-#[derive(Error, Debug)]
+#[derive(Debug)]
 pub enum HeatherError {
     /// Failed to read a file from disk.
-    #[error("failed to read file '{path}': {source}")]
     FileRead {
         /// Path to the file that could not be read.
         path: PathBuf,
@@ -20,7 +18,6 @@ pub enum HeatherError {
     },
 
     /// Failed to parse the configuration file.
-    #[error("failed to parse config '{path}': {message}")]
     ConfigParse {
         /// Path to the configuration file.
         path: PathBuf,
@@ -29,27 +26,53 @@ pub enum HeatherError {
     },
 
     /// Configuration file not found.
-    #[error("config file not found: {0}")]
     ConfigNotFound(PathBuf),
 
     /// Configuration is invalid (e.g., both `license` and `header` specified).
-    #[error("invalid config: {0}")]
     ConfigInvalid(String),
 
     /// Unknown SPDX license identifier.
-    #[error("unknown SPDX license identifier: '{0}'")]
     UnknownLicense(String),
 
     /// File type not supported for header checking.
-    #[error("unsupported file type: '{path}'")]
     UnsupportedFileType {
         /// Path to the unsupported file.
         path: PathBuf,
     },
 
     /// Header validation failed for one or more files.
-    #[error("{0} file(s) have missing or incorrect license headers")]
     ValidationFailed(usize),
+}
+
+impl fmt::Display for HeatherError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FileRead { path, source } => {
+                write!(f, "failed to read file '{}': {source}", path.display())
+            }
+            Self::ConfigParse { path, message } => {
+                write!(f, "failed to parse config '{}': {message}", path.display())
+            }
+            Self::ConfigNotFound(path) => write!(f, "config file not found: {}", path.display()),
+            Self::ConfigInvalid(msg) => write!(f, "invalid config: {msg}"),
+            Self::UnknownLicense(id) => write!(f, "unknown SPDX license identifier: '{id}'"),
+            Self::UnsupportedFileType { path } => {
+                write!(f, "unsupported file type: '{}'", path.display())
+            }
+            Self::ValidationFailed(count) => {
+                write!(f, "{count} file(s) have missing or incorrect license headers")
+            }
+        }
+    }
+}
+
+impl std::error::Error for HeatherError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::FileRead { source, .. } => Some(source),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
