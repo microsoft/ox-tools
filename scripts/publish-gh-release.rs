@@ -2,7 +2,7 @@
 ---
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-#
+
 # This script is invoked by the `create-release` GitHub Actions workflow
 # when a version tag is pushed. It is not intended to be run manually.
 

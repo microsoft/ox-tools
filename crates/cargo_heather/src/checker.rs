@@ -21,13 +21,20 @@ pub enum CheckResult {
     /// The file is missing a header entirely.
     Missing,
     /// The file has a header, but it doesn't match the expected text.
-    Mismatch { expected: String, actual: String },
+    Mismatch {
+        /// The expected header text.
+        expected: String,
+        /// The actual header text found in the file.
+        actual: String,
+    },
 }
 
 /// Result of checking a single file, including its path.
 #[derive(Debug, Clone)]
 pub struct FileCheckResult {
+    /// Path to the checked file.
     pub path: PathBuf,
+    /// The result of the header check.
     pub result: CheckResult,
 }
 

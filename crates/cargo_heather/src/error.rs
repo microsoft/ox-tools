@@ -12,11 +12,21 @@ use thiserror::Error;
 pub enum HeatherError {
     /// Failed to read a file from disk.
     #[error("failed to read file '{path}': {source}")]
-    FileRead { path: PathBuf, source: std::io::Error },
+    FileRead {
+        /// Path to the file that could not be read.
+        path: PathBuf,
+        /// The underlying I/O error.
+        source: std::io::Error,
+    },
 
     /// Failed to parse the configuration file.
     #[error("failed to parse config '{path}': {message}")]
-    ConfigParse { path: PathBuf, message: String },
+    ConfigParse {
+        /// Path to the configuration file.
+        path: PathBuf,
+        /// Description of the parse error.
+        message: String,
+    },
 
     /// Configuration file not found.
     #[error("config file not found: {0}")]
@@ -32,7 +42,10 @@ pub enum HeatherError {
 
     /// File type not supported for header checking.
     #[error("unsupported file type: '{path}'")]
-    UnsupportedFileType { path: PathBuf },
+    UnsupportedFileType {
+        /// Path to the unsupported file.
+        path: PathBuf,
+    },
 
     /// Header validation failed for one or more files.
     #[error("{0} file(s) have missing or incorrect license headers")]
