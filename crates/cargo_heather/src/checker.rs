@@ -498,7 +498,7 @@ mod tests {
         let config = HeatherConfig::with_defaults("MIT".into());
 
         let result = check_file(Path::new("/nonexistent/file.rs"), &config);
-        assert!(result.is_err());
+        result.unwrap_err();
     }
 
     #[test]
@@ -704,7 +704,7 @@ mod tests {
         let config = HeatherConfig::with_defaults("MIT".into());
 
         let result = check_file(&file, &config);
-        assert!(result.is_err());
+        result.unwrap_err();
     }
 
     // --- Cargo-script tests ---

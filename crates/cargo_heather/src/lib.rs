@@ -268,7 +268,7 @@ mod tests {
             fix: false,
         };
 
-        assert!(run(&args).is_ok());
+        run(&args).unwrap();
     }
 
     #[test]
@@ -287,7 +287,7 @@ mod tests {
             fix: false,
         };
 
-        assert!(run(&args).is_err());
+        run(&args).unwrap_err();
     }
 
     #[test]
@@ -301,7 +301,7 @@ mod tests {
             fix: false,
         };
 
-        assert!(run(&args).is_ok());
+        run(&args).unwrap();
     }
 
     #[test]
@@ -314,7 +314,7 @@ mod tests {
             fix: true,
         };
 
-        assert!(run(&args).is_ok());
+        run(&args).unwrap();
 
         let content = std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap();
         assert!(content.starts_with("// Licensed under the MIT License."));
@@ -333,7 +333,7 @@ mod tests {
             fix: true,
         };
 
-        assert!(run(&args).is_ok());
+        run(&args).unwrap();
     }
 
     #[test]
@@ -355,7 +355,7 @@ mod tests {
             fix: false,
         };
 
-        assert!(run(&args).is_ok());
+        run(&args).unwrap();
     }
 
     #[test]
@@ -370,7 +370,7 @@ mod tests {
             fix: false,
         };
 
-        assert!(run(&args).is_err());
+        run(&args).unwrap_err();
     }
 
     #[test]
@@ -386,7 +386,7 @@ mod tests {
             fix: false,
         };
 
-        assert!(run(&args).is_ok());
+        run(&args).unwrap();
     }
 
     #[test]

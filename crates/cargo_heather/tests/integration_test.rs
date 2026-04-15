@@ -5,7 +5,7 @@
 //!
 //! These tests exercise the full pipeline from CLI to output.
 
-#![allow(deprecated)]
+#![allow(deprecated, reason = "assert_cmd API deprecation warnings are not actionable")]
 
 use std::path::{Path, PathBuf};
 
@@ -20,16 +20,16 @@ fn default_config() -> HeatherConfig {
 
 /// Helper to create a test project with config and source files.
 fn create_project(config_content: &str, files: &[(&str, &str)]) -> TempDir {
-    let dir = TempDir::new().unwrap();
+    let dir = TempDir::new().expect("failed to create temp dir");
 
-    std::fs::write(dir.path().join(config::CONFIG_FILE_NAME), config_content).unwrap();
+    std::fs::write(dir.path().join(config::CONFIG_FILE_NAME), config_content).expect("failed to write config file");
 
     for (path, content) in files {
         let full_path = dir.path().join(path);
         if let Some(parent) = full_path.parent() {
-            std::fs::create_dir_all(parent).unwrap();
+            std::fs::create_dir_all(parent).expect("failed to create parent dirs");
         }
-        std::fs::write(&full_path, content).unwrap();
+        std::fs::write(&full_path, content).expect("failed to write test file");
     }
 
     dir
@@ -338,8 +338,8 @@ fn scanner_finds_nested_files() {
     }
 
     let files = scanner::find_source_files(dir.path(), None, &default_config());
-    let rs_files: Vec<_> = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).collect();
-    assert_eq!(rs_files.len(), 4);
+    let rs_count = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).count();
+    assert_eq!(rs_count, 4);
 }
 
 #[test]

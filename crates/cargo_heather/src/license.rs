@@ -314,21 +314,21 @@ mod tests {
 
     #[test]
     fn bsd_licenses_present() {
-        assert!(header_for_license("BSD-2-Clause").is_ok());
-        assert!(header_for_license("BSD-3-Clause").is_ok());
-        assert!(header_for_license("0BSD").is_ok());
+        header_for_license("BSD-2-Clause").unwrap();
+        header_for_license("BSD-3-Clause").unwrap();
+        header_for_license("0BSD").unwrap();
     }
 
     #[test]
     fn misc_licenses_present() {
         for id in &["ISC", "Unlicense", "BSL-1.0", "Zlib"] {
-            assert!(header_for_license(id).is_ok(), "Missing license: {id}");
+            header_for_license(id).unwrap();
         }
     }
 
     #[test]
     fn agpl_licenses_present() {
-        assert!(header_for_license("AGPL-3.0-only").is_ok());
-        assert!(header_for_license("AGPL-3.0-or-later").is_ok());
+        header_for_license("AGPL-3.0-only").unwrap();
+        header_for_license("AGPL-3.0-or-later").unwrap();
     }
 }

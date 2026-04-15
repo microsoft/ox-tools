@@ -109,11 +109,11 @@ pub fn load_config(project_dir: &Path) -> Result<HeatherConfig, HeatherError> {
 
     // Fall back to Cargo.toml's license field
     let cargo_toml_path = project_dir.join("Cargo.toml");
-    if cargo_toml_path.exists() {
-        if let Some(config) = try_load_from_cargo_toml(&cargo_toml_path)? {
-            info!("No {} found, using license from Cargo.toml.", CONFIG_FILE_NAME);
-            return Ok(config);
-        }
+    if cargo_toml_path.exists()
+        && let Some(config) = try_load_from_cargo_toml(&cargo_toml_path)?
+    {
+        info!("No {} found, using license from Cargo.toml.", CONFIG_FILE_NAME);
+        return Ok(config);
     }
 
     Err(HeatherError::ConfigNotFound(config_path))
@@ -202,9 +202,8 @@ fn try_load_from_cargo_toml(path: &Path) -> Result<Option<HeatherConfig>, Heathe
                 let header_text = license::header_for_license(&id)?;
                 Ok(Some(HeatherConfig::with_defaults(header_text.to_owned())))
             }
-            LicenseField::Plain(_) => Ok(None),
             LicenseField::Workspace { workspace: true } => resolve_workspace_license(path),
-            LicenseField::Workspace { workspace: false } => Ok(None),
+            LicenseField::Plain(_) | LicenseField::Workspace { workspace: false } => Ok(None),
         };
     }
 
@@ -268,10 +267,8 @@ fn find_workspace_root(package_cargo_toml: &Path) -> Result<PathBuf, HeatherErro
 
     loop {
         let candidate = current.join("Cargo.toml");
-        if candidate.exists() {
-            if cargo_toml_has_workspace(&candidate)? {
-                return Ok(candidate);
-            }
+        if candidate.exists() && cargo_toml_has_workspace(&candidate)? {
+            return Ok(candidate);
         }
 
         match current.parent() {

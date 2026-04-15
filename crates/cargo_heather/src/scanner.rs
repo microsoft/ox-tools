@@ -45,28 +45,27 @@ pub fn find_source_files(project_dir: &Path, exclude_path: Option<&Path>, config
         .map(walkdir::DirEntry::into_path)
         .filter(|path| {
             // Skip the config file itself
-            if let Some(ref excl) = exclude_canonical {
-                if std::fs::canonicalize(path).ok().as_ref() == Some(excl) {
-                    return false;
-                }
+            if let Some(ref excl) = exclude_canonical
+                && std::fs::canonicalize(path).ok().as_ref() == Some(excl)
+            {
+                return false;
             }
 
             // Skip dot-TOML files unless config says otherwise
-            if !config.dot_toml {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.ends_with(".toml") && name.starts_with('.') {
-                        return false;
-                    }
-                }
+            if !config.dot_toml
+                && let Some(name) = path.file_name().and_then(|n| n.to_str())
+                && name.starts_with('.')
+                && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("toml"))
+            {
+                return false;
             }
 
             // Skip files in the exclude list
-            if !exclude_list.is_empty() {
-                if let Ok(canonical) = std::fs::canonicalize(path) {
-                    if exclude_list.iter().any(|excl| canonical == *excl || canonical.starts_with(excl)) {
-                        return false;
-                    }
-                }
+            if !exclude_list.is_empty()
+                && let Ok(canonical) = std::fs::canonicalize(path)
+                && exclude_list.iter().any(|excl| canonical == *excl || canonical.starts_with(excl))
+            {
+                return false;
             }
 
             true
@@ -120,8 +119,8 @@ mod tests {
         create_file(dir.path(), "src/utils/mod.rs");
 
         let files = find_source_files(dir.path(), None, &default_config());
-        let rs_files: Vec<_> = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).collect();
-        assert_eq!(rs_files.len(), 3);
+        let rs_count = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).count();
+        assert_eq!(rs_count, 3);
     }
 
     #[test]
@@ -131,8 +130,8 @@ mod tests {
         create_file(dir.path(), "deny.toml");
 
         let files = find_source_files(dir.path(), None, &default_config());
-        let toml_files: Vec<_> = files.iter().filter(|f| f.extension().is_some_and(|e| e == "toml")).collect();
-        assert_eq!(toml_files.len(), 2);
+        let toml_count = files.iter().filter(|f| f.extension().is_some_and(|e| e == "toml")).count();
+        assert_eq!(toml_count, 2);
     }
 
     #[test]
@@ -166,8 +165,8 @@ mod tests {
         create_file(dir.path(), "benches/bench.rs");
 
         let files = find_source_files(dir.path(), None, &default_config());
-        let rs_files: Vec<_> = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).collect();
-        assert_eq!(rs_files.len(), 4);
+        let rs_count = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).count();
+        assert_eq!(rs_count, 4);
     }
 
     #[test]
@@ -177,8 +176,8 @@ mod tests {
         create_file(dir.path(), "target/debug/build/generated.rs");
 
         let files = find_source_files(dir.path(), None, &default_config());
-        let rs_files: Vec<_> = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).collect();
-        assert_eq!(rs_files.len(), 1);
+        let rs_count = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).count();
+        assert_eq!(rs_count, 1);
     }
 
     #[test]
@@ -188,8 +187,8 @@ mod tests {
         create_file(dir.path(), ".hidden/something.rs");
 
         let files = find_source_files(dir.path(), None, &default_config());
-        let rs_files: Vec<_> = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).collect();
-        assert_eq!(rs_files.len(), 1);
+        let rs_count = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).count();
+        assert_eq!(rs_count, 1);
     }
 
     #[test]
@@ -232,8 +231,8 @@ mod tests {
         create_file(dir.path(), "src/main.rs");
 
         let files = find_source_files(dir.path(), None, &default_config());
-        let rs_files: Vec<_> = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).collect();
-        assert_eq!(rs_files.len(), 2);
+        let rs_count = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).count();
+        assert_eq!(rs_count, 2);
     }
 
     #[test]

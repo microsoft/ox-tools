@@ -45,8 +45,6 @@ impl HeatherArgs {
 
 #[cfg(test)]
 mod tests {
-    use clap::Parser;
-
     use super::*;
 
     #[test]
