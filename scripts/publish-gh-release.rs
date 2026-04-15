@@ -30,7 +30,7 @@ struct Args {
     #[argh(positional)]
     tag: String,
 
-    /// the GitHub repository in "owner/name" format (e.g. "microsoft/oxidizer")
+    /// the GitHub repository in "owner/name" format (e.g. "microsoft/ox-tools")
     #[argh(option)]
     repo: String,
 }

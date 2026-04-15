@@ -14,7 +14,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/microsoft/oxidizer/tree/main/crates/cargo_heather"
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo_heather"
 
 [[bin]]
 name = "cargo-heather"

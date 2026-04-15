@@ -45,7 +45,7 @@ function Get-LatestStableRustVersion {
 
     try {
         $headers = @{
-            "User-Agent" = "oxidizer-version-updater (github.com/microsoft/oxidizer)"
+            "User-Agent" = "oxidizer-version-updater (github.com/microsoft/ox-tools"
             "Accept" = "application/vnd.github+json"
         }
 
@@ -101,7 +101,7 @@ function Get-ExternalTypesTestedNightly {
 
     try {
         $headers = @{
-            "User-Agent" = "oxidizer-version-updater (github.com/microsoft/oxidizer)"
+            "User-Agent" = "oxidizer-version-updater (github.com/microsoft/ox-tools)"
             "Accept" = "application/vnd.github+json"
         }
 

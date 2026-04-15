@@ -48,7 +48,7 @@ function Get-ActionLatestVersion {
 
     try {
         $headers = @{
-            "User-Agent" = "oxidizer-action-updater (github.com/microsoft/oxidizer)"
+            "User-Agent" = "oxidizer-action-updater (github.com/microsoft/ox-tools)"
             "Accept" = "application/vnd.github+json"
         }
 

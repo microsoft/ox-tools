@@ -1,15 +1,15 @@
 <div align="center">
  <img src="./logo.svg" alt="Oxidizer Logo" width="96">
 
-# The Oxidizer Project
+# The Oxidizer Tools Project
 
-[![CI](https://github.com/microsoft/oxidizer/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/oxidizer/actions/workflows/main.yml)
-[![Coverage](https://codecov.io/gh/microsoft/oxidizer/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/oxidizer)
+[![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
+[![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 
 </div>
 
-This repository contains a set of crates that help you build robust highly scalable services in Rust.
+This repository contains a set of tools  that help you build robust highly scalable services in Rust.
 
 - [Crates](#crates)
 - [About this Repo](#about-this-repo)
@@ -25,19 +25,7 @@ This repository contains a set of crates that help you build robust highly scala
 
 These are the primary crates built out of this repo:
 
-- [`anyspawn`](./crates/anyspawn/README.md) - A generic task spawner compatible with any async runtime.
-- [`bytesbuf`](./crates/bytesbuf/README.md) - Types for creating and manipulating byte sequences.
-- [`bytesbuf_io`](./crates/bytesbuf_io/README.md) - Asynchronous I/O abstractions expressed via `bytesbuf` types.
 - [`cargo_heather`](./crates/cargo_heather/README.md) -  A cargo subcommand to validate license headers in Rust and TOML source files
-- [`data_privacy`](./crates/data_privacy/README.md) - Mechanisms to classify, manipulate, and redact sensitive data.
-- [`fundle`](./crates/fundle/README.md) - Compile-time safe dependency injection for Rust.
-- [`layered`](./crates/layered/README.md) - A foundational service abstraction for building composable, middleware-driven systems.
-- [`ohno`](./crates/ohno/README.md) - High-quality Rust error handling.
-- [`recoverable`](./crates/recoverable/README.md) - Recovery information and classification for resilience patterns.
-- [`seatbelt`](./crates/seatbelt/README.md) - Resilience and recovery mechanisms for fallible operations.
-- [`thread_aware`](./crates/thread_aware/README.md) - Facilities to support thread-isolated state.
-- [`tick`](./crates/tick/README.md) - Provides primitives to interact with and manipulate machine time.
-- [`uniflight`](./crates/uniflight/README.md) - Coalesces duplicate async tasks into a single execution.
 
 ## About this Repo
 
