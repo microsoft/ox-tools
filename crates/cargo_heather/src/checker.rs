@@ -9,7 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::comment::CommentStyle;
+use crate::comment::{CommentStyle, FileKind};
 use crate::config::HeatherConfig;
 use crate::error::HeatherError;
 
@@ -37,30 +37,41 @@ pub struct FileCheckResult {
 ///
 /// Returns [`HeatherError::FileRead`] if any file cannot be read,
 /// or [`HeatherError::UnsupportedFileType`] if a file has an unknown extension.
-pub fn check_files(
-    files: &[PathBuf],
-    config: &HeatherConfig,
-) -> Result<Vec<FileCheckResult>, HeatherError> {
+pub fn check_files(files: &[PathBuf], config: &HeatherConfig) -> Result<Vec<FileCheckResult>, HeatherError> {
     files.iter().map(|path| check_file(path, config)).collect()
 }
 
 /// Check a single file for the expected license header.
+///
+/// For cargo-script files (shebang + `---`), the header is expected inside
+/// the frontmatter using `#` comment style. These files are skipped when
+/// `config.scripts` is `false`.
 ///
 /// # Errors
 ///
 /// Returns [`HeatherError::FileRead`] if the file cannot be read,
 /// or [`HeatherError::UnsupportedFileType`] if the extension is unknown.
 pub fn check_file(path: &Path, config: &HeatherConfig) -> Result<FileCheckResult, HeatherError> {
-    let style = CommentStyle::from_path(path).ok_or_else(|| HeatherError::UnsupportedFileType {
-        path: path.to_path_buf(),
-    })?;
-
     let content = std::fs::read_to_string(path).map_err(|e| HeatherError::FileRead {
         path: path.to_path_buf(),
         source: e,
     })?;
 
-    let result = check_content(&content, &config.header_text, style);
+    let kind = FileKind::detect(path, Some(&content)).ok_or_else(|| HeatherError::UnsupportedFileType { path: path.to_path_buf() })?;
+
+    // Skip cargo-script files when scripts processing is disabled.
+    if kind == FileKind::CargoScript && !config.scripts {
+        return Ok(FileCheckResult {
+            path: path.to_path_buf(),
+            result: CheckResult::Ok,
+        });
+    }
+
+    let style = kind.comment_style();
+    let result = match kind {
+        FileKind::CargoScript => check_content_script(&content, &config.header_text, style),
+        _ => check_content(&content, &config.header_text, style),
+    };
 
     Ok(FileCheckResult {
         path: path.to_path_buf(),
@@ -91,6 +102,70 @@ pub fn check_content(content: &str, expected_header: &str, style: CommentStyle) 
             }
         }
     }
+}
+
+/// Check file content for the expected header inside a cargo-script frontmatter.
+///
+/// Skips the shebang line and opening `---`, then checks the `#` comment block.
+#[must_use]
+fn check_content_script(content: &str, expected_header: &str, style: CommentStyle) -> CheckResult {
+    let extracted = extract_script_header(content, style);
+
+    match extracted {
+        None => CheckResult::Missing,
+        Some(actual) => {
+            let normalized_expected = normalize_text(expected_header);
+            let normalized_actual = normalize_text(&actual);
+
+            if normalized_expected == normalized_actual {
+                CheckResult::Ok
+            } else {
+                CheckResult::Mismatch {
+                    expected: expected_header.to_owned(),
+                    actual,
+                }
+            }
+        }
+    }
+}
+
+/// Extract the header comment block from inside a cargo-script frontmatter.
+///
+/// Expects the file to start with a shebang and `---`. Extracts `#` comment
+/// lines immediately after the opening `---`, stopping at the first blank
+/// or non-comment line.
+fn extract_script_header(content: &str, style: CommentStyle) -> Option<String> {
+    let mut lines = content.lines();
+
+    // Skip shebang (line 1)
+    lines.next()?;
+    // Skip opening --- (line 2)
+    let dash_line = lines.next()?;
+    if dash_line.trim() != "---" {
+        return None;
+    }
+
+    let mut comment_lines: Vec<String> = Vec::new();
+
+    for line in lines {
+        let trimmed = line.trim();
+        if style.is_header_comment_line(trimmed) {
+            comment_lines.push(style.strip_prefix(trimmed));
+        } else {
+            break;
+        }
+    }
+
+    if comment_lines.is_empty() {
+        return None;
+    }
+
+    // Trim trailing empty lines
+    while comment_lines.last().is_some_and(String::is_empty) {
+        comment_lines.pop();
+    }
+
+    Some(comment_lines.join("\n"))
 }
 
 /// Extract the first contiguous block of comment lines from file content.
@@ -137,12 +212,7 @@ fn extract_header_comment(content: &str, style: CommentStyle) -> Option<String> 
 
 /// Normalize text for comparison: trim lines and collapse whitespace variations.
 fn normalize_text(text: &str) -> String {
-    text.lines()
-        .map(str::trim_end)
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_owned()
+    text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim().to_owned()
 }
 
 /// Prepend the license header comment to file content.
@@ -159,33 +229,52 @@ pub fn prepend_header(content: &str, header_text: &str, style: CommentStyle) -> 
     format!("{comment}\n\n{content}")
 }
 
-/// Fix a single file by prepending the header if it's missing or mismatched.
+/// Fix a single file by adding or replacing the header.
+///
+/// For cargo-script files, the header is placed inside the frontmatter
+/// (after the shebang and `---`). These files are skipped when
+/// `config.scripts` is `false`.
 ///
 /// # Errors
 ///
 /// Returns [`HeatherError::FileRead`] if the file cannot be read or written,
 /// or [`HeatherError::UnsupportedFileType`] if the extension is unknown.
 pub fn fix_file(path: &Path, config: &HeatherConfig) -> Result<FileCheckResult, HeatherError> {
-    let style = CommentStyle::from_path(path).ok_or_else(|| HeatherError::UnsupportedFileType {
-        path: path.to_path_buf(),
-    })?;
-
     let content = std::fs::read_to_string(path).map_err(|e| HeatherError::FileRead {
         path: path.to_path_buf(),
         source: e,
     })?;
 
-    let result = check_content(&content, &config.header_text, style);
+    let kind = FileKind::detect(path, Some(&content)).ok_or_else(|| HeatherError::UnsupportedFileType { path: path.to_path_buf() })?;
+
+    // Skip cargo-script files when scripts processing is disabled.
+    if kind == FileKind::CargoScript && !config.scripts {
+        return Ok(FileCheckResult {
+            path: path.to_path_buf(),
+            result: CheckResult::Ok,
+        });
+    }
+
+    let style = kind.comment_style();
+    let result = match kind {
+        FileKind::CargoScript => check_content_script(&content, &config.header_text, style),
+        _ => check_content(&content, &config.header_text, style),
+    };
 
     match &result {
         CheckResult::Ok => {}
-        CheckResult::Missing => {
-            let fixed = prepend_header(&content, &config.header_text, style);
-            write_file(path, &fixed)?;
-        }
-        CheckResult::Mismatch { .. } => {
-            let without_header = strip_existing_header(&content, style);
-            let fixed = prepend_header(&without_header, &config.header_text, style);
+        CheckResult::Missing | CheckResult::Mismatch { .. } => {
+            let fixed = match kind {
+                FileKind::CargoScript => fix_script_content(&content, &config.header_text, style),
+                _ => {
+                    if matches!(result, CheckResult::Missing) {
+                        prepend_header(&content, &config.header_text, style)
+                    } else {
+                        let without_header = strip_existing_header(&content, style);
+                        prepend_header(&without_header, &config.header_text, style)
+                    }
+                }
+            };
             write_file(path, &fixed)?;
         }
     }
@@ -194,6 +283,42 @@ pub fn fix_file(path: &Path, config: &HeatherConfig) -> Result<FileCheckResult, 
         path: path.to_path_buf(),
         result,
     })
+}
+
+/// Fix a cargo-script file by placing the header inside the frontmatter.
+///
+/// Preserves the shebang line and opening `---`. Strips any existing `#`
+/// comment block immediately after `---`, then inserts the new header.
+fn fix_script_content(content: &str, header_text: &str, style: CommentStyle) -> String {
+    let mut lines = content.lines();
+
+    let shebang = lines.next().unwrap_or("");
+    let dash_open = lines.next().unwrap_or("---");
+
+    // Skip existing comment header
+    let mut remaining_lines: Vec<&str> = Vec::new();
+    let mut skipped_header = false;
+    for line in lines {
+        if !skipped_header && style.is_header_comment_line(line.trim()) {
+            continue;
+        }
+        // Skip one blank line between old header and TOML manifest
+        if !skipped_header && line.trim().is_empty() {
+            skipped_header = true;
+            continue;
+        }
+        skipped_header = true;
+        remaining_lines.push(line);
+    }
+
+    let header_comment = style.format_header(header_text);
+    let rest = remaining_lines.join("\n");
+
+    if rest.is_empty() {
+        format!("{shebang}\n{dash_open}\n{header_comment}\n")
+    } else {
+        format!("{shebang}\n{dash_open}\n{header_comment}\n\n{rest}\n")
+    }
 }
 
 /// Strip the existing header comment block from file content.
@@ -207,10 +332,7 @@ fn strip_existing_header(content: &str, style: CommentStyle) -> String {
     }
 
     // Skip the comment block
-    while lines
-        .peek()
-        .is_some_and(|l| style.is_header_comment_line(l.trim()))
-    {
+    while lines.peek().is_some_and(|l| style.is_header_comment_line(l.trim())) {
         lines.next();
         skipped_comment = true;
     }
@@ -241,8 +363,9 @@ fn write_file(path: &Path, content: &str) -> Result<(), HeatherError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     // Most content-level tests use DoubleSlash since the logic is shared;
     // TOML-specific behaviour is tested via Hash variants below.
@@ -355,15 +478,9 @@ mod tests {
     fn check_file_reads_and_checks() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.rs");
-        std::fs::write(
-            &file,
-            "// Licensed under the MIT License.\n\nfn main() {}\n",
-        )
-        .unwrap();
+        std::fs::write(&file, "// Licensed under the MIT License.\n\nfn main() {}\n").unwrap();
 
-        let config = HeatherConfig {
-            header_text: "Licensed under the MIT License.".into(),
-        };
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
 
         let result = check_file(&file, &config).unwrap();
         assert_eq!(result.result, CheckResult::Ok);
@@ -371,9 +488,7 @@ mod tests {
 
     #[test]
     fn check_file_nonexistent() {
-        let config = HeatherConfig {
-            header_text: "MIT".into(),
-        };
+        let config = HeatherConfig::with_defaults("MIT".into());
 
         let result = check_file(Path::new("/nonexistent/file.rs"), &config);
         assert!(result.is_err());
@@ -387,9 +502,7 @@ mod tests {
         std::fs::write(&good, "// MIT\n\nfn a() {}\n").unwrap();
         std::fs::write(&bad, "fn b() {}\n").unwrap();
 
-        let config = HeatherConfig {
-            header_text: "MIT".into(),
-        };
+        let config = HeatherConfig::with_defaults("MIT".into());
 
         let results = check_files(&[good, bad], &config).unwrap();
         assert_eq!(results.len(), 2);
@@ -403,9 +516,7 @@ mod tests {
         let file = dir.path().join("test.rs");
         std::fs::write(&file, "fn main() {}\n").unwrap();
 
-        let config = HeatherConfig {
-            header_text: "Licensed under the MIT License.".into(),
-        };
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
 
         let result = fix_file(&file, &config).unwrap();
         assert_eq!(result.result, CheckResult::Missing);
@@ -421,9 +532,7 @@ mod tests {
         let file = dir.path().join("test.rs");
         std::fs::write(&file, "// Wrong header\n\nfn main() {}\n").unwrap();
 
-        let config = HeatherConfig {
-            header_text: "Licensed under the MIT License.".into(),
-        };
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
 
         let result = fix_file(&file, &config).unwrap();
         assert!(matches!(result.result, CheckResult::Mismatch { .. }));
@@ -441,9 +550,7 @@ mod tests {
         let original = "// Licensed under the MIT License.\n\nfn main() {}\n";
         std::fs::write(&file, original).unwrap();
 
-        let config = HeatherConfig {
-            header_text: "Licensed under the MIT License.".into(),
-        };
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
 
         let result = fix_file(&file, &config).unwrap();
         assert_eq!(result.result, CheckResult::Ok);
@@ -533,15 +640,9 @@ mod tests {
     fn toml_check_file_reads_and_checks() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.toml");
-        std::fs::write(
-            &file,
-            "# Licensed under the MIT License.\n\n[package]\nname = \"foo\"\n",
-        )
-        .unwrap();
+        std::fs::write(&file, "# Licensed under the MIT License.\n\n[package]\nname = \"foo\"\n").unwrap();
 
-        let config = HeatherConfig {
-            header_text: "Licensed under the MIT License.".into(),
-        };
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
 
         let result = check_file(&file, &config).unwrap();
         assert_eq!(result.result, CheckResult::Ok);
@@ -553,9 +654,7 @@ mod tests {
         let file = dir.path().join("test.toml");
         std::fs::write(&file, "[package]\nname = \"foo\"\n").unwrap();
 
-        let config = HeatherConfig {
-            header_text: "Licensed under the MIT License.".into(),
-        };
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
 
         let result = fix_file(&file, &config).unwrap();
         assert_eq!(result.result, CheckResult::Missing);
@@ -571,9 +670,7 @@ mod tests {
         let file = dir.path().join("test.toml");
         std::fs::write(&file, "# Wrong header\n\n[package]\nname = \"foo\"\n").unwrap();
 
-        let config = HeatherConfig {
-            header_text: "Licensed under the MIT License.".into(),
-        };
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
 
         let result = fix_file(&file, &config).unwrap();
         assert!(matches!(result.result, CheckResult::Mismatch { .. }));
@@ -597,11 +694,119 @@ mod tests {
         let file = dir.path().join("readme.md");
         std::fs::write(&file, "# Hello").unwrap();
 
-        let config = HeatherConfig {
-            header_text: "MIT".into(),
-        };
+        let config = HeatherConfig::with_defaults("MIT".into());
 
         let result = check_file(&file, &config);
         assert!(result.is_err());
+    }
+
+    // --- Cargo-script tests ---
+
+    #[test]
+    fn script_check_correct_header() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Licensed under the MIT License.\n\n[package]\nedition = \"2024\"\n---\nfn main() {}\n";
+        let result = check_content_script(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert_eq!(result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn script_check_missing_header() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n[package]\nedition = \"2024\"\n---\nfn main() {}\n";
+        let result = check_content_script(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert_eq!(result, CheckResult::Missing);
+    }
+
+    #[test]
+    fn script_check_mismatched_header() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Apache License\n\n[package]\n---\n";
+        let result = check_content_script(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert!(matches!(result, CheckResult::Mismatch { .. }));
+    }
+
+    #[test]
+    fn script_check_multiline_header() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Copyright (c) Microsoft Corporation.\n# Licensed under the MIT License.\n\n[package]\nedition = \"2024\"\n---\n";
+        let result = check_content_script(
+            content,
+            "Copyright (c) Microsoft Corporation.\nLicensed under the MIT License.",
+            CommentStyle::Hash,
+        );
+        assert_eq!(result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn script_fix_adds_header() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n[package]\nedition = \"2024\"\n---\nfn main() {}\n";
+        let fixed = fix_script_content(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert!(fixed.starts_with("#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Licensed under the MIT License.\n"));
+        assert!(fixed.contains("[package]"));
+        assert!(fixed.contains("fn main()"));
+    }
+
+    #[test]
+    fn script_fix_replaces_header() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Old Header\n\n[package]\nedition = \"2024\"\n---\nfn main() {}\n";
+        let fixed = fix_script_content(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert!(fixed.contains("# Licensed under the MIT License."));
+        assert!(!fixed.contains("Old Header"));
+        assert!(fixed.contains("[package]"));
+    }
+
+    #[test]
+    fn script_check_file_correct() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("script.rs");
+        std::fs::write(
+            &file,
+            "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Licensed under the MIT License.\n\n[package]\n---\n",
+        )
+        .unwrap();
+
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
+        let result = check_file(&file, &config).unwrap();
+        assert_eq!(result.result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn script_check_file_skipped_when_disabled() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("script.rs");
+        std::fs::write(&file, "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n[package]\n---\n").unwrap();
+
+        let mut config = HeatherConfig::with_defaults("MIT".into());
+        config.scripts = false;
+        let result = check_file(&file, &config).unwrap();
+        assert_eq!(result.result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn script_fix_file_adds_header() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("script.rs");
+        std::fs::write(
+            &file,
+            "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n[package]\nedition = \"2024\"\n---\nfn main() {}\n",
+        )
+        .unwrap();
+
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
+        let result = fix_file(&file, &config).unwrap();
+        assert_eq!(result.result, CheckResult::Missing);
+
+        let fixed_content = std::fs::read_to_string(&file).unwrap();
+        assert!(fixed_content.starts_with("#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Licensed under the MIT License.\n"));
+        assert!(fixed_content.contains("[package]"));
+    }
+
+    #[test]
+    fn inner_attribute_not_treated_as_script() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, "#![allow(unused)]\nfn main() {}\n").unwrap();
+
+        let config = HeatherConfig::with_defaults("MIT".into());
+        let result = check_file(&file, &config).unwrap();
+        // Should be treated as regular Rust, not a script — missing header
+        assert_eq!(result.result, CheckResult::Missing);
     }
 }

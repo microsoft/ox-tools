@@ -25,6 +25,12 @@ struct RawConfig {
     license: Option<String>,
     /// Custom multiline header text (without comment markers).
     header: Option<String>,
+    /// Whether to process Rust script files (shebang + `---` frontmatter). Default: `true`.
+    scripts: Option<bool>,
+    /// Whether to process TOML files whose filename starts with `.`. Default: `false`.
+    dot_toml: Option<bool>,
+    /// List of relative paths to exclude from checking.
+    exclude: Option<Vec<String>>,
 }
 
 /// Minimal representation of `Cargo.toml` for license fallback.
@@ -60,11 +66,30 @@ struct WorkspacePackage {
     license: Option<String>,
 }
 
-/// Resolved configuration with the final header text.
+/// Resolved configuration with the final header text and processing options.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeatherConfig {
-    /// The expected header text that should appear at the top of each `.rs` file.
+    /// The expected header text that should appear at the top of each source file.
     pub header_text: String,
+    /// Whether to process Rust script files (shebang + `---` frontmatter). Default: `true`.
+    pub scripts: bool,
+    /// Whether to process TOML files whose filename starts with `.`. Default: `false`.
+    pub dot_toml: bool,
+    /// List of relative paths to exclude from checking.
+    pub exclude: Vec<String>,
+}
+
+impl HeatherConfig {
+    /// Create a config with the given header text and default processing options.
+    #[must_use]
+    pub fn with_defaults(header_text: String) -> Self {
+        Self {
+            header_text,
+            scripts: true,
+            dot_toml: false,
+            exclude: Vec::new(),
+        }
+    }
 }
 
 /// Load and resolve the configuration.
@@ -86,10 +111,7 @@ pub fn load_config(project_dir: &Path) -> Result<HeatherConfig, HeatherError> {
     let cargo_toml_path = project_dir.join("Cargo.toml");
     if cargo_toml_path.exists() {
         if let Some(config) = try_load_from_cargo_toml(&cargo_toml_path)? {
-            info!(
-                "No {} found, using license from Cargo.toml.",
-                CONFIG_FILE_NAME
-            );
+            info!("No {} found, using license from Cargo.toml.", CONFIG_FILE_NAME);
             return Ok(config);
         }
     }
@@ -126,30 +148,29 @@ fn parse_raw_config(path: &Path, content: &str) -> Result<RawConfig, HeatherErro
 }
 
 fn resolve_config(raw: RawConfig) -> Result<HeatherConfig, HeatherError> {
-    match (raw.license, raw.header) {
-        (Some(_), Some(_)) => Err(HeatherError::ConfigInvalid(
-            "specify either 'license' or 'header', not both".into(),
-        )),
+    let base = match (raw.license, raw.header) {
+        (Some(_), Some(_)) => Err(HeatherError::ConfigInvalid("specify either 'license' or 'header', not both".into())),
         (None, None) => Err(HeatherError::ConfigInvalid(
             "must specify either 'license' (SPDX identifier) or 'header' (custom text)".into(),
         )),
         (Some(spdx_id), None) => {
             let header_text = license::header_for_license(&spdx_id)?;
-            Ok(HeatherConfig {
-                header_text: header_text.to_owned(),
-            })
+            Ok(header_text.to_owned())
         }
         (None, Some(header)) => {
             if header.trim().is_empty() {
-                return Err(HeatherError::ConfigInvalid(
-                    "'header' must not be empty".into(),
-                ));
+                return Err(HeatherError::ConfigInvalid("'header' must not be empty".into()));
             }
-            Ok(HeatherConfig {
-                header_text: header,
-            })
+            Ok(header)
         }
-    }
+    }?;
+
+    Ok(HeatherConfig {
+        header_text: base,
+        scripts: raw.scripts.unwrap_or(true),
+        dot_toml: raw.dot_toml.unwrap_or(false),
+        exclude: raw.exclude.unwrap_or_default(),
+    })
 }
 
 /// Try to extract a license header config from `Cargo.toml`.
@@ -179,9 +200,7 @@ fn try_load_from_cargo_toml(path: &Path) -> Result<Option<HeatherConfig>, Heathe
         return match field {
             LicenseField::Plain(id) if !id.trim().is_empty() => {
                 let header_text = license::header_for_license(&id)?;
-                Ok(Some(HeatherConfig {
-                    header_text: header_text.to_owned(),
-                }))
+                Ok(Some(HeatherConfig::with_defaults(header_text.to_owned())))
             }
             LicenseField::Plain(_) => Ok(None),
             LicenseField::Workspace { workspace: true } => resolve_workspace_license(path),
@@ -198,9 +217,7 @@ fn try_load_from_cargo_toml(path: &Path) -> Result<Option<HeatherConfig>, Heathe
         .filter(|id| !id.trim().is_empty())
     {
         let header_text = license::header_for_license(&id)?;
-        return Ok(Some(HeatherConfig {
-            header_text: header_text.to_owned(),
-        }));
+        return Ok(Some(HeatherConfig::with_defaults(header_text.to_owned())));
     }
 
     Ok(None)
@@ -216,11 +233,10 @@ fn resolve_workspace_license(package_cargo_toml: &Path) -> Result<Option<Heather
         source: e,
     })?;
 
-    let manifest: CargoManifest =
-        toml::from_str(&content).map_err(|e| HeatherError::ConfigParse {
-            path: workspace_root,
-            message: e.to_string(),
-        })?;
+    let manifest: CargoManifest = toml::from_str(&content).map_err(|e| HeatherError::ConfigParse {
+        path: workspace_root,
+        message: e.to_string(),
+    })?;
 
     let spdx_id = manifest
         .workspace
@@ -231,9 +247,7 @@ fn resolve_workspace_license(package_cargo_toml: &Path) -> Result<Option<Heather
     match spdx_id {
         Some(id) => {
             let header_text = license::header_for_license(&id)?;
-            Ok(Some(HeatherConfig {
-                header_text: header_text.to_owned(),
-            }))
+            Ok(Some(HeatherConfig::with_defaults(header_text.to_owned())))
         }
         None => Ok(None),
     }
@@ -248,12 +262,7 @@ fn find_workspace_root(package_cargo_toml: &Path) -> Result<PathBuf, HeatherErro
     // Start from the directory containing the package Cargo.toml, then go up.
     let start_dir = package_cargo_toml
         .parent()
-        .ok_or_else(|| {
-            HeatherError::ConfigInvalid(format!(
-                "cannot determine parent directory of '{}'",
-                package_cargo_toml.display()
-            ))
-        })?;
+        .ok_or_else(|| HeatherError::ConfigInvalid(format!("cannot determine parent directory of '{}'", package_cargo_toml.display())))?;
 
     let mut current = start_dir;
 
@@ -309,8 +318,9 @@ pub fn config_path_for(project_dir: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn write_config(dir: &Path, content: &str) {
         std::fs::write(dir.join(CONFIG_FILE_NAME), content).unwrap();
@@ -328,10 +338,7 @@ mod tests {
     #[test]
     fn load_with_custom_header() {
         let dir = TempDir::new().unwrap();
-        write_config(
-            dir.path(),
-            "header = \"Copyright 2024 MyCompany\\nAll rights reserved.\"\n",
-        );
+        write_config(dir.path(), "header = \"Copyright 2024 MyCompany\\nAll rights reserved.\"\n");
 
         let config = load_config(dir.path()).unwrap();
         assert!(config.header_text.contains("Copyright 2024 MyCompany"));
@@ -340,10 +347,7 @@ mod tests {
     #[test]
     fn load_with_multiline_header() {
         let dir = TempDir::new().unwrap();
-        write_config(
-            dir.path(),
-            "header = \"\"\"\nCopyright 2024\nAll rights reserved.\n\"\"\"\n",
-        );
+        write_config(dir.path(), "header = \"\"\"\nCopyright 2024\nAll rights reserved.\n\"\"\"\n");
 
         let config = load_config(dir.path()).unwrap();
         assert!(config.header_text.contains("Copyright 2024"));
@@ -353,10 +357,7 @@ mod tests {
     #[test]
     fn error_both_license_and_header() {
         let dir = TempDir::new().unwrap();
-        write_config(
-            dir.path(),
-            "license = \"MIT\"\nheader = \"Custom header\"\n",
-        );
+        write_config(dir.path(), "license = \"MIT\"\nheader = \"Custom header\"\n");
 
         let err = load_config(dir.path()).unwrap_err();
         assert!(err.to_string().contains("not both"));
@@ -399,11 +400,7 @@ mod tests {
     #[test]
     fn fallback_to_cargo_toml_license() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(
-            dir.path().join("Cargo.toml"),
-            "[package]\nname = \"test\"\nlicense = \"MIT\"\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\nlicense = \"MIT\"\n").unwrap();
 
         let config = load_config(dir.path()).unwrap();
         assert_eq!(config.header_text, "Licensed under the MIT License.");
@@ -425,11 +422,7 @@ mod tests {
     #[test]
     fn fallback_skipped_when_cargo_toml_has_no_license() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(
-            dir.path().join("Cargo.toml"),
-            "[package]\nname = \"test\"\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\n").unwrap();
 
         let err = load_config(dir.path()).unwrap_err();
         assert!(err.to_string().contains("config file not found"));
@@ -501,11 +494,7 @@ mod tests {
 
         let pkg_dir = dir.path().join("pkg");
         std::fs::create_dir_all(&pkg_dir).unwrap();
-        std::fs::write(
-            pkg_dir.join("Cargo.toml"),
-            "[package]\nname = \"pkg\"\nlicense.workspace = true\n",
-        )
-        .unwrap();
+        std::fs::write(pkg_dir.join("Cargo.toml"), "[package]\nname = \"pkg\"\nlicense.workspace = true\n").unwrap();
 
         let err = load_config(&pkg_dir).unwrap_err();
         assert!(err.to_string().contains("config file not found"));
@@ -543,11 +532,7 @@ mod tests {
     fn config_file_takes_priority_over_cargo_toml() {
         let dir = TempDir::new().unwrap();
         write_config(dir.path(), "license = \"ISC\"\n");
-        std::fs::write(
-            dir.path().join("Cargo.toml"),
-            "[package]\nname = \"test\"\nlicense = \"MIT\"\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\nlicense = \"MIT\"\n").unwrap();
 
         let config = load_config(dir.path()).unwrap();
         // Should use .cargo-heather.toml (ISC), not Cargo.toml (MIT)

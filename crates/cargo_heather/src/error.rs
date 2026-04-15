@@ -12,10 +12,7 @@ use thiserror::Error;
 pub enum HeatherError {
     /// Failed to read a file from disk.
     #[error("failed to read file '{path}': {source}")]
-    FileRead {
-        path: PathBuf,
-        source: std::io::Error,
-    },
+    FileRead { path: PathBuf, source: std::io::Error },
 
     /// Failed to parse the configuration file.
     #[error("failed to parse config '{path}': {message}")]

@@ -284,11 +284,7 @@ mod tests {
     #[test]
     fn all_licenses_have_nonempty_headers() {
         for lic in LICENSES {
-            assert!(
-                !lic.header.is_empty(),
-                "License {} has an empty header",
-                lic.id
-            );
+            assert!(!lic.header.is_empty(), "License {} has an empty header", lic.id);
         }
     }
 
@@ -304,24 +300,14 @@ mod tests {
 
     #[test]
     fn all_gpl_variants_present() {
-        for id in &[
-            "GPL-2.0-only",
-            "GPL-2.0-or-later",
-            "GPL-3.0-only",
-            "GPL-3.0-or-later",
-        ] {
+        for id in &["GPL-2.0-only", "GPL-2.0-or-later", "GPL-3.0-only", "GPL-3.0-or-later"] {
             assert!(header_for_license(id).is_ok(), "Missing license: {id}");
         }
     }
 
     #[test]
     fn all_lgpl_variants_present() {
-        for id in &[
-            "LGPL-2.1-only",
-            "LGPL-2.1-or-later",
-            "LGPL-3.0-only",
-            "LGPL-3.0-or-later",
-        ] {
+        for id in &["LGPL-2.1-only", "LGPL-2.1-or-later", "LGPL-3.0-only", "LGPL-3.0-or-later"] {
             assert!(header_for_license(id).is_ok(), "Missing license: {id}");
         }
     }

@@ -8,6 +8,64 @@
 
 use std::path::Path;
 
+/// The kind of source file, determining header placement and comment style.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileKind {
+    /// A regular Rust source file (`.rs`). Header uses `//` at the top.
+    Rust,
+    /// A TOML file (`.toml`). Header uses `#` at the top.
+    Toml,
+    /// A Rust cargo-script file (`.rs` with shebang + `---` frontmatter).
+    /// Header uses `#` after the opening `---`.
+    CargoScript,
+}
+
+impl FileKind {
+    /// Detect the file kind from a path and (optionally) content.
+    ///
+    /// For `.rs` files, pass the content to distinguish cargo-scripts from
+    /// regular Rust files. If `content` is `None`, assumes regular Rust.
+    #[must_use]
+    pub fn detect(path: &Path, content: Option<&str>) -> Option<Self> {
+        match path.extension()?.to_str()? {
+            "rs" => {
+                if content.is_some_and(is_cargo_script) {
+                    Some(Self::CargoScript)
+                } else {
+                    Some(Self::Rust)
+                }
+            }
+            "toml" => Some(Self::Toml),
+            _ => None,
+        }
+    }
+
+    /// The comment style used for headers in this file kind.
+    #[must_use]
+    pub const fn comment_style(self) -> CommentStyle {
+        match self {
+            Self::Rust => CommentStyle::DoubleSlash,
+            Self::Toml | Self::CargoScript => CommentStyle::Hash,
+        }
+    }
+}
+
+/// Returns `true` if the content looks like a cargo-script file.
+///
+/// A cargo-script starts with a shebang (`#!`, but not `#![` which is a
+/// Rust inner attribute) on the first line, followed by `---` on the second.
+#[must_use]
+pub fn is_cargo_script(content: &str) -> bool {
+    let mut lines = content.lines();
+    let Some(first) = lines.next() else {
+        return false;
+    };
+    if !first.starts_with("#!") || first.starts_with("#![") {
+        return false;
+    }
+    lines.next().is_some_and(|l| l.trim() == "---")
+}
+
 /// Comment syntax for a supported file type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommentStyle {
@@ -99,8 +157,9 @@ impl CommentStyle {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::path::PathBuf;
+
+    use super::*;
 
     #[test]
     fn from_path_rs() {
@@ -112,10 +171,7 @@ mod tests {
 
     #[test]
     fn from_path_toml() {
-        assert_eq!(
-            CommentStyle::from_path(&PathBuf::from("Cargo.toml")),
-            Some(CommentStyle::Hash)
-        );
+        assert_eq!(CommentStyle::from_path(&PathBuf::from("Cargo.toml")), Some(CommentStyle::Hash));
     }
 
     #[test]
@@ -230,5 +286,60 @@ mod tests {
     #[test]
     fn strip_prefix_hash_empty() {
         assert_eq!(CommentStyle::Hash.strip_prefix("#"), "");
+    }
+
+    #[test]
+    fn is_cargo_script_detects_shebang_and_frontmatter() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# License\n";
+        assert!(is_cargo_script(content));
+    }
+
+    #[test]
+    fn is_cargo_script_rejects_inner_attribute() {
+        let content = "#![allow(unused)]\nfn main() {}\n";
+        assert!(!is_cargo_script(content));
+    }
+
+    #[test]
+    fn is_cargo_script_rejects_no_frontmatter() {
+        let content = "#!/usr/bin/env cargo\nfn main() {}\n";
+        assert!(!is_cargo_script(content));
+    }
+
+    #[test]
+    fn is_cargo_script_rejects_empty() {
+        assert!(!is_cargo_script(""));
+    }
+
+    #[test]
+    fn file_kind_detect_regular_rs() {
+        let kind = FileKind::detect(&PathBuf::from("src/main.rs"), Some("fn main() {}"));
+        assert_eq!(kind, Some(FileKind::Rust));
+    }
+
+    #[test]
+    fn file_kind_detect_cargo_script() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n";
+        let kind = FileKind::detect(&PathBuf::from("script.rs"), Some(content));
+        assert_eq!(kind, Some(FileKind::CargoScript));
+    }
+
+    #[test]
+    fn file_kind_detect_toml() {
+        let kind = FileKind::detect(&PathBuf::from("Cargo.toml"), None);
+        assert_eq!(kind, Some(FileKind::Toml));
+    }
+
+    #[test]
+    fn file_kind_detect_unsupported() {
+        let kind = FileKind::detect(&PathBuf::from("README.md"), None);
+        assert_eq!(kind, None);
+    }
+
+    #[test]
+    fn file_kind_comment_style() {
+        assert_eq!(FileKind::Rust.comment_style(), CommentStyle::DoubleSlash);
+        assert_eq!(FileKind::Toml.comment_style(), CommentStyle::Hash);
+        assert_eq!(FileKind::CargoScript.comment_style(), CommentStyle::Hash);
     }
 }

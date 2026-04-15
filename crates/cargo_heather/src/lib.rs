@@ -99,15 +99,9 @@
 //! 3. **Header validation** — Extracts the first comment block from each file (`//` for Rust, `#` for TOML) and compares it to the expected header. Reports missing or mismatched headers.
 //! 4. **Fix mode** — When `--fix` is passed, automatically prepends the correct header to files that are missing it, or replaces incorrect headers.
 //!
-//!
 
-#![doc(
-    html_logo_url = "https://media.githubusercontent.com/media/microsoft/oxidizer/refs/heads/main/crates/cargo_heather/logo.png"
-)]
-#![doc(
-    html_favicon_url = "https://media.githubusercontent.com/media/microsoft/oxidizer/refs/heads/main/crates/cargo_heather/favicon.ico"
-)]
-
+#![doc(html_logo_url = "https://media.githubusercontent.com/media/microsoft/oxidizer/refs/heads/main/crates/cargo_heather/logo.png")]
+#![doc(html_favicon_url = "https://media.githubusercontent.com/media/microsoft/oxidizer/refs/heads/main/crates/cargo_heather/favicon.ico")]
 #![deny(unsafe_code)]
 
 pub mod checker;
@@ -120,13 +114,12 @@ pub mod scanner;
 
 use std::path::Path;
 
-use ohno::AppError;
-use tracing::info;
-
 use checker::{CheckResult, FileCheckResult};
 use cli::HeatherArgs;
 use config::HeatherConfig;
 use error::HeatherError;
+use ohno::AppError;
+use tracing::info;
 
 /// Run the `cargo-heather` tool with the given arguments.
 ///
@@ -141,7 +134,7 @@ pub fn run(args: &HeatherArgs) -> Result<(), AppError> {
     let project_dir = args.project_dir();
     let config_path = resolve_config_path(args, &project_dir);
     let config = load_config(args, &project_dir)?;
-    let files = scanner::find_source_files(&project_dir, Some(&config_path));
+    let files = scanner::find_source_files(&project_dir, Some(&config_path), &config);
 
     if files.is_empty() {
         info!("No source files found in '{}'.", project_dir.display());
@@ -171,11 +164,7 @@ fn load_config(args: &HeatherArgs, project_dir: &Path) -> Result<HeatherConfig, 
     }
 }
 
-fn run_check(
-    files: &[std::path::PathBuf],
-    config: &HeatherConfig,
-    project_dir: &Path,
-) -> Result<(), AppError> {
+fn run_check(files: &[std::path::PathBuf], config: &HeatherConfig, project_dir: &Path) -> Result<(), AppError> {
     let results = checker::check_files(files, config)?;
     let failures = report_results(&results, project_dir);
 
@@ -183,18 +172,11 @@ fn run_check(
         ohno::bail!(HeatherError::ValidationFailed(failures));
     }
 
-    info!(
-        "All {} file(s) have correct license headers.",
-        results.len()
-    );
+    info!("All {} file(s) have correct license headers.", results.len());
     Ok(())
 }
 
-fn run_fix(
-    files: &[std::path::PathBuf],
-    config: &HeatherConfig,
-    project_dir: &Path,
-) -> Result<(), AppError> {
+fn run_fix(files: &[std::path::PathBuf], config: &HeatherConfig, project_dir: &Path) -> Result<(), AppError> {
     let mut fixed_count = 0;
 
     for file in files {
@@ -251,8 +233,9 @@ fn make_relative(path: &Path, base: &Path) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
 
     fn setup_project(license_toml: &str, files: &[(&str, &str)]) -> TempDir {
         let dir = TempDir::new().unwrap();
@@ -275,14 +258,8 @@ mod tests {
         let dir = setup_project(
             "license = \"MIT\"\n",
             &[
-                (
-                    "src/main.rs",
-                    "// Licensed under the MIT License.\n\nfn main() {}\n",
-                ),
-                (
-                    "src/lib.rs",
-                    "// Licensed under the MIT License.\n\npub fn hello() {}\n",
-                ),
+                ("src/main.rs", "// Licensed under the MIT License.\n\nfn main() {}\n"),
+                ("src/lib.rs", "// Licensed under the MIT License.\n\npub fn hello() {}\n"),
             ],
         );
 
@@ -300,10 +277,7 @@ mod tests {
         let dir = setup_project(
             "license = \"MIT\"\n",
             &[
-                (
-                    "src/main.rs",
-                    "// Licensed under the MIT License.\n\nfn main() {}\n",
-                ),
+                ("src/main.rs", "// Licensed under the MIT License.\n\nfn main() {}\n"),
                 ("src/lib.rs", "fn hello() {}\n"),
             ],
         );
@@ -320,11 +294,7 @@ mod tests {
     #[test]
     fn run_no_source_files() {
         let dir = TempDir::new().unwrap();
-        std::fs::write(
-            dir.path().join(config::CONFIG_FILE_NAME),
-            "license = \"MIT\"\n",
-        )
-            .unwrap();
+        std::fs::write(dir.path().join(config::CONFIG_FILE_NAME), "license = \"MIT\"\n").unwrap();
 
         let args = HeatherArgs {
             project_dir: Some(dir.path().to_path_buf()),
@@ -355,10 +325,7 @@ mod tests {
     fn run_fix_already_correct() {
         let dir = setup_project(
             "license = \"MIT\"\n",
-            &[(
-                "src/main.rs",
-                "// Licensed under the MIT License.\n\nfn main() {}\n",
-            )],
+            &[("src/main.rs", "// Licensed under the MIT License.\n\nfn main() {}\n")],
         );
 
         let args = HeatherArgs {
@@ -381,7 +348,7 @@ mod tests {
             dir.path().join("src/main.rs"),
             "// Licensed under the MIT License.\n\nfn main() {}\n",
         )
-            .unwrap();
+        .unwrap();
 
         let args = HeatherArgs {
             project_dir: Some(dir.path().to_path_buf()),
@@ -411,10 +378,7 @@ mod tests {
     fn run_with_custom_header() {
         let dir = setup_project(
             "header = \"Copyright 2024 MyCompany\"\n",
-            &[(
-                "src/main.rs",
-                "// Copyright 2024 MyCompany\n\nfn main() {}\n",
-            )],
+            &[("src/main.rs", "// Copyright 2024 MyCompany\n\nfn main() {}\n")],
         );
 
         let args = HeatherArgs {

@@ -39,16 +39,15 @@ impl HeatherArgs {
     /// Returns the project directory, defaulting to the current directory.
     #[must_use]
     pub fn project_dir(&self) -> PathBuf {
-        self.project_dir
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("."))
+        self.project_dir.clone().unwrap_or_else(|| PathBuf::from("."))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use clap::Parser;
+
+    use super::*;
 
     #[test]
     fn parse_basic_args() {

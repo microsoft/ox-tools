@@ -11,16 +11,10 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::comment::CommentStyle;
+use crate::config::HeatherConfig;
 
 /// Directories to always skip when scanning.
-const SKIP_DIRS: &[&str] = &[
-    "target",
-    ".git",
-    ".github",
-    ".vscode",
-    ".idea",
-    "node_modules",
-];
+const SKIP_DIRS: &[&str] = &["target", ".git", ".github", ".vscode", ".idea", "node_modules"];
 
 /// Discover all supported source files in the given project directory.
 ///
@@ -28,26 +22,54 @@ const SKIP_DIRS: &[&str] = &[
 /// Skips hidden directories, build artifacts (`target/`), and other
 /// non-source directories. Returns a sorted list of absolute paths.
 ///
-/// If `exclude` is provided, any path matching it will be omitted from results.
+/// Uses the config to:
+/// - Filter out TOML files starting with `.` (unless `config.dot_toml` is `true`)
+/// - Apply the `config.exclude` list (relative paths from `project_dir`)
+/// - Always exclude `exclude_path` (typically the config file itself)
 #[must_use]
-pub fn find_source_files(project_dir: &Path, exclude: Option<&Path>) -> Vec<PathBuf> {
-    let exclude = exclude.and_then(|p| std::fs::canonicalize(p).ok());
+pub fn find_source_files(project_dir: &Path, exclude_path: Option<&Path>, config: &HeatherConfig) -> Vec<PathBuf> {
+    let exclude_canonical = exclude_path.and_then(|p| std::fs::canonicalize(p).ok());
+
+    let exclude_list: Vec<PathBuf> = config
+        .exclude
+        .iter()
+        .map(|rel| project_dir.join(rel))
+        .filter_map(|p| std::fs::canonicalize(&p).ok())
+        .collect();
 
     let mut files: Vec<PathBuf> = WalkDir::new(project_dir)
         .into_iter()
         .filter_entry(|entry| !should_skip_dir(entry))
         .filter_map(Result::ok)
-        .filter(|entry| {
-            entry.file_type().is_file()
-                && CommentStyle::from_path(entry.path()).is_some()
-        })
+        .filter(|entry| entry.file_type().is_file() && CommentStyle::from_path(entry.path()).is_some())
         .map(walkdir::DirEntry::into_path)
         .filter(|path| {
-            if let Some(ref excl) = exclude {
-                std::fs::canonicalize(path).ok().as_ref() != Some(excl)
-            } else {
-                true
+            // Skip the config file itself
+            if let Some(ref excl) = exclude_canonical {
+                if std::fs::canonicalize(path).ok().as_ref() == Some(excl) {
+                    return false;
+                }
             }
+
+            // Skip dot-TOML files unless config says otherwise
+            if !config.dot_toml {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if name.ends_with(".toml") && name.starts_with('.') {
+                        return false;
+                    }
+                }
+            }
+
+            // Skip files in the exclude list
+            if !exclude_list.is_empty() {
+                if let Ok(canonical) = std::fs::canonicalize(path) {
+                    if exclude_list.iter().any(|excl| canonical == *excl || canonical.starts_with(excl)) {
+                        return false;
+                    }
+                }
+            }
+
+            true
         })
         .collect();
 
@@ -74,8 +96,13 @@ fn should_skip_dir(entry: &walkdir::DirEntry) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use tempfile::TempDir;
+
+    use super::*;
+
+    fn default_config() -> HeatherConfig {
+        HeatherConfig::with_defaults(String::new())
+    }
 
     fn create_file(dir: &Path, relative: &str) {
         let path = dir.join(relative);
@@ -92,11 +119,8 @@ mod tests {
         create_file(dir.path(), "src/lib.rs");
         create_file(dir.path(), "src/utils/mod.rs");
 
-        let files = find_source_files(dir.path(), None);
-        let rs_files: Vec<_> = files
-            .iter()
-            .filter(|f| f.extension().is_some_and(|e| e == "rs"))
-            .collect();
+        let files = find_source_files(dir.path(), None, &default_config());
+        let rs_files: Vec<_> = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).collect();
         assert_eq!(rs_files.len(), 3);
     }
 
@@ -106,11 +130,8 @@ mod tests {
         create_file(dir.path(), "Cargo.toml");
         create_file(dir.path(), "deny.toml");
 
-        let files = find_source_files(dir.path(), None);
-        let toml_files: Vec<_> = files
-            .iter()
-            .filter(|f| f.extension().is_some_and(|e| e == "toml"))
-            .collect();
+        let files = find_source_files(dir.path(), None, &default_config());
+        let toml_files: Vec<_> = files.iter().filter(|f| f.extension().is_some_and(|e| e == "toml")).collect();
         assert_eq!(toml_files.len(), 2);
     }
 
@@ -120,7 +141,7 @@ mod tests {
         create_file(dir.path(), "src/main.rs");
         create_file(dir.path(), "Cargo.toml");
 
-        let files = find_source_files(dir.path(), None);
+        let files = find_source_files(dir.path(), None, &default_config());
         assert_eq!(files.len(), 2);
     }
 
@@ -132,7 +153,7 @@ mod tests {
         create_file(dir.path(), ".cargo-heather.toml");
 
         let exclude = dir.path().join(".cargo-heather.toml");
-        let files = find_source_files(dir.path(), Some(&exclude));
+        let files = find_source_files(dir.path(), Some(&exclude), &default_config());
         assert!(files.iter().all(|f| !f.ends_with(".cargo-heather.toml")));
     }
 
@@ -144,11 +165,8 @@ mod tests {
         create_file(dir.path(), "examples/demo.rs");
         create_file(dir.path(), "benches/bench.rs");
 
-        let files = find_source_files(dir.path(), None);
-        let rs_files: Vec<_> = files
-            .iter()
-            .filter(|f| f.extension().is_some_and(|e| e == "rs"))
-            .collect();
+        let files = find_source_files(dir.path(), None, &default_config());
+        let rs_files: Vec<_> = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).collect();
         assert_eq!(rs_files.len(), 4);
     }
 
@@ -158,11 +176,8 @@ mod tests {
         create_file(dir.path(), "src/main.rs");
         create_file(dir.path(), "target/debug/build/generated.rs");
 
-        let files = find_source_files(dir.path(), None);
-        let rs_files: Vec<_> = files
-            .iter()
-            .filter(|f| f.extension().is_some_and(|e| e == "rs"))
-            .collect();
+        let files = find_source_files(dir.path(), None, &default_config());
+        let rs_files: Vec<_> = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).collect();
         assert_eq!(rs_files.len(), 1);
     }
 
@@ -172,11 +187,8 @@ mod tests {
         create_file(dir.path(), "src/main.rs");
         create_file(dir.path(), ".hidden/something.rs");
 
-        let files = find_source_files(dir.path(), None);
-        let rs_files: Vec<_> = files
-            .iter()
-            .filter(|f| f.extension().is_some_and(|e| e == "rs"))
-            .collect();
+        let files = find_source_files(dir.path(), None, &default_config());
+        let rs_files: Vec<_> = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).collect();
         assert_eq!(rs_files.len(), 1);
     }
 
@@ -187,7 +199,7 @@ mod tests {
         create_file(dir.path(), "src/readme.md");
         create_file(dir.path(), "data.json");
 
-        let files = find_source_files(dir.path(), None);
+        let files = find_source_files(dir.path(), None, &default_config());
         assert!(files.iter().all(|f| {
             let ext = f.extension().and_then(|e| e.to_str());
             ext == Some("rs") || ext == Some("toml")
@@ -197,7 +209,7 @@ mod tests {
     #[test]
     fn empty_directory_returns_empty() {
         let dir = TempDir::new().unwrap();
-        let files = find_source_files(dir.path(), None);
+        let files = find_source_files(dir.path(), None, &default_config());
         assert!(files.is_empty());
     }
 
@@ -208,11 +220,8 @@ mod tests {
         create_file(dir.path(), "src/a.rs");
         create_file(dir.path(), "src/m.rs");
 
-        let files = find_source_files(dir.path(), None);
-        let names: Vec<&str> = files
-            .iter()
-            .filter_map(|p| p.file_name()?.to_str())
-            .collect();
+        let files = find_source_files(dir.path(), None, &default_config());
+        let names: Vec<&str> = files.iter().filter_map(|p| p.file_name()?.to_str()).collect();
         assert_eq!(names, vec!["a.rs", "m.rs", "z.rs"]);
     }
 
@@ -222,11 +231,8 @@ mod tests {
         create_file(dir.path(), "build.rs");
         create_file(dir.path(), "src/main.rs");
 
-        let files = find_source_files(dir.path(), None);
-        let rs_files: Vec<_> = files
-            .iter()
-            .filter(|f| f.extension().is_some_and(|e| e == "rs"))
-            .collect();
+        let files = find_source_files(dir.path(), None, &default_config());
+        let rs_files: Vec<_> = files.iter().filter(|f| f.extension().is_some_and(|e| e == "rs")).collect();
         assert_eq!(rs_files.len(), 2);
     }
 
@@ -256,5 +262,63 @@ mod tests {
                 assert!(!should_skip_dir(&entry));
             }
         }
+    }
+
+    #[test]
+    fn skips_dot_toml_by_default() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "Cargo.toml");
+        create_file(dir.path(), ".rustfmt.toml");
+        create_file(dir.path(), ".cargo-heather.toml");
+
+        let config = default_config();
+        let files = find_source_files(dir.path(), None, &config);
+        let names: Vec<&str> = files.iter().filter_map(|p| p.file_name()?.to_str()).collect();
+        assert!(names.contains(&"Cargo.toml"));
+        assert!(!names.contains(&".rustfmt.toml"));
+        assert!(!names.contains(&".cargo-heather.toml"));
+    }
+
+    #[test]
+    fn includes_dot_toml_when_configured() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "Cargo.toml");
+        create_file(dir.path(), ".rustfmt.toml");
+
+        let mut config = default_config();
+        config.dot_toml = true;
+        let files = find_source_files(dir.path(), None, &config);
+        let names: Vec<&str> = files.iter().filter_map(|p| p.file_name()?.to_str()).collect();
+        assert!(names.contains(&"Cargo.toml"));
+        assert!(names.contains(&".rustfmt.toml"));
+    }
+
+    #[test]
+    fn exclude_list_filters_files() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "src/main.rs");
+        create_file(dir.path(), "src/generated.rs");
+        create_file(dir.path(), "Cargo.toml");
+
+        let mut config = default_config();
+        config.exclude = vec!["src/generated.rs".to_owned()];
+        let files = find_source_files(dir.path(), None, &config);
+        let names: Vec<&str> = files.iter().filter_map(|p| p.file_name()?.to_str()).collect();
+        assert!(names.contains(&"main.rs"));
+        assert!(!names.contains(&"generated.rs"));
+    }
+
+    #[test]
+    fn exclude_list_filters_directories() {
+        let dir = TempDir::new().unwrap();
+        create_file(dir.path(), "src/main.rs");
+        create_file(dir.path(), "vendor/lib.rs");
+        create_file(dir.path(), "vendor/util.rs");
+
+        let mut config = default_config();
+        config.exclude = vec!["vendor".to_owned()];
+        let files = find_source_files(dir.path(), None, &config);
+        assert!(files.iter().all(|f| !f.to_string_lossy().contains("vendor")));
+        assert_eq!(files.len(), 1);
     }
 }
