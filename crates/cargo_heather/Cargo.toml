@@ -16,12 +16,12 @@ license.workspace = true
 homepage.workspace = true
 repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo_heather"
 
+[package.metadata.docs.rs]
+all-features = true
+
 [[bin]]
 name = "cargo-heather"
 path = "src/main.rs"
-
-[package.metadata.docs.rs]
-all-features = true
 
 [dependencies]
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }

@@ -25,15 +25,15 @@ homepage = "https://github.com/microsoft/ox-tools"
 cargo_heather = { path = "crates/cargo_heather", default-features = false, version = "0.1.0" }
 
 # external dependencies
-assert_cmd = { version = "2.2.0", default-features = false }
 ahash = { version = "0.8", default-features = false }
 alloc_tracker = { version = "0.5.9", default-features = false }
 anyhow = { version = "1.0.100", default-features = false }
+assert_cmd = { version = "2.2.0", default-features = false }
 async-once-cell = { version = "0.5", default-features = false }
 bytes = { version = "1.11.1", default-features = false }
-clap = { version = "4.5.60", default-features = false }
 chrono = { version = "0.4.40", default-features = false }
 chrono-tz = { version = "0.10.4", default-features = false }
+clap = { version = "4.5.60", default-features = false }
 criterion = { version = "0.8.1", default-features = false }
 dashmap = { version = "6.1", default-features = false }
 derive_more = { version = "2.0.1", default-features = false }
@@ -81,10 +81,10 @@ tempfile = { version = "3.27.0", default-features = false }
 thiserror = { version = "2.0.17", default-features = false }
 time = { version = "0.3.47", default-features = false }
 tokio = { version = "1.48.0", default-features = false }
+toml = { version = "0.8.23", default-features = false }
 tower = { version = "0.5.2", default-features = false }
 tower-layer = { version = "0.3.3", default-features = false }
 tower-service = { version = "0.3.3", default-features = false }
-toml = { version = "0.8.23", default-features = false }
 tracing = { version = "0.1.41", default-features = false }
 tracing-subscriber = { version = "0.3.20", default-features = false }
 trait-variant = { version = "0.1.2", default-features = false }
