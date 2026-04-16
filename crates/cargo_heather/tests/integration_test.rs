@@ -463,3 +463,25 @@ fn full_pipeline_mixed_rs_and_toml() {
     assert_eq!(ok_count, 2); // main.rs and Cargo.toml
     assert_eq!(fail_count, 1); // deny.toml missing header
 }
+
+#[test]
+fn run_fix_replaces_wrong_header() {
+    use cargo_heather::cli::HeatherArgs;
+
+    let dir = create_project(
+        "license = \"MIT\"\n",
+        &[("src/main.rs", "// Wrong license header\n\nfn main() {}\n")],
+    );
+
+    let args = HeatherArgs {
+        project_dir: Some(dir.path().to_path_buf()),
+        config: None,
+        fix: true,
+    };
+
+    cargo_heather::run(&args).unwrap();
+
+    let content = std::fs::read_to_string(dir.path().join("src/main.rs")).unwrap();
+    assert!(content.contains("Licensed under the MIT License"));
+    assert!(!content.contains("Wrong license header"));
+}

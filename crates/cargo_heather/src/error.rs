@@ -122,4 +122,42 @@ mod tests {
         let err = HeatherError::ValidationFailed(3);
         assert!(err.to_string().contains("3 file(s)"));
     }
+
+    #[test]
+    fn unsupported_file_type_error_display() {
+        let err = HeatherError::UnsupportedFileType {
+            path: PathBuf::from("data.csv"),
+        };
+        assert!(err.to_string().contains("unsupported file type"));
+        assert!(err.to_string().contains("data.csv"));
+    }
+
+    #[test]
+    fn error_source_file_read() {
+        use std::error::Error;
+        let err = HeatherError::FileRead {
+            path: PathBuf::from("missing.rs"),
+            source: std::io::Error::new(std::io::ErrorKind::NotFound, "gone"),
+        };
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn error_source_none_for_other_variants() {
+        use std::error::Error;
+        let variants: Vec<HeatherError> = vec![
+            HeatherError::ConfigNotFound(PathBuf::from("x")),
+            HeatherError::ConfigInvalid("bad".into()),
+            HeatherError::UnknownLicense("X".into()),
+            HeatherError::UnsupportedFileType { path: PathBuf::from("x") },
+            HeatherError::ValidationFailed(1),
+            HeatherError::ConfigParse {
+                path: PathBuf::from("x"),
+                message: "y".into(),
+            },
+        ];
+        for v in &variants {
+            assert!(v.source().is_none());
+        }
+    }
 }

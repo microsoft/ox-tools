@@ -25,7 +25,7 @@ This repository contains a set of tools  that help you build robust highly scala
 
 These are the primary crates built out of this repo:
 
-- [`cargo_heather`](./crates/cargo_heather/README.md) -  A cargo subcommand to validate license headers in Rust and TOML source files
+- [`cargo_heather`](./crates/cargo_heather/README.md) -  A cargo sub-command to validate license headers in Rust and TOML source files
 
 ## About this Repo
 

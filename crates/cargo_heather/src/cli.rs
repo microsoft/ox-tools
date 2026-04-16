@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser};
 
-/// Cargo subcommand entry point.
+/// Cargo sub-command entry point.
 ///
 /// Handles the `cargo heather` invocation pattern where cargo passes
 /// "heather" as the first argument to the `cargo-heather` binary.
@@ -26,7 +26,7 @@ pub struct HeatherArgs {
     #[arg(long)]
     pub project_dir: Option<PathBuf>,
 
-    /// Path to the configuration file (defaults to `.cargo-heather.toml` in project dir).
+    /// Path to the configuration file (defaults to `.cargo-heather.toml` in project directory).
     #[arg(long)]
     pub config: Option<PathBuf>,
 

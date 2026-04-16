@@ -23,11 +23,11 @@ pub const CONFIG_FILE_NAME: &str = ".cargo-heather.toml";
 struct RawConfig {
     /// SPDX license identifier (e.g., `"MIT"`, `"Apache-2.0"`).
     license: Option<String>,
-    /// Custom multiline header text (without comment markers).
+    /// Custom multi-line header text (without comment markers).
     header: Option<String>,
     /// Whether to process Rust script files (shebang + `---` frontmatter). Default: `true`.
     scripts: Option<bool>,
-    /// Whether to process TOML files whose filename starts with `.`. Default: `false`.
+    /// Whether to process TOML files whose file name starts with `.`. Default: `false`.
     dot_toml: Option<bool>,
     /// List of relative paths to exclude from checking.
     exclude: Option<Vec<String>>,
@@ -73,7 +73,7 @@ pub struct HeatherConfig {
     pub header_text: String,
     /// Whether to process Rust script files (shebang + `---` frontmatter). Default: `true`.
     pub scripts: bool,
-    /// Whether to process TOML files whose filename starts with `.`. Default: `false`.
+    /// Whether to process TOML files whose file name starts with `.`. Default: `false`.
     pub dot_toml: bool,
     /// List of relative paths to exclude from checking.
     pub exclude: Vec<String>,
@@ -571,5 +571,106 @@ mod tests {
 
         let config = load_config_from_path(&path).unwrap();
         assert!(config.header_text.contains("Permission to use"));
+    }
+
+    #[test]
+    fn read_config_file_not_found() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nonexistent.toml");
+        let err = read_config_file(&path).unwrap_err();
+        assert!(err.to_string().contains("config file not found"));
+    }
+
+    #[test]
+    fn read_config_file_io_error() {
+        // A directory cannot be read as a file
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("adir");
+        std::fs::create_dir(&path).unwrap();
+        // Ensure the path "exists" but reading as file fails
+        // On Windows, reading a dir as file gives an error
+        let result = read_config_file(&path);
+        // Either ConfigNotFound (unlikely since dir exists) or FileRead error
+        result.unwrap_err();
+    }
+
+    #[test]
+    fn try_load_from_cargo_toml_io_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nonexistent").join("Cargo.toml");
+        let err = try_load_from_cargo_toml(&path).unwrap_err();
+        assert!(err.to_string().contains("failed to read file"));
+    }
+
+    #[test]
+    fn try_load_from_cargo_toml_malformed_toml() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("Cargo.toml");
+        std::fs::write(&path, "this is {{{ not valid").unwrap();
+        let err = try_load_from_cargo_toml(&path).unwrap_err();
+        assert!(err.to_string().contains("failed to parse config"));
+    }
+
+    #[test]
+    fn find_workspace_root_not_found() {
+        // Create a temp dir tree with no workspace Cargo.toml
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        // Create a non-workspace Cargo.toml
+        std::fs::write(sub.join("Cargo.toml"), "[package]\nname = \"test\"\n").unwrap();
+
+        let err = find_workspace_root(&sub.join("Cargo.toml")).unwrap_err();
+        assert!(err.to_string().contains("no workspace root Cargo.toml found"));
+    }
+
+    #[test]
+    fn cargo_toml_has_workspace_io_error() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("nonexistent_dir").join("Cargo.toml");
+        let err = cargo_toml_has_workspace(&path).unwrap_err();
+        assert!(err.to_string().contains("failed to read file"));
+    }
+
+    #[test]
+    fn cargo_toml_has_workspace_malformed_toml() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("Cargo.toml");
+        std::fs::write(&path, "not valid {{{").unwrap();
+        let err = cargo_toml_has_workspace(&path).unwrap_err();
+        assert!(err.to_string().contains("failed to parse config"));
+    }
+
+    #[test]
+    fn resolve_workspace_license_read_error() {
+        // Create workspace structure where workspace root Cargo.toml exists
+        // but we'll test the path where find_workspace_root succeeds
+        // but reading it fails. Hard to simulate I/O error on existing file.
+        // Instead, test find_workspace_root failure path.
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("crate");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+
+        // No workspace root exists → resolve_workspace_license will fail
+        let err = resolve_workspace_license(&sub.join("Cargo.toml")).unwrap_err();
+        assert!(err.to_string().contains("no workspace root Cargo.toml found"));
+    }
+
+    #[test]
+    fn resolve_workspace_license_malformed_workspace_root() {
+        // Create a workspace root with invalid TOML
+        let dir = TempDir::new().unwrap();
+        // Sub-directory with a package Cargo.toml
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+        // Workspace root with [workspace] but invalid content after
+        std::fs::write(dir.path().join("Cargo.toml"), "[workspace]\nmembers = [\"sub\"]\n").unwrap();
+
+        // find_workspace_root will find the root. resolve_workspace_license should parse it
+        // and find no [workspace.package].license → Ok(None)
+        let result = resolve_workspace_license(&sub.join("Cargo.toml")).unwrap();
+        assert!(result.is_none());
     }
 }

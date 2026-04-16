@@ -217,7 +217,7 @@ fn extract_header_comment(content: &str, style: CommentStyle) -> Option<String> 
     Some(comment_lines.join("\n"))
 }
 
-/// Normalize text for comparison: trim lines and collapse whitespace variations.
+/// Normalize text for comparison: trim lines and collapse white-space variations.
 fn normalize_text(text: &str) -> String {
     text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim().to_owned()
 }
@@ -815,5 +815,83 @@ mod tests {
         let result = check_file(&file, &config).unwrap();
         // Should be treated as regular Rust, not a script — missing header
         assert_eq!(result.result, CheckResult::Missing);
+    }
+
+    #[test]
+    fn extract_header_trailing_empty_comment_lines_trimmed() {
+        // Test that trailing empty comment lines are stripped from extracted header
+        let content = "// Licensed under MIT\n//\n\nfn main() {}\n";
+        let extracted = extract_header_comment(content, CommentStyle::DoubleSlash);
+        assert_eq!(extracted.as_deref(), Some("Licensed under MIT"));
+    }
+
+    #[test]
+    fn extract_script_header_trailing_empty_comment_lines_trimmed() {
+        // Script header with trailing empty `#` comment line
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Licensed under MIT\n#\n---\n";
+        let extracted = extract_script_header(content, CommentStyle::Hash);
+        assert_eq!(extracted.as_deref(), Some("Licensed under MIT"));
+    }
+
+    #[test]
+    fn extract_script_header_no_dash_line() {
+        // Line 2 is not `---`, so no script header
+        let content = "#!/usr/bin/env cargo\nnot-a-dash\n# License\n";
+        let extracted = extract_script_header(content, CommentStyle::Hash);
+        assert!(extracted.is_none());
+    }
+
+    #[test]
+    fn fix_file_nonexistent_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("nonexistent.rs");
+        let config = HeatherConfig::with_defaults("MIT".into());
+        let err = fix_file(&file, &config).unwrap_err();
+        assert!(err.to_string().contains("failed to read file"));
+    }
+
+    #[test]
+    fn fix_file_skips_script_when_scripts_disabled() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("script.rs");
+        std::fs::write(&file, "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n---\nfn main() {}\n").unwrap();
+
+        let mut config = HeatherConfig::with_defaults("MIT".into());
+        config.scripts = false;
+
+        let result = fix_file(&file, &config).unwrap();
+        assert_eq!(result.result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn fix_script_content_empty_rest() {
+        // Script with only shebang + --- + no other content
+        let content = "#!/usr/bin/env cargo\n---\n";
+        let fixed = fix_script_content(content, "MIT License", CommentStyle::Hash);
+        assert!(fixed.starts_with("#!/usr/bin/env cargo\n---\n# MIT License\n"));
+        // Should NOT have double newlines before EOF
+        assert!(!fixed.contains("\n\n"));
+    }
+
+    #[test]
+    fn write_file_read_only_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("readonly.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+
+        // Make file read-only
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file, perms).unwrap();
+
+        let config = HeatherConfig::with_defaults("MIT".into());
+        let err = fix_file(&file, &config).unwrap_err();
+        assert!(err.to_string().contains("failed to read file") || err.to_string().contains("denied"));
+
+        // Cleanup: restore permissions so TempDir can clean up
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        #[expect(clippy::permissions_set_readonly_false, reason = "required to clean up test temp dir")]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&file, perms).unwrap();
     }
 }

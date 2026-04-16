@@ -15,7 +15,7 @@
 
 ## cargo-heather
 
-A cargo subcommand to validate license headers in Rust (`.rs`) and TOML (`.toml`) source files.
+A cargo sub-command to validate license headers in Rust (`.rs`) and TOML (`.toml`) source files.
 
 ### Installation
 
