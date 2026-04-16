@@ -55,7 +55,7 @@ cargo heather --fix
 #### Options
 
 * `--project-dir <PATH>` — Path to the project directory (defaults to current directory)
-* `--config <PATH>` — Path to the configuration file (defaults to `.cargo-heather.toml` in project dir)
+* `--config <PATH>` — Path to the configuration file (defaults to `.cargo-heather.toml` in project directory)
 * `--fix` — Fix files by adding or replacing missing/incorrect headers
 * `--help` — Print help
 * `--version` — Print version
