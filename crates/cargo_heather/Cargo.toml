@@ -20,10 +20,7 @@ repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo_heath
 all-features = true
 
 [package.metadata.cargo_check_external_types]
-allowed_external_types = [
-    "clap_builder::derive::*",
-    "ohno::app::error::AppError"
-]
+allowed_external_types = ["clap_builder::derive::*", "ohno::app::error::AppError"]
 
 [[bin]]
 name = "cargo-heather"
