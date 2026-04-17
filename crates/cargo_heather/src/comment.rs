@@ -312,6 +312,13 @@ mod tests {
     }
 
     #[test]
+    fn is_cargo_script_rejects_non_shebang_with_frontmatter() {
+        // First line doesn't start with `#!` but second line is `---`
+        let content = "fn main() {}\n---\nsome content\n";
+        assert!(!is_cargo_script(content));
+    }
+
+    #[test]
     fn file_kind_detect_regular_rs() {
         let kind = FileKind::detect(&PathBuf::from("src/main.rs"), Some("fn main() {}"));
         assert_eq!(kind, Some(FileKind::Rust));

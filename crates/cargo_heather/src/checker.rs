@@ -800,6 +800,19 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn regular_file_still_checked_when_scripts_disabled() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+
+        let mut config = HeatherConfig::with_defaults("MIT".into());
+        config.scripts = false;
+        let result = check_file(&file, &config).unwrap();
+        assert_eq!(result.result, CheckResult::Missing);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn script_fix_file_adds_header() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("script.rs");
@@ -887,6 +900,19 @@ mod tests {
         assert!(fixed.starts_with("#!/usr/bin/env cargo\n---\n# MIT License\n"));
         // Should NOT have double newlines before EOF
         assert!(!fixed.contains("\n\n"));
+    }
+
+    #[test]
+    fn fix_script_content_strips_blank_line_between_old_header_and_manifest() {
+        // Old header followed by blank line then TOML manifest
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Old Header\n\n[package]\nedition = \"2024\"\n---\nfn main() {}\n";
+        let fixed = fix_script_content(content, "New Header", CommentStyle::Hash);
+        // The blank line between old header and [package] must be stripped,
+        // and a new blank line inserted between new header and [package].
+        assert_eq!(
+            fixed,
+            "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# New Header\n\n[package]\nedition = \"2024\"\n---\nfn main() {}\n"
+        );
     }
 
     #[test]

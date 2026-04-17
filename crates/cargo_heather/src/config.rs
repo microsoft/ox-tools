@@ -272,8 +272,8 @@ fn find_workspace_root(package_cargo_toml: &Path) -> Result<PathBuf, HeatherErro
         }
 
         match current.parent() {
-            Some(parent) if parent != current => current = parent,
-            _ => break,
+            Some(parent) => current = parent,
+            None => break,
         }
     }
 
@@ -521,6 +521,26 @@ mod tests {
             "[package]\nname = \"test\"\nlicense.workspace = false\n",
         )
         .unwrap();
+
+        let err = load_config(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("config file not found"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn fallback_empty_license_treated_as_absent() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\nlicense = \"\"\n").unwrap();
+
+        let err = load_config(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("config file not found"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn fallback_whitespace_only_license_treated_as_absent() {
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\nlicense = \"   \"\n").unwrap();
 
         let err = load_config(dir.path()).unwrap_err();
         assert!(err.to_string().contains("config file not found"));

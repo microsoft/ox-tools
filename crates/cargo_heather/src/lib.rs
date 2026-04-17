@@ -143,7 +143,8 @@ pub fn run(args: &HeatherArgs) -> Result<(), AppError> {
     info!("Checking {} file(s)...", files.len());
 
     if args.fix {
-        run_fix(&files, &config, &project_dir)
+        run_fix(&files, &config, &project_dir)?;
+        Ok(())
     } else {
         run_check(&files, &config, &project_dir)
     }
@@ -175,8 +176,8 @@ fn run_check(files: &[std::path::PathBuf], config: &HeatherConfig, project_dir: 
     Ok(())
 }
 
-fn run_fix(files: &[std::path::PathBuf], config: &HeatherConfig, project_dir: &Path) -> Result<(), AppError> {
-    let mut fixed_count = 0;
+fn run_fix(files: &[std::path::PathBuf], config: &HeatherConfig, project_dir: &Path) -> Result<usize, AppError> {
+    let mut fixed_count: usize = 0;
 
     for file in files {
         let result = checker::fix_file(file, config)?;
@@ -195,13 +196,12 @@ fn run_fix(files: &[std::path::PathBuf], config: &HeatherConfig, project_dir: &P
         }
     }
 
-    if fixed_count > 0 {
-        info!("Fixed {fixed_count} file(s).");
-    } else {
-        info!("All files already have correct headers.");
+    match fixed_count {
+        0 => info!("All files already have correct headers."),
+        n => info!("Fixed {n} file(s)."),
     }
 
-    Ok(())
+    Ok(fixed_count)
 }
 
 fn report_results(results: &[FileCheckResult], project_dir: &Path) -> usize {
@@ -431,5 +431,41 @@ mod tests {
 
         let failures = report_results(&results, Path::new("."));
         assert_eq!(failures, 2);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn run_fix_returns_count_of_fixed_files() {
+        let dir = setup_project(
+            "license = \"MIT\"\n",
+            &[
+                ("src/main.rs", "fn main() {}\n"),
+                ("src/lib.rs", "// Wrong header\n\npub fn hello() {}\n"),
+                ("src/ok.rs", "// Licensed under the MIT License.\n\nfn ok() {}\n"),
+            ],
+        );
+
+        let config = config::load_config(dir.path()).unwrap();
+        let config_path = config::config_path_for(dir.path());
+        let files = scanner::find_source_files(dir.path(), Some(&config_path), &config);
+
+        let fixed = run_fix(&files, &config, dir.path()).unwrap();
+        assert_eq!(fixed, 2);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn run_fix_returns_zero_when_all_correct() {
+        let dir = setup_project(
+            "license = \"MIT\"\n",
+            &[("src/main.rs", "// Licensed under the MIT License.\n\nfn main() {}\n")],
+        );
+
+        let config = config::load_config(dir.path()).unwrap();
+        let config_path = config::config_path_for(dir.path());
+        let files = scanner::find_source_files(dir.path(), Some(&config_path), &config);
+
+        let fixed = run_fix(&files, &config, dir.path()).unwrap();
+        assert_eq!(fixed, 0);
     }
 }
