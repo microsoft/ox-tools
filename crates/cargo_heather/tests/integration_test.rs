@@ -43,6 +43,7 @@ fn config_exclude(dir: &Path) -> PathBuf {
 // --- Full pipeline tests ---
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_mit_header_check_passes() {
     let header = license::header_for_license("MIT").unwrap();
     let comment = config::format_header_comment(header);
@@ -59,6 +60,7 @@ fn full_pipeline_mit_header_check_passes() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_apache_header_check_passes() {
     let header = license::header_for_license("Apache-2.0").unwrap();
     let comment = config::format_header_comment(header);
@@ -73,6 +75,7 @@ fn full_pipeline_apache_header_check_passes() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_missing_header_detected() {
     let dir = create_project("license = \"MIT\"\n", &[("src/main.rs", "fn main() {}\n")]);
 
@@ -83,6 +86,7 @@ fn full_pipeline_missing_header_detected() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_wrong_header_detected() {
     let dir = create_project(
         "license = \"MIT\"\n",
@@ -96,6 +100,7 @@ fn full_pipeline_wrong_header_detected() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_custom_header() {
     let dir = create_project(
         "header = \"Copyright 2024 ACME Corp\"\n",
@@ -109,6 +114,7 @@ fn full_pipeline_custom_header() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_custom_multiline_header() {
     let dir = create_project(
         "header = \"\"\"Copyright 2024\nAll rights reserved.\"\"\"\n",
@@ -122,6 +128,7 @@ fn full_pipeline_custom_multiline_header() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_fix_adds_header() {
     let dir = create_project("license = \"MIT\"\n", &[("src/main.rs", "fn main() {}\n")]);
 
@@ -138,6 +145,7 @@ fn full_pipeline_fix_adds_header() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_fix_replaces_wrong_header() {
     let dir = create_project("license = \"MIT\"\n", &[("src/main.rs", "// Old wrong header\n\nfn main() {}\n")]);
 
@@ -154,6 +162,7 @@ fn full_pipeline_fix_replaces_wrong_header() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_multiple_files_mixed() {
     let mit_header = license::header_for_license("MIT").unwrap();
     let comment = config::format_header_comment(mit_header);
@@ -180,6 +189,7 @@ fn full_pipeline_multiple_files_mixed() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_scanner_skips_target() {
     let dir = create_project(
         "license = \"MIT\"\n",
@@ -197,6 +207,7 @@ fn full_pipeline_scanner_skips_target() {
 // --- CLI binary tests ---
 
 #[test]
+#[cfg_attr(miri, ignore)] // subprocess execution is not supported under Miri
 fn binary_help() {
     let mut cmd = Command::cargo_bin("cargo-heather").unwrap();
     cmd.arg("heather").arg("--help");
@@ -204,6 +215,7 @@ fn binary_help() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // subprocess execution is not supported under Miri
 fn binary_version() {
     let mut cmd = Command::cargo_bin("cargo-heather").unwrap();
     cmd.arg("heather").arg("--version");
@@ -211,6 +223,7 @@ fn binary_version() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // subprocess execution is not supported under Miri
 fn binary_check_passes() {
     let mit_header = license::header_for_license("MIT").unwrap();
     let comment = config::format_header_comment(mit_header);
@@ -224,6 +237,7 @@ fn binary_check_passes() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // subprocess execution is not supported under Miri
 fn binary_check_fails_on_missing_header() {
     let dir = create_project("license = \"MIT\"\n", &[("src/main.rs", "fn main() {}\n")]);
 
@@ -233,6 +247,7 @@ fn binary_check_fails_on_missing_header() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // subprocess execution is not supported under Miri
 fn binary_fix_mode() {
     let dir = create_project("license = \"MIT\"\n", &[("src/main.rs", "fn main() {}\n")]);
 
@@ -248,6 +263,7 @@ fn binary_fix_mode() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // subprocess execution is not supported under Miri
 fn binary_custom_config_path() {
     let dir = TempDir::new().unwrap();
     let config_path = dir.path().join("my-config.toml");
@@ -270,6 +286,7 @@ fn binary_custom_config_path() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // subprocess execution is not supported under Miri
 fn binary_no_config_file_fails() {
     let dir = TempDir::new().unwrap();
     std::fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -283,6 +300,7 @@ fn binary_no_config_file_fails() {
 // --- License lookup integration ---
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn all_spdx_licenses_produce_valid_config() {
     for spdx_id in license::supported_licenses() {
         let dir = TempDir::new().unwrap();
@@ -297,6 +315,7 @@ fn all_spdx_licenses_produce_valid_config() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn all_spdx_headers_round_trip_through_checker() {
     for spdx_id in license::supported_licenses() {
         let header = license::header_for_license(spdx_id).unwrap();
@@ -329,6 +348,7 @@ fn format_header_comment_produces_valid_rust_comments() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn scanner_finds_nested_files() {
     let dir = TempDir::new().unwrap();
     for path in &["src/main.rs", "src/a/b/c.rs", "tests/integration.rs", "examples/demo.rs"] {
@@ -343,6 +363,7 @@ fn scanner_finds_nested_files() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn config_with_gpl3_produces_correct_header() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join(config::CONFIG_FILE_NAME), "license = \"GPL-3.0-only\"\n").unwrap();
@@ -353,6 +374,7 @@ fn config_with_gpl3_produces_correct_header() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn config_with_mpl2_produces_correct_header() {
     let dir = TempDir::new().unwrap();
     std::fs::write(dir.path().join(config::CONFIG_FILE_NAME), "license = \"MPL-2.0\"\n").unwrap();
@@ -365,6 +387,7 @@ fn config_with_mpl2_produces_correct_header() {
 // --- TOML file integration tests ---
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_toml_header_check_passes() {
     let dir = create_project(
         "license = \"MIT\"\n",
@@ -381,6 +404,7 @@ fn full_pipeline_toml_header_check_passes() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_toml_missing_header_detected() {
     let dir = create_project(
         "license = \"MIT\"\n",
@@ -397,6 +421,7 @@ fn full_pipeline_toml_missing_header_detected() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_toml_fix_adds_header() {
     let dir = create_project("license = \"MIT\"\n", &[("Cargo.toml", "[package]\nname = \"foo\"\n")]);
 
@@ -413,6 +438,7 @@ fn full_pipeline_toml_fix_adds_header() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_toml_fix_replaces_wrong_header() {
     let dir = create_project(
         "license = \"MIT\"\n",
@@ -433,6 +459,7 @@ fn full_pipeline_toml_fix_replaces_wrong_header() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_config_file_excluded_from_scan() {
     let dir = create_project(
         "license = \"MIT\"\n",
@@ -444,6 +471,7 @@ fn full_pipeline_config_file_excluded_from_scan() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn full_pipeline_mixed_rs_and_toml() {
     let dir = create_project(
         "license = \"MIT\"\n",
@@ -465,6 +493,7 @@ fn full_pipeline_mixed_rs_and_toml() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
 fn run_fix_replaces_wrong_header() {
     use cargo_heather::cli::HeatherArgs;
 

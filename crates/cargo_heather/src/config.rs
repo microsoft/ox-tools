@@ -324,6 +324,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn load_with_spdx_license() {
         let dir = TempDir::new().unwrap();
         write_config(dir.path(), "license = \"MIT\"\n");
@@ -333,6 +334,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn load_with_custom_header() {
         let dir = TempDir::new().unwrap();
         write_config(dir.path(), "header = \"Copyright 2024 MyCompany\\nAll rights reserved.\"\n");
@@ -342,6 +344,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn load_with_multiline_header() {
         let dir = TempDir::new().unwrap();
         write_config(dir.path(), "header = \"\"\"\nCopyright 2024\nAll rights reserved.\n\"\"\"\n");
@@ -352,6 +355,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn error_both_license_and_header() {
         let dir = TempDir::new().unwrap();
         write_config(dir.path(), "license = \"MIT\"\nheader = \"Custom header\"\n");
@@ -361,6 +365,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn error_neither_license_nor_header() {
         let dir = TempDir::new().unwrap();
         write_config(dir.path(), "# empty config\n");
@@ -370,6 +375,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn error_empty_header() {
         let dir = TempDir::new().unwrap();
         write_config(dir.path(), "header = \"  \"\n");
@@ -379,6 +385,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn error_unknown_license() {
         let dir = TempDir::new().unwrap();
         write_config(dir.path(), "license = \"FAKE-1.0\"\n");
@@ -388,6 +395,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn error_config_not_found_and_no_cargo_toml() {
         let dir = TempDir::new().unwrap();
         let err = load_config(dir.path()).unwrap_err();
@@ -395,6 +403,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn fallback_to_cargo_toml_license() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\nlicense = \"MIT\"\n").unwrap();
@@ -404,6 +413,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn fallback_to_cargo_toml_apache() {
         let dir = TempDir::new().unwrap();
         std::fs::write(
@@ -417,6 +427,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn fallback_skipped_when_cargo_toml_has_no_license() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join("Cargo.toml"), "[package]\nname = \"test\"\n").unwrap();
@@ -426,6 +437,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn fallback_error_on_unknown_cargo_toml_license() {
         let dir = TempDir::new().unwrap();
         std::fs::write(
@@ -439,6 +451,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn fallback_workspace_license_inheritance() {
         // Simulate a workspace: parent dir has workspace Cargo.toml,
         // child dir has package Cargo.toml with license.workspace = true
@@ -465,6 +478,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn fallback_workspace_license_same_dir() {
         // The workspace root and the package are in the same Cargo.toml
         let dir = TempDir::new().unwrap();
@@ -479,6 +493,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn fallback_workspace_no_license_in_workspace_root() {
         let dir = TempDir::new().unwrap();
 
@@ -498,6 +513,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn fallback_workspace_false_treated_as_absent() {
         let dir = TempDir::new().unwrap();
         std::fs::write(
@@ -511,6 +527,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn fallback_workspace_root_only_manifest() {
         // A workspace root Cargo.toml with no [package] section at all,
         // only [workspace.package].license — common for pure workspace roots.
@@ -526,6 +543,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn config_file_takes_priority_over_cargo_toml() {
         let dir = TempDir::new().unwrap();
         write_config(dir.path(), "license = \"ISC\"\n");
@@ -537,6 +555,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn error_malformed_toml() {
         let dir = TempDir::new().unwrap();
         write_config(dir.path(), "this is not valid toml {{{\n");
@@ -564,6 +583,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn load_config_from_path_direct() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join(CONFIG_FILE_NAME);
@@ -574,6 +594,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn read_config_file_not_found() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("nonexistent.toml");
@@ -582,6 +603,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn read_config_file_io_error() {
         // A directory cannot be read as a file
         let dir = TempDir::new().unwrap();
@@ -595,6 +617,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn try_load_from_cargo_toml_io_error() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("nonexistent").join("Cargo.toml");
@@ -603,6 +626,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn try_load_from_cargo_toml_malformed_toml() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("Cargo.toml");
@@ -612,6 +636,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn find_workspace_root_not_found() {
         // Create a temp dir tree with no workspace Cargo.toml
         let dir = TempDir::new().unwrap();
@@ -625,6 +650,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn cargo_toml_has_workspace_io_error() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("nonexistent_dir").join("Cargo.toml");
@@ -633,6 +659,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn cargo_toml_has_workspace_malformed_toml() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("Cargo.toml");
@@ -642,6 +669,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn resolve_workspace_license_read_error() {
         // Create workspace structure where workspace root Cargo.toml exists
         // but we'll test the path where find_workspace_root succeeds
@@ -658,6 +686,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn resolve_workspace_license_malformed_workspace_root() {
         // Create a workspace root with invalid TOML
         let dir = TempDir::new().unwrap();

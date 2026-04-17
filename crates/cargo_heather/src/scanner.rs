@@ -112,6 +112,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn finds_rs_files_in_src() {
         let dir = TempDir::new().unwrap();
         create_file(dir.path(), "src/main.rs");
@@ -124,6 +125,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn finds_toml_files() {
         let dir = TempDir::new().unwrap();
         create_file(dir.path(), "Cargo.toml");
@@ -135,6 +137,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn finds_both_rs_and_toml() {
         let dir = TempDir::new().unwrap();
         create_file(dir.path(), "src/main.rs");
@@ -145,6 +148,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn excludes_specified_file() {
         let dir = TempDir::new().unwrap();
         create_file(dir.path(), "src/main.rs");
@@ -157,6 +161,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn finds_rs_files_in_tests_and_examples() {
         let dir = TempDir::new().unwrap();
         create_file(dir.path(), "src/main.rs");
@@ -170,6 +175,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn skips_target_directory() {
         let dir = TempDir::new().unwrap();
         create_file(dir.path(), "src/main.rs");
@@ -181,6 +187,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn skips_hidden_directories() {
         let dir = TempDir::new().unwrap();
         create_file(dir.path(), "src/main.rs");
@@ -192,6 +199,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn ignores_unsupported_files() {
         let dir = TempDir::new().unwrap();
         create_file(dir.path(), "src/main.rs");
@@ -206,6 +214,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn empty_directory_returns_empty() {
         let dir = TempDir::new().unwrap();
         let files = find_source_files(dir.path(), None, &default_config());
@@ -213,6 +222,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn returns_sorted_paths() {
         let dir = TempDir::new().unwrap();
         create_file(dir.path(), "src/z.rs");
@@ -225,6 +235,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn finds_build_rs_at_root() {
         let dir = TempDir::new().unwrap();
         create_file(dir.path(), "build.rs");
@@ -236,6 +247,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn should_skip_dir_skips_target() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("target")).unwrap();
@@ -250,6 +262,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn should_skip_dir_does_not_skip_src() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -264,6 +277,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn skips_dot_toml_by_default() {
         let dir = TempDir::new().unwrap();
         create_file(dir.path(), "Cargo.toml");
@@ -279,6 +293,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn includes_dot_toml_when_configured() {
         let dir = TempDir::new().unwrap();
         create_file(dir.path(), "Cargo.toml");
@@ -293,6 +308,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn exclude_list_filters_files() {
         let dir = TempDir::new().unwrap();
         create_file(dir.path(), "src/main.rs");
@@ -308,6 +324,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn exclude_list_filters_directories() {
         let dir = TempDir::new().unwrap();
         create_file(dir.path(), "src/main.rs");

@@ -482,6 +482,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn check_file_reads_and_checks() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.rs");
@@ -494,6 +495,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn check_file_nonexistent() {
         let config = HeatherConfig::with_defaults("MIT".into());
 
@@ -502,6 +504,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn check_files_multiple() {
         let dir = TempDir::new().unwrap();
         let good = dir.path().join("good.rs");
@@ -518,6 +521,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn fix_file_adds_missing_header() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.rs");
@@ -534,6 +538,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn fix_file_replaces_wrong_header() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.rs");
@@ -551,6 +556,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn fix_file_leaves_correct_header_unchanged() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.rs");
@@ -644,6 +650,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn toml_check_file_reads_and_checks() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.toml");
@@ -656,6 +663,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn toml_fix_file_adds_missing_header() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.toml");
@@ -672,6 +680,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn toml_fix_file_replaces_wrong_header() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("test.toml");
@@ -696,6 +705,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn check_file_unsupported_extension() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("readme.md");
@@ -760,6 +770,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn script_check_file_correct() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("script.rs");
@@ -775,6 +786,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn script_check_file_skipped_when_disabled() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("script.rs");
@@ -787,6 +799,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn script_fix_file_adds_header() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("script.rs");
@@ -806,6 +819,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn inner_attribute_not_treated_as_script() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("lib.rs");
@@ -842,6 +856,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn fix_file_nonexistent_returns_error() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("nonexistent.rs");
@@ -851,6 +866,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn fix_file_skips_script_when_scripts_disabled() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("script.rs");
@@ -874,6 +890,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn write_file_read_only_returns_error() {
         let dir = TempDir::new().unwrap();
         let file = dir.path().join("readonly.rs");

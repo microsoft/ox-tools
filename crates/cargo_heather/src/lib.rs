@@ -253,6 +253,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn run_check_all_pass() {
         let dir = setup_project(
             "license = \"MIT\"\n",
@@ -272,6 +273,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn run_check_some_fail() {
         let dir = setup_project(
             "license = \"MIT\"\n",
@@ -291,6 +293,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn run_no_source_files() {
         let dir = TempDir::new().unwrap();
         std::fs::write(dir.path().join(config::CONFIG_FILE_NAME), "license = \"MIT\"\n").unwrap();
@@ -305,6 +308,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn run_fix_mode() {
         let dir = setup_project("license = \"MIT\"\n", &[("src/main.rs", "fn main() {}\n")]);
 
@@ -321,6 +325,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn run_fix_already_correct() {
         let dir = setup_project(
             "license = \"MIT\"\n",
@@ -337,6 +342,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn run_with_custom_config_path() {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("custom.toml");
@@ -359,6 +365,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn run_config_not_found() {
         let dir = TempDir::new().unwrap();
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
@@ -374,6 +381,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
     fn run_with_custom_header() {
         let dir = setup_project(
             "header = \"Copyright 2024 MyCompany\"\n",
