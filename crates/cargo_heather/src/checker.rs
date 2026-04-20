@@ -1,0 +1,940 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Header validation logic for `cargo-heather`.
+//!
+//! Extracts the first comment block from source files and compares it
+//! against the expected license header text. Supports multiple comment
+//! styles via [`CommentStyle`].
+
+use std::path::{Path, PathBuf};
+
+use crate::comment::{CommentStyle, FileKind};
+use crate::config::HeatherConfig;
+use crate::error::HeatherError;
+
+/// Result of checking a single file's header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckResult {
+    /// The file has the correct header.
+    Ok,
+    /// The file is missing a header entirely.
+    Missing,
+    /// The file has a header, but it doesn't match the expected text.
+    Mismatch {
+        /// The expected header text.
+        expected: String,
+        /// The actual header text found in the file.
+        actual: String,
+    },
+}
+
+/// Result of checking a single file, including its path.
+#[derive(Debug, Clone)]
+pub struct FileCheckResult {
+    /// Path to the checked file.
+    pub path: PathBuf,
+    /// The result of the header check.
+    pub result: CheckResult,
+}
+
+/// Check all given files for the expected license header.
+///
+/// # Errors
+///
+/// Returns [`HeatherError::FileRead`] if any file cannot be read,
+/// or [`HeatherError::UnsupportedFileType`] if a file has an unknown extension.
+pub fn check_files(files: &[PathBuf], config: &HeatherConfig) -> Result<Vec<FileCheckResult>, HeatherError> {
+    files.iter().map(|path| check_file(path, config)).collect()
+}
+
+/// Check a single file for the expected license header.
+///
+/// For cargo-script files (shebang + `---`), the header is expected inside
+/// the frontmatter using `#` comment style. These files are skipped when
+/// `config.scripts` is `false`.
+///
+/// # Errors
+///
+/// Returns [`HeatherError::FileRead`] if the file cannot be read,
+/// or [`HeatherError::UnsupportedFileType`] if the extension is unknown.
+pub fn check_file(path: &Path, config: &HeatherConfig) -> Result<FileCheckResult, HeatherError> {
+    let content = std::fs::read_to_string(path).map_err(|e| HeatherError::FileRead {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+
+    let kind = FileKind::detect(path, Some(&content)).ok_or_else(|| HeatherError::UnsupportedFileType { path: path.to_path_buf() })?;
+
+    // Skip cargo-script files when scripts processing is disabled.
+    if kind == FileKind::CargoScript && !config.scripts {
+        return Ok(FileCheckResult {
+            path: path.to_path_buf(),
+            result: CheckResult::Ok,
+        });
+    }
+
+    let style = kind.comment_style();
+    let result = match kind {
+        FileKind::CargoScript => check_content_script(&content, &config.header_text, style),
+        _ => check_content(&content, &config.header_text, style),
+    };
+
+    Ok(FileCheckResult {
+        path: path.to_path_buf(),
+        result,
+    })
+}
+
+/// Check file content against the expected header text.
+///
+/// Extracts the first comment block and compares it to the expected header.
+#[must_use]
+pub fn check_content(content: &str, expected_header: &str, style: CommentStyle) -> CheckResult {
+    let extracted = extract_header_comment(content, style);
+
+    match extracted {
+        None => CheckResult::Missing,
+        Some(actual) => {
+            let normalized_expected = normalize_text(expected_header);
+            let normalized_actual = normalize_text(&actual);
+
+            if normalized_expected == normalized_actual {
+                CheckResult::Ok
+            } else {
+                CheckResult::Mismatch {
+                    expected: expected_header.to_owned(),
+                    actual,
+                }
+            }
+        }
+    }
+}
+
+/// Check file content for the expected header inside a cargo-script frontmatter.
+///
+/// Skips the shebang line and opening `---`, then checks the `#` comment block.
+#[must_use]
+fn check_content_script(content: &str, expected_header: &str, style: CommentStyle) -> CheckResult {
+    let extracted = extract_script_header(content, style);
+
+    match extracted {
+        None => CheckResult::Missing,
+        Some(actual) => {
+            let normalized_expected = normalize_text(expected_header);
+            let normalized_actual = normalize_text(&actual);
+
+            if normalized_expected == normalized_actual {
+                CheckResult::Ok
+            } else {
+                CheckResult::Mismatch {
+                    expected: expected_header.to_owned(),
+                    actual,
+                }
+            }
+        }
+    }
+}
+
+/// Extract the header comment block from inside a cargo-script frontmatter.
+///
+/// Expects the file to start with a shebang and `---`. Extracts `#` comment
+/// lines immediately after the opening `---`, stopping at the first blank
+/// or non-comment line.
+fn extract_script_header(content: &str, style: CommentStyle) -> Option<String> {
+    let mut lines = content.lines();
+
+    // Skip shebang (line 1)
+    lines.next()?;
+    // Skip opening --- (line 2)
+    let dash_line = lines.next()?;
+    if dash_line.trim() != "---" {
+        return None;
+    }
+
+    let mut comment_lines: Vec<String> = Vec::new();
+
+    for line in lines {
+        let trimmed = line.trim();
+        if style.is_header_comment_line(trimmed) {
+            comment_lines.push(style.strip_prefix(trimmed));
+        } else {
+            break;
+        }
+    }
+
+    if comment_lines.is_empty() {
+        return None;
+    }
+
+    // Trim trailing empty lines
+    while comment_lines.last().is_some_and(String::is_empty) {
+        comment_lines.pop();
+    }
+
+    Some(comment_lines.join("\n"))
+}
+
+/// Extract the first contiguous block of comment lines from file content.
+///
+/// Skips leading blank lines. Stops at the first non-comment line.
+/// For Rust files, does NOT include doc comments (`///` or `//!`).
+/// Returns `None` if no comment block is found at the start.
+fn extract_header_comment(content: &str, style: CommentStyle) -> Option<String> {
+    let mut comment_lines: Vec<String> = Vec::new();
+    let mut found_comment = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        // Skip leading blank lines before the comment block
+        if !found_comment && trimmed.is_empty() {
+            continue;
+        }
+
+        if style.is_header_comment_line(trimmed) {
+            found_comment = true;
+            let text = style.strip_prefix(trimmed);
+            comment_lines.push(text);
+        } else if found_comment {
+            // End of comment block
+            break;
+        } else {
+            // First non-blank, non-comment line — no header found
+            return None;
+        }
+    }
+
+    if comment_lines.is_empty() {
+        return None;
+    }
+
+    // Trim trailing empty lines from the comment block
+    while comment_lines.last().is_some_and(String::is_empty) {
+        comment_lines.pop();
+    }
+
+    Some(comment_lines.join("\n"))
+}
+
+/// Normalize text for comparison: trim lines and collapse white-space variations.
+fn normalize_text(text: &str) -> String {
+    text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim().to_owned()
+}
+
+/// Prepend the license header comment to file content.
+///
+/// Used by `--fix` mode to add missing headers.
+#[must_use]
+pub fn prepend_header(content: &str, header_text: &str, style: CommentStyle) -> String {
+    let comment = style.format_header(header_text);
+
+    if content.is_empty() {
+        return format!("{comment}\n");
+    }
+
+    format!("{comment}\n\n{content}")
+}
+
+/// Fix a single file by adding or replacing the header.
+///
+/// For cargo-script files, the header is placed inside the frontmatter
+/// (after the shebang and `---`). These files are skipped when
+/// `config.scripts` is `false`.
+///
+/// # Errors
+///
+/// Returns [`HeatherError::FileRead`] if the file cannot be read or written,
+/// or [`HeatherError::UnsupportedFileType`] if the extension is unknown.
+pub fn fix_file(path: &Path, config: &HeatherConfig) -> Result<FileCheckResult, HeatherError> {
+    let content = std::fs::read_to_string(path).map_err(|e| HeatherError::FileRead {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+
+    let kind = FileKind::detect(path, Some(&content)).ok_or_else(|| HeatherError::UnsupportedFileType { path: path.to_path_buf() })?;
+
+    // Skip cargo-script files when scripts processing is disabled.
+    if kind == FileKind::CargoScript && !config.scripts {
+        return Ok(FileCheckResult {
+            path: path.to_path_buf(),
+            result: CheckResult::Ok,
+        });
+    }
+
+    let style = kind.comment_style();
+    let result = match kind {
+        FileKind::CargoScript => check_content_script(&content, &config.header_text, style),
+        _ => check_content(&content, &config.header_text, style),
+    };
+
+    match &result {
+        CheckResult::Ok => {}
+        CheckResult::Missing | CheckResult::Mismatch { .. } => {
+            let fixed = match kind {
+                FileKind::CargoScript => fix_script_content(&content, &config.header_text, style),
+                _ => {
+                    if matches!(result, CheckResult::Missing) {
+                        prepend_header(&content, &config.header_text, style)
+                    } else {
+                        let without_header = strip_existing_header(&content, style);
+                        prepend_header(&without_header, &config.header_text, style)
+                    }
+                }
+            };
+            write_file(path, &fixed)?;
+        }
+    }
+
+    Ok(FileCheckResult {
+        path: path.to_path_buf(),
+        result,
+    })
+}
+
+/// Fix a cargo-script file by placing the header inside the frontmatter.
+///
+/// Preserves the shebang line and opening `---`. Strips any existing `#`
+/// comment block immediately after `---`, then inserts the new header.
+fn fix_script_content(content: &str, header_text: &str, style: CommentStyle) -> String {
+    let mut lines = content.lines();
+
+    let shebang = lines.next().unwrap_or("");
+    let dash_open = lines.next().unwrap_or("---");
+
+    // Skip existing comment header
+    let mut remaining_lines: Vec<&str> = Vec::new();
+    let mut skipped_header = false;
+    for line in lines {
+        if !skipped_header && style.is_header_comment_line(line.trim()) {
+            continue;
+        }
+        // Skip one blank line between old header and TOML manifest
+        if !skipped_header && line.trim().is_empty() {
+            skipped_header = true;
+            continue;
+        }
+        skipped_header = true;
+        remaining_lines.push(line);
+    }
+
+    let header_comment = style.format_header(header_text);
+    let rest = remaining_lines.join("\n");
+
+    if rest.is_empty() {
+        format!("{shebang}\n{dash_open}\n{header_comment}\n")
+    } else {
+        format!("{shebang}\n{dash_open}\n{header_comment}\n\n{rest}\n")
+    }
+}
+
+/// Strip the existing header comment block from file content.
+fn strip_existing_header(content: &str, style: CommentStyle) -> String {
+    let mut lines = content.lines().peekable();
+    let mut skipped_comment = false;
+
+    // Skip leading blank lines
+    while lines.peek().is_some_and(|l| l.trim().is_empty()) {
+        lines.next();
+    }
+
+    // Skip the comment block
+    while lines.peek().is_some_and(|l| style.is_header_comment_line(l.trim())) {
+        lines.next();
+        skipped_comment = true;
+    }
+
+    if !skipped_comment {
+        return content.to_owned();
+    }
+
+    // Skip one blank line after the comment block
+    if lines.peek().is_some_and(|l| l.trim().is_empty()) {
+        lines.next();
+    }
+
+    let remaining: String = lines.collect::<Vec<_>>().join("\n");
+    if remaining.is_empty() {
+        remaining
+    } else {
+        format!("{remaining}\n")
+    }
+}
+
+fn write_file(path: &Path, content: &str) -> Result<(), HeatherError> {
+    std::fs::write(path, content).map_err(|e| HeatherError::FileRead {
+        path: path.to_path_buf(),
+        source: e,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    // Most content-level tests use DoubleSlash since the logic is shared;
+    // TOML-specific behaviour is tested via Hash variants below.
+
+    #[test]
+    fn check_correct_header() {
+        let content = "// Licensed under the MIT License.\n\nfn main() {}\n";
+        let result = check_content(content, "Licensed under the MIT License.", CommentStyle::DoubleSlash);
+        assert_eq!(result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn check_missing_header() {
+        let content = "fn main() {}\n";
+        let result = check_content(content, "Licensed under the MIT License.", CommentStyle::DoubleSlash);
+        assert_eq!(result, CheckResult::Missing);
+    }
+
+    #[test]
+    fn check_mismatched_header() {
+        let content = "// Some other header\n\nfn main() {}\n";
+        let result = check_content(content, "Licensed under the MIT License.", CommentStyle::DoubleSlash);
+        assert!(matches!(result, CheckResult::Mismatch { .. }));
+    }
+
+    #[test]
+    fn check_multiline_header() {
+        let content = "// Line one\n//\n// Line three\n\nfn main() {}\n";
+        let result = check_content(content, "Line one\n\nLine three", CommentStyle::DoubleSlash);
+        assert_eq!(result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn check_empty_file() {
+        let result = check_content("", "Licensed under the MIT License.", CommentStyle::DoubleSlash);
+        assert_eq!(result, CheckResult::Missing);
+    }
+
+    #[test]
+    fn check_only_blank_lines() {
+        let result = check_content("\n\n\n", "Licensed under the MIT License.", CommentStyle::DoubleSlash);
+        assert_eq!(result, CheckResult::Missing);
+    }
+
+    #[test]
+    fn check_skips_leading_blanks() {
+        let content = "\n\n// Licensed under the MIT License.\n\nfn main() {}\n";
+        let result = check_content(content, "Licensed under the MIT License.", CommentStyle::DoubleSlash);
+        assert_eq!(result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn check_ignores_doc_comments() {
+        let content = "//! Module doc\n\nfn main() {}\n";
+        let result = check_content(content, "Licensed under the MIT License.", CommentStyle::DoubleSlash);
+        assert_eq!(result, CheckResult::Missing);
+    }
+
+    #[test]
+    fn check_ignores_triple_slash_doc_comments() {
+        let content = "/// Doc comment\nfn main() {}\n";
+        let result = check_content(content, "Licensed under the MIT License.", CommentStyle::DoubleSlash);
+        assert_eq!(result, CheckResult::Missing);
+    }
+
+    #[test]
+    fn extract_header_simple() {
+        let content = "// Hello\n// World\n\nfn main() {}\n";
+        let header = extract_header_comment(content, CommentStyle::DoubleSlash).unwrap();
+        assert_eq!(header, "Hello\nWorld");
+    }
+
+    #[test]
+    fn extract_header_with_blank_comment_line() {
+        let content = "// First\n//\n// Third\n\nfn main() {}\n";
+        let header = extract_header_comment(content, CommentStyle::DoubleSlash).unwrap();
+        assert_eq!(header, "First\n\nThird");
+    }
+
+    #[test]
+    fn extract_no_header() {
+        let content = "fn main() {}\n";
+        assert!(extract_header_comment(content, CommentStyle::DoubleSlash).is_none());
+    }
+
+    #[test]
+    fn extract_empty_content() {
+        assert!(extract_header_comment("", CommentStyle::DoubleSlash).is_none());
+    }
+
+    #[test]
+    fn normalize_trims_trailing_whitespace() {
+        let result = normalize_text("Hello   \nWorld  ");
+        assert_eq!(result, "Hello\nWorld");
+    }
+
+    #[test]
+    fn prepend_header_to_content() {
+        let result = prepend_header("fn main() {}\n", "MIT License", CommentStyle::DoubleSlash);
+        assert_eq!(result, "// MIT License\n\nfn main() {}\n");
+    }
+
+    #[test]
+    fn prepend_header_to_empty() {
+        let result = prepend_header("", "MIT License", CommentStyle::DoubleSlash);
+        assert_eq!(result, "// MIT License\n");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn check_file_reads_and_checks() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "// Licensed under the MIT License.\n\nfn main() {}\n").unwrap();
+
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
+
+        let result = check_file(&file, &config).unwrap();
+        assert_eq!(result.result, CheckResult::Ok);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn check_file_nonexistent() {
+        let config = HeatherConfig::with_defaults("MIT".into());
+
+        let result = check_file(Path::new("/nonexistent/file.rs"), &config);
+        result.unwrap_err();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn check_files_multiple() {
+        let dir = TempDir::new().unwrap();
+        let good = dir.path().join("good.rs");
+        let bad = dir.path().join("bad.rs");
+        std::fs::write(&good, "// MIT\n\nfn a() {}\n").unwrap();
+        std::fs::write(&bad, "fn b() {}\n").unwrap();
+
+        let config = HeatherConfig::with_defaults("MIT".into());
+
+        let results = check_files(&[good, bad], &config).unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].result, CheckResult::Ok);
+        assert_eq!(results[1].result, CheckResult::Missing);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn fix_file_adds_missing_header() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
+
+        let result = fix_file(&file, &config).unwrap();
+        assert_eq!(result.result, CheckResult::Missing);
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert!(content.starts_with("// Licensed under the MIT License."));
+        assert!(content.contains("fn main()"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn fix_file_replaces_wrong_header() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "// Wrong header\n\nfn main() {}\n").unwrap();
+
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
+
+        let result = fix_file(&file, &config).unwrap();
+        assert!(matches!(result.result, CheckResult::Mismatch { .. }));
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert!(content.starts_with("// Licensed under the MIT License."));
+        assert!(content.contains("fn main()"));
+        assert!(!content.contains("Wrong header"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn fix_file_leaves_correct_header_unchanged() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("test.rs");
+        let original = "// Licensed under the MIT License.\n\nfn main() {}\n";
+        std::fs::write(&file, original).unwrap();
+
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
+
+        let result = fix_file(&file, &config).unwrap();
+        assert_eq!(result.result, CheckResult::Ok);
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(content, original);
+    }
+
+    #[test]
+    fn strip_existing_header_removes_comment_block() {
+        let content = "// Old header\n// Second line\n\nfn main() {}\n";
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        assert_eq!(result, "fn main() {}\n");
+    }
+
+    #[test]
+    fn strip_existing_header_no_comment() {
+        let content = "fn main() {}\n";
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn strip_existing_header_only_comment() {
+        let content = "// Just a comment\n";
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn strip_existing_header_with_leading_blanks() {
+        let content = "\n\n// Header\n\nfn main() {}\n";
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        assert_eq!(result, "fn main() {}\n");
+    }
+
+    #[test]
+    fn check_trailing_whitespace_tolerance() {
+        let content = "// Licensed under the MIT License.  \n\nfn main() {}\n";
+        let result = check_content(content, "Licensed under the MIT License.", CommentStyle::DoubleSlash);
+        assert_eq!(result, CheckResult::Ok);
+    }
+
+    // --- TOML-specific tests ---
+
+    #[test]
+    fn toml_check_correct_header() {
+        let content = "# Licensed under the MIT License.\n\n[package]\nname = \"foo\"\n";
+        let result = check_content(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert_eq!(result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn toml_check_missing_header() {
+        let content = "[package]\nname = \"foo\"\n";
+        let result = check_content(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert_eq!(result, CheckResult::Missing);
+    }
+
+    #[test]
+    fn toml_check_mismatched_header() {
+        let content = "# Some other header\n\n[package]\n";
+        let result = check_content(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert!(matches!(result, CheckResult::Mismatch { .. }));
+    }
+
+    #[test]
+    fn toml_check_multiline_header() {
+        let content = "# Line one\n#\n# Line three\n\n[package]\n";
+        let result = check_content(content, "Line one\n\nLine three", CommentStyle::Hash);
+        assert_eq!(result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn toml_prepend_header_to_content() {
+        let result = prepend_header("[package]\nname = \"foo\"\n", "MIT License", CommentStyle::Hash);
+        assert_eq!(result, "# MIT License\n\n[package]\nname = \"foo\"\n");
+    }
+
+    #[test]
+    fn toml_prepend_header_to_empty() {
+        let result = prepend_header("", "MIT License", CommentStyle::Hash);
+        assert_eq!(result, "# MIT License\n");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn toml_check_file_reads_and_checks() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("test.toml");
+        std::fs::write(&file, "# Licensed under the MIT License.\n\n[package]\nname = \"foo\"\n").unwrap();
+
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
+
+        let result = check_file(&file, &config).unwrap();
+        assert_eq!(result.result, CheckResult::Ok);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn toml_fix_file_adds_missing_header() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("test.toml");
+        std::fs::write(&file, "[package]\nname = \"foo\"\n").unwrap();
+
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
+
+        let result = fix_file(&file, &config).unwrap();
+        assert_eq!(result.result, CheckResult::Missing);
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert!(content.starts_with("# Licensed under the MIT License."));
+        assert!(content.contains("[package]"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn toml_fix_file_replaces_wrong_header() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("test.toml");
+        std::fs::write(&file, "# Wrong header\n\n[package]\nname = \"foo\"\n").unwrap();
+
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
+
+        let result = fix_file(&file, &config).unwrap();
+        assert!(matches!(result.result, CheckResult::Mismatch { .. }));
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert!(content.starts_with("# Licensed under the MIT License."));
+        assert!(content.contains("[package]"));
+        assert!(!content.contains("Wrong header"));
+    }
+
+    #[test]
+    fn toml_strip_existing_header() {
+        let content = "# Old header\n# Second line\n\n[package]\n";
+        let result = strip_existing_header(content, CommentStyle::Hash);
+        assert_eq!(result, "[package]\n");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn check_file_unsupported_extension() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("readme.md");
+        std::fs::write(&file, "# Hello").unwrap();
+
+        let config = HeatherConfig::with_defaults("MIT".into());
+
+        let result = check_file(&file, &config);
+        result.unwrap_err();
+    }
+
+    // --- Cargo-script tests ---
+
+    #[test]
+    fn script_check_correct_header() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Licensed under the MIT License.\n\n[package]\nedition = \"2024\"\n---\nfn main() {}\n";
+        let result = check_content_script(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert_eq!(result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn script_check_missing_header() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n[package]\nedition = \"2024\"\n---\nfn main() {}\n";
+        let result = check_content_script(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert_eq!(result, CheckResult::Missing);
+    }
+
+    #[test]
+    fn script_check_mismatched_header() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Apache License\n\n[package]\n---\n";
+        let result = check_content_script(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert!(matches!(result, CheckResult::Mismatch { .. }));
+    }
+
+    #[test]
+    fn script_check_multiline_header() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Copyright (c) Microsoft Corporation.\n# Licensed under the MIT License.\n\n[package]\nedition = \"2024\"\n---\n";
+        let result = check_content_script(
+            content,
+            "Copyright (c) Microsoft Corporation.\nLicensed under the MIT License.",
+            CommentStyle::Hash,
+        );
+        assert_eq!(result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn script_fix_adds_header() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n[package]\nedition = \"2024\"\n---\nfn main() {}\n";
+        let fixed = fix_script_content(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert!(fixed.starts_with("#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Licensed under the MIT License.\n"));
+        assert!(fixed.contains("[package]"));
+        assert!(fixed.contains("fn main()"));
+    }
+
+    #[test]
+    fn script_fix_replaces_header() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Old Header\n\n[package]\nedition = \"2024\"\n---\nfn main() {}\n";
+        let fixed = fix_script_content(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert!(fixed.contains("# Licensed under the MIT License."));
+        assert!(!fixed.contains("Old Header"));
+        assert!(fixed.contains("[package]"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn script_check_file_correct() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("script.rs");
+        std::fs::write(
+            &file,
+            "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Licensed under the MIT License.\n\n[package]\n---\n",
+        )
+        .unwrap();
+
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
+        let result = check_file(&file, &config).unwrap();
+        assert_eq!(result.result, CheckResult::Ok);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn script_check_file_skipped_when_disabled() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("script.rs");
+        std::fs::write(&file, "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n[package]\n---\n").unwrap();
+
+        let mut config = HeatherConfig::with_defaults("MIT".into());
+        config.scripts = false;
+        let result = check_file(&file, &config).unwrap();
+        assert_eq!(result.result, CheckResult::Ok);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn regular_file_still_checked_when_scripts_disabled() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("main.rs");
+        std::fs::write(&file, "fn main() {}\n").unwrap();
+
+        let mut config = HeatherConfig::with_defaults("MIT".into());
+        config.scripts = false;
+        let result = check_file(&file, &config).unwrap();
+        assert_eq!(result.result, CheckResult::Missing);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn script_fix_file_adds_header() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("script.rs");
+        std::fs::write(
+            &file,
+            "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n[package]\nedition = \"2024\"\n---\nfn main() {}\n",
+        )
+        .unwrap();
+
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
+        let result = fix_file(&file, &config).unwrap();
+        assert_eq!(result.result, CheckResult::Missing);
+
+        let fixed_content = std::fs::read_to_string(&file).unwrap();
+        assert!(fixed_content.starts_with("#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Licensed under the MIT License.\n"));
+        assert!(fixed_content.contains("[package]"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn inner_attribute_not_treated_as_script() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("lib.rs");
+        std::fs::write(&file, "#![allow(unused)]\nfn main() {}\n").unwrap();
+
+        let config = HeatherConfig::with_defaults("MIT".into());
+        let result = check_file(&file, &config).unwrap();
+        // Should be treated as regular Rust, not a script — missing header
+        assert_eq!(result.result, CheckResult::Missing);
+    }
+
+    #[test]
+    fn extract_header_trailing_empty_comment_lines_trimmed() {
+        // Test that trailing empty comment lines are stripped from extracted header
+        let content = "// Licensed under MIT\n//\n\nfn main() {}\n";
+        let extracted = extract_header_comment(content, CommentStyle::DoubleSlash);
+        assert_eq!(extracted.as_deref(), Some("Licensed under MIT"));
+    }
+
+    #[test]
+    fn extract_script_header_trailing_empty_comment_lines_trimmed() {
+        // Script header with trailing empty `#` comment line
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Licensed under MIT\n#\n---\n";
+        let extracted = extract_script_header(content, CommentStyle::Hash);
+        assert_eq!(extracted.as_deref(), Some("Licensed under MIT"));
+    }
+
+    #[test]
+    fn extract_script_header_no_dash_line() {
+        // Line 2 is not `---`, so no script header
+        let content = "#!/usr/bin/env cargo\nnot-a-dash\n# License\n";
+        let extracted = extract_script_header(content, CommentStyle::Hash);
+        assert!(extracted.is_none());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn fix_file_nonexistent_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("nonexistent.rs");
+        let config = HeatherConfig::with_defaults("MIT".into());
+        let err = fix_file(&file, &config).unwrap_err();
+        assert!(err.to_string().contains("failed to read file"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn fix_file_skips_script_when_scripts_disabled() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("script.rs");
+        std::fs::write(&file, "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n---\nfn main() {}\n").unwrap();
+
+        let mut config = HeatherConfig::with_defaults("MIT".into());
+        config.scripts = false;
+
+        let result = fix_file(&file, &config).unwrap();
+        assert_eq!(result.result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn fix_script_content_empty_rest() {
+        // Script with only shebang + --- + no other content
+        let content = "#!/usr/bin/env cargo\n---\n";
+        let fixed = fix_script_content(content, "MIT License", CommentStyle::Hash);
+        assert!(fixed.starts_with("#!/usr/bin/env cargo\n---\n# MIT License\n"));
+        // Should NOT have double newlines before EOF
+        assert!(!fixed.contains("\n\n"));
+    }
+
+    #[test]
+    fn fix_script_content_strips_blank_line_between_old_header_and_manifest() {
+        // Old header followed by blank line then TOML manifest
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Old Header\n\n[package]\nedition = \"2024\"\n---\nfn main() {}\n";
+        let fixed = fix_script_content(content, "New Header", CommentStyle::Hash);
+        // The blank line between old header and [package] must be stripped,
+        // and a new blank line inserted between new header and [package].
+        assert_eq!(
+            fixed,
+            "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# New Header\n\n[package]\nedition = \"2024\"\n---\nfn main() {}\n"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn write_file_read_only_returns_error() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("readonly.rs");
+        std::fs::write(&file, "fn main() {}").unwrap();
+
+        // Make file read-only
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file, perms).unwrap();
+
+        let config = HeatherConfig::with_defaults("MIT".into());
+        let err = fix_file(&file, &config).unwrap_err();
+        assert!(err.to_string().contains("failed to read file") || err.to_string().contains("denied"));
+
+        // Cleanup: restore permissions so TempDir can clean up
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        #[expect(clippy::permissions_set_readonly_false, reason = "required to clean up test temp dir")]
+        perms.set_readonly(false);
+        std::fs::set_permissions(&file, perms).unwrap();
+    }
+}

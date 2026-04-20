@@ -53,12 +53,13 @@
 //!
 //! The tool will exit with code 0 if no cycles are found, or code 1 if cycles are detected.
 
+use std::collections::HashMap;
+
 use anyhow::{Context, Result};
 use cargo_metadata::{Metadata, MetadataCommand, PackageId};
 use clap::Parser;
 use petgraph::algo::tarjan_scc;
 use petgraph::graph::DiGraph;
-use std::collections::HashMap;
 
 #[derive(Parser, Debug)]
 #[command(

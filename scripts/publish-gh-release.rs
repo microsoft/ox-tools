@@ -2,7 +2,7 @@
 ---
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-#
+
 # This script is invoked by the `create-release` GitHub Actions workflow
 # when a version tag is pushed. It is not intended to be run manually.
 
@@ -30,7 +30,7 @@ struct Args {
     #[argh(positional)]
     tag: String,
 
-    /// the GitHub repository in "owner/name" format (e.g. "microsoft/oxidizer")
+    /// the GitHub repository in "owner/name" format (e.g. "microsoft/ox-tools")
     #[argh(option)]
     repo: String,
 }

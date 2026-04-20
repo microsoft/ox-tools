@@ -41,7 +41,7 @@ function Get-CrateLatestVersion {
 
     try {
         $headers = @{
-            "User-Agent" = "oxidizer-version-updater (github.com/microsoft/oxidizer)"
+            "User-Agent" = "oxidizer-version-updater (github.com/microsoft/ox-tools)"
         }
 
         $response = Invoke-RestMethod -Uri $apiUrl -Headers $headers -ErrorAction Stop

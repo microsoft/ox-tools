@@ -34,11 +34,11 @@ This guide assumes a clean Windows PC in other regards.
 
 After installing the Rust toolchain, we setup repository-specific tooling:
 
-1. In a directory of your choosing, clone the `oxidizer` repo: `git clone https://github.com/microsoft/oxidizer.git`.
+1. In a directory of your choosing, clone the `ox-tools` repo: `git clone https://github.com/microsoft/ox-tools.git`.
 
 > 💡 Even though the Windows and Linux development environments are largely independent, they will both use the same working directory (created by the above `git clone` command). This allows you to build and test your changes immediately on both operating systems.
 
-2. Switch to the `oxidizer` directory: `cd oxidizer`.
+2. Switch to the `ox-tools` directory: `cd ox-tools`.
 2. Execute `git config --local include.path ./.gitconfig` to attach the repo-specific Git configuration.
 2. Execute `just install-tools` to install all necessary Rust toolchain versions and development tooling.
 2. Open `.vscode/settings.template.jsonc` and save a copy as `.vscode/settings.json` to apply repo-specific settings for Visual Studio Code. Part of this file should be the same for everyone but the rest you can customize - refer to inline comments.
@@ -72,7 +72,7 @@ Next, we upgrade, install and configure development prerequisites:
 
 Next, we setup repository-specific tooling on Linux:
 
-1. Switch to the `oxidizer` directory you previously cloned on Windows, using a `/mnt/c` style path to access the Windows filesystem: `cd /mnt/c/Users/username/Desktop/oxidizer` (adjusting the path to match your chosen location).
+1. Switch to the `ox-tools` directory you previously cloned on Windows, using a `/mnt/c` style path to access the Windows filesystem: `cd /mnt/c/Users/username/Desktop/ox-tools` (adjusting the path to match your chosen location).
 1. Execute `just install-tools` to install all necessary Rust toolchain versions and development tooling.
 
 ## Optimize Linux build performance
@@ -98,7 +98,7 @@ Visual Studio Code is also our standard Linux IDE and requires some additional s
 
 > ⚠️ While the IDE runs on the Windows desktop, all tooling runs in the Linux VM, including Visual Studio Code extensions. The below steps will instruct you to install the minimum set of required Visual Studio Code extensions for the Linux environment.
 
-1. In an Ubuntu terminal, in the `oxidizer` directory, execute `code .` to open the project in Visual Studio Code.
+1. In an Ubuntu terminal, in the `ox-tools` directory, execute `code .` to open the project in Visual Studio Code.
 1. Open the Extensions panel in Visual Studio Code.
 1. Install following extensions by selecting "Install in WSL" for each:
     * C/C++ (ms-vscode.cpptools)

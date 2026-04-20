@@ -22,15 +22,18 @@ homepage = "https://github.com/microsoft/ox-tools"
 
 [workspace.dependencies]
 # local dependencies
+cargo_heather = { path = "crates/cargo_heather", default-features = false, version = "0.1.0" }
 
 # external dependencies
 ahash = { version = "0.8", default-features = false }
 alloc_tracker = { version = "0.5.9", default-features = false }
 anyhow = { version = "1.0.100", default-features = false }
+assert_cmd = { version = "2.2.0", default-features = false }
 async-once-cell = { version = "0.5", default-features = false }
 bytes = { version = "1.11.1", default-features = false }
 chrono = { version = "0.4.40", default-features = false }
 chrono-tz = { version = "0.10.4", default-features = false }
+clap = { version = "4.5.60", default-features = false }
 criterion = { version = "0.8.1", default-features = false }
 dashmap = { version = "6.1", default-features = false }
 derive_more = { version = "2.0.1", default-features = false }
@@ -59,6 +62,7 @@ opentelemetry-stdout = { version = "0.31.0", default-features = false }
 opentelemetry_sdk = { version = "0.31.0", default-features = false }
 parking_lot = { version = "0.12.5", default-features = false }
 pin-project-lite = { version = "0.2.13", default-features = false }
+predicates = { version = "3.1.4", default-features = false }
 pretty_assertions = { version = "1.4.1", default-features = false }
 prettyplease = { version = "0.2.37", default-features = false }
 proc-macro2 = { version = "1.0.103", default-features = false }
@@ -73,9 +77,11 @@ serde_json = { version = "1.0.145", default-features = false }
 smallvec = { version = "1.15.1", default-features = false }
 static_assertions = { version = "1.1.0", default-features = false }
 syn = { version = "2.0.111", default-features = false }
+tempfile = { version = "3.27.0", default-features = false }
 thiserror = { version = "2.0.17", default-features = false }
 time = { version = "0.3.47", default-features = false }
 tokio = { version = "1.48.0", default-features = false }
+toml = { version = "0.8.23", default-features = false }
 tower = { version = "0.5.2", default-features = false }
 tower-layer = { version = "0.3.3", default-features = false }
 tower-service = { version = "0.3.3", default-features = false }
@@ -84,6 +90,7 @@ tracing-subscriber = { version = "0.3.20", default-features = false }
 trait-variant = { version = "0.1.2", default-features = false }
 trybuild = { version = "1.0.114", default-features = false }
 typeid = { version = "1.0.3", default-features = false }
+walkdir = { version = "2.5.0", default-features = false }
 windows-sys = { version = "0.61.2", default-features = false }
 xutex = { version = "0.2.0", default-features = false }
 xxhash-rust = { version = "0.8.15", default-features = false }

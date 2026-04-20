@@ -3,10 +3,11 @@
 
 //! Integration test
 
-use assert_cmd::prelude::*;
-use predicates::prelude::*;
 use std::path::PathBuf;
 use std::process::Command;
+
+use assert_cmd::prelude::*;
+use predicates::prelude::*;
 
 fn get_fixture_path(fixture_name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))

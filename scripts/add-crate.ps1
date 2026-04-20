@@ -55,9 +55,10 @@ if ($keywordsList.Count -gt 5) {
 
 $crateCategories = Read-Host -Prompt "Enter comma-separated crate categories (see https://crates.io/categories for allowed categories)"
 
+Write-Host $repoRoot
 # Define paths
-$templateDir = Join-Path $repoRoot "scripts" "crate-template"
-$destinationDir = Join-Path $repoRoot "crates" $crateName
+$templateDir = Join-Path (Join-Path $repoRoot "scripts") "crate-template"
+$destinationDir = Join-Path (Join-Path $repoRoot "crates") $crateName
 
 # Check if crate already exists
 if (Test-Path $destinationDir) {
