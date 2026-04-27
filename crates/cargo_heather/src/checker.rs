@@ -325,12 +325,11 @@ fn fix_script_content(content: &str, header_text: &str, style: CommentStyle) -> 
     let dash_open = lines_iter.next().unwrap_or("---");
 
     let body_lines: Vec<&str> = lines_iter.collect();
-    let mut idx = 0;
 
-    // Skip leading blank lines after `---`
-    while idx < body_lines.len() && body_lines[idx].trim().is_empty() {
-        idx += 1;
-    }
+    // Skip leading blank lines after `---`. Using take_while + count avoids
+    // a mutable += that cargo-mutants can mutate into an infinite loop.
+    let leading_blank_count = body_lines.iter().take_while(|l| l.trim().is_empty()).count();
+    let mut idx = leading_blank_count;
 
     let start = idx;
     let header_line_count = header_text.lines().count();
@@ -389,12 +388,12 @@ fn fix_script_content(content: &str, header_text: &str, style: CommentStyle) -> 
 /// separator are preserved.
 fn strip_existing_header(content: &str, style: CommentStyle, expected_header: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
-    let mut idx = 0;
 
     // Skip leading blank lines (real blanks, not blank-comment lines).
-    while idx < lines.len() && lines[idx].trim().is_empty() {
-        idx += 1;
-    }
+    // Using take_while + count avoids a mutable += that cargo-mutants can
+    // mutate into an infinite loop (e.g. += 1 -> *= 1).
+    let leading_blank_count = lines.iter().take_while(|l| l.trim().is_empty()).count();
+    let mut idx = leading_blank_count;
 
     let start = idx;
     let header_line_count = expected_header.lines().count();
