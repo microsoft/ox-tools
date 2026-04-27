@@ -1167,4 +1167,76 @@ mod tests {
     fn header_matches_tolerates_trailing_whitespace_on_lines() {
         assert!(header_matches("MIT License   ", "MIT License"));
     }
+
+    // --- Mutation-testing-driven edge-case tests ---
+    //
+    // These tests target specific arithmetic/comparison boundaries in
+    // `fix_script_content` and `strip_existing_header` so that flipped
+    // operators in the paragraph-aware logic produce observably wrong
+    // output (or a panic).
+
+    #[test]
+    fn fix_script_content_no_header_preserves_blank_comment_paragraph() {
+        // Body has NO leading header paragraph — just a `#` blank-comment line
+        // followed by a real blank line followed by content. The else branch
+        // (`if idx > start`) must keep idx==0 so the body is preserved.
+        let content = "#!/usr/bin/env script\n---\n#\n\n[package]\nname = \"foo\"\n---\nfn main() {}\n";
+        let fixed = fix_script_content(content, "MIT License", CommentStyle::Hash);
+        assert!(fixed.contains("# MIT License"));
+        assert!(fixed.contains("#\n\n[package]"));
+    }
+
+    #[test]
+    fn fix_script_content_header_only_no_trailing_lines() {
+        // Body is ONLY a single header line — exercises the boundary where
+        // idx == body_lines.len() after stripping, so the optional consumes
+        // must not access out-of-bounds indices.
+        let content = "#!/usr/bin/env script\n---\n# Old header\n---\n";
+        let fixed = fix_script_content(content, "MIT License", CommentStyle::Hash);
+        assert!(fixed.contains("# MIT License"));
+        assert!(!fixed.contains("Old header"));
+    }
+
+    #[test]
+    fn fix_script_content_consumes_blank_comment_separator() {
+        // Header paragraph + `#` separator + content (no blank line between).
+        // The separator MUST be consumed, otherwise it shows up in output.
+        let content = "#!/usr/bin/env script\n---\n# Old header\n#\n[package]\nname = \"foo\"\n---\nfn main() {}\n";
+        let fixed = fix_script_content(content, "MIT License", CommentStyle::Hash);
+        // The new header is followed by a single blank line, then `[package]`
+        // — the `#` separator from the original must NOT survive.
+        assert!(fixed.contains("# MIT License\n\n[package]"));
+        assert!(!fixed.contains("# MIT License\n\n#\n"));
+    }
+
+    #[test]
+    fn fix_script_content_consumes_blank_line_after_header() {
+        // Header paragraph followed directly by a blank line and then content.
+        // The blank line MUST be consumed (otherwise we'd insert a duplicate
+        // blank, producing a double-blank gap before `[package]`).
+        let content = "#!/usr/bin/env script\n---\n# Old header\n\n[package]\nname = \"foo\"\n---\nfn main() {}\n";
+        let fixed = fix_script_content(content, "MIT License", CommentStyle::Hash);
+        assert!(fixed.contains("# MIT License\n\n[package]"));
+        assert!(!fixed.contains("\n\n\n[package]"));
+    }
+
+    #[test]
+    fn strip_existing_header_only_blank_lines() {
+        // Content that is only blank lines — leading-blank-skip loop runs to
+        // idx == lines.len(). The boundary check (`idx < lines.len()`) must
+        // hold or a `<=` mutation would index out of bounds.
+        let content = "\n\n\n";
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        // No header paragraph found → content returned unchanged.
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn strip_existing_header_only_a_single_header_line() {
+        // Content is exactly a one-line header with no trailing content. The
+        // optional separator+blank-line consumes must respect bounds.
+        let content = "// Old header\n";
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        assert_eq!(result, "");
+    }
 }
