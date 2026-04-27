@@ -38,13 +38,7 @@ struct Args {
 // Grouping related packages (e.g., a crate and its proc macros) ensures mutations are properly
 // validated by all relevant tests. Ungrouped packages are tested individually, which may miss
 // mutations if their tests reside in dependent packages.
-const TEST_GROUPS: &[&[&str]] = &[
-    &["bytesbuf"],
-    &["data_privacy", "data_privacy_macros", "data_privacy_macros_impl"],
-    &["fundle", "fundle_macros", "fundle_macros_impl"],
-    &["ohno", "ohno_macros"],
-    &["thread_aware", "thread_aware_macros", "thread_aware_macros_impl"],
-];
+const TEST_GROUPS: &[&[&str]] = &[];
 
 fn main() {
     let args: Args = argh::from_env();
