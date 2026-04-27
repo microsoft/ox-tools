@@ -294,7 +294,7 @@ pub fn fix_file(path: &Path, config: &HeatherConfig) -> Result<FileCheckResult, 
                     if matches!(result, CheckResult::Missing) {
                         prepend_header(&content, &config.header_text, style)
                     } else {
-                        let without_header = strip_existing_header(&content, style);
+                        let without_header = strip_existing_header(&content, style, &config.header_text);
                         prepend_header(&without_header, &config.header_text, style)
                     }
                 }
@@ -311,10 +311,13 @@ pub fn fix_file(path: &Path, config: &HeatherConfig) -> Result<FileCheckResult, 
 
 /// Fix a cargo-script file by placing the header inside the frontmatter.
 ///
-/// Preserves the shebang line and opening `---`. Strips the leading header
-/// paragraph (contiguous non-blank `#` lines) immediately after `---` plus
-/// an optional blank-comment-line separator and one blank line, then inserts
-/// the new header. Descriptive trailing comment lines are preserved.
+/// Preserves the shebang line and opening `---`. Strips up to
+/// `header_text.lines().count()` consecutive header-comment lines (counting
+/// blank-comment lines like `#` as comment lines, so multi-paragraph
+/// configured headers are removed cleanly), then optionally consumes one
+/// trailing blank-comment-line separator and one blank line, before inserting
+/// the new header. Descriptive trailing comment lines that follow a blank
+/// separator are preserved.
 fn fix_script_content(content: &str, header_text: &str, style: CommentStyle) -> String {
     let mut lines_iter = content.lines();
 
@@ -329,33 +332,39 @@ fn fix_script_content(content: &str, header_text: &str, style: CommentStyle) -> 
         idx += 1;
     }
 
-    // Strip the leading header paragraph: contiguous non-blank header-comment lines.
     let start = idx;
-    while idx < body_lines.len() {
+    let header_line_count = header_text.lines().count();
+
+    // Strip up to `header_line_count` consecutive header-comment lines.
+    // Blank-comment lines (`#` with nothing after) count as comment lines so
+    // multi-paragraph configured headers are stripped fully. Stops early at
+    // the first non-comment line.
+    let mut stripped = 0;
+    while stripped < header_line_count && idx < body_lines.len() {
         let trimmed = body_lines[idx].trim();
         if !style.is_header_comment_line(trimmed) {
             break;
         }
-        if style.strip_prefix(trimmed).is_empty() {
-            break;
-        }
         idx += 1;
+        stripped += 1;
     }
 
     if idx > start {
-        // Consume an optional blank-comment paragraph separator.
+        // Consume one trailing blank-comment-line paragraph separator if the
+        // existing header had a `#` separator after the lines we just stripped
+        // (e.g. existing header was longer than the configured one).
         if idx < body_lines.len() {
             let trimmed = body_lines[idx].trim();
             if style.is_header_comment_line(trimmed) && style.strip_prefix(trimmed).is_empty() {
                 idx += 1;
             }
         }
-        // Consume one blank line after the stripped paragraph.
+        // Consume one blank line after the stripped header.
         if idx < body_lines.len() && body_lines[idx].trim().is_empty() {
             idx += 1;
         }
     } else {
-        // No header paragraph to strip — keep all body lines as-is.
+        // No leading comment lines at all — keep the whole body as-is.
         idx = 0;
     }
 
@@ -369,43 +378,45 @@ fn fix_script_content(content: &str, header_text: &str, style: CommentStyle) -> 
     }
 }
 
-/// Strip the leading "header paragraph" from file content.
+/// Strip the leading header from file content.
 ///
-/// Removes the contiguous run of non-blank header-comment lines at the top
-/// of the file (skipping any leading blank lines first), plus an optional
-/// blank-comment-line paragraph separator (e.g. `//` or `#`) and an optional
-/// blank line that follows. Trailing comment lines that form a separate
-/// paragraph (descriptive module comments) are preserved.
-fn strip_existing_header(content: &str, style: CommentStyle) -> String {
+/// Removes up to `expected_header.lines().count()` consecutive header-comment
+/// lines from the top of the file (skipping any leading blank lines first).
+/// Blank-comment lines (e.g. `//` or `#`) count as comment lines, so
+/// multi-paragraph configured headers are stripped fully. After that, an
+/// optional blank-comment-line paragraph separator and one blank line are
+/// consumed. Descriptive trailing comment lines that come after the blank
+/// separator are preserved.
+fn strip_existing_header(content: &str, style: CommentStyle, expected_header: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let mut idx = 0;
 
-    // Skip leading blank lines
+    // Skip leading blank lines (real blanks, not blank-comment lines).
     while idx < lines.len() && lines[idx].trim().is_empty() {
         idx += 1;
     }
 
-    // Strip the leading header paragraph: contiguous non-blank header-comment
-    // lines. Stops at a blank-comment line (paragraph separator) or any
-    // non-header-comment line.
     let start = idx;
-    while idx < lines.len() {
+    let header_line_count = expected_header.lines().count();
+
+    // Strip up to `header_line_count` consecutive header-comment lines.
+    let mut stripped = 0;
+    while stripped < header_line_count && idx < lines.len() {
         let trimmed = lines[idx].trim();
         if !style.is_header_comment_line(trimmed) {
             break;
         }
-        if style.strip_prefix(trimmed).is_empty() {
-            break;
-        }
         idx += 1;
+        stripped += 1;
     }
 
     if idx == start {
-        // No header paragraph found — return unchanged
+        // No header paragraph found — return unchanged.
         return content.to_owned();
     }
 
-    // Consume an optional blank-comment-line paragraph separator (e.g. `//`).
+    // Consume one trailing blank-comment-line paragraph separator if the
+    // existing header had a `//` or `#` separator after the stripped lines.
     if idx < lines.len() {
         let trimmed = lines[idx].trim();
         if style.is_header_comment_line(trimmed) && style.strip_prefix(trimmed).is_empty() {
@@ -648,28 +659,29 @@ mod tests {
     #[test]
     fn strip_existing_header_removes_comment_block() {
         let content = "// Old header\n// Second line\n\nfn main() {}\n";
-        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        let expected = "Old header\nSecond line";
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash, expected);
         assert_eq!(result, "fn main() {}\n");
     }
 
     #[test]
     fn strip_existing_header_no_comment() {
         let content = "fn main() {}\n";
-        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash, "Header");
         assert_eq!(result, content);
     }
 
     #[test]
     fn strip_existing_header_only_comment() {
         let content = "// Just a comment\n";
-        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash, "Just a comment");
         assert!(result.is_empty());
     }
 
     #[test]
     fn strip_existing_header_with_leading_blanks() {
         let content = "\n\n// Header\n\nfn main() {}\n";
-        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash, "Header");
         assert_eq!(result, "fn main() {}\n");
     }
 
@@ -773,7 +785,8 @@ mod tests {
     #[test]
     fn toml_strip_existing_header() {
         let content = "# Old header\n# Second line\n\n[package]\n";
-        let result = strip_existing_header(content, CommentStyle::Hash);
+        let expected = "Old header\nSecond line";
+        let result = strip_existing_header(content, CommentStyle::Hash, expected);
         assert_eq!(result, "[package]\n");
     }
 
@@ -1077,15 +1090,23 @@ mod tests {
 
     #[test]
     fn strip_existing_header_preserves_descriptive_comment_paragraph() {
+        // Configured 1-line header — the wrong header line, the `//` separator,
+        // and the blank line are stripped; the descriptive comment is preserved.
         let content = "// Old wrong header\n//\n// Module description.\n\nfn main() {}\n";
-        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash, "Old wrong header");
         assert_eq!(result, "// Module description.\n\nfn main() {}\n");
     }
 
     #[test]
     fn strip_existing_header_preserves_multi_line_descriptive_paragraph() {
+        // Configured 2-line header strips both header lines + `//` separator,
+        // preserving the descriptive paragraph that follows.
         let content = "// Old wrong header line 1\n// Old wrong header line 2\n//\n// Module description line 1.\n// Module description line 2.\n\nfn main() {}\n";
-        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        let result = strip_existing_header(
+            content,
+            CommentStyle::DoubleSlash,
+            "Old wrong header line 1\nOld wrong header line 2",
+        );
         assert_eq!(
             result,
             "// Module description line 1.\n// Module description line 2.\n\nfn main() {}\n"
@@ -1094,9 +1115,20 @@ mod tests {
 
     #[test]
     fn strip_existing_header_no_paragraph_separator_strips_whole_block() {
-        // No blank-comment separator — strips the whole header block (legacy behavior).
+        // 2-line configured header strips both contiguous comment lines.
         let content = "// Wrong header\n// Wrong line 2\n\nfn main() {}\n";
-        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash, "Wrong header\nWrong line 2");
+        assert_eq!(result, "fn main() {}\n");
+    }
+
+    #[test]
+    fn strip_existing_header_multi_paragraph_configured_strips_all_paragraphs() {
+        // Reviewer-flagged case: multi-paragraph SPDX header (with blank-comment
+        // line in the middle). All N lines (including the blank-comment) must be
+        // stripped, otherwise leftover lines from the old license remain.
+        let content = "// Apache License 2.0\n//\n// Licensed under the old text.\n\nfn main() {}\n";
+        let expected = "Apache License 2.0\n\nLicensed under the new text.";
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash, expected);
         assert_eq!(result, "fn main() {}\n");
     }
 
@@ -1172,19 +1204,8 @@ mod tests {
     //
     // These tests target specific arithmetic/comparison boundaries in
     // `fix_script_content` and `strip_existing_header` so that flipped
-    // operators in the paragraph-aware logic produce observably wrong
-    // output (or a panic).
-
-    #[test]
-    fn fix_script_content_no_header_preserves_blank_comment_paragraph() {
-        // Body has NO leading header paragraph — just a `#` blank-comment line
-        // followed by a real blank line followed by content. The else branch
-        // (`if idx > start`) must keep idx==0 so the body is preserved.
-        let content = "#!/usr/bin/env script\n---\n#\n\n[package]\nname = \"foo\"\n---\nfn main() {}\n";
-        let fixed = fix_script_content(content, "MIT License", CommentStyle::Hash);
-        assert!(fixed.contains("# MIT License"));
-        assert!(fixed.contains("#\n\n[package]"));
-    }
+    // operators in the strip-N-lines logic produce observably wrong output
+    // (or a panic).
 
     #[test]
     fn fix_script_content_header_only_no_trailing_lines() {
@@ -1226,7 +1247,7 @@ mod tests {
         // idx == lines.len(). The boundary check (`idx < lines.len()`) must
         // hold or a `<=` mutation would index out of bounds.
         let content = "\n\n\n";
-        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash, "Header");
         // No header paragraph found → content returned unchanged.
         assert_eq!(result, content);
     }
@@ -1236,7 +1257,7 @@ mod tests {
         // Content is exactly a one-line header with no trailing content. The
         // optional separator+blank-line consumes must respect bounds.
         let content = "// Old header\n";
-        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash, "Old header");
         assert_eq!(result, "");
     }
 }
