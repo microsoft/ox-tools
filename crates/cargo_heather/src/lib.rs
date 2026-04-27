@@ -216,14 +216,47 @@ fn report_results(results: &[FileCheckResult], project_dir: &Path) -> usize {
                 info!("  MISSING header: {}", relative.display());
                 failures += 1;
             }
-            CheckResult::Mismatch { .. } => {
+            CheckResult::Mismatch { expected, actual } => {
                 info!("  MISMATCH header: {}", relative.display());
+                for line in format_mismatch_details(expected, actual).lines() {
+                    info!("{line}");
+                }
                 failures += 1;
             }
         }
     }
 
     failures
+}
+
+/// Format a human-readable rendering of a header mismatch, showing both the
+/// expected header and what was actually found.
+///
+/// Output uses a `-`/`+` marker convention (lines that should appear are
+/// prefixed with `+`, lines that were found instead with `-`) so it reads
+/// like a unified diff at a glance.
+fn format_mismatch_details(expected: &str, actual: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    out.push_str("    expected header:\n");
+    if expected.is_empty() {
+        out.push_str("      + <empty>\n");
+    } else {
+        for line in expected.lines() {
+            // String::write_str/writeln to a String is infallible, so unwrap is safe.
+            writeln!(out, "      + {line}").expect("writing to String never fails");
+        }
+    }
+    out.push_str("    actual header:\n");
+    if actual.is_empty() {
+        out.push_str("      - <empty>\n");
+    } else {
+        for line in actual.lines() {
+            writeln!(out, "      - {line}").expect("writing to String never fails");
+        }
+    }
+    out
 }
 
 fn make_relative(path: &Path, base: &Path) -> std::path::PathBuf {
@@ -467,5 +500,30 @@ mod tests {
 
         let fixed = run_fix(&files, &config, dir.path()).unwrap();
         assert_eq!(fixed, 0);
+    }
+
+    #[test]
+    fn format_mismatch_details_includes_expected_and_actual() {
+        let out = format_mismatch_details("Licensed under MIT.", "Apache 2.0");
+        assert!(out.contains("expected header:"));
+        assert!(out.contains("+ Licensed under MIT."));
+        assert!(out.contains("actual header:"));
+        assert!(out.contains("- Apache 2.0"));
+    }
+
+    #[test]
+    fn format_mismatch_details_handles_multi_line() {
+        let out = format_mismatch_details("Copyright Microsoft.\nLicensed under MIT.", "Wrong line 1\nWrong line 2");
+        assert!(out.contains("+ Copyright Microsoft."));
+        assert!(out.contains("+ Licensed under MIT."));
+        assert!(out.contains("- Wrong line 1"));
+        assert!(out.contains("- Wrong line 2"));
+    }
+
+    #[test]
+    fn format_mismatch_details_handles_empty_actual() {
+        let out = format_mismatch_details("Licensed under MIT.", "");
+        assert!(out.contains("+ Licensed under MIT."));
+        assert!(out.contains("- <empty>"));
     }
 }

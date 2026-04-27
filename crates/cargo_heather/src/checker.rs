@@ -88,7 +88,9 @@ pub fn check_file(path: &Path, config: &HeatherConfig) -> Result<FileCheckResult
 
 /// Check file content against the expected header text.
 ///
-/// Extracts the first comment block and compares it to the expected header.
+/// Extracts the first comment block and validates that it begins with the
+/// expected header. Additional descriptive comment lines after the header
+/// are allowed (treated as documentation, not a mismatch).
 #[must_use]
 pub fn check_content(content: &str, expected_header: &str, style: CommentStyle) -> CheckResult {
     let extracted = extract_header_comment(content, style);
@@ -96,10 +98,7 @@ pub fn check_content(content: &str, expected_header: &str, style: CommentStyle) 
     match extracted {
         None => CheckResult::Missing,
         Some(actual) => {
-            let normalized_expected = normalize_text(expected_header);
-            let normalized_actual = normalize_text(&actual);
-
-            if normalized_expected == normalized_actual {
+            if header_matches(&actual, expected_header) {
                 CheckResult::Ok
             } else {
                 CheckResult::Mismatch {
@@ -114,6 +113,8 @@ pub fn check_content(content: &str, expected_header: &str, style: CommentStyle) 
 /// Check file content for the expected header inside a cargo-script frontmatter.
 ///
 /// Skips the shebang line and opening `---`, then checks the `#` comment block.
+/// Like [`check_content`], allows descriptive trailing comment lines after the
+/// expected header.
 #[must_use]
 fn check_content_script(content: &str, expected_header: &str, style: CommentStyle) -> CheckResult {
     let extracted = extract_script_header(content, style);
@@ -121,10 +122,7 @@ fn check_content_script(content: &str, expected_header: &str, style: CommentStyl
     match extracted {
         None => CheckResult::Missing,
         Some(actual) => {
-            let normalized_expected = normalize_text(expected_header);
-            let normalized_actual = normalize_text(&actual);
-
-            if normalized_expected == normalized_actual {
+            if header_matches(&actual, expected_header) {
                 CheckResult::Ok
             } else {
                 CheckResult::Mismatch {
@@ -134,6 +132,30 @@ fn check_content_script(content: &str, expected_header: &str, style: CommentStyl
             }
         }
     }
+}
+
+/// Returns `true` if `extracted` begins with `expected_header`.
+///
+/// Compares line-by-line (after trimming trailing whitespace per line and
+/// stripping leading/trailing blank lines from both inputs). The expected
+/// header is required to appear as a contiguous prefix of the extracted
+/// block; any extra trailing comment lines in `extracted` are allowed.
+fn header_matches(extracted: &str, expected_header: &str) -> bool {
+    let expected_lines = normalize_to_lines(expected_header);
+    let actual_lines = normalize_to_lines(extracted);
+
+    if actual_lines.len() < expected_lines.len() {
+        return false;
+    }
+    actual_lines[..expected_lines.len()] == expected_lines[..]
+}
+
+/// Normalize text to a vector of per-line strings with trailing whitespace
+/// removed, and outer blank lines stripped. Used to compare headers
+/// line-by-line for prefix matching.
+fn normalize_to_lines(text: &str) -> Vec<String> {
+    let joined = text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
+    joined.trim().lines().map(str::to_owned).collect()
 }
 
 /// Extract the header comment block from inside a cargo-script frontmatter.
@@ -217,11 +239,6 @@ fn extract_header_comment(content: &str, style: CommentStyle) -> Option<String> 
     Some(comment_lines.join("\n"))
 }
 
-/// Normalize text for comparison: trim lines and collapse white-space variations.
-fn normalize_text(text: &str) -> String {
-    text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n").trim().to_owned()
-}
-
 /// Prepend the license header comment to file content.
 ///
 /// Used by `--fix` mode to add missing headers.
@@ -294,32 +311,56 @@ pub fn fix_file(path: &Path, config: &HeatherConfig) -> Result<FileCheckResult, 
 
 /// Fix a cargo-script file by placing the header inside the frontmatter.
 ///
-/// Preserves the shebang line and opening `---`. Strips any existing `#`
-/// comment block immediately after `---`, then inserts the new header.
+/// Preserves the shebang line and opening `---`. Strips the leading header
+/// paragraph (contiguous non-blank `#` lines) immediately after `---` plus
+/// an optional blank-comment-line separator and one blank line, then inserts
+/// the new header. Descriptive trailing comment lines are preserved.
 fn fix_script_content(content: &str, header_text: &str, style: CommentStyle) -> String {
-    let mut lines = content.lines();
+    let mut lines_iter = content.lines();
 
-    let shebang = lines.next().unwrap_or("");
-    let dash_open = lines.next().unwrap_or("---");
+    let shebang = lines_iter.next().unwrap_or("");
+    let dash_open = lines_iter.next().unwrap_or("---");
 
-    // Skip existing comment header
-    let mut remaining_lines: Vec<&str> = Vec::new();
-    let mut skipped_header = false;
-    for line in lines {
-        if !skipped_header && style.is_header_comment_line(line.trim()) {
-            continue;
+    let body_lines: Vec<&str> = lines_iter.collect();
+    let mut idx = 0;
+
+    // Skip leading blank lines after `---`
+    while idx < body_lines.len() && body_lines[idx].trim().is_empty() {
+        idx += 1;
+    }
+
+    // Strip the leading header paragraph: contiguous non-blank header-comment lines.
+    let start = idx;
+    while idx < body_lines.len() {
+        let trimmed = body_lines[idx].trim();
+        if !style.is_header_comment_line(trimmed) {
+            break;
         }
-        // Skip one blank line between old header and TOML manifest
-        if !skipped_header && line.trim().is_empty() {
-            skipped_header = true;
-            continue;
+        if style.strip_prefix(trimmed).is_empty() {
+            break;
         }
-        skipped_header = true;
-        remaining_lines.push(line);
+        idx += 1;
+    }
+
+    if idx > start {
+        // Consume an optional blank-comment paragraph separator.
+        if idx < body_lines.len() {
+            let trimmed = body_lines[idx].trim();
+            if style.is_header_comment_line(trimmed) && style.strip_prefix(trimmed).is_empty() {
+                idx += 1;
+            }
+        }
+        // Consume one blank line after the stripped paragraph.
+        if idx < body_lines.len() && body_lines[idx].trim().is_empty() {
+            idx += 1;
+        }
+    } else {
+        // No header paragraph to strip — keep all body lines as-is.
+        idx = 0;
     }
 
     let header_comment = style.format_header(header_text);
-    let rest = remaining_lines.join("\n");
+    let rest = body_lines[idx..].join("\n");
 
     if rest.is_empty() {
         format!("{shebang}\n{dash_open}\n{header_comment}\n")
@@ -328,36 +369,62 @@ fn fix_script_content(content: &str, header_text: &str, style: CommentStyle) -> 
     }
 }
 
-/// Strip the existing header comment block from file content.
+/// Strip the leading "header paragraph" from file content.
+///
+/// Removes the contiguous run of non-blank header-comment lines at the top
+/// of the file (skipping any leading blank lines first), plus an optional
+/// blank-comment-line paragraph separator (e.g. `//` or `#`) and an optional
+/// blank line that follows. Trailing comment lines that form a separate
+/// paragraph (descriptive module comments) are preserved.
 fn strip_existing_header(content: &str, style: CommentStyle) -> String {
-    let mut lines = content.lines().peekable();
-    let mut skipped_comment = false;
+    let lines: Vec<&str> = content.lines().collect();
+    let mut idx = 0;
 
     // Skip leading blank lines
-    while lines.peek().is_some_and(|l| l.trim().is_empty()) {
-        lines.next();
+    while idx < lines.len() && lines[idx].trim().is_empty() {
+        idx += 1;
     }
 
-    // Skip the comment block
-    while lines.peek().is_some_and(|l| style.is_header_comment_line(l.trim())) {
-        lines.next();
-        skipped_comment = true;
+    // Strip the leading header paragraph: contiguous non-blank header-comment
+    // lines. Stops at a blank-comment line (paragraph separator) or any
+    // non-header-comment line.
+    let start = idx;
+    while idx < lines.len() {
+        let trimmed = lines[idx].trim();
+        if !style.is_header_comment_line(trimmed) {
+            break;
+        }
+        if style.strip_prefix(trimmed).is_empty() {
+            break;
+        }
+        idx += 1;
     }
 
-    if !skipped_comment {
+    if idx == start {
+        // No header paragraph found — return unchanged
         return content.to_owned();
     }
 
-    // Skip one blank line after the comment block
-    if lines.peek().is_some_and(|l| l.trim().is_empty()) {
-        lines.next();
+    // Consume an optional blank-comment-line paragraph separator (e.g. `//`).
+    if idx < lines.len() {
+        let trimmed = lines[idx].trim();
+        if style.is_header_comment_line(trimmed) && style.strip_prefix(trimmed).is_empty() {
+            idx += 1;
+        }
     }
 
-    let remaining: String = lines.collect::<Vec<_>>().join("\n");
+    // Consume one blank line after the stripped paragraph.
+    if idx < lines.len() && lines[idx].trim().is_empty() {
+        idx += 1;
+    }
+
+    let remaining = lines[idx..].join("\n");
     if remaining.is_empty() {
         remaining
-    } else {
+    } else if content.ends_with('\n') {
         format!("{remaining}\n")
+    } else {
+        remaining
     }
 }
 
@@ -464,9 +531,15 @@ mod tests {
     }
 
     #[test]
-    fn normalize_trims_trailing_whitespace() {
-        let result = normalize_text("Hello   \nWorld  ");
-        assert_eq!(result, "Hello\nWorld");
+    fn normalize_to_lines_trims_trailing_whitespace() {
+        let result = normalize_to_lines("Hello   \nWorld  ");
+        assert_eq!(result, vec!["Hello".to_owned(), "World".to_owned()]);
+    }
+
+    #[test]
+    fn normalize_to_lines_strips_outer_blank_lines() {
+        let result = normalize_to_lines("\n\nHello\nWorld\n\n");
+        assert_eq!(result, vec!["Hello".to_owned(), "World".to_owned()]);
     }
 
     #[test]
@@ -936,5 +1009,162 @@ mod tests {
         #[expect(clippy::permissions_set_readonly_false, reason = "required to clean up test temp dir")]
         perms.set_readonly(false);
         std::fs::set_permissions(&file, perms).unwrap();
+    }
+
+    // --- Prefix-match tests (descriptive trailing comments allowed) ---
+
+    #[test]
+    fn check_passes_with_descriptive_trailing_comment() {
+        let content = "// Licensed under the MIT License.\n// Hand-written types matching foo.\n\nfn main() {}\n";
+        let result = check_content(content, "Licensed under the MIT License.", CommentStyle::DoubleSlash);
+        assert_eq!(result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn check_passes_with_multi_line_header_and_trailing_comment() {
+        let content =
+            "// Copyright (c) Microsoft Corporation.\n// Licensed under the MIT License.\n// Module description here.\n\nfn main() {}\n";
+        let result = check_content(
+            content,
+            "Copyright (c) Microsoft Corporation.\nLicensed under the MIT License.",
+            CommentStyle::DoubleSlash,
+        );
+        assert_eq!(result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn check_passes_with_blank_separator_then_descriptive_paragraph() {
+        let content = "// Copyright (c) Microsoft Corporation.\n//\n// Module description here.\n\nfn main() {}\n";
+        let result = check_content(content, "Copyright (c) Microsoft Corporation.", CommentStyle::DoubleSlash);
+        assert_eq!(result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn check_still_fails_when_header_missing_from_block() {
+        // The block has comments, but they are not the configured header.
+        let content = "// Some unrelated comment.\n// Licensed under the MIT License.\n\nfn main() {}\n";
+        let result = check_content(content, "Licensed under the MIT License.", CommentStyle::DoubleSlash);
+        assert!(matches!(result, CheckResult::Mismatch { .. }));
+    }
+
+    #[test]
+    fn check_still_fails_when_header_only_partially_present() {
+        // Header is 2 lines, file only has line 1.
+        let content = "// Copyright (c) Microsoft Corporation.\n\nfn main() {}\n";
+        let result = check_content(
+            content,
+            "Copyright (c) Microsoft Corporation.\nLicensed under the MIT License.",
+            CommentStyle::DoubleSlash,
+        );
+        assert!(matches!(result, CheckResult::Mismatch { .. }));
+    }
+
+    #[test]
+    fn toml_check_passes_with_descriptive_trailing_comment() {
+        let content = "# Licensed under the MIT License.\n# Build script for the foo crate.\n\n[package]\nname = \"foo\"\n";
+        let result = check_content(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert_eq!(result, CheckResult::Ok);
+    }
+
+    #[test]
+    fn script_check_passes_with_descriptive_trailing_comment() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Licensed under the MIT License.\n# Helper script for X.\n\n[package]\nedition = \"2024\"\n---\nfn main() {}\n";
+        let result = check_content_script(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert_eq!(result, CheckResult::Ok);
+    }
+
+    // --- Safer --fix tests (descriptive trailing comments preserved) ---
+
+    #[test]
+    fn strip_existing_header_preserves_descriptive_comment_paragraph() {
+        let content = "// Old wrong header\n//\n// Module description.\n\nfn main() {}\n";
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        assert_eq!(result, "// Module description.\n\nfn main() {}\n");
+    }
+
+    #[test]
+    fn strip_existing_header_preserves_multi_line_descriptive_paragraph() {
+        let content = "// Old wrong header line 1\n// Old wrong header line 2\n//\n// Module description line 1.\n// Module description line 2.\n\nfn main() {}\n";
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        assert_eq!(
+            result,
+            "// Module description line 1.\n// Module description line 2.\n\nfn main() {}\n"
+        );
+    }
+
+    #[test]
+    fn strip_existing_header_no_paragraph_separator_strips_whole_block() {
+        // No blank-comment separator — strips the whole header block (legacy behavior).
+        let content = "// Wrong header\n// Wrong line 2\n\nfn main() {}\n";
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash);
+        assert_eq!(result, "fn main() {}\n");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // filesystem access is not supported under Miri isolation
+    fn fix_file_replaces_wrong_header_and_preserves_descriptive_comments() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("test.rs");
+        std::fs::write(&file, "// Apache License 2.0\n//\n// Module description here.\n\nfn main() {}\n").unwrap();
+
+        let config = HeatherConfig::with_defaults("Licensed under the MIT License.".into());
+
+        let result = fix_file(&file, &config).unwrap();
+        assert!(matches!(result.result, CheckResult::Mismatch { .. }));
+
+        let content = std::fs::read_to_string(&file).unwrap();
+        assert!(content.starts_with("// Licensed under the MIT License."));
+        assert!(content.contains("// Module description here."));
+        assert!(!content.contains("Apache"));
+    }
+
+    #[test]
+    fn script_fix_preserves_descriptive_comments() {
+        let content = "#!/usr/bin/env -S cargo +nightly -Zscript\n---\n# Apache License 2.0\n#\n# Helper script description.\n\n[package]\nedition = \"2024\"\n---\nfn main() {}\n";
+        let fixed = fix_script_content(content, "Licensed under the MIT License.", CommentStyle::Hash);
+        assert!(fixed.contains("# Licensed under the MIT License."));
+        assert!(fixed.contains("# Helper script description."));
+        assert!(!fixed.contains("Apache"));
+    }
+
+    // --- header_matches direct tests ---
+
+    #[test]
+    fn header_matches_exact_single_line() {
+        assert!(header_matches("MIT License", "MIT License"));
+    }
+
+    #[test]
+    fn header_matches_exact_multi_line() {
+        assert!(header_matches(
+            "Copyright Microsoft.\nMIT License.",
+            "Copyright Microsoft.\nMIT License."
+        ));
+    }
+
+    #[test]
+    fn header_matches_with_extra_trailing_lines() {
+        assert!(header_matches(
+            "Copyright Microsoft.\nMIT License.\nDescriptive comment.",
+            "Copyright Microsoft.\nMIT License."
+        ));
+    }
+
+    #[test]
+    fn header_matches_rejects_when_first_line_differs() {
+        assert!(!header_matches(
+            "Apache License.\nMIT License.",
+            "Copyright Microsoft.\nMIT License."
+        ));
+    }
+
+    #[test]
+    fn header_matches_rejects_when_actual_too_short() {
+        assert!(!header_matches("Copyright Microsoft.", "Copyright Microsoft.\nMIT License."));
+    }
+
+    #[test]
+    fn header_matches_tolerates_trailing_whitespace_on_lines() {
+        assert!(header_matches("MIT License   ", "MIT License"));
     }
 }
