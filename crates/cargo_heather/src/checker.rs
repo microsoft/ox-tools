@@ -1260,4 +1260,72 @@ mod tests {
         let result = strip_existing_header(content, CommentStyle::DoubleSlash, "Old header");
         assert_eq!(result, "");
     }
+
+    // --- Strip-N-lines mutation kills ---
+    //
+    // These tests target arithmetic/comparison boundaries in the new strip-N
+    // logic so flipped operators (< vs <=, > vs >=, += vs -=, < vs >) produce
+    // observably wrong output.
+
+    #[test]
+    fn fix_script_content_skips_leading_blank_lines() {
+        // Body has leading blank lines BEFORE the wrong header. The
+        // skip-blank-lines loop must run (`idx < len`, `idx += 1`) — flipping
+        // `<` to `>` makes the loop never enter and the wrong header survives,
+        // and flipping `+=` to `-=` / `*=` panics or hangs.
+        let content = "#!/usr/bin/env script\n---\n\n\n# Old wrong header\n[package]\nname = \"foo\"\n---\nfn main() {}\n";
+        let fixed = fix_script_content(content, "MIT License", CommentStyle::Hash);
+        assert!(fixed.contains("# MIT License"));
+        assert!(!fixed.contains("Old wrong header"));
+    }
+
+    #[test]
+    fn fix_script_content_strip_n_does_not_eat_descriptive_comment() {
+        // Configured 1-line header, body has wrong header (1 line) immediately
+        // followed by a descriptive comment line (no blank separator). N-line
+        // strip must remove ONLY the first line; flipping `<` to `<=` in the
+        // strip loop bound would eat the descriptive comment too.
+        let content =
+            "#!/usr/bin/env script\n---\n# Wrong header\n# Descriptive (preserve)\n[package]\nname = \"foo\"\n---\nfn main() {}\n";
+        let fixed = fix_script_content(content, "MIT License", CommentStyle::Hash);
+        assert!(fixed.contains("# MIT License"));
+        assert!(fixed.contains("# Descriptive (preserve)"));
+        assert!(!fixed.contains("# Wrong header"));
+    }
+
+    #[test]
+    fn fix_script_content_strip_n_consumes_all_body_no_panic() {
+        // Body consists entirely of N header-comment lines so `idx` ends at
+        // `body_lines.len()`. Both optional-consume bounds checks
+        // (`idx < body_lines.len()`) must hold — flipping to `<=` would panic
+        // accessing `body_lines[len]`.
+        let content = "#!/usr/bin/env script\n---\n# A\n# B\n";
+        let fixed = fix_script_content(content, "MIT\nLicense", CommentStyle::Hash);
+        assert!(fixed.contains("# MIT"));
+        assert!(fixed.contains("# License"));
+        assert!(!fixed.contains("# A"));
+        assert!(!fixed.contains("# B"));
+    }
+
+    #[test]
+    fn fix_script_content_no_header_preserves_leading_blank() {
+        // Body has a leading blank then code (no header). After skip-blanks,
+        // idx==start with strip stripping nothing. The `idx > start` else
+        // branch must reset idx to 0 so the leading blank survives —
+        // flipping to `idx >= start` would skip the reset and drop the blank.
+        let content = "#!/usr/bin/env script\n---\n\nfn main() {}\n";
+        let fixed = fix_script_content(content, "MIT", CommentStyle::Hash);
+        // Header + mandatory blank separator + preserved leading blank + code.
+        assert!(fixed.contains("# MIT\n\n\nfn main() {}"));
+    }
+
+    #[test]
+    fn strip_existing_header_strip_n_does_not_eat_descriptive_comment() {
+        // Mirror of fix_script_content_strip_n_does_not_eat_descriptive_comment
+        // for `strip_existing_header` — kills the L404 `<` vs `<=` mutation.
+        let content = "// Wrong header\n// Descriptive (preserve)\n\nfn main() {}\n";
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash, "Wrong header");
+        assert!(result.contains("// Descriptive (preserve)"));
+        assert!(!result.contains("Wrong header"));
+    }
 }
