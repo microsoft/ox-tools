@@ -154,8 +154,14 @@ fn header_matches(extracted: &str, expected_header: &str) -> bool {
 /// removed, and outer blank lines stripped. Used to compare headers
 /// line-by-line for prefix matching.
 fn normalize_to_lines(text: &str) -> Vec<String> {
-    let joined = text.lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
-    joined.trim().lines().map(str::to_owned).collect()
+    let mut lines: Vec<String> = text.lines().map(|l| l.trim_end().to_owned()).collect();
+    while lines.first().is_some_and(String::is_empty) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(String::is_empty) {
+        lines.pop();
+    }
+    lines
 }
 
 /// Extract the header comment block from inside a cargo-script frontmatter.
