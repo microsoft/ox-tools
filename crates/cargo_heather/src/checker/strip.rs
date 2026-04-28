@@ -3,7 +3,7 @@
 
 //! Header-block stripping for `--fix` mode.
 //!
-//! Both regular files and cargo-script frontmatters use the same algorithm:
+//! Both regular files and cargo-script frontmatter blocks use the same algorithm:
 //! skip leading blanks, then strip up to N header-comment lines, then
 //! optionally consume one blank-comment paragraph separator and one blank
 //! line. The two callers differ only in how they reassemble the output.
@@ -55,7 +55,7 @@ fn find_header_end(lines: &[&str], style: CommentStyle, max_header_lines: usize)
 /// Strip the leading header from regular file content.
 ///
 /// If no header is found, returns content unchanged. Trailing newline is
-/// preserved iff the original content had one.
+/// preserved if and only if the original content had one.
 pub(super) fn strip_existing_header(content: &str, style: CommentStyle, expected_header: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
     let max_header_lines = expected_header.lines().count();
