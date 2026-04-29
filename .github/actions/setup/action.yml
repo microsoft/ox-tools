@@ -114,3 +114,6 @@ runs:
     - name: Install Wild Linker
       if: inputs.enable-wild-linker == 'true'
       uses: Vaiz/wild-linker-action@fix/harden-wild-download
+      with:
+        download-retries: "10"
+        download-retry-delay: "5"
