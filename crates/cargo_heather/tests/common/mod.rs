@@ -16,6 +16,10 @@ use cargo_heather::{CheckResult, FileKind, check, fix};
 
 pub const HEADER_MIT: &str = "Licensed under the MIT License.";
 
+pub const HEADER_MS_MIT: &str = "\
+Copyright (c) Microsoft Corporation.
+Licensed under the MIT License.";
+
 pub const HEADER_APACHE: &str = "\
 Licensed under the Apache License, Version 2.0 (the \"License\");
 you may not use this file except in compliance with the License.
