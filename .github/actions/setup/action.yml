@@ -115,5 +115,4 @@ runs:
       if: inputs.enable-wild-linker == 'true'
       uses: Vaiz/wild-linker-action@fix/harden-wild-download
       with:
-        download-retries: "10"
-        download-retry-delay: "5"
+        download-retries: "6"
