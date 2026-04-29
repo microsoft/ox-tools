@@ -84,6 +84,77 @@ fn rust_empty() {
     assert_eq!(out, EXPECTED);
 }
 
+#[test]
+fn rust_existing_non_license_comment_is_preserved() {
+    // A leading `//` comment that is NOT a license/copyright/SPDX header
+    // must NOT be treated as a license header. `check` reports `Missing`
+    // and `fix` prepends the license while preserving the original comment.
+    const INPUT: &str = include_str!("fixtures/rust_existing_comment/input.rs");
+    const EXPECTED: &str = include_str!("fixtures/rust_existing_comment/expected.rs");
+
+    assert_eq!(check_str(INPUT, HEADER_MIT, FileKind::Rust), CheckResult::Missing);
+    let (out, _) = fix_to_string(INPUT, HEADER_MIT, FileKind::Rust);
+    assert_eq!(out, EXPECTED);
+}
+
+#[test]
+fn rust_doc_comment_is_preserved() {
+    // `//!` doc comments are not header comments. The license must be
+    // prepended above the doc comment, leaving it intact.
+    const INPUT: &str = include_str!("fixtures/rust_doc_comment/input.rs");
+    const EXPECTED: &str = include_str!("fixtures/rust_doc_comment/expected.rs");
+
+    assert_eq!(check_str(INPUT, HEADER_MIT, FileKind::Rust), CheckResult::Missing);
+    let (out, _) = fix_to_string(INPUT, HEADER_MIT, FileKind::Rust);
+    assert_eq!(out, EXPECTED);
+}
+
+const HEADER_APACHE: &str = "\
+Licensed under the Apache License, Version 2.0 (the \"License\");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an \"AS IS\" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.";
+
+#[test]
+fn rust_apache_ok() {
+    const INPUT: &str = include_str!("fixtures/rust_apache_ok/input.rs");
+    const EXPECTED: &str = include_str!("fixtures/rust_apache_ok/expected.rs");
+
+    assert_eq!(check_str(INPUT, HEADER_APACHE, FileKind::Rust), CheckResult::Ok);
+    let (out, _) = fix_to_string(INPUT, HEADER_APACHE, FileKind::Rust);
+    assert_eq!(out, EXPECTED);
+}
+
+#[test]
+fn rust_apache_missing() {
+    const INPUT: &str = include_str!("fixtures/rust_apache_missing/input.rs");
+    const EXPECTED: &str = include_str!("fixtures/rust_apache_missing/expected.rs");
+
+    assert_eq!(check_str(INPUT, HEADER_APACHE, FileKind::Rust), CheckResult::Missing);
+    let (out, _) = fix_to_string(INPUT, HEADER_APACHE, FileKind::Rust);
+    assert_eq!(out, EXPECTED);
+}
+
+#[test]
+fn rust_apache_mismatch() {
+    // MIT header present, Apache expected — Mismatch. The MIT block is
+    // stripped and the multi-line Apache header is prepended.
+    const INPUT: &str = include_str!("fixtures/rust_apache_mismatch/input.rs");
+    const EXPECTED: &str = include_str!("fixtures/rust_apache_mismatch/expected.rs");
+
+    let result = check_str(INPUT, HEADER_APACHE, FileKind::Rust);
+    assert!(matches!(result, CheckResult::Mismatch { .. }), "expected Mismatch, got {result:?}");
+    let (out, _) = fix_to_string(INPUT, HEADER_APACHE, FileKind::Rust);
+    assert_eq!(out, EXPECTED);
+}
+
 // ---------------------------------------------------------------------------
 // TOML (.toml) fixtures
 // ---------------------------------------------------------------------------

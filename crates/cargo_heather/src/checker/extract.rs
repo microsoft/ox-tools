@@ -9,7 +9,8 @@ use crate::comment::CommentStyle;
 /// Collect a contiguous block of header-comment lines from `lines`, stripping
 /// each line's comment prefix. Stops at the first non-comment line. Trailing
 /// blank-comment lines are trimmed. Returns `None` if no comment line was
-/// collected.
+/// collected, or if the collected block does not look like a license header
+/// (see [`looks_like_license_header`]).
 fn collect_comment_block<'a, I>(lines: I, style: CommentStyle) -> Option<String>
 where
     I: IntoIterator<Item = &'a str>,
@@ -27,7 +28,23 @@ where
         out.pop();
     }
 
-    if out.is_empty() { None } else { Some(out.join("\n")) }
+    if out.is_empty() {
+        return None;
+    }
+    let block = out.join("\n");
+    looks_like_license_header(&block).then_some(block)
+}
+
+/// Heuristic: does `block` look like a license / copyright header?
+///
+/// Returns `true` if any line contains a license-related keyword
+/// (case-insensitive): `license`, `copyright`, or `spdx`. This prevents
+/// `cargo-heather` from treating an unrelated leading `//` comment as a
+/// header to be replaced.
+fn looks_like_license_header(block: &str) -> bool {
+    const KEYWORDS: &[&str] = &["license", "copyright", "spdx"];
+    let lower = block.to_ascii_lowercase();
+    KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
 
 /// Extract the first contiguous block of comment lines from file content.
