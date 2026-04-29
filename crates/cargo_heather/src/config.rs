@@ -314,6 +314,7 @@ pub fn config_path_for(project_dir: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 

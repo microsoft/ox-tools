@@ -264,6 +264,7 @@ fn make_relative(path: &Path, base: &Path) -> std::path::PathBuf {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 
@@ -525,5 +526,13 @@ mod tests {
         let out = format_mismatch_details("Licensed under MIT.", "");
         assert!(out.contains("+ Licensed under MIT."));
         assert!(out.contains("- <empty>"));
+    }
+
+    #[test]
+    fn format_mismatch_details_handles_empty_expected() {
+        let out = format_mismatch_details("", "Apache 2.0");
+        assert!(out.contains("expected header:"));
+        assert!(out.contains("+ <empty>"));
+        assert!(out.contains("- Apache 2.0"));
     }
 }

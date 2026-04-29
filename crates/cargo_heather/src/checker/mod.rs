@@ -97,17 +97,21 @@ pub fn fix_file(path: &Path, config: &HeatherConfig) -> Result<FileCheckResult, 
 
     let result = check_with_kind(&content, &config.header_text, kind, style);
 
-    if !matches!(result, CheckResult::Ok) {
-        let fixed = match (kind, &result) {
-            (FileKind::CargoScript, _) => strip::fix_script_content(&content, &config.header_text, style),
-            (_, CheckResult::Missing) => prepend_header(&content, &config.header_text, style),
-            (_, CheckResult::Mismatch { .. }) => {
-                let stripped = strip::strip_existing_header(&content, style, &config.header_text);
-                prepend_header(&stripped, &config.header_text, style)
-            }
-            (_, CheckResult::Ok) => unreachable!("filtered out above"),
-        };
-        write_file(path, &fixed)?;
+    match &result {
+        CheckResult::Ok => {}
+        _ if kind == FileKind::CargoScript => {
+            let fixed = strip::fix_script_content(&content, &config.header_text, style);
+            write_file(path, &fixed)?;
+        }
+        CheckResult::Missing => {
+            let fixed = prepend_header(&content, &config.header_text, style);
+            write_file(path, &fixed)?;
+        }
+        CheckResult::Mismatch { .. } => {
+            let stripped = strip::strip_existing_header(&content, style, &config.header_text);
+            let fixed = prepend_header(&stripped, &config.header_text, style);
+            write_file(path, &fixed)?;
+        }
     }
 
     Ok(FileCheckResult {
@@ -198,6 +202,7 @@ fn write_file(path: &Path, content: &str) -> Result<(), HeatherError> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 

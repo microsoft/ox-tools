@@ -250,6 +250,7 @@ pub fn supported_licenses() -> Vec<&'static str> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

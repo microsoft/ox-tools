@@ -57,6 +57,7 @@ pub(super) fn script_header(content: &str, style: CommentStyle) -> Option<String
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

@@ -99,6 +99,7 @@ pub(super) fn fix_script_content(content: &str, header_text: &str, style: Commen
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -117,6 +118,14 @@ mod tests {
         let content = "fn main() {}\n";
         let result = strip_existing_header(content, CommentStyle::DoubleSlash, "Header");
         assert_eq!(result, content);
+    }
+
+    #[test]
+    fn preserves_lack_of_trailing_newline() {
+        // Original content has no trailing newline → stripped result must also lack it.
+        let content = "// Old header\n\nfn main() {}";
+        let result = strip_existing_header(content, CommentStyle::DoubleSlash, "Old header");
+        assert_eq!(result, "fn main() {}");
     }
 
     #[test]

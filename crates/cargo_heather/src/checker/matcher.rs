@@ -33,6 +33,7 @@ pub(super) fn normalize_to_lines(text: &str) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

@@ -94,6 +94,7 @@ fn should_skip_dir(entry: &walkdir::DirEntry) -> bool {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 
