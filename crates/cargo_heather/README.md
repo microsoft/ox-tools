@@ -15,98 +15,52 @@
 
 ## cargo-heather
 
-A cargo sub-command to validate license headers in Rust (`.rs`) and TOML (`.toml`) source files.
+Library for validating and rewriting license headers in Rust (`.rs`) and
+TOML (`.toml`) source files. The accompanying `cargo-heather` binary uses
+this library to discover files on disk and apply the rewrites.
 
-### Installation
+### Public API
 
-```bash
-cargo install --path .
+The library is intentionally minimal: a pair of stream-based functions
+that operate on any [`std::io::Read`][__link0] / [`std::io::Write`][__link1].
+
+* [`check`][__link2] reads content and reports whether the expected header is
+  present, missing, or mismatched.
+* [`fix`][__link3] reads content and writes the fixed-up content.
+
+Callers are responsible for opening files, deciding which paths to
+process, and writing results back to disk.
+
+```rust
+use cargo_heather::{check, fix, CheckResult, FileKind};
+
+let input = b"fn main() {}\n";
+let header = "Licensed under the MIT License.";
+
+// Check whether the header is present.
+let result = check(&input[..], header, FileKind::Rust).unwrap();
+assert_eq!(result, CheckResult::Missing);
+
+// Produce a fixed copy.
+let mut output: Vec<u8> = Vec::new();
+fix(&input[..], &mut output, header, FileKind::Rust).unwrap();
+assert!(output.starts_with(b"// Licensed under the MIT License.\n"));
 ```
 
-### Setup
+### Supported file kinds
 
-Create a `.cargo-heather.toml` file in your project root, **or** simply set the `license` field in your `Cargo.toml` — the tool will use it automatically when no `.cargo-heather.toml` is present.
+* [`FileKind::Rust`][__link4] — regular Rust source (`//` comments).
+* [`FileKind::Toml`][__link5] — TOML files (`#` comments).
+* [`FileKind::CargoScript`][__link6] — Rust script with shebang + `---`
+  frontmatter; the header lives inside the frontmatter using `#`.
 
-#### Using an SPDX License Identifier
+Use [`FileKind::detect`][__link7] (or [`is_cargo_script`][__link8]) to classify a file
+from its path and content before calling [`check`][__link9] / [`fix`][__link10].
 
-```toml
-license = "MIT"
-```
+### License header lookup
 
-#### Using a Custom Header
-
-```toml
-header = """
-Copyright (c) 2024 MyCompany
-All rights reserved.
-"""
-```
-
-### Usage
-
-```bash
-# Check all .rs and .toml files for correct license headers
-cargo heather
-
-# Automatically fix files by adding/replacing headers
-cargo heather --fix
-```
-
-#### Options
-
-* `--project-dir <PATH>` — Path to the project directory (defaults to current directory)
-* `--config <PATH>` — Path to the configuration file (defaults to `.cargo-heather.toml` in project directory)
-* `--fix` — Fix files by adding or replacing missing/incorrect headers
-* `--help` — Print help
-* `--version` — Print version
-
-#### Example
-
-```bash
-$ cargo heather
-Checking 5 file(s)...
-MISSING header: src/utils.rs
-MISMATCH header: src/lib.rs
-2 file(s) have missing or incorrect license headers
-
-$ cargo heather --fix
-Checking 5 file(s)...
-Fixed (added header): src/utils.rs
-Fixed (replaced header): src/lib.rs
-Fixed 2 file(s).
-```
-
-### Supported SPDX Identifiers
-
-|Identifier|License|
-|----------|-------|
-|`MIT`|MIT License|
-|`Apache-2.0`|Apache License 2.0|
-|`GPL-2.0-only`|GNU General Public License v2.0 only|
-|`GPL-2.0-or-later`|GNU General Public License v2.0 or later|
-|`GPL-3.0-only`|GNU General Public License v3.0 only|
-|`GPL-3.0-or-later`|GNU General Public License v3.0 or later|
-|`LGPL-2.1-only`|GNU Lesser General Public License v2.1 only|
-|`LGPL-2.1-or-later`|GNU Lesser General Public License v2.1 or later|
-|`LGPL-3.0-only`|GNU Lesser General Public License v3.0 only|
-|`LGPL-3.0-or-later`|GNU Lesser General Public License v3.0 or later|
-|`BSD-2-Clause`|BSD 2-Clause “Simplified” License|
-|`BSD-3-Clause`|BSD 3-Clause “New” or “Revised” License|
-|`ISC`|ISC License|
-|`MPL-2.0`|Mozilla Public License 2.0|
-|`AGPL-3.0-only`|GNU Affero General Public License v3.0 only|
-|`AGPL-3.0-or-later`|GNU Affero General Public License v3.0 or later|
-|`Unlicense`|The Unlicense|
-|`BSL-1.0`|Boost Software License 1.0|
-|`0BSD`|BSD Zero Clause License|
-|`Zlib`|zlib License|
-
-### How it works
-
-1. **Config loading** — Reads `.cargo-heather.toml` from the project root and resolves the expected header text (from SPDX identifier or custom text).
-1. **File scanning** — Walks the project directory to find all `.rs` and `.toml` files, skipping `target/`, hidden directories, and the config file itself.
-1. **Header validation** — Extracts the first comment block from each file (`//` for Rust, `#` for TOML) and compares it to the expected header. Reports missing or mismatched headers.
-1. **Fix mode** — When `--fix` is passed, automatically prepends the correct header to files that are missing it, or replaces incorrect headers.
+The [`license`][__link11] module maps SPDX identifiers to canonical short header
+strings; this is what the binary uses when no custom header is supplied.
 
 
 <hr/>
@@ -114,3 +68,16 @@ Fixed 2 file(s).
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo_heather">source code</a>.
 </sub>
 
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQbIO-yhm33vhYbzeULwGvlFEwbtCQvvMS9iNAbir3G8ex7VL9hZIGCbWNhcmdvX2hlYXRoZXJlMC4xLjA
+ [__link0]: https://doc.rust-lang.org/stable/std/?search=io::Read
+ [__link1]: https://doc.rust-lang.org/stable/std/?search=io::Write
+ [__link10]: https://docs.rs/cargo_heather/0.1.0/cargo_heather/?search=fix
+ [__link11]: https://docs.rs/cargo_heather/0.1.0/cargo_heather/license/index.html
+ [__link2]: https://docs.rs/cargo_heather/0.1.0/cargo_heather/?search=check
+ [__link3]: https://docs.rs/cargo_heather/0.1.0/cargo_heather/?search=fix
+ [__link4]: https://docs.rs/cargo_heather/0.1.0/cargo_heather/?search=FileKind::Rust
+ [__link5]: https://docs.rs/cargo_heather/0.1.0/cargo_heather/?search=FileKind::Toml
+ [__link6]: https://docs.rs/cargo_heather/0.1.0/cargo_heather/?search=FileKind::CargoScript
+ [__link7]: https://docs.rs/cargo_heather/0.1.0/cargo_heather/?search=FileKind::detect
+ [__link8]: https://docs.rs/cargo_heather/0.1.0/cargo_heather/?search=is_cargo_script
+ [__link9]: https://docs.rs/cargo_heather/0.1.0/cargo_heather/?search=check
