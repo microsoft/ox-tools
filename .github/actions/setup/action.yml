@@ -114,5 +114,3 @@ runs:
     - name: Install Wild Linker
       if: inputs.enable-wild-linker == 'true'
       uses: wild-linker/action@0.8.0
-      with:
-        download-retries: "6"
