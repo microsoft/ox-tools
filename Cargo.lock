@@ -91,9 +91,11 @@ dependencies = [
 name = "cargo_heather"
 version = "0.1.0"
 dependencies = [
+ "assert_cmd",
  "clap",
  "ohno",
  "serde",
+ "tempfile",
  "toml",
  "tracing",
  "tracing-subscriber",
