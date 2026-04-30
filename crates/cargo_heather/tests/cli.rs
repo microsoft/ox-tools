@@ -9,6 +9,11 @@
 //! designed to kill mutants in `src/bin/cargo-heather/*.rs` by asserting
 //! both the exit status and concrete log lines.
 
+// Miri cannot run subprocesses, so the entire `assert_cmd`-based test
+// suite is gated out under miri. The library-level unit tests (in
+// `src/checker/strip.rs` and the `tests/rust_*.rs` integration tests
+// that call the library directly) still run under miri.
+#![cfg(not(miri))]
 #![allow(clippy::unwrap_used, reason = "tests panic on setup failure — that's the expected failure mode")]
 #![allow(clippy::missing_panics_doc, reason = "test functions")]
 
@@ -114,6 +119,14 @@ fn check_fails_with_mismatch_diff_block() {
         "expected + line: {stderr}"
     );
     assert!(stderr.contains("- Some other header line."), "actual - line: {stderr}");
+    // Asserting on the post-loop summary count is what kills the
+    // `failures += 1` → `failures -= 1` mutant in `run.rs`: with the
+    // mutation, `failures` underflows on the first mismatch and the
+    // process panics before reaching this `bail!()` formatting path.
+    assert!(
+        stderr.contains("1 file(s) have missing or incorrect license headers"),
+        "validation summary line for 1 file: {stderr}"
+    );
 }
 #[test]
 fn check_succeeds_when_no_files_found() {
@@ -485,6 +498,13 @@ fn config_no_config_no_cargo_returns_not_found() {
 fn config_cargo_toml_with_empty_package_license_falls_through() {
     // Empty package license must NOT be accepted; expect ConfigNotFound
     // because there's no .cargo-heather.toml and no usable license.
+    //
+    // Mutation guard for `config.rs:160`: replacing
+    // `LicenseField::Plain(id) if !id.trim().is_empty()` with `if true`
+    // would make the binary call `license::header_for_license("   ")`
+    // and fail with `unknown SPDX license identifier: '   '` rather than
+    // `config file not found`. We assert the exact original error text
+    // to distinguish the two paths.
     let dir = TempDir::new().unwrap();
     let p = dir.path();
     let cargo_header = "# Licensed under the MIT License.\n";
@@ -495,7 +515,107 @@ fn config_cargo_toml_with_empty_package_license_falls_through() {
     write(&p.join("a.rs"), "fn a() {}\n");
 
     let out = run_heather(p, &[]);
-    assert!(!out.status.success(), "empty license must be rejected");
+    let stderr = stderr_of(&out);
+    assert!(!out.status.success(), "empty license must be rejected: {stderr}");
+    assert!(
+        stderr.contains("config file not found"),
+        "empty license must fall through to ConfigNotFound, not be treated as a license id: {stderr}"
+    );
+    assert!(
+        !stderr.contains("unknown SPDX license identifier"),
+        "empty license must NOT be passed to header_for_license: {stderr}"
+    );
+}
+
+#[test]
+fn config_workspace_package_license_inferred_at_root() {
+    // Root Cargo.toml has NO [package] section but provides
+    // `[workspace.package] license = "MIT"`. The MIT header should be
+    // inferred for the lone source file at the workspace root.
+    //
+    // Mutation guard for `config.rs:173`: deleting the `!` in
+    // `.filter(|id| !id.trim().is_empty())` would make the filter
+    // reject the non-empty "MIT" id and fall through to Ok(None),
+    // which ends with ConfigNotFound.
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    let cargo_header = "# Licensed under the MIT License.\n";
+    write(
+        &p.join("Cargo.toml"),
+        &format!("{cargo_header}\n[workspace]\nmembers = []\n[workspace.package]\nlicense = \"MIT\"\n"),
+    );
+    // A Rust file at the workspace root with the canonical MIT-only
+    // header; success requires the inferred header to match this.
+    write(&p.join("a.rs"), &format!("{HEADER_TEXT_MIT_ONLY}\nfn a() {{}}\n"));
+
+    let out = run_heather(p, &[]);
+    let stderr = stderr_of(&out);
+    assert!(out.status.success(), "workspace.package.license inference must succeed: {stderr}");
+    // Cargo.toml itself is also scanned (CommentStyle::Hash), so 2 files.
+    assert!(stderr.contains("Checking 2 file(s)"), "{stderr}");
+    assert!(stderr.contains("All 2 file(s) have correct license headers"), "{stderr}");
+}
+
+// ───────────────────────── scanner.rs mutants ─────────────────────────
+
+#[test]
+fn scanner_rejects_directory_with_rust_extension() {
+    // A directory NAMED `weird.rs` is not a file, so the scanner must
+    // skip it. A subdirectory whose name ends in `.rs` is unusual but
+    // legal on Windows and Unix.
+    //
+    // Mutation guard for `scanner.rs:34`: replacing
+    // `is_file() && from_path.is_some()` with `||` would let the
+    // directory entry slip into the file list because
+    // `CommentStyle::from_path("weird.rs") == Some(Slash)`. The binary
+    // would then try to read it as a file and fail.
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    write(&p.join(".cargo-heather.toml"), CONFIG_MIT);
+    // A correctly-headered file so the scanner has something to find.
+    write(&p.join("a.rs"), &format!("{HEADER_TEXT}\nfn a() {{}}\n"));
+    // A directory named like a Rust file; must be ignored.
+    fs::create_dir_all(p.join("weird.rs")).unwrap();
+
+    let out = run_heather(p, &[]);
+    let stderr = stderr_of(&out);
+    assert!(out.status.success(), "directory ending in .rs must be ignored: {stderr}");
+    assert!(
+        stderr.contains("Checking 1 file(s)"),
+        "exactly one file must be picked up: {stderr}"
+    );
+}
+
+#[test]
+fn scanner_skips_hidden_directories_at_any_depth() {
+    // A non-SKIP_DIRS hidden directory like `.foobar/` must be pruned
+    // by the depth>0 + starts_with('.') check.
+    //
+    // Mutation guard for `scanner.rs:73`: replacing `>` with `<` in
+    // `entry.depth() > 0` — since `depth()` is `usize`, the mutated
+    // condition `depth() < 0` is always false, disabling the
+    // hidden-dir prune. The mutated binary would descend into
+    // `.foobar/` and report MISSING for `.foobar/inner.rs`.
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    write(&p.join(".cargo-heather.toml"), CONFIG_MIT);
+    let hidden = p.join(".foobar");
+    fs::create_dir_all(&hidden).unwrap();
+    // Unheaded source file inside the hidden dir.
+    write(&hidden.join("inner.rs"), "fn inner() {}\n");
+    // A correctly-headered file at the visible root so the scanner has
+    // SOMETHING to traverse.
+    write(&p.join("a.rs"), &format!("{HEADER_TEXT}\nfn a() {{}}\n"));
+
+    let out = run_heather(p, &[]);
+    let stderr = stderr_of(&out);
+    assert!(out.status.success(), "hidden dir must be skipped: {stderr}");
+    assert!(stderr.contains("Checking 1 file(s)"), "{stderr}");
+    assert!(
+        !stderr.contains("MISSING header: .foobar"),
+        "hidden dir contents must not be scanned: {stderr}"
+    );
+    assert!(!stderr.contains("inner.rs"), "hidden dir contents must not be scanned: {stderr}");
 }
 
 #[test]

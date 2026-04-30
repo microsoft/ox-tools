@@ -97,3 +97,53 @@ pub(super) fn fix_script_content(content: &str, header_text: &str, style: Commen
         format!("{shebang}\n{dash_open}\n{header_comment}\n\n{rest}\n")
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `+= 1` on line 43 advances the index past a blank-comment
+    /// paragraph separator. We assert the exact returned `Some(_)` so
+    /// that mutations to that statement are observable:
+    ///
+    /// - Original `idx += 1`           → `Some(2)`
+    /// - Mutation `idx -= 1`           → `Some(0)`
+    /// - Mutation `idx *= 1` (no-op)   → `Some(1)`
+    #[test]
+    fn find_header_end_consumes_paragraph_separator_returns_exact_index() {
+        let lines = ["// Old.", "//", "// More.", "fn main() {}"];
+        let body_start = find_header_end(&lines, CommentStyle::DoubleSlash, 1);
+        assert_eq!(
+            body_start,
+            Some(2),
+            "must consume the `//` paragraph separator after the 1-line header"
+        );
+    }
+
+    #[test]
+    fn find_header_end_no_separator_when_next_line_is_real_code() {
+        let lines = ["// Old.", "fn main() {}"];
+        // No paragraph separator and no blank line after a 1-line header.
+        assert_eq!(find_header_end(&lines, CommentStyle::DoubleSlash, 1), Some(1));
+    }
+
+    #[test]
+    fn find_header_end_consumes_blank_after_separator() {
+        let lines = ["// Old.", "//", "", "fn main() {}"];
+        // 1 header + 1 paragraph separator + 1 blank ⇒ body_start = 3.
+        assert_eq!(find_header_end(&lines, CommentStyle::DoubleSlash, 1), Some(3));
+    }
+
+    #[test]
+    fn find_header_end_returns_none_when_no_header_lines() {
+        let lines = ["fn main() {}"];
+        assert_eq!(find_header_end(&lines, CommentStyle::DoubleSlash, 1), None);
+    }
+
+    #[test]
+    fn find_header_end_skips_leading_blanks() {
+        let lines = ["", "", "// Header.", "fn main() {}"];
+        // 2 blanks + 1 stripped + no separator + no trailing blank ⇒ 3.
+        assert_eq!(find_header_end(&lines, CommentStyle::DoubleSlash, 1), Some(3));
+    }
+}
