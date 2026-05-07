@@ -684,3 +684,234 @@ fn cargo_script_processed_when_scripts_default_true() {
         "expected missing log for script: {stderr}"
     );
 }
+
+// ─────────────── custom (non-SPDX) header via `header = "..."` ───────────────
+//
+// These tests cover the case where a project supplies a fully custom
+// header text via the `header` field of `.cargo-heather.toml` whose
+// content is NOT one of the SPDX licenses registered in
+// `crates/cargo_heather/src/license.rs`. The tool must accept arbitrary
+// header text — proprietary licenses, internal-use notices, etc. — and
+// must NOT treat the `header` field as an SPDX identifier.
+
+/// A multi-line, fully custom header that does not match any SPDX
+/// identifier or any header text in the registered license registry.
+/// It contains the word "Copyright" so the header-detection heuristic
+/// recognises it as a license header (see
+/// `looks_like_license_header` in `src/checker/extract.rs`).
+const CUSTOM_HEADER_TOML: &str = "header = \"Copyright (c) Acme Corp 2026.\\nAll rights reserved. Proprietary - internal use only.\"\n";
+
+const CUSTOM_HEADER_RS: &str = "\
+// Copyright (c) Acme Corp 2026.
+// All rights reserved. Proprietary - internal use only.
+";
+
+const CUSTOM_HEADER_HASH: &str = "\
+# Copyright (c) Acme Corp 2026.
+# All rights reserved. Proprietary - internal use only.
+";
+
+#[test]
+fn custom_header_check_passes_when_files_match() {
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    write(&p.join(".cargo-heather.toml"), CUSTOM_HEADER_TOML);
+    write(&p.join("a.rs"), &format!("{CUSTOM_HEADER_RS}\nfn a() {{}}\n"));
+    write(&p.join("b.rs"), &format!("{CUSTOM_HEADER_RS}\nfn b() {{}}\n"));
+
+    let out = run_heather(p, &[]);
+    let stderr = stderr_of(&out);
+    assert!(out.status.success(), "custom header must be accepted: {stderr}");
+    assert!(
+        stderr.contains("All 2 file(s) have correct license headers."),
+        "summary missing for custom header: {stderr}"
+    );
+}
+
+#[test]
+fn custom_header_check_fails_when_file_has_wrong_header() {
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    write(&p.join(".cargo-heather.toml"), CUSTOM_HEADER_TOML);
+    // File has the standard MS-MIT header, which does NOT match the
+    // configured custom proprietary header.
+    write(&p.join("a.rs"), &format!("{HEADER_TEXT}\nfn a() {{}}\n"));
+
+    let out = run_heather(p, &[]);
+    let stderr = stderr_of(&out);
+    assert!(!out.status.success(), "wrong header must be rejected: {stderr}");
+    assert!(stderr.contains("MISMATCH header: a.rs"), "expected MISMATCH log: {stderr}");
+    // The expected/actual diff must reference the custom header text.
+    assert!(
+        stderr.contains("Copyright (c) Acme Corp 2026."),
+        "diff must show expected custom header: {stderr}"
+    );
+    assert!(
+        stderr.contains("Licensed under the MIT License."),
+        "diff must show actual (wrong) header: {stderr}"
+    );
+}
+
+#[test]
+fn custom_header_check_fails_when_file_missing_header() {
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    write(&p.join(".cargo-heather.toml"), CUSTOM_HEADER_TOML);
+    write(&p.join("a.rs"), "fn a() {}\n");
+
+    let out = run_heather(p, &[]);
+    let stderr = stderr_of(&out);
+    assert!(!out.status.success(), "missing header must fail: {stderr}");
+    assert!(stderr.contains("MISSING header: a.rs"), "expected MISSING log: {stderr}");
+}
+
+#[test]
+fn custom_header_fix_inserts_header_in_rust_file() {
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    write(&p.join(".cargo-heather.toml"), CUSTOM_HEADER_TOML);
+    write(&p.join("a.rs"), "fn a() {}\n");
+
+    let out = run_heather(p, &["--fix"]);
+    let stderr = stderr_of(&out);
+    assert!(out.status.success(), "fix must succeed: {stderr}");
+
+    let fixed = fs::read_to_string(p.join("a.rs")).unwrap();
+    assert!(
+        fixed.starts_with(CUSTOM_HEADER_RS),
+        "fix must insert custom header at top of Rust file. Got: {fixed:?}"
+    );
+    assert!(fixed.contains("fn a() {}"), "fix must preserve original code: {fixed:?}");
+}
+
+#[test]
+fn custom_header_fix_inserts_header_in_toml_file() {
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    write(&p.join(".cargo-heather.toml"), CUSTOM_HEADER_TOML);
+    // dot_toml = true so the `.cargo-heather.toml` itself is also a
+    // candidate; but we explicitly target a regular Cargo.toml here.
+    write(
+        &p.join("Cargo.toml"),
+        "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+
+    let out = run_heather(p, &["--fix"]);
+    let stderr = stderr_of(&out);
+    assert!(out.status.success(), "fix must succeed for TOML: {stderr}");
+
+    let fixed = fs::read_to_string(p.join("Cargo.toml")).unwrap();
+    assert!(
+        fixed.starts_with(CUSTOM_HEADER_HASH),
+        "fix must insert hash-style custom header at top of TOML file. Got: {fixed:?}"
+    );
+}
+
+#[test]
+fn custom_header_fix_replaces_wrong_header() {
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    write(&p.join(".cargo-heather.toml"), CUSTOM_HEADER_TOML);
+    // File starts with the standard MS-MIT header that must be replaced.
+    write(&p.join("a.rs"), &format!("{HEADER_TEXT}\nfn a() {{}}\n"));
+
+    let out = run_heather(p, &["--fix"]);
+    let stderr = stderr_of(&out);
+    assert!(out.status.success(), "fix must succeed: {stderr}");
+
+    let fixed = fs::read_to_string(p.join("a.rs")).unwrap();
+    assert!(
+        fixed.starts_with(CUSTOM_HEADER_RS),
+        "fix must replace wrong header with custom one. Got: {fixed:?}"
+    );
+    // The old (wrong) MIT line must no longer be present at the top.
+    assert!(
+        !fixed.starts_with("// Copyright (c) Microsoft Corporation."),
+        "old header must be stripped: {fixed:?}"
+    );
+}
+
+#[test]
+fn custom_header_recheck_after_fix_passes() {
+    // End-to-end: fix then re-check on the same tree must succeed,
+    // proving the custom header round-trips through fix and check.
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    write(&p.join(".cargo-heather.toml"), CUSTOM_HEADER_TOML);
+    write(&p.join("a.rs"), "fn a() {}\n");
+    write(&p.join("b.rs"), "fn b() {}\n");
+
+    let fix_out = run_heather(p, &["--fix"]);
+    assert!(fix_out.status.success(), "fix must succeed: {}", stderr_of(&fix_out));
+
+    let check_out = run_heather(p, &[]);
+    let stderr = stderr_of(&check_out);
+    assert!(check_out.status.success(), "re-check after fix must succeed: {stderr}");
+    assert!(
+        stderr.contains("All 2 file(s) have correct license headers."),
+        "re-check summary missing: {stderr}"
+    );
+}
+
+#[test]
+fn config_unknown_spdx_license_errors_clearly() {
+    // `license = "FOO-BAR"` is an SPDX-style identifier that is NOT in
+    // the tool's registered license registry. The tool must surface a
+    // clear `unknown SPDX license identifier` error rather than treating
+    // the unknown id as a custom header.
+    //
+    // This complements the `header = "..."` custom-header tests above:
+    // the two config keys have different semantics — `license` is
+    // looked up in the SPDX registry; `header` is taken verbatim — and
+    // a typo in `license` must NOT silently succeed.
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    write(&p.join(".cargo-heather.toml"), "license = \"FOO-BAR\"\n");
+    write(&p.join("a.rs"), "fn a() {}\n");
+
+    let out = run_heather(p, &[]);
+    let stderr = stderr_of(&out);
+    assert!(!out.status.success(), "unknown SPDX id must fail: {stderr}");
+    assert!(
+        stderr.contains("unknown SPDX license identifier"),
+        "expected UnknownLicense error wording: {stderr}"
+    );
+    assert!(stderr.contains("FOO-BAR"), "error must echo the unknown id: {stderr}");
+}
+
+#[test]
+fn fix_strips_long_existing_header_when_expected_is_short() {
+    // Regression for the "expected shorter than existing header" review
+    // comment on PR #16: previously, `--fix` bounded the strip by the
+    // expected header's line count, so a file with a 5-line wrong header
+    // configured with a 1-line MIT header ended up with the new header
+    // followed by the 4 leftover lines from the old header. After the
+    // fix, the entire existing header block is stripped and only the
+    // new header + body remain.
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    write(&p.join(".cargo-heather.toml"), "header = \"Licensed under the MIT License.\"\n");
+    let long_existing = "\
+// Copyright 2024 Acme Corp.
+// Licensed under the Apache License, Version 2.0 (the \"License\");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//     http://www.apache.org/licenses/LICENSE-2.0
+
+fn main() {}
+";
+    write(&p.join("a.rs"), long_existing);
+
+    let out = run_heather(p, &["--fix"]);
+    let stderr = stderr_of(&out);
+    assert!(out.status.success(), "fix should succeed, stderr: {stderr}");
+
+    let fixed = fs::read_to_string(p.join("a.rs")).unwrap();
+    assert_eq!(
+        fixed, "// Licensed under the MIT License.\n\nfn main() {}\n",
+        "fix must strip the entire 5-line wrong header, not just the first line"
+    );
+    // Belt-and-suspenders: no Apache leftovers.
+    assert!(!fixed.contains("Apache"), "Apache leftovers in fixed file: {fixed}");
+    assert!(!fixed.contains("Acme"), "Acme leftovers in fixed file: {fixed}");
+}

@@ -41,7 +41,12 @@ pub fn check<R: Read>(mut reader: R, expected_header: &str, kind: FileKind) -> i
 pub fn fix<R: Read, W: Write>(mut reader: R, mut writer: W, expected_header: &str, kind: FileKind) -> io::Result<CheckResult> {
     let mut content = String::new();
     reader.read_to_string(&mut content)?;
-    let (result, new_content) = checker::fix(&content, expected_header, kind);
-    writer.write_all(new_content.as_bytes())?;
-    Ok(result)
+    if checker::check(&content, expected_header, kind) == CheckResult::Ok {
+        writer.write_all(content.as_bytes())?;
+        Ok(CheckResult::Ok)
+    } else {
+        let (result, new_content) = checker::fix(&content, expected_header, kind);
+        writer.write_all(new_content.as_bytes())?;
+        Ok(result)
+    }
 }

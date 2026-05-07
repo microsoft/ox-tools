@@ -177,8 +177,9 @@ We strive to deliver high-quality code and as such, we've put in place a number 
   the [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/)
   specification. We use these PR titles as part of our automatic change log generation logic.
 
-- **License Headers**. We ensure all source files have the requisite license header. The headers are described in
-  the `.github\license-check` directory.
+- **License Headers**. We ensure all source files have the requisite license header. The expected header is described in
+  the [`.cargo-heather.toml`](./.cargo-heather.toml) file at the repo root and validated by the in-repo
+  [`cargo-heather`](./crates/cargo_heather) tool.
 
 - **Spell Checking**. We use [cargo-spellcheck](https://crates.io/crates/cargo-spellcheck) to help our docs have fewer typos.
 

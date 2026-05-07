@@ -57,7 +57,7 @@ pub(crate) fn fix(content: &str, expected_header: &str, kind: FileKind) -> (Chec
         (_, FileKind::CargoScript) => strip::fix_script_content(content, expected_header, style),
         (CheckResult::Missing, _) => prepend_header(content, expected_header, style),
         (CheckResult::Mismatch { .. }, _) => {
-            let stripped = strip::strip_existing_header(content, style, expected_header);
+            let stripped = strip::strip_existing_header(content, style);
             prepend_header(&stripped, expected_header, style)
         }
     };

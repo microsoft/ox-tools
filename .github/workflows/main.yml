@@ -286,14 +286,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6.0.2
+      - name: Setup
+        uses: ./.github/actions/setup
         with:
-          fetch-depth: 1
+          enable-sccache: true
+          rust-toolchain: RUST_LATEST
       - name: Check License Headers
-        uses: viperproject/check-license-header@v2.0.3
-        with:
-          path: .
-          config: .github/license-check/config.json
-          strict: true
+        # Build and run cargo-heather from the in-repo sources. The tool's
+        # configuration lives at the repo root in `.cargo-heather.toml`.
+        run: cargo run --release --locked -p cargo_heather --bin cargo-heather -- heather
 
   external-type-exposure:
     runs-on: ubuntu-latest
