@@ -62,7 +62,7 @@ See also:
 ```
 
 All files are regular owned files (carry an `ox-ci-checksum` first line, governed by
-[updates.md §5](./updates.md#5-per-item-decision-table)). Users who customize the root
+[updates.md §5](./updates.md#5-the-decision-algorithm)). Users who customize the root
 workflow take ownership through the standard dirty-file flow.
 
 ## 3. Root workflows
@@ -100,7 +100,7 @@ jobs:
 
 Common edits users make to the root workflow (these flip the file to "dirty" and produce
 a `.ox-ci-proposed` sibling on the next `update` — see
-[updates.md §5](./updates.md#5-per-item-decision-table)):
+[updates.md §5](./updates.md#5-the-decision-algorithm)):
 
 - **Self-hosted runners**: pass `with: { runs_on: 'self-hosted-rust' }` to the reusable
   workflow.

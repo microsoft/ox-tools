@@ -71,13 +71,13 @@ that provided the strongest version of the check.
 | `fmt`                          | `cargo fmt --all --check`                                 | all |
 | `clippy`                       | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
 | `cargo-sort`                   | `cargo sort --workspace --check`                          | oxidizer-github |
-| `license-headers`              | `cargo deny check sources` (license enforcement via deny) ＋ a small embedded `cargo-ox-ci`-shipped helper recipe that greps for the required SPDX header in `*.rs` | oxidizer (`heather`), oxidizer-github |
-| `ensure-no-cyclic-deps`        | `cargo tree --workspace --duplicates` post-processed by a small embedded script | oxidizer-github |
-| `ensure-no-default-features`   | `cargo metadata --format-version 1` parsed by an embedded helper that fails on `default = [...]` in any workspace member | oxidizer-github |
+| `license-headers`              | `cargo heather --workspace`                               | oxidizer (`heather`), oxidizer-github |
+| `ensure-no-cyclic-deps`        | `cargo ensure-no-cyclic-deps --workspace`                 | oxidizer-github (sibling crate in `ox-tools-gh`) |
+| `ensure-no-default-features`   | `cargo ensure-no-default-features --workspace`            | oxidizer-github |
 | `doc-build`                    | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps` | oxidizer-github |
 | `readme-check`                 | `cargo doc2readme --check` for each crate that opts in (presence of a `[package.metadata.doc2readme]` table) | oxidizer-github |
 | `spellcheck`                   | `cargo spellcheck check --code 1`                         | oxidizer-github |
-| `pr-title`                     | Conventional-Commits regex applied to the title in the `PR_TITLE` env var, with a fallback to `git log -1 --pretty=%s HEAD` when unset. The check itself is a single `just` recipe that defers to a tool-shipped script (`scripts/ox-ci/check-pr-title.sh`). The CI emitter sets `PR_TITLE` on the pr-fast job: GitHub Actions reads `${{ github.event.pull_request.title }}`; ADO reads `$(System.PullRequest.Title)`. Local `just ox-ci-pr-fast` works without setup via the git fallback. | oxidizer-github |
+| `pr-title`                     | Conventional-Commits regex applied to the title in the `PR_TITLE` env var, with a fallback to `git log -1 --pretty=%s HEAD` when unset. Written as a `[script("pwsh")]` recipe (the one check that needs scripting; see [design.md §8.3](./design.md#83-cross-os-test-matrices)). The CI emitter sets `PR_TITLE` on the pr-fast job: GitHub Actions reads `${{ github.event.pull_request.title }}`; ADO reads `$(System.PullRequest.Title)`. Local `just ox-ci-pr-fast` works without setup via the git fallback. | oxidizer-github |
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
 | `udeps`                        | `cargo +nightly udeps --workspace --all-targets --all-features` | oxidizer, oxidizer-github |
@@ -89,7 +89,7 @@ that provided the strongest version of the check.
 
 | Check        | Invocation                                                                  | Source |
 |--------------|-----------------------------------------------------------------------------|--------|
-| `test`       | `cargo llvm-cov nextest --workspace --all-features --locked --lcov --output-path target/coverage/lcov.info` ＋ HTML report ＋ enforced minimum threshold. The instrumented `nextest` run produces both the test pass/fail signal and the coverage artifacts in a single pass. | oxidizer, oxidizer-github |
+| `llvm-cov`   | `cargo llvm-cov nextest --workspace --all-features --locked --lcov --output-path target/coverage/lcov.info` ＋ HTML report ＋ enforced minimum threshold. The instrumented `nextest` run produces both the test pass/fail signal and the coverage artifacts in a single pass. | oxidizer, oxidizer-github |
 | `doc-test`   | `cargo test --doc --workspace --all-features --locked` (nextest does not run doctests, so this is a separate cargo-test invocation) | oxidizer, oxidizer-github |
 | `examples`   | `cargo run --example <name>` for each example target                        | oxidizer, oxidizer-github |
 
@@ -108,13 +108,13 @@ wired to `System.PullRequest.TargetBranch`.
 
 | Check        | Invocation                                                                  | Source |
 |--------------|-----------------------------------------------------------------------------|--------|
-| `test`       | `cargo llvm-cov nextest --workspace --all-features --locked --lcov --output-path target/llvm-cov/nightly.lcov` | oxidizer, oxidizer-github |
+| `llvm-cov`   | `cargo llvm-cov nextest --workspace --all-features --locked --lcov --output-path target/llvm-cov/nightly.lcov` | oxidizer, oxidizer-github |
 | `doc-test`   | `cargo test --doc --workspace --all-features --locked`                      | oxidizer, oxidizer-github |
 | `examples`   | `cargo run --example <name>` for each example target                        | oxidizer, oxidizer-github |
 
 The same checks as `pr-test`, run on `main`. Two purposes: catch flakes/environmental
 sensitivities that didn't trip in PR, and publish a full coverage snapshot for the current
-state of `main` (the PR `test` upload only reflects diffed code; this one reflects the
+state of `main` (the PR `llvm-cov` upload only reflects diffed code; this one reflects the
 whole codebase). The CI emitter wires the lcov artifact upload step in the nightly workflow
 only.
 
@@ -175,7 +175,7 @@ duplicating PR signal.
 What that means concretely:
 
 - **Re-run in nightly** (in addition to PR):
-  - `test`, `doc-test`, `examples` (in `nightly-test`) — non-determinism, environment
+  - `llvm-cov`, `doc-test`, `examples` (in `nightly-test`) — non-determinism, environment
     sensitivity, runner drift can produce flakes that the PR run missed.
   - `deny`, `audit`, `aprz`, `clippy`, `udeps` (in `nightly-advisories`) — see §2.
 - **Run only in PR** — checks whose outcome is fully determined by the source tree and
@@ -203,7 +203,7 @@ flags (the workspace complement of the relevant tier), which composes cleanly wi
 | Env var                       | cargo-delta source                                     | Checks that consume it                               |
 |-------------------------------|--------------------------------------------------------|------------------------------------------------------|
 | `OX_CI_EXCLUDE_NOT_MODIFIED`  | `cargo delta impact -f cargo-excludes --modified`      | clippy, udeps                                        |
-| `OX_CI_EXCLUDE_NOT_AFFECTED`  | `cargo delta impact -f cargo-excludes --affected`      | test (llvm-cov nextest), doc-test, examples, miri, careful, semver-check, mutants (diff and full), cargo-hack powerset, bench |
+| `OX_CI_EXCLUDE_NOT_AFFECTED`  | `cargo delta impact -f cargo-excludes --affected`      | llvm-cov, doc-test, examples, miri, careful, semver-check, mutants (diff and full), cargo-hack powerset, bench |
 | `OX_CI_EXCLUDE_NOT_REQUIRED`  | `cargo delta impact -f cargo-excludes --required`      | doc-build, readme-check, external-types              |
 
 Checks with no per-crate scope ignore the vars: `fmt` (always all files), `pr-title`,

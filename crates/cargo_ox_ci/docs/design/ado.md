@@ -61,7 +61,7 @@ See also:
 ```
 
 All files are regular owned files (carry an `ox-ci-checksum` first line, governed by
-[updates.md §5](./updates.md#5-per-item-decision-table)). Users who customize the root
+[updates.md §5](./updates.md#5-the-decision-algorithm)). Users who customize the root
 pipeline take ownership through the standard dirty-file flow.
 
 ## 3. Root pipelines

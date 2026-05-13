@@ -7,7 +7,7 @@
 This is the top-level design document. It captures the why, the principles, and the
 user-visible shape of the tool. Detail lives in companion documents:
 
-- [checks.md](./checks.md) — the opinionated check catalog, the group/tier structure, and tool-version policy.
+- [checks.md](./checks.md) — the opinionated check catalog, the group/tier structure
 - [local.md](./local.md) — the `justfiles/ox-ci/` layout, recipe surface, and customization.
 - [updates.md](./updates.md) — the drift-detection and update algorithm; opt-out semantics.
 - [github.md](./github.md) — GitHub Actions emission, example workflows, impact wiring.
@@ -177,26 +177,29 @@ covers core hygiene only — coverage, miri, mutants, etc. still require their r
 
 The tool produces a small set of files. They fall into three categories:
 
-- **owned** — the tool fully writes the file. The first line is an `ox-ci-checksum`
-  comment. Updates apply automatically when the user hasn't touched the file. If the user
-  edits the file, the next `update` writes a `.ox-ci-proposed` sibling and leaves the
-  user's copy alone (same flow for every owned file). This is where the
-  frequently-changing wiring lives, but also where the root pipelines/workflows live —
-  users who need to customize triggers, runner pools, or wrap with 1ESPT/SubstratePT
-  edit those files in place.
+- **owned** — the tool fully writes the file. There is no in-file checksum line; ox-ci
+  tracks ownership and last-rendered content in a sidecar manifest at the repo root
+  (`.ox-ci.lock`). An advisory one-line `# Managed by cargo-ox-ci` comment may appear
+  at the top of each owned file, but it carries no metadata. Updates apply
+  automatically when the user hasn't touched the file. If the user edits the file, the
+  next `update` writes a `.ox-ci-proposed` sibling **only if the template has changed
+  since the last render** — claiming a file with no upstream churn produces zero
+  noise.
 - **managed-region** — a user-composed file with one or more tool-managed sections
-  bracketed by sentinel comments. Each section carries its own checksum. Outside the
+  bracketed by sentinel comments. The sentinel pair (`# >>> ox-ci-managed: <id>` …
+  `# <<< ox-ci-managed: <id>`) delimits the region body and identifies it by stable ID;
+  the manifest tracks the last-rendered checksum per `(host, id)`. Outside the
   sentinels, the user's content is preserved byte-for-byte.
-- **user-authored** — files the user owns; the tool only reads them. `rust-toolchain.toml`
-  and `.cargo/config.toml` fall in this category. The tool has no separate config file of
-  its own.
+- **user-authored** — files the user owns; the tool only reads them.
+  `rust-toolchain.toml` and `.cargo/config.toml` fall in this category.
 
-Opt-out is expressed inline in the affected file itself (an empty managed-region stub or a
-single-line `# ox-ci-disabled` marker for owned files); see
-[updates.md §opt-out](./updates.md#opting-out-in-file-stubs).
+Opt-out is expressed inline by **emptiness**: an empty managed-region body (just the
+sentinels, no content between them) disables a region; an empty owned file disables
+that owned item. See [updates.md §6](./updates.md#6-opting-out-in-file-stubs).
 
 ```text
 repo/
+├── .ox-ci.lock                                    sidecar manifest tracking last-rendered checksums (see updates.md)
 ├── Justfile                                       managed-region: ox-ci-imports
 ├── justfiles/ox-ci/                               owned (see local.md)
 ├── Cargo.toml                                     managed-region: ox-ci-workspace-lints (or ox-ci-lints in single-crate)
@@ -225,12 +228,19 @@ repo/
 Detail on each host:
 
 - **`Justfile` and `justfiles/ox-ci/*.just`** — see [local.md](./local.md).
-- **`Cargo.toml` lints regions** — workspace `Cargo.toml` carries the `ox-ci-workspace-lints`
-  region with `[workspace.lints.rust]`, `[workspace.lints.clippy]`, and
-  `[workspace.lints.rustdoc]`. Each member `Cargo.toml` carries an `ox-ci-lints` region with
-  exactly `[lints]\nworkspace = true`. The emitter uses `toml-edit` for round-trip-safe
-  manipulation. In a single-crate repo (no `[workspace]` table), the workspace region becomes
-  `ox-ci-lints` and contains `[lints.*]` directly.
+- **`Cargo.toml` lints regions** — workspace `Cargo.toml` carries the
+  `ox-ci-workspace-lints` region containing a single `[workspace.lints]` table whose
+  rust/clippy/rustdoc entries are written in dotted-key form
+  (`rust.unsafe_op_in_unsafe_fn = "deny"`, `clippy.unwrap_used = "deny"`, etc.). This
+  form is chosen because TOML forbids re-declaring a table header — if ox-ci wrote
+  `[workspace.lints.clippy]` inside the region, users couldn't add another
+  `[workspace.lints.clippy]` block elsewhere in the file. With dotted keys, users
+  append new lints in the same scope right after the closing sentinel; see §7. Each
+  member `Cargo.toml` carries an `ox-ci-lints` region with exactly
+  `[lints]\nworkspace = true`. The emitter uses `toml-edit` for round-trip-safe
+  manipulation. In a single-crate repo (no `[workspace]` table), the workspace region
+  becomes `ox-ci-lints` and contains a single `[lints]` table with the same
+  dotted-key layout.
 - **`deny.toml`** — managed region at the end of the file with the tool's baseline
   license/advisory rules. Users add their own keys outside the region. Created if absent.
   Content detailed in [checks.md](./checks.md).
@@ -246,8 +256,10 @@ Detail on each host:
   minimum. The CI building blocks do not install Rust; that is the user's pipeline's job
   (msrustup in 1ESPT, rustup on GH runners).
 
-The tool has no separate config file. All state — including opt-outs — lives in the affected
-file itself; see [updates.md](./updates.md).
+The tool's persistent state lives in `.ox-ci.lock` at the repo root — the sidecar
+manifest tracking last-rendered checksums per owned file and per managed region. See
+[updates.md §1](./updates.md#1-the-manifest). All other state — including opt-outs —
+lives in the affected file itself; see [updates.md](./updates.md).
 
 ## 7. Customization
 
@@ -257,18 +269,23 @@ Four escape valves, in increasing severity:
    alongside the `ox-ci/*` imports. Add your own `.github/workflows/*.yml` files (anything not
    prefixed `ox-ci-` is left alone). Add your own `.pipelines/` templates and root pipelines.
    The path of least resistance and the recommended approach for project-specific checks.
-2. **Edit a managed-region host file outside the sentinels**: extra recipes in your `Justfile`,
-   extra rules in `deny.toml` outside the managed region, extra clippy lints in
-   `[workspace.lints.clippy]` after the closing sentinel. The tool preserves everything outside
-   the sentinels verbatim.
-3. **Opt out with an in-file stub**. Empty out a managed region (leave only the sentinels) or
-   replace an owned file's contents with `# ox-ci-disabled`. The tool will skip the item on
-   every future `update`. See [updates.md](./updates.md).
-4. **Take ownership of an owned file or managed region by editing it inside the
-   sentinels/checksum boundary.** The next `update` will detect the dirt, leave your file
-   alone, and write a `.ox-ci-proposed` sibling. Re-bless by deleting your file (or region)
-   and rerunning `update`. Suitable for one-off divergence; for permanent divergence prefer
-   the opt-out stub.
+2. **Edit a managed-region host file outside the sentinels**: extra recipes in your
+   `Justfile`, extra rules in `deny.toml` outside the managed region, extra clippy
+   lints written in dotted-key form after the closing sentinel (e.g. `clippy.pedantic = "warn"`
+   in the `[workspace.lints]` scope). The tool preserves everything outside the
+   sentinels verbatim. Note that TOML forbids redeclaring a table header (`[workspace.lints.clippy]`
+   etc.), so user extensions must use dotted-key form or sit in a different parent
+   table; overriding an individual key already set inside the region requires editing
+   inside it, which triggers the dirty-file flow (see [updates.md §5](./updates.md#5-the-decision-algorithm)).
+3. **Opt out by emptying.** Empty a managed region (leave only the sentinels) or empty
+   an owned file. The tool will skip the item on every future `update` and only emit a
+   `.ox-ci-proposed` sibling when the template actually changes. See
+   [updates.md §6](./updates.md#6-opting-out-in-file-stubs).
+4. **Take ownership of an owned file or managed region by editing it.** The next
+   `update` detects the dirt (via checksum comparison against the manifest), leaves your
+   file alone, and writes a `.ox-ci-proposed` sibling only if the template changed since
+   the last render. Re-bless by deleting your file (or region) and rerunning `update`.
+   Suitable for one-off divergence; for permanent divergence prefer the opt-out stub.
 
 What the tool deliberately does **not** do:
 
@@ -325,15 +342,21 @@ cargo-delta impact runs once on Linux and feeds the same excludes to every matri
 the source tree is OS-invariant. Caching keys already include OS (see
 [github.md §8](./github.md#8-caching) and [ado.md §7](./ado.md#7-caching)).
 
-**Helper scripts use PowerShell Core (`pwsh`) on every platform.** Most check recipes
-are single-line `cargo …` invocations that work unmodified on Windows. The four
-`[script]`-block recipes (`license-headers`, `ensure-no-cyclic-deps`,
-`ensure-no-default-features`, `pr-title`) use `[script("pwsh")]` so a single
-implementation runs everywhere. `pwsh` is preinstalled on GH-hosted runners
-(`ubuntu-latest` included) and Microsoft-hosted ADO Linux agents; Linux/macOS developers
-install it from <https://github.com/PowerShell/PowerShell> as a one-time prerequisite.
-The `_ox-ci-require pwsh` recipe enforces this with a clean failure message and a
-per-OS install hint. The catalog avoids any tool that would need a separate cargo subcommand or shell helper per OS.
+**Helper scripts use PowerShell Core (`pwsh`) on every platform.** Almost every check
+recipe is a single-line `cargo …` invocation that works unmodified on Windows —
+including `license-headers` (which calls `cargo heather`), `ensure-no-cyclic-deps`
+(`cargo ensure-no-cyclic-deps`), and `ensure-no-default-features`
+(`cargo ensure-no-default-features`), all of which are plain cargo subcommands from the
+ox-tools family. The one current exception is `pr-title`, which does a regex match
+against `$PR_TITLE` (no equivalent cargo subcommand and `just` itself has no
+boolean-regex primitive). That check is written as a `[script("pwsh")]` block. `pwsh`
+is preinstalled on GH-hosted runners (`ubuntu-latest` included) and Microsoft-hosted
+ADO Linux agents; Linux/macOS developers install it from
+<https://github.com/PowerShell/PowerShell> as a one-time prerequisite. The
+`_ox-ci-require pwsh` recipe enforces this with a clean failure message and a per-OS
+install hint. The dependency is kept (rather than dropped to remove the one script)
+so future additions that don't fit cleanly as cargo subcommands have an established
+escape hatch.
 
 ### 8.4 Internal vs OSS
 

@@ -26,7 +26,7 @@ repo/
 │   …user content…
 │
 └── justfiles/ox-ci/                               owned (one checksum per file)
-    ├── checks.just          per-check recipes (ox-ci-fmt, ox-ci-clippy, ox-ci-test, …)
+    ├── checks.just          per-check recipes (ox-ci-fmt, ox-ci-clippy, ox-ci-llvm-cov, …)
     ├── groups.just          group recipes (ox-ci-pr-fast, ox-ci-pr-test, ox-ci-nightly-test, …)
     ├── tiers.just           tier aggregators (ox-ci-pr, ox-ci-nightly, ox-ci-full)
     └── tools.just           ox-ci-tools-check + ox-ci-tools-install + helpers
@@ -61,11 +61,12 @@ tools fail with a one-line `cargo install` hint. The cost is one cheap `cargo in
 
 ### groups.just
 
-One recipe per group, named `ox-ci-<tier>-<group>`. Where a check name and a group's nested
-check name would collide (the `pr-test` group contains a check also called `test`), the
-check recipe is suffixed `-only`: `ox-ci-test-only` is the single-check recipe. The
-`pr-mutants` group runs the diff-scoped recipe; `nightly-exhaustive` runs the full-workspace
-recipe:
+One recipe per group, named `ox-ci-<tier>-<group>`. The check-recipe and group-recipe
+namespaces are kept disjoint by naming choice: no check is named `<tier>-<group>` for
+any tier × group combination (e.g. the coverage-instrumented test check is named
+`llvm-cov`, not `test`, so that `ox-ci-pr-test` unambiguously refers to the PR-tier
+test group). The `pr-mutants` group runs the diff-scoped recipe; `nightly-exhaustive`
+runs the full-workspace recipe:
 
 ```just
 ox-ci-pr-fast: ox-ci-fmt ox-ci-clippy ox-ci-cargo-sort ox-ci-license-headers \
@@ -74,10 +75,10 @@ ox-ci-pr-fast: ox-ci-fmt ox-ci-clippy ox-ci-cargo-sort ox-ci-license-headers \
                ox-ci-deny ox-ci-audit ox-ci-udeps ox-ci-semver-check \
                ox-ci-external-types ox-ci-aprz
 
-ox-ci-pr-test: ox-ci-test-only ox-ci-doc-test ox-ci-examples
+ox-ci-pr-test: ox-ci-llvm-cov ox-ci-doc-test ox-ci-examples
 ox-ci-pr-mutants: ox-ci-mutants-diff
 
-ox-ci-nightly-test: ox-ci-test-only ox-ci-doc-test ox-ci-examples
+ox-ci-nightly-test: ox-ci-llvm-cov ox-ci-doc-test ox-ci-examples
 ox-ci-nightly-advisories: ox-ci-deny ox-ci-audit ox-ci-aprz ox-ci-clippy ox-ci-udeps
 ox-ci-nightly-runtime: ox-ci-miri ox-ci-careful
 ox-ci-nightly-exhaustive: ox-ci-mutants-full ox-ci-cargo-hack ox-ci-bench-only
@@ -135,14 +136,17 @@ run:
 
 - **`just`** itself — bootstrap with `cargo install just --locked` once, or use a system
   package. Every backend's setup composite/template installs it via cargo as a one-shot.
-- **`pwsh`** (PowerShell Core) — used by four `[script]` recipes
-  (`license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features`, `pr-title`)
-  for cross-platform shell logic. Preinstalled on every relevant CI runner (GH-hosted
-  Linux/Windows/macOS, Microsoft-hosted ADO agents). On a developer machine without
-  pwsh, `_ox-ci-require pwsh` fails with a per-OS install hint pointing at
-  <https://github.com/PowerShell/PowerShell>. We use pwsh-everywhere rather than a
-  bash/pwsh split because (a) it's already a hard dep on Windows, (b) it's pre-staged in
-  CI, and (c) maintaining one helper implementation is materially simpler than two.
+- **`pwsh`** (PowerShell Core) — used by the `pr-title` `[script]` recipe (regex
+  match on `$PR_TITLE`; no equivalent cargo subcommand and `just` lacks a
+  boolean-regex primitive). The other historically-scripted checks
+  (`license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features`) are now
+  plain cargo subcommands from the ox-tools family and don't need pwsh. `pwsh` is
+  preinstalled on every relevant CI runner (GH-hosted Linux/Windows/macOS,
+  Microsoft-hosted ADO agents). On a developer machine without pwsh,
+  `_ox-ci-require pwsh` fails with a per-OS install hint pointing at
+  <https://github.com/PowerShell/PowerShell>. The dependency is kept (rather than
+  dropped to remove the one script) so future additions that don't fit cleanly as
+  cargo subcommands have an established escape hatch.
 
 Trade-off acknowledged: `cargo install --locked` is slow on a cold cache (several minutes
 for the full catalog). It is also the most reliable mechanism in restricted networks.
@@ -180,7 +184,7 @@ default) means full workspace; CI populates them from the `ox-ci-impact` buildin
 ox-ci-clippy: (_ox-ci-require "cargo-clippy")
     cargo clippy --workspace ${OX_CI_EXCLUDE_NOT_MODIFIED:-} --all-targets --all-features --locked -- -D warnings
 
-ox-ci-test-only: (_ox-ci-require "cargo-llvm-cov") (_ox-ci-require "cargo-nextest")
+ox-ci-llvm-cov: (_ox-ci-require "cargo-llvm-cov") (_ox-ci-require "cargo-nextest")
     cargo llvm-cov nextest --workspace ${OX_CI_EXCLUDE_NOT_AFFECTED:-} --all-features --locked --lcov --output-path target/coverage/lcov.info
 ```
 
@@ -288,7 +292,7 @@ Per the four customization tiers in [design.md §7](./design.md#7-customization)
   (e.g. `my-clippy`) and reference *that* from your own group/tier recipes. Don't fight the
   ox-ci-* names; just compose around them.
 - **Disable a recipe wholesale**: opt out of the managed `Justfile` region per
-  [updates.md §opt-out](./updates.md#opting-out-in-file-stubs). This stops the imports from
+  [updates.md §opt-out](./updates.md#6-opting-out-in-file-stubs). This stops the imports from
   happening at all, so all `ox-ci-*` recipes vanish. Use this only when ox-ci is no longer
   the right tool for your repo.
 
