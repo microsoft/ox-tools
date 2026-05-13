@@ -363,9 +363,15 @@ mechanics are in [local.md §4](./local.md#4-impact-scoping-pass-through-env-var
 ## 7. Rust toolchain
 
 ox-ci does not install Rust on GitHub. The composite actions assume `cargo` is on PATH.
-On GH-hosted runners (the default), `rustup` is pre-installed and
-`rust-toolchain.toml` triggers auto-install on first `cargo` invocation; the cache hit on
-subsequent runs is good. No explicit install step is needed.
+GH-hosted runners ship with a recent stable Rust and `rustup` pre-installed; if your
+`rust-toolchain.toml` pins a different channel, the first `cargo` invocation in a job
+triggers `rustup` to download the pinned toolchain. For a published stable channel this
+typically takes 10–30 seconds on Linux (somewhat longer on Windows and longer still for
+nightly with components). The auto-install runs once per job and is not cached across
+jobs by ox-ci — `~/.rustup` has high invalidation churn and the install cost is small
+relative to the cached cargo registry / `target/` paths (§8). Repos that want to skip
+even this per-job overhead can add their own toolchain-install step (e.g.
+`dtolnay/rust-toolchain@stable`) before the ox-ci composite action runs.
 
 On self-hosted runners or pre-baked images without rustup, the user adds a Rust install
 step to their root workflow before the `uses:` of the reusable workflow:
