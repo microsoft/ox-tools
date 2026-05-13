@@ -191,16 +191,28 @@ rename that doesn't round-trip will produce drift on the second run, failing the
 
 ### Recovering from a self-inflicted breakage
 
-If a PR lands that breaks the regenerate-check (because reviewers missed it), the next
-PR cannot pass CI until the broken state is fixed. Recovery procedure:
+If a PR lands that breaks the regenerate-check (because reviewers missed it), the
+breakage is **not stuck** — every PR builds cargo-ox-ci from source on its own branch,
+so the fix PR is free to either revert the offending change or land the missing
+regenerated output, and its own CI will pass cleanly.
 
-1. Revert the offending commit on `main`.
-2. Open a fix PR with the correct catalog/emitter change.
-3. `cargo ox-ci update` runs cleanly; CI passes; merge.
+What is affected: unrelated PRs that branched off the broken commit will fail their
+regenerate-check, because they inherit the drift through the merge base. They recover
+by rebasing past the fix.
+
+Procedure:
+
+1. Open a fix PR. Either: (a) revert the offending commit, or (b) commit the missing
+   `cargo ox-ci update` output. Either flavor builds the binary from the fix branch
+   and produces a clean `git diff` against its own tree, so CI passes.
+2. Merge.
+3. In-flight PRs rebase to pick up the fix; their regenerate-check passes once their
+   merge base is past the fix commit.
 
 ox-tools never depends on the published crates.io version of cargo-ox-ci for its own
 checks — it always builds from source. So a broken release on crates.io doesn't
-cascade into ox-tools's CI; only a broken `main` does.
+cascade into ox-tools's CI; only a broken `main` does, and only for unrelated
+in-flight PRs.
 
 ## 5. Coverage gaps
 
