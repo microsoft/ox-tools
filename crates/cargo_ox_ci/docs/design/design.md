@@ -46,7 +46,8 @@ missed, and onboarding new Rust repos requires copying-and-praying.
 3. **Both CI backends** — GitHub Actions and Azure DevOps Pipelines — generated from the same
    source of truth. The user picks one or both per repo via a CLI flag.
 4. **Compliance preservation**: ADO pipelines that must `extends:` 1ESPT/SubstratePT continue to
-   do so. The tool generates building blocks the repo composes, never root pipelines.
+   do so. The tool's emitted templates contain no references to those harnesses; the user's
+   root pipeline does the wrapping. See [ado.md](./ado.md).
 5. **Local/CI parity at every level**: every individual check, every group of checks, and the
    full tier are all reproducible locally with a single `just` invocation, using the exact same
    arguments CI uses. The three commands `just ox-ci-pr`, `just ox-ci-nightly`, and
@@ -61,10 +62,9 @@ missed, and onboarding new Rust repos requires copying-and-praying.
 
 ## 3. Non-Goals
 
-- Replacing 1ESPT, SubstratePT, CloudBuild, or any other compliance/release pipeline.
-- Generating workflow or root pipeline YAML. The tool emits composable building blocks
-  (composite actions / step templates) and the user wires them into their own workflows or
-  pipelines. See [github.md](./github.md) and [ado.md](./ado.md).
+- Replacing 1ESPT, SubstratePT, CloudBuild, or any other compliance/release pipeline. ox-ci's
+  emitted templates contain no references to those harnesses; users wrap ox-ci's stages
+  template in their compliance-extending pipeline themselves. See [ado.md](./ado.md).
 - Building a general-purpose CI compiler/IR. We share **check semantics**, not CI features.
 - Owning `.cargo/config.toml`, `rust-toolchain.toml`, or workspace layout in `Cargo.toml`.
 - Installing the Rust toolchain. msrustup owns it on 1ESPT; the runner image owns it on
@@ -177,12 +177,19 @@ covers core hygiene only — coverage, miri, mutants, etc. still require their r
 
 The tool produces a small set of files. They fall into three categories:
 
-- **owned** — the tool fully writes the file. The first line is an `ox-ci-checksum` comment.
-- **managed-region** — a user-composed file with one or more tool-managed sections bracketed by
-  sentinel comments. Each section carries its own checksum. Outside the sentinels, the user's
-  content is preserved byte-for-byte.
-- **user-authored** — files the user owns; the tool only reads them. `rust-toolchain.toml` and
-  `.cargo/config.toml` fall in this category. The tool has no separate config file of its own.
+- **owned** — the tool fully writes the file. The first line is an `ox-ci-checksum`
+  comment. Updates apply automatically when the user hasn't touched the file. If the user
+  edits the file, the next `update` writes a `.ox-ci-proposed` sibling and leaves the
+  user's copy alone (same flow for every owned file). This is where the
+  frequently-changing wiring lives, but also where the root pipelines/workflows live —
+  users who need to customize triggers, runner pools, or wrap with 1ESPT/SubstratePT
+  edit those files in place.
+- **managed-region** — a user-composed file with one or more tool-managed sections
+  bracketed by sentinel comments. Each section carries its own checksum. Outside the
+  sentinels, the user's content is preserved byte-for-byte.
+- **user-authored** — files the user owns; the tool only reads them. `rust-toolchain.toml`
+  and `.cargo/config.toml` fall in this category. The tool has no separate config file of
+  its own.
 
 Opt-out is expressed inline in the affected file itself (an empty managed-region stub or a
 single-line `# ox-ci-disabled` marker for owned files); see
@@ -199,8 +206,20 @@ repo/
 ├── .delta.toml                                    managed-region: ox-ci-delta (opt out disables impact scoping)
 ├── rust-toolchain.toml                            user-authored (read only)
 ├── .cargo/config.toml                             user-authored (read only)
-├── .github/actions/ox-ci-*/                       owned, only if --backend github|both — see github.md
-└── .pipelines/ox-ci/steps/                        owned, only if --backend ado|both — see ado.md
+│
+├── .github/                                       only if --backend github|both — see github.md
+│   ├── actions/ox-ci-*/                             owned   (per-group composite actions)
+│   ├── workflows/ox-ci-pr-impl.yml                  owned   (reusable workflow doing the wiring)
+│   ├── workflows/ox-ci-nightly-impl.yml             owned
+│   ├── workflows/ox-ci-pr.yml                       owned   (root workflow: triggers/permissions/runner)
+│   └── workflows/ox-ci-nightly.yml                  owned
+│
+└── .pipelines/                                    only if --backend ado|both — see ado.md
+    ├── ox-ci/pr.yml                                 owned   (stages template doing the wiring)
+    ├── ox-ci/nightly.yml                            owned
+    ├── ox-ci/steps/*.yml                            owned   (per-group step templates)
+    ├── ox-ci-pr.yml                                 owned   (root pipeline: triggers/pool/optional extends:)
+    └── ox-ci-nightly.yml                            owned
 ```
 
 Detail on each host:
@@ -274,7 +293,7 @@ outstanding proposed updates.
   everything executable in the repo is plain `just` recipes the user can read.
 - Recommended user-workflow shape: `permissions: contents: read` on PR workflows; grant
   `pull-requests: read` only on the pr-fast job (for PR title). Nightly secrets, if any, live
-  on the nightly workflow only — never on the PR workflow. See the starter snippets in
+  on the nightly workflow only — never on the PR workflow. See the snippets in
   [github.md](./github.md) and [ado.md](./ado.md).
 
 ### 8.2 Monorepo / multi-workspace
@@ -284,7 +303,39 @@ Repos with multiple workspaces (uncommon in the surveyed set) compose by having 
 ox-ci tree per workspace root, each with its own `cargo ox-ci update`. Revisit after first
 adopters report friction.
 
-### 8.3 Internal vs OSS
+### 8.3 Cross-OS test matrices
+
+CI fans out a small set of groups across operating systems. Default matrix:
+
+| Group                         | OS scope        | Rationale                                                |
+|-------------------------------|-----------------|----------------------------------------------------------|
+| `pr-test`, `nightly-test`     | Linux + Windows | Where compile-time and runtime OS bugs actually surface. |
+| All other groups              | Linux only      | Source-only checks (`pr-fast`), advisory DBs, miri/careful (Linux-only tooling), mutants & feature-powerset (already expensive). |
+
+macOS is not in the default matrix — adopters who need it add it via the root workflow's
+`test_os` input (GH) or root pipeline's `testPools` parameter (ADO). Both knobs are
+documented in [github.md §4](./github.md#4-owned-reusable-workflows) for `test_os` and
+[ado.md §4](./ado.md#4-owned-stages-templates) for `linuxPool`/`windowsPool`.
+
+Locally there is no matrix — `just ox-ci-pr-test` runs against whatever OS the developer
+is on. CI fan-out lives entirely in the owned wiring layer (the reusable workflow / stages
+template), so users don't write per-OS jobs.
+
+cargo-delta impact runs once on Linux and feeds the same excludes to every matrix leg —
+the source tree is OS-invariant. Caching keys already include OS (see
+[github.md §8](./github.md#8-caching) and [ado.md §7](./ado.md#7-caching)).
+
+**Helper scripts use PowerShell Core (`pwsh`) on every platform.** Most check recipes
+are single-line `cargo …` invocations that work unmodified on Windows. The four
+`[script]`-block recipes (`license-headers`, `ensure-no-cyclic-deps`,
+`ensure-no-default-features`, `pr-title`) use `[script("pwsh")]` so a single
+implementation runs everywhere. `pwsh` is preinstalled on GH-hosted runners
+(`ubuntu-latest` included) and Microsoft-hosted ADO Linux agents; Linux/macOS developers
+install it from <https://github.com/PowerShell/PowerShell> as a one-time prerequisite.
+The `_ox-ci-require pwsh` recipe enforces this with a clean failure message and a
+per-OS install hint. The catalog avoids any tool that would need a separate cargo subcommand or shell helper per OS.
+
+### 8.4 Internal vs OSS
 
 The crate ships from `github.com/microsoft/ox-tools` (alongside the existing tools published
 from that repo) and from crates.io. The binary contains:

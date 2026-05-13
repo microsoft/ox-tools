@@ -32,20 +32,27 @@ in different tiers and makes the tier of any failing job obvious from its name a
 
 ### PR tier (3 groups)
 
-| Group              | Purpose                                                                                                                              |
-|--------------------|--------------------------------------------------------------------------------------------------------------------------------------|
-| `pr-fast`          | All static analysis: nothing here compiles user tests or examples through to execution. Fast feedback, fail-fast.                    |
-| `pr-test`          | Code execution: tests (instrumented for coverage), doctests, examples. Coverage reporting is folded in via `cargo llvm-cov nextest`. |
-| `pr-mutants`       | Diff-scoped mutation testing on the change in this PR.                                                                               |
+| Group              | OS scope           | Purpose                                                                                                              |
+|--------------------|--------------------|----------------------------------------------------------------------------------------------------------------------|
+| `pr-fast`          | Linux only         | All static analysis: nothing here compiles user tests or examples through to execution. Fast feedback, fail-fast.    |
+| `pr-test`          | Linux + Windows    | Code execution: tests (instrumented for coverage), doctests, examples. Coverage reporting is folded in via `cargo llvm-cov nextest`. |
+| `pr-mutants`       | Linux only         | Diff-scoped mutation testing on the change in this PR.                                                               |
 
 ### Nightly tier (4 groups)
 
-| Group                | Purpose                                                                                                                                |
-|----------------------|----------------------------------------------------------------------------------------------------------------------------------------|
-| `nightly-test`       | Re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
-| `nightly-advisories` | Re-runs every check whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain), `udeps` (uses `cargo +nightly`, which evolves). |
-| `nightly-runtime`    | Tests under stricter runtimes that catch UB and timing/threading bugs: `miri`, `careful`.                                              |
-| `nightly-exhaustive` | The expensive whole-workspace permutations that don't fit the PR budget: full `cargo mutants`, `cargo-hack --feature-powerset`, and `cargo bench --no-run` plus a single-iteration smoke run per bench target. |
+| Group                | OS scope        | Purpose                                                                                                                                |
+|----------------------|-----------------|----------------------------------------------------------------------------------------------------------------------------------------|
+| `nightly-test`       | Linux + Windows | Re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
+| `nightly-advisories` | Linux only      | Re-runs every check whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain), `udeps` (uses `cargo +nightly`, which evolves). |
+| `nightly-runtime`    | Linux only      | Tests under stricter runtimes that catch UB and timing/threading bugs: `miri`, `careful`. (Both tools are Linux-only.)                  |
+| `nightly-exhaustive` | Linux only      | The expensive whole-workspace permutations that don't fit the PR budget: full `cargo mutants`, `cargo-hack --feature-powerset`, and `cargo bench --no-run` plus a single-iteration smoke run per bench target. |
+
+OS-scope is an opinion ox-ci ships and the user overrides per-repo through the
+backend-specific knobs ([github.md §4](./github.md#4-owned-reusable-workflows) for
+`test_os`, [ado.md §4](./ado.md#4-owned-stages-templates) for `linuxPool`/`windowsPool`).
+Locally there is no OS matrix; `just ox-ci-pr-test` runs against whatever OS the
+developer is on. See [design.md §8.3](./design.md#83-cross-os-test-matrices) for the
+overall rationale.
 
 The `nightly-exhaustive` group's checks are independent and could in principle live in three
 parallel jobs; they're folded into one group because each individually is just one check,
@@ -204,15 +211,16 @@ Checks with no per-crate scope ignore the vars: `fmt` (always all files), `pr-ti
 `ensure-no-cyclic-deps`, `ensure-no-default-features`. The mapping is hardcoded in the
 catalog alongside each check's invocation.
 
-The recipe-side mechanics are in [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars).
-The CI-side wiring (the `ox-ci-impact` building block, the `skip` short-circuit, how
-downstream jobs consume the excludes) is in [github.md](./github.md#impact-scoping) and
-[ado.md](./ado.md#impact-scoping).
+The recipe-side mechanics are in [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars)
+(including the `OX_CI_IMPACT_SKIP` early-return hint). The CI-side wiring (the
+`ox-ci-impact` building block, how downstream jobs consume the excludes) is in
+[github.md](./github.md#impact-scoping) and [ado.md](./ado.md#impact-scoping).
 
 Trade-off acknowledged: the risk cargo-delta introduces is that a misconfigured analysis
 silently skips checks that should have run, leaving "all green" on a PR that actually broke
-something. The design mitigates this with: (1) trip-wire patterns in `.delta.toml` that bias
-toward full runs whenever config changes; (2) the `skip` flag falling open (`skip=false`
-when any member is affected); (3) nightly always running full-workspace, catching anything
-the PR-scoping missed within 24 hours; and (4) any repo can disable scoping wholesale by
-emptying `.delta.toml`'s region.
+something. The design mitigates this with: (1) trip-wire patterns in `.delta.toml` that
+bias toward full runs whenever config changes; (2) the `skip` flag is advisory only and
+the CI wiring never gates whole jobs on it — non-scoping checks (`fmt`, `deny`, `audit`,
+`aprz`, `pr-title`, `spellcheck`) always run regardless of impact analysis; (3) nightly
+always runs full-workspace, catching anything the PR-scoping missed within 24 hours; and
+(4) any repo can disable scoping wholesale by emptying `.delta.toml`'s region.

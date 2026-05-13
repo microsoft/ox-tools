@@ -120,15 +120,29 @@ newer versions, use `mise`/`asdf`, install via package manager, etc.
 versions, then compares against the catalog minimum. This avoids the problem of tools
 without a stable `--version` flag, is fast, and works uniformly for everything the tool
 cares about (all the cargo-* checks). For the small number of non-cargo dependencies
-(`just` itself), the recipe falls back to `tool --version` and a known parser.
+(`just` itself and `pwsh`), the recipe falls back to `tool --version` and a known parser.
 
 ### 3.3 Installing tools
 
 `ox-ci-tools-install` and `ox-ci-tools-install-missing` are plain `just` recipes that loop
 over the catalog and run `cargo install --locked <tool> --version >=<min>`. They are the
-*only* mechanism the tool uses to install — there is no separate code path for CI. CI setup
-just calls the recipes. Locally, the user runs the recipes once when `ox-ci-tools-check`
-complains.
+*only* mechanism the tool uses to install cargo-managed tools — there is no separate code
+path for CI. CI setup just calls the recipes. Locally, the user runs the recipes once
+when `ox-ci-tools-check` complains.
+
+Two prerequisites are not cargo-installable and must be present before the recipes can
+run:
+
+- **`just`** itself — bootstrap with `cargo install just --locked` once, or use a system
+  package. Every backend's setup composite/template installs it via cargo as a one-shot.
+- **`pwsh`** (PowerShell Core) — used by four `[script]` recipes
+  (`license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features`, `pr-title`)
+  for cross-platform shell logic. Preinstalled on every relevant CI runner (GH-hosted
+  Linux/Windows/macOS, Microsoft-hosted ADO agents). On a developer machine without
+  pwsh, `_ox-ci-require pwsh` fails with a per-OS install hint pointing at
+  <https://github.com/PowerShell/PowerShell>. We use pwsh-everywhere rather than a
+  bash/pwsh split because (a) it's already a hard dep on Windows, (b) it's pre-staged in
+  CI, and (c) maintaining one helper implementation is materially simpler than two.
 
 Trade-off acknowledged: `cargo install --locked` is slow on a cold cache (several minutes
 for the full catalog). It is also the most reliable mechanism in restricted networks.
@@ -158,9 +172,9 @@ owner to add `nightly` to msrustup").
 
 ## 4. Impact-scoping pass-through env vars
 
-Every check recipe whose work is per-crate accepts three optional pass-through env vars and
-forwards them verbatim as `--workspace`-compatible exclude flags. Empty (the local default)
-means full workspace; CI populates them from the `ox-ci-impact` building block:
+Every check recipe whose work is per-crate accepts three optional pass-through env vars
+and forwards them verbatim as `--workspace`-compatible exclude flags. Empty (the local
+default) means full workspace; CI populates them from the `ox-ci-impact` building block:
 
 ```just
 ox-ci-clippy: (_ox-ci-require "cargo-clippy")
@@ -172,12 +186,45 @@ ox-ci-test-only: (_ox-ci-require "cargo-llvm-cov") (_ox-ci-require "cargo-nextes
 
 The mapping from check to env var is fixed in the catalog (see
 [checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)). Checks with no
-per-crate scope (`pr-title`, `aprz`, `deny`, `audit`, `spellcheck`) ignore the vars. Group
-recipes do not interpolate the vars themselves — each underlying check recipe reads what it
-needs, so a group recipe is just a dependency list and nothing changes when scoping is
-disabled.
+per-crate scope (`pr-title`, `aprz`, `deny`, `audit`, `spellcheck`, `fmt`, `cargo-sort`,
+`license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features`) ignore the
+vars. Group recipes do not interpolate the vars themselves — each underlying check
+recipe reads what it needs, so a group recipe is just a dependency list and nothing
+changes when scoping is disabled.
 
-### 4.1 Local impact-scoped runs
+### 4.1 `OX_CI_IMPACT_SKIP` early-return hint
+
+A fourth env var, `OX_CI_IMPACT_SKIP`, is set to `"true"` by the CI wiring when
+cargo-delta reports that no workspace member is in any impact tier (typically a
+docs-only PR or a PR touching only files cargo-delta's `file_exclude_patterns` ignore).
+It is **advisory**, not a kill switch:
+
+- The CI wiring **never** uses it to skip whole jobs. Every group runs on every PR.
+- Recipes that scope to workspace members **may** check it and early-return — for
+  example, `ox-ci-clippy` skips the cargo invocation when `OX_CI_IMPACT_SKIP=true`,
+  saving the cargo-delta-computed exclude list from being parsed and the workspace from
+  being touched.
+- Recipes that don't scope to workspace members **ignore** it. `fmt` still runs (the
+  source tree may have non-Rust files affected by the PR), `deny`/`audit`/`aprz` still
+  run (their outcome doesn't depend on what was changed), `pr-title` still runs.
+
+This separation is what makes the wiring layer durably structural. "Which checks can
+no-op when nothing in the workspace is affected?" is a per-check property and lives in
+the catalog/recipe, not in the wiring layer. Moving a check between groups never
+requires touching the stages template / reusable workflow.
+
+A typical skip-aware recipe looks like:
+
+```just
+ox-ci-clippy: (_ox-ci-require "cargo-clippy")
+    @[ "${OX_CI_IMPACT_SKIP:-false}" = "true" ] && echo 'no affected crates; skipping clippy' && exit 0; \
+        cargo clippy --workspace ${OX_CI_EXCLUDE_NOT_MODIFIED:-} --all-targets --all-features --locked -- -D warnings
+```
+
+(On Windows, with `set shell := ["pwsh", "-NoProfile", "-Command"]`, the equivalent
+short-circuit uses `if ($env:OX_CI_IMPACT_SKIP -eq 'true') { exit 0 }`.)
+
+### 4.2 Local impact-scoped runs
 
 Not the default. To preview what CI would skip, run cargo-delta manually and export the
 env vars:

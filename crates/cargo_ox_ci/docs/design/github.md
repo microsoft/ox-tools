@@ -1,114 +1,145 @@
 # GitHub Actions Integration
 
 This document describes what `cargo ox-ci update --backend github|both` emits for GitHub
-Actions, and how a repo wires those building blocks into workflows. ox-ci emits **only
-building blocks** — never workflow files. The user owns triggers, runners, permissions,
-concurrency, and any non-ox-ci jobs.
+Actions, and how a repo wires those files into its own CI.
+
+ox-ci emits three layers, all owned by ox-ci with the standard owned-file flow (edit →
+dirty → `.ox-ci-proposed` sibling on next update). The split is by what users actually
+need to change:
+
+1. **Root workflows** (`ox-ci-pr.yml`, `ox-ci-nightly.yml` at `.github/workflows/`).
+   Triggers, `permissions`, runner choice, any secret pass-through. ox-ci ships an
+   opinionated default; users who need to customize edit in place and accept the
+   proposal-on-update flow.
+2. **Reusable workflows** (`ox-ci-pr-impl.yml`, `ox-ci-nightly-impl.yml`), containing the
+   impact job and the per-group jobs with all the `needs.impact.outputs.*` plumbing.
+   These change when ox-ci's groups or impact wiring evolve; most users won't ever edit
+   them.
+3. **Per-group composite actions** (`.github/actions/ox-ci-*/`). Each is a multi-step
+   composite that runs setup + the matching `just ox-ci-<tier>-<group>` recipe.
 
 See also:
 
-- [design.md](./design.md) for the overall principles and the "building blocks only" stance.
+- [design.md §6](./design.md#6-repo-layout) for the file-category model.
 - [checks.md](./checks.md) for what each group runs.
-- [local.md](./local.md) for the `just` recipes the building blocks invoke.
+- [local.md](./local.md) for the `just` recipes the composite actions invoke.
 - [ado.md](./ado.md) for the ADO counterpart.
 
-## 1. Why only building blocks
+## 1. Why three layers
 
-- **Workflows reflect repo policy.** Triggers, branch protection, required-status-checks
-  policy, concurrency groups, and the choice of GH-hosted vs self-hosted runners are all
-  repo-level decisions ox-ci has no business making.
-- **Compliance parity with ADO.** The ADO side cannot emit workflows for compliance reasons
-  ([ado.md](./ado.md)). Keeping GH on the same model keeps the user-facing mental model
-  uniform: "ox-ci ships building blocks; you wire them in."
-- **Toolchain install is the user's responsibility.** `rustup` is pre-installed on
-  GH-hosted runners and `rust-toolchain.toml` triggers auto-install on first `cargo`
-  invocation. On self-hosted or pre-baked-image runners the user installs Rust however they
-  prefer. An ox-ci-emitted Rust install step would be either wrong or redundant.
+- **Frequently-changing wiring** (group set, impact computation, fan-out, `needs:` graph)
+  lives in the reusable workflows. Updates apply automatically; users don't have to merge
+  changes.
+- **Per-repo customization** (triggers, permissions, runner pool, secret scoping) lives
+  in the root workflows. Users who customize them accept the cost of merging the
+  `.ox-ci-proposed` sibling when the ox-ci defaults evolve — which is rare, since the
+  root workflow is intentionally minimal.
+- The reusable-workflow seam ([`workflow_call`][1]) is GitHub's first-class mechanism for
+  exactly this: a workflow can call another workflow in the same repo, passing inputs and
+  secrets. We use it so the root workflow stays ~10 lines.
+
+[1]: https://docs.github.com/en/actions/sharing-automations/reusing-workflows
 
 ## 2. Emitted artifacts
 
-All under `.github/actions/` (one composite action per directory):
-
 ```text
-.github/actions/
-├── ox-ci-setup/action.yml                # installs just + catalog tools
-├── ox-ci-impact/action.yml               # cargo-delta scoping; omitted if .delta.toml disabled
-├── ox-ci-pr-fast/action.yml              # one composite action per group
-├── ox-ci-pr-test/action.yml
-├── ox-ci-pr-mutants/action.yml
-├── ox-ci-nightly-test/action.yml
-├── ox-ci-nightly-advisories/action.yml
-├── ox-ci-nightly-runtime/action.yml
-└── ox-ci-nightly-exhaustive/action.yml
+.github/
+├── actions/
+│   ├── ox-ci-setup/action.yml         owned   (install just + catalog tools)
+│   ├── ox-ci-impact/action.yml        owned   (cargo-delta; omitted if .delta.toml disabled)
+│   ├── ox-ci-pr-fast/action.yml       owned   (one composite action per group)
+│   ├── ox-ci-pr-test/action.yml       owned
+│   ├── ox-ci-pr-mutants/action.yml    owned
+│   ├── ox-ci-nightly-test/action.yml  owned
+│   ├── ox-ci-nightly-advisories/action.yml  owned
+│   ├── ox-ci-nightly-runtime/action.yml     owned
+│   └── ox-ci-nightly-exhaustive/action.yml  owned
+└── workflows/
+    ├── ox-ci-pr-impl.yml              owned   (reusable workflow doing the wiring)
+    ├── ox-ci-nightly-impl.yml         owned   (reusable workflow for nightly)
+    ├── ox-ci-pr.yml                   owned   (root workflow; triggers/permissions/runner)
+    └── ox-ci-nightly.yml              owned
 ```
 
-What ox-ci does **not** emit:
+All files are regular owned files (carry an `ox-ci-checksum` first line, governed by
+[updates.md §5](./updates.md#5-per-item-decision-table)). Users who customize the root
+workflow take ownership through the standard dirty-file flow.
 
-- Workflow files (`.github/workflows/*.yml`).
-- Job templates, reusable workflows.
-- Rust toolchain install steps.
+## 3. Root workflows
 
-### 2.1 `ox-ci-setup`
-
-Composite action that installs `just` (`cargo install just --locked --version >=<min>`)
-and runs `just ox-ci-tools-install-missing`. Does not install Rust; expects `cargo` on
-PATH. The user's workflow file is responsible for any prior Rust install step.
-
-### 2.2 Per-group composite actions
-
-One composite action per group (3 PR + 4 nightly = 7 actions). Each declares the inputs it
-needs and invokes `just ox-ci-<tier>-<group>` with them wired to env vars.
-
-Example `ox-ci-pr-fast/action.yml`:
+The default `ox-ci-pr.yml` ox-ci emits is the minimum needed to call the reusable
+workflow:
 
 ```yaml
-name: ox-ci-pr-fast
-description: ox-ci PR fast group
-inputs:
-  pr_title:
-    description: PR title for the pr-title check
-    required: false
-    default: ""
-  exclude_not_modified:
-    description: cargo-excludes string from ox-ci-impact (--modified). Empty = full workspace.
-    required: false
-    default: ""
-runs:
-  using: composite
-  steps:
-    - uses: ./.github/actions/ox-ci-setup
-    - shell: bash
-      env:
-        PR_TITLE: ${{ inputs.pr_title }}
-        OX_CI_EXCLUDE_NOT_MODIFIED: ${{ inputs.exclude_not_modified }}
-      run: just ox-ci-pr-fast
-```
-
-The per-group composite actions accept these inputs (each optional, default `""` = full
-workspace):
-
-| Group                  | Inputs                                                                  |
-|------------------------|-------------------------------------------------------------------------|
-| `ox-ci-pr-fast`        | `pr_title`, `exclude_not_modified`                                      |
-| `ox-ci-pr-test`        | `exclude_not_affected`, `exclude_not_required`                          |
-| `ox-ci-pr-mutants`     | `base_ref`, `exclude_not_affected`                                      |
-| `ox-ci-nightly-test`   | (none — always full workspace)                                          |
-| `ox-ci-nightly-advisories` | (none)                                                              |
-| `ox-ci-nightly-runtime`    | (none)                                                              |
-| `ox-ci-nightly-exhaustive` | (none)                                                              |
-
-## 3. Example user-owned workflow
-
-The user writes one workflow file per tier. Below is a typical hand-written
-`.github/workflows/ox-ci-pr.yml`:
-
-```yaml
+# .github/workflows/ox-ci-pr.yml
 name: ox-ci-pr
-on: { pull_request: {}, merge_group: {} }
-permissions: { contents: read }
+on:
+  pull_request: {}
+  merge_group: {}
+permissions:
+  contents: read
+jobs:
+  ox-ci:
+    uses: ./.github/workflows/ox-ci-pr-impl.yml
+```
+
+The nightly root workflow adds a schedule and `workflow_dispatch`:
+
+```yaml
+# .github/workflows/ox-ci-nightly.yml
+name: ox-ci-nightly
+on:
+  schedule: [{ cron: '0 6 * * *' }]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  ox-ci:
+    uses: ./.github/workflows/ox-ci-nightly-impl.yml
+```
+
+Common edits users make to the root workflow (these flip the file to "dirty" and produce
+a `.ox-ci-proposed` sibling on the next `update` — see
+[updates.md §5](./updates.md#5-per-item-decision-table)):
+
+- **Self-hosted runners**: pass `with: { runs_on: 'self-hosted-rust' }` to the reusable
+  workflow.
+- **Trim or expand the test matrix**: pass `with: { test_os: '["ubuntu-latest"]' }` to
+  run tests on Linux only, or `'["ubuntu-latest","windows-latest","macos-latest"]'` to
+  add macOS. See §4 for the input contract.
+- **Required secrets**: add `secrets: inherit` (or specific secrets) under the `ox-ci:`
+  job.
+- **Different schedule** for nightly.
+- **Concurrency groups**: add a `concurrency:` block.
+- **Path filters** to skip the workflow on docs-only PRs (though ox-ci's own
+  `.delta.toml` trip-wire patterns already do impact-scoped skipping).
+
+## 4. Owned reusable workflows
+
+`ox-ci-pr-impl.yml` is where the wiring lives. Every per-group composite action takes
+the same three impact-exclude inputs unconditionally; which ones a group's checks
+actually consume is the catalog's concern, not the wiring layer's. Moving a check
+between groups never changes the reusable workflow.
+
+Approximate shape (ox-ci writes this verbatim; users never edit it):
+
+```yaml
+# .github/workflows/ox-ci-pr-impl.yml   (owned by cargo-ox-ci)
+on:
+  workflow_call:
+    inputs:
+      runs_on:
+        type: string
+        default: ubuntu-latest
+        description: Runner for single-OS jobs (impact, pr-fast, pr-mutants).
+      test_os:
+        type: string
+        default: '["ubuntu-latest","windows-latest"]'
+        description: JSON array of runners for the cross-OS pr-test matrix.
+
 jobs:
   impact:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs_on }}
     outputs:
       exclude_not_modified: ${{ steps.impact.outputs.exclude_not_modified }}
       exclude_not_affected: ${{ steps.impact.outputs.exclude_not_affected }}
@@ -121,77 +152,193 @@ jobs:
         uses: ./.github/actions/ox-ci-impact
         with:
           base_ref: ${{ github.event.pull_request.base.sha }}
-  lint:
+
+  pr-fast:
     needs: impact
-    if: needs.impact.outputs.skip != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs_on }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-ci-pr-fast
         with:
-          pr_title: ${{ github.event.pull_request.title }}
+          pr_title:             ${{ github.event.pull_request.title }}
           exclude_not_modified: ${{ needs.impact.outputs.exclude_not_modified }}
-  test:
+          exclude_not_affected: ${{ needs.impact.outputs.exclude_not_affected }}
+          exclude_not_required: ${{ needs.impact.outputs.exclude_not_required }}
+          impact_skip:          ${{ needs.impact.outputs.skip }}
+
+  pr-test:
     needs: impact
-    if: needs.impact.outputs.skip != 'true'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.test_os) }}
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-ci-pr-test
         with:
+          exclude_not_modified: ${{ needs.impact.outputs.exclude_not_modified }}
           exclude_not_affected: ${{ needs.impact.outputs.exclude_not_affected }}
           exclude_not_required: ${{ needs.impact.outputs.exclude_not_required }}
-  mutants:
+          impact_skip:          ${{ needs.impact.outputs.skip }}
+
+  pr-mutants:
     needs: impact
-    if: needs.impact.outputs.skip != 'true'
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runs_on }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-ci-pr-mutants
         with:
-          base_ref: origin/${{ github.event.pull_request.base.ref }}
+          base_ref:             origin/${{ github.event.pull_request.base.ref }}
+          exclude_not_modified: ${{ needs.impact.outputs.exclude_not_modified }}
           exclude_not_affected: ${{ needs.impact.outputs.exclude_not_affected }}
+          exclude_not_required: ${{ needs.impact.outputs.exclude_not_required }}
+          impact_skip:          ${{ needs.impact.outputs.skip }}
 ```
 
-A typical `.github/workflows/ox-ci-nightly.yml` is shorter — nightly always runs
-full-workspace, so it omits the `impact` job entirely:
+The wiring never short-circuits jobs on `skip=true`. Each group always runs; the
+recipes inside the group decide whether a given check can no-op. This matters because
+several PR-tier checks (`fmt`, `deny`, `audit`, `aprz`, `pr-title`, `spellcheck`) don't
+scope to workspace members and must run on every PR, including docs-only PRs where
+nothing in the workspace is "affected." See
+[local.md §4](./local.md#4-impact-scoping-pass-through-env-vars) for the recipe-side
+contract.
+
+The nightly reusable workflow is simpler — it omits the `impact` job and runs each group
+full-workspace. The exclude inputs are still passed (defaulted to empty) so the composite
+actions have a uniform interface across tiers:
 
 ```yaml
-name: ox-ci-nightly
+# .github/workflows/ox-ci-nightly-impl.yml  (owned)
 on:
-  schedule: [{ cron: '0 6 * * *' }]
-  workflow_dispatch: {}
-permissions: { contents: read }
+  workflow_call:
+    inputs:
+      runs_on:
+        type: string
+        default: ubuntu-latest
+      test_os:
+        type: string
+        default: '["ubuntu-latest","windows-latest"]'
 jobs:
   test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/ox-ci-nightly-test
-  advisories:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/ox-ci-nightly-advisories
-  runtime:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/ox-ci-nightly-runtime
-  exhaustive:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/ox-ci-nightly-exhaustive
+    strategy:
+      fail-fast: false
+      matrix: { os: ${{ fromJSON(inputs.test_os) }} }
+    runs-on: ${{ matrix.os }}
+    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-ci-nightly-test } ]
+  advisories:  { runs-on: ${{ inputs.runs_on }}, steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-ci-nightly-advisories } ] }
+  runtime:     { runs-on: ${{ inputs.runs_on }}, steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-ci-nightly-runtime } ] }
+  exhaustive:  { runs-on: ${{ inputs.runs_on }}, steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-ci-nightly-exhaustive } ] }
 ```
 
-The README that ox-ci writes on first run includes both snippets (plus an impact-free PR
-variant for repos that disabled `.delta.toml`) as copy-paste starting points.
+Nightly composite actions don't receive `exclude_*` at all — their inputs default to
+empty (full workspace) and the reusable workflow omits the passthrough. Threading them
+through is purely a PR-tier optimization; nightly never benefits.
 
-## 4. Impact scoping
+If `.delta.toml`'s managed region is disabled
+([updates.md §opt-out](./updates.md#6-opting-out-in-file-stubs)),
+`ox-ci-pr-impl.yml` is regenerated **without** the `impact` job: each group job becomes
+unconditional and the `exclude_*` inputs default to empty, so every group runs
+full-workspace. `.github/actions/ox-ci-impact/` is not emitted in that mode.
 
-ox-ci emits `.github/actions/ox-ci-impact/action.yml` as a composite action with input
-`base_ref`. It runs:
+The reusable workflow declares a small input set so the root workflow can pass overrides:
+
+| Input     | Type   | Default                                | Meaning                                                |
+|-----------|--------|----------------------------------------|--------------------------------------------------------|
+| `runs_on` | string | `ubuntu-latest`                        | Runner for single-OS jobs (impact, pr-fast, pr-mutants). |
+| `test_os` | string | `'["ubuntu-latest","windows-latest"]'` | JSON array of runners for the cross-OS `pr-test` matrix. Override to drop Windows for OSS-only repos, or to add `macos-latest`, `windows-2022`, a self-hosted label, etc. |
+
+The nightly reusable workflow has the same two inputs; its `nightly-test` job uses
+`test_os` and every other job uses `runs_on`.
+
+We deliberately keep this input surface minimal. Anything more elaborate (e.g.
+per-job runner overrides) lives in the user's own workflow, which can compose its own
+`uses:`-of-reusable-workflow shape.
+
+## 5. Per-group composite actions
+
+Each per-group composite action has the **same** uniform input surface — the three
+impact-exclude variables plus a per-action handful of PR-context strings. This means
+the reusable workflow doesn't need to know which excludes a group's checks consume; it
+threads all three to every action. Moving a check between groups is a pure catalog
+change.
+
+```yaml
+# .github/actions/ox-ci-pr-fast/action.yml  (owned)
+name: ox-ci-pr-fast
+description: ox-ci PR fast group
+inputs:
+  pr_title:
+    description: PR title for the pr-title check.
+    required: false
+    default: ""
+  exclude_not_modified:
+    description: cargo-excludes string from ox-ci-impact (--modified). Empty = full workspace.
+    required: false
+    default: ""
+  exclude_not_affected:
+    description: cargo-excludes string from ox-ci-impact (--affected). Empty = full workspace.
+    required: false
+    default: ""
+  exclude_not_required:
+    description: cargo-excludes string from ox-ci-impact (--required). Empty = full workspace.
+    required: false
+    default: ""
+  impact_skip:
+    description: '"true" when no workspace member is in any impact tier. Recipes that scope to workspace members may early-return; non-scoping recipes ignore this.'
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/ox-ci-setup
+    - shell: bash
+      env:
+        PR_TITLE: ${{ inputs.pr_title }}
+        OX_CI_EXCLUDE_NOT_MODIFIED: ${{ inputs.exclude_not_modified }}
+        OX_CI_EXCLUDE_NOT_AFFECTED: ${{ inputs.exclude_not_affected }}
+        OX_CI_EXCLUDE_NOT_REQUIRED: ${{ inputs.exclude_not_required }}
+        OX_CI_IMPACT_SKIP: ${{ inputs.impact_skip }}
+      run: just ox-ci-pr-fast
+```
+
+Uniform input set on every per-group composite action:
+
+| Input                     | Default     | Notes                                              |
+|---------------------------|-------------|----------------------------------------------------|
+| `exclude_not_modified`    | `""`        | Forwarded as `OX_CI_EXCLUDE_NOT_MODIFIED`.         |
+| `exclude_not_affected`    | `""`        | Forwarded as `OX_CI_EXCLUDE_NOT_AFFECTED`.         |
+| `exclude_not_required`    | `""`        | Forwarded as `OX_CI_EXCLUDE_NOT_REQUIRED`.         |
+| `impact_skip`             | `"false"`   | Forwarded as `OX_CI_IMPACT_SKIP`. Recipes that consume the excludes may early-return when `"true"`; non-scoping recipes (fmt, deny, audit, …) ignore it. See [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars). |
+
+Per-action additions (only where the action consumes PR-context strings the recipe needs):
+
+| Action                       | Extra inputs                                                            |
+|------------------------------|-------------------------------------------------------------------------|
+| `ox-ci-pr-fast`              | `pr_title`                                                              |
+| `ox-ci-pr-mutants`           | `base_ref`                                                              |
+| `ox-ci-pr-test`              | —                                                                       |
+| `ox-ci-nightly-*`            | —                                                                       |
+
+The recipes themselves consume only the env vars they need; the catalog records the
+mapping (see [checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)).
+Threading all three to every action costs a few lines per composite but is the right
+separation: wiring is about "which jobs depend on impact and feed it forward", not about
+"which check needs which env var."
+
+These actions are consumed primarily by ox-ci's own reusable workflow. Users who want to
+plug individual groups into an unrelated workflow can `uses:` them directly.
+
+### `ox-ci-setup`
+
+`ox-ci-setup` installs `just` (`cargo install just --locked --version >=<min>`) and runs
+`just ox-ci-tools-install-missing`. Does not install Rust; expects `cargo` on PATH (see
+§7). `ox-ci-impact` is described in §6 below.
+
+## 6. Impact scoping
+
+`.github/actions/ox-ci-impact/action.yml` is a composite action with input `base_ref`. It
+runs:
 
 1. `git checkout $base_ref` and `cargo delta -c .delta.toml snapshot > baseline.json`.
 2. `git checkout $head` and `cargo delta -c .delta.toml snapshot > current.json`.
@@ -205,43 +352,46 @@ Outputs:
 | `exclude_not_modified`  | `--exclude X --exclude Y …` string for the complement of cargo-delta's `modified` tier.                  |
 | `exclude_not_affected`  | Same, for the `affected` tier.                                                                           |
 | `exclude_not_required`  | Same, for the `required` tier.                                                                           |
-| `skip`                  | `true` when no workspace member is in any tier (no PR-relevant change); use to short-circuit downstream jobs via `if: needs.impact.outputs.skip != 'true'`. |
+| `skip`                  | `"true"` when no workspace member is in any tier (no PR-relevant change). Propagated via `impact_skip` to every composite action; recipes that scope to workspace members may use it to early-return, but the wiring never gates whole jobs on it (see §4). |
+
+The reusable workflow handles consumption — users never wire these outputs themselves.
 
 The check → tier mapping is in
 [checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping). The recipe-side
 mechanics are in [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars).
 
-If `.delta.toml`'s managed region is disabled
-([updates.md §opt-out](./updates.md#opting-out-in-file-stubs)), ox-ci suppresses emission
-of `ox-ci-impact/action.yml` entirely. The per-group composite actions still accept the
-`exclude_*` inputs for compatibility; with no `impact` job feeding them they default to
-empty and every group runs full-workspace.
-
-Nightly workflows always run full-workspace and don't use the `ox-ci-impact` action.
-
-## 5. Rust toolchain
+## 7. Rust toolchain
 
 ox-ci does not install Rust on GitHub. The composite actions assume `cargo` is on PATH.
-The user is responsible for installing Rust before invoking any ox-ci action:
+On GH-hosted runners (the default), `rustup` is pre-installed and
+`rust-toolchain.toml` triggers auto-install on first `cargo` invocation; the cache hit on
+subsequent runs is good. No explicit install step is needed.
 
-- **GH-hosted runners (default)**: `rustup` is pre-installed; `rust-toolchain.toml`
-  triggers auto-install on first `cargo` invocation; the cache hit on subsequent runs is
-  good. No explicit install step is needed.
-- **Self-hosted runners or pre-baked images without rustup**: add whatever install step
-  fits your environment (`dtolnay/rust-toolchain`, `actions-rust-lang/setup-rust-toolchain`,
-  msrustup, a pre-baked image, …) as the first step of each job, before the ox-ci
-  composite action.
+On self-hosted runners or pre-baked images without rustup, the user adds a Rust install
+step to their root workflow before the `uses:` of the reusable workflow:
+
+```yaml
+jobs:
+  ox-ci:
+    uses: ./.github/workflows/ox-ci-pr-impl.yml
+    # Self-hosted? Add a setup workflow that runs first and uploads
+    # toolchain to a shared cache, then reference it here.
+```
+
+Since reusable workflows can't accept "previous step" handoff, self-hosted users usually
+forgo the reusable-workflow shape and write a single workflow that calls the composite
+actions directly. ox-ci's composite actions are exposed for that use case.
 
 `_ox-ci-require` (invoked by every check recipe) validates the installed `rustc` against
 the catalog minimum at recipe time; missing or below-minimum `rustc` produces a clean
 failure message.
 
-## 6. Caching
+## 8. Caching
 
-The `ox-ci-setup` composite action computes a cache key from: OS, rustc version (read from
-`rust-toolchain.toml`), `Cargo.lock`, `.cargo/config.toml`, and the binary's embedded
-catalog hash. Uses `actions/cache` natively. `CARGO_HOME` is pinned to a workspace-scratch
-location to keep cache scoping predictable.
+The `ox-ci-setup` composite action computes a cache key from: OS, rustc version (read
+from `rust-toolchain.toml`), `Cargo.lock`, `.cargo/config.toml`, and the binary's
+embedded catalog hash. Uses `actions/cache` natively. `CARGO_HOME` is pinned to a
+workspace-scratch location to keep cache scoping predictable.
 
 The cache covers:
 
@@ -249,14 +399,16 @@ The cache covers:
 - The `target/` directory (per ox-ci recipe; a per-recipe cache scope means a `pr-test`
   cache hit doesn't have to wait on a `pr-fast` cache miss).
 
-## 7. Security
+## 9. Security
 
 The composite actions do nothing privileged on their own — they just install tools and
-invoke `just`. The user's workflow controls permissions.
+invoke `just`. The reusable workflow propagates only what the root workflow passes (and
+only the inputs explicitly declared).
 
-Recommended user-workflow shape:
+Recommended root workflow shape:
 
-- `permissions: contents: read` at the workflow level.
+- `permissions: contents: read` at the workflow level. ox-ci's default ships with
+  this.
 - No `pull-requests: write` (the PR-title check only needs the title from the event
   payload, which is already in `${{ github.event.pull_request.title }}`).
 - Nightly secrets, if any, live on `ox-ci-nightly.yml` only — never on `ox-ci-pr.yml`.

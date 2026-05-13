@@ -109,6 +109,13 @@ distinction between "first run" and "subsequent run."
 | Host present, region present, checksum line missing or mismatched                 | leave region alone, write proposal side file, report                                    |
 | Host present, region absent                                                       | insert region at the anchor in §4                                                       |
 
+The root pipeline / workflow files (`.pipelines/ox-ci-{pr,nightly}.yml`,
+`.github/workflows/ox-ci-{pr,nightly}.yml`) are regular owned files governed by the rows
+above. Users who want to customize them (different triggers, runner pool, `extends:` for
+1ESPT, additional secrets) edit in place; the next `update` detects the dirty checksum,
+leaves the user's version alone, and writes a `.ox-ci-proposed` sibling — the same flow
+as every other owned file.
+
 Side files for proposed regions are named `<host>.<region-id>.proposed` (e.g.
 `Justfile.ox-ci-imports.proposed`, `Cargo.toml.ox-ci-workspace-lints.proposed`). Side files
 for proposed owned files are `<path>.ox-ci-proposed`. The same file name is used in both
