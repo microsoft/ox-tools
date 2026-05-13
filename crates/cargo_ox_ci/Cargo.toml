@@ -1,0 +1,25 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-ox-ci"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors = ["The Oxidizer Project Authors"]
+description = "Opinionated, unified Rust build/CI scaffolding for GitHub Actions and Azure DevOps"
+readme = "README.md"
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo_ox_ci"
+homepage = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo_ox_ci"
+keywords = ["cargo", "subcommand", "ci", "just", "github-actions"]
+categories = ["development-tools::cargo-plugins"]
+
+[[bin]]
+name = "cargo-ox-ci"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true
