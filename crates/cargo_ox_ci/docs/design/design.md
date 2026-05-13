@@ -1,0 +1,299 @@
+# cargo-ox-ci — Design
+
+> Status: **Draft**.
+> Crate name: `cargo-ox-ci`.
+> Home: `github.com/microsoft/ox-tools`, published to crates.io.
+
+This is the top-level design document. It captures the why, the principles, and the
+user-visible shape of the tool. Detail lives in companion documents:
+
+- [checks.md](./checks.md) — the opinionated check catalog, the group/tier structure, and tool-version policy.
+- [local.md](./local.md) — the `justfiles/ox-ci/` layout, recipe surface, and customization.
+- [updates.md](./updates.md) — the drift-detection and update algorithm; opt-out semantics.
+- [github.md](./github.md) — GitHub Actions emission, example workflows, impact wiring.
+- [ado.md](./ado.md) — Azure DevOps Pipelines emission, 1ESPT/msrustup composition.
+
+## 1. Problem
+
+Across the surveyed Rust repos (`oxidizer`, `oxidizer-github`, `ox-tools`, `ox-tools-gh`,
+`assistants-oxide`, `ox-docs`) the build/test/CI infrastructure is conceptually similar but
+implemented six different ways:
+
+| Repo | CI | Justfile shape | Toolchain | Notable specifics |
+|------|----|----------------|-----------|-------------------|
+| `oxidizer`         | ADO 1ESPT (`SubstratePT`) | 500-line monolith + `just_mutants.just` | `ms-prod-1.93` | Stage flags (`enableStages`), `cargo-aprz`, stable-API checks |
+| `oxidizer-github`  | GitHub Actions            | Modular `justfiles/{basic,coverage,format,setup,spelling}.just` + `constants.env` | `1.93` | `cargo-delta` impact-scoped builds, sticky semver comments, composite `setup` action |
+| `ox-tools`         | ADO (CloudBuild + classic) | none in worktree                       | `ms-prod-1.92` | NuGet/MSBuild scaffolding, internal templates |
+| `ox-tools-gh`      | GitHub Actions            | Same modular shape as `oxidizer-github` | `1.93` | Mirror surface to OSS oxidizer |
+| `assistants-oxide` | ADO 1ESPT (custom `rust/`) | Monolith + `.just/tds.just`            | `ms-prod-1.93` | Symcrypt setup steps, NuGet publish stage |
+| `ox-docs`          | ADO classic               | Monolith                                | `ms-prod-1.88` | Mixed C#/.NET + Rust, mdbook/docfx |
+
+The same logical checks (clippy, fmt, deny, miri, mutants, coverage, hack feature-powerset, udeps,
+semver, spellcheck, license headers, doc/doctest, careful, audit, ensure-no-cyclic-deps,
+ensure-no-default-features, doc2readme, …) are spelled in subtly different ways in each repo, with
+different argument sets, different tool versions, and different opinions about which tier (PR vs.
+nightly) a check belongs to.
+
+Maintaining six artisanal copies is expensive: improvements made in one repo (e.g. `cargo-delta`
+impact scoping in `oxidizer-github`) take months to propagate, security/policy upgrades are
+missed, and onboarding new Rust repos requires copying-and-praying.
+
+## 2. Goals
+
+1. **One opinionated build profile** for Rust repos, with sane defaults distilled from the
+   strongest patterns observed across the existing repos.
+2. **Two tiers**: `pr` (blocking on every pull request) and `nightly` (slow, scheduled).
+3. **Both CI backends** — GitHub Actions and Azure DevOps Pipelines — generated from the same
+   source of truth. The user picks one or both per repo via a CLI flag.
+4. **Compliance preservation**: ADO pipelines that must `extends:` 1ESPT/SubstratePT continue to
+   do so. The tool generates building blocks the repo composes, never root pipelines.
+5. **Local/CI parity at every level**: every individual check, every group of checks, and the
+   full tier are all reproducible locally with a single `just` invocation, using the exact same
+   arguments CI uses. The three commands `just ox-ci-pr`, `just ox-ci-nightly`, and
+   `just ox-ci-full` (= pr + nightly) are first-class local entry points.
+6. **Plain-cargo fallback**: a developer with only `cargo` installed (no `just`, no
+   `cargo-ox-ci`) can still build and run tests.
+7. **Friendly updates**: the tool detects, per file and per managed region, whether the user has
+   modified it, and updates only the unmodified bits.
+8. **Open source**: the crate ships from `github.com/microsoft/ox-tools` and publishes to
+   crates.io. The binary contains no Microsoft-internal dependencies; everything it can install
+   on the user's behalf comes from crates.io.
+
+## 3. Non-Goals
+
+- Replacing 1ESPT, SubstratePT, CloudBuild, or any other compliance/release pipeline.
+- Generating workflow or root pipeline YAML. The tool emits composable building blocks
+  (composite actions / step templates) and the user wires them into their own workflows or
+  pipelines. See [github.md](./github.md) and [ado.md](./ado.md).
+- Building a general-purpose CI compiler/IR. We share **check semantics**, not CI features.
+- Owning `.cargo/config.toml`, `rust-toolchain.toml`, or workspace layout in `Cargo.toml`.
+- Installing the Rust toolchain. msrustup owns it on 1ESPT; the runner image owns it on
+  GitHub-hosted runners; the user owns it locally. The tool validates `rustc` version at
+  recipe time and produces a clean failure when it doesn't meet the catalog minimum.
+- Managing exact tool versions on the user's behalf — we enforce minimums only. See
+  [local.md §3](./local.md#3-tool-versions-and-installation).
+- Hosting a service. The tool is a CLI binary; updates ship via crates.io.
+- Acting as a runtime: the tool emits `just` recipes and CI building blocks, then exits.
+  It is **not** invoked at build/test/CI time. `just` is the runtime.
+- Destructive operations: `cargo ox-ci update` never deletes files. Removing a previously
+  configured CI backend is a manual `rm -rf` by the user.
+
+## 4. Guiding Principle
+
+> **`cargo-ox-ci` writes files. `just` runs them. The repo composes everything.**
+
+Corollaries that drive every section below:
+
+- The tool's only job is to author and update files. It is not on the local-build hot path or in
+  the CI graph at runtime.
+- The local daily-driver is `just ox-ci` (and friends). Those recipes call `cargo …` directly. CI
+  jobs invoke the same `just` recipes. Local and CI are bit-identical because they share one
+  implementation in the imported `.just` files.
+- Drift detection lives inside the files themselves (per-file checksums and per-managed-region
+  checksums). There is no parallel metadata file. See [updates.md](./updates.md).
+- The tool inserts managed sections into the user's `Justfile` and into a small set of shared
+  config files (`deny.toml`, `[workspace.lints]` in the workspace `Cargo.toml`, and `[lints]`
+  in each crate's `Cargo.toml`, plus `.delta.toml` and `rustfmt.toml`). Outside those sections,
+  the user's content is preserved verbatim. Everything else is in tool-owned files under
+  `justfiles/ox-ci/` and the backend-specific CI directories.
+
+## 5. User Experience
+
+### 5.1 Installation (maintainer)
+
+```sh
+cargo install --locked cargo-ox-ci
+```
+
+Only the repo maintainer who runs updates needs the binary installed. Everyone else uses
+`just` (or plain `cargo`).
+
+### 5.2 The single command
+
+```text
+cargo ox-ci update [--backend github|ado|both|none] [--dry-run]
+```
+
+That is the entire CLI surface. There is intentionally no `init`, `migrate`, `check`, `run`,
+`doctor`, `diff`, `explain`, `disable`, `enable`, or `versions` subcommand.
+
+The algorithm is uniform — there is no distinction between "first run" and "subsequent run."
+The full per-item decision table lives in [updates.md](./updates.md).
+
+`--dry-run` performs the same analysis but writes nothing. Exit code 0 means "everything is in
+sync with the binary's current templates and all managed content matched, ignoring disabled
+items"; exit code 1 means "something is out of date or user-modified."
+
+`--backend` controls which CI backend(s) get emitted: `github`, `ado`, `both`, or `none`. If
+omitted, the tool autodetects from the `origin` git remote URL (`github.com` → `github`,
+`dev.azure.com`/`*.visualstudio.com` → `ado`). `--backend none` is valid and useful for repos
+that want only the local `just` setup. `update` never deletes files; to stop using a backend
+the user removes its directory by hand.
+
+### 5.3 Daily driver
+
+The local UX is plain `just`:
+
+```text
+$ just ox-ci
+[just] running ox-ci-tools-check
+[just] running ox-ci-pr-fast
+[just] running ox-ci-pr-test
+[just] running ox-ci-pr-mutants
+ox-ci OK
+```
+
+`ox-ci` is an alias for `ox-ci-pr`. Both are plain `just` recipes (not wrappers around
+`cargo ox-ci`). The PR tier is made up of a small set of *check groups* — each group is a
+`just` recipe that runs the individual checks belonging to it. Groups are the level at which
+CI parallelizes. See [checks.md](./checks.md) for the group → check mapping and
+[local.md](./local.md) for the recipe tree.
+
+Other tier entry points:
+
+- `just ox-ci-pr` — fast checks suitable for every PR.
+- `just ox-ci-nightly` — slow checks: miri, full mutants, feature-powerset, bench, etc.
+- `just ox-ci-full` — both tiers, run sequentially.
+
+A user with only `just` installed (no `cargo-ox-ci`) can run any check, any group, or any tier
+without ever invoking the tool. `cargo-ox-ci` is only required by the maintainer who wants to
+update the recipes or CI building blocks.
+
+### 5.4 No-tooling fallback
+
+A user with only `cargo` (no `just`, no `cargo-ox-ci`) can still run the basics:
+
+```sh
+cargo test   --workspace --all-targets --all-features --locked
+cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo fmt --check
+```
+
+The same commands appear as the body of the corresponding `just` recipes in
+`justfiles/ox-ci/checks.just`, so they are discoverable by reading that file. The fallback
+covers core hygiene only — coverage, miri, mutants, etc. still require their respective tools.
+
+## 6. Repo Layout
+
+The tool produces a small set of files. They fall into three categories:
+
+- **owned** — the tool fully writes the file. The first line is an `ox-ci-checksum` comment.
+- **managed-region** — a user-composed file with one or more tool-managed sections bracketed by
+  sentinel comments. Each section carries its own checksum. Outside the sentinels, the user's
+  content is preserved byte-for-byte.
+- **user-authored** — files the user owns; the tool only reads them. `rust-toolchain.toml` and
+  `.cargo/config.toml` fall in this category. The tool has no separate config file of its own.
+
+Opt-out is expressed inline in the affected file itself (an empty managed-region stub or a
+single-line `# ox-ci-disabled` marker for owned files); see
+[updates.md §opt-out](./updates.md#opting-out-in-file-stubs).
+
+```text
+repo/
+├── Justfile                                       managed-region: ox-ci-imports
+├── justfiles/ox-ci/                               owned (see local.md)
+├── Cargo.toml                                     managed-region: ox-ci-workspace-lints (or ox-ci-lints in single-crate)
+├── crates/<member>/Cargo.toml                     managed-region: ox-ci-lints (one per workspace member)
+├── deny.toml                                      managed-region: ox-ci-deny
+├── rustfmt.toml                                   managed-region: ox-ci-rustfmt (opt out with empty stub)
+├── .delta.toml                                    managed-region: ox-ci-delta (opt out disables impact scoping)
+├── rust-toolchain.toml                            user-authored (read only)
+├── .cargo/config.toml                             user-authored (read only)
+├── .github/actions/ox-ci-*/                       owned, only if --backend github|both — see github.md
+└── .pipelines/ox-ci/steps/                        owned, only if --backend ado|both — see ado.md
+```
+
+Detail on each host:
+
+- **`Justfile` and `justfiles/ox-ci/*.just`** — see [local.md](./local.md).
+- **`Cargo.toml` lints regions** — workspace `Cargo.toml` carries the `ox-ci-workspace-lints`
+  region with `[workspace.lints.rust]`, `[workspace.lints.clippy]`, and
+  `[workspace.lints.rustdoc]`. Each member `Cargo.toml` carries an `ox-ci-lints` region with
+  exactly `[lints]\nworkspace = true`. The emitter uses `toml-edit` for round-trip-safe
+  manipulation. In a single-crate repo (no `[workspace]` table), the workspace region becomes
+  `ox-ci-lints` and contains `[lints.*]` directly.
+- **`deny.toml`** — managed region at the end of the file with the tool's baseline
+  license/advisory rules. Users add their own keys outside the region. Created if absent.
+  Content detailed in [checks.md](./checks.md).
+- **`rustfmt.toml`** — created with the opinionated baseline if absent; managed region at the
+  end of the file. The most contested opinion in the catalog; users who want to keep their own
+  formatting opt the file out via the empty-stub mechanism in [updates.md](./updates.md).
+- **`.delta.toml`** — cargo-delta configuration that drives impact-scoped CI runs. Created if
+  absent. Region at the end of the file. Disabling the region opts the repo out of impact
+  scoping entirely. See [checks.md](./checks.md#impact-scoping) and the per-backend wiring in
+  [github.md](./github.md) / [ado.md](./ado.md).
+- **`rust-toolchain.toml`** and **`.cargo/config.toml`** — never touched. Read-only inputs
+  used by `_ox-ci-require` to validate the user's `rustc` version against the catalog
+  minimum. The CI building blocks do not install Rust; that is the user's pipeline's job
+  (msrustup in 1ESPT, rustup on GH runners).
+
+The tool has no separate config file. All state — including opt-outs — lives in the affected
+file itself; see [updates.md](./updates.md).
+
+## 7. Customization
+
+Four escape valves, in increasing severity:
+
+1. **Compose around the tool**: add your own `.just` files and import them from your `Justfile`
+   alongside the `ox-ci/*` imports. Add your own `.github/workflows/*.yml` files (anything not
+   prefixed `ox-ci-` is left alone). Add your own `.pipelines/` templates and root pipelines.
+   The path of least resistance and the recommended approach for project-specific checks.
+2. **Edit a managed-region host file outside the sentinels**: extra recipes in your `Justfile`,
+   extra rules in `deny.toml` outside the managed region, extra clippy lints in
+   `[workspace.lints.clippy]` after the closing sentinel. The tool preserves everything outside
+   the sentinels verbatim.
+3. **Opt out with an in-file stub**. Empty out a managed region (leave only the sentinels) or
+   replace an owned file's contents with `# ox-ci-disabled`. The tool will skip the item on
+   every future `update`. See [updates.md](./updates.md).
+4. **Take ownership of an owned file or managed region by editing it inside the
+   sentinels/checksum boundary.** The next `update` will detect the dirt, leave your file
+   alone, and write a `.ox-ci-proposed` sibling. Re-bless by deleting your file (or region)
+   and rerunning `update`. Suitable for one-off divergence; for permanent divergence prefer
+   the opt-out stub.
+
+What the tool deliberately does **not** do:
+
+- Modify `Cargo.toml` outside the `ox-ci-workspace-lints` / `ox-ci-lints` managed regions.
+- Modify `.cargo/config.toml` or `rust-toolchain.toml`.
+- Replace existing workflows, root pipelines, or any file it didn't create.
+
+The intentional consequence: there is exactly one place to look for "what does this repo do
+differently from the default?" — the working tree itself, plus the `--dry-run` summary listing
+outstanding proposed updates.
+
+## 8. Cross-Cutting Concerns
+
+### 8.1 Security
+
+- Generated GH composite actions and ADO step templates do nothing privileged on their own;
+  they just invoke `just` recipes. The user's workflow / pipeline file controls permissions
+  and secrets.
+- All cargo-tool installs done by the setup building blocks use `--locked`. No
+  `cargo-binstall`.
+- The tool never sources or executes content from any user-edited file at runtime;
+  everything executable in the repo is plain `just` recipes the user can read.
+- Recommended user-workflow shape: `permissions: contents: read` on PR workflows; grant
+  `pull-requests: read` only on the pr-fast job (for PR title). Nightly secrets, if any, live
+  on the nightly workflow only — never on the PR workflow. See the starter snippets in
+  [github.md](./github.md) and [ado.md](./ado.md).
+
+### 8.2 Monorepo / multi-workspace
+
+Out of scope for v1. `ox-ci-*` recipes always operate on `--workspace` from the repo root.
+Repos with multiple workspaces (uncommon in the surveyed set) compose by having a separate
+ox-ci tree per workspace root, each with its own `cargo ox-ci update`. Revisit after first
+adopters report friction.
+
+### 8.3 Internal vs OSS
+
+The crate ships from `github.com/microsoft/ox-tools` (alongside the existing tools published
+from that repo) and from crates.io. The binary contains:
+
+- The full check catalog (see [checks.md](./checks.md)), including `cargo aprz`, which is
+  itself published to crates.io.
+- All emitters (GH, ADO).
+
+There is no overlay system, no internal-only check, and no proprietary content. ADO
+templates are plain ADO templates — they happen to be shaped to compose cleanly with
+SubstratePT/1ESPT, but they are freely usable in any ADO environment.
+
