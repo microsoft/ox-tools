@@ -12,6 +12,8 @@ user-visible shape of the tool. Detail lives in companion documents:
 - [updates.md](./updates.md) — the drift-detection and update algorithm; opt-out semantics.
 - [github.md](./github.md) — GitHub Actions emission, example workflows, impact wiring.
 - [ado.md](./ado.md) — Azure DevOps Pipelines emission, 1ESPT/msrustup composition.
+- [../verification.md](../verification.md) — continuous-validation strategy: dogfooding,
+  fixture tests, schema validation.
 
 ## 1. Problem
 
