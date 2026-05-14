@@ -1,7 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# >>> ox-check-managed: ox-check-groups
-# Group recipes. Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
 # See ../../docs/design/checks.md for the catalog and rationale.
 
 # Each group is one CI job. Within a group, checks run sequentially.
@@ -62,4 +61,3 @@ ox-check-nightly-exhaustive: \
     ox-check-mutants-full \
     ox-check-cargo-hack \
     ox-check-bench
-# <<< ox-check-managed: ox-check-groups

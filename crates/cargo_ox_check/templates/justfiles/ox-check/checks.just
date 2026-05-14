@@ -1,7 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# >>> ox-check-managed: ox-check-checks
-# Per-check recipes. Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
 # See ../../docs/design/checks.md for the catalog and rationale.
 
 set unstable
@@ -100,4 +99,3 @@ ox-check-cargo-hack: (_ox-check-require "cargo-hack")
 
 ox-check-bench:
     cargo bench --workspace --all-features --no-run
-# <<< ox-check-managed: ox-check-checks
