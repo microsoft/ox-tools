@@ -8,6 +8,8 @@
 //! [`Plan`] and either applies or summarizes it.
 
 pub mod local;
+pub mod managed_region;
 pub mod owned_file;
 
+pub use managed_region::plan_managed_region;
 pub use owned_file::plan_owned_file;

@@ -82,6 +82,42 @@ pub fn plan_tiers_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem
     plan_owned_file(repo_root, manifest, TIERS_JUST_PATH, TIERS_JUST)
 }
 
+/// Region id for the imports block in the user's `Justfile`.
+pub const JUSTFILE_REGION_ID: &str = "ox-check-imports";
+
+/// Repo-root-relative path of the user's `Justfile`.
+pub const JUSTFILE_PATH: &str = "Justfile";
+
+/// Render the body of the Justfile imports region.
+///
+/// The four `import` lines plus the `ox-check` alias.
+#[must_use]
+pub fn render_justfile_imports() -> String {
+    "import 'justfiles/ox-check/checks.just'\n\
+     import 'justfiles/ox-check/groups.just'\n\
+     import 'justfiles/ox-check/tiers.just'\n\
+     import 'justfiles/ox-check/tools.just'\n\
+     alias ox-check := ox-check-pr\n"
+        .to_owned()
+}
+
+/// Emit a [`PlanItem`] for the `Justfile` imports region.
+///
+/// # Errors
+///
+/// Propagates I/O and region-parsing errors.
+pub fn plan_justfile_imports(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
+    let body = render_justfile_imports();
+    super::managed_region::plan_managed_region(
+        repo_root,
+        manifest,
+        JUSTFILE_PATH,
+        JUSTFILE_REGION_ID,
+        &body,
+        crate::region::CommentSyntax::Hash,
+    )
+}
+
 /// Plan all four files of the `justfiles/ox-check/` tree.
 ///
 /// # Errors
@@ -171,6 +207,26 @@ mod tests {
         for item in &items {
             assert_eq!(item.decision, Decision::Write);
         }
+    }
+
+    #[test]
+    fn justfile_imports_renders_expected_lines() {
+        let body = render_justfile_imports();
+        assert!(body.contains("import 'justfiles/ox-check/checks.just'"));
+        assert!(body.contains("import 'justfiles/ox-check/groups.just'"));
+        assert!(body.contains("import 'justfiles/ox-check/tiers.just'"));
+        assert!(body.contains("import 'justfiles/ox-check/tools.just'"));
+        assert!(body.contains("alias ox-check := ox-check-pr"));
+    }
+
+    #[test]
+    fn justfile_imports_writes_into_empty_repo() {
+        let tmp = TempDir::new().unwrap();
+        let item = plan_justfile_imports(tmp.path(), &Manifest::default()).unwrap();
+        assert_eq!(item.decision, Decision::Write);
+        let spliced = item.spliced_host.as_deref().unwrap();
+        assert!(spliced.contains("# >>> ox-check-managed: ox-check-imports"));
+        assert!(spliced.contains("alias ox-check := ox-check-pr"));
     }
 
     #[test]
