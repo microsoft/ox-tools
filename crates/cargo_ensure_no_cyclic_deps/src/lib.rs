@@ -182,7 +182,7 @@ fn format_cycle(cycle: &[PackageId], metadata: &Metadata) -> String {
                 .packages
                 .iter()
                 .find(|p| &p.id == id)
-                .map_or_else(|| id.to_string(), |p| p.name.clone())
+                .map_or_else(|| id.to_string(), |p| p.name.to_string())
         })
         .collect();
 
