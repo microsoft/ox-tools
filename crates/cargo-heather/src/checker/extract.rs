@@ -59,6 +59,20 @@ pub(super) fn header_comment(content: &str, style: CommentStyle) -> Option<Strin
     collect_comment_block(lines, style)
 }
 
+/// Extract a header comment block from a file that may start with a shebang.
+///
+/// If the first line is a shebang, the header is expected immediately after it.
+/// Otherwise, this falls back to regular header extraction.
+pub(super) fn header_after_optional_shebang(content: &str, style: CommentStyle) -> Option<String> {
+    let mut lines = content.lines();
+    let first = lines.next()?;
+    if first.trim().starts_with("#!") {
+        collect_comment_block(lines, style)
+    } else {
+        header_comment(content, style)
+    }
+}
+
 /// Extract the header comment block from inside a cargo-script frontmatter.
 ///
 /// Expects the file to start with a shebang and `---`. Extracts comment lines

@@ -14,13 +14,13 @@ use clap::{Args, Parser};
 #[derive(Parser, Debug)]
 #[command(name = "cargo", bin_name = "cargo")]
 pub(crate) enum CargoCli {
-    /// Validate license headers in Rust source files.
+    /// Validate license headers in source files.
     Heather(HeatherArgs),
 }
 
 /// Arguments for the `cargo heather` command.
 #[derive(Args, Debug, Clone)]
-#[command(version, about = "Validate license headers in Rust source files")]
+#[command(version, about = "Validate license headers in source files")]
 pub(crate) struct HeatherArgs {
     /// Path to the project directory (defaults to current directory).
     #[arg(long)]

@@ -3,9 +3,9 @@
 
 # Cargo Heather
 
-[![crate.io](https://img.shields.io/crates/v/cargo_heather.svg)](https://crates.io/crates/cargo_heather)
-[![docs.rs](https://docs.rs/cargo_heather/badge.svg)](https://docs.rs/cargo_heather)
-[![MSRV](https://img.shields.io/crates/msrv/cargo_heather)](https://crates.io/crates/cargo_heather)
+[![crate.io](https://img.shields.io/crates/v/cargo-heather.svg)](https://crates.io/crates/cargo-heather)
+[![docs.rs](https://docs.rs/cargo-heather/badge.svg)](https://docs.rs/cargo-heather)
+[![MSRV](https://img.shields.io/crates/msrv/cargo-heather)](https://crates.io/crates/cargo-heather)
 [![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
 [![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
@@ -105,6 +105,5 @@ Fixed 2 file(s).
 
 <hr/>
 <sub>
-This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo_heather">source code</a>.
+This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-heather">source code</a>.
 </sub>
-

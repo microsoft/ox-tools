@@ -2,8 +2,8 @@
 # Licensed under the MIT License.
 
 [package]
-name = "cargo_heather"
-description = " A cargo subcommand to validate license headers in Rust and TOML source files"
+name = "cargo-heather"
+description = " A cargo subcommand to validate license headers in Rust, TOML, PowerShell, Just, and env source files"
 version = "0.1.0"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "license", "cli"]
@@ -14,7 +14,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 homepage.workspace = true
-repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo_heather"
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-heather"
 
 [package.metadata.docs.rs]
 all-features = true

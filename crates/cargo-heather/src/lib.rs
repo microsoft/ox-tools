@@ -6,9 +6,9 @@
 
 //! # cargo-heather
 //!
-//! Library for validating and rewriting license headers in Rust (`.rs`) and
-//! TOML (`.toml`) source files. The accompanying `cargo-heather` binary uses
-//! this library to discover files on disk and apply the rewrites.
+//! Library for validating and rewriting license headers in source files. The
+//! accompanying `cargo-heather` binary uses this library to discover files on
+//! disk and apply the rewrites.
 //!
 //! ## Public API
 //!
@@ -42,6 +42,9 @@
 //!
 //! - [`FileKind::Rust`] — regular Rust source (`//` comments).
 //! - [`FileKind::Toml`] — TOML files (`#` comments).
+//! - [`FileKind::PowerShell`] — `PowerShell` scripts (`#` comments).
+//! - [`FileKind::Just`] — Just recipes (`#` comments).
+//! - [`FileKind::Env`] — `constants.env` files (`#` comments).
 //! - [`FileKind::CargoScript`] — Rust script with shebang + `---`
 //!   frontmatter; the header lives inside the frontmatter using `#`.
 //!
@@ -53,8 +56,8 @@
 //! The [`license`] module maps SPDX identifiers to canonical short header
 //! strings; this is what the binary uses when no custom header is supplied.
 
-#![doc(html_logo_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo_heather/logo.png")]
-#![doc(html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo_heather/favicon.ico")]
+#![doc(html_logo_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-heather/logo.png")]
+#![doc(html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-heather/favicon.ico")]
 #![deny(unsafe_code)]
 
 mod checker;

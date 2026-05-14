@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `cargo-heather`: Validate license headers in Rust source files.
+//! `cargo-heather`: Validate license headers in source files.
 
 mod cli;
 mod config;

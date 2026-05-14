@@ -72,6 +72,30 @@ pub(super) fn strip_existing_header(content: &str, style: CommentStyle) -> Strin
     }
 }
 
+/// Replace or insert a header after an optional shebang line.
+pub(super) fn fix_shebang_content(content: &str, header_text: &str, style: CommentStyle) -> String {
+    let mut iter = content.lines();
+    let Some(first) = iter.next() else {
+        return format!("{}\n", style.format_header(header_text));
+    };
+
+    if !first.trim().starts_with("#!") {
+        let stripped = strip_existing_header(content, style);
+        return super::prepend_header(&stripped, header_text, style);
+    }
+
+    let body_lines: Vec<&str> = iter.collect();
+    let body_start = find_header_end(&body_lines, style).unwrap_or(0);
+    let header_comment = style.format_header(header_text);
+    let rest = body_lines[body_start..].join("\n");
+
+    if rest.is_empty() {
+        format!("{first}\n{header_comment}\n")
+    } else {
+        format!("{first}\n{header_comment}\n\n{rest}\n")
+    }
+}
+
 /// Replace the header inside a cargo-script frontmatter.
 ///
 /// Preserves the shebang and opening `---`, strips any existing header block
