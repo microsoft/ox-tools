@@ -13,7 +13,7 @@ use tracing::info;
 
 use crate::backend::{self, Backend};
 use crate::cli::{Command, UpdateArgs};
-use crate::emit::{cargo_toml, local, shared_configs};
+use crate::emit::{cargo_toml, github, local, shared_configs};
 use crate::manifest::Manifest;
 use crate::plan::Plan;
 use crate::workspace::{self, Workspace};
@@ -87,15 +87,11 @@ pub fn run_update(args: &UpdateArgs, start_dir: &Path) -> Result<RunOutcome> {
 }
 
 /// Build the full plan: local files + selected CI backends.
-///
-/// CI backends are *declared* but not yet emitted — those land in later
-/// commits. Today, the `backends` argument is recorded only in the
-/// outcome.
 fn build_plan(
     repo_root: &Path,
     workspace: &Workspace,
     manifest: &Manifest,
-    _backends: &[Backend],
+    backends: &[Backend],
 ) -> Result<Plan> {
     let mut plan = Plan::default();
 
@@ -109,6 +105,19 @@ fn build_plan(
     }
     for item in shared_configs::plan_shared_configs(repo_root, manifest)? {
         plan.push(item);
+    }
+
+    for backend in backends {
+        match backend {
+            Backend::GitHub => {
+                for item in github::plan_github_backend(repo_root, manifest)? {
+                    plan.push(item);
+                }
+            }
+            Backend::Ado => {
+                // ADO emitter lands in later commits.
+            }
+        }
     }
 
     Ok(plan)
@@ -281,5 +290,55 @@ mod tests {
         );
         let final_text = fs::read_to_string(&path).unwrap();
         assert!(final_text.contains("edition = \"2021\""));
+    }
+
+    #[test]
+    fn github_backend_writes_full_dotgithub_tree() {
+        let tmp = empty_workspace();
+        let args = UpdateArgs {
+            backends: vec!["github".to_owned()],
+            no_backends: false,
+            dry_run: false,
+        };
+        let outcome = run_update(&args, tmp.path()).unwrap();
+        assert!(outcome.applied);
+        assert_eq!(outcome.backends, vec![Backend::GitHub]);
+        for expected in [
+            ".github/actions/ox-check-setup/action.yml",
+            ".github/actions/ox-check-impact/action.yml",
+            ".github/actions/ox-check-pr-fast/action.yml",
+            ".github/actions/ox-check-pr-test/action.yml",
+            ".github/actions/ox-check-pr-mutants/action.yml",
+            ".github/actions/ox-check-nightly-test/action.yml",
+            ".github/actions/ox-check-nightly-advisories/action.yml",
+            ".github/actions/ox-check-nightly-runtime/action.yml",
+            ".github/actions/ox-check-nightly-exhaustive/action.yml",
+            ".github/workflows/ox-check-pr-impl.yml",
+            ".github/workflows/ox-check-nightly-impl.yml",
+            ".github/workflows/ox-check-pr.yml",
+            ".github/workflows/ox-check-nightly.yml",
+        ] {
+            assert!(
+                tmp.path().join(expected).is_file(),
+                "expected '{expected}' after github update"
+            );
+        }
+    }
+
+    #[test]
+    fn github_backend_idempotent() {
+        let tmp = empty_workspace();
+        let args = UpdateArgs {
+            backends: vec!["github".to_owned()],
+            no_backends: false,
+            dry_run: false,
+        };
+        let _ = run_update(&args, tmp.path()).unwrap();
+        let second = run_update(&args, tmp.path()).unwrap();
+        assert!(
+            !second.plan.has_changes(),
+            "second github run should be a no-op:\n{}",
+            second.plan.summary()
+        );
     }
 }

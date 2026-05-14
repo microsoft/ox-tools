@@ -37,6 +37,14 @@ pub const PR_IMPL_WORKFLOW: &str =
 pub const NIGHTLY_IMPL_WORKFLOW: &str =
     include_str!("../../templates/github/nightly-impl-workflow.yml");
 
+/// Embedded body of the PR root workflow.
+pub const PR_ROOT_WORKFLOW: &str =
+    include_str!("../../templates/github/pr-root-workflow.yml");
+
+/// Embedded body of the nightly root workflow.
+pub const NIGHTLY_ROOT_WORKFLOW: &str =
+    include_str!("../../templates/github/nightly-root-workflow.yml");
+
 /// All check groups for which the GitHub backend emits a composite action.
 ///
 /// Mirrors [`checks.md`](../../../docs/design/checks.md) §1.
@@ -151,6 +159,47 @@ pub fn plan_reusable_workflows(
     ])
 }
 
+/// Plan the two root workflows.
+///
+/// # Errors
+///
+/// Propagates I/O errors from the owned-file driver.
+pub fn plan_root_workflows(
+    repo_root: &Path,
+    manifest: &Manifest,
+) -> Result<Vec<PlanItem>> {
+    Ok(vec![
+        plan_owned_file(
+            repo_root,
+            manifest,
+            ".github/workflows/ox-check-pr.yml",
+            PR_ROOT_WORKFLOW,
+        )?,
+        plan_owned_file(
+            repo_root,
+            manifest,
+            ".github/workflows/ox-check-nightly.yml",
+            NIGHTLY_ROOT_WORKFLOW,
+        )?,
+    ])
+}
+
+/// Plan every file the GitHub backend emits.
+///
+/// # Errors
+///
+/// Propagates I/O errors from any per-file emitter.
+pub fn plan_github_backend(
+    repo_root: &Path,
+    manifest: &Manifest,
+) -> Result<Vec<PlanItem>> {
+    let mut items = Vec::new();
+    items.extend(plan_composite_actions(repo_root, manifest)?);
+    items.extend(plan_reusable_workflows(repo_root, manifest)?);
+    items.extend(plan_root_workflows(repo_root, manifest)?);
+    Ok(items)
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
@@ -250,6 +299,23 @@ mod tests {
         for item in &items {
             assert_eq!(item.decision, Decision::Write);
         }
+    }
+
+    #[test]
+    fn root_workflows_call_reusable_workflows() {
+        assert!(PR_ROOT_WORKFLOW.contains("uses: ./.github/workflows/ox-check-pr-impl.yml"));
+        assert!(PR_ROOT_WORKFLOW.contains("pull_request:"));
+        assert!(PR_ROOT_WORKFLOW.contains("merge_group:"));
+        assert!(NIGHTLY_ROOT_WORKFLOW.contains("uses: ./.github/workflows/ox-check-nightly-impl.yml"));
+        assert!(NIGHTLY_ROOT_WORKFLOW.contains("schedule:"));
+    }
+
+    #[test]
+    fn plan_github_backend_emits_full_file_set() {
+        let tmp = TempDir::new().unwrap();
+        let items = plan_github_backend(tmp.path(), &Manifest::default()).unwrap();
+        // 2 shared actions + 7 group actions + 2 reusable workflows + 2 root workflows
+        assert_eq!(items.len(), 2 + GROUPS.len() + 2 + 2);
     }
 
     #[test]
