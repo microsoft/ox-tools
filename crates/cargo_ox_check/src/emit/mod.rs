@@ -11,6 +11,7 @@ pub mod cargo_toml;
 pub mod local;
 pub mod managed_region;
 pub mod owned_file;
+pub mod shared_configs;
 
 pub use managed_region::plan_managed_region;
 pub use owned_file::plan_owned_file;
