@@ -400,6 +400,23 @@ fn scanner_reports_missing_header_in_legacy_hash_comment_file_type() {
 }
 
 #[test]
+fn scanner_ignores_unsupported_extension_even_when_hash_comments_would_work() {
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    write(&p.join(".cargo-heather.toml"), CONFIG_MIT);
+    write(&p.join("a.rs"), &format!("{HEADER_TEXT}\nfn a() {{}}\n"));
+    write(
+        &p.join("notes.txt"),
+        "Copyright (c) Microsoft Corporation.\nLicensed under the MIT License.\n",
+    );
+
+    let out = run_heather(p, &[]);
+    let stderr = stderr_of(&out);
+    assert!(out.status.success(), "unsupported .txt file must not be scanned: {stderr}");
+    assert!(stderr.contains("Checking 1 file(s)"), "{stderr}");
+}
+
+#[test]
 fn fix_inserts_powershell_header_after_shebang() {
     let dir = TempDir::new().unwrap();
     let p = dir.path();

@@ -19,7 +19,7 @@ pub enum FileKind {
     PowerShell,
     /// A Just recipe file (`*.just` or `justfile`). Header uses `#` at the top.
     Just,
-    /// The repo's `constants.env` file. Header uses `#` at the top.
+    /// The repository's `constants.env` file. Header uses `#` at the top.
     Env,
     /// A Rust cargo-script file (`.rs` with shebang + `---` frontmatter).
     /// Header uses `#` after the opening `---`.
