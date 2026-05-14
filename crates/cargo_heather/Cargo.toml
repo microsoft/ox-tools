@@ -29,8 +29,8 @@ path = "src/bin/cargo-heather/main.rs"
 [dependencies]
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
 ohno = { workspace = true, features = ["app-err"] }
-serde = { workspace = true, features = ["derive"] }
-toml = { workspace = true, features = ["parse", "display"] }
+serde = { workspace = true, features = ["derive", "alloc"] }
+toml = { workspace = true, features = ["parse", "display", "serde"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
 walkdir = { workspace = true }
