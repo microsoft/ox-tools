@@ -4,6 +4,8 @@
 # Per-check recipes. Owned by cargo-ox-check; edit via `cargo ox-check update`.
 # See ../../docs/design/checks.md for the catalog and rationale.
 
+set unstable
+
 # === pr-fast members ====================================================
 
 ox-check-fmt: ox-check-tools-check
