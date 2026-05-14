@@ -1,0 +1,18 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+trigger: none
+pr: none
+
+schedules:
+  - cron: "0 6 * * *"
+    displayName: ox-check nightly
+    branches:
+      include: [main]
+    always: true
+
+stages:
+  - template: ox-check/nightly.yml
+    parameters:
+      linuxPool: { vmImage: ubuntu-latest }
+      windowsPool: { vmImage: windows-latest }

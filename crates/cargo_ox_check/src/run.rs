@@ -13,7 +13,7 @@ use tracing::info;
 
 use crate::backend::{self, Backend};
 use crate::cli::{Command, UpdateArgs};
-use crate::emit::{cargo_toml, github, local, shared_configs};
+use crate::emit::{ado, cargo_toml, github, local, shared_configs};
 use crate::manifest::Manifest;
 use crate::plan::Plan;
 use crate::workspace::{self, Workspace};
@@ -115,7 +115,9 @@ fn build_plan(
                 }
             }
             Backend::Ado => {
-                // ADO emitter lands in later commits.
+                for item in ado::plan_ado_backend(repo_root, manifest)? {
+                    plan.push(item);
+                }
             }
         }
     }
@@ -340,5 +342,51 @@ mod tests {
             "second github run should be a no-op:\n{}",
             second.plan.summary()
         );
+    }
+
+    #[test]
+    fn ado_backend_writes_full_pipelines_tree() {
+        let tmp = empty_workspace();
+        let args = UpdateArgs {
+            backends: vec!["ado".to_owned()],
+            no_backends: false,
+            dry_run: false,
+        };
+        let outcome = run_update(&args, tmp.path()).unwrap();
+        assert!(outcome.applied);
+        assert_eq!(outcome.backends, vec![Backend::Ado]);
+        for expected in [
+            ".pipelines/ox-check/steps/setup.yml",
+            ".pipelines/ox-check/steps/impact.yml",
+            ".pipelines/ox-check/steps/pr-fast.yml",
+            ".pipelines/ox-check/steps/pr-test.yml",
+            ".pipelines/ox-check/steps/pr-mutants.yml",
+            ".pipelines/ox-check/steps/nightly-test.yml",
+            ".pipelines/ox-check/steps/nightly-advisories.yml",
+            ".pipelines/ox-check/steps/nightly-runtime.yml",
+            ".pipelines/ox-check/steps/nightly-exhaustive.yml",
+            ".pipelines/ox-check/pr.yml",
+            ".pipelines/ox-check/nightly.yml",
+            ".pipelines/ox-check-pr.yml",
+            ".pipelines/ox-check-nightly.yml",
+        ] {
+            assert!(
+                tmp.path().join(expected).is_file(),
+                "expected '{expected}' after ado update"
+            );
+        }
+    }
+
+    #[test]
+    fn both_backends_idempotent() {
+        let tmp = empty_workspace();
+        let args = UpdateArgs {
+            backends: vec!["github".to_owned(), "ado".to_owned()],
+            no_backends: false,
+            dry_run: false,
+        };
+        let _ = run_update(&args, tmp.path()).unwrap();
+        let second = run_update(&args, tmp.path()).unwrap();
+        assert!(!second.plan.has_changes());
     }
 }

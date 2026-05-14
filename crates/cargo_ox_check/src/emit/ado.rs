@@ -31,6 +31,14 @@ pub const PR_STAGES: &str = include_str!("../../templates/ado/pr-stages.yml");
 pub const NIGHTLY_STAGES: &str =
     include_str!("../../templates/ado/nightly-stages.yml");
 
+/// Embedded body of the PR root pipeline.
+pub const PR_ROOT_PIPELINE: &str =
+    include_str!("../../templates/ado/pr-root-pipeline.yml");
+
+/// Embedded body of the nightly root pipeline.
+pub const NIGHTLY_ROOT_PIPELINE: &str =
+    include_str!("../../templates/ado/nightly-root-pipeline.yml");
+
 /// All check groups that get a per-group step template.
 pub const GROUPS: &[&str] = &[
     "pr-fast",
@@ -103,6 +111,47 @@ pub fn plan_stages_templates(
             NIGHTLY_STAGES,
         )?,
     ])
+}
+
+/// Plan the two root pipelines.
+///
+/// # Errors
+///
+/// Propagates I/O errors from the owned-file driver.
+pub fn plan_root_pipelines(
+    repo_root: &Path,
+    manifest: &Manifest,
+) -> Result<Vec<PlanItem>> {
+    Ok(vec![
+        plan_owned_file(
+            repo_root,
+            manifest,
+            ".pipelines/ox-check-pr.yml",
+            PR_ROOT_PIPELINE,
+        )?,
+        plan_owned_file(
+            repo_root,
+            manifest,
+            ".pipelines/ox-check-nightly.yml",
+            NIGHTLY_ROOT_PIPELINE,
+        )?,
+    ])
+}
+
+/// Plan every file the ADO backend emits.
+///
+/// # Errors
+///
+/// Propagates I/O errors from any per-file emitter.
+pub fn plan_ado_backend(
+    repo_root: &Path,
+    manifest: &Manifest,
+) -> Result<Vec<PlanItem>> {
+    let mut items = Vec::new();
+    items.extend(plan_step_templates(repo_root, manifest)?);
+    items.extend(plan_stages_templates(repo_root, manifest)?);
+    items.extend(plan_root_pipelines(repo_root, manifest)?);
+    Ok(items)
 }
 
 /// Plan every step template: setup, impact, and the seven per-group steps.
