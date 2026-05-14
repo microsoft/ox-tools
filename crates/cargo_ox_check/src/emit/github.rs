@@ -29,6 +29,14 @@ pub const SETUP_ACTION: &str =
 pub const IMPACT_ACTION: &str =
     include_str!("../../templates/github/impact-action.yml");
 
+/// Embedded body of the PR reusable workflow.
+pub const PR_IMPL_WORKFLOW: &str =
+    include_str!("../../templates/github/pr-impl-workflow.yml");
+
+/// Embedded body of the nightly reusable workflow.
+pub const NIGHTLY_IMPL_WORKFLOW: &str =
+    include_str!("../../templates/github/nightly-impl-workflow.yml");
+
 /// All check groups for which the GitHub backend emits a composite action.
 ///
 /// Mirrors [`checks.md`](../../../docs/design/checks.md) §1.
@@ -118,6 +126,31 @@ pub fn plan_composite_actions(
     Ok(items)
 }
 
+/// Plan the two reusable workflows.
+///
+/// # Errors
+///
+/// Propagates I/O errors from the owned-file driver.
+pub fn plan_reusable_workflows(
+    repo_root: &Path,
+    manifest: &Manifest,
+) -> Result<Vec<PlanItem>> {
+    Ok(vec![
+        plan_owned_file(
+            repo_root,
+            manifest,
+            ".github/workflows/ox-check-pr-impl.yml",
+            PR_IMPL_WORKFLOW,
+        )?,
+        plan_owned_file(
+            repo_root,
+            manifest,
+            ".github/workflows/ox-check-nightly-impl.yml",
+            NIGHTLY_IMPL_WORKFLOW,
+        )?,
+    ])
+}
+
 #[cfg(test)]
 mod tests {
     use tempfile::TempDir;
@@ -170,6 +203,50 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let items = plan_composite_actions(tmp.path(), &Manifest::default()).unwrap();
         assert_eq!(items.len(), GROUPS.len() + 2);
+        for item in &items {
+            assert_eq!(item.decision, Decision::Write);
+        }
+    }
+
+    #[test]
+    fn pr_impl_workflow_has_expected_jobs() {
+        assert!(PR_IMPL_WORKFLOW.contains("workflow_call:"));
+        for needle in ["impact:", "pr-fast:", "pr-test:", "pr-mutants:"] {
+            assert!(
+                PR_IMPL_WORKFLOW.contains(needle),
+                "PR impl workflow missing job '{needle}'"
+            );
+        }
+        // PR-test fans out across the OS matrix from `test_os`.
+        assert!(PR_IMPL_WORKFLOW.contains("test_os"));
+        // pr-fast carries the PR title for the ox-check-pr-title check.
+        assert!(PR_IMPL_WORKFLOW.contains("PR_TITLE"));
+        // pr-mutants needs the base SHA for diff scoping.
+        assert!(PR_IMPL_WORKFLOW.contains("BASE_REF"));
+    }
+
+    #[test]
+    fn nightly_impl_workflow_has_expected_jobs() {
+        for needle in [
+            "nightly-test:",
+            "nightly-advisories:",
+            "nightly-runtime:",
+            "nightly-exhaustive:",
+        ] {
+            assert!(
+                NIGHTLY_IMPL_WORKFLOW.contains(needle),
+                "nightly impl workflow missing job '{needle}'"
+            );
+        }
+        // Nightly uploads the lcov artifact.
+        assert!(NIGHTLY_IMPL_WORKFLOW.contains("upload-artifact"));
+    }
+
+    #[test]
+    fn plan_reusable_workflows_emits_two() {
+        let tmp = TempDir::new().unwrap();
+        let items = plan_reusable_workflows(tmp.path(), &Manifest::default()).unwrap();
+        assert_eq!(items.len(), 2);
         for item in &items {
             assert_eq!(item.decision, Decision::Write);
         }

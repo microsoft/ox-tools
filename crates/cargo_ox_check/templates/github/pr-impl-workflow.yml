@@ -1,0 +1,79 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+name: ox-check-pr-impl
+
+on:
+  workflow_call:
+    inputs:
+      test_os:
+        description: Comma-separated OS list for pr-test matrix (linux, windows, macos).
+        type: string
+        default: linux,windows
+      linux_runner:
+        description: Runner label for Linux jobs.
+        type: string
+        default: ubuntu-latest
+      windows_runner:
+        description: Runner label for Windows jobs.
+        type: string
+        default: windows-latest
+      macos_runner:
+        description: Runner label for macOS jobs.
+        type: string
+        default: macos-latest
+
+jobs:
+  impact:
+    runs-on: ${{ inputs.linux_runner }}
+    outputs:
+      excludes: ${{ steps.delta.outputs.excludes }}
+      skip: ${{ steps.delta.outputs.skip }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: delta
+        uses: ./.github/actions/ox-check-impact
+
+  pr-fast:
+    needs: impact
+    runs-on: ${{ inputs.linux_runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/ox-check-pr-fast
+        with:
+          excludes: ${{ needs.impact.outputs.excludes }}
+          skip: ${{ needs.impact.outputs.skip }}
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+
+  pr-test:
+    needs: impact
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(format('[{0}]', inputs.test_os)) }}
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || inputs.macos_runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/ox-check-pr-test
+        with:
+          excludes: ${{ needs.impact.outputs.excludes }}
+          skip: ${{ needs.impact.outputs.skip }}
+
+  pr-mutants:
+    needs: impact
+    runs-on: ${{ inputs.linux_runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ./.github/actions/ox-check-pr-mutants
+        with:
+          excludes: ${{ needs.impact.outputs.excludes }}
+          skip: ${{ needs.impact.outputs.skip }}
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
