@@ -1,0 +1,74 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+parameters:
+  - name: linuxPool
+    type: object
+    default: { vmImage: ubuntu-latest }
+  - name: windowsPool
+    type: object
+    default: { vmImage: windows-latest }
+
+stages:
+  - stage: impact
+    displayName: ox-check impact
+    pool: ${{ parameters.linuxPool }}
+    jobs:
+      - job: compute
+        steps:
+          - template: steps/impact.yml
+
+  - stage: pr_fast
+    displayName: ox-check pr-fast
+    dependsOn: impact
+    condition: succeededOrFailed()
+    pool: ${{ parameters.linuxPool }}
+    variables:
+      excludes: $[ stageDependencies.impact.compute.outputs['compute.excludes'] ]
+      skip: $[ stageDependencies.impact.compute.outputs['compute.skip'] ]
+    jobs:
+      - job: pr_fast
+        steps:
+          - template: steps/pr-fast.yml
+            parameters:
+              excludes: $(excludes)
+              skip: $(skip)
+
+  - stage: pr_test
+    displayName: ox-check pr-test
+    dependsOn: impact
+    condition: succeededOrFailed()
+    variables:
+      excludes: $[ stageDependencies.impact.compute.outputs['compute.excludes'] ]
+      skip: $[ stageDependencies.impact.compute.outputs['compute.skip'] ]
+    jobs:
+      - job: linux
+        pool: ${{ parameters.linuxPool }}
+        steps:
+          - template: steps/pr-test.yml
+            parameters:
+              excludes: $(excludes)
+              skip: $(skip)
+      - job: windows
+        pool: ${{ parameters.windowsPool }}
+        steps:
+          - template: steps/pr-test.yml
+            parameters:
+              excludes: $(excludes)
+              skip: $(skip)
+
+  - stage: pr_mutants
+    displayName: ox-check pr-mutants
+    dependsOn: impact
+    condition: succeededOrFailed()
+    pool: ${{ parameters.linuxPool }}
+    variables:
+      excludes: $[ stageDependencies.impact.compute.outputs['compute.excludes'] ]
+      skip: $[ stageDependencies.impact.compute.outputs['compute.skip'] ]
+    jobs:
+      - job: pr_mutants
+        steps:
+          - template: steps/pr-mutants.yml
+            parameters:
+              excludes: $(excludes)
+              skip: $(skip)

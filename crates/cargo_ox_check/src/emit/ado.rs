@@ -24,6 +24,13 @@ pub const SETUP_STEP: &str = include_str!("../../templates/ado/steps/setup.yml")
 /// Embedded body of the cargo-delta impact step template.
 pub const IMPACT_STEP: &str = include_str!("../../templates/ado/steps/impact.yml");
 
+/// Embedded body of the PR-tier stages template.
+pub const PR_STAGES: &str = include_str!("../../templates/ado/pr-stages.yml");
+
+/// Embedded body of the nightly-tier stages template.
+pub const NIGHTLY_STAGES: &str =
+    include_str!("../../templates/ado/nightly-stages.yml");
+
 /// All check groups that get a per-group step template.
 pub const GROUPS: &[&str] = &[
     "pr-fast",
@@ -71,6 +78,31 @@ pub fn render_group_step(group: &str) -> String {
 #[must_use]
 pub fn group_step_path(group: &str) -> String {
     format!(".pipelines/ox-check/steps/{group}.yml")
+}
+
+/// Plan the two stages templates.
+///
+/// # Errors
+///
+/// Propagates I/O errors from the owned-file driver.
+pub fn plan_stages_templates(
+    repo_root: &Path,
+    manifest: &Manifest,
+) -> Result<Vec<PlanItem>> {
+    Ok(vec![
+        plan_owned_file(
+            repo_root,
+            manifest,
+            ".pipelines/ox-check/pr.yml",
+            PR_STAGES,
+        )?,
+        plan_owned_file(
+            repo_root,
+            manifest,
+            ".pipelines/ox-check/nightly.yml",
+            NIGHTLY_STAGES,
+        )?,
+    ])
 }
 
 /// Plan every step template: setup, impact, and the seven per-group steps.
@@ -138,6 +170,34 @@ mod tests {
             group_step_path("nightly-test"),
             ".pipelines/ox-check/steps/nightly-test.yml"
         );
+    }
+
+    #[test]
+    fn pr_stages_has_impact_and_group_stages() {
+        for needle in ["stage: impact", "stage: pr_fast", "stage: pr_test", "stage: pr_mutants"] {
+            assert!(PR_STAGES.contains(needle), "PR stages missing '{needle}'");
+        }
+        assert!(PR_STAGES.contains("stageDependencies.impact.compute.outputs"));
+    }
+
+    #[test]
+    fn nightly_stages_has_four_groups() {
+        for needle in [
+            "stage: nightly_test",
+            "stage: nightly_advisories",
+            "stage: nightly_runtime",
+            "stage: nightly_exhaustive",
+        ] {
+            assert!(NIGHTLY_STAGES.contains(needle), "nightly stages missing '{needle}'");
+        }
+        assert!(NIGHTLY_STAGES.contains("artifact: nightly-coverage-lcov"));
+    }
+
+    #[test]
+    fn plan_stages_templates_emits_two() {
+        let tmp = TempDir::new().unwrap();
+        let items = plan_stages_templates(tmp.path(), &Manifest::default()).unwrap();
+        assert_eq!(items.len(), 2);
     }
 
     #[test]
