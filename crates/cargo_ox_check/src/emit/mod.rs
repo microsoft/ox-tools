@@ -7,6 +7,7 @@
 //! previous manifest. The driver in [`crate::run`] collects them into a
 //! [`Plan`] and either applies or summarizes it.
 
+pub mod cargo_toml;
 pub mod local;
 pub mod managed_region;
 pub mod owned_file;
