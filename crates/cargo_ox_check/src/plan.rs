@@ -224,7 +224,7 @@ impl Plan {
     ///   targets, the sibling is on the *host* file:
     ///   `<host>.ox-check-proposed`. The manifest is NOT updated for
     ///   proposals — see [updates.md §7](../../docs/design/updates.md).
-    /// - `InSync`, `Skipped`, `LeaveAlone` items preserve their existing
+    /// - `InSync`, `LeaveAlone` items preserve their existing
     ///   manifest entries from `previous_manifest`.
     ///
     /// # Errors
@@ -295,7 +295,7 @@ impl Plan {
                     let abs = repo_root.join(format!("{host}.ox-check-proposed"));
                     write_file(&abs, spliced)?;
                 }
-                (_, Decision::InSync | Decision::Skipped | Decision::LeaveAlone) => {
+                (_, Decision::InSync | Decision::LeaveAlone) => {
                     // No-op; manifest entry already preserved.
                 }
             }
@@ -308,7 +308,6 @@ impl Plan {
 const fn decision_label(d: Decision) -> &'static str {
     match d {
         Decision::InSync => "in-sync",
-        Decision::Skipped => "skipped",
         Decision::Write => "write",
         Decision::Propose => "propose",
         Decision::LeaveAlone => "leave-alone",
@@ -371,7 +370,7 @@ mod tests {
                 host: "Justfile".into(),
                 id: "x".into(),
             },
-            Decision::Skipped,
+            Decision::LeaveAlone,
         ));
         assert!(!plan.has_changes());
     }

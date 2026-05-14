@@ -13,7 +13,7 @@ use std::path::Path;
 use ohno::{AppError, IntoAppError as _};
 
 use crate::checksum::checksum_str;
-use crate::decision::{Decision, DecisionInputs, decide, should_emit_proposed_for_opt_out};
+use crate::decision::{Decision, DecisionInputs, decide};
 use crate::manifest::{Manifest, RegionKey};
 use crate::plan::{PlanItem, Target};
 use crate::region::{CommentSyntax, find_region, upsert_region};
@@ -54,22 +54,16 @@ pub fn plan_managed_region(
     };
     let last_rendered = manifest.regions.get(&key).map(String::as_str);
 
-    let (disk_checksum, emptied) = match host_text.as_deref() {
-        None => (None, false),
-        Some(text) => match find_region(text, region_id, syntax)? {
-            Some(region) => {
-                let body = region.body_str();
-                (Some(checksum_str(body)), body.trim().is_empty())
-            }
-            None => (None, false),
-        },
+    let disk_checksum = match host_text.as_deref() {
+        None => None,
+        Some(text) => find_region(text, region_id, syntax)?
+            .map(|region| checksum_str(region.body_str())),
     };
 
     let inputs = DecisionInputs {
         last_rendered,
         disk: disk_checksum.as_deref(),
         template: &template_checksum,
-        emptied,
     };
     let decision = decide(&inputs);
 
@@ -79,14 +73,6 @@ pub fn plan_managed_region(
     };
     let item = match decision {
         Decision::InSync | Decision::LeaveAlone => PlanItem::noop(target, decision),
-        Decision::Skipped => {
-            if should_emit_proposed_for_opt_out(last_rendered, &template_checksum) {
-                let spliced = splice(host_text.as_deref(), region_id, rendered_body, syntax)?;
-                PlanItem::propose_region(host_relpath, region_id, spliced)
-            } else {
-                PlanItem::noop(target, decision)
-            }
-        }
         Decision::Write => {
             let spliced = splice(host_text.as_deref(), region_id, rendered_body, syntax)?;
             PlanItem::write_region(
@@ -222,7 +208,8 @@ mod tests {
     }
 
     #[test]
-    fn empty_region_is_opt_out() {
+    fn empty_region_opts_out_when_template_unchanged() {
+        // Steady-state opt-out: user emptied the region, template hasn't moved.
         let tmp = TempDir::new().unwrap();
         let host = "# >>> ox-check-managed: r\n# <<< ox-check-managed: r\n";
         std::fs::write(tmp.path().join("Justfile"), host).unwrap();
@@ -237,7 +224,7 @@ mod tests {
             SYN,
         )
         .unwrap();
-        assert_eq!(item.decision, Decision::Skipped);
+        assert_eq!(item.decision, Decision::LeaveAlone);
     }
 
     #[test]

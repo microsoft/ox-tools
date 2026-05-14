@@ -12,7 +12,7 @@ use std::path::Path;
 use ohno::{AppError, IntoAppError as _};
 
 use crate::checksum::checksum_str;
-use crate::decision::{Decision, DecisionInputs, decide, should_emit_proposed_for_opt_out};
+use crate::decision::{Decision, DecisionInputs, decide};
 use crate::manifest::Manifest;
 use crate::plan::{PlanItem, Target};
 
@@ -35,15 +35,11 @@ pub fn plan_owned_file(
     let disk_checksum = on_disk.as_deref().map(checksum_str);
     let template_checksum = checksum_str(rendered);
     let last_rendered = manifest.files.get(relpath).map(String::as_str);
-    let emptied = on_disk
-        .as_deref()
-        .is_some_and(|s| s.trim().is_empty());
 
     let inputs = DecisionInputs {
         last_rendered,
         disk: disk_checksum.as_deref(),
         template: &template_checksum,
-        emptied,
     };
     let decision = decide(&inputs);
 
@@ -52,16 +48,6 @@ pub fn plan_owned_file(
     };
     let item = match decision {
         Decision::InSync | Decision::LeaveAlone => PlanItem::noop(target, decision),
-        Decision::Skipped => {
-            if should_emit_proposed_for_opt_out(last_rendered, &template_checksum) {
-                // Opt-out with new template content. Emit a proposed sibling
-                // so the user can see upstream churn; the opt-out (empty
-                // file) survives in place.
-                PlanItem::propose_file(relpath, rendered.to_owned())
-            } else {
-                PlanItem::noop(target, decision)
-            }
-        }
         Decision::Write => {
             PlanItem::write_file(relpath, rendered.to_owned(), template_checksum)
         }
@@ -125,13 +111,15 @@ mod tests {
     }
 
     #[test]
-    fn empty_file_opts_out_with_unchanged_template() {
+    fn empty_file_opts_out_when_template_unchanged() {
+        // After a previous render, user empties the file. Template hasn't
+        // moved → LeaveAlone (silent, opt-out preserved).
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.txt"), "").unwrap();
         let mut manifest = Manifest::default();
         manifest.set_file("a.txt", checksum_str("template\n"));
         let item = plan_owned_file(tmp.path(), &manifest, "a.txt", "template\n").unwrap();
-        assert_eq!(item.decision, Decision::Skipped);
+        assert_eq!(item.decision, Decision::LeaveAlone);
     }
 
     #[test]
@@ -145,12 +133,15 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_only_file_is_opt_out() {
+    fn whitespace_only_file_is_treated_as_user_divergence() {
+        // No special-casing for whitespace any more — it's just user
+        // content that diverges from the template. Steady-state with an
+        // unchanged template is still LeaveAlone, so opt-out works.
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.txt"), "   \n\t\n").unwrap();
         let mut manifest = Manifest::default();
         manifest.set_file("a.txt", checksum_str("template\n"));
         let item = plan_owned_file(tmp.path(), &manifest, "a.txt", "template\n").unwrap();
-        assert_eq!(item.decision, Decision::Skipped);
+        assert_eq!(item.decision, Decision::LeaveAlone);
     }
 }

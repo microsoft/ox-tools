@@ -252,7 +252,7 @@ mod tests {
                     if host == "rustfmt.toml" && id == shared_configs::RUSTFMT_REGION_ID)
             })
             .expect("rustfmt region item missing from plan");
-        assert_eq!(rustfmt_item.decision, crate::decision::Decision::Skipped);
+        assert_eq!(rustfmt_item.decision, crate::decision::Decision::LeaveAlone);
     }
 
     #[test]
