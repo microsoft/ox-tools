@@ -1,0 +1,10 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+steps:
+  - bash: |
+      if ! command -v just >/dev/null 2>&1 ; then
+        cargo install --locked just
+      fi
+      just ox-check-tools-install
+    displayName: ox-check setup (install just + catalog tools)

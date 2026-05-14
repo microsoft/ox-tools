@@ -1,0 +1,14 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+steps:
+  - bash: |
+      cargo install --locked cargo-delta
+      base="${BASE_REF:-$(System.PullRequest.TargetBranch)}"
+      result="$(cargo delta impact --base "$base" --format json || echo '{}')"
+      excludes="$(printf '%s' "$result" | jq -r '.excludes // [] | join(",")')"
+      skip="$(printf '%s' "$result" | jq -r '.skip // false')"
+      echo "##vso[task.setvariable variable=excludes;isOutput=true]$excludes"
+      echo "##vso[task.setvariable variable=skip;isOutput=true]$skip"
+    name: compute
+    displayName: ox-check impact (cargo-delta)
