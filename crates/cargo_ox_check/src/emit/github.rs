@@ -66,9 +66,6 @@ pub const GROUP_ACTION_TEMPLATE: &str =
 /// Placeholder token the per-group template uses for the group name.
 const GROUP_PLACEHOLDER: &str = "__GROUP__";
 
-/// Placeholder token in root workflows for the repo's default branch.
-const DEFAULT_BRANCH_PLACEHOLDER: &str = "__DEFAULT_BRANCH__";
-
 /// Render the `action.yml` for one check group's composite action.
 ///
 /// Substitutes the group name into [`GROUP_ACTION_TEMPLATE`]. The action
@@ -147,25 +144,19 @@ pub fn plan_reusable_workflows(
 
 /// Plan the two root workflows.
 ///
-/// `default_branch` is substituted into the PR workflow's `branches:`
-/// filter. The nightly workflow has no branch reference (cron schedules
-/// run against the repo's default branch automatically).
-///
 /// # Errors
 ///
 /// Propagates I/O errors from the owned-file driver.
 pub fn plan_root_workflows(
     repo_root: &Path,
     manifest: &Manifest,
-    default_branch: &str,
 ) -> Result<Vec<PlanItem>, AppError> {
-    let pr = PR_ROOT_WORKFLOW.replace(DEFAULT_BRANCH_PLACEHOLDER, default_branch);
     Ok(vec![
         plan_owned_file(
             repo_root,
             manifest,
             ".github/workflows/ox-check-pr.yml",
-            &pr,
+            PR_ROOT_WORKFLOW,
         )?,
         plan_owned_file(
             repo_root,
@@ -184,12 +175,11 @@ pub fn plan_root_workflows(
 pub fn plan_github_backend(
     repo_root: &Path,
     manifest: &Manifest,
-    default_branch: &str,
 ) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::new();
     items.extend(plan_composite_actions(repo_root, manifest)?);
     items.extend(plan_reusable_workflows(repo_root, manifest)?);
-    items.extend(plan_root_workflows(repo_root, manifest, default_branch)?);
+    items.extend(plan_root_workflows(repo_root, manifest)?);
     Ok(items)
 }
 
@@ -304,24 +294,9 @@ mod tests {
     }
 
     #[test]
-    fn plan_root_workflows_substitutes_default_branch() {
-        let tmp = TempDir::new().unwrap();
-        let items = plan_root_workflows(tmp.path(), &Manifest::default(), "trunk").unwrap();
-        let pr = items
-            .iter()
-            .find(|i| {
-                matches!(&i.target, crate::plan::Target::File { path } if path.ends_with("ox-check-pr.yml"))
-            })
-            .unwrap();
-        let rendered = pr.rendered.as_deref().unwrap();
-        assert!(rendered.contains("branches: [trunk]"));
-        assert!(!rendered.contains("__DEFAULT_BRANCH__"));
-    }
-
-    #[test]
     fn plan_github_backend_emits_full_file_set() {
         let tmp = TempDir::new().unwrap();
-        let items = plan_github_backend(tmp.path(), &Manifest::default(), "main").unwrap();
+        let items = plan_github_backend(tmp.path(), &Manifest::default()).unwrap();
         // 2 shared actions + 7 group actions + 2 reusable workflows + 2 root workflows
         assert_eq!(items.len(), 2 + GROUPS.len() + 2 + 2);
     }

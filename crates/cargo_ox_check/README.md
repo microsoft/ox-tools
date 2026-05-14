@@ -52,8 +52,7 @@ uses `just` (or plain `cargo`).
 ### Usage
 
 ```text
-cargo ox-check update [--backend <name>]... [--no-backends]
-                      [--default-branch <name>] [--dry-run]
+cargo ox-check update [--backend <name>]... [--no-backends] [--dry-run]
 ```
 
 `update` is the only subcommand. There is no separate `init`,
@@ -66,9 +65,6 @@ Flags:
   omitted, the backend is autodetected from the `origin` git remote.
 * `--no-backends` — emit only local files; skip every CI backend.
   Mutually exclusive with `--backend`.
-* `--default-branch <name>` — branch the emitted CI root templates
-  target (PR `branches:` filter, nightly schedule branch). If
-  omitted, autodetected from `git symbolic-ref refs/remotes/origin/HEAD` with a fallback to local `main`/`master`.
 * `--dry-run` — analyze without writing. Exits 1 if anything would be
   written or proposed.
 

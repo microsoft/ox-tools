@@ -52,16 +52,6 @@ pub struct UpdateArgs {
     #[arg(long, conflicts_with = "backends")]
     pub no_backends: bool,
 
-    /// Default branch the emitted CI root templates target (PR base
-    /// branch and nightly schedule branch).
-    ///
-    /// If omitted, ox-check autodetects from `git symbolic-ref
-    /// refs/remotes/origin/HEAD`, falling back to whichever of `main` or
-    /// `master` exists locally. If autodetection fails, the run errors
-    /// with a hint to pass this flag explicitly.
-    #[arg(long, value_name = "NAME")]
-    pub default_branch: Option<String>,
-
     /// Analyze and report without writing any files.
     ///
     /// Exits with code 1 if anything would be written or proposed.

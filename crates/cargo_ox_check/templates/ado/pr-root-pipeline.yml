@@ -1,12 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
-# The token __DEFAULT_BRANCH__ is substituted by cargo-ox-check at emit
-# time with the repo's default branch.
 trigger: none
 pr:
   branches:
-    include: [__DEFAULT_BRANCH__]
+    include: [main]
 
 stages:
   - template: ox-check/pr.yml

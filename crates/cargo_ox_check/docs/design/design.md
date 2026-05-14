@@ -113,8 +113,7 @@ Only the repo maintainer who runs updates needs the binary installed. Everyone e
 ### 5.2 The single command
 
 ```text
-cargo ox-check update [--backend <name>]... [--no-backends]
-                      [--default-branch <name>] [--dry-run]
+cargo ox-check update [--backend <name>]... [--no-backends] [--dry-run]
 ```
 
 That is the entire CLI surface. There is intentionally no `init`, `migrate`, `check`, `run`,
@@ -135,21 +134,6 @@ syntax. If `--backend` is omitted, the tool autodetects from the `origin` git re
 is valid and useful for repos that want only the local `just` setup with no CI files.
 `update` never deletes files; to stop using a backend the user removes its directory by
 hand and reruns without that backend.
-
-`--default-branch <name>` controls the branch the emitted CI root templates target: the
-`pull_request.branches` filter in the GitHub PR workflow, and the `pr.branches.include` and
-`schedules.branches.include` lists in the ADO PR and nightly pipelines. The reusable
-workflows and step templates are branch-agnostic; only the root files reference a branch
-name. If `--default-branch` is omitted, ox-check autodetects in this order:
-
-1. `git symbolic-ref refs/remotes/origin/HEAD` — the canonical answer once the remote has
-   been cloned or fetched.
-2. Local heuristic: prefer `main`, fall back to `master`.
-3. If both fail, the run errors with a hint to pass the flag explicitly.
-
-The flag is only consulted when at least one CI backend is selected; `--no-backends` skips
-the resolution entirely so brand-new repos with no remote yet can still drive the local
-recipe tree.
 
 ### 5.3 Daily driver
 
