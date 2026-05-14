@@ -1,15 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
-#
-# No `trigger:` or `pr:` block here: PR validation for Azure Repos must
-# be configured via branch policies in the project UI (the YAML `pr:`
-# block is ignored for Azure Repos anyway). The branch policy points at
-# this pipeline and selects which branches it validates.
-#
-# For GitHub-hosted repos consumed via an Azure Pipelines service
-# connection, add your own `pr:` block here if you want any-branch
-# coverage (`pr: { branches: { include: ['*'] } }`) or a specific filter.
 trigger: none
 
 stages:
