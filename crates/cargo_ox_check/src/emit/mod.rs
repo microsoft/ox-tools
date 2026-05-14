@@ -8,6 +8,7 @@
 //! [`Plan`] and either applies or summarizes it.
 
 pub mod cargo_toml;
+pub mod github;
 pub mod local;
 pub mod managed_region;
 pub mod owned_file;
