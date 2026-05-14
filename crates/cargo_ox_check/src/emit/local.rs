@@ -32,6 +32,20 @@ pub const CHECKS_JUST: &str =
 /// Repo-root-relative path of the per-check recipe file.
 pub const CHECKS_JUST_PATH: &str = "justfiles/ox-check/checks.just";
 
+/// Contents of `justfiles/ox-check/groups.just` baked into the binary.
+pub const GROUPS_JUST: &str =
+    include_str!("../../templates/justfiles/ox-check/groups.just");
+
+/// Repo-root-relative path of the group recipe file.
+pub const GROUPS_JUST_PATH: &str = "justfiles/ox-check/groups.just";
+
+/// Contents of `justfiles/ox-check/tiers.just` baked into the binary.
+pub const TIERS_JUST: &str =
+    include_str!("../../templates/justfiles/ox-check/tiers.just");
+
+/// Repo-root-relative path of the tier aggregator file.
+pub const TIERS_JUST_PATH: &str = "justfiles/ox-check/tiers.just";
+
 /// Emit a [`PlanItem`] for `justfiles/ox-check/tools.just`.
 ///
 /// # Errors
@@ -48,6 +62,41 @@ pub fn plan_tools_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem
 /// Propagates I/O errors from [`plan_owned_file`].
 pub fn plan_checks_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
     plan_owned_file(repo_root, manifest, CHECKS_JUST_PATH, CHECKS_JUST)
+}
+
+/// Emit a [`PlanItem`] for `justfiles/ox-check/groups.just`.
+///
+/// # Errors
+///
+/// Propagates I/O errors from [`plan_owned_file`].
+pub fn plan_groups_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
+    plan_owned_file(repo_root, manifest, GROUPS_JUST_PATH, GROUPS_JUST)
+}
+
+/// Emit a [`PlanItem`] for `justfiles/ox-check/tiers.just`.
+///
+/// # Errors
+///
+/// Propagates I/O errors from [`plan_owned_file`].
+pub fn plan_tiers_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
+    plan_owned_file(repo_root, manifest, TIERS_JUST_PATH, TIERS_JUST)
+}
+
+/// Plan all four files of the `justfiles/ox-check/` tree.
+///
+/// # Errors
+///
+/// Propagates I/O errors from any per-file emitter.
+pub fn plan_local_just_tree(
+    repo_root: &Path,
+    manifest: &Manifest,
+) -> Result<Vec<PlanItem>> {
+    Ok(vec![
+        plan_tools_just(repo_root, manifest)?,
+        plan_checks_just(repo_root, manifest)?,
+        plan_groups_just(repo_root, manifest)?,
+        plan_tiers_just(repo_root, manifest)?,
+    ])
 }
 
 #[cfg(test)]
@@ -90,6 +139,38 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let item = plan_checks_just(tmp.path(), &Manifest::default()).unwrap();
         assert_eq!(item.decision, Decision::Write);
+    }
+
+    #[test]
+    fn groups_just_template_includes_all_seven_groups() {
+        for needle in [
+            "ox-check-pr-fast:",
+            "ox-check-pr-test:",
+            "ox-check-pr-mutants:",
+            "ox-check-nightly-test:",
+            "ox-check-nightly-advisories:",
+            "ox-check-nightly-runtime:",
+            "ox-check-nightly-exhaustive:",
+        ] {
+            assert!(GROUPS_JUST.contains(needle), "groups.just missing '{needle}'");
+        }
+    }
+
+    #[test]
+    fn tiers_just_template_has_three_tiers() {
+        for needle in ["ox-check-pr:", "ox-check-nightly:", "ox-check-full:"] {
+            assert!(TIERS_JUST.contains(needle), "tiers.just missing '{needle}'");
+        }
+    }
+
+    #[test]
+    fn plan_local_just_tree_emits_four_items() {
+        let tmp = TempDir::new().unwrap();
+        let items = plan_local_just_tree(tmp.path(), &Manifest::default()).unwrap();
+        assert_eq!(items.len(), 4);
+        for item in &items {
+            assert_eq!(item.decision, Decision::Write);
+        }
     }
 
     #[test]
