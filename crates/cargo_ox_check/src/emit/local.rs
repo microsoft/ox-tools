@@ -25,6 +25,13 @@ pub const TOOLS_JUST: &str =
 /// Repo-root-relative path of the tools recipe file.
 pub const TOOLS_JUST_PATH: &str = "justfiles/ox-check/tools.just";
 
+/// Contents of `justfiles/ox-check/checks.just` baked into the binary.
+pub const CHECKS_JUST: &str =
+    include_str!("../../templates/justfiles/ox-check/checks.just");
+
+/// Repo-root-relative path of the per-check recipe file.
+pub const CHECKS_JUST_PATH: &str = "justfiles/ox-check/checks.just";
+
 /// Emit a [`PlanItem`] for `justfiles/ox-check/tools.just`.
 ///
 /// # Errors
@@ -32,6 +39,15 @@ pub const TOOLS_JUST_PATH: &str = "justfiles/ox-check/tools.just";
 /// Propagates I/O errors from [`plan_owned_file`].
 pub fn plan_tools_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
     plan_owned_file(repo_root, manifest, TOOLS_JUST_PATH, TOOLS_JUST)
+}
+
+/// Emit a [`PlanItem`] for `justfiles/ox-check/checks.just`.
+///
+/// # Errors
+///
+/// Propagates I/O errors from [`plan_owned_file`].
+pub fn plan_checks_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
+    plan_owned_file(repo_root, manifest, CHECKS_JUST_PATH, CHECKS_JUST)
 }
 
 #[cfg(test)]
@@ -45,6 +61,35 @@ mod tests {
     fn tools_just_template_is_not_empty() {
         assert!(TOOLS_JUST.contains("ox-check-tools-check"));
         assert!(TOOLS_JUST.contains("_ox-check-require"));
+    }
+
+    #[test]
+    fn checks_just_template_includes_all_catalog_checks() {
+        // Sample a handful from each group to guard against accidental deletions.
+        for needle in [
+            "ox-check-fmt:",
+            "ox-check-clippy:",
+            "ox-check-license-headers:",
+            "ox-check-pr-title:",
+            "ox-check-llvm-cov:",
+            "ox-check-doc-test:",
+            "ox-check-mutants:",
+            "ox-check-miri:",
+            "ox-check-mutants-full:",
+            "ox-check-bench:",
+        ] {
+            assert!(
+                CHECKS_JUST.contains(needle),
+                "checks.just missing recipe '{needle}'"
+            );
+        }
+    }
+
+    #[test]
+    fn checks_just_emitter_writes_on_first_render() {
+        let tmp = TempDir::new().unwrap();
+        let item = plan_checks_just(tmp.path(), &Manifest::default()).unwrap();
+        assert_eq!(item.decision, Decision::Write);
     }
 
     #[test]
