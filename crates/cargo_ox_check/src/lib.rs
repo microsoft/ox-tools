@@ -27,8 +27,10 @@
 
 #![deny(unsafe_code)]
 
+pub mod backend;
 pub mod cli;
 pub mod run;
 
+pub use backend::Backend;
 pub use cli::{Cli, Command, UpdateArgs};
 pub use run::run;
