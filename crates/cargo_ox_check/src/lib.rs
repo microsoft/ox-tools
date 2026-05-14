@@ -28,13 +28,17 @@
 #![deny(unsafe_code)]
 
 pub mod backend;
+pub mod checksum;
 pub mod cli;
+pub mod decision;
 pub mod manifest;
 pub mod run;
 pub mod workspace;
 
 pub use backend::Backend;
+pub use checksum::{checksum_bytes, checksum_str};
 pub use cli::{Cli, Command, UpdateArgs};
+pub use decision::{Decision, DecisionInputs, decide};
 pub use manifest::{Manifest, RegionKey};
 pub use run::run;
 pub use workspace::{Workspace, WorkspaceMember};
