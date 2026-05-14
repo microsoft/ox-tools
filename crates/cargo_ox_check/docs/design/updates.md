@@ -360,19 +360,21 @@ opt-out mechanism remains entirely in-file.
 
 ## 8. Backend selection during update
 
-`--backend github|ado|both|none`. If omitted, autodetected from the `origin` git remote
-URL:
+`--backend <name>` is a repeatable flag; valid names today are `github` and `ado`. If
+omitted, the tool autodetects from the `origin` git remote URL:
 
 - `github.com` → `github`
 - `dev.azure.com` or `*.visualstudio.com` → `ado`
-- anything else, or if `origin` is missing → the tool errors out asking for `--backend`.
+- anything else, or if `origin` is missing → the tool errors out asking for an explicit
+  `--backend` flag.
 
-`--backend none` is valid and useful for repos that want only the local `just` setup
-with no CI files. Autodetection runs every time; there is no "first run" special case.
-`update` never deletes files. To stop using a backend, the user removes the
-corresponding directory by hand and trims the stale entries from `.ox-check.lock`
-(or just deletes them and reruns; the tool purges manifest entries whose catalog item
-is no longer enabled by the current `--backend` choice).
+`--no-backends` is valid and useful for repos that want only the local `just` setup
+with no CI files; it is mutually exclusive with `--backend`. Autodetection runs every
+time `--backend` and `--no-backends` are both absent; there is no "first run" special
+case. `update` never deletes files. To stop using a backend, the user removes the
+corresponding directory by hand and trims the stale entries from `.ox-check.lock` (or
+just deletes them and reruns without that backend; the tool purges manifest entries
+whose catalog item is no longer enabled by the current backend set).
 
 ## 9. Dry-run UX
 
@@ -388,8 +390,8 @@ the manifest nor any file). Output is grouped by category:
   emptiness has no special status in the algorithm.
 - **Unchanged**: clean items whose template is identical to last render.
 - **Stale manifest entries**: paths or `(host, id)` pairs in `.ox-check.lock` that the
-  current catalog no longer manages (e.g. removed by ox-check version bump, or by switching
-  `--backend`). These are purged on the next non-dry-run.
+  current catalog no longer manages (e.g. removed by ox-check version bump, or by
+  changing the enabled backend set). These are purged on the next non-dry-run.
 
 Exit code 0 if nothing is dirty-and-template-changed; exit code 1 otherwise. The same
 output format is printed at the end of a non-dry-run `update`, summarizing what

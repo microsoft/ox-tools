@@ -113,7 +113,7 @@ Only the repo maintainer who runs updates needs the binary installed. Everyone e
 ### 5.2 The single command
 
 ```text
-cargo ox-check update [--backend github|ado|both|none] [--dry-run]
+cargo ox-check update [--backend <name>]... [--no-backends] [--dry-run]
 ```
 
 That is the entire CLI surface. There is intentionally no `init`, `migrate`, `check`, `run`,
@@ -126,11 +126,14 @@ The full per-item decision table lives in [updates.md](./updates.md).
 sync with the binary's current templates and all managed content matched, ignoring disabled
 items"; exit code 1 means "something is out of date or user-modified."
 
-`--backend` controls which CI backend(s) get emitted: `github`, `ado`, `both`, or `none`. If
-omitted, the tool autodetects from the `origin` git remote URL (`github.com` → `github`,
-`dev.azure.com`/`*.visualstudio.com` → `ado`). `--backend none` is valid and useful for repos
-that want only the local `just` setup. `update` never deletes files; to stop using a backend
-the user removes its directory by hand.
+`--backend <name>` is a repeatable flag controlling which CI backend(s) get emitted. Valid
+backend names today are `github` and `ado`; the flag is repeatable (`--backend github
+--backend ado`) so that adding a third backend in the future doesn't require new CLI
+syntax. If `--backend` is omitted, the tool autodetects from the `origin` git remote URL
+(`github.com` → `github`; `dev.azure.com` / `*.visualstudio.com` → `ado`). `--no-backends`
+is valid and useful for repos that want only the local `just` setup with no CI files.
+`update` never deletes files; to stop using a backend the user removes its directory by
+hand and reruns without that backend.
 
 ### 5.3 Daily driver
 
@@ -212,14 +215,14 @@ repo/
 ├── rust-toolchain.toml                            user-authored (read only)
 ├── .cargo/config.toml                             user-authored (read only)
 │
-├── .github/                                       only if --backend github|both — see github.md
+├── .github/                                       only if --backend github (or autodetected) — see github.md
 │   ├── actions/ox-check-*/                             owned   (per-group composite actions)
 │   ├── workflows/ox-check-pr-impl.yml                  owned   (reusable workflow doing the wiring)
 │   ├── workflows/ox-check-nightly-impl.yml             owned
 │   ├── workflows/ox-check-pr.yml                       owned   (root workflow: triggers/permissions/runner)
 │   └── workflows/ox-check-nightly.yml                  owned
 │
-└── .pipelines/                                    only if --backend ado|both — see ado.md
+└── .pipelines/                                    only if --backend ado (or autodetected) — see ado.md
     ├── ox-check/pr.yml                                 owned   (stages template doing the wiring)
     ├── ox-check/nightly.yml                            owned
     ├── ox-check/steps/*.yml                            owned   (per-group step templates)

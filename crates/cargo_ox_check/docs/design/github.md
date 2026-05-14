@@ -1,6 +1,6 @@
 # GitHub Actions Integration
 
-This document describes what `cargo ox-check update --backend github|both` emits for GitHub
+This document describes what `cargo ox-check update --backend github` emits for GitHub
 Actions, and how a repo wires those files into its own CI.
 
 ox-check emits three layers, all owned by ox-check with the standard owned-file flow (edit →
