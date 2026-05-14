@@ -1,14 +1,14 @@
-# cargo-ox-ci — Design
+# cargo-ox-check — Design
 
 > Status: **Draft**.
-> Crate name: `cargo-ox-ci`.
+> Crate name: `cargo-ox-check`.
 > Home: `github.com/microsoft/ox-tools`, published to crates.io.
 
 This is the top-level design document. It captures the why, the principles, and the
 user-visible shape of the tool. Detail lives in companion documents:
 
 - [checks.md](./checks.md) — the opinionated check catalog, the group/tier structure
-- [local.md](./local.md) — the `justfiles/ox-ci/` layout, recipe surface, and customization.
+- [local.md](./local.md) — the `justfiles/ox-check/` layout, recipe surface, and customization.
 - [updates.md](./updates.md) — the drift-detection and update algorithm; opt-out semantics.
 - [github.md](./github.md) — GitHub Actions emission, example workflows, impact wiring.
 - [ado.md](./ado.md) — Azure DevOps Pipelines emission, 1ESPT/msrustup composition.
@@ -52,10 +52,10 @@ missed, and onboarding new Rust repos requires copying-and-praying.
    root pipeline does the wrapping. See [ado.md](./ado.md).
 5. **Local/CI parity at every level**: every individual check, every group of checks, and the
    full tier are all reproducible locally with a single `just` invocation, using the exact same
-   arguments CI uses. The three commands `just ox-ci-pr`, `just ox-ci-nightly`, and
-   `just ox-ci-full` (= pr + nightly) are first-class local entry points.
+   arguments CI uses. The three commands `just ox-check-pr`, `just ox-check-nightly`, and
+   `just ox-check-full` (= pr + nightly) are first-class local entry points.
 6. **Plain-cargo fallback**: a developer with only `cargo` installed (no `just`, no
-   `cargo-ox-ci`) can still build and run tests.
+   `cargo-ox-check`) can still build and run tests.
 7. **Friendly updates**: the tool detects, per file and per managed region, whether the user has
    modified it, and updates only the unmodified bits.
 8. **Open source**: the crate ships from `github.com/microsoft/ox-tools` and publishes to
@@ -64,8 +64,8 @@ missed, and onboarding new Rust repos requires copying-and-praying.
 
 ## 3. Non-Goals
 
-- Replacing 1ESPT, SubstratePT, CloudBuild, or any other compliance/release pipeline. ox-ci's
-  emitted templates contain no references to those harnesses; users wrap ox-ci's stages
+- Replacing 1ESPT, SubstratePT, CloudBuild, or any other compliance/release pipeline. ox-check's
+  emitted templates contain no references to those harnesses; users wrap ox-check's stages
   template in their compliance-extending pipeline themselves. See [ado.md](./ado.md).
 - Building a general-purpose CI compiler/IR. We share **check semantics**, not CI features.
 - Owning `.cargo/config.toml`, `rust-toolchain.toml`, or workspace layout in `Cargo.toml`.
@@ -77,18 +77,18 @@ missed, and onboarding new Rust repos requires copying-and-praying.
 - Hosting a service. The tool is a CLI binary; updates ship via crates.io.
 - Acting as a runtime: the tool emits `just` recipes and CI building blocks, then exits.
   It is **not** invoked at build/test/CI time. `just` is the runtime.
-- Destructive operations: `cargo ox-ci update` never deletes files. Removing a previously
+- Destructive operations: `cargo ox-check update` never deletes files. Removing a previously
   configured CI backend is a manual `rm -rf` by the user.
 
 ## 4. Guiding Principle
 
-> **`cargo-ox-ci` writes files. `just` runs them. The repo composes everything.**
+> **`cargo-ox-check` writes files. `just` runs them. The repo composes everything.**
 
 Corollaries that drive every section below:
 
 - The tool's only job is to author and update files. It is not on the local-build hot path or in
   the CI graph at runtime.
-- The local daily-driver is `just ox-ci` (and friends). Those recipes call `cargo …` directly. CI
+- The local daily-driver is `just ox-check` (and friends). Those recipes call `cargo …` directly. CI
   jobs invoke the same `just` recipes. Local and CI are bit-identical because they share one
   implementation in the imported `.just` files.
 - Drift detection lives inside the files themselves (per-file checksums and per-managed-region
@@ -97,14 +97,14 @@ Corollaries that drive every section below:
   config files (`deny.toml`, `[workspace.lints]` in the workspace `Cargo.toml`, and `[lints]`
   in each crate's `Cargo.toml`, plus `.delta.toml` and `rustfmt.toml`). Outside those sections,
   the user's content is preserved verbatim. Everything else is in tool-owned files under
-  `justfiles/ox-ci/` and the backend-specific CI directories.
+  `justfiles/ox-check/` and the backend-specific CI directories.
 
 ## 5. User Experience
 
 ### 5.1 Installation (maintainer)
 
 ```sh
-cargo install --locked cargo-ox-ci
+cargo install --locked cargo-ox-check
 ```
 
 Only the repo maintainer who runs updates needs the binary installed. Everyone else uses
@@ -113,7 +113,7 @@ Only the repo maintainer who runs updates needs the binary installed. Everyone e
 ### 5.2 The single command
 
 ```text
-cargo ox-ci update [--backend github|ado|both|none] [--dry-run]
+cargo ox-check update [--backend github|ado|both|none] [--dry-run]
 ```
 
 That is the entire CLI surface. There is intentionally no `init`, `migrate`, `check`, `run`,
@@ -137,33 +137,33 @@ the user removes its directory by hand.
 The local UX is plain `just`:
 
 ```text
-$ just ox-ci
-[just] running ox-ci-tools-check
-[just] running ox-ci-pr-fast
-[just] running ox-ci-pr-test
-[just] running ox-ci-pr-mutants
-ox-ci OK
+$ just ox-check
+[just] running ox-check-tools-check
+[just] running ox-check-pr-fast
+[just] running ox-check-pr-test
+[just] running ox-check-pr-mutants
+ox-check OK
 ```
 
-`ox-ci` is an alias for `ox-ci-pr`. Both are plain `just` recipes (not wrappers around
-`cargo ox-ci`). The PR tier is made up of a small set of *check groups* — each group is a
+`ox-check` is an alias for `ox-check-pr`. Both are plain `just` recipes (not wrappers around
+`cargo ox-check`). The PR tier is made up of a small set of *check groups* — each group is a
 `just` recipe that runs the individual checks belonging to it. Groups are the level at which
 CI parallelizes. See [checks.md](./checks.md) for the group → check mapping and
 [local.md](./local.md) for the recipe tree.
 
 Other tier entry points:
 
-- `just ox-ci-pr` — fast checks suitable for every PR.
-- `just ox-ci-nightly` — slow checks: miri, full mutants, feature-powerset, bench, etc.
-- `just ox-ci-full` — both tiers, run sequentially.
+- `just ox-check-pr` — fast checks suitable for every PR.
+- `just ox-check-nightly` — slow checks: miri, full mutants, feature-powerset, bench, etc.
+- `just ox-check-full` — both tiers, run sequentially.
 
-A user with only `just` installed (no `cargo-ox-ci`) can run any check, any group, or any tier
-without ever invoking the tool. `cargo-ox-ci` is only required by the maintainer who wants to
+A user with only `just` installed (no `cargo-ox-check`) can run any check, any group, or any tier
+without ever invoking the tool. `cargo-ox-check` is only required by the maintainer who wants to
 update the recipes or CI building blocks.
 
 ### 5.4 No-tooling fallback
 
-A user with only `cargo` (no `just`, no `cargo-ox-ci`) can still run the basics:
+A user with only `cargo` (no `just`, no `cargo-ox-check`) can still run the basics:
 
 ```sh
 cargo test   --workspace --all-targets --all-features --locked
@@ -172,24 +172,24 @@ cargo fmt --check
 ```
 
 The same commands appear as the body of the corresponding `just` recipes in
-`justfiles/ox-ci/checks.just`, so they are discoverable by reading that file. The fallback
+`justfiles/ox-check/checks.just`, so they are discoverable by reading that file. The fallback
 covers core hygiene only — coverage, miri, mutants, etc. still require their respective tools.
 
 ## 6. Repo Layout
 
 The tool produces a small set of files. They fall into three categories:
 
-- **owned** — the tool fully writes the file. There is no in-file checksum line; ox-ci
+- **owned** — the tool fully writes the file. There is no in-file checksum line; ox-check
   tracks ownership and last-rendered content in a sidecar manifest at the repo root
-  (`.ox-ci.lock`). An advisory one-line `# Managed by cargo-ox-ci` comment may appear
+  (`.ox-check.lock`). An advisory one-line `# Managed by cargo-ox-check` comment may appear
   at the top of each owned file, but it carries no metadata. Updates apply
   automatically when the user hasn't touched the file. If the user edits the file, the
-  next `update` writes a `.ox-ci-proposed` sibling **only if the template has changed
+  next `update` writes a `.ox-check-proposed` sibling **only if the template has changed
   since the last render** — claiming a file with no upstream churn produces zero
   noise.
 - **managed-region** — a user-composed file with one or more tool-managed sections
-  bracketed by sentinel comments. The sentinel pair (`# >>> ox-ci-managed: <id>` …
-  `# <<< ox-ci-managed: <id>`) delimits the region body and identifies it by stable ID;
+  bracketed by sentinel comments. The sentinel pair (`# >>> ox-check-managed: <id>` …
+  `# <<< ox-check-managed: <id>`) delimits the region body and identifies it by stable ID;
   the manifest tracks the last-rendered checksum per `(host, id)`. Outside the
   sentinels, the user's content is preserved byte-for-byte.
 - **user-authored** — files the user owns; the tool only reads them.
@@ -201,47 +201,47 @@ that owned item. See [updates.md §6](./updates.md#6-opting-out-in-file-stubs).
 
 ```text
 repo/
-├── .ox-ci.lock                                    sidecar manifest tracking last-rendered checksums (see updates.md)
-├── Justfile                                       managed-region: ox-ci-imports
-├── justfiles/ox-ci/                               owned (see local.md)
-├── Cargo.toml                                     managed-region: ox-ci-workspace-lints (or ox-ci-lints in single-crate)
-├── crates/<member>/Cargo.toml                     managed-region: ox-ci-lints (one per workspace member)
-├── deny.toml                                      managed-region: ox-ci-deny
-├── rustfmt.toml                                   managed-region: ox-ci-rustfmt (opt out with empty stub)
-├── .delta.toml                                    managed-region: ox-ci-delta (opt out disables impact scoping)
+├── .ox-check.lock                                    sidecar manifest tracking last-rendered checksums (see updates.md)
+├── Justfile                                       managed-region: ox-check-imports
+├── justfiles/ox-check/                               owned (see local.md)
+├── Cargo.toml                                     managed-region: ox-check-workspace-lints (or ox-check-lints in single-crate)
+├── crates/<member>/Cargo.toml                     managed-region: ox-check-lints (one per workspace member)
+├── deny.toml                                      managed-region: ox-check-deny
+├── rustfmt.toml                                   managed-region: ox-check-rustfmt (opt out with empty stub)
+├── .delta.toml                                    managed-region: ox-check-delta (opt out disables impact scoping)
 ├── rust-toolchain.toml                            user-authored (read only)
 ├── .cargo/config.toml                             user-authored (read only)
 │
 ├── .github/                                       only if --backend github|both — see github.md
-│   ├── actions/ox-ci-*/                             owned   (per-group composite actions)
-│   ├── workflows/ox-ci-pr-impl.yml                  owned   (reusable workflow doing the wiring)
-│   ├── workflows/ox-ci-nightly-impl.yml             owned
-│   ├── workflows/ox-ci-pr.yml                       owned   (root workflow: triggers/permissions/runner)
-│   └── workflows/ox-ci-nightly.yml                  owned
+│   ├── actions/ox-check-*/                             owned   (per-group composite actions)
+│   ├── workflows/ox-check-pr-impl.yml                  owned   (reusable workflow doing the wiring)
+│   ├── workflows/ox-check-nightly-impl.yml             owned
+│   ├── workflows/ox-check-pr.yml                       owned   (root workflow: triggers/permissions/runner)
+│   └── workflows/ox-check-nightly.yml                  owned
 │
 └── .pipelines/                                    only if --backend ado|both — see ado.md
-    ├── ox-ci/pr.yml                                 owned   (stages template doing the wiring)
-    ├── ox-ci/nightly.yml                            owned
-    ├── ox-ci/steps/*.yml                            owned   (per-group step templates)
-    ├── ox-ci-pr.yml                                 owned   (root pipeline: triggers/pool/optional extends:)
-    └── ox-ci-nightly.yml                            owned
+    ├── ox-check/pr.yml                                 owned   (stages template doing the wiring)
+    ├── ox-check/nightly.yml                            owned
+    ├── ox-check/steps/*.yml                            owned   (per-group step templates)
+    ├── ox-check-pr.yml                                 owned   (root pipeline: triggers/pool/optional extends:)
+    └── ox-check-nightly.yml                            owned
 ```
 
 Detail on each host:
 
-- **`Justfile` and `justfiles/ox-ci/*.just`** — see [local.md](./local.md).
+- **`Justfile` and `justfiles/ox-check/*.just`** — see [local.md](./local.md).
 - **`Cargo.toml` lints regions** — workspace `Cargo.toml` carries the
-  `ox-ci-workspace-lints` region containing a single `[workspace.lints]` table whose
+  `ox-check-workspace-lints` region containing a single `[workspace.lints]` table whose
   rust/clippy/rustdoc entries are written in dotted-key form
   (`rust.unsafe_op_in_unsafe_fn = "deny"`, `clippy.unwrap_used = "deny"`, etc.). This
-  form is chosen because TOML forbids re-declaring a table header — if ox-ci wrote
+  form is chosen because TOML forbids re-declaring a table header — if ox-check wrote
   `[workspace.lints.clippy]` inside the region, users couldn't add another
   `[workspace.lints.clippy]` block elsewhere in the file. With dotted keys, users
   append new lints in the same scope right after the closing sentinel; see §7. Each
-  member `Cargo.toml` carries an `ox-ci-lints` region with exactly
+  member `Cargo.toml` carries an `ox-check-lints` region with exactly
   `[lints]\nworkspace = true`. The emitter uses `toml-edit` for round-trip-safe
   manipulation. In a single-crate repo (no `[workspace]` table), the workspace region
-  becomes `ox-ci-lints` and contains a single `[lints]` table with the same
+  becomes `ox-check-lints` and contains a single `[lints]` table with the same
   dotted-key layout.
 - **`deny.toml`** — managed region at the end of the file with the tool's baseline
   license/advisory rules. Users add their own keys outside the region. Created if absent.
@@ -254,11 +254,11 @@ Detail on each host:
   scoping entirely. See [checks.md](./checks.md#impact-scoping) and the per-backend wiring in
   [github.md](./github.md) / [ado.md](./ado.md).
 - **`rust-toolchain.toml`** and **`.cargo/config.toml`** — never touched. Read-only inputs
-  used by `_ox-ci-require` to validate the user's `rustc` version against the catalog
+  used by `_ox-check-require` to validate the user's `rustc` version against the catalog
   minimum. The CI building blocks do not install Rust; that is the user's pipeline's job
   (msrustup in 1ESPT, rustup on GH runners).
 
-The tool's persistent state lives in `.ox-ci.lock` at the repo root — the sidecar
+The tool's persistent state lives in `.ox-check.lock` at the repo root — the sidecar
 manifest tracking last-rendered checksums per owned file and per managed region. See
 [updates.md §1](./updates.md#1-the-manifest). All other state — including opt-outs —
 lives in the affected file itself; see [updates.md](./updates.md).
@@ -268,8 +268,8 @@ lives in the affected file itself; see [updates.md](./updates.md).
 Four escape valves, in increasing severity:
 
 1. **Compose around the tool**: add your own `.just` files and import them from your `Justfile`
-   alongside the `ox-ci/*` imports. Add your own `.github/workflows/*.yml` files (anything not
-   prefixed `ox-ci-` is left alone). Add your own `.pipelines/` templates and root pipelines.
+   alongside the `ox-check/*` imports. Add your own `.github/workflows/*.yml` files (anything not
+   prefixed `ox-check-` is left alone). Add your own `.pipelines/` templates and root pipelines.
    The path of least resistance and the recommended approach for project-specific checks.
 2. **Edit a managed-region host file outside the sentinels**: extra recipes in your
    `Justfile`, extra rules in `deny.toml` outside the managed region, extra clippy
@@ -281,17 +281,17 @@ Four escape valves, in increasing severity:
    inside it, which triggers the dirty-file flow (see [updates.md §5](./updates.md#5-the-decision-algorithm)).
 3. **Opt out by emptying.** Empty a managed region (leave only the sentinels) or empty
    an owned file. The tool will skip the item on every future `update` and only emit a
-   `.ox-ci-proposed` sibling when the template actually changes. See
+   `.ox-check-proposed` sibling when the template actually changes. See
    [updates.md §6](./updates.md#6-opting-out-in-file-stubs).
 4. **Take ownership of an owned file or managed region by editing it.** The next
    `update` detects the dirt (via checksum comparison against the manifest), leaves your
-   file alone, and writes a `.ox-ci-proposed` sibling only if the template changed since
+   file alone, and writes a `.ox-check-proposed` sibling only if the template changed since
    the last render. Re-bless by deleting your file (or region) and rerunning `update`.
    Suitable for one-off divergence; for permanent divergence prefer the opt-out stub.
 
 What the tool deliberately does **not** do:
 
-- Modify `Cargo.toml` outside the `ox-ci-workspace-lints` / `ox-ci-lints` managed regions.
+- Modify `Cargo.toml` outside the `ox-check-workspace-lints` / `ox-check-lints` managed regions.
 - Modify `.cargo/config.toml` or `rust-toolchain.toml`.
 - Replace existing workflows, root pipelines, or any file it didn't create.
 
@@ -317,9 +317,9 @@ outstanding proposed updates.
 
 ### 8.2 Monorepo / multi-workspace
 
-Out of scope for v1. `ox-ci-*` recipes always operate on `--workspace` from the repo root.
+Out of scope for v1. `ox-check-*` recipes always operate on `--workspace` from the repo root.
 Repos with multiple workspaces (uncommon in the surveyed set) compose by having a separate
-ox-ci tree per workspace root, each with its own `cargo ox-ci update`. Revisit after first
+ox-check tree per workspace root, each with its own `cargo ox-check update`. Revisit after first
 adopters report friction.
 
 ### 8.3 Cross-OS test matrices
@@ -336,7 +336,7 @@ macOS is not in the default matrix — adopters who need it add it via the root 
 documented in [github.md §4](./github.md#4-owned-reusable-workflows) for `test_os` and
 [ado.md §4](./ado.md#4-owned-stages-templates) for `linuxPool`/`windowsPool`.
 
-Locally there is no matrix — `just ox-ci-pr-test` runs against whatever OS the developer
+Locally there is no matrix — `just ox-check-pr-test` runs against whatever OS the developer
 is on. CI fan-out lives entirely in the owned wiring layer (the reusable workflow / stages
 template), so users don't write per-OS jobs.
 
@@ -355,7 +355,7 @@ boolean-regex primitive). That check is written as a `[script("pwsh")]` block. `
 is preinstalled on GH-hosted runners (`ubuntu-latest` included) and Microsoft-hosted
 ADO Linux agents; Linux/macOS developers install it from
 <https://github.com/PowerShell/PowerShell> as a one-time prerequisite. The
-`_ox-ci-require pwsh` recipe enforces this with a clean failure message and a per-OS
+`_ox-check-require pwsh` recipe enforces this with a clean failure message and a per-OS
 install hint. The dependency is kept (rather than dropped to remove the one script)
 so future additions that don't fit cleanly as cargo subcommands have an established
 escape hatch.

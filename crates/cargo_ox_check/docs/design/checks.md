@@ -2,7 +2,7 @@
 
 This document defines the opinionated default profile: which checks ship, how they're
 grouped, which tier they belong to, and how the tool-version policy works. It is the
-canonical source for "what does ox-ci actually run?"
+canonical source for "what does ox-check actually run?"
 
 See also:
 
@@ -17,8 +17,8 @@ each group belongs to exactly one *tier*. Groups are the unit of CI parallelizat
 job per group) and the unit of local invocation through `just` (one `just` recipe per group).
 A user (or CI) never has to enumerate individual checks — they operate at the group level.
 
-The **single-tier-per-group** rule is deliberate: if you see `just ox-ci-pr-fast` in CI logs,
-you know it is a PR-tier check; if you see `just ox-ci-nightly-runtime`, you know it is
+The **single-tier-per-group** rule is deliberate: if you see `just ox-check-pr-fast` in CI logs,
+you know it is a PR-tier check; if you see `just ox-check-nightly-runtime`, you know it is
 nightly-only. This makes "what gets executed" trivially answerable from the group name.
 
 A consequence is that some checks must appear in two groups — one PR group and one nightly
@@ -26,8 +26,8 @@ group — when the check should run in both tiers. The two invocations may diffe
 `mutants` runs diff-scoped in PR and full-workspace in nightly) or be identical (e.g. `tests`
 runs the same way in both, but the nightly run catches flakes/environmental drift on `main`).
 
-Group recipes follow the pattern `ox-ci-<tier>-<group>` (e.g. `ox-ci-pr-fast`,
-`ox-ci-nightly-runtime`). The tier prefix removes the need to pick distinct names for groups
+Group recipes follow the pattern `ox-check-<tier>-<group>` (e.g. `ox-check-pr-fast`,
+`ox-check-nightly-runtime`). The tier prefix removes the need to pick distinct names for groups
 in different tiers and makes the tier of any failing job obvious from its name alone.
 
 ### PR tier (3 groups)
@@ -47,10 +47,10 @@ in different tiers and makes the tier of any failing job obvious from its name a
 | `nightly-runtime`    | Linux only      | Tests under stricter runtimes that catch UB and timing/threading bugs: `miri`, `careful`. (Both tools are Linux-only.)                  |
 | `nightly-exhaustive` | Linux only      | The expensive whole-workspace permutations that don't fit the PR budget: full `cargo mutants`, `cargo-hack --feature-powerset`, and `cargo bench --no-run` plus a single-iteration smoke run per bench target. |
 
-OS-scope is an opinion ox-ci ships and the user overrides per-repo through the
+OS-scope is an opinion ox-check ships and the user overrides per-repo through the
 backend-specific knobs ([github.md §4](./github.md#4-owned-reusable-workflows) for
 `test_os`, [ado.md §4](./ado.md#4-owned-stages-templates) for `linuxPool`/`windowsPool`).
-Locally there is no OS matrix; `just ox-ci-pr-test` runs against whatever OS the
+Locally there is no OS matrix; `just ox-check-pr-test` runs against whatever OS the
 developer is on. See [design.md §8.3](./design.md#83-cross-os-test-matrices) for the
 overall rationale.
 
@@ -77,7 +77,7 @@ that provided the strongest version of the check.
 | `doc-build`                    | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps` | oxidizer-github |
 | `readme-check`                 | `cargo doc2readme --check` for each crate that opts in (presence of a `[package.metadata.doc2readme]` table) | oxidizer-github |
 | `spellcheck`                   | `cargo spellcheck check --code 1`                         | oxidizer-github |
-| `pr-title`                     | Conventional-Commits regex applied to the title in the `PR_TITLE` env var, with a fallback to `git log -1 --pretty=%s HEAD` when unset. Written as a `[script("pwsh")]` recipe (the one check that needs scripting; see [design.md §8.3](./design.md#83-cross-os-test-matrices)). The CI emitter sets `PR_TITLE` on the pr-fast job: GitHub Actions reads `${{ github.event.pull_request.title }}`; ADO reads `$(System.PullRequest.Title)`. Local `just ox-ci-pr-fast` works without setup via the git fallback. | oxidizer-github |
+| `pr-title`                     | Conventional-Commits regex applied to the title in the `PR_TITLE` env var, with a fallback to `git log -1 --pretty=%s HEAD` when unset. Written as a `[script("pwsh")]` recipe (the one check that needs scripting; see [design.md §8.3](./design.md#83-cross-os-test-matrices)). The CI emitter sets `PR_TITLE` on the pr-fast job: GitHub Actions reads `${{ github.event.pull_request.title }}`; ADO reads `$(System.PullRequest.Title)`. Local `just ox-check-pr-fast` works without setup via the git fallback. | oxidizer-github |
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
 | `udeps`                        | `cargo +nightly udeps --workspace --all-targets --all-features` | oxidizer, oxidizer-github |
@@ -160,7 +160,7 @@ as the `just` recipe defines them. A failure in any check fails the group; the p
 lines are visible in the job log but the CI surface (the green/red pill in the PR view) is
 per-group.
 
-This is the deliberate middle ground between "one giant CI step running `just ox-ci-pr`"
+This is the deliberate middle ground between "one giant CI step running `just ox-check-pr`"
 (loses all per-check structure, one red X for any failure) and "twenty-five individual CI
 steps" (unmaintainable YAML, fragile, and the tool would have to re-emit the workflow file
 every time the catalog changes). Groups are stable units of meaning the user can talk about;
@@ -189,8 +189,8 @@ What that means concretely:
 
 The single-tier-per-group rule still holds: when a check appears in both tiers it lives in
 two different groups (one PR group, one nightly group). Repos that want a
-belt-and-suspenders cron run of `just ox-ci-pr` on `main` can wire one up in their own
-workflow/pipeline file alongside the ox-ci composite actions / step templates.
+belt-and-suspenders cron run of `just ox-check-pr` on `main` can wire one up in their own
+workflow/pipeline file alongside the ox-check composite actions / step templates.
 
 ## 5. Impact-scoping check → env-var mapping
 
@@ -202,9 +202,9 @@ flags (the workspace complement of the relevant tier), which composes cleanly wi
 
 | Env var                       | cargo-delta source                                     | Checks that consume it                               |
 |-------------------------------|--------------------------------------------------------|------------------------------------------------------|
-| `OX_CI_EXCLUDE_NOT_MODIFIED`  | `cargo delta impact -f cargo-excludes --modified`      | clippy, udeps                                        |
-| `OX_CI_EXCLUDE_NOT_AFFECTED`  | `cargo delta impact -f cargo-excludes --affected`      | llvm-cov, doc-test, examples, miri, careful, semver-check, mutants (diff and full), cargo-hack powerset, bench |
-| `OX_CI_EXCLUDE_NOT_REQUIRED`  | `cargo delta impact -f cargo-excludes --required`      | doc-build, readme-check, external-types              |
+| `OX_CHECK_EXCLUDE_NOT_MODIFIED`  | `cargo delta impact -f cargo-excludes --modified`      | clippy, udeps                                        |
+| `OX_CHECK_EXCLUDE_NOT_AFFECTED`  | `cargo delta impact -f cargo-excludes --affected`      | llvm-cov, doc-test, examples, miri, careful, semver-check, mutants (diff and full), cargo-hack powerset, bench |
+| `OX_CHECK_EXCLUDE_NOT_REQUIRED`  | `cargo delta impact -f cargo-excludes --required`      | doc-build, readme-check, external-types              |
 
 Checks with no per-crate scope ignore the vars: `fmt` (always all files), `pr-title`,
 `spellcheck`, `deny`, `audit`, `aprz`, `cargo-sort`, `license-headers`,
@@ -212,8 +212,8 @@ Checks with no per-crate scope ignore the vars: `fmt` (always all files), `pr-ti
 catalog alongside each check's invocation.
 
 The recipe-side mechanics are in [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars)
-(including the `OX_CI_IMPACT_SKIP` early-return hint). The CI-side wiring (the
-`ox-ci-impact` building block, how downstream jobs consume the excludes) is in
+(including the `OX_CHECK_IMPACT_SKIP` early-return hint). The CI-side wiring (the
+`ox-check-impact` building block, how downstream jobs consume the excludes) is in
 [github.md](./github.md#impact-scoping) and [ado.md](./ado.md#impact-scoping).
 
 Trade-off acknowledged: the risk cargo-delta introduces is that a misconfigured analysis

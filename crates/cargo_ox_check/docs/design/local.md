@@ -1,6 +1,6 @@
 # Local Recipe Surface
 
-This document describes the `justfiles/ox-ci/` tree that ox-ci writes into a repo, how the
+This document describes the `justfiles/ox-check/` tree that ox-check writes into a repo, how the
 recipes are organized, and how local invocations differ from CI invocations (spoiler: they
 don't — that's the design).
 
@@ -14,74 +14,74 @@ See also:
 
 ```text
 repo/
-├── Justfile                                       managed-region: ox-ci-imports
-│   # >>> ox-ci-managed: ox-ci-imports
-│   # checksum: sha256:…  rendered-by: cargo-ox-ci 0.4.1
-│   import 'justfiles/ox-ci/checks.just'
-│   import 'justfiles/ox-ci/groups.just'
-│   import 'justfiles/ox-ci/tiers.just'
-│   import 'justfiles/ox-ci/tools.just'
-│   alias ox-ci := ox-ci-pr
-│   # <<< ox-ci-managed: ox-ci-imports
+├── Justfile                                       managed-region: ox-check-imports
+│   # >>> ox-check-managed: ox-check-imports
+│   # checksum: sha256:…  rendered-by: cargo-ox-check 0.4.1
+│   import 'justfiles/ox-check/checks.just'
+│   import 'justfiles/ox-check/groups.just'
+│   import 'justfiles/ox-check/tiers.just'
+│   import 'justfiles/ox-check/tools.just'
+│   alias ox-check := ox-check-pr
+│   # <<< ox-check-managed: ox-check-imports
 │   …user content…
 │
-└── justfiles/ox-ci/                               owned (one checksum per file)
-    ├── checks.just          per-check recipes (ox-ci-fmt, ox-ci-clippy, ox-ci-llvm-cov, …)
-    ├── groups.just          group recipes (ox-ci-pr-fast, ox-ci-pr-test, ox-ci-nightly-test, …)
-    ├── tiers.just           tier aggregators (ox-ci-pr, ox-ci-nightly, ox-ci-full)
-    └── tools.just           ox-ci-tools-check + ox-ci-tools-install + helpers
+└── justfiles/ox-check/                               owned (one checksum per file)
+    ├── checks.just          per-check recipes (ox-check-fmt, ox-check-clippy, ox-check-llvm-cov, …)
+    ├── groups.just          group recipes (ox-check-pr-fast, ox-check-pr-test, ox-check-nightly-test, …)
+    ├── tiers.just           tier aggregators (ox-check-pr, ox-check-nightly, ox-check-full)
+    └── tools.just           ox-check-tools-check + ox-check-tools-install + helpers
 ```
 
-The Justfile region is the only file ox-ci adds to that the user co-owns. The four files
-under `justfiles/ox-ci/` are tool-owned (full file checksums). If the user wants to add
+The Justfile region is the only file ox-check adds to that the user co-owns. The four files
+under `justfiles/ox-check/` are tool-owned (full file checksums). If the user wants to add
 project-specific recipes, they add them to the top-level `Justfile` outside the managed
 region, or to their own additional imported `.just` files.
 
 ## 2. Recipe layers
 
-`justfiles/ox-ci/` is structured to make all three levels (check, group, tier) addressable
+`justfiles/ox-check/` is structured to make all three levels (check, group, tier) addressable
 from the command line.
 
 ### checks.just
 
-One recipe per individual check, each named `ox-ci-<check>`. Recipes are usually a single
+One recipe per individual check, each named `ox-check-<check>`. Recipes are usually a single
 `cargo …` line; a handful (license-headers, ensure-no-cyclic-deps,
 ensure-no-default-features, pr-title, the bench smoke loop) are short `[script]` blocks.
 Every check recipe is prefixed with a quick version-gate dependency:
 
 ```just
-ox-ci-clippy: (_ox-ci-require "cargo-clippy")
+ox-check-clippy: (_ox-check-require "cargo-clippy")
     cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 ```
 
-`_ox-ci-require` is a private recipe in `tools.just` that calls `cargo install --list` to
+`_ox-check-require` is a private recipe in `tools.just` that calls `cargo install --list` to
 verify the tool meets the catalog's declared minimum version; missing or below-minimum
 tools fail with a one-line `cargo install` hint. The cost is one cheap `cargo install
 --list` invocation per check, well under a second on a warm cache.
 
 ### groups.just
 
-One recipe per group, named `ox-ci-<tier>-<group>`. The check-recipe and group-recipe
+One recipe per group, named `ox-check-<tier>-<group>`. The check-recipe and group-recipe
 namespaces are kept disjoint by naming choice: no check is named `<tier>-<group>` for
 any tier × group combination (e.g. the coverage-instrumented test check is named
-`llvm-cov`, not `test`, so that `ox-ci-pr-test` unambiguously refers to the PR-tier
+`llvm-cov`, not `test`, so that `ox-check-pr-test` unambiguously refers to the PR-tier
 test group). The `pr-mutants` group runs the diff-scoped recipe; `nightly-exhaustive`
 runs the full-workspace recipe:
 
 ```just
-ox-ci-pr-fast: ox-ci-fmt ox-ci-clippy ox-ci-cargo-sort ox-ci-license-headers \
-               ox-ci-ensure-no-cyclic-deps ox-ci-ensure-no-default-features \
-               ox-ci-doc-build ox-ci-readme-check ox-ci-spellcheck ox-ci-pr-title \
-               ox-ci-deny ox-ci-audit ox-ci-udeps ox-ci-semver-check \
-               ox-ci-external-types ox-ci-aprz
+ox-check-pr-fast: ox-check-fmt ox-check-clippy ox-check-cargo-sort ox-check-license-headers \
+               ox-check-ensure-no-cyclic-deps ox-check-ensure-no-default-features \
+               ox-check-doc-build ox-check-readme-check ox-check-spellcheck ox-check-pr-title \
+               ox-check-deny ox-check-audit ox-check-udeps ox-check-semver-check \
+               ox-check-external-types ox-check-aprz
 
-ox-ci-pr-test: ox-ci-llvm-cov ox-ci-doc-test ox-ci-examples
-ox-ci-pr-mutants: ox-ci-mutants-diff
+ox-check-pr-test: ox-check-llvm-cov ox-check-doc-test ox-check-examples
+ox-check-pr-mutants: ox-check-mutants-diff
 
-ox-ci-nightly-test: ox-ci-llvm-cov ox-ci-doc-test ox-ci-examples
-ox-ci-nightly-advisories: ox-ci-deny ox-ci-audit ox-ci-aprz ox-ci-clippy ox-ci-udeps
-ox-ci-nightly-runtime: ox-ci-miri ox-ci-careful
-ox-ci-nightly-exhaustive: ox-ci-mutants-full ox-ci-cargo-hack ox-ci-bench-only
+ox-check-nightly-test: ox-check-llvm-cov ox-check-doc-test ox-check-examples
+ox-check-nightly-advisories: ox-check-deny ox-check-audit ox-check-aprz ox-check-clippy ox-check-udeps
+ox-check-nightly-runtime: ox-check-miri ox-check-careful
+ox-check-nightly-exhaustive: ox-check-mutants-full ox-check-cargo-hack ox-check-bench-only
 ```
 
 ### tiers.just
@@ -90,19 +90,19 @@ Three tier aggregators. Each tier is a recipe that depends on the appropriate se
 in a deterministic order:
 
 ```just
-ox-ci-pr: ox-ci-tools-check ox-ci-pr-fast ox-ci-pr-test ox-ci-pr-mutants
-ox-ci-nightly: ox-ci-tools-check ox-ci-nightly-test ox-ci-nightly-advisories \
-               ox-ci-nightly-runtime ox-ci-nightly-exhaustive
-ox-ci-full: ox-ci-pr ox-ci-nightly
+ox-check-pr: ox-check-tools-check ox-check-pr-fast ox-check-pr-test ox-check-pr-mutants
+ox-check-nightly: ox-check-tools-check ox-check-nightly-test ox-check-nightly-advisories \
+               ox-check-nightly-runtime ox-check-nightly-exhaustive
+ox-check-full: ox-check-pr ox-check-nightly
 ```
 
 ### tools.just
 
-- `ox-ci-tools-check` — print a status table of every tool's installed version vs. minimum.
-- `ox-ci-tools-install` — install every catalog tool at the minimum version (or skip if
+- `ox-check-tools-check` — print a status table of every tool's installed version vs. minimum.
+- `ox-check-tools-install` — install every catalog tool at the minimum version (or skip if
   already satisfied). Used as a one-shot in CI setup and locally on first use.
-- `ox-ci-tools-install-missing` — install only the tools that are missing or below minimum.
-- `_ox-ci-require <tool>` — internal helper called by each check.
+- `ox-check-tools-install-missing` — install only the tools that are missing or below minimum.
+- `_ox-check-require <tool>` — internal helper called by each check.
 
 The full tool-version policy these recipes implement is detailed in §3 below.
 
@@ -116,7 +116,7 @@ newer versions, use `mise`/`asdf`, install via package manager, etc.
 
 ### 3.2 Detecting installed versions
 
-`_ox-ci-require <tool>` (a private `just` recipe in `tools.just`) uses
+`_ox-check-require <tool>` (a private `just` recipe in `tools.just`) uses
 `cargo install --list` to enumerate currently-installed cargo subcommands and their
 versions, then compares against the catalog minimum. This avoids the problem of tools
 without a stable `--version` flag, is fast, and works uniformly for everything the tool
@@ -125,11 +125,11 @@ cares about (all the cargo-* checks). For the small number of non-cargo dependen
 
 ### 3.3 Installing tools
 
-`ox-ci-tools-install` and `ox-ci-tools-install-missing` are plain `just` recipes that loop
+`ox-check-tools-install` and `ox-check-tools-install-missing` are plain `just` recipes that loop
 over the catalog and run `cargo install --locked <tool> --version >=<min>`. They are the
 *only* mechanism the tool uses to install cargo-managed tools — there is no separate code
 path for CI. CI setup just calls the recipes. Locally, the user runs the recipes once
-when `ox-ci-tools-check` complains.
+when `ox-check-tools-check` complains.
 
 Two prerequisites are not cargo-installable and must be present before the recipes can
 run:
@@ -143,7 +143,7 @@ run:
   plain cargo subcommands from the ox-tools family and don't need pwsh. `pwsh` is
   preinstalled on every relevant CI runner (GH-hosted Linux/Windows/macOS,
   Microsoft-hosted ADO agents). On a developer machine without pwsh,
-  `_ox-ci-require pwsh` fails with a per-OS install hint pointing at
+  `_ox-check-require pwsh` fails with a per-OS install hint pointing at
   <https://github.com/PowerShell/PowerShell>. The dependency is kept (rather than
   dropped to remove the one script) so future additions that don't fit cleanly as
   cargo subcommands have an established escape hatch.
@@ -156,21 +156,21 @@ catalog hash. See [github.md](./github.md#caching) and [ado.md](./ado.md#caching
 
 ### 3.4 Per-check warnings
 
-Every check recipe depends on `_ox-ci-require <its-tool>` so even ad-hoc invocations like
-`just ox-ci-miri` warn loudly if the installed tool predates the catalog minimum. The full
+Every check recipe depends on `_ox-check-require <its-tool>` so even ad-hoc invocations like
+`just ox-check-miri` warn loudly if the installed tool predates the catalog minimum. The full
 tier invocations additionally print a one-line tools summary at the top.
 
 ### 3.5 The Rust toolchain
 
-`rust-toolchain.toml` is read but never written, and ox-ci never installs a Rust toolchain
+`rust-toolchain.toml` is read but never written, and ox-check never installs a Rust toolchain
 itself. Per-backend rationale lives in [github.md](./github.md#rust-toolchain) and
 [ado.md](./ado.md#rust-toolchain); short version: msrustup owns it on ADO/1ESPT, the runner
 image owns it on GH, the user owns it locally.
 
-`_ox-ci-require` validates the installed `rustc` against the catalog's minimum at recipe
+`_ox-check-require` validates the installed `rustc` against the catalog's minimum at recipe
 time; missing or below-minimum `rustc` produces a clean failure message naming the version
 mismatch. Per-check toolchain requirements (e.g. miri, careful, udeps need nightly) are
-also enforced by `_ox-ci-require`, which suggests the user-environment-appropriate install
+also enforced by `_ox-check-require`, which suggests the user-environment-appropriate install
 command in the failure message (`rustup install nightly` or "ask your team's pipeline
 owner to add `nightly` to msrustup").
 
@@ -178,14 +178,14 @@ owner to add `nightly` to msrustup").
 
 Every check recipe whose work is per-crate accepts three optional pass-through env vars
 and forwards them verbatim as `--workspace`-compatible exclude flags. Empty (the local
-default) means full workspace; CI populates them from the `ox-ci-impact` building block:
+default) means full workspace; CI populates them from the `ox-check-impact` building block:
 
 ```just
-ox-ci-clippy: (_ox-ci-require "cargo-clippy")
-    cargo clippy --workspace ${OX_CI_EXCLUDE_NOT_MODIFIED:-} --all-targets --all-features --locked -- -D warnings
+ox-check-clippy: (_ox-check-require "cargo-clippy")
+    cargo clippy --workspace ${OX_CHECK_EXCLUDE_NOT_MODIFIED:-} --all-targets --all-features --locked -- -D warnings
 
-ox-ci-llvm-cov: (_ox-ci-require "cargo-llvm-cov") (_ox-ci-require "cargo-nextest")
-    cargo llvm-cov nextest --workspace ${OX_CI_EXCLUDE_NOT_AFFECTED:-} --all-features --locked --lcov --output-path target/coverage/lcov.info
+ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "cargo-nextest")
+    cargo llvm-cov nextest --workspace ${OX_CHECK_EXCLUDE_NOT_AFFECTED:-} --all-features --locked --lcov --output-path target/coverage/lcov.info
 ```
 
 The mapping from check to env var is fixed in the catalog (see
@@ -196,16 +196,16 @@ vars. Group recipes do not interpolate the vars themselves — each underlying c
 recipe reads what it needs, so a group recipe is just a dependency list and nothing
 changes when scoping is disabled.
 
-### 4.1 `OX_CI_IMPACT_SKIP` early-return hint
+### 4.1 `OX_CHECK_IMPACT_SKIP` early-return hint
 
-A fourth env var, `OX_CI_IMPACT_SKIP`, is set to `"true"` by the CI wiring when
+A fourth env var, `OX_CHECK_IMPACT_SKIP`, is set to `"true"` by the CI wiring when
 cargo-delta reports that no workspace member is in any impact tier (typically a
 docs-only PR or a PR touching only files cargo-delta's `file_exclude_patterns` ignore).
 It is **advisory**, not a kill switch:
 
 - The CI wiring **never** uses it to skip whole jobs. Every group runs on every PR.
 - Recipes that scope to workspace members **may** check it and early-return — for
-  example, `ox-ci-clippy` skips the cargo invocation when `OX_CI_IMPACT_SKIP=true`,
+  example, `ox-check-clippy` skips the cargo invocation when `OX_CHECK_IMPACT_SKIP=true`,
   saving the cargo-delta-computed exclude list from being parsed and the workspace from
   being touched.
 - Recipes that don't scope to workspace members **ignore** it. `fmt` still runs (the
@@ -220,13 +220,13 @@ requires touching the stages template / reusable workflow.
 A typical skip-aware recipe looks like:
 
 ```just
-ox-ci-clippy: (_ox-ci-require "cargo-clippy")
-    @[ "${OX_CI_IMPACT_SKIP:-false}" = "true" ] && echo 'no affected crates; skipping clippy' && exit 0; \
-        cargo clippy --workspace ${OX_CI_EXCLUDE_NOT_MODIFIED:-} --all-targets --all-features --locked -- -D warnings
+ox-check-clippy: (_ox-check-require "cargo-clippy")
+    @[ "${OX_CHECK_IMPACT_SKIP:-false}" = "true" ] && echo 'no affected crates; skipping clippy' && exit 0; \
+        cargo clippy --workspace ${OX_CHECK_EXCLUDE_NOT_MODIFIED:-} --all-targets --all-features --locked -- -D warnings
 ```
 
 (On Windows, with `set shell := ["pwsh", "-NoProfile", "-Command"]`, the equivalent
-short-circuit uses `if ($env:OX_CI_IMPACT_SKIP -eq 'true') { exit 0 }`.)
+short-circuit uses `if ($env:OX_CHECK_IMPACT_SKIP -eq 'true') { exit 0 }`.)
 
 ### 4.2 Local impact-scoped runs
 
@@ -238,33 +238,33 @@ git stash; git checkout origin/main
 cargo delta -c .delta.toml snapshot > /tmp/base.json
 git stash pop
 cargo delta -c .delta.toml snapshot > /tmp/head.json
-export OX_CI_EXCLUDE_NOT_AFFECTED="$(cargo delta -c .delta.toml impact \
+export OX_CHECK_EXCLUDE_NOT_AFFECTED="$(cargo delta -c .delta.toml impact \
     --baseline /tmp/base.json --current /tmp/head.json -f cargo-excludes --affected)"
-just ox-ci-pr-test
+just ox-check-pr-test
 ```
 
-A wrapper recipe (`ox-ci-impact-set base=origin/main`) is left to v2: it has subtle
+A wrapper recipe (`ox-check-impact-set base=origin/main`) is left to v2: it has subtle
 git-state interactions and the manual flow is good enough for the rare case a developer
 actually wants to reproduce CI scoping locally.
 
 ## 5. Daily driver
 
 ```text
-$ just ox-ci
-[just] running ox-ci-tools-check
-[just] running ox-ci-pr-fast
-[just] running ox-ci-pr-test
-[just] running ox-ci-pr-mutants
-ox-ci OK
+$ just ox-check
+[just] running ox-check-tools-check
+[just] running ox-check-pr-fast
+[just] running ox-check-pr-test
+[just] running ox-check-pr-mutants
+ox-check OK
 ```
 
-`ox-ci` is an alias for `ox-ci-pr` (set in the managed `Justfile` region). All three tiers
-(`ox-ci-pr`, `ox-ci-nightly`, `ox-ci-full`) are first-class — locally reproducible with
+`ox-check` is an alias for `ox-check-pr` (set in the managed `Justfile` region). All three tiers
+(`ox-check-pr`, `ox-check-nightly`, `ox-check-full`) are first-class — locally reproducible with
 exactly the same arguments CI uses, because CI invokes the same `just` recipes.
 
 ## 6. No-tooling fallback
 
-A user with only `cargo` (no `just`, no `cargo-ox-ci`) can still run the basics:
+A user with only `cargo` (no `just`, no `cargo-ox-check`) can still run the basics:
 
 ```sh
 cargo test   --workspace --all-targets --all-features --locked
@@ -273,7 +273,7 @@ cargo fmt --check
 ```
 
 The same commands appear as the body of the corresponding `just` recipes in
-`justfiles/ox-ci/checks.just`, so they are discoverable by reading that file. The fallback
+`justfiles/ox-check/checks.just`, so they are discoverable by reading that file. The fallback
 covers core hygiene only — coverage, miri, mutants, etc. still require their respective
 tools.
 
@@ -286,16 +286,16 @@ Per the four customization tiers in [design.md §7](./design.md#7-customization)
   collide with it.
 - **Add your own `.just` files** and `import` them after the managed region's closing
   sentinel.
-- **Override a single ox-ci recipe**: the `just` import-and-override rules make this awkward
+- **Override a single ox-check recipe**: the `just` import-and-override rules make this awkward
   (just doesn't have a "the most specific definition wins" rule). The recommended way is to
   copy the recipe you want to change into your top-level Justfile with a different name
   (e.g. `my-clippy`) and reference *that* from your own group/tier recipes. Don't fight the
-  ox-ci-* names; just compose around them.
+  ox-check-* names; just compose around them.
 - **Disable a recipe wholesale**: opt out of the managed `Justfile` region per
   [updates.md §opt-out](./updates.md#6-opting-out-in-file-stubs). This stops the imports from
-  happening at all, so all `ox-ci-*` recipes vanish. Use this only when ox-ci is no longer
+  happening at all, so all `ox-check-*` recipes vanish. Use this only when ox-check is no longer
   the right tool for your repo.
 
-Customizing the *contents* of `justfiles/ox-ci/*.just` is supported — they're owned files,
-so editing them flips them to "dirty" and the next `update` writes a `.ox-ci-proposed`
+Customizing the *contents* of `justfiles/ox-check/*.just` is supported — they're owned files,
+so editing them flips them to "dirty" and the next `update` writes a `.ox-check-proposed`
 sibling instead of overwriting. See [updates.md](./updates.md) for the lifecycle.

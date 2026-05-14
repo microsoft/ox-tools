@@ -1,23 +1,23 @@
 # Azure DevOps Pipelines Integration
 
-This document describes what `cargo ox-ci update --backend ado|both` emits for Azure DevOps
+This document describes what `cargo ox-check update --backend ado|both` emits for Azure DevOps
 Pipelines, and how a repo wires those files into its own CI.
 
-ox-ci emits three layers, all owned by ox-ci with the standard owned-file flow (edit →
-dirty → `.ox-ci-proposed` sibling on next update). The split is by what users actually
+ox-check emits three layers, all owned by ox-check with the standard owned-file flow (edit →
+dirty → `.ox-check-proposed` sibling on next update). The split is by what users actually
 need to change:
 
-1. **Root pipelines** (`ox-ci-pr.yml`, `ox-ci-nightly.yml` at `.pipelines/`). Triggers,
+1. **Root pipelines** (`ox-check-pr.yml`, `ox-check-nightly.yml` at `.pipelines/`). Triggers,
    runner pool, secret variable groups, and the optional `extends:` to a compliance
-   template (1ESPT/SubstratePT/CloudBuild) live here. ox-ci ships an opinionated default;
+   template (1ESPT/SubstratePT/CloudBuild) live here. ox-check ships an opinionated default;
    users who need to customize edit in place and accept the proposal-on-update flow.
-   ox-ci's emitted root pipelines contain **no** references to compliance harnesses —
+   ox-check's emitted root pipelines contain **no** references to compliance harnesses —
    wrapping with 1ESPT is purely a user-side edit.
-2. **Stages templates** (`ox-ci/pr.yml`, `ox-ci/nightly.yml`), containing the impact job
+2. **Stages templates** (`ox-check/pr.yml`, `ox-check/nightly.yml`), containing the impact job
    and the per-group jobs with all the dependency / output-variable plumbing. These
-   change when ox-ci's groups or impact wiring evolve; most users won't ever edit them.
-3. **Per-group step templates** (`ox-ci/steps/*.yml`). Each is a multi-step template that
-   runs setup + the matching `just ox-ci-<tier>-<group>` recipe.
+   change when ox-check's groups or impact wiring evolve; most users won't ever edit them.
+3. **Per-group step templates** (`ox-check/steps/*.yml`). Each is a multi-step template that
+   runs setup + the matching `just ox-check-<tier>-<group>` recipe.
 
 See also:
 
@@ -33,9 +33,9 @@ See also:
   to merge changes.
 - **Per-repo customization** (triggers, runner pool, compliance harness, secrets) lives
   in the root pipeline. Users who customize it accept the cost of merging the
-  `.ox-ci-proposed` sibling when the ox-ci defaults evolve — which is rare, since the
+  `.ox-check-proposed` sibling when the ox-check defaults evolve — which is rare, since the
   root pipeline is intentionally minimal.
-- **Compliance composition** is purely a user concern. ox-ci's stages template is plain
+- **Compliance composition** is purely a user concern. ox-check's stages template is plain
   ADO YAML; 1ESPT/SubstratePT/CloudBuild composition happens in the user's root pipeline
   by way of `extends:` and `parameters.stages`.
 
@@ -43,9 +43,9 @@ See also:
 
 ```text
 .pipelines/
-├── ox-ci-pr.yml                    owned   (root PR pipeline)
-├── ox-ci-nightly.yml               owned   (root nightly pipeline)
-└── ox-ci/
+├── ox-check-pr.yml                    owned   (root PR pipeline)
+├── ox-check-nightly.yml               owned   (root nightly pipeline)
+└── ox-check/
     ├── pr.yml                      owned   (PR-tier stages template)
     ├── nightly.yml                 owned   (nightly-tier stages template)
     └── steps/
@@ -60,24 +60,24 @@ See also:
         └── nightly-exhaustive.yml  owned
 ```
 
-All files are regular owned files (carry an `ox-ci-checksum` first line, governed by
+All files are regular owned files (carry an `ox-check-checksum` first line, governed by
 [updates.md §5](./updates.md#5-the-decision-algorithm)). Users who customize the root
 pipeline take ownership through the standard dirty-file flow.
 
 ## 3. Root pipelines
 
-The default `ox-ci-pr.yml` ox-ci emits is the minimum needed to run ox-ci's stages
+The default `ox-check-pr.yml` ox-check emits is the minimum needed to run ox-check's stages
 template:
 
 ```yaml
-# .pipelines/ox-ci-pr.yml
+# .pipelines/ox-check-pr.yml
 trigger: none           # PR validation only; configure in branch policies
 pr:
   branches:
     include: [main]
 
 stages:
-- template: ox-ci/pr.yml
+- template: ox-check/pr.yml
   parameters:
     linuxPool:   { vmImage: ubuntu-latest }
     windowsPool: { vmImage: windows-latest }
@@ -86,27 +86,27 @@ stages:
 The nightly root pipeline adds a schedule:
 
 ```yaml
-# .pipelines/ox-ci-nightly.yml
+# .pipelines/ox-check-nightly.yml
 schedules:
 - cron: "0 6 * * *"
-  displayName: ox-ci nightly
+  displayName: ox-check nightly
   branches:
     include: [main]
   always: true
 
 stages:
-- template: ox-ci/nightly.yml
+- template: ox-check/nightly.yml
   parameters:
     linuxPool:   { vmImage: ubuntu-latest }
     windowsPool: { vmImage: windows-latest }
 ```
 
 For an internal/compliance pipeline, the user replaces their root pipeline with one that
-extends 1ESPT/SubstratePT and passes ox-ci's stages template as the stages parameter,
+extends 1ESPT/SubstratePT and passes ox-check's stages template as the stages parameter,
 overriding the pools with the team's 1ESPT pools:
 
 ```yaml
-# .pipelines/ox-ci-pr.yml (user-edited for 1ESPT)
+# .pipelines/ox-check-pr.yml (user-edited for 1ESPT)
 trigger: none
 pr: { branches: { include: [main] } }
 
@@ -122,14 +122,14 @@ extends:
   parameters:
     pool: { name: <your-default-1ESPT-pool> }
     stages:
-    - template: /.pipelines/ox-ci/pr.yml@self
+    - template: /.pipelines/ox-check/pr.yml@self
       parameters:
         linuxPool:   { name: <your-1ESPT-linux-pool> }
         windowsPool: { name: <your-1ESPT-windows-pool> }
 ```
 
 The `extends:` keyword, the resources block, and the pool definitions are entirely the
-user's business. ox-ci's `pr.yml` is a plain stages template that drops in unchanged. To
+user's business. ox-check's `pr.yml` is a plain stages template that drops in unchanged. To
 trim the matrix (run on Linux only), the user sets `windowsPool` to an empty object
 `{}` — `pr.yml` treats an empty pool as "skip this OS." Same shape for adding macOS via
 a future `macosPool` parameter (deferred to v2; ADO macOS adoption is rare in the
@@ -143,10 +143,10 @@ checks actually consume is the catalog's concern, not the wiring layer's. This m
 moving a check between groups (e.g. `clippy` from `pr-fast` to `nightly-advisories`)
 never changes the stages template.
 
-Approximate shape (ox-ci writes this verbatim; users never edit it):
+Approximate shape (ox-check writes this verbatim; users never edit it):
 
 ```yaml
-# .pipelines/ox-ci/pr.yml   (owned by cargo-ox-ci)
+# .pipelines/ox-check/pr.yml   (owned by cargo-ox-check)
 parameters:
 - name: linuxPool
   type: object
@@ -156,7 +156,7 @@ parameters:
   default: { vmImage: windows-latest }
 
 stages:
-- stage: ox_ci_pr
+- stage: OX_CHECK_pr
   jobs:
   - job: impact
     pool: ${{ parameters.linuxPool }}
@@ -212,7 +212,7 @@ the snippet above shows the intent, not the verbatim YAML).
 
 ADO's `strategy.matrix` doesn't compose with output-variable expressions cleanly (the
 expansion happens at compile time but the values aren't available until impact has run),
-so ox-ci unrolls the OS axis into two explicit jobs (`pr_test_linux` and
+so ox-check unrolls the OS axis into two explicit jobs (`pr_test_linux` and
 `pr_test_windows`) at template-compile time using the `${{ if … }}` conditional. Setting
 `windowsPool: {}` in the user's root pipeline elides `pr_test_windows` entirely.
 
@@ -222,7 +222,7 @@ parameters are still threaded through (defaulted to empty) so step templates hav
 uniform interface across tiers:
 
 ```yaml
-# .pipelines/ox-ci/nightly.yml  (owned by cargo-ox-ci)
+# .pipelines/ox-check/nightly.yml  (owned by cargo-ox-check)
 parameters:
 - name: linuxPool
   type: object
@@ -232,7 +232,7 @@ parameters:
   default: { vmImage: windows-latest }
 
 stages:
-- stage: ox_ci_nightly
+- stage: OX_CHECK_nightly
   jobs:
   - job: nightly_test_linux
     pool: ${{ parameters.linuxPool }}
@@ -267,7 +267,7 @@ just threads all three to every group. Moving a check between groups is a pure c
 change.
 
 ```yaml
-# .pipelines/ox-ci/steps/pr-fast.yml  (owned by cargo-ox-ci)
+# .pipelines/ox-check/steps/pr-fast.yml  (owned by cargo-ox-check)
 parameters:
 - name: prTitle
   type: string
@@ -286,24 +286,24 @@ parameters:
   default: "false"
 steps:
 - template: setup.yml
-- script: just ox-ci-pr-fast
-  displayName: ox-ci pr-fast
+- script: just ox-check-pr-fast
+  displayName: ox-check pr-fast
   env:
     PR_TITLE: ${{ parameters.prTitle }}
-    OX_CI_EXCLUDE_NOT_MODIFIED: ${{ parameters.excludeNotModified }}
-    OX_CI_EXCLUDE_NOT_AFFECTED: ${{ parameters.excludeNotAffected }}
-    OX_CI_EXCLUDE_NOT_REQUIRED: ${{ parameters.excludeNotRequired }}
-    OX_CI_IMPACT_SKIP: ${{ parameters.impactSkip }}
+    OX_CHECK_EXCLUDE_NOT_MODIFIED: ${{ parameters.excludeNotModified }}
+    OX_CHECK_EXCLUDE_NOT_AFFECTED: ${{ parameters.excludeNotAffected }}
+    OX_CHECK_EXCLUDE_NOT_REQUIRED: ${{ parameters.excludeNotRequired }}
+    OX_CHECK_IMPACT_SKIP: ${{ parameters.impactSkip }}
 ```
 
 Uniform parameter set on every per-group template:
 
 | Parameter             | Default      | Notes                                              |
 |-----------------------|--------------|----------------------------------------------------|
-| `excludeNotModified`  | `""`         | Forwarded as `OX_CI_EXCLUDE_NOT_MODIFIED`.         |
-| `excludeNotAffected`  | `""`         | Forwarded as `OX_CI_EXCLUDE_NOT_AFFECTED`.         |
-| `excludeNotRequired`  | `""`         | Forwarded as `OX_CI_EXCLUDE_NOT_REQUIRED`.         |
-| `impactSkip`          | `"false"`    | Forwarded as `OX_CI_IMPACT_SKIP`. Recipes that consume the excludes may early-return when this is `"true"`; non-scoping recipes (fmt, deny, audit, …) ignore it. See [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars). |
+| `excludeNotModified`  | `""`         | Forwarded as `OX_CHECK_EXCLUDE_NOT_MODIFIED`.         |
+| `excludeNotAffected`  | `""`         | Forwarded as `OX_CHECK_EXCLUDE_NOT_AFFECTED`.         |
+| `excludeNotRequired`  | `""`         | Forwarded as `OX_CHECK_EXCLUDE_NOT_REQUIRED`.         |
+| `impactSkip`          | `"false"`    | Forwarded as `OX_CHECK_IMPACT_SKIP`. Recipes that consume the excludes may early-return when this is `"true"`; non-scoping recipes (fmt, deny, audit, …) ignore it. See [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars). |
 
 Per-group additions (only where the group consumes PR-context strings the recipe needs):
 
@@ -323,7 +323,7 @@ Threading all three to every template costs a few lines per step template but is
 right separation: wiring is about "which jobs depend on impact and feed it forward", not
 about "which check needs which env var."
 
-These templates are consumed primarily by ox-ci's own stages template. Users who want to
+These templates are consumed primarily by ox-check's own stages template. Users who want to
 plug individual groups into an unrelated pipeline can `template:` them directly without
 passing any exclude parameters — they default to empty (full workspace) — and only
 override what they want to scope.
@@ -331,7 +331,7 @@ override what they want to scope.
 ### `setup.yml` and `impact.yml`
 
 `setup.yml` installs `just` (`cargo install just --locked --version >=<min>`) and runs
-`just ox-ci-tools-install-missing`. Does not install Rust; expects `cargo` on PATH —
+`just ox-check-tools-install-missing`. Does not install Rust; expects `cargo` on PATH —
 provided by the user's msrustup step in 1ESPT pipelines or by a previous step in OSS
 pipelines (see §6).
 
@@ -360,23 +360,23 @@ mechanics are in [local.md §4](./local.md#4-impact-scoping-pass-through-env-var
 
 ## 6. Rust toolchain
 
-ox-ci does not install Rust on ADO. The step templates assume `cargo` is on PATH. The
-user's root pipeline (or compliance template) installs Rust before the ox-ci stages run.
+ox-check does not install Rust on ADO. The step templates assume `cargo` is on PATH. The
+user's root pipeline (or compliance template) installs Rust before the ox-check stages run.
 
-Why ox-ci doesn't ship a Rust install step:
+Why ox-check doesn't ship a Rust install step:
 
 - **1ESPT compliance.** Compliance pipelines install Rust via msrustup
-  (Microsoft-internal). The standard `RustInstaller` ADO task is not used. ox-ci must
+  (Microsoft-internal). The standard `RustInstaller` ADO task is not used. ox-check must
   emit nothing that conflicts with that.
 - **Toolchain choice is a repo decision.** msrustup channels (`ms-prod-1.93`, etc.) are
-  repo-policy questions ox-ci has no business making.
+  repo-policy questions ox-check has no business making.
 
 In the OSS / non-1ESPT case, the user adds a `RustInstaller@1` task (or a rustup
-shell script) to their root pipeline before the ox-ci stages template runs. A typical
-placement: a setup stage that `dependsOn`s nothing and runs first, followed by the ox-ci
+shell script) to their root pipeline before the ox-check stages template runs. A typical
+placement: a setup stage that `dependsOn`s nothing and runs first, followed by the ox-check
 stages.
 
-`_ox-ci-require` (invoked by every check recipe) validates the installed `rustc` against
+`_ox-check-require` (invoked by every check recipe) validates the installed `rustc` against
 the catalog minimum at recipe time; missing or below-minimum `rustc` produces a clean
 failure message. For nightly-requiring checks (miri, careful, udeps), the failure message
 suggests asking the team's pipeline owner to add `nightly` to msrustup.
@@ -390,8 +390,8 @@ pinned to a workspace-scratch location to keep cache scoping predictable.
 
 The cache covers:
 
-- The `cargo install`-ed tools from `ox-ci-tools-install-missing`.
-- The `target/` directory (per ox-ci recipe; a per-recipe cache scope means a `pr-test`
+- The `cargo install`-ed tools from `ox-check-tools-install-missing`.
+- The `target/` directory (per ox-check recipe; a per-recipe cache scope means a `pr-test`
   cache hit doesn't have to wait on a `pr-fast` cache miss).
 
 Cache scoping inside 1ESPT-compliant pipelines is bounded by the template's allowed cache
@@ -415,21 +415,21 @@ Recommended user-pipeline shape:
 
 ## 9. Incremental adoption
 
-For repos with an existing 1ESPT-extending pipeline, adopting ox-ci is incremental:
+For repos with an existing 1ESPT-extending pipeline, adopting ox-check is incremental:
 
-1. Run `cargo ox-ci update --backend ado` to emit owned templates and root pipelines.
-2. Either delete the emitted root pipelines (`.pipelines/ox-ci-{pr,nightly}.yml`) if they
+1. Run `cargo ox-check update --backend ado` to emit owned templates and root pipelines.
+2. Either delete the emitted root pipelines (`.pipelines/ox-check-{pr,nightly}.yml`) if they
    conflict with the repo's existing ones, or edit the existing pipelines to call out to
-   `ox-ci/pr.yml` / `ox-ci/nightly.yml`.
+   `ox-check/pr.yml` / `ox-check/nightly.yml`.
 3. In the repo's existing pipeline, add a stage that does
-   `template: /.pipelines/ox-ci/pr.yml@self` under `parameters.stages` of the 1ESPT
+   `template: /.pipelines/ox-check/pr.yml@self` under `parameters.stages` of the 1ESPT
    `extends:` block.
 4. Verify the stage runs green on a PR.
 5. Optionally split into individual group stages by hand if the compliance template
    requires it.
 
-ox-ci's owned templates compose cleanly with the 1ESPT `enableStages` flag system: each
-group is its own job inside the `ox_ci_pr` stage, so 1ESPT can gate or split them as
+ox-check's owned templates compose cleanly with the 1ESPT `enableStages` flag system: each
+group is its own job inside the `OX_CHECK_pr` stage, so 1ESPT can gate or split them as
 needed. The pre-existing repo-specific compliance steps (msrustup, NuGet pushes, signing,
-…) keep running alongside the ox-ci stage. ox-ci does not own the pipeline's shape —
+…) keep running alongside the ox-check stage. ox-check does not own the pipeline's shape —
 it just contributes a stage.

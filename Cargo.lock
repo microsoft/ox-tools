@@ -79,7 +79,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "cargo-ox-ci"
+name = "cargo-ox-check"
 version = "0.1.0"
 
 [[package]]
