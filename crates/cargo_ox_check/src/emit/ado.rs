@@ -50,9 +50,18 @@ pub const GROUPS: &[&str] = &[
     "nightly-exhaustive",
 ];
 
+/// Embedded template for one per-group step. `__GROUP__` is substituted
+/// with the group name at emit time.
+pub const GROUP_STEP_TEMPLATE: &str =
+    include_str!("../../templates/ado/steps/group.yml");
+
+/// Placeholder token the per-group template uses for the group name.
+const GROUP_PLACEHOLDER: &str = "__GROUP__";
+
 /// Render the step template for one group.
 ///
-/// The step template:
+/// Substitutes the group name into [`GROUP_STEP_TEMPLATE`]. The
+/// resulting template:
 ///
 /// - Skips itself if the `skip` parameter is `'true'` (set from the
 ///   impact stage's `skip` output in the stages template).
@@ -60,26 +69,7 @@ pub const GROUPS: &[&str] = &[
 /// - Invokes `just ox-check-<group>` via bash.
 #[must_use]
 pub fn render_group_step(group: &str) -> String {
-    format!(
-        "# Copyright (c) Microsoft Corporation.\n\
-         # Licensed under the MIT License.\n\
-         # Owned by cargo-ox-check; edit via `cargo ox-check update`.\n\
-         parameters:\n  \
-           - name: excludes\n    \
-             type: string\n    \
-             default: ''\n  \
-           - name: skip\n    \
-             type: string\n    \
-             default: 'false'\n\
-         steps:\n  \
-           - template: setup.yml\n    \
-             condition: ne(parameters.skip, 'true')\n  \
-           - bash: just ox-check-{group}\n    \
-             condition: ne(parameters.skip, 'true')\n    \
-             displayName: ox-check-{group}\n    \
-             env:\n      \
-               OX_CHECK_EXCLUDES: ${{{{ parameters.excludes }}}}\n"
-    )
+    GROUP_STEP_TEMPLATE.replace(GROUP_PLACEHOLDER, group)
 }
 
 /// Repo-root-relative path for one group's step template.

@@ -1,0 +1,27 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# The token __GROUP__ is substituted by cargo-ox-check at emit time with
+# the concrete check-group name (pr-fast, pr-test, nightly-runtime, ...).
+name: ox-check-__GROUP__
+description: Run the __GROUP__ check group.
+inputs:
+  excludes:
+    description: Comma-separated package excludes from the impact job.
+    default: ""
+    required: false
+  skip:
+    description: If "true", skip this group entirely.
+    default: "false"
+    required: false
+runs:
+  using: composite
+  steps:
+    - if: inputs.skip != 'true'
+      uses: ./.github/actions/ox-check-setup
+    - if: inputs.skip != 'true'
+      name: Run just ox-check-__GROUP__
+      shell: bash
+      env:
+        OX_CHECK_EXCLUDES: ${{ inputs.excludes }}
+      run: just ox-check-__GROUP__
