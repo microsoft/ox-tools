@@ -17,12 +17,6 @@
 
 A cargo sub-command to validate license headers in Rust (`.rs`) and TOML (`.toml`) source files.
 
-### Installation
-
-```bash
-cargo install --path .
-```
-
 ### Setup
 
 Create a `.cargo-heather.toml` file in your project root, **or** simply set the `license` field in your `Cargo.toml` — the tool will use it automatically when no `.cargo-heather.toml` is present.

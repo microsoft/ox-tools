@@ -3,10 +3,16 @@
 
 //! `cargo-heather`: Validate license headers in Rust source files.
 
-use cargo_heather::cli::CargoCli;
+mod cli;
+mod config;
+mod run;
+mod scanner;
+
 use clap::Parser;
 use ohno::AppError;
 use tracing_subscriber::fmt::format::FmtSpan;
+
+use crate::cli::CargoCli;
 
 fn main() -> Result<(), AppError> {
     tracing_subscriber::fmt()
@@ -17,5 +23,5 @@ fn main() -> Result<(), AppError> {
         .init();
 
     let CargoCli::Heather(args) = CargoCli::parse();
-    cargo_heather::run(&args)
+    run::run(&args)
 }

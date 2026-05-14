@@ -61,7 +61,7 @@ jobs:
           enable-sccache: true
           rust-toolchain: RUST_LATEST
           rust-components: clippy, rustfmt
-          cargo-tools: CARGO_DOC2README_VERSION, CARGO_WORKSPACES_VERSION, CARGO_ENSURE_NO_DEFAULT_FEATURES_VERSION, CARGO_ENSURE_NO_CYCLIC_DEPS_VERSION, CARGO_DENY_VERSION, CARGO_SORT_VERSION
+          cargo-tools: CARGO_DOC2README_VERSION, CARGO_WORKSPACES_VERSION, CARGO_ENSURE_NO_DEFAULT_FEATURES_VERSION, CARGO_ENSURE_NO_CYCLIC_DEPS_VERSION, CARGO_DENY_VERSION, CARGO_SORT_VERSION, JUST_VERSION
 
       # execute
       - name: Clippy
@@ -74,7 +74,7 @@ jobs:
         run: cargo sort --check --grouped --workspace
       - name: Readmes
         if: success() || failure()
-        run: cargo workspaces exec --ignore-private cargo doc2readme --check --lib --template ../README.j2
+        run: just readme-check
         env:
           # Disable sccache: macro expansion (rustc -Zunpretty=expanded) does not
           # produce the artifact files sccache expects to cache, causing it to fail.
@@ -286,14 +286,15 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6.0.2
+      - name: Setup
+        uses: ./.github/actions/setup
         with:
-          fetch-depth: 1
+          enable-sccache: true
+          rust-toolchain: RUST_LATEST
       - name: Check License Headers
-        uses: viperproject/check-license-header@v2.0.3
-        with:
-          path: .
-          config: .github/license-check/config.json
-          strict: true
+        # Build and run cargo-heather from the in-repo sources. The tool's
+        # configuration lives at the repo root in `.cargo-heather.toml`.
+        run: cargo run --release --locked -p cargo_heather --bin cargo-heather -- heather
 
   external-type-exposure:
     runs-on: ubuntu-latest

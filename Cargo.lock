@@ -94,7 +94,6 @@ dependencies = [
  "assert_cmd",
  "clap",
  "ohno",
- "predicates",
  "serde",
  "tempfile",
  "toml",
