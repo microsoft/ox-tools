@@ -187,6 +187,73 @@ pub fn resolve(
     Ok(detected)
 }
 
+/// Resolve the default branch name for emitted CI root templates.
+///
+/// Resolution order:
+/// 1. Explicit `--default-branch <name>` flag.
+/// 2. `git symbolic-ref refs/remotes/origin/HEAD` (the canonical
+///    GitHub/ADO answer once the remote has been cloned or fetched).
+/// 3. Local branch heuristic: prefer `main`, fall back to `master`.
+/// 4. Error with a hint to pass the flag explicitly.
+///
+/// # Errors
+///
+/// Returns an error only when every step fails — most commonly a
+/// brand-new repo with no remote tracking and no `main`/`master` branch
+/// yet.
+pub fn resolve_default_branch(
+    flag_value: Option<&str>,
+    repo_root: &Path,
+) -> Result<String, AppError> {
+    if let Some(name) = flag_value {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(app_err!("--default-branch cannot be empty"));
+        }
+        return Ok(trimmed.to_owned());
+    }
+
+    if let Some(name) = read_origin_head(repo_root) {
+        return Ok(name);
+    }
+
+    for candidate in ["main", "master"] {
+        if local_branch_exists(repo_root, candidate) {
+            return Ok(candidate.to_owned());
+        }
+    }
+
+    Err(app_err!(
+        "could not autodetect the default branch (no origin/HEAD tracking, no local 'main' or 'master'). \
+         Pass --default-branch <name> explicitly."
+    ))
+}
+
+fn read_origin_head(repo_root: &Path) -> Option<String> {
+    let output = Command::new("git")
+        .args(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"])
+        .current_dir(repo_root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8(output.stdout).ok()?;
+    raw.trim()
+        .strip_prefix("origin/")
+        .map(str::to_owned)
+}
+
+fn local_branch_exists(repo_root: &Path, name: &str) -> bool {
+    Command::new("git")
+        .args(["show-ref", "--verify", "--quiet"])
+        .arg(format!("refs/heads/{name}"))
+        .current_dir(repo_root)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,5 +381,34 @@ mod tests {
         let result = resolve(&["gitlab".to_owned()], false, Path::new("/nonexistent"));
         let err = result.unwrap_err().to_string();
         assert!(err.contains("unknown backend 'gitlab'"));
+    }
+
+    #[test]
+    fn resolve_default_branch_returns_explicit_flag() {
+        let result =
+            resolve_default_branch(Some("develop"), Path::new("/nonexistent")).unwrap();
+        assert_eq!(result, "develop");
+    }
+
+    #[test]
+    fn resolve_default_branch_trims_whitespace() {
+        let result =
+            resolve_default_branch(Some("  trunk  "), Path::new("/nonexistent")).unwrap();
+        assert_eq!(result, "trunk");
+    }
+
+    #[test]
+    fn resolve_default_branch_rejects_empty_flag() {
+        let result = resolve_default_branch(Some("   "), Path::new("/nonexistent"));
+        assert!(result.unwrap_err().to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn resolve_default_branch_errors_when_nothing_works() {
+        // /nonexistent has no git repo and no local branches; autodetect fails.
+        let result = resolve_default_branch(None, Path::new("/nonexistent"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("could not autodetect the default branch"));
+        assert!(err.contains("--default-branch"));
     }
 }

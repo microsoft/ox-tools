@@ -58,6 +58,9 @@ pub const GROUP_STEP_TEMPLATE: &str =
 /// Placeholder token the per-group template uses for the group name.
 const GROUP_PLACEHOLDER: &str = "__GROUP__";
 
+/// Placeholder token in root pipelines for the repo's default branch.
+const DEFAULT_BRANCH_PLACEHOLDER: &str = "__DEFAULT_BRANCH__";
+
 /// Render the step template for one group.
 ///
 /// Substitutes the group name into [`GROUP_STEP_TEMPLATE`]. The
@@ -105,25 +108,26 @@ pub fn plan_stages_templates(
 
 /// Plan the two root pipelines.
 ///
+/// `default_branch` is substituted into the PR pipeline's `branches.include:`
+/// list and the nightly pipeline's schedule `branches.include:` list.
+///
 /// # Errors
 ///
 /// Propagates I/O errors from the owned-file driver.
 pub fn plan_root_pipelines(
     repo_root: &Path,
     manifest: &Manifest,
+    default_branch: &str,
 ) -> Result<Vec<PlanItem>, AppError> {
+    let pr = PR_ROOT_PIPELINE.replace(DEFAULT_BRANCH_PLACEHOLDER, default_branch);
+    let nightly = NIGHTLY_ROOT_PIPELINE.replace(DEFAULT_BRANCH_PLACEHOLDER, default_branch);
     Ok(vec![
-        plan_owned_file(
-            repo_root,
-            manifest,
-            ".pipelines/ox-check-pr.yml",
-            PR_ROOT_PIPELINE,
-        )?,
+        plan_owned_file(repo_root, manifest, ".pipelines/ox-check-pr.yml", &pr)?,
         plan_owned_file(
             repo_root,
             manifest,
             ".pipelines/ox-check-nightly.yml",
-            NIGHTLY_ROOT_PIPELINE,
+            &nightly,
         )?,
     ])
 }
@@ -136,11 +140,12 @@ pub fn plan_root_pipelines(
 pub fn plan_ado_backend(
     repo_root: &Path,
     manifest: &Manifest,
+    default_branch: &str,
 ) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::new();
     items.extend(plan_step_templates(repo_root, manifest)?);
     items.extend(plan_stages_templates(repo_root, manifest)?);
-    items.extend(plan_root_pipelines(repo_root, manifest)?);
+    items.extend(plan_root_pipelines(repo_root, manifest, default_branch)?);
     Ok(items)
 }
 

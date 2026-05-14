@@ -54,6 +54,7 @@ fn run_with_backend(backend: &str) -> TempDir {
     let args = UpdateArgs {
         backends: vec![backend.to_owned()],
         no_backends: false,
+        default_branch: Some("main".to_owned()),
         dry_run: false,
     };
     run_update(&args, tmp.path()).unwrap();

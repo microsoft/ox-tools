@@ -62,14 +62,25 @@ pub fn run_update(args: &UpdateArgs, start_dir: &Path) -> Result<RunOutcome, App
     let manifest = Manifest::load(&repo_root)?;
 
     let backends = backend::resolve(&args.backends, args.no_backends, &repo_root)?;
+
+    // The default branch only matters when we emit CI root templates.
+    // Skip resolution when no backend is selected so --no-backends runs
+    // cleanly in repos without a remote / default branch.
+    let default_branch = if backends.is_empty() {
+        String::new()
+    } else {
+        backend::resolve_default_branch(args.default_branch.as_deref(), &repo_root)?
+    };
+
     info!(
         repo_root = %repo_root.display(),
         backends = ?backends.iter().map(|b| b.name()).collect::<Vec<_>>(),
+        default_branch = %default_branch,
         dry_run = args.dry_run,
         "ox-check update"
     );
 
-    let plan = build_plan(&repo_root, &ws, &manifest, &backends)?;
+    let plan = build_plan(&repo_root, &ws, &manifest, &backends, &default_branch)?;
 
     let applied = if args.dry_run {
         false
@@ -92,6 +103,7 @@ fn build_plan(
     workspace: &Workspace,
     manifest: &Manifest,
     backends: &[Backend],
+    default_branch: &str,
 ) -> Result<Plan, AppError> {
     let mut plan = Plan::default();
 
@@ -110,12 +122,12 @@ fn build_plan(
     for backend in backends {
         match backend {
             Backend::GitHub => {
-                for item in github::plan_github_backend(repo_root, manifest)? {
+                for item in github::plan_github_backend(repo_root, manifest, default_branch)? {
                     plan.push(item);
                 }
             }
             Backend::Ado => {
-                for item in ado::plan_ado_backend(repo_root, manifest)? {
+                for item in ado::plan_ado_backend(repo_root, manifest, default_branch)? {
                     plan.push(item);
                 }
             }
@@ -162,6 +174,7 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            default_branch: None,
         };
         let outcome = run_update(&args, tmp.path()).unwrap();
         assert!(outcome.applied);
@@ -201,6 +214,7 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            default_branch: None,
         };
         let _ = run_update(&args, tmp.path()).unwrap();
         let second = run_update(&args, tmp.path()).unwrap();
@@ -214,6 +228,7 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: true,
+            default_branch: None,
         };
         let outcome = run_update(&args, tmp.path()).unwrap();
         assert!(!outcome.applied);
@@ -229,6 +244,7 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            default_branch: None,
         };
         let _ = run_update(&args, tmp.path()).unwrap();
 
@@ -263,6 +279,7 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            default_branch: None,
         };
         let _ = run_update(&args, tmp.path()).unwrap();
 
@@ -302,6 +319,7 @@ mod tests {
             backends: vec!["github".to_owned()],
             no_backends: false,
             dry_run: false,
+            default_branch: Some("main".to_owned()),
         };
         let outcome = run_update(&args, tmp.path()).unwrap();
         assert!(outcome.applied);
@@ -335,6 +353,7 @@ mod tests {
             backends: vec!["github".to_owned()],
             no_backends: false,
             dry_run: false,
+            default_branch: Some("main".to_owned()),
         };
         let _ = run_update(&args, tmp.path()).unwrap();
         let second = run_update(&args, tmp.path()).unwrap();
@@ -352,6 +371,7 @@ mod tests {
             backends: vec!["ado".to_owned()],
             no_backends: false,
             dry_run: false,
+            default_branch: Some("main".to_owned()),
         };
         let outcome = run_update(&args, tmp.path()).unwrap();
         assert!(outcome.applied);
@@ -385,6 +405,7 @@ mod tests {
             backends: vec!["github".to_owned(), "ado".to_owned()],
             no_backends: false,
             dry_run: false,
+            default_branch: Some("main".to_owned()),
         };
         let _ = run_update(&args, tmp.path()).unwrap();
         let second = run_update(&args, tmp.path()).unwrap();
