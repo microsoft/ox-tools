@@ -17,7 +17,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use ohno::{AppError, IntoAppError as _, app_err, bail};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
 
 /// File name of the manifest at the repo root.
@@ -65,15 +65,15 @@ impl Manifest {
     ///
     /// Returns an error if the file exists but can't be read, can't be
     /// parsed, or declares an unsupported schema version.
-    pub fn load(repo_root: &Path) -> Result<Self> {
+    pub fn load(repo_root: &Path) -> Result<Self, AppError> {
         let path = Self::path_for(repo_root);
         if !path.exists() {
             return Ok(Self::default());
         }
         let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
+            .into_app_err_with(|| format!("failed to read {}", path.display()))?;
         Self::parse(&text)
-            .with_context(|| format!("failed to parse manifest at {}", path.display()))
+            .into_app_err_with(|| format!("failed to parse manifest at {}", path.display()))
     }
 
     /// Parse a manifest from a TOML string.
@@ -81,13 +81,13 @@ impl Manifest {
     /// # Errors
     ///
     /// Returns an error on malformed TOML or unsupported schema version.
-    pub fn parse(text: &str) -> Result<Self> {
-        let doc: DocumentMut = text.parse().context("manifest is not valid TOML")?;
+    pub fn parse(text: &str) -> Result<Self, AppError> {
+        let doc: DocumentMut = text.parse::<DocumentMut>().into_app_err("manifest is not valid TOML")?;
 
         let version = doc
             .get("version")
             .and_then(Item::as_integer)
-            .ok_or_else(|| anyhow!("manifest is missing a top-level `version` integer"))?;
+            .ok_or_else(|| app_err!("manifest is missing a top-level `version` integer"))?;
         if version > SCHEMA_VERSION {
             bail!(
                 "manifest schema version {version} is newer than supported ({SCHEMA_VERSION}); upgrade cargo-ox-check"
@@ -105,12 +105,12 @@ impl Manifest {
                 let path = table
                     .get("path")
                     .and_then(Item::as_str)
-                    .ok_or_else(|| anyhow!("[[file]] entry is missing `path`"))?
+                    .ok_or_else(|| app_err!("[[file]] entry is missing `path`"))?
                     .to_owned();
                 let checksum = table
                     .get("checksum")
                     .and_then(Item::as_str)
-                    .ok_or_else(|| anyhow!("[[file]] entry '{path}' is missing `checksum`"))?
+                    .ok_or_else(|| app_err!("[[file]] entry '{path}' is missing `checksum`"))?
                     .to_owned();
                 if files.insert(path.clone(), checksum).is_some() {
                     bail!("duplicate [[file]] entry for '{path}'");
@@ -124,18 +124,18 @@ impl Manifest {
                 let host = table
                     .get("host")
                     .and_then(Item::as_str)
-                    .ok_or_else(|| anyhow!("[[region]] entry is missing `host`"))?
+                    .ok_or_else(|| app_err!("[[region]] entry is missing `host`"))?
                     .to_owned();
                 let id = table
                     .get("id")
                     .and_then(Item::as_str)
-                    .ok_or_else(|| anyhow!("[[region]] entry '{host}' is missing `id`"))?
+                    .ok_or_else(|| app_err!("[[region]] entry '{host}' is missing `id`"))?
                     .to_owned();
                 let checksum = table
                     .get("checksum")
                     .and_then(Item::as_str)
                     .ok_or_else(|| {
-                        anyhow!("[[region]] entry '{host}'/'{id}' is missing `checksum`")
+                        app_err!("[[region]] entry '{host}'/'{id}' is missing `checksum`")
                     })?
                     .to_owned();
                 let key = RegionKey { host, id };
@@ -205,14 +205,14 @@ impl Manifest {
     /// # Errors
     ///
     /// Returns an error if the write fails.
-    pub fn save(&self, repo_root: &Path) -> Result<()> {
+    pub fn save(&self, repo_root: &Path) -> Result<(), AppError> {
         let path = Self::path_for(repo_root);
         let text = self.to_toml();
         let tmp = path.with_extension("lock.tmp");
         std::fs::write(&tmp, text.as_bytes())
-            .with_context(|| format!("failed to write {}", tmp.display()))?;
+            .into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
         std::fs::rename(&tmp, &path)
-            .with_context(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
+            .into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
         Ok(())
     }
 

@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use ohno::AppError;
 
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
@@ -104,7 +104,7 @@ pub fn render_delta_body() -> &'static str {
 /// # Errors
 ///
 /// Propagates I/O and region-parsing errors.
-pub fn plan_shared_configs(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>> {
+pub fn plan_shared_configs(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
         plan_managed_region(
             repo_root,

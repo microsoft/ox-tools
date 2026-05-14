@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use ohno::AppError;
 
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
@@ -108,7 +108,7 @@ pub fn group_action_path(group: &str) -> String {
 pub fn plan_composite_actions(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::with_capacity(GROUPS.len() + 2);
     items.push(plan_owned_file(
         repo_root,
@@ -142,7 +142,7 @@ pub fn plan_composite_actions(
 pub fn plan_reusable_workflows(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
         plan_owned_file(
             repo_root,
@@ -167,7 +167,7 @@ pub fn plan_reusable_workflows(
 pub fn plan_root_workflows(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
         plan_owned_file(
             repo_root,
@@ -192,7 +192,7 @@ pub fn plan_root_workflows(
 pub fn plan_github_backend(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::new();
     items.extend(plan_composite_actions(repo_root, manifest)?);
     items.extend(plan_reusable_workflows(repo_root, manifest)?);

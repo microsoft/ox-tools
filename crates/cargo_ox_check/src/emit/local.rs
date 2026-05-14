@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use ohno::AppError;
 
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
@@ -51,7 +51,7 @@ pub const TIERS_JUST_PATH: &str = "justfiles/ox-check/tiers.just";
 /// # Errors
 ///
 /// Propagates I/O errors from [`plan_owned_file`].
-pub fn plan_tools_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
+pub fn plan_tools_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
     plan_owned_file(repo_root, manifest, TOOLS_JUST_PATH, TOOLS_JUST)
 }
 
@@ -60,7 +60,7 @@ pub fn plan_tools_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem
 /// # Errors
 ///
 /// Propagates I/O errors from [`plan_owned_file`].
-pub fn plan_checks_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
+pub fn plan_checks_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
     plan_owned_file(repo_root, manifest, CHECKS_JUST_PATH, CHECKS_JUST)
 }
 
@@ -69,7 +69,7 @@ pub fn plan_checks_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanIte
 /// # Errors
 ///
 /// Propagates I/O errors from [`plan_owned_file`].
-pub fn plan_groups_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
+pub fn plan_groups_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
     plan_owned_file(repo_root, manifest, GROUPS_JUST_PATH, GROUPS_JUST)
 }
 
@@ -78,7 +78,7 @@ pub fn plan_groups_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanIte
 /// # Errors
 ///
 /// Propagates I/O errors from [`plan_owned_file`].
-pub fn plan_tiers_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
+pub fn plan_tiers_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
     plan_owned_file(repo_root, manifest, TIERS_JUST_PATH, TIERS_JUST)
 }
 
@@ -106,7 +106,7 @@ pub fn render_justfile_imports() -> String {
 /// # Errors
 ///
 /// Propagates I/O and region-parsing errors.
-pub fn plan_justfile_imports(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
+pub fn plan_justfile_imports(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
     let body = render_justfile_imports();
     super::managed_region::plan_managed_region(
         repo_root,
@@ -126,7 +126,7 @@ pub fn plan_justfile_imports(repo_root: &Path, manifest: &Manifest) -> Result<Pl
 pub fn plan_local_just_tree(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
         plan_tools_just(repo_root, manifest)?,
         plan_checks_just(repo_root, manifest)?,

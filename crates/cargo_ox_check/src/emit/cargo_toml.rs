@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use ohno::AppError;
 
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
@@ -133,7 +133,7 @@ pub fn plan_cargo_lints(
     repo_root: &Path,
     workspace: &Workspace,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::new();
     if workspace.has_workspace_table {
         let body = render_workspace_lints_body();

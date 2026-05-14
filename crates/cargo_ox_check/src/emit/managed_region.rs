@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context as _, Result};
+use ohno::{AppError, IntoAppError as _};
 
 use crate::checksum::checksum_str;
 use crate::decision::{Decision, DecisionInputs, decide, should_emit_proposed_for_opt_out};
@@ -39,12 +39,12 @@ pub fn plan_managed_region(
     region_id: &str,
     rendered_body: &str,
     syntax: CommentSyntax,
-) -> Result<PlanItem> {
+) -> Result<PlanItem, AppError> {
     let abs = repo_root.join(host_relpath);
     let host_text = match std::fs::read_to_string(&abs) {
         Ok(s) => Some(s),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e).with_context(|| format!("failed to read {}", abs.display())),
+        Err(e) => return Err(e).into_app_err_with(|| format!("failed to read {}", abs.display())),
     };
 
     let template_checksum = checksum_str(rendered_body);
@@ -111,7 +111,7 @@ fn splice(
     region_id: &str,
     rendered_body: &str,
     syntax: CommentSyntax,
-) -> Result<String> {
+) -> Result<String, AppError> {
     let base = host_text.unwrap_or("");
     upsert_region(base, region_id, rendered_body, syntax)
 }

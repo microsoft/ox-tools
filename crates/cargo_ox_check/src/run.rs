@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use ohno::AppError;
 use tracing::info;
 
 use crate::backend::{self, Backend};
@@ -34,7 +34,7 @@ pub struct RunOutcome {
 /// # Errors
 ///
 /// Returns an error when the underlying subcommand fails.
-pub fn run(command: Command) -> Result<()> {
+pub fn run(command: Command) -> Result<(), AppError> {
     match command {
         Command::Update(args) => {
             let outcome = run_update(&args, &std::env::current_dir()?)?;
@@ -56,7 +56,7 @@ pub fn run(command: Command) -> Result<()> {
 ///
 /// Propagates errors from any subsystem (workspace discovery, manifest
 /// I/O, emitter, plan application).
-pub fn run_update(args: &UpdateArgs, start_dir: &Path) -> Result<RunOutcome> {
+pub fn run_update(args: &UpdateArgs, start_dir: &Path) -> Result<RunOutcome, AppError> {
     let repo_root = workspace::find_workspace_root(start_dir)?;
     let ws = workspace::load_workspace(&repo_root)?;
     let manifest = Manifest::load(&repo_root)?;
@@ -92,7 +92,7 @@ fn build_plan(
     workspace: &Workspace,
     manifest: &Manifest,
     backends: &[Backend],
-) -> Result<Plan> {
+) -> Result<Plan, AppError> {
     let mut plan = Plan::default();
 
     for item in local::plan_local_just_tree(repo_root, manifest)? {

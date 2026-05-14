@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use ohno::AppError;
 
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
@@ -96,7 +96,7 @@ pub fn group_step_path(group: &str) -> String {
 pub fn plan_stages_templates(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
         plan_owned_file(
             repo_root,
@@ -121,7 +121,7 @@ pub fn plan_stages_templates(
 pub fn plan_root_pipelines(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
         plan_owned_file(
             repo_root,
@@ -146,7 +146,7 @@ pub fn plan_root_pipelines(
 pub fn plan_ado_backend(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::new();
     items.extend(plan_step_templates(repo_root, manifest)?);
     items.extend(plan_stages_templates(repo_root, manifest)?);
@@ -162,7 +162,7 @@ pub fn plan_ado_backend(
 pub fn plan_step_templates(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::with_capacity(GROUPS.len() + 2);
     items.push(plan_owned_file(
         repo_root,

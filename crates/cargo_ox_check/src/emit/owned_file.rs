@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use anyhow::{Context as _, Result};
+use ohno::{AppError, IntoAppError as _};
 
 use crate::checksum::checksum_str;
 use crate::decision::{Decision, DecisionInputs, decide, should_emit_proposed_for_opt_out};
@@ -29,7 +29,7 @@ pub fn plan_owned_file(
     manifest: &Manifest,
     relpath: &str,
     rendered: &str,
-) -> Result<PlanItem> {
+) -> Result<PlanItem, AppError> {
     let abs = repo_root.join(relpath);
     let on_disk = read_optional(&abs)?;
     let disk_checksum = on_disk.as_deref().map(checksum_str);
@@ -71,11 +71,11 @@ pub fn plan_owned_file(
     Ok(item)
 }
 
-fn read_optional(path: &Path) -> Result<Option<String>> {
+fn read_optional(path: &Path) -> Result<Option<String>, AppError> {
     match std::fs::read_to_string(path) {
         Ok(s) => Ok(Some(s)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).with_context(|| format!("failed to read {}", path.display())),
+        Err(e) => Err(e).into_app_err_with(|| format!("failed to read {}", path.display())),
     }
 }
 

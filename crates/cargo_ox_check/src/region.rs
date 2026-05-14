@@ -20,7 +20,7 @@
 //! Empty body (just the sentinels with no content between them) is the
 //! opt-out signal — see [updates.md §6](../../docs/design/updates.md).
 
-use anyhow::{Result, anyhow, bail};
+use ohno::{AppError, app_err, bail};
 
 /// Comment syntax used by the host file.
 ///
@@ -97,7 +97,7 @@ pub fn find_region<'a>(
     text: &'a str,
     id: &str,
     syntax: CommentSyntax,
-) -> Result<Option<Region<'a>>> {
+) -> Result<Option<Region<'a>>, AppError> {
     let opener = format!("{} >>> ox-check-managed: {id}", syntax.prefix());
     let closer = format!("{} <<< ox-check-managed: {id}", syntax.prefix());
 
@@ -126,11 +126,11 @@ pub fn find_region<'a>(
 
     match (start_line, end_line) {
         (None, None) => Ok(None),
-        (Some(_), None) => Err(anyhow!(
+        (Some(_), None) => Err(app_err!(
             "region '{id}' has an opening sentinel but no closing sentinel"
         )),
         // (None, Some(_)) was already caught above; left as a safety net.
-        (None, Some(_)) => Err(anyhow!(
+        (None, Some(_)) => Err(app_err!(
             "region '{id}' has a closing sentinel with no opener"
         )),
         (Some(start), Some(end)) => {
@@ -167,7 +167,7 @@ pub fn upsert_region(
     id: &str,
     new_body: &str,
     syntax: CommentSyntax,
-) -> Result<String> {
+) -> Result<String, AppError> {
     let rendered = render_region(id, new_body, syntax);
 
     if let Some(region) = find_region(text, id, syntax)? {

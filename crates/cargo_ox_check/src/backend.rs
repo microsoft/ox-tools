@@ -15,7 +15,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context as _, Result, anyhow};
+use ohno::{AppError, IntoAppError as _, app_err};
 
 /// Supported CI backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -41,11 +41,11 @@ impl Backend {
     /// # Errors
     ///
     /// Returns an error for any name other than `github` or `ado`.
-    pub fn parse(name: &str) -> Result<Self> {
+    pub fn parse(name: &str) -> Result<Self, AppError> {
         match name {
             "github" => Ok(Self::GitHub),
             "ado" => Ok(Self::Ado),
-            other => Err(anyhow!(
+            other => Err(app_err!(
                 "unknown backend '{other}' (valid values: github, ado)"
             )),
         }
@@ -115,15 +115,15 @@ fn extract_host(url: &str) -> Option<&str> {
 ///
 /// Returns an error if `git` is not on PATH, the command exits non-zero, or
 /// no `origin` remote is configured.
-pub fn read_origin_url(repo_root: &Path) -> Result<String> {
+pub fn read_origin_url(repo_root: &Path) -> Result<String, AppError> {
     let output = Command::new("git")
         .args(["config", "--get", "remote.origin.url"])
         .current_dir(repo_root)
         .output()
-        .context("failed to invoke `git config` — is git installed and on PATH?")?;
+        .into_app_err("failed to invoke `git config` — is git installed and on PATH?")?;
 
     if !output.status.success() {
-        return Err(anyhow!(
+        return Err(app_err!(
             "`git config --get remote.origin.url` exited with {} in {}",
             output.status,
             repo_root.display()
@@ -131,12 +131,12 @@ pub fn read_origin_url(repo_root: &Path) -> Result<String> {
     }
 
     let url = String::from_utf8(output.stdout)
-        .context("git config output was not valid UTF-8")?
+        .into_app_err("git config output was not valid UTF-8")?
         .trim()
         .to_owned();
 
     if url.is_empty() {
-        return Err(anyhow!(
+        return Err(app_err!(
             "no `origin` remote configured in {}",
             repo_root.display()
         ));
@@ -161,7 +161,7 @@ pub fn resolve(
     flag_backends: &[String],
     no_backends: bool,
     repo_root: &Path,
-) -> Result<Vec<Backend>> {
+) -> Result<Vec<Backend>, AppError> {
     if no_backends {
         return Ok(Vec::new());
     }
@@ -179,7 +179,7 @@ pub fn resolve(
     let url = read_origin_url(repo_root)?;
     let detected = detect_from_url(&url);
     if detected.is_empty() {
-        return Err(anyhow!(
+        return Err(app_err!(
             "could not autodetect a CI backend from origin URL '{url}'. \
              Pass --backend github|ado explicitly, or --no-backends."
         ));
