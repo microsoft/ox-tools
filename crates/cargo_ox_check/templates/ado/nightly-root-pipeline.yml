@@ -7,6 +7,10 @@ pr: none
 schedules:
   - cron: "0 6 * * *"
     displayName: ox-check nightly
+    # Scheduled triggers in ADO require an explicit branch list. `main`
+    # is the most common default; change this in-place if your repo's
+    # canonical branch is named differently. The dirty-file flow keeps
+    # your edit on subsequent `cargo ox-check update` runs.
     branches:
       include: [main]
     always: true
