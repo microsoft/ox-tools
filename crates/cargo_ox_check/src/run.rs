@@ -170,6 +170,7 @@ mod tests {
 
         for expected in [
             "Justfile",
+            "justfiles/ox-check/mod.just",
             "justfiles/ox-check/checks.just",
             "justfiles/ox-check/groups.just",
             "justfiles/ox-check/tiers.just",
