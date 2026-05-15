@@ -38,6 +38,7 @@ pub enum CheckResult {
 pub(crate) fn check(content: &str, expected_header: &str, kind: FileKind) -> CheckResult {
     let style = kind.comment_style();
     let extracted = match kind {
+        FileKind::PowerShell => extract::header_after_optional_shebang(content, style),
         FileKind::CargoScript => extract::script_header(content, style),
         _ => extract::header_comment(content, style),
     };
@@ -54,6 +55,7 @@ pub(crate) fn fix(content: &str, expected_header: &str, kind: FileKind) -> (Chec
     let result = check(content, expected_header, kind);
     let new_content = match (&result, kind) {
         (CheckResult::Ok, _) => content.to_owned(),
+        (_, FileKind::PowerShell) => strip::fix_shebang_content(content, expected_header, style),
         (_, FileKind::CargoScript) => strip::fix_script_content(content, expected_header, style),
         (CheckResult::Missing, _) => prepend_header(content, expected_header, style),
         (CheckResult::Mismatch { .. }, _) => {

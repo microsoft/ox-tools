@@ -25,7 +25,7 @@ This repository contains a set of tools  that help you build robust highly scala
 
 These are the primary crates built out of this repo:
 
-- [`cargo_heather`](./crates/cargo_heather/README.md) -  A cargo sub-command to validate license headers in Rust and TOML source files
+- [`cargo-heather`](./crates/cargo-heather/README.md) -  A cargo sub-command to validate license headers in Rust, TOML, PowerShell, Just, and env source files
 
 ## About this Repo
 
@@ -179,7 +179,7 @@ We strive to deliver high-quality code and as such, we've put in place a number 
 
 - **License Headers**. We ensure all source files have the requisite license header. The expected header is described in
   the [`.cargo-heather.toml`](./.cargo-heather.toml) file at the repo root and validated by the in-repo
-  [`cargo-heather`](./crates/cargo_heather) tool.
+  [`cargo-heather`](./crates/cargo-heather) tool.
 
 - **Spell Checking**. We use [cargo-spellcheck](https://crates.io/crates/cargo-spellcheck) to help our docs have fewer typos.
 

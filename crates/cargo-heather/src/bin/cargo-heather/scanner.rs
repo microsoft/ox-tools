@@ -4,7 +4,7 @@
 //! File scanner for discovering source files in a project.
 //!
 //! Walks the project directory tree, collecting all supported source files
-//! (`.rs` and `.toml`) while skipping build artifacts and hidden directories.
+//! while skipping build artifacts and hidden directories.
 
 use std::path::{Path, PathBuf};
 

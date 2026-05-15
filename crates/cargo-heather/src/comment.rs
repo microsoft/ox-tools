@@ -15,6 +15,12 @@ pub enum FileKind {
     Rust,
     /// A TOML file (`.toml`). Header uses `#` at the top.
     Toml,
+    /// A `PowerShell` script (`.ps1`). Header uses `#` at the top.
+    PowerShell,
+    /// A Just recipe file (`*.just` or `justfile`). Header uses `#` at the top.
+    Just,
+    /// The repository's `constants.env` file. Header uses `#` at the top.
+    Env,
     /// A Rust cargo-script file (`.rs` with shebang + `---` frontmatter).
     /// Header uses `#` after the opening `---`.
     CargoScript,
@@ -27,15 +33,25 @@ impl FileKind {
     /// regular Rust files. If `content` is `None`, assumes regular Rust.
     #[must_use]
     pub fn detect(path: &Path, content: Option<&str>) -> Option<Self> {
+        let file_name = path.file_name()?.to_str()?;
+        if file_name.eq_ignore_ascii_case("justfile") {
+            return Some(Self::Just);
+        }
+        if file_name == "constants.env" {
+            return Some(Self::Env);
+        }
+
         match path.extension()?.to_str()? {
-            "rs" => {
+            ext if ext.eq_ignore_ascii_case("rs") => {
                 if content.is_some_and(is_cargo_script) {
                     Some(Self::CargoScript)
                 } else {
                     Some(Self::Rust)
                 }
             }
-            "toml" => Some(Self::Toml),
+            ext if ext.eq_ignore_ascii_case("toml") => Some(Self::Toml),
+            ext if ext.eq_ignore_ascii_case("ps1") => Some(Self::PowerShell),
+            ext if ext.eq_ignore_ascii_case("just") => Some(Self::Just),
             _ => None,
         }
     }
@@ -45,7 +61,7 @@ impl FileKind {
     pub const fn comment_style(self) -> CommentStyle {
         match self {
             Self::Rust => CommentStyle::DoubleSlash,
-            Self::Toml | Self::CargoScript => CommentStyle::Hash,
+            Self::Toml | Self::PowerShell | Self::Just | Self::Env | Self::CargoScript => CommentStyle::Hash,
         }
     }
 }
@@ -81,11 +97,7 @@ impl CommentStyle {
     /// Returns `None` for unsupported file types.
     #[must_use]
     pub fn from_path(path: &Path) -> Option<Self> {
-        match path.extension()?.to_str()? {
-            "rs" => Some(Self::DoubleSlash),
-            "toml" => Some(Self::Hash),
-            _ => None,
-        }
+        FileKind::detect(path, None).map(FileKind::comment_style)
     }
 
     /// The bare comment prefix (e.g. `"//"` or `"#"`).
@@ -127,7 +139,7 @@ impl CommentStyle {
     /// Returns `true` if `trimmed` is a header comment line for this style.
     ///
     /// For Rust files, excludes doc comments (`///` and `//!`).
-    /// For TOML files, any `#` line is a valid comment.
+    /// For hash-commented files, any `#` line is a valid comment.
     #[must_use]
     pub fn is_header_comment_line(self, trimmed: &str) -> bool {
         match self {

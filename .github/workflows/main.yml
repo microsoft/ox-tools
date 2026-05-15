@@ -294,7 +294,7 @@ jobs:
       - name: Check License Headers
         # Build and run cargo-heather from the in-repo sources. The tool's
         # configuration lives at the repo root in `.cargo-heather.toml`.
-        run: cargo run --release --locked -p cargo_heather --bin cargo-heather -- heather
+        run: cargo run --release --locked -p cargo-heather --bin cargo-heather -- heather
 
   external-type-exposure:
     runs-on: ubuntu-latest
