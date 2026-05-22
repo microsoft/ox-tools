@@ -34,10 +34,7 @@ Write-Output \"done\"
 Write-Output \"done\"
 ";
 
-    assert_eq!(
-        check_str(INPUT, HEADER, FileKind::PowerShell),
-        CheckResult::Missing
-    );
+    assert_eq!(check_str(INPUT, HEADER, FileKind::PowerShell), CheckResult::Missing);
     let (out, result) = fix_to_string(INPUT, HEADER, FileKind::PowerShell);
     assert_eq!(result, CheckResult::Missing);
     assert_eq!(out, EXPECTED, "descriptive comments must be preserved");
@@ -60,10 +57,7 @@ Write-Output \"done\"
 Write-Output \"done\"
 ";
 
-    assert_eq!(
-        check_str(INPUT, HEADER, FileKind::PowerShell),
-        CheckResult::Missing
-    );
+    assert_eq!(check_str(INPUT, HEADER, FileKind::PowerShell), CheckResult::Missing);
     let (out, result) = fix_to_string(INPUT, HEADER, FileKind::PowerShell);
     assert_eq!(result, CheckResult::Missing);
     assert_eq!(out, EXPECTED, "descriptive comments must be preserved");
@@ -98,10 +92,7 @@ param(
 )
 ";
 
-    assert_eq!(
-        check_str(INPUT, HEADER, FileKind::PowerShell),
-        CheckResult::Missing
-    );
+    assert_eq!(check_str(INPUT, HEADER, FileKind::PowerShell), CheckResult::Missing);
     let (out, result) = fix_to_string(INPUT, HEADER, FileKind::PowerShell);
     assert_eq!(result, CheckResult::Missing);
     assert_eq!(out, EXPECTED, "banner comment must be preserved");
@@ -120,10 +111,7 @@ param($Name)
 Write-Output $Name
 ";
 
-    assert_eq!(
-        check_str(INPUT, HEADER, FileKind::PowerShell),
-        CheckResult::Missing
-    );
+    assert_eq!(check_str(INPUT, HEADER, FileKind::PowerShell), CheckResult::Missing);
     let (out, result) = fix_to_string(INPUT, HEADER, FileKind::PowerShell);
     assert_eq!(result, CheckResult::Missing);
     assert_eq!(out, EXPECTED);
@@ -137,10 +125,7 @@ fn ps1_ok() {
 Write-Output \"hello\"
 ";
 
-    assert_eq!(
-        check_str(INPUT, HEADER, FileKind::PowerShell),
-        CheckResult::Ok
-    );
+    assert_eq!(check_str(INPUT, HEADER, FileKind::PowerShell), CheckResult::Ok);
     let (out, result) = fix_to_string(INPUT, HEADER, FileKind::PowerShell);
     assert_eq!(result, CheckResult::Ok);
     assert_eq!(out, INPUT);
@@ -156,10 +141,7 @@ fn ps1_ok_with_trailing_comments() {
 Write-Output \"hello\"
 ";
 
-    assert_eq!(
-        check_str(INPUT, HEADER, FileKind::PowerShell),
-        CheckResult::Ok
-    );
+    assert_eq!(check_str(INPUT, HEADER, FileKind::PowerShell), CheckResult::Ok);
     let (out, result) = fix_to_string(INPUT, HEADER, FileKind::PowerShell);
     assert_eq!(result, CheckResult::Ok);
     assert_eq!(out, INPUT);
@@ -205,10 +187,7 @@ param($Name)
 param($Name)
 ";
 
-    assert_eq!(
-        check_str(INPUT, HEADER, FileKind::PowerShell),
-        CheckResult::Missing
-    );
+    assert_eq!(check_str(INPUT, HEADER, FileKind::PowerShell), CheckResult::Missing);
     let (out, result) = fix_to_string(INPUT, HEADER, FileKind::PowerShell);
     assert_eq!(result, CheckResult::Missing);
     assert_eq!(out, EXPECTED, "shebang file: descriptive comments must be preserved");
