@@ -55,7 +55,8 @@ pub(crate) fn fix(content: &str, expected_header: &str, kind: FileKind) -> (Chec
     let result = check(content, expected_header, kind);
     let new_content = match (&result, kind) {
         (CheckResult::Ok, _) => content.to_owned(),
-        (_, FileKind::PowerShell) => strip::fix_shebang_content(content, expected_header, style),
+        (CheckResult::Missing, FileKind::PowerShell) => strip::prepend_after_optional_shebang(content, expected_header, style),
+        (CheckResult::Mismatch { .. }, FileKind::PowerShell) => strip::fix_shebang_content(content, expected_header, style),
         (_, FileKind::CargoScript) => strip::fix_script_content(content, expected_header, style),
         (CheckResult::Missing, _) => prepend_header(content, expected_header, style),
         (CheckResult::Mismatch { .. }, _) => {
