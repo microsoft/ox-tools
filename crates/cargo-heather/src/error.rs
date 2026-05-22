@@ -74,3 +74,26 @@ impl std::error::Error for HeatherError {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error;
+
+    #[test]
+    fn file_read_error_exposes_source() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        let err = HeatherError::FileRead {
+            path: PathBuf::from("/tmp/missing"),
+            source: io_err,
+        };
+        let source = err.source().expect("FileRead should have a source");
+        assert!(source.to_string().contains("gone"));
+    }
+
+    #[test]
+    fn non_io_variants_have_no_source() {
+        let err = HeatherError::ConfigInvalid("bad".into());
+        assert!(err.source().is_none());
+    }
+}
