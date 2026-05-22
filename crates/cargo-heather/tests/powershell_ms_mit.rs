@@ -15,13 +15,6 @@ use common::{check_str, fix_to_string};
 
 const HEADER: &str = "Copyright (c) Microsoft Corporation.";
 
-// ── Missing header with descriptive comment block ────────────────────
-
-/// Regression: a file whose only leading comments are descriptive (no
-/// license keywords) must be classified as Missing. The fix must
-/// prepend the license header and preserve the descriptive comments.
-///
-/// Repro from ox-sdk `scripts/docs-clean-branches.ps1`.
 #[test]
 fn ps1_missing_with_descriptive_block() {
     const INPUT: &str = "\
@@ -50,7 +43,6 @@ Write-Output \"done\"
     assert_eq!(out, EXPECTED, "descriptive comments must be preserved");
 }
 
-/// Repro from ox-sdk `scripts/docs-make-map.ps1`.
 #[test]
 fn ps1_missing_with_short_descriptive_block() {
     const INPUT: &str = "\
@@ -77,16 +69,13 @@ Write-Output \"done\"
     assert_eq!(out, EXPECTED, "descriptive comments must be preserved");
 }
 
-/// Repro from ox-sdk `load_testing/scenarios/scenario_workers.ps1` —
-/// a multi-line descriptive header followed by a `param(` block.
 #[test]
 fn ps1_missing_with_banner_comment() {
     const INPUT: &str = "\
 # ============================================================================
 # Script: scenario_workers.ps1
 #
-# Benchmarks throughput as the number of worker processes increases, keeping
-# concurrency fixed.
+# Benchmarks throughput
 # ============================================================================
 
 param(
@@ -100,8 +89,7 @@ param(
 # ============================================================================
 # Script: scenario_workers.ps1
 #
-# Benchmarks throughput as the number of worker processes increases, keeping
-# concurrency fixed.
+# Benchmarks throughput
 # ============================================================================
 
 param(
@@ -118,8 +106,6 @@ param(
     assert_eq!(result, CheckResult::Missing);
     assert_eq!(out, EXPECTED, "banner comment must be preserved");
 }
-
-// ── Missing header with no comments at all ───────────────────────────
 
 #[test]
 fn ps1_missing_no_comments() {
@@ -143,8 +129,6 @@ Write-Output $Name
     assert_eq!(out, EXPECTED);
 }
 
-// ── Correct header present ───────────────────────────────────────────
-
 #[test]
 fn ps1_ok() {
     const INPUT: &str = "\
@@ -162,8 +146,6 @@ Write-Output \"hello\"
     assert_eq!(out, INPUT);
 }
 
-/// Header present with trailing descriptive comments — still OK
-/// because `header_matches` does prefix matching.
 #[test]
 fn ps1_ok_with_trailing_comments() {
     const INPUT: &str = "\
@@ -182,8 +164,6 @@ Write-Output \"hello\"
     assert_eq!(result, CheckResult::Ok);
     assert_eq!(out, INPUT);
 }
-
-// ── Mismatch — wrong license header ──────────────────────────────────
 
 #[test]
 fn ps1_mismatch_wrong_license() {
@@ -206,9 +186,6 @@ Write-Output \"hello\"
     assert!(matches!(result, CheckResult::Mismatch { .. }));
     assert_eq!(out, EXPECTED);
 }
-
-// ── Shebang file (missing header) ────────────────────────────────────
-
 #[test]
 fn ps1_shebang_missing_with_descriptive_comments() {
     const INPUT: &str = "\
