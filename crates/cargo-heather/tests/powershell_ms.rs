@@ -11,9 +11,9 @@
 mod common;
 
 use cargo_heather::{CheckResult, FileKind};
-use common::{check_str, fix_to_string};
+use common::{HEADER_MS, check_str, fix_to_string};
 
-const HEADER: &str = "Copyright (c) Microsoft Corporation.";
+const HEADER: &str = HEADER_MS;
 
 #[test]
 fn ps1_missing_with_descriptive_block() {

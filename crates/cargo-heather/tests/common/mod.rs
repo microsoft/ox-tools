@@ -16,6 +16,8 @@ use cargo_heather::{CheckResult, FileKind, check, fix};
 
 pub const HEADER_MIT: &str = "Licensed under the MIT License.";
 
+pub const HEADER_MS: &str = "Copyright (c) Microsoft Corporation.";
+
 pub const HEADER_MS_MIT: &str = "\
 Copyright (c) Microsoft Corporation.
 Licensed under the MIT License.";

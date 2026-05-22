@@ -72,6 +72,22 @@ pub(super) fn strip_existing_header(content: &str, style: CommentStyle) -> Strin
     }
 }
 
+/// Reassemble a file with a shebang, a new header, and remaining body lines.
+///
+/// Shared by both the `Missing` path (which passes `body_start = 0` to
+/// preserve all content) and the `Mismatch` path (which skips stripped
+/// header lines).
+fn reassemble_after_shebang(shebang: &str, header_text: &str, body_lines: &[&str], body_start: usize, style: CommentStyle) -> String {
+    let header_comment = style.format_header(header_text);
+    let rest = body_lines[body_start..].join("\n");
+
+    if rest.is_empty() {
+        format!("{shebang}\n{header_comment}\n")
+    } else {
+        format!("{shebang}\n{header_comment}\n\n{rest}\n")
+    }
+}
+
 /// Replace or insert a header after an optional shebang line.
 pub(super) fn fix_shebang_content(content: &str, header_text: &str, style: CommentStyle) -> String {
     let mut iter = content.lines();
@@ -86,14 +102,25 @@ pub(super) fn fix_shebang_content(content: &str, header_text: &str, style: Comme
 
     let body_lines: Vec<&str> = iter.collect();
     let body_start = find_header_end(&body_lines, style).unwrap_or(0);
-    let header_comment = style.format_header(header_text);
-    let rest = body_lines[body_start..].join("\n");
+    reassemble_after_shebang(first, header_text, &body_lines, body_start, style)
+}
 
-    if rest.is_empty() {
-        format!("{first}\n{header_comment}\n")
-    } else {
-        format!("{first}\n{header_comment}\n\n{rest}\n")
+/// Prepend a header after an optional shebang line, preserving all
+/// existing content (including descriptive comment blocks).
+///
+/// Used for `CheckResult::Missing` where no header needs to be stripped.
+pub(super) fn prepend_after_optional_shebang(content: &str, header_text: &str, style: CommentStyle) -> String {
+    let mut iter = content.lines();
+    let Some(first) = iter.next() else {
+        return format!("{}\n", style.format_header(header_text));
+    };
+
+    if !first.trim().starts_with("#!") {
+        return super::prepend_header(content, header_text, style);
     }
+
+    let body_lines: Vec<&str> = iter.collect();
+    reassemble_after_shebang(first, header_text, &body_lines, 0, style)
 }
 
 /// Replace the header inside a cargo-script frontmatter.

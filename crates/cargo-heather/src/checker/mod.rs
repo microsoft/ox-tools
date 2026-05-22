@@ -55,7 +55,7 @@ pub(crate) fn fix(content: &str, expected_header: &str, kind: FileKind) -> (Chec
     let result = check(content, expected_header, kind);
     let new_content = match (&result, kind) {
         (CheckResult::Ok, _) => content.to_owned(),
-        (CheckResult::Missing, FileKind::PowerShell) => prepend_after_optional_shebang(content, expected_header, style),
+        (CheckResult::Missing, FileKind::PowerShell) => strip::prepend_after_optional_shebang(content, expected_header, style),
         (CheckResult::Mismatch { .. }, FileKind::PowerShell) => strip::fix_shebang_content(content, expected_header, style),
         (_, FileKind::CargoScript) => strip::fix_script_content(content, expected_header, style),
         (CheckResult::Missing, _) => prepend_header(content, expected_header, style),
@@ -65,27 +65,6 @@ pub(crate) fn fix(content: &str, expected_header: &str, kind: FileKind) -> (Chec
         }
     };
     (result, new_content)
-}
-
-/// Prepend the license header after an optional shebang line, preserving
-/// all existing content (including descriptive comment blocks).
-fn prepend_after_optional_shebang(content: &str, header_text: &str, style: CommentStyle) -> String {
-    let mut lines = content.lines();
-    let Some(first) = lines.next() else {
-        return format!("{}\n", style.format_header(header_text));
-    };
-
-    if first.trim().starts_with("#!") {
-        let header_comment = style.format_header(header_text);
-        let rest: String = lines.collect::<Vec<_>>().join("\n");
-        if rest.is_empty() {
-            format!("{first}\n{header_comment}\n")
-        } else {
-            format!("{first}\n{header_comment}\n\n{rest}\n")
-        }
-    } else {
-        prepend_header(content, header_text, style)
-    }
 }
 
 /// Prepend the license header comment to file content.
