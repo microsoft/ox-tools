@@ -122,7 +122,7 @@ impl CommentStyle {
     ///
     /// Converts plain-text header into commented lines.
     #[must_use]
-    pub fn format_header(self, header_text: &str) -> String {
+    pub fn format_header(self, header_text: &str, line_ending: &str) -> String {
         header_text
             .lines()
             .map(|line| {
@@ -133,7 +133,7 @@ impl CommentStyle {
                 }
             })
             .collect::<Vec<_>>()
-            .join("\n")
+            .join(line_ending)
     }
 
     /// Returns `true` if `trimmed` is a header comment line for this style.
