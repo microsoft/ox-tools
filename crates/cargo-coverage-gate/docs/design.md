@@ -40,8 +40,7 @@ lower-coverage code.
    summary, and ADO build summary tab. Reviewers see the same per-crate
    table no matter where they look.
 5. **Threshold lifecycle is git-native**: thresholds change via Cargo.toml
-   edits that show up in PR diffs and through a one-shot
-   `cargo coverage-gate bump` command — no hidden state, no separate baseline
+   edits that show up in PR diffs — no hidden state, no separate baseline
    service.
 6. **Open source**: ships from `github.com/microsoft/ox-tools` to crates.io.
 
@@ -94,26 +93,24 @@ want to reproduce the gate locally.
 ```text
 cargo coverage-gate check  [--json <path>] [--crates <name>,<name>,...]
                            [--summary-file <path>] [--quiet]
-cargo coverage-gate bump   [--json <path>] [--crates <name>,<name>,...]
+cargo coverage-gate init   [--json <path>] [--crates <name>,<name>,...]
                            [--margin <pp>] [--dry-run]
-cargo coverage-gate init   [--json <path>] [--margin <pp>] [--dry-run]
 ```
 
-Three subcommands, deliberately small surface:
+Two subcommands, deliberately small surface:
 
-- **`check`** — the gating command. Reads coverage JSON, looks up per-crate
-  thresholds in workspace `Cargo.toml`s, computes per-crate percentages,
-  emits a verdict table. Exit `0` if every in-scope crate meets its
-  threshold (or has none); exit `1` if any in-scope crate fails its
-  threshold; exit `2` on configuration error.
-- **`bump`** — updates thresholds for crates that have one, setting each
-  to `floor(observed_percentage - margin)` (default margin: `1.0`
-  percentage points to absorb measurement noise). Skips crates whose
-  current threshold already matches; skips crates without an existing
-  threshold (use `init` to add new ones).
-- **`init`** — adds `coverage-gate.min-lines` metadata to crates that
-  don't yet have one, seeded from observed coverage. Idempotent: never
-  overwrites an existing threshold (use `bump` for that).
+- **`check`** — the gating command. Reads coverage JSON, resolves the
+  effective per-crate threshold (per-crate metadata, then workspace
+  default, then the built-in default of `100.0`), computes per-crate
+  percentages, emits a verdict table. Exit `0` if every in-scope crate
+  meets its threshold; exit `1` if any in-scope crate fails; exit `2` on
+  configuration error.
+- **`init`** — adds `[package.metadata.coverage-gate]` to crates that
+  don't yet have one, seeded from observed coverage as
+  `floor((observed - margin) * 10) / 10`. Idempotent: never overwrites
+  an existing per-crate threshold. After `init`, any subsequent
+  threshold change is a manual `Cargo.toml` edit so that the change
+  appears in the PR diff and is reviewed.
 
 Shared flags:
 
@@ -121,35 +118,55 @@ Shared flags:
   `target/coverage/coverage.json` (matching the recommended
   `cargo llvm-cov report --json --output-path <path>` invocation).
 - `--crates <list>` — restrict the operation to a comma-separated list of
-  package names. Default: every workspace member that has a threshold
-  defined (for `check` / `bump`) or every workspace member at all (for
-  `init`). The CI emitters pass `--crates $OX_CHECK_IMPACTED` to scope to
-  cargo-delta's impacted set.
+  package names. Default: every workspace member. CI integrations pass
+  the impacted-crate list from their test-impact step (e.g., a
+  comma-separated env var set by the surrounding pipeline) so that
+  impact-scoped runs only gate the crates whose tests actually ran.
 - `--summary-file <path>` — write a Markdown verdict table to this file.
   When unset, `check` honors the environment variables
   `GITHUB_STEP_SUMMARY` (GitHub Actions) and
   `COVERAGE_GATE_SUMMARY` (any CI that pipes the file content through
   `##vso[task.uploadsummary]` or equivalent) automatically.
+- `--margin <pp>` — (`init` only) percentage points subtracted from the
+  observed value before writing it as a threshold, to absorb measurement
+  noise. Default: `1.0`.
+- `--dry-run` — (`init` only) print the proposed Cargo.toml edits
+  without writing.
 - `--quiet` — suppress stdout output (the summary file, if any, is still
   written).
 
 ### 5.3 The threshold metadata
 
-Each crate that wants gating carries a tiny `[package.metadata.coverage-gate]`
-section in its `Cargo.toml`:
+A crate's threshold is resolved in three layers, in priority order:
+
+1. **Per-crate**: `[package.metadata.coverage-gate]` in the crate's
+   `Cargo.toml`.
+2. **Workspace default**: `[workspace.metadata.coverage-gate]` in the
+   root `Cargo.toml`. Applies to every member without per-crate
+   metadata.
+3. **Built-in default**: `min-lines = 100.0`. Applied when neither of
+   the above is present.
 
 ```toml
+# Per-crate (highest priority):
 [package.metadata.coverage-gate]
-min-lines = 75
+min-lines = 75.0
 ```
 
-Schema today is one key, `min-lines`, an integer or float percentage
-(0.0–100.0 inclusive). Future extensions can add `min-functions`,
+```toml
+# Workspace-wide default (applies to all members that don't override):
+[workspace.metadata.coverage-gate]
+min-lines = 80.0
+```
+
+The schema today is one key, `min-lines`, an integer or float percentage
+(`0.0`–`100.0` inclusive). Future extensions can add `min-functions`,
 `min-regions` symmetrically.
 
-A crate without that section is **excluded from gating**. It still appears
-in the output table for visibility, with a `(no threshold)` annotation.
-Removing gating for a crate is achieved by removing the section.
+The built-in default of `100.0` means **gating is on by default**: a new
+crate with no metadata anywhere will only pass if every measured line is
+covered. To opt a crate out of gating, set `min-lines = 0.0` explicitly
+(at the crate or workspace level). There is no implicit opt-out.
 
 ### 5.4 The verdict table
 
@@ -159,14 +176,17 @@ when configured):
 ```text
 ox coverage-gate
 
-  Crate              Lines       Threshold   Δ vs floor   Status
-  ─────────────────  ──────────  ──────────  ───────────  ──────
-  crates/alpha       82.1%        80.0%        +2.1pp      OK
-  crates/beta        74.5%        80.0%        −5.5pp      FAIL
-  crates/gamma       91.0%        (none)         —          —
-  ─────────────────  ──────────  ──────────  ───────────  ──────
-  Result: 1 crate(s) below threshold.
+  Crate              Lines       Threshold   Δ vs threshold   Status   Source
+  ─────────────────  ──────────  ──────────  ───────────────  ───────  ─────────
+  crates/alpha       82.1%        80.0%        +2.1pp           OK       crate
+  crates/beta        74.5%        80.0%        −5.5pp           FAIL     workspace
+  crates/gamma       91.0%       100.0%        −9.0pp           FAIL     default
+  ─────────────────  ──────────  ──────────  ───────────────  ───────  ─────────
+  Result: 2 crate(s) below threshold.
 ```
+
+The `Source` column reports which layer supplied the threshold: `crate`,
+`workspace`, or `default` (the built-in `100.0`).
 
 Markdown variant uses the same columns and a leading `### ox coverage-gate`
 header so it renders cleanly in GitHub job summaries and ADO build summaries.
@@ -182,8 +202,8 @@ cargo llvm-cov report --json --output-path target/coverage/coverage.json
 cargo coverage-gate check
 ```
 
-Both commands chain naturally; the recipe for `just ox-check-llvm-cov`
-in cargo-ox-check sequences them as a single check.
+Both commands chain naturally and can be wrapped in a single recipe by
+whatever task-runner the repo uses (`just`, `make`, `cargo xtask`, …).
 
 ## 6. Inputs & Outputs in Detail
 
@@ -246,44 +266,46 @@ Markdown rendering uses GitHub-flavored tables, which both
 ```markdown
 ### ox coverage-gate
 
-| Crate         | Lines  | Threshold | Δ vs floor | Status |
-|---------------|-------:|----------:|-----------:|:------:|
-| crates/alpha  | 82.1%  | 80.0%     | +2.1pp     | ✅     |
-| crates/beta   | 74.5%  | 80.0%     | −5.5pp     | ❌     |
-| crates/gamma  | 91.0%  | _none_    | —          | —      |
+| Crate         | Lines  | Threshold | Δ vs threshold | Status | Source     |
+|---------------|-------:|----------:|---------------:|:------:|:-----------|
+| crates/alpha  | 82.1%  | 80.0%     | +2.1pp         | ✅     | crate      |
+| crates/beta   | 74.5%  | 80.0%     | −5.5pp         | ❌     | workspace  |
+| crates/gamma  | 91.0%  | 100.0%    | −9.0pp         | ❌     | default    |
 
-**Result:** 1 crate below threshold.
+**Result:** 2 crates below threshold.
 ```
 
 ## 7. Threshold Lifecycle
 
 ### 7.1 Adoption
 
-A new repo adopts the gate in two steps:
+A new repo adopts the gate in one of two ways:
 
-1. Run coverage at least once (`cargo llvm-cov nextest --no-report &&
-   cargo llvm-cov report --json …`).
-2. `cargo coverage-gate init` populates `[package.metadata.coverage-gate]`
-   in every workspace member with `min-lines = floor(observed - 1.0)`. The
-   maintainer commits the Cargo.toml diffs.
+- **Start strict, opt out as needed.** Do nothing: every crate inherits
+  the built-in default of `100.0` and the first `check` run fails
+  loudly. The maintainer either sets a `[workspace.metadata.coverage-gate]`
+  default for the repo, adds per-crate `min-lines` overrides, or
+  explicitly opts crates out with `min-lines = 0.0`. The whole picture
+  is visible in the same PR.
+- **Seed from observed.** Run coverage once
+  (`cargo llvm-cov nextest --no-report && cargo llvm-cov report --json …`),
+  then `cargo coverage-gate init` to populate per-crate
+  `[package.metadata.coverage-gate]` with values seeded from observed
+  coverage (`floor((observed - margin) * 10) / 10`). The maintainer
+  commits the resulting `Cargo.toml` diffs.
 
 From that point on, every PR runs `check` and gates.
 
 ### 7.2 Intentional improvement
 
 After a PR meaningfully improves coverage in some crate, the maintainer
-ratchets the threshold up by running `cargo coverage-gate bump` and
-committing the resulting Cargo.toml diff in a follow-up PR (or as part of
-the same one):
+ratchets the threshold up by editing the relevant `min-lines` value in
+`Cargo.toml` (per-crate or workspace-level). The change appears in the
+PR diff and is reviewed alongside the code that justifies it.
 
-```sh
-cargo coverage-gate bump --margin 1
-```
-
-`bump` only ratchets thresholds **upward**. If the observed value is below
-the current threshold, `bump` is a no-op for that crate (downward
-adjustment is intentional and must be done by manual edit, so it shows up
-plainly in code review).
+There is intentionally no automated "ratchet" command: every threshold
+change — up or down — is a code-reviewed edit, so the policy and the
+code that satisfies it land together and stay together in the git log.
 
 ### 7.3 Regression
 
@@ -300,11 +322,11 @@ is the intentional way to bypass, and it leaves a permanent record.
 
 ### 7.4 Crate addition and removal
 
-A new crate added in a PR has no threshold yet. The gate skips it (the
-table shows it as `(no threshold)`). To require it to gate, the same PR
-(or a follow-up) sets a `min-lines` value by hand or by running `init`
-after the first coverage build. A removed crate's threshold disappears
-with its `Cargo.toml`; the gate ignores it automatically.
+A new crate added in a PR inherits the workspace default (or the
+built-in `100.0` if no workspace default is set). To set a different
+floor, the same PR adds `[package.metadata.coverage-gate]` to the new
+crate's `Cargo.toml`. A removed crate's threshold disappears with its
+`Cargo.toml`; the gate ignores it automatically.
 
 ## 8. CI Integration
 
@@ -316,8 +338,13 @@ the lcov / cobertura artifacts. After the test step:
 ```yaml
 - name: Coverage gate
   shell: bash
-  run: cargo coverage-gate check --crates "$OX_CHECK_IMPACTED"
+  run: cargo coverage-gate check --crates "$IMPACTED_CRATES"
 ```
+
+`$IMPACTED_CRATES` is whatever comma-separated list the surrounding
+pipeline produces from its test-impact step (e.g., from `cargo-delta`
+or an equivalent). If you don't do impact scoping, drop the `--crates`
+flag and gate every workspace member every run.
 
 The job picks up `$GITHUB_STEP_SUMMARY` automatically and writes the
 verdict table to the workflow-run page above the job log.
@@ -328,7 +355,7 @@ verdict table to the workflow-run page above the job log.
 - bash: |
     summary="$(mktemp).md"
     cargo coverage-gate check \
-        --crates "$(OX_CHECK_IMPACTED)" \
+        --crates "$(IMPACTED_CRATES)" \
         --summary-file "$summary"
     echo "##vso[task.uploadsummary]$summary"
   displayName: Coverage gate
@@ -359,8 +386,7 @@ Three escape valves, in increasing severity:
    run. Useful for impact-scoped builds; the CI templates use this by
    default.
 3. **Stop running the gate.** Remove the `coverage-gate check` step from
-   the CI template (or empty the recipe that calls it, when invoked via
-   cargo-ox-check). The thresholds in `Cargo.toml`s remain as static
+   the CI template. The thresholds in `Cargo.toml`s remain as static
    documentation; nothing enforces them.
 
 ## 10. Cross-cutting Concerns
@@ -376,14 +402,14 @@ for display; the underlying comparison uses the unrounded `f64`.
 ### 10.2 Security
 
 The tool reads `Cargo.toml` files and a coverage JSON file. It writes
-`Cargo.toml` files only when `bump` or `init` is invoked. No network
+`Cargo.toml` files only when `init` is invoked. No network
 access, no shell-out, no privileged operations.
 
 ### 10.3 Monorepo / multi-workspace
 
-Same posture as cargo-ox-check: v1 supports one workspace per invocation,
-located via `find_workspace_root` from CWD. Repos with multiple
-workspaces invoke the tool once per workspace.
+v1 supports one workspace per invocation, located by walking up from
+CWD to the nearest `Cargo.toml` with a `[workspace]` table. Repos with
+multiple workspaces invoke the tool once per workspace.
 
 ### 10.4 Versioning of the JSON schema
 
