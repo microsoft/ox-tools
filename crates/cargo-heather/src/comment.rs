@@ -166,3 +166,47 @@ impl CommentStyle {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inner_attribute_is_not_cargo_script() {
+        // `#![...]` is a Rust inner attribute, not a shebang.
+        assert!(!is_cargo_script("#![allow(unused)]\n---\n"));
+    }
+
+    #[test]
+    fn shebang_without_frontmatter_is_not_cargo_script() {
+        assert!(!is_cargo_script("#!/usr/bin/env cargo\nfn main() {}\n"));
+    }
+
+    #[test]
+    fn valid_cargo_script() {
+        assert!(is_cargo_script("#!/usr/bin/env cargo\n---\n"));
+    }
+
+    #[test]
+    fn doc_comment_is_not_header_comment() {
+        let style = CommentStyle::DoubleSlash;
+        // `///` is a doc comment, not a header comment.
+        assert!(!style.is_header_comment_line("///"));
+        assert!(!style.is_header_comment_line("/// doc"));
+    }
+
+    #[test]
+    fn inner_doc_comment_is_not_header_comment() {
+        let style = CommentStyle::DoubleSlash;
+        // `//!` is an inner doc comment, not a header comment.
+        assert!(!style.is_header_comment_line("//!"));
+        assert!(!style.is_header_comment_line("//! module doc"));
+    }
+
+    #[test]
+    fn regular_comment_is_header_comment() {
+        let style = CommentStyle::DoubleSlash;
+        assert!(style.is_header_comment_line("// Copyright"));
+        assert!(style.is_header_comment_line("//"));
+    }
+}

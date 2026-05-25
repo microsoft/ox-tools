@@ -248,3 +248,24 @@ pub fn supported_licenses() -> Vec<&'static str> {
     ids.sort_unstable();
     ids
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn supported_licenses_contains_known_ids() {
+        let ids = supported_licenses();
+        assert!(!ids.is_empty());
+        assert!(ids.contains(&"MIT"));
+        assert!(ids.contains(&"Apache-2.0"));
+    }
+
+    #[test]
+    fn supported_licenses_is_sorted() {
+        let ids = supported_licenses();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(ids, sorted);
+    }
+}
