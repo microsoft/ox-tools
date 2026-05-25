@@ -50,30 +50,30 @@ pub(crate) fn check(content: &str, expected_header: &str, kind: FileKind) -> Che
 /// Returns the [`CheckResult`] for the *input* alongside the rewritten
 /// content. When the input is already [`CheckResult::Ok`], the returned
 /// content is byte-equivalent to the input.
-pub(crate) fn fix(content: &str, expected_header: &str, kind: FileKind) -> (CheckResult, String) {
+pub(crate) fn fix(content: &str, expected_header: &str, kind: FileKind, line_ending: &str) -> (CheckResult, String) {
     let style = kind.comment_style();
     let result = check(content, expected_header, kind);
     let new_content = match (&result, kind) {
         (CheckResult::Ok, _) => content.to_owned(),
-        (CheckResult::Missing, FileKind::PowerShell) => strip::prepend_after_optional_shebang(content, expected_header, style),
-        (CheckResult::Mismatch { .. }, FileKind::PowerShell) => strip::fix_shebang_content(content, expected_header, style),
-        (_, FileKind::CargoScript) => strip::fix_script_content(content, expected_header, style),
-        (CheckResult::Missing, _) => prepend_header(content, expected_header, style),
+        (CheckResult::Missing, FileKind::PowerShell) => strip::prepend_after_optional_shebang(content, expected_header, style, line_ending),
+        (CheckResult::Mismatch { .. }, FileKind::PowerShell) => strip::fix_shebang_content(content, expected_header, style, line_ending),
+        (_, FileKind::CargoScript) => strip::fix_script_content(content, expected_header, style, line_ending),
+        (CheckResult::Missing, _) => prepend_header(content, expected_header, style, line_ending),
         (CheckResult::Mismatch { .. }, _) => {
-            let stripped = strip::strip_existing_header(content, style);
-            prepend_header(&stripped, expected_header, style)
+            let stripped = strip::strip_existing_header(content, style, line_ending);
+            prepend_header(&stripped, expected_header, style, line_ending)
         }
     };
     (result, new_content)
 }
 
 /// Prepend the license header comment to file content.
-fn prepend_header(content: &str, header_text: &str, style: CommentStyle) -> String {
-    let comment = style.format_header(header_text);
+fn prepend_header(content: &str, header_text: &str, style: CommentStyle, line_ending: &str) -> String {
+    let comment = style.format_header(header_text, line_ending);
     if content.is_empty() {
-        format!("{comment}\n")
+        format!("{comment}{line_ending}")
     } else {
-        format!("{comment}\n\n{content}")
+        format!("{comment}{line_ending}{line_ending}{content}")
     }
 }
 

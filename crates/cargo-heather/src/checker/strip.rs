@@ -55,18 +55,18 @@ fn find_header_end(lines: &[&str], style: CommentStyle) -> Option<usize> {
 ///
 /// If no header is found, returns content unchanged. Trailing newline is
 /// preserved if and only if the original content had one.
-pub(super) fn strip_existing_header(content: &str, style: CommentStyle) -> String {
+pub(super) fn strip_existing_header(content: &str, style: CommentStyle, line_ending: &str) -> String {
     let lines: Vec<&str> = content.lines().collect();
 
     let Some(body_start) = find_header_end(&lines, style) else {
         return content.to_owned();
     };
 
-    let remaining = lines[body_start..].join("\n");
+    let remaining = lines[body_start..].join(line_ending);
     if remaining.is_empty() {
         remaining
     } else if content.ends_with('\n') {
-        format!("{remaining}\n")
+        format!("{remaining}{line_ending}")
     } else {
         remaining
     }
@@ -77,50 +77,57 @@ pub(super) fn strip_existing_header(content: &str, style: CommentStyle) -> Strin
 /// Shared by both the `Missing` path (which passes `body_start = 0` to
 /// preserve all content) and the `Mismatch` path (which skips stripped
 /// header lines).
-fn reassemble_after_shebang(shebang: &str, header_text: &str, body_lines: &[&str], body_start: usize, style: CommentStyle) -> String {
-    let header_comment = style.format_header(header_text);
-    let rest = body_lines[body_start..].join("\n");
+fn reassemble_after_shebang(
+    shebang: &str,
+    header_text: &str,
+    body_lines: &[&str],
+    body_start: usize,
+    style: CommentStyle,
+    line_ending: &str,
+) -> String {
+    let header_comment = style.format_header(header_text, line_ending);
+    let rest = body_lines[body_start..].join(line_ending);
 
     if rest.is_empty() {
-        format!("{shebang}\n{header_comment}\n")
+        format!("{shebang}{line_ending}{header_comment}{line_ending}")
     } else {
-        format!("{shebang}\n{header_comment}\n\n{rest}\n")
+        format!("{shebang}{line_ending}{header_comment}{line_ending}{line_ending}{rest}{line_ending}")
     }
 }
 
 /// Replace or insert a header after an optional shebang line.
-pub(super) fn fix_shebang_content(content: &str, header_text: &str, style: CommentStyle) -> String {
+pub(super) fn fix_shebang_content(content: &str, header_text: &str, style: CommentStyle, line_ending: &str) -> String {
     let mut iter = content.lines();
     let Some(first) = iter.next() else {
-        return format!("{}\n", style.format_header(header_text));
+        return format!("{}{line_ending}", style.format_header(header_text, line_ending));
     };
 
     if !first.trim().starts_with("#!") {
-        let stripped = strip_existing_header(content, style);
-        return super::prepend_header(&stripped, header_text, style);
+        let stripped = strip_existing_header(content, style, line_ending);
+        return super::prepend_header(&stripped, header_text, style, line_ending);
     }
 
     let body_lines: Vec<&str> = iter.collect();
     let body_start = find_header_end(&body_lines, style).unwrap_or(0);
-    reassemble_after_shebang(first, header_text, &body_lines, body_start, style)
+    reassemble_after_shebang(first, header_text, &body_lines, body_start, style, line_ending)
 }
 
 /// Prepend a header after an optional shebang line, preserving all
 /// existing content (including descriptive comment blocks).
 ///
 /// Used for `CheckResult::Missing` where no header needs to be stripped.
-pub(super) fn prepend_after_optional_shebang(content: &str, header_text: &str, style: CommentStyle) -> String {
+pub(super) fn prepend_after_optional_shebang(content: &str, header_text: &str, style: CommentStyle, line_ending: &str) -> String {
     let mut iter = content.lines();
     let Some(first) = iter.next() else {
-        return format!("{}\n", style.format_header(header_text));
+        return format!("{}{line_ending}", style.format_header(header_text, line_ending));
     };
 
     if !first.trim().starts_with("#!") {
-        return super::prepend_header(content, header_text, style);
+        return super::prepend_header(content, header_text, style, line_ending);
     }
 
     let body_lines: Vec<&str> = iter.collect();
-    reassemble_after_shebang(first, header_text, &body_lines, 0, style)
+    reassemble_after_shebang(first, header_text, &body_lines, 0, style, line_ending)
 }
 
 /// Replace the header inside a cargo-script frontmatter.
@@ -128,7 +135,7 @@ pub(super) fn prepend_after_optional_shebang(content: &str, header_text: &str, s
 /// Preserves the shebang and opening `---`, strips any existing header block
 /// (per [`find_header_end`]), then inserts the new header. If no header is
 /// found, the body is preserved verbatim (leading blanks included).
-pub(super) fn fix_script_content(content: &str, header_text: &str, style: CommentStyle) -> String {
+pub(super) fn fix_script_content(content: &str, header_text: &str, style: CommentStyle, line_ending: &str) -> String {
     let mut iter = content.lines();
     let shebang = iter.next().unwrap_or("");
     let dash_open = iter.next().unwrap_or("---");
@@ -136,13 +143,13 @@ pub(super) fn fix_script_content(content: &str, header_text: &str, style: Commen
 
     let body_start = find_header_end(&body_lines, style).unwrap_or(0);
 
-    let header_comment = style.format_header(header_text);
-    let rest = body_lines[body_start..].join("\n");
+    let header_comment = style.format_header(header_text, line_ending);
+    let rest = body_lines[body_start..].join(line_ending);
 
     if rest.is_empty() {
-        format!("{shebang}\n{dash_open}\n{header_comment}\n")
+        format!("{shebang}{line_ending}{dash_open}{line_ending}{header_comment}{line_ending}")
     } else {
-        format!("{shebang}\n{dash_open}\n{header_comment}\n\n{rest}\n")
+        format!("{shebang}{line_ending}{dash_open}{line_ending}{header_comment}{line_ending}{line_ending}{rest}{line_ending}")
     }
 }
 
@@ -213,7 +220,7 @@ mod tests {
 
 fn main() {}
 ";
-        let stripped = strip_existing_header(content, CommentStyle::DoubleSlash);
+        let stripped = strip_existing_header(content, CommentStyle::DoubleSlash, "\n");
         assert_eq!(stripped, "fn main() {}\n", "all 5 wrong header lines must be removed");
     }
 }
