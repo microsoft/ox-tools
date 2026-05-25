@@ -12,3 +12,10 @@ pipelines:
           lastModifiedDate: 2026-05-15
         armory:
           lastModifiedDate: 2026-05-15
+  54484:
+    retail:
+      source:
+        eslint:
+          lastModifiedDate: 2026-05-25
+        armory:
+          lastModifiedDate: 2026-05-25
