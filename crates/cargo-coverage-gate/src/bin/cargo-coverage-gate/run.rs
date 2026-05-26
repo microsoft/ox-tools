@@ -7,14 +7,14 @@ use std::env;
 use std::fs::{self, File};
 use std::io::{self, BufWriter};
 use std::path::{Path, PathBuf};
-use std::process;
+use std::process::ExitCode;
 
 use cargo_coverage_gate::EvaluatedReport;
 use ohno::{AppError, IntoAppError};
 
 use crate::cli::CoverageGateArgs;
 
-pub(crate) fn run(args: &CoverageGateArgs) -> Result<(), AppError> {
+pub(crate) fn run(args: &CoverageGateArgs) -> Result<ExitCode, AppError> {
     let json_path = args
         .json
         .clone()
@@ -33,7 +33,9 @@ pub(crate) fn run(args: &CoverageGateArgs) -> Result<(), AppError> {
             .into_app_err(format!("failed to write summary file `{}`", path.display()))?;
     }
 
-    process::exit(report.verdict().exit_code());
+    let code = u8::try_from(report.verdict().exit_code())
+        .expect("Verdict::exit_code only ever produces values in 0..=2");
+    Ok(ExitCode::from(code))
 }
 
 fn write_text_output(report: &EvaluatedReport, quiet: bool) -> io::Result<()> {

@@ -6,13 +6,14 @@
 mod cli;
 mod run;
 
+use std::process::ExitCode;
+
 use clap::Parser;
-use ohno::AppError;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 use crate::cli::CargoCli;
 
-fn main() -> Result<(), AppError> {
+fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_target(false)
         .with_level(false)
@@ -21,5 +22,13 @@ fn main() -> Result<(), AppError> {
         .init();
 
     let CargoCli::CoverageGate(args) = CargoCli::parse();
-    run::run(&args)
+    match run::run(&args) {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("error: {err}");
+            // Every library-side failure is a configuration error from
+            // the gate's point of view; map them all to exit 2.
+            ExitCode::from(2)
+        }
+    }
 }
