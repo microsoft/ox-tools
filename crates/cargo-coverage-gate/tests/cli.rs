@@ -21,25 +21,15 @@ use tempfile::TempDir;
 /// member entry is `(name, optional min-lines)`. The workspace root
 /// gets a `[workspace.metadata.coverage-gate]` block when
 /// `workspace_min_lines` is `Some`.
-fn make_workspace(
-    dir: &Path,
-    members: &[(&str, Option<&str>)],
-    workspace_min_lines: Option<&str>,
-) {
+fn make_workspace(dir: &Path, members: &[(&str, Option<&str>)], workspace_min_lines: Option<&str>) {
     let names: Vec<&&str> = members.iter().map(|(n, _)| n).collect();
-    let members_list = names
-        .iter()
-        .map(|n| format!("\"{n}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let members_list = names.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ");
     let workspace_meta = workspace_min_lines
         .map(|m| format!("\n[workspace.metadata.coverage-gate]\nmin-lines = {m}\n"))
         .unwrap_or_default();
     fs::write(
         dir.join("Cargo.toml"),
-        format!(
-            "[workspace]\nresolver = \"2\"\nmembers = [{members_list}]\n{workspace_meta}"
-        ),
+        format!("[workspace]\nresolver = \"2\"\nmembers = [{members_list}]\n{workspace_meta}"),
     )
     .expect("write workspace root Cargo.toml");
 
@@ -72,9 +62,7 @@ fn make_coverage_json(dir: &Path, files: &[(&str, u64, u64)]) -> String {
         .map(|(rel, count, covered)| {
             let full = dir.join(rel);
             let s = full.to_string_lossy().replace('\\', "/");
-            format!(
-                r#"{{"filename":"{s}","summary":{{"lines":{{"count":{count},"covered":{covered}}}}}}}"#
-            )
+            format!(r#"{{"filename":"{s}","summary":{{"lines":{{"count":{count},"covered":{covered}}}}}}}"#)
         })
         .collect();
     format!(
@@ -140,18 +128,8 @@ fn all_pass_mixed_sources() {
 #[test]
 fn one_crate_below_threshold_exits_1() {
     let tmp = TempDir::new().expect("tempdir");
-    make_workspace(
-        tmp.path(),
-        &[("alpha", Some("80")), ("beta", Some("80"))],
-        None,
-    );
-    let json = write_json(
-        tmp.path(),
-        &[
-            ("alpha/src/lib.rs", 100, 95),
-            ("beta/src/lib.rs", 100, 60),
-        ],
-    );
+    make_workspace(tmp.path(), &[("alpha", Some("80")), ("beta", Some("80"))], None);
+    let json = write_json(tmp.path(), &[("alpha/src/lib.rs", 100, 95), ("beta/src/lib.rs", 100, 60)]);
 
     coverage_gate(tmp.path())
         .args(["--json", &json])
@@ -164,11 +142,7 @@ fn one_crate_below_threshold_exits_1() {
 #[test]
 fn gated_crate_with_no_data_exits_2() {
     let tmp = TempDir::new().expect("tempdir");
-    make_workspace(
-        tmp.path(),
-        &[("alpha", Some("80")), ("beta", Some("80"))],
-        None,
-    );
+    make_workspace(tmp.path(), &[("alpha", Some("80")), ("beta", Some("80"))], None);
     // Only alpha has data; beta has none.
     let json = write_json(tmp.path(), &[("alpha/src/lib.rs", 100, 95)]);
 
@@ -183,18 +157,8 @@ fn gated_crate_with_no_data_exits_2() {
 #[test]
 fn crates_flag_restricts_scope() {
     let tmp = TempDir::new().expect("tempdir");
-    make_workspace(
-        tmp.path(),
-        &[("alpha", Some("80")), ("beta", Some("80"))],
-        None,
-    );
-    let json = write_json(
-        tmp.path(),
-        &[
-            ("alpha/src/lib.rs", 100, 95),
-            ("beta/src/lib.rs", 100, 50),
-        ],
-    );
+    make_workspace(tmp.path(), &[("alpha", Some("80")), ("beta", Some("80"))], None);
+    let json = write_json(tmp.path(), &[("alpha/src/lib.rs", 100, 95), ("beta/src/lib.rs", 100, 50)]);
 
     // Only gate alpha; beta would fail but is out of scope.
     coverage_gate(tmp.path())
@@ -226,12 +190,7 @@ fn summary_file_flag_writes_markdown() {
     let summary = tmp.path().join("summary.md");
 
     coverage_gate(tmp.path())
-        .args([
-            "--json",
-            &json,
-            "--summary-file",
-            summary.to_str().expect("utf-8"),
-        ])
+        .args(["--json", &json, "--summary-file", summary.to_str().expect("utf-8")])
         .assert()
         .success();
 
@@ -271,13 +230,7 @@ fn quiet_suppresses_stdout_but_still_writes_summary() {
     let summary = tmp.path().join("summary.md");
 
     coverage_gate(tmp.path())
-        .args([
-            "--json",
-            &json,
-            "--summary-file",
-            summary.to_str().expect("utf-8"),
-            "--quiet",
-        ])
+        .args(["--json", &json, "--summary-file", summary.to_str().expect("utf-8"), "--quiet"])
         .assert()
         .success()
         .stdout(predicate::str::is_empty());

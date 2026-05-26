@@ -15,26 +15,18 @@ use ohno::{AppError, IntoAppError};
 use crate::cli::CoverageGateArgs;
 
 pub(crate) fn run(args: &CoverageGateArgs) -> Result<ExitCode, AppError> {
-    let json_path = args
-        .json
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("target/coverage/coverage.json"));
-    let json_text = fs::read_to_string(&json_path)
-        .into_app_err(format!("failed to read coverage JSON `{}`", json_path.display()))?;
+    let json_path = args.json.clone().unwrap_or_else(|| PathBuf::from("target/coverage/coverage.json"));
+    let json_text = fs::read_to_string(&json_path).into_app_err(format!("failed to read coverage JSON `{}`", json_path.display()))?;
 
-    let report = cargo_coverage_gate::evaluate(&json_text, None, &args.crates)
-        .map_err(|e| AppError::new(e.to_string()))?;
+    let report = cargo_coverage_gate::evaluate(&json_text, None, &args.crates).map_err(|e| AppError::new(e.to_string()))?;
 
-    write_text_output(&report, args.quiet)
-        .into_app_err("failed to write verdict to stdout")?;
+    write_text_output(&report, args.quiet).into_app_err("failed to write verdict to stdout")?;
 
     if let Some(path) = summary_target(args) {
-        write_summary_file(&report, &path)
-            .into_app_err(format!("failed to write summary file `{}`", path.display()))?;
+        write_summary_file(&report, &path).into_app_err(format!("failed to write summary file `{}`", path.display()))?;
     }
 
-    let code = u8::try_from(report.verdict().exit_code())
-        .expect("Verdict::exit_code only ever produces values in 0..=2");
+    let code = u8::try_from(report.verdict().exit_code()).expect("Verdict::exit_code only ever produces values in 0..=2");
     Ok(ExitCode::from(code))
 }
 
@@ -71,4 +63,3 @@ fn summary_target(args: &CoverageGateArgs) -> Option<PathBuf> {
     }
     None
 }
-

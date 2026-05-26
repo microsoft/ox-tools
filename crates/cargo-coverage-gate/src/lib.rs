@@ -74,7 +74,9 @@
 //! [`docs/implementation-plans/0000.md`]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/implementation-plans/0000.md
 
 #![doc(html_logo_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-coverage-gate/logo.png")]
-#![doc(html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-coverage-gate/favicon.ico")]
+#![doc(
+    html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-coverage-gate/favicon.ico"
+)]
 #![deny(unsafe_code)]
 
 use std::io;
@@ -175,11 +177,7 @@ impl EvaluatedReport {
 /// failures or unknown crate names in `gated_crates`, and
 /// [`CoverageGateError::InvalidThreshold`] if a configured
 /// `min-lines` value is outside `[0.0, 100.0]`.
-pub fn evaluate(
-    json_text: &str,
-    manifest_path: Option<&Path>,
-    gated_crates: &[String],
-) -> Result<EvaluatedReport, CoverageGateError> {
+pub fn evaluate(json_text: &str, manifest_path: Option<&Path>, gated_crates: &[String]) -> Result<EvaluatedReport, CoverageGateError> {
     let report = llvm_cov::CoverageReport::from_str(json_text)?;
     let ws = workspace::Workspace::load(manifest_path)?;
     let inner = verdict::evaluate(&report, &ws, gated_crates)?;
@@ -202,5 +200,27 @@ mod tests {
     fn evaluate_rejects_malformed_json() {
         let err = evaluate("not json", None, &[]).expect_err("malformed JSON must error");
         assert!(matches!(err, CoverageGateError::JsonParse { .. }));
+    }
+
+    #[test]
+    fn evaluated_report_unattributed_count_round_trips() {
+        // Construct an EvaluatedReport whose inner Report has a known
+        // unattributed count, then verify the public accessor returns it.
+        let inner = verdict::Report {
+            outcomes: Vec::new(),
+            unattributed: 3,
+        };
+        let report = EvaluatedReport { inner };
+        assert_eq!(report.unattributed_count(), 3);
+    }
+
+    #[test]
+    fn evaluated_report_unattributed_count_zero_for_empty() {
+        let inner = verdict::Report {
+            outcomes: Vec::new(),
+            unattributed: 0,
+        };
+        let report = EvaluatedReport { inner };
+        assert_eq!(report.unattributed_count(), 0);
     }
 }

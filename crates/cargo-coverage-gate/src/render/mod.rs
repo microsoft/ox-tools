@@ -22,9 +22,7 @@ use crate::verdict::{CrateOutcome, Status};
 
 /// Human-readable text for the `Lines` column.
 fn format_lines(outcome: &CrateOutcome) -> String {
-    outcome
-        .percent()
-        .map_or_else(|| "(no data)".to_owned(), |p| format!("{p:.1}%"))
+    outcome.percent().map_or_else(|| "(no data)".to_owned(), |p| format!("{p:.1}%"))
 }
 
 /// Human-readable text for the `Threshold` column.
@@ -71,16 +69,10 @@ fn format_source(source: ThresholdSource) -> &'static str {
 /// Number of crates below threshold (`Fail` only — `NoData` is a
 /// configuration error and is summarised separately).
 fn count_failures(outcomes: &[CrateOutcome]) -> usize {
-    outcomes
-        .iter()
-        .filter(|o| o.status == Status::Fail)
-        .count()
+    outcomes.iter().filter(|o| o.status == Status::Fail).count()
 }
 
 /// Number of crates with no attributed coverage data.
 fn count_no_data(outcomes: &[CrateOutcome]) -> usize {
-    outcomes
-        .iter()
-        .filter(|o| o.status == Status::NoData)
-        .count()
+    outcomes.iter().filter(|o| o.status == Status::NoData).count()
 }

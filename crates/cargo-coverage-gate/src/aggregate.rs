@@ -27,10 +27,7 @@ impl LineTotals {
         } else {
             // Cast is intentional: u64 → f64 is lossy only beyond
             // ~2^53, which we will never see for line counts.
-            #[expect(
-                clippy::cast_precision_loss,
-                reason = "line counts will never exceed f64 mantissa width"
-            )]
+            #[expect(clippy::cast_precision_loss, reason = "line counts will never exceed f64 mantissa width")]
             let pct = 100.0 * self.covered as f64 / self.count as f64;
             Some(pct)
         }
@@ -80,19 +77,13 @@ mod tests {
 
     #[test]
     fn percent_handles_zero_lines() {
-        let totals = LineTotals {
-            count: 0,
-            covered: 0,
-        };
+        let totals = LineTotals { count: 0, covered: 0 };
         assert!(totals.percent().is_none());
     }
 
     #[test]
     fn percent_computes_correctly() {
-        let totals = LineTotals {
-            count: 100,
-            covered: 82,
-        };
+        let totals = LineTotals { count: 100, covered: 82 };
         let pct = totals.percent().expect("non-empty totals");
         assert!((pct - 82.0).abs() < f64::EPSILON);
     }

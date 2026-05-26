@@ -31,10 +31,7 @@ pub(crate) struct AttributionOutcome<'f> {
 }
 
 /// Group `files` by owning workspace member.
-pub(crate) fn attribute<'f>(
-    files: &'f [FileEntry],
-    members: &[Member],
-) -> AttributionOutcome<'f> {
+pub(crate) fn attribute<'f>(files: &'f [FileEntry], members: &[Member]) -> AttributionOutcome<'f> {
     // Longest-prefix-first: when paths nest, the deeper member wins.
     let mut order: Vec<usize> = (0..members.len()).collect();
     order.sort_by_key(|&i| std::cmp::Reverse(members[i].manifest_dir.components().count()));
@@ -43,10 +40,7 @@ pub(crate) fn attribute<'f>(
     'files: for f in files {
         for &i in &order {
             if f.filename.starts_with(&members[i].manifest_dir) {
-                out.by_member
-                    .entry(members[i].name.clone())
-                    .or_default()
-                    .push(f);
+                out.by_member.entry(members[i].name.clone()).or_default().push(f);
                 continue 'files;
             }
         }
@@ -67,10 +61,7 @@ mod tests {
         FileEntry {
             filename: PathBuf::from(path),
             summary: SummaryBlock {
-                lines: LineCounters {
-                    count: 10,
-                    covered: 5,
-                },
+                lines: LineCounters { count: 10, covered: 5 },
             },
         }
     }
@@ -90,10 +81,7 @@ mod tests {
             entry("/repo/crates/alpha/src/util.rs"),
             entry("/repo/crates/beta/src/lib.rs"),
         ];
-        let members = [
-            member("alpha", "/repo/crates/alpha"),
-            member("beta", "/repo/crates/beta"),
-        ];
+        let members = [member("alpha", "/repo/crates/alpha"), member("beta", "/repo/crates/beta")];
         let out = attribute(&files, &members);
         assert_eq!(out.by_member["alpha"].len(), 2);
         assert_eq!(out.by_member["beta"].len(), 1);
@@ -102,18 +90,12 @@ mod tests {
 
     #[test]
     fn unmatched_files_are_reported_separately() {
-        let files = vec![
-            entry("/repo/crates/alpha/src/lib.rs"),
-            entry("/elsewhere/build-script.rs"),
-        ];
+        let files = vec![entry("/repo/crates/alpha/src/lib.rs"), entry("/elsewhere/build-script.rs")];
         let members = [member("alpha", "/repo/crates/alpha")];
         let out = attribute(&files, &members);
         assert_eq!(out.by_member["alpha"].len(), 1);
         assert_eq!(out.unattributed.len(), 1);
-        assert_eq!(
-            out.unattributed[0].filename,
-            PathBuf::from("/elsewhere/build-script.rs")
-        );
+        assert_eq!(out.unattributed[0].filename, PathBuf::from("/elsewhere/build-script.rs"));
     }
 
     #[test]

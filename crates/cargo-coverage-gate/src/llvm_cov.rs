@@ -29,6 +29,19 @@ use crate::error::CoverageGateError;
 /// The supported major version of the LLVM coverage JSON export schema.
 const SUPPORTED_MAJOR: &str = "2";
 
+/// Classification of the report's `version` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VersionStatus {
+    /// `version` is present and its major component matches
+    /// [`SUPPORTED_MAJOR`].
+    Supported,
+    /// `version` is missing entirely.
+    Missing,
+    /// `version` is present but its major component is not
+    /// [`SUPPORTED_MAJOR`].
+    Unsupported,
+}
+
 /// A parsed `cargo-llvm-cov` JSON report.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct CoverageReport {
@@ -82,27 +95,35 @@ impl CoverageReport {
     /// Emits warnings via `tracing` for missing or unsupported `version`
     /// values but returns `Ok` as long as the structural shape parses.
     pub(crate) fn from_str(json: &str) -> Result<Self, CoverageGateError> {
-        let report: Self = serde_json::from_str(json).map_err(|source| {
-            CoverageGateError::JsonParse {
-                message: source.to_string(),
-            }
+        let report: Self = serde_json::from_str(json).map_err(|source| CoverageGateError::JsonParse {
+            message: source.to_string(),
         })?;
-        report.warn_on_unsupported_version();
+        match report.version_status() {
+            VersionStatus::Supported => {}
+            VersionStatus::Missing => {
+                warn!("coverage JSON has no `version` field; assuming v2 schema");
+            }
+            VersionStatus::Unsupported => {
+                let v = report.version.as_deref().unwrap_or("?");
+                warn!(
+                    "coverage JSON has unsupported version `{v}`; \
+                     continuing on the assumption that v2 structure still applies"
+                );
+            }
+        }
         Ok(report)
     }
 
-    fn warn_on_unsupported_version(&self) {
+    /// Classify the report's top-level `version` field.
+    pub(crate) fn version_status(&self) -> VersionStatus {
         match self.version.as_deref() {
-            None => {
-                warn!("coverage JSON has no `version` field; assuming v2 schema");
-            }
+            None => VersionStatus::Missing,
             Some(v) => {
                 let major = v.split('.').next().unwrap_or("");
-                if major != SUPPORTED_MAJOR {
-                    warn!(
-                        "coverage JSON has unsupported version `{v}`; \
-                         continuing on the assumption that v2 structure still applies"
-                    );
+                if major == SUPPORTED_MAJOR {
+                    VersionStatus::Supported
+                } else {
+                    VersionStatus::Unsupported
                 }
             }
         }
@@ -118,11 +139,9 @@ mod tests {
     const SINGLE_FILE: &str = include_str!("../tests/fixtures/llvm_cov/single_file.json");
     const MULTI_FILE: &str = include_str!("../tests/fixtures/llvm_cov/multi_file.json");
     const NO_VERSION: &str = include_str!("../tests/fixtures/llvm_cov/no_version.json");
-    const UNKNOWN_VERSION: &str =
-        include_str!("../tests/fixtures/llvm_cov/unknown_version.json");
+    const UNKNOWN_VERSION: &str = include_str!("../tests/fixtures/llvm_cov/unknown_version.json");
     const MALFORMED: &str = include_str!("../tests/fixtures/llvm_cov/malformed.json");
-    const MISSING_REQUIRED: &str =
-        include_str!("../tests/fixtures/llvm_cov/missing_required.json");
+    const MISSING_REQUIRED: &str = include_str!("../tests/fixtures/llvm_cov/missing_required.json");
 
     #[test]
     fn parses_empty_data() {
@@ -138,10 +157,7 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].summary.lines.count, 100);
         assert_eq!(files[0].summary.lines.covered, 82);
-        assert!(files[0]
-            .filename
-            .to_string_lossy()
-            .ends_with("crates/alpha/src/lib.rs"));
+        assert!(files[0].filename.to_string_lossy().ends_with("crates/alpha/src/lib.rs"));
     }
 
     #[test]
@@ -158,18 +174,24 @@ mod tests {
 
     #[test]
     fn missing_version_is_tolerated() {
-        let report =
-            CoverageReport::from_str(NO_VERSION).expect("no_version is structurally well-formed");
+        let report = CoverageReport::from_str(NO_VERSION).expect("no_version is structurally well-formed");
         assert!(report.version.is_none());
+        assert_eq!(report.version_status(), VersionStatus::Missing);
         assert_eq!(report.data[0].files.len(), 1);
     }
 
     #[test]
     fn unknown_version_is_tolerated() {
-        let report = CoverageReport::from_str(UNKNOWN_VERSION)
-            .expect("unknown_version is structurally well-formed");
+        let report = CoverageReport::from_str(UNKNOWN_VERSION).expect("unknown_version is structurally well-formed");
         assert_eq!(report.version.as_deref(), Some("3.0.0"));
+        assert_eq!(report.version_status(), VersionStatus::Unsupported);
         assert_eq!(report.data[0].files.len(), 1);
+    }
+
+    #[test]
+    fn supported_version_is_recognised() {
+        let report = CoverageReport::from_str(SINGLE_FILE).expect("single_file is well-formed");
+        assert_eq!(report.version_status(), VersionStatus::Supported);
     }
 
     #[test]
@@ -183,8 +205,7 @@ mod tests {
 
     #[test]
     fn structurally_invalid_json_is_rejected() {
-        let err = CoverageReport::from_str(MISSING_REQUIRED)
-            .expect_err("entry without filename / summary should fail to parse");
+        let err = CoverageReport::from_str(MISSING_REQUIRED).expect_err("entry without filename / summary should fail to parse");
         match err {
             CoverageGateError::JsonParse { .. } => {}
             other => panic!("expected JsonParse, got {other:?}"),

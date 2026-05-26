@@ -88,11 +88,7 @@ impl Report {
                 Status::Ok => {}
             }
         }
-        if has_fail {
-            Verdict::Fail
-        } else {
-            Verdict::Pass
-        }
+        if has_fail { Verdict::Fail } else { Verdict::Pass }
     }
 }
 
@@ -102,25 +98,13 @@ impl Report {
 /// workspace's member list: when empty, every member is gated.
 /// Crates listed in `gated_crates` that aren't workspace members
 /// produce [`CoverageGateError::Metadata`].
-pub(crate) fn evaluate(
-    report: &CoverageReport,
-    workspace: &Workspace,
-    gated_crates: &[String],
-) -> Result<Report, CoverageGateError> {
+pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_crates: &[String]) -> Result<Report, CoverageGateError> {
     let gated = resolve_gated(workspace, gated_crates)?;
 
     // Flatten every file entry across all data[] elements.
-    let files: Vec<_> = report
-        .data
-        .iter()
-        .flat_map(|d| d.files.iter())
-        .cloned()
-        .collect();
+    let files: Vec<_> = report.data.iter().flat_map(|d| d.files.iter()).cloned().collect();
 
-    let AttributionOutcome {
-        by_member,
-        unattributed,
-    } = attribute(&files, &workspace.members);
+    let AttributionOutcome { by_member, unattributed } = attribute(&files, &workspace.members);
 
     if !unattributed.is_empty() {
         warn!(
@@ -132,10 +116,7 @@ pub(crate) fn evaluate(
     let mut outcomes: Vec<CrateOutcome> = gated
         .iter()
         .map(|m| {
-            let attrib: Vec<&_> = by_member
-                .get(m.name.as_str())
-                .cloned()
-                .unwrap_or_default();
+            let attrib: Vec<&_> = by_member.get(m.name.as_str()).cloned().unwrap_or_default();
             let totals = aggregate(&attrib);
             let threshold = Threshold::resolve(m, workspace);
             let status = classify(totals, threshold);
@@ -160,10 +141,7 @@ pub(crate) fn evaluate(
 /// An empty `crates` list selects every member. Any non-empty list is
 /// validated: every name must correspond to an actual workspace
 /// member.
-fn resolve_gated<'w>(
-    workspace: &'w Workspace,
-    crates: &[String],
-) -> Result<Vec<&'w Member>, CoverageGateError> {
+fn resolve_gated<'w>(workspace: &'w Workspace, crates: &[String]) -> Result<Vec<&'w Member>, CoverageGateError> {
     if crates.is_empty() {
         return Ok(workspace.members.iter().collect());
     }
@@ -308,13 +286,9 @@ mod tests {
 
     #[test]
     fn crates_flag_with_unknown_name_errors() {
-        let ws = make_workspace(
-            vec![make_member("alpha", "/repo/crates/alpha", None)],
-            None,
-        );
+        let ws = make_workspace(vec![make_member("alpha", "/repo/crates/alpha", None)], None);
         let report = make_report(Vec::new());
-        let err = evaluate(&report, &ws, &["typo".to_owned()])
-            .expect_err("unknown crate must error");
+        let err = evaluate(&report, &ws, &["typo".to_owned()]).expect_err("unknown crate must error");
         match err {
             CoverageGateError::Metadata { message } => {
                 assert!(message.contains("typo"));
@@ -330,10 +304,7 @@ mod tests {
             make_file("/repo/crates/alpha/src/lib.rs", 100, 80),
             make_file("/elsewhere/build-script.rs", 50, 0),
         ]);
-        let ws = make_workspace(
-            vec![make_member("alpha", "/repo/crates/alpha", Some(70.0))],
-            None,
-        );
+        let ws = make_workspace(vec![make_member("alpha", "/repo/crates/alpha", Some(70.0))], None);
         let r = evaluate(&report, &ws, &[]).expect("evaluate");
         assert_eq!(r.unattributed, 1);
         let alpha = &r.outcomes[0];
@@ -357,8 +328,7 @@ mod tests {
             make_file("/repo/crates/gamma/src/lib.rs", 10, 10),
         ]);
         let r = evaluate(&report, &ws, &[]).expect("evaluate");
-        let by_name: std::collections::HashMap<_, _> =
-            r.outcomes.iter().map(|o| (o.name.as_str(), o)).collect();
+        let by_name: std::collections::HashMap<_, _> = r.outcomes.iter().map(|o| (o.name.as_str(), o)).collect();
         assert_eq!(by_name["alpha"].threshold.source, ThresholdSource::Crate);
         assert_eq!(by_name["beta"].threshold.source, ThresholdSource::Workspace);
         // gamma also inherits from workspace, not default, because the
@@ -369,10 +339,7 @@ mod tests {
     #[test]
     fn epsilon_protects_against_floating_point_equality() {
         // 82.0 = 82.0 must not fail due to f64 representation jitter.
-        let totals = LineTotals {
-            count: 100,
-            covered: 82,
-        };
+        let totals = LineTotals { count: 100, covered: 82 };
         let threshold = Threshold {
             min_lines: 82.0,
             source: ThresholdSource::Default,

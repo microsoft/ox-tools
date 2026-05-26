@@ -10,24 +10,15 @@
 
 use std::io;
 
-use crate::render::{
-    count_failures, count_no_data, format_delta, format_lines, format_source,
-    format_status_markdown, format_threshold,
-};
+use crate::render::{count_failures, count_no_data, format_delta, format_lines, format_source, format_status_markdown, format_threshold};
 use crate::verdict::Report;
 
 /// Render `report` as a GFM table to `out`.
 pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()> {
     writeln!(out, "### ox coverage-gate")?;
     writeln!(out)?;
-    writeln!(
-        out,
-        "| Crate | Lines | Threshold | Δ vs threshold | Status | Source |"
-    )?;
-    writeln!(
-        out,
-        "|-------|------:|----------:|---------------:|:------:|:-------|"
-    )?;
+    writeln!(out, "| Crate | Lines | Threshold | Δ vs threshold | Status | Source |")?;
+    writeln!(out, "|-------|------:|----------:|---------------:|:------:|:-------|")?;
     for o in &report.outcomes {
         writeln!(
             out,
@@ -47,14 +38,8 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
     match (failures, no_data) {
         (0, 0) => writeln!(out, "**Result:** all crates meet their threshold.")?,
         (n, 0) => writeln!(out, "**Result:** {n} crate(s) below threshold.")?,
-        (0, n) => writeln!(
-            out,
-            "**Result:** {n} crate(s) with no attributed coverage data."
-        )?,
-        (f, d) => writeln!(
-            out,
-            "**Result:** {f} crate(s) below threshold, {d} with no attributed data."
-        )?,
+        (0, n) => writeln!(out, "**Result:** {n} crate(s) with no attributed coverage data.")?,
+        (f, d) => writeln!(out, "**Result:** {f} crate(s) below threshold, {d} with no attributed data.")?,
     }
     Ok(())
 }
@@ -67,14 +52,7 @@ mod tests {
     use crate::threshold::{Threshold, ThresholdSource};
     use crate::verdict::{CrateOutcome, Status};
 
-    fn outcome(
-        name: &str,
-        count: u64,
-        covered: u64,
-        threshold: f64,
-        source: ThresholdSource,
-        status: Status,
-    ) -> CrateOutcome {
+    fn outcome(name: &str, count: u64, covered: u64, threshold: f64, source: ThresholdSource, status: Status) -> CrateOutcome {
         CrateOutcome {
             name: name.to_owned(),
             threshold: Threshold {
@@ -95,14 +73,7 @@ mod tests {
     #[test]
     fn renders_gfm_table_header() {
         let report = Report {
-            outcomes: vec![outcome(
-                "alpha",
-                100,
-                95,
-                80.0,
-                ThresholdSource::Crate,
-                Status::Ok,
-            )],
+            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Crate, Status::Ok)],
             unattributed: 0,
         };
         let s = render_to_string(&report);
@@ -116,14 +87,7 @@ mod tests {
         let report = Report {
             outcomes: vec![
                 outcome("alpha", 100, 95, 80.0, ThresholdSource::Crate, Status::Ok),
-                outcome(
-                    "beta",
-                    100,
-                    50,
-                    80.0,
-                    ThresholdSource::Workspace,
-                    Status::Fail,
-                ),
+                outcome("beta", 100, 50, 80.0, ThresholdSource::Workspace, Status::Fail),
             ],
             unattributed: 0,
         };
@@ -136,14 +100,7 @@ mod tests {
     #[test]
     fn renders_no_data_with_warning_emoji() {
         let report = Report {
-            outcomes: vec![outcome(
-                "gamma",
-                0,
-                0,
-                100.0,
-                ThresholdSource::Default,
-                Status::NoData,
-            )],
+            outcomes: vec![outcome("gamma", 0, 0, 100.0, ThresholdSource::Default, Status::NoData)],
             unattributed: 0,
         };
         let s = render_to_string(&report);

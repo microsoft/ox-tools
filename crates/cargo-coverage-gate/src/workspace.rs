@@ -55,11 +55,9 @@ impl Workspace {
         if let Some(path) = manifest_path {
             cmd.manifest_path(path);
         }
-        let metadata = cmd
-            .exec()
-            .map_err(|source| CoverageGateError::Metadata {
-                message: source.to_string(),
-            })?;
+        let metadata = cmd.exec().map_err(|source| CoverageGateError::Metadata {
+            message: source.to_string(),
+        })?;
 
         let workspace_default = extract_min_lines(&metadata.workspace_metadata, "workspace")?;
 
@@ -67,10 +65,10 @@ impl Workspace {
             .workspace_packages()
             .iter()
             .map(|pkg| {
-                let manifest_dir = pkg.manifest_path.parent().map_or_else(
-                    || PathBuf::from(pkg.manifest_path.as_str()),
-                    |p| PathBuf::from(p.as_str()),
-                );
+                let manifest_dir = pkg
+                    .manifest_path
+                    .parent()
+                    .map_or_else(|| PathBuf::from(pkg.manifest_path.as_str()), |p| PathBuf::from(p.as_str()));
                 let min_lines = extract_min_lines(&pkg.metadata, &pkg.name)?;
                 Ok::<Member, CoverageGateError>(Member {
                     name: pkg.name.to_string(),
@@ -94,16 +92,11 @@ impl Workspace {
 /// Accepts either integer or float JSON numbers (the TOML
 /// representation may have used either form).
 fn extract_min_lines(metadata: &Value, source: &str) -> Result<Option<f64>, CoverageGateError> {
-    let Some(min) = metadata
-        .get("coverage-gate")
-        .and_then(|v| v.get("min-lines"))
-    else {
+    let Some(min) = metadata.get("coverage-gate").and_then(|v| v.get("min-lines")) else {
         return Ok(None);
     };
     let value = min.as_f64().ok_or_else(|| CoverageGateError::Metadata {
-        message: format!(
-            "{source}: `coverage-gate.min-lines` must be a number, got {min}"
-        ),
+        message: format!("{source}: `coverage-gate.min-lines` must be a number, got {min}"),
     })?;
     if !(MIN_LINES_LOWER..=MIN_LINES_UPPER).contains(&value) {
         return Err(CoverageGateError::InvalidThreshold {
@@ -123,11 +116,7 @@ mod tests {
 
     /// Write a minimal workspace with the given root `Cargo.toml` body
     /// and per-member specs.
-    fn write_workspace(
-        dir: &Path,
-        root_body: &str,
-        members: &[(&str, &str)],
-    ) {
+    fn write_workspace(dir: &Path, root_body: &str, members: &[(&str, &str)]) {
         fs::write(dir.join("Cargo.toml"), root_body).expect("write root Cargo.toml");
         for (name, body) in members {
             let member_dir = dir.join(name);
@@ -153,11 +142,7 @@ min-lines = 80
 "#;
 
     fn member(name: &str, min_lines: Option<&str>) -> String {
-        let extra = min_lines.map_or(String::new(), |m| {
-            format!(
-                "\n[package.metadata.coverage-gate]\nmin-lines = {m}\n"
-            )
-        });
+        let extra = min_lines.map_or(String::new(), |m| format!("\n[package.metadata.coverage-gate]\nmin-lines = {m}\n"));
         format!(
             r#"
 [package]
@@ -181,8 +166,7 @@ edition = "2021"
                 ("gamma", &member("gamma", None)),
             ],
         );
-        let ws = Workspace::load(Some(&tmp.path().join("Cargo.toml")))
-            .expect("workspace load should succeed");
+        let ws = Workspace::load(Some(&tmp.path().join("Cargo.toml"))).expect("workspace load should succeed");
         assert!(ws.default_min_lines.is_none());
         assert_eq!(ws.members.len(), 3);
         let names: Vec<&str> = ws.members.iter().map(|m| m.name.as_str()).collect();
@@ -199,13 +183,9 @@ edition = "2021"
         write_workspace(
             tmp.path(),
             ROOT_WITH_DEFAULT,
-            &[
-                ("alpha", &member("alpha", None)),
-                ("beta", &member("beta", None)),
-            ],
+            &[("alpha", &member("alpha", None)), ("beta", &member("beta", None))],
         );
-        let ws = Workspace::load(Some(&tmp.path().join("Cargo.toml")))
-            .expect("workspace load should succeed");
+        let ws = Workspace::load(Some(&tmp.path().join("Cargo.toml"))).expect("workspace load should succeed");
         assert_eq!(ws.default_min_lines, Some(80.0));
     }
 
@@ -215,13 +195,9 @@ edition = "2021"
         write_workspace(
             tmp.path(),
             ROOT_WITH_DEFAULT,
-            &[
-                ("alpha", &member("alpha", Some("90.5"))),
-                ("beta", &member("beta", Some("0"))),
-            ],
+            &[("alpha", &member("alpha", Some("90.5"))), ("beta", &member("beta", Some("0")))],
         );
-        let ws = Workspace::load(Some(&tmp.path().join("Cargo.toml")))
-            .expect("workspace load should succeed");
+        let ws = Workspace::load(Some(&tmp.path().join("Cargo.toml"))).expect("workspace load should succeed");
         let alpha = ws.members.iter().find(|m| m.name == "alpha").expect("alpha");
         let beta = ws.members.iter().find(|m| m.name == "beta").expect("beta");
         assert_eq!(alpha.min_lines, Some(90.5));
@@ -241,8 +217,7 @@ edition = "2021"
                 ("gamma", &member("gamma", None)),
             ],
         );
-        let err = Workspace::load(Some(&tmp.path().join("Cargo.toml")))
-            .expect_err("out-of-range value must error");
+        let err = Workspace::load(Some(&tmp.path().join("Cargo.toml"))).expect_err("out-of-range value must error");
         match err {
             CoverageGateError::InvalidThreshold { source, value } => {
                 assert_eq!(source, "alpha");
@@ -264,8 +239,7 @@ members = ["alpha"]
 min-lines = -1
 "#;
         write_workspace(tmp.path(), root, &[("alpha", &member("alpha", None))]);
-        let err = Workspace::load(Some(&tmp.path().join("Cargo.toml")))
-            .expect_err("negative workspace value must error");
+        let err = Workspace::load(Some(&tmp.path().join("Cargo.toml"))).expect_err("negative workspace value must error");
         match err {
             CoverageGateError::InvalidThreshold { source, .. } => {
                 assert_eq!(source, "workspace");
@@ -286,8 +260,7 @@ members = ["alpha"]
 min-lines = "ninety"
 "#;
         write_workspace(tmp.path(), root, &[("alpha", &member("alpha", None))]);
-        let err = Workspace::load(Some(&tmp.path().join("Cargo.toml")))
-            .expect_err("string threshold must error");
+        let err = Workspace::load(Some(&tmp.path().join("Cargo.toml"))).expect_err("string threshold must error");
         match err {
             CoverageGateError::Metadata { message } => {
                 assert!(message.contains("must be a number"));

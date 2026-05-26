@@ -5,20 +5,10 @@
 
 use std::io;
 
-use crate::render::{
-    count_failures, count_no_data, format_delta, format_lines, format_source, format_status_text,
-    format_threshold,
-};
+use crate::render::{count_failures, count_no_data, format_delta, format_lines, format_source, format_status_text, format_threshold};
 use crate::verdict::Report;
 
-const HEADERS: [&str; 6] = [
-    "Crate",
-    "Lines",
-    "Threshold",
-    "Δ vs threshold",
-    "Status",
-    "Source",
-];
+const HEADERS: [&str; 6] = ["Crate", "Lines", "Threshold", "Δ vs threshold", "Status", "Source"];
 
 /// Render `report` as a plain-text table to `out`.
 pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()> {
@@ -62,14 +52,8 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
     match (failures, no_data) {
         (0, 0) => writeln!(out, "Result: all crates meet their threshold.")?,
         (n, 0) => writeln!(out, "Result: {n} crate(s) below threshold.")?,
-        (0, n) => writeln!(
-            out,
-            "Result: {n} crate(s) with no attributed coverage data."
-        )?,
-        (f, d) => writeln!(
-            out,
-            "Result: {f} crate(s) below threshold, {d} with no attributed data."
-        )?,
+        (0, n) => writeln!(out, "Result: {n} crate(s) with no attributed coverage data.")?,
+        (f, d) => writeln!(out, "Result: {f} crate(s) below threshold, {d} with no attributed data.")?,
     }
     Ok(())
 }
@@ -112,14 +96,7 @@ mod tests {
     use crate::threshold::{Threshold, ThresholdSource};
     use crate::verdict::{CrateOutcome, Status};
 
-    fn outcome(
-        name: &str,
-        count: u64,
-        covered: u64,
-        threshold: f64,
-        source: ThresholdSource,
-        status: Status,
-    ) -> CrateOutcome {
+    fn outcome(name: &str, count: u64, covered: u64, threshold: f64, source: ThresholdSource, status: Status) -> CrateOutcome {
         let _ = PathBuf::new();
         CrateOutcome {
             name: name.to_owned(),
@@ -141,14 +118,7 @@ mod tests {
     #[test]
     fn renders_pass_table() {
         let report = Report {
-            outcomes: vec![outcome(
-                "alpha",
-                100,
-                95,
-                80.0,
-                ThresholdSource::Crate,
-                Status::Ok,
-            )],
+            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Crate, Status::Ok)],
             unattributed: 0,
         };
         let s = render_to_string(&report);
@@ -160,6 +130,19 @@ mod tests {
         assert!(s.contains("OK"));
         assert!(s.contains("crate"));
         assert!(s.contains("all crates meet their threshold"));
+    }
+
+    #[test]
+    fn renders_two_separator_rules() {
+        // The text renderer wraps the data rows with ─-bar separators
+        // above and below; both must appear.
+        let report = Report {
+            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Crate, Status::Ok)],
+            unattributed: 0,
+        };
+        let s = render_to_string(&report);
+        let bar_lines = s.lines().filter(|l| l.contains('─')).count();
+        assert_eq!(bar_lines, 2, "expected two ─ separator lines, got:\n{s}");
     }
 
     #[test]
@@ -182,14 +165,7 @@ mod tests {
     #[test]
     fn renders_no_data_row_and_summary() {
         let report = Report {
-            outcomes: vec![outcome(
-                "gamma",
-                0,
-                0,
-                100.0,
-                ThresholdSource::Default,
-                Status::NoData,
-            )],
+            outcomes: vec![outcome("gamma", 0, 0, 100.0, ThresholdSource::Default, Status::NoData)],
             unattributed: 0,
         };
         let s = render_to_string(&report);
