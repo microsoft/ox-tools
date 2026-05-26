@@ -42,6 +42,7 @@
 #![deny(unsafe_code)]
 
 mod error;
+mod llvm_cov;
 
 pub use error::CoverageGateError;
 
