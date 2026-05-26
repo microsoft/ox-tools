@@ -28,11 +28,13 @@
 //!
 //! ## Public API
 //!
-//! The library surface is intentionally minimal: a single [`run`]
-//! function that drives an evaluation end-to-end given a coverage
-//! JSON, an optional `Cargo.toml` manifest path, and an optional
-//! crate filter. The accompanying binary loads the JSON from disk and
-//! calls it.
+//! The library exposes [`evaluate`], which returns an
+//! [`EvaluatedReport`]. The report can be rendered as plain text via
+//! [`EvaluatedReport::render_text`] or as GitHub-flavored Markdown
+//! via [`EvaluatedReport::render_markdown`], and reduced to a single
+//! [`Verdict`] via [`EvaluatedReport::verdict`]. The accompanying
+//! binary loads the JSON from disk and orchestrates rendering plus
+//! the appropriate exit code.
 //!
 //! [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
 //! [`docs/design/main.md`]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/design/main.md
@@ -41,12 +43,14 @@
 #![doc(html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-coverage-gate/favicon.ico")]
 #![deny(unsafe_code)]
 
+use std::io;
 use std::path::Path;
 
 mod aggregate;
 mod attribute;
 mod error;
 mod llvm_cov;
+mod render;
 mod threshold;
 mod verdict;
 mod workspace;
@@ -80,8 +84,52 @@ impl Verdict {
     }
 }
 
+/// An evaluated coverage report.
+///
+/// Produced by [`evaluate`]; renderable to either a fixed-width plain
+/// text table or a GitHub-flavored Markdown table, and reducible to a
+/// single [`Verdict`].
+#[derive(Debug)]
+pub struct EvaluatedReport {
+    inner: verdict::Report,
+}
+
+impl EvaluatedReport {
+    /// The overall verdict for this evaluation.
+    #[must_use]
+    pub fn verdict(&self) -> Verdict {
+        self.inner.verdict()
+    }
+
+    /// Number of coverage entries whose file paths did not match any
+    /// workspace member. These files are dropped from the aggregation.
+    #[must_use]
+    pub fn unattributed_count(&self) -> usize {
+        self.inner.unattributed
+    }
+
+    /// Render the verdict table as plain text to `out`.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever IO error `out` produces.
+    pub fn render_text(&self, out: &mut dyn io::Write) -> io::Result<()> {
+        render::text::render(out, &self.inner)
+    }
+
+    /// Render the verdict table as GitHub-flavored Markdown to `out`.
+    ///
+    /// # Errors
+    ///
+    /// Returns whatever IO error `out` produces.
+    pub fn render_markdown(&self, out: &mut dyn io::Write) -> io::Result<()> {
+        render::markdown::render(out, &self.inner)
+    }
+}
+
 /// Evaluate `json_text` (a `cargo-llvm-cov` JSON v2 report) against
-/// the workspace anchored at `manifest_path` and report the [`Verdict`].
+/// the workspace anchored at `manifest_path` and return the resolved
+/// [`EvaluatedReport`].
 ///
 /// `gated_crates` restricts the operation to a named subset; when
 /// empty, every workspace member is in scope.
@@ -93,15 +141,15 @@ impl Verdict {
 /// failures or unknown crate names in `gated_crates`, and
 /// [`CoverageGateError::InvalidThreshold`] if a configured
 /// `min-lines` value is outside `[0.0, 100.0]`.
-pub fn run(
+pub fn evaluate(
     json_text: &str,
     manifest_path: Option<&Path>,
     gated_crates: &[String],
-) -> Result<Verdict, CoverageGateError> {
+) -> Result<EvaluatedReport, CoverageGateError> {
     let report = llvm_cov::CoverageReport::from_str(json_text)?;
     let ws = workspace::Workspace::load(manifest_path)?;
-    let evaluated = verdict::evaluate(&report, &ws, gated_crates)?;
-    Ok(evaluated.verdict())
+    let inner = verdict::evaluate(&report, &ws, gated_crates)?;
+    Ok(EvaluatedReport { inner })
 }
 
 #[cfg(test)]
@@ -117,8 +165,8 @@ mod tests {
     }
 
     #[test]
-    fn run_rejects_malformed_json() {
-        let err = run("not json", None, &[]).expect_err("malformed JSON must error");
+    fn evaluate_rejects_malformed_json() {
+        let err = evaluate("not json", None, &[]).expect_err("malformed JSON must error");
         assert!(matches!(err, CoverageGateError::JsonParse { .. }));
     }
 }

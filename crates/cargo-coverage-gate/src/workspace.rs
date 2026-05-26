@@ -25,12 +25,6 @@ const MIN_LINES_UPPER: f64 = 100.0;
 /// A resolved view of the cargo workspace the gate is operating on.
 #[derive(Debug, Clone)]
 pub(crate) struct Workspace {
-    /// Absolute workspace root directory.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "phase 6 renderer will display this")
-    )]
-    pub(crate) root: PathBuf,
     /// One entry per workspace member, in alphabetical order by name.
     pub(crate) members: Vec<Member>,
     /// `min-lines` value from `[workspace.metadata.coverage-gate]`, if set.
@@ -88,7 +82,6 @@ impl Workspace {
         members.sort_by(|a, b| a.name.cmp(&b.name));
 
         Ok(Self {
-            root: PathBuf::from(metadata.workspace_root.as_str()),
             members,
             default_min_lines: workspace_default,
         })
@@ -192,8 +185,6 @@ edition = "2021"
             .expect("workspace load should succeed");
         assert!(ws.default_min_lines.is_none());
         assert_eq!(ws.members.len(), 3);
-        // Sanity check that the workspace root resolves to the temp dir we created.
-        assert!(ws.root.is_dir());
         let names: Vec<&str> = ws.members.iter().map(|m| m.name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "beta", "gamma"]);
         for m in &ws.members {

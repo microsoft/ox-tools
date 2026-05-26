@@ -35,10 +35,6 @@ pub(crate) enum ThresholdSource {
 
 impl ThresholdSource {
     /// Short label used in the verdict table's `Source` column.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "phase 6 renderer will display this")
-    )]
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Crate => "crate",
@@ -97,7 +93,6 @@ mod tests {
 
     fn workspace(default: Option<f64>) -> Workspace {
         Workspace {
-            root: PathBuf::from("/repo"),
             members: Vec::new(),
             default_min_lines: default,
         }

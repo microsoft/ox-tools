@@ -3,13 +3,14 @@
 
 //! Implementation of the `cargo coverage-gate` command.
 
-use std::fs;
-use std::path::PathBuf;
+use std::env;
+use std::fs::{self, File};
+use std::io::{self, BufWriter};
+use std::path::{Path, PathBuf};
 use std::process;
 
-use cargo_coverage_gate::Verdict;
+use cargo_coverage_gate::EvaluatedReport;
 use ohno::{AppError, IntoAppError};
-use tracing::info;
 
 use crate::cli::CoverageGateArgs;
 
@@ -21,21 +22,51 @@ pub(crate) fn run(args: &CoverageGateArgs) -> Result<(), AppError> {
     let json_text = fs::read_to_string(&json_path)
         .into_app_err(format!("failed to read coverage JSON `{}`", json_path.display()))?;
 
-    let verdict = cargo_coverage_gate::run(&json_text, None, &args.crates)
+    let report = cargo_coverage_gate::evaluate(&json_text, None, &args.crates)
         .map_err(|e| AppError::new(e.to_string()))?;
-    report_verdict(verdict, args.quiet);
-    process::exit(verdict.exit_code());
+
+    write_text_output(&report, args.quiet)
+        .into_app_err("failed to write verdict to stdout")?;
+
+    if let Some(path) = summary_target(args) {
+        write_summary_file(&report, &path)
+            .into_app_err(format!("failed to write summary file `{}`", path.display()))?;
+    }
+
+    process::exit(report.verdict().exit_code());
 }
 
-fn report_verdict(verdict: Verdict, quiet: bool) {
+fn write_text_output(report: &EvaluatedReport, quiet: bool) -> io::Result<()> {
     if quiet {
-        return;
+        return Ok(());
     }
-    let label = match verdict {
-        Verdict::Pass => "PASS",
-        Verdict::Fail => "FAIL",
-        Verdict::ConfigError => "CONFIG ERROR",
-    };
-    info!("coverage-gate verdict: {label}");
+    let stdout = io::stdout();
+    let mut handle = stdout.lock();
+    report.render_text(&mut handle)
+}
+
+fn write_summary_file(report: &EvaluatedReport, path: &Path) -> io::Result<()> {
+    let file = File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    report.render_markdown(&mut writer)?;
+    Ok(())
+}
+
+/// Resolve where the Markdown summary should be written, if anywhere.
+///
+/// Priority: `--summary-file` > `$GITHUB_STEP_SUMMARY` >
+/// `$COVERAGE_GATE_SUMMARY`.
+fn summary_target(args: &CoverageGateArgs) -> Option<PathBuf> {
+    if let Some(p) = &args.summary_file {
+        return Some(p.clone());
+    }
+    for var in ["GITHUB_STEP_SUMMARY", "COVERAGE_GATE_SUMMARY"] {
+        if let Ok(v) = env::var(var)
+            && !v.is_empty()
+        {
+            return Some(PathBuf::from(v));
+        }
+    }
+    None
 }
 

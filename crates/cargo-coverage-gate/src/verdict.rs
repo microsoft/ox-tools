@@ -49,10 +49,6 @@ pub(crate) struct CrateOutcome {
     /// Cargo package name.
     pub(crate) name: String,
     /// Resolved threshold and the layer it came from.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "phase 6 renderer will display this")
-    )]
     pub(crate) threshold: Threshold,
     /// Aggregated line counters; may be all-zero when status is `NoData`.
     pub(crate) totals: LineTotals,
@@ -62,10 +58,6 @@ pub(crate) struct CrateOutcome {
 
 impl CrateOutcome {
     /// Measured percentage, or `None` when no data was attributed.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "phase 6 renderer will display this")
-    )]
     pub(crate) fn percent(&self) -> Option<f64> {
         self.totals.percent()
     }
@@ -78,10 +70,6 @@ pub(crate) struct Report {
     pub(crate) outcomes: Vec<CrateOutcome>,
     /// Number of coverage entries that matched no workspace member.
     /// Surfaced as a single aggregated warning rather than per-file.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "phase 6 renderer will display this")
-    )]
     pub(crate) unattributed: usize,
 }
 
@@ -238,7 +226,6 @@ mod tests {
 
     fn make_workspace(members: Vec<Member>, default: Option<f64>) -> Workspace {
         Workspace {
-            root: PathBuf::from("/repo"),
             members,
             default_min_lines: default,
         }
