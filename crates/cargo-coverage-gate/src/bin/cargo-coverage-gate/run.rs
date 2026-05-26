@@ -48,8 +48,9 @@ fn write_summary_file(report: &EvaluatedReport, path: &Path) -> io::Result<()> {
 
 /// Resolve where the Markdown summary should be written, if anywhere.
 ///
-/// Priority: `--summary-file` > `$GITHUB_STEP_SUMMARY` >
-/// `$COVERAGE_GATE_SUMMARY`.
+/// Priority order (first match wins): `--summary-file`, then the
+/// `GITHUB_STEP_SUMMARY` env var, then the `COVERAGE_GATE_SUMMARY`
+/// env var.
 fn summary_target(args: &CoverageGateArgs) -> Option<PathBuf> {
     if let Some(p) = &args.summary_file {
         return Some(p.clone());
