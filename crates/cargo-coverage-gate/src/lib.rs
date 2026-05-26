@@ -43,6 +43,7 @@
 
 mod error;
 mod llvm_cov;
+mod threshold;
 mod workspace;
 
 pub use error::CoverageGateError;
