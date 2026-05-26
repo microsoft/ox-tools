@@ -93,11 +93,9 @@ want to reproduce the gate locally.
 ```text
 cargo coverage-gate check  [--json <path>] [--crates <name>,<name>,...]
                            [--summary-file <path>] [--quiet]
-cargo coverage-gate init   [--json <path>] [--crates <name>,<name>,...]
-                           [--margin <pp>] [--dry-run]
 ```
 
-Two subcommands, deliberately small surface:
+One subcommand, deliberately minimal surface:
 
 - **`check`** — the gating command. Reads coverage JSON, resolves the
   effective per-crate threshold (per-crate metadata, then workspace
@@ -105,14 +103,8 @@ Two subcommands, deliberately small surface:
   percentages, emits a verdict table. Exit `0` if every in-scope crate
   meets its threshold; exit `1` if any in-scope crate fails; exit `2` on
   configuration error.
-- **`init`** — adds `[package.metadata.coverage-gate]` to crates that
-  don't yet have one, seeded from observed coverage as
-  `floor((observed - margin) * 10) / 10`. Idempotent: never overwrites
-  an existing per-crate threshold. After `init`, any subsequent
-  threshold change is a manual `Cargo.toml` edit so that the change
-  appears in the PR diff and is reviewed.
 
-Shared flags:
+Flags:
 
 - `--json <path>` — path to the cargo-llvm-cov JSON report. Defaults to
   `target/coverage/coverage.json` (matching the recommended
@@ -127,13 +119,11 @@ Shared flags:
   `GITHUB_STEP_SUMMARY` (GitHub Actions) and
   `COVERAGE_GATE_SUMMARY` (any CI that pipes the file content through
   `##vso[task.uploadsummary]` or equivalent) automatically.
-- `--margin <pp>` — (`init` only) percentage points subtracted from the
-  observed value before writing it as a threshold, to absorb measurement
-  noise. Default: `1.0`.
-- `--dry-run` — (`init` only) print the proposed Cargo.toml edits
-  without writing.
 - `--quiet` — suppress stdout output (the summary file, if any, is still
   written).
+
+The tool never writes to `Cargo.toml`. All threshold values are set by
+hand, so every change appears in a PR diff and is reviewed.
 
 ### 5.3 The threshold metadata
 
@@ -342,22 +332,20 @@ Markdown rendering uses GitHub-flavored tables, which both
 
 ### 7.1 Adoption
 
-A new repo adopts the gate in one of two ways:
+A new repo adopts the gate by enabling `check` in CI and watching the
+first run fail loudly. Every crate inherits the built-in default of
+`100.0`, so until the maintainer says otherwise, every crate is
+required to be fully covered.
 
-- **Start strict, opt out as needed.** Do nothing: every crate inherits
-  the built-in default of `100.0` and the first `check` run fails
-  loudly. The maintainer either sets a `[workspace.metadata.coverage-gate]`
-  default for the repo, adds per-crate `min-lines` overrides, or
-  explicitly opts crates out with `min-lines = 0.0`. The whole picture
-  is visible in the same PR.
-- **Seed from observed.** Run coverage once
-  (`cargo llvm-cov nextest --no-report && cargo llvm-cov report --json …`),
-  then `cargo coverage-gate init` to populate per-crate
-  `[package.metadata.coverage-gate]` with values seeded from observed
-  coverage (`floor((observed - margin) * 10) / 10`). The maintainer
-  commits the resulting `Cargo.toml` diffs.
+To shape the policy, the maintainer either:
 
-From that point on, every PR runs `check` and gates.
+- sets a `[workspace.metadata.coverage-gate]` default for the repo,
+- adds per-crate `[package.metadata.coverage-gate]` overrides for
+  crates whose realistic floor differs, or
+- explicitly opts crates out with `min-lines = 0.0`.
+
+All three live in `Cargo.toml` files, so the policy lands as a normal
+reviewed change. From that point on, every PR runs `check` and gates.
 
 ### 7.2 Intentional improvement
 
@@ -464,9 +452,9 @@ for display; the underlying comparison uses the unrounded `f64`.
 
 ### 10.2 Security
 
-The tool reads `Cargo.toml` files and a coverage JSON file. It writes
-`Cargo.toml` files only when `init` is invoked. No network
-access, no shell-out, no privileged operations.
+The tool reads `Cargo.toml` files and a coverage JSON file. It never
+writes; the only output channels are stdout and the optional summary
+file. No network access, no shell-out, no privileged operations.
 
 ### 10.3 Monorepo / multi-workspace
 
