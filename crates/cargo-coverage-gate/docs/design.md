@@ -252,13 +252,76 @@ single warning per `check` run. They are not folded into any crate's totals.
 
 Per crate, the tool sums `lines.count` and `lines.covered` over every
 attributed file, then computes percentage as
-`100.0 * sum(covered) / sum(count)`. Crates with zero attributed files get
-a `(no data)` row in the table; they are treated as `OK` for gating
-purposes (a crate that ran no tests can't fail a threshold check it never
-got a chance to measure — that's a separate problem the test-runner CI
-configuration should surface).
+`100.0 * sum(covered) / sum(count)`.
 
-### 6.4 Markdown output
+A crate that is in the gated set (either listed in `--crates`, or
+implicitly via the default of "every workspace member") but has **zero
+attributed files** in the coverage JSON is a configuration error: it
+means no test binary that touched that crate's source actually ran.
+`check` reports such crates in the table as `(no data)` and exits with
+code `2`. This converts a silent gap — a typo in `--crates`, a broken
+impact tool, a `--ignore-filename-regex` mismatch — into a loud failure
+that surfaces immediately in CI.
+
+### 6.4 Cross-crate test attribution
+
+Per-crate aggregation groups measurements by **source-file ownership**
+(longest-prefix match against workspace member paths), but the
+measurements themselves are produced by **whichever test binaries
+executed**. In a workspace those two views diverge: crate `B`'s
+integration tests can — and routinely do — exercise crate `A`'s public
+API, and the lines marked covered are then attributed to `A` even
+though the test that produced them lives in `B`.
+
+This matters at PR time under impact scoping. Consider:
+
+1. **PR1** modifies `A` and `B`. The impact-scoped run includes both,
+   so `B`'s integration tests run and incidentally cover much of `A`.
+   `A`'s measured percentage is high; the author commits a high
+   `min-lines` for `A`.
+2. **PR2** modifies only `A`. If the impact-scoped run includes only
+   `A`'s own tests, `A`'s measured percentage drops sharply — not
+   because `A` regressed, but because the test binary that contributed
+   most of `A`'s coverage didn't run. The gate fails for reasons the
+   author cannot fix in this PR.
+
+The fix is a **contract on the impact tool**, not on the gate:
+
+> **For every crate `X` in the impacted set, the impact tool must also
+> include every crate that depends on `X` (directly or transitively,
+> through normal, dev, and build dependencies), so that every test
+> binary capable of exercising `X` runs.**
+
+This is the reverse-dependency closure. Most impact tools — including
+`cargo-delta` — already compute it, because they have to in order to
+catch downstream breakage from API changes. The argument that it
+suffices for coverage is the same: the only way another crate's tests
+can contribute coverage to `X` is if those tests link against `X`,
+which requires a (transitive) dependency edge from that crate to `X`.
+The reverse-dep closure includes every such crate by construction, so
+the set of test binaries that exercise `X` is the same in PR1 and PR2,
+and so is `X`'s measured percentage.
+
+`check` cannot verify the contract directly — the coverage JSON
+doesn't record which test binaries ran. The mitigation is the §6.3
+rule above: a crate listed in `--crates` but with no attributed files
+is treated as a configuration error, so the most common
+contract-violating shape (the impact tool omits a crate's
+reverse-dep that owns the only test binary covering it) surfaces as a
+hard failure rather than a quietly mis-gated number.
+
+Repos that do not impact-scope their coverage runs are unaffected:
+running every test binary every time trivially satisfies the contract.
+
+One residual case is intentional, not a bug: a PR that *removes* a
+test in `B` which had been covering parts of `A` will cause `A`'s
+measured percentage to drop, and the gate will fail on `A`. This is
+exactly the displaced-coverage case the gate is designed to catch
+(§1.2). The author either restores equivalent coverage, lowers `A`'s
+threshold in the same PR (visible in the diff), or finds another way
+to cover the affected paths.
+
+### 6.5 Markdown output
 
 Markdown rendering uses GitHub-flavored tables, which both
 `$GITHUB_STEP_SUMMARY` and ADO's `task.uploadsummary` render correctly:
