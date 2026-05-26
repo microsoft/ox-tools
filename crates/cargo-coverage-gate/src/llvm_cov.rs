@@ -19,18 +19,6 @@
 //! usable across cargo-llvm-cov / llvm-tools upgrades that nudge the
 //! string without changing the structure we depend on.
 
-// The deserialized types and the parser entry point are introduced in
-// phase 2 of the implementation plan; phase 3+ consumers wire them in.
-// The dead_code suppression below applies only outside test builds,
-// where the unit tests in this module exercise the full API.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by later phases of the implementation plan"
-    )
-)]
-
 use std::path::PathBuf;
 
 use serde::Deserialize;

@@ -16,15 +16,6 @@
 //! [`ThresholdSource`] tag so the verdict table can report which layer
 //! supplied the number.
 
-// Phase 4 stages threshold resolution; phase 5+ consumers wire it in.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by later phases of the implementation plan"
-    )
-)]
-
 use crate::workspace::{Member, Workspace};
 
 /// The built-in `min-lines` value used when neither per-crate nor
@@ -44,6 +35,10 @@ pub(crate) enum ThresholdSource {
 
 impl ThresholdSource {
     /// Short label used in the verdict table's `Source` column.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "phase 6 renderer will display this")
+    )]
     pub(crate) fn label(self) -> &'static str {
         match self {
             Self::Crate => "crate",

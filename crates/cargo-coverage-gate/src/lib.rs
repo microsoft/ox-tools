@@ -29,10 +29,10 @@
 //! ## Public API
 //!
 //! The library surface is intentionally minimal: a single [`run`]
-//! function that drives an evaluation end-to-end. Phase 1 of the
-//! implementation only exposes the entry point as a placeholder; later
-//! phases fill in JSON parsing, workspace discovery, threshold
-//! resolution, attribution, and rendering.
+//! function that drives an evaluation end-to-end given a coverage
+//! JSON, an optional `Cargo.toml` manifest path, and an optional
+//! crate filter. The accompanying binary loads the JSON from disk and
+//! calls it.
 //!
 //! [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
 //! [`docs/design/main.md`]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/design/main.md
@@ -41,9 +41,14 @@
 #![doc(html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-coverage-gate/favicon.ico")]
 #![deny(unsafe_code)]
 
+use std::path::Path;
+
+mod aggregate;
+mod attribute;
 mod error;
 mod llvm_cov;
 mod threshold;
+mod verdict;
 mod workspace;
 
 pub use error::CoverageGateError;
@@ -75,16 +80,28 @@ impl Verdict {
     }
 }
 
-/// Placeholder for the end-to-end evaluation entry point.
+/// Evaluate `json_text` (a `cargo-llvm-cov` JSON v2 report) against
+/// the workspace anchored at `manifest_path` and report the [`Verdict`].
 ///
-/// Returns [`CoverageGateError::NotImplemented`] until the full
-/// implementation lands in later phases.
+/// `gated_crates` restricts the operation to a named subset; when
+/// empty, every workspace member is in scope.
 ///
 /// # Errors
 ///
-/// Returns [`CoverageGateError::NotImplemented`] in the current phase.
-pub fn run() -> Result<Verdict, CoverageGateError> {
-    Err(CoverageGateError::NotImplemented)
+/// Returns [`CoverageGateError::JsonParse`] if `json_text` does not
+/// parse, [`CoverageGateError::Metadata`] for workspace-discovery
+/// failures or unknown crate names in `gated_crates`, and
+/// [`CoverageGateError::InvalidThreshold`] if a configured
+/// `min-lines` value is outside `[0.0, 100.0]`.
+pub fn run(
+    json_text: &str,
+    manifest_path: Option<&Path>,
+    gated_crates: &[String],
+) -> Result<Verdict, CoverageGateError> {
+    let report = llvm_cov::CoverageReport::from_str(json_text)?;
+    let ws = workspace::Workspace::load(manifest_path)?;
+    let evaluated = verdict::evaluate(&report, &ws, gated_crates)?;
+    Ok(evaluated.verdict())
 }
 
 #[cfg(test)]
@@ -100,7 +117,8 @@ mod tests {
     }
 
     #[test]
-    fn run_is_unimplemented_for_now() {
-        assert!(matches!(run(), Err(CoverageGateError::NotImplemented)));
+    fn run_rejects_malformed_json() {
+        let err = run("not json", None, &[]).expect_err("malformed JSON must error");
+        assert!(matches!(err, CoverageGateError::JsonParse { .. }));
     }
 }

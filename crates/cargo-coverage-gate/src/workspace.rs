@@ -10,15 +10,6 @@
 //! workspace default → built-in `100.0`) lives in [`crate::threshold`]
 //! and consumes the values surfaced here.
 
-// Phase 3 stages the workspace model; phase 4+ consumers wire it in.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "consumed by later phases of the implementation plan"
-    )
-)]
-
 use std::path::{Path, PathBuf};
 
 use cargo_metadata::MetadataCommand;
@@ -35,6 +26,10 @@ const MIN_LINES_UPPER: f64 = 100.0;
 #[derive(Debug, Clone)]
 pub(crate) struct Workspace {
     /// Absolute workspace root directory.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "phase 6 renderer will display this")
+    )]
     pub(crate) root: PathBuf,
     /// One entry per workspace member, in alphabetical order by name.
     pub(crate) members: Vec<Member>,
