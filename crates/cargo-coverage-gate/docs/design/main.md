@@ -91,18 +91,16 @@ want to reproduce the gate locally.
 ### 5.2 CLI surface
 
 ```text
-cargo coverage-gate check  [--json <path>] [--crates <name>,<name>,...]
-                           [--summary-file <path>] [--quiet]
+cargo coverage-gate  [--json <path>] [--crates <name>,<name>,...]
+                     [--summary-file <path>] [--quiet]
 ```
 
-One subcommand, deliberately minimal surface:
-
-- **`check`** — the gating command. Reads coverage JSON, resolves the
-  effective per-crate threshold (per-crate metadata, then workspace
-  default, then the built-in default of `100.0`), computes per-crate
-  percentages, emits a verdict table. Exit `0` if every in-scope crate
-  meets its threshold; exit `1` if any in-scope crate fails; exit `2` on
-  configuration error.
+A single command — no subcommands. The tool reads the cargo-llvm-cov
+JSON, resolves the effective per-crate threshold (per-crate metadata,
+then workspace default, then the built-in default of `100.0`), computes
+per-crate percentages, and emits a verdict table. Exit `0` if every
+in-scope crate meets its threshold; exit `1` if any in-scope crate
+fails; exit `2` on configuration error.
 
 Flags:
 
@@ -115,7 +113,7 @@ Flags:
   comma-separated env var set by the surrounding pipeline) so that
   impact-scoped runs only gate the crates whose tests actually ran.
 - `--summary-file <path>` — write a Markdown verdict table to this file.
-  When unset, `check` honors the environment variables
+  When unset, the tool honors the environment variables
   `GITHUB_STEP_SUMMARY` (GitHub Actions) and
   `COVERAGE_GATE_SUMMARY` (any CI that pipes the file content through
   `##vso[task.uploadsummary]` or equivalent) automatically.
@@ -160,8 +158,8 @@ covered. To opt a crate out of gating, set `min-lines = 0.0` explicitly
 
 ### 5.4 The verdict table
 
-`check` prints a deterministic table to stdout (and to the summary file
-when configured):
+The tool prints a deterministic table to stdout (and to the summary
+file when configured):
 
 ```text
 ox coverage-gate
@@ -189,7 +187,7 @@ cargo llvm-cov nextest --workspace --all-features --locked --no-report
 cargo llvm-cov report --json --output-path target/coverage/coverage.json
 
 # Apply the gate.
-cargo coverage-gate check
+cargo coverage-gate
 ```
 
 Both commands chain naturally and can be wrapped in a single recipe by
@@ -236,7 +234,7 @@ manifest is `workspace_root/crates/alpha/Cargo.toml`.
 
 Files that match no member (typically generated code outside the workspace
 tree, or proc-macro expansions with synthesized paths) are dropped with a
-single warning per `check` run. They are not folded into any crate's totals.
+single warning per run. They are not folded into any crate's totals.
 
 ### 6.3 Aggregation
 
@@ -248,7 +246,7 @@ A crate that is in the gated set (either listed in `--crates`, or
 implicitly via the default of "every workspace member") but has **zero
 attributed files** in the coverage JSON is a configuration error: it
 means no test binary that touched that crate's source actually ran.
-`check` reports such crates in the table as `(no data)` and exits with
+The tool reports such crates in the table as `(no data)` and exits with
 code `2`. This converts a silent gap — a typo in `--crates`, a broken
 impact tool, a `--ignore-filename-regex` mismatch — into a loud failure
 that surfaces immediately in CI.
@@ -292,7 +290,7 @@ The reverse-dep closure includes every such crate by construction, so
 the set of test binaries that exercise `X` is the same in PR1 and PR2,
 and so is `X`'s measured percentage.
 
-`check` cannot verify the contract directly — the coverage JSON
+The tool cannot verify the contract directly — the coverage JSON
 doesn't record which test binaries ran. The mitigation is the §6.3
 rule above: a crate listed in `--crates` but with no attributed files
 is treated as a configuration error, so the most common
@@ -332,10 +330,10 @@ Markdown rendering uses GitHub-flavored tables, which both
 
 ### 7.1 Adoption
 
-A new repo adopts the gate by enabling `check` in CI and watching the
-first run fail loudly. Every crate inherits the built-in default of
-`100.0`, so until the maintainer says otherwise, every crate is
-required to be fully covered.
+A new repo adopts the gate by enabling `cargo coverage-gate` in CI and
+watching the first run fail loudly. Every crate inherits the built-in
+default of `100.0`, so until the maintainer says otherwise, every crate
+is required to be fully covered.
 
 To shape the policy, the maintainer either:
 
@@ -345,7 +343,7 @@ To shape the policy, the maintainer either:
 - explicitly opts crates out with `min-lines = 0.0`.
 
 All three live in `Cargo.toml` files, so the policy lands as a normal
-reviewed change. From that point on, every PR runs `check` and gates.
+reviewed change. From that point on, every PR runs the gate.
 
 ### 7.2 Intentional improvement
 
@@ -360,8 +358,8 @@ code that satisfies it land together and stay together in the git log.
 
 ### 7.3 Regression
 
-A PR that drops a crate's coverage below its threshold fails the
-`check` step. The author either:
+A PR that drops a crate's coverage below its threshold fails the gate.
+The author either:
 
 - Improves test coverage in that crate to clear the threshold, **or**
 - Edits `min-lines` downward in the same PR, making the lowered floor
@@ -389,7 +387,7 @@ the lcov / cobertura artifacts. After the test step:
 ```yaml
 - name: Coverage gate
   shell: bash
-  run: cargo coverage-gate check --crates "$IMPACTED_CRATES"
+  run: cargo coverage-gate --crates "$IMPACTED_CRATES"
 ```
 
 `$IMPACTED_CRATES` is whatever comma-separated list the surrounding
@@ -405,7 +403,7 @@ verdict table to the workflow-run page above the job log.
 ```yaml
 - bash: |
     summary="$(mktemp).md"
-    cargo coverage-gate check \
+    cargo coverage-gate \
         --crates "$(IMPACTED_CRATES)" \
         --summary-file "$summary"
     echo "##vso[task.uploadsummary]$summary"
@@ -414,7 +412,7 @@ verdict table to the workflow-run page above the job log.
 
 The summary file is uploaded as a tab on the build run, alongside the
 existing "Code Coverage" tab. The job's exit code is set by
-`coverage-gate check`, so the build fails when any crate is below
+`cargo coverage-gate`, so the build fails when any crate is below
 threshold.
 
 ### 8.3 Coexistence with native UIs
@@ -436,9 +434,9 @@ Three escape valves, in increasing severity:
 2. **Limit scope with `--crates`** to gate only a subset of crates per
    run. Useful for impact-scoped builds; the CI templates use this by
    default.
-3. **Stop running the gate.** Remove the `coverage-gate check` step from
-   the CI template. The thresholds in `Cargo.toml`s remain as static
-   documentation; nothing enforces them.
+3. **Stop running the gate.** Remove the `cargo coverage-gate` step
+   from the CI template. The thresholds in `Cargo.toml`s remain as
+   static documentation; nothing enforces them.
 
 ## 10. Cross-cutting Concerns
 
