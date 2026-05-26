@@ -155,6 +155,7 @@ edition = "2021"
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns cargo metadata subprocess")]
     fn loads_workspace_with_no_metadata_anywhere() {
         let tmp = tempfile::tempdir().expect("tempdir");
         write_workspace(
@@ -178,6 +179,7 @@ edition = "2021"
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns cargo metadata subprocess")]
     fn picks_up_workspace_level_default() {
         let tmp = tempfile::tempdir().expect("tempdir");
         write_workspace(
@@ -190,6 +192,7 @@ edition = "2021"
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns cargo metadata subprocess")]
     fn picks_up_per_crate_override() {
         let tmp = tempfile::tempdir().expect("tempdir");
         write_workspace(
@@ -206,6 +209,7 @@ edition = "2021"
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns cargo metadata subprocess")]
     fn rejects_out_of_range_per_crate_threshold() {
         let tmp = tempfile::tempdir().expect("tempdir");
         write_workspace(
@@ -228,6 +232,7 @@ edition = "2021"
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns cargo metadata subprocess")]
     fn rejects_negative_workspace_threshold() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = r#"
@@ -249,6 +254,7 @@ min-lines = -1
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "spawns cargo metadata subprocess")]
     fn rejects_non_numeric_threshold() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = r#"

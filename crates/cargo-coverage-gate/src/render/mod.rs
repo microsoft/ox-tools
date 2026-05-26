@@ -3,7 +3,7 @@
 
 //! Verdict-table renderers.
 //!
-//! Two output flavours, sharing the same underlying [`Report`]:
+//! Two output flavors, sharing the same underlying [`Report`]:
 //!
 //! - [`text`] — fixed-width plain text suitable for terminal output.
 //! - [`markdown`] — GitHub-flavored Markdown suitable for CI step
@@ -67,7 +67,7 @@ fn format_source(source: ThresholdSource) -> &'static str {
 }
 
 /// Number of crates below threshold (`Fail` only — `NoData` is a
-/// configuration error and is summarised separately).
+/// configuration error and is summarized separately).
 fn count_failures(outcomes: &[CrateOutcome]) -> usize {
     outcomes.iter().filter(|o| o.status == Status::Fail).count()
 }

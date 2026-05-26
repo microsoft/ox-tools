@@ -92,6 +92,7 @@ fn coverage_gate(dir: &Path) -> Command {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn all_pass_mixed_sources() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(
@@ -126,6 +127,7 @@ fn all_pass_mixed_sources() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn one_crate_below_threshold_exits_1() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80")), ("beta", Some("80"))], None);
@@ -140,6 +142,7 @@ fn one_crate_below_threshold_exits_1() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn gated_crate_with_no_data_exits_2() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80")), ("beta", Some("80"))], None);
@@ -155,6 +158,7 @@ fn gated_crate_with_no_data_exits_2() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn crates_flag_restricts_scope() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80")), ("beta", Some("80"))], None);
@@ -170,6 +174,7 @@ fn crates_flag_restricts_scope() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn crates_flag_with_unknown_name_exits_2() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", None)], None);
@@ -183,6 +188,7 @@ fn crates_flag_with_unknown_name_exits_2() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn summary_file_flag_writes_markdown() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80"))], None);
@@ -201,6 +207,7 @@ fn summary_file_flag_writes_markdown() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn github_step_summary_env_is_auto_detected() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80"))], None);
@@ -223,6 +230,7 @@ fn github_step_summary_env_is_auto_detected() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn quiet_suppresses_stdout_but_still_writes_summary() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80"))], None);
@@ -239,6 +247,7 @@ fn quiet_suppresses_stdout_but_still_writes_summary() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn unknown_version_string_warns_but_continues() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80"))], None);
@@ -257,6 +266,7 @@ fn unknown_version_string_warns_but_continues() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn malformed_json_exits_2() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", None)], None);
@@ -271,6 +281,7 @@ fn malformed_json_exits_2() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn missing_json_file_exits_2() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", None)], None);
@@ -283,6 +294,7 @@ fn missing_json_file_exits_2() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn default_threshold_is_100_when_nothing_configured() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", None)], None);

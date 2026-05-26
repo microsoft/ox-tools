@@ -3,7 +3,7 @@
 
 //! `cargo-llvm-cov` JSON v2 schema deserialization.
 //!
-//! Only the subset of fields the gate actually consumes is modelled:
+//! Only the subset of fields the gate actually consumes is modeled:
 //! file paths and per-file line counters. The top-level `totals` block
 //! and the `functions` / `regions` summaries are accepted by the
 //! deserializer but discarded — the tool computes its own per-crate

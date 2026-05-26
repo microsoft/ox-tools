@@ -122,7 +122,7 @@ impl Verdict {
 
 /// An evaluated coverage report.
 ///
-/// Produced by [`evaluate`]; renderable to either a fixed-width plain
+/// Produced by [`evaluate`]; can be rendered as either a fixed-width plain
 /// text table or a GitHub-flavored Markdown table, and reducible to a
 /// single [`Verdict`].
 #[derive(Debug)]

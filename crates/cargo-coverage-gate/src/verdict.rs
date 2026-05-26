@@ -25,9 +25,9 @@ use crate::workspace::{Member, Workspace};
 
 /// Tolerance used when comparing measured percentages to thresholds.
 ///
-/// A tight epsilon avoids spurious failures when the JSON's stored
+/// A tight epsilon avoids spurious failures when the stored JSON
 /// percentage and the recomputed-from-counters percentage differ at
-/// the last representable f64 digit.
+/// the last representable `f64` digit.
 const COMPARE_EPSILON: f64 = 1e-6;
 
 /// Status of a single crate against its threshold.
