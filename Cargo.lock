@@ -70,6 +70,7 @@ name = "cargo-coverage-gate"
 version = "0.1.0"
 dependencies = [
  "assert_cmd",
+ "cargo_metadata",
  "clap",
  "ohno",
  "predicates",

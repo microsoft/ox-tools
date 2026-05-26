@@ -27,6 +27,7 @@ name = "cargo-coverage-gate"
 path = "src/bin/cargo-coverage-gate/main.rs"
 
 [dependencies]
+cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
 ohno = { workspace = true, features = ["app-err"] }
 serde = { workspace = true, features = ["derive", "alloc"] }

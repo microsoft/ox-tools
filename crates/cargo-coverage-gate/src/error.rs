@@ -20,6 +20,21 @@ pub enum CoverageGateError {
         /// the underlying line/column where available.
         message: String,
     },
+    /// Failed to load workspace metadata (typically a `cargo metadata`
+    /// invocation failure, or unreadable / malformed `Cargo.toml`).
+    Metadata {
+        /// Human-readable description of the failure.
+        message: String,
+    },
+    /// A `min-lines` threshold value was outside the allowed
+    /// `[0.0, 100.0]` range.
+    InvalidThreshold {
+        /// Where the offending value was found — either a crate name
+        /// or `"workspace"` for the workspace-level default.
+        source: String,
+        /// The offending value.
+        value: f64,
+    },
 }
 
 impl fmt::Display for CoverageGateError {
@@ -29,6 +44,14 @@ impl fmt::Display for CoverageGateError {
             Self::JsonParse { message } => {
                 write!(f, "failed to parse coverage JSON: {message}")
             }
+            Self::Metadata { message } => {
+                write!(f, "failed to load workspace metadata: {message}")
+            }
+            Self::InvalidThreshold { source, value } => write!(
+                f,
+                "invalid coverage-gate min-lines value `{value}` for {source}: \
+                 expected a number in 0.0..=100.0"
+            ),
         }
     }
 }
@@ -54,5 +77,25 @@ mod tests {
         let s = err.to_string();
         assert!(s.contains("coverage JSON"));
         assert!(s.contains("expected `,` or `}`"));
+    }
+
+    #[test]
+    fn metadata_displays() {
+        let err = CoverageGateError::Metadata {
+            message: "cargo exited with code 101".to_owned(),
+        };
+        assert!(err.to_string().contains("cargo exited with code 101"));
+    }
+
+    #[test]
+    fn invalid_threshold_displays() {
+        let err = CoverageGateError::InvalidThreshold {
+            source: "alpha".to_owned(),
+            value: 150.0,
+        };
+        let s = err.to_string();
+        assert!(s.contains("alpha"));
+        assert!(s.contains("150"));
+        assert!(s.contains("0.0..=100.0"));
     }
 }
