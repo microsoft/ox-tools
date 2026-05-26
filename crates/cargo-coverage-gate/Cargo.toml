@@ -1,0 +1,45 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-coverage-gate"
+description = "A cargo subcommand that gates pull requests on per-crate line coverage measured by cargo-llvm-cov"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["oxidizer", "cargo", "subcommand", "coverage", "ci"]
+categories = ["command-line-utilities", "development-tools::cargo-plugins"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.cargo_check_external_types]
+allowed_external_types = []
+
+[[bin]]
+name = "cargo-coverage-gate"
+path = "src/bin/cargo-coverage-gate/main.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+ohno = { workspace = true, features = ["app-err"] }
+serde = { workspace = true, features = ["derive", "alloc"] }
+serde_json = { workspace = true, features = ["std"] }
+toml = { workspace = true, features = ["parse", "serde"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt"] }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+pretty_assertions = { workspace = true, features = ["std"] }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

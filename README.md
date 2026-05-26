@@ -25,6 +25,7 @@ This repository contains a set of tools  that help you build robust highly scala
 
 These are the primary crates built out of this repo:
 
+- [`cargo-coverage-gate`](./crates/cargo-coverage-gate/README.md) - A cargo sub-command that gates pull requests on per-crate line coverage measured by cargo-llvm-cov
 - [`cargo-heather`](./crates/cargo-heather/README.md) -  A cargo sub-command to validate license headers in Rust, TOML, PowerShell, Just, and env source files
 
 ## About this Repo
