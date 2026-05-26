@@ -13,7 +13,9 @@
 //! three-layer lookup, and emits a verdict table to stdout (and,
 //! optionally, to a Markdown summary file for CI step summaries).
 //!
-//! The full design is in [`docs/design/main.md`] in the source tree.
+//! The full design is in [`docs/design/main.md`] in the source tree;
+//! the implementation plan tracking the build is in
+//! [`docs/implementation-plans/0000.md`].
 //!
 //! ## Threshold resolution
 //!
@@ -25,6 +27,37 @@
 //! 2. `[workspace.metadata.coverage-gate] min-lines = N` in the workspace
 //!    root `Cargo.toml`, or
 //! 3. The built-in default of `100.0` — full coverage required.
+//!
+//! Setting `min-lines = 0.0` explicitly opts a crate out of gating.
+//!
+//! ## Binary usage
+//!
+//! ```text
+//! cargo coverage-gate  [--json <path>] [--crates <name>,<name>,...]
+//!                      [--summary-file <path>] [--quiet]
+//! ```
+//!
+//! Exit codes: `0` if every gated crate meets its threshold, `1` if any
+//! gated crate falls below its threshold, and `2` for configuration
+//! errors (unparseable JSON, missing data for a gated crate, an unknown
+//! crate name in `--crates`, an out-of-range `min-lines` value, …).
+//!
+//! When `--summary-file` is unset, the binary falls back to
+//! `$GITHUB_STEP_SUMMARY` and then `$COVERAGE_GATE_SUMMARY` to decide
+//! where to write the Markdown verdict table.
+//!
+//! ## Library usage
+//!
+//! ```no_run
+//! use std::io;
+//!
+//! let json = std::fs::read_to_string("target/coverage/coverage.json")?;
+//! let report = cargo_coverage_gate::evaluate(&json, None, &[])?;
+//! report.render_text(&mut io::stdout())?;
+//! let code = report.verdict().exit_code();
+//! # let _ = code;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 //!
 //! ## Public API
 //!
@@ -38,6 +71,7 @@
 //!
 //! [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
 //! [`docs/design/main.md`]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/design/main.md
+//! [`docs/implementation-plans/0000.md`]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/implementation-plans/0000.md
 
 #![doc(html_logo_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-coverage-gate/logo.png")]
 #![doc(html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-coverage-gate/favicon.ico")]
