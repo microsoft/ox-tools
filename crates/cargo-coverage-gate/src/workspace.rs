@@ -55,9 +55,9 @@ impl Workspace {
         if let Some(path) = manifest_path {
             cmd.manifest_path(path);
         }
-        let metadata = cmd.exec().map_err(|source| CoverageGateError::Metadata {
-            message: source.to_string(),
-        })?;
+        let metadata = cmd
+            .exec()
+            .map_err(|source| CoverageGateError::caused_by("failed to load workspace metadata".to_owned(), source))?;
 
         let workspace_default = extract_min_lines(&metadata.workspace_metadata, "workspace")?;
 
@@ -95,14 +95,14 @@ fn extract_min_lines(metadata: &Value, source: &str) -> Result<Option<f64>, Cove
     let Some(min) = metadata.get("coverage-gate").and_then(|v| v.get("min-lines")) else {
         return Ok(None);
     };
-    let value = min.as_f64().ok_or_else(|| CoverageGateError::Metadata {
-        message: format!("{source}: `coverage-gate.min-lines` must be a number, got {min}"),
-    })?;
+    let value = min
+        .as_f64()
+        .ok_or_else(|| CoverageGateError::new(format!("{source}: `coverage-gate.min-lines` must be a number, got {min}")))?;
     if !(MIN_LINES_LOWER..=MIN_LINES_UPPER).contains(&value) {
-        return Err(CoverageGateError::InvalidThreshold {
-            source: source.to_owned(),
-            value,
-        });
+        return Err(CoverageGateError::new(format!(
+            "invalid coverage-gate min-lines value `{value}` for {source}: \
+             expected a number in {MIN_LINES_LOWER}.0..={MIN_LINES_UPPER}.0"
+        )));
     }
     Ok(Some(value))
 }
@@ -222,13 +222,9 @@ edition = "2021"
             ],
         );
         let err = Workspace::load(Some(&tmp.path().join("Cargo.toml"))).expect_err("out-of-range value must error");
-        match err {
-            CoverageGateError::InvalidThreshold { source, value } => {
-                assert_eq!(source, "alpha");
-                assert!((value - 120.0).abs() < f64::EPSILON);
-            }
-            other => panic!("expected InvalidThreshold, got {other:?}"),
-        }
+        let rendered = err.to_string();
+        assert!(rendered.contains("alpha"), "rendered: {rendered}");
+        assert!(rendered.contains("120"), "rendered: {rendered}");
     }
 
     #[test]
@@ -245,12 +241,9 @@ min-lines = -1
 "#;
         write_workspace(tmp.path(), root, &[("alpha", &member("alpha", None))]);
         let err = Workspace::load(Some(&tmp.path().join("Cargo.toml"))).expect_err("negative workspace value must error");
-        match err {
-            CoverageGateError::InvalidThreshold { source, .. } => {
-                assert_eq!(source, "workspace");
-            }
-            other => panic!("expected InvalidThreshold, got {other:?}"),
-        }
+        let rendered = err.to_string();
+        assert!(rendered.contains("workspace"), "rendered: {rendered}");
+        assert!(rendered.contains("-1"), "rendered: {rendered}");
     }
 
     #[test]
@@ -267,11 +260,6 @@ min-lines = "ninety"
 "#;
         write_workspace(tmp.path(), root, &[("alpha", &member("alpha", None))]);
         let err = Workspace::load(Some(&tmp.path().join("Cargo.toml"))).expect_err("string threshold must error");
-        match err {
-            CoverageGateError::Metadata { message } => {
-                assert!(message.contains("must be a number"));
-            }
-            other => panic!("expected Metadata, got {other:?}"),
-        }
+        assert!(err.to_string().contains("must be a number"));
     }
 }

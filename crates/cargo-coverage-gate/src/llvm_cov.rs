@@ -95,9 +95,8 @@ impl CoverageReport {
     /// Emits warnings via `tracing` for missing or unsupported `version`
     /// values but returns `Ok` as long as the structural shape parses.
     pub(crate) fn from_str(json: &str) -> Result<Self, CoverageGateError> {
-        let report: Self = serde_json::from_str(json).map_err(|source| CoverageGateError::JsonParse {
-            message: source.to_string(),
-        })?;
+        let report: Self = serde_json::from_str(json)
+            .map_err(|source| CoverageGateError::caused_by("failed to parse coverage JSON".to_owned(), source))?;
         match report.version_status() {
             VersionStatus::Supported => {}
             VersionStatus::Missing => {
@@ -197,18 +196,12 @@ mod tests {
     #[test]
     fn malformed_json_is_rejected() {
         let err = CoverageReport::from_str(MALFORMED).expect_err("garbage should fail to parse");
-        match err {
-            CoverageGateError::JsonParse { .. } => {}
-            other => panic!("expected JsonParse, got {other:?}"),
-        }
+        assert!(err.to_string().contains("coverage JSON"));
     }
 
     #[test]
     fn structurally_invalid_json_is_rejected() {
         let err = CoverageReport::from_str(MISSING_REQUIRED).expect_err("entry without filename / summary should fail to parse");
-        match err {
-            CoverageGateError::JsonParse { .. } => {}
-            other => panic!("expected JsonParse, got {other:?}"),
-        }
+        assert!(err.to_string().contains("coverage JSON"));
     }
 }

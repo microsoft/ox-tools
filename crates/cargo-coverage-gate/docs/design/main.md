@@ -443,10 +443,12 @@ Three escape valves, in increasing severity:
 ### 10.1 Determinism
 
 Per-crate aggregation must produce the same percentage byte-for-byte given
-the same JSON input, regardless of file iteration order. The
-implementation sorts files by path before aggregation and rounds to one
-decimal place (matching cargo-llvm-cov's default text-summary precision)
-for display; the underlying comparison uses the unrounded `f64`.
+the same JSON input, regardless of file iteration order. This holds for
+free because the aggregation step sums integer line counters (commutative
+and associative), and the f64 percentage is computed once at the end.
+The displayed value rounds to one decimal place (matching
+cargo-llvm-cov's default text-summary precision); the underlying
+comparison uses the unrounded `f64`.
 
 ### 10.2 Security
 

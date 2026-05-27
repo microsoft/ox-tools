@@ -4,8 +4,9 @@
 //! Per-crate line-coverage aggregation.
 //!
 //! Sums `lines.count` and `lines.covered` across every file attributed
-//! to a crate, in a deterministic order (sorted by path) so the result
-//! is byte-stable across runs.
+//! to a crate. The result is order-independent because integer addition
+//! is commutative and associative, so two runs over the same data
+//! always produce byte-identical counters.
 
 use crate::llvm_cov::FileEntry;
 
@@ -34,14 +35,14 @@ impl LineTotals {
     }
 }
 
-/// Sum line counters across `files`, in path-sorted order for
-/// determinism.
+/// Sum line counters across `files`.
+///
+/// Order-independent: integer addition is commutative and associative,
+/// so two calls with the same files in any permutation produce the same
+/// totals.
 pub(crate) fn aggregate(files: &[&FileEntry]) -> LineTotals {
-    let mut sorted: Vec<&&FileEntry> = files.iter().collect();
-    sorted.sort_by(|a, b| a.filename.cmp(&b.filename));
-
     let mut totals = LineTotals::default();
-    for f in sorted {
+    for f in files {
         totals.count += f.summary.lines.count;
         totals.covered += f.summary.lines.covered;
     }

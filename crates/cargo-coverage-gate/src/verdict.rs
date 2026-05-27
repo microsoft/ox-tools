@@ -97,7 +97,7 @@ impl Report {
 /// `gated_crates` is the result of applying `--crates` to the
 /// workspace's member list: when empty, every member is gated.
 /// Crates listed in `gated_crates` that aren't workspace members
-/// produce [`CoverageGateError::Metadata`].
+/// produce a [`CoverageGateError`].
 pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_crates: &[String]) -> Result<Report, CoverageGateError> {
     let gated = resolve_gated(workspace, gated_crates)?;
 
@@ -148,9 +148,9 @@ fn resolve_gated<'w>(workspace: &'w Workspace, crates: &[String]) -> Result<Vec<
     let mut out = Vec::with_capacity(crates.len());
     for name in crates {
         let Some(m) = workspace.members.iter().find(|m| m.name == *name) else {
-            return Err(CoverageGateError::Metadata {
-                message: format!("`--crates` lists `{name}`, but it is not a workspace member"),
-            });
+            return Err(CoverageGateError::new(format!(
+                "`--crates` lists `{name}`, but it is not a workspace member"
+            )));
         };
         out.push(m);
     }
@@ -289,13 +289,9 @@ mod tests {
         let ws = make_workspace(vec![make_member("alpha", "/repo/crates/alpha", None)], None);
         let report = make_report(Vec::new());
         let err = evaluate(&report, &ws, &["typo".to_owned()]).expect_err("unknown crate must error");
-        match err {
-            CoverageGateError::Metadata { message } => {
-                assert!(message.contains("typo"));
-                assert!(message.contains("--crates"));
-            }
-            other => panic!("expected Metadata, got {other:?}"),
-        }
+        let rendered = err.to_string();
+        assert!(rendered.contains("typo"));
+        assert!(rendered.contains("--crates"));
     }
 
     #[test]

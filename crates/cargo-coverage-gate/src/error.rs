@@ -2,100 +2,52 @@
 // Licensed under the MIT License.
 
 //! Error type for the `cargo-coverage-gate` library.
+//!
+//! Built on [`ohno`] for backtrace capture and error-chain support.
+//! The library exposes a single [`CoverageGateError`] struct rather
+//! than a typed-variant enum: callers propagate the error via
+//! [`std::error::Error`] / [`Display`] or surface the message verbatim
+//! through their own diagnostic surface. The kind of failure is
+//! encoded in the message text and (where applicable) in the chained
+//! source error.
 
-use std::fmt;
-
-/// Errors that can occur while evaluating coverage.
+/// An error returned from the `cargo-coverage-gate` library.
 ///
-/// The variant set will grow as later phases land.
-#[derive(Debug)]
-#[non_exhaustive]
-pub enum CoverageGateError {
-    /// The requested operation is not implemented yet in the current
-    /// build of the library.
-    NotImplemented,
-    /// Failed to parse a `cargo-llvm-cov` JSON report.
-    JsonParse {
-        /// Human-readable description of the parse failure, including
-        /// the underlying line/column where available.
-        message: String,
-    },
-    /// Failed to load workspace metadata (typically a `cargo metadata`
-    /// invocation failure, or unreadable / malformed `Cargo.toml`).
-    Metadata {
-        /// Human-readable description of the failure.
-        message: String,
-    },
-    /// A `min-lines` threshold value was outside the allowed
-    /// `[0.0, 100.0]` range.
-    InvalidThreshold {
-        /// Where the offending value was found — either a crate name
-        /// or `"workspace"` for the workspace-level default.
-        source: String,
-        /// The offending value.
-        value: f64,
-    },
+/// Carries a human-readable message and, when one exists, a chained
+/// source error (typically the underlying `serde_json::Error` or
+/// `cargo_metadata::Error`). The message rendered by [`Display`]
+/// includes the chained source as `Caused by: …` automatically.
+///
+/// Construct via [`CoverageGateError::new`] (no source) or
+/// [`CoverageGateError::caused_by`] (with source). Both are generated
+/// by the `#[ohno::error]` attribute.
+///
+/// [`Display`]: std::fmt::Display
+#[ohno::error]
+#[display("{message}")]
+pub struct CoverageGateError {
+    message: String,
 }
-
-impl fmt::Display for CoverageGateError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotImplemented => f.write_str("cargo-coverage-gate: not implemented yet"),
-            Self::JsonParse { message } => {
-                write!(f, "failed to parse coverage JSON: {message}")
-            }
-            Self::Metadata { message } => {
-                write!(f, "failed to load workspace metadata: {message}")
-            }
-            Self::InvalidThreshold { source, value } => write!(
-                f,
-                "invalid coverage-gate min-lines value `{value}` for {source}: \
-                 expected a number in 0.0..=100.0"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for CoverageGateError {}
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::io;
+
     use super::*;
 
     #[test]
-    fn not_implemented_displays() {
-        let err = CoverageGateError::NotImplemented;
-        assert!(err.to_string().contains("not implemented"));
+    fn new_carries_the_message() {
+        let err = CoverageGateError::new("something broke".to_owned());
+        assert!(err.to_string().contains("something broke"));
     }
 
     #[test]
-    fn json_parse_displays() {
-        let err = CoverageGateError::JsonParse {
-            message: "expected `,` or `}`".to_owned(),
-        };
-        let s = err.to_string();
-        assert!(s.contains("coverage JSON"));
-        assert!(s.contains("expected `,` or `}`"));
-    }
-
-    #[test]
-    fn metadata_displays() {
-        let err = CoverageGateError::Metadata {
-            message: "cargo exited with code 101".to_owned(),
-        };
-        assert!(err.to_string().contains("cargo exited with code 101"));
-    }
-
-    #[test]
-    fn invalid_threshold_displays() {
-        let err = CoverageGateError::InvalidThreshold {
-            source: "alpha".to_owned(),
-            value: 150.0,
-        };
-        let s = err.to_string();
-        assert!(s.contains("alpha"));
-        assert!(s.contains("150"));
-        assert!(s.contains("0.0..=100.0"));
+    fn caused_by_chains_the_source() {
+        let io_err = io::Error::new(io::ErrorKind::NotFound, "file gone");
+        let err = CoverageGateError::caused_by("failed to read JSON".to_owned(), io_err);
+        let rendered = err.to_string();
+        assert!(rendered.contains("failed to read JSON"));
+        assert!(rendered.contains("file gone"));
     }
 }

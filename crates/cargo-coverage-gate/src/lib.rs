@@ -172,11 +172,11 @@ impl EvaluatedReport {
 ///
 /// # Errors
 ///
-/// Returns [`CoverageGateError::JsonParse`] if `json_text` does not
-/// parse, [`CoverageGateError::Metadata`] for workspace-discovery
-/// failures or unknown crate names in `gated_crates`, and
-/// [`CoverageGateError::InvalidThreshold`] if a configured
-/// `min-lines` value is outside `[0.0, 100.0]`.
+/// Returns a [`CoverageGateError`] when the JSON does not parse,
+/// workspace discovery fails, an unknown crate appears in
+/// `gated_crates`, or a configured `min-lines` value is outside
+/// `[0.0, 100.0]`. The error message identifies which case occurred;
+/// callers usually just propagate it.
 pub fn evaluate(json_text: &str, manifest_path: Option<&Path>, gated_crates: &[String]) -> Result<EvaluatedReport, CoverageGateError> {
     let report = llvm_cov::CoverageReport::from_str(json_text)?;
     let ws = workspace::Workspace::load(manifest_path)?;
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn evaluate_rejects_malformed_json() {
         let err = evaluate("not json", None, &[]).expect_err("malformed JSON must error");
-        assert!(matches!(err, CoverageGateError::JsonParse { .. }));
+        assert!(err.to_string().contains("coverage JSON"));
     }
 
     #[test]
