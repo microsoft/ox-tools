@@ -26,19 +26,25 @@ use tracing::warn;
 
 use crate::error::CoverageGateError;
 
-/// The supported major version of the LLVM coverage JSON export schema.
-const SUPPORTED_MAJOR: &str = "2";
+/// Major versions of the LLVM coverage JSON export schema known to be
+/// structurally compatible with the subset of fields this parser reads.
+///
+/// Empirically: cargo-llvm-cov 0.6.x emits `version: "3.0.1"` on
+/// recent toolchains; older releases emitted `"2.0.1"`. The shape of
+/// `data[*].files[*].{filename, summary.lines.{count, covered}}` is
+/// unchanged across both, so both are accepted without a warning.
+const SUPPORTED_MAJORS: &[&str] = &["2", "3"];
 
 /// Classification of the report's `version` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum VersionStatus {
-    /// `version` is present and its major component matches
-    /// [`SUPPORTED_MAJOR`].
+    /// `version` is present and its major component is in
+    /// [`SUPPORTED_MAJORS`].
     Supported,
     /// `version` is missing entirely.
     Missing,
-    /// `version` is present but its major component is not
-    /// [`SUPPORTED_MAJOR`].
+    /// `version` is present but its major component is not in
+    /// [`SUPPORTED_MAJORS`].
     Unsupported,
 }
 
@@ -100,13 +106,13 @@ impl CoverageReport {
         match report.version_status() {
             VersionStatus::Supported => {}
             VersionStatus::Missing => {
-                warn!("coverage JSON has no `version` field; assuming v2 schema");
+                warn!("coverage JSON has no `version` field; assuming a supported schema");
             }
             VersionStatus::Unsupported => {
                 let v = report.version.as_deref().unwrap_or("?");
                 warn!(
                     "coverage JSON has unsupported version `{v}`; \
-                     continuing on the assumption that v2 structure still applies"
+                     continuing on the assumption that the known schema shape still applies"
                 );
             }
         }
@@ -119,7 +125,7 @@ impl CoverageReport {
             None => VersionStatus::Missing,
             Some(v) => {
                 let major = v.split('.').next().unwrap_or("");
-                if major == SUPPORTED_MAJOR {
+                if SUPPORTED_MAJORS.contains(&major) {
                     VersionStatus::Supported
                 } else {
                     VersionStatus::Unsupported
@@ -137,6 +143,7 @@ mod tests {
     const EMPTY: &str = include_str!("../tests/fixtures/llvm_cov/empty.json");
     const SINGLE_FILE: &str = include_str!("../tests/fixtures/llvm_cov/single_file.json");
     const MULTI_FILE: &str = include_str!("../tests/fixtures/llvm_cov/multi_file.json");
+    const V3: &str = include_str!("../tests/fixtures/llvm_cov/v3.json");
     const NO_VERSION: &str = include_str!("../tests/fixtures/llvm_cov/no_version.json");
     const UNKNOWN_VERSION: &str = include_str!("../tests/fixtures/llvm_cov/unknown_version.json");
     const MALFORMED: &str = include_str!("../tests/fixtures/llvm_cov/malformed.json");
@@ -182,15 +189,24 @@ mod tests {
     #[test]
     fn unknown_version_is_tolerated() {
         let report = CoverageReport::from_str(UNKNOWN_VERSION).expect("unknown_version is structurally well-formed");
-        assert_eq!(report.version.as_deref(), Some("3.0.0"));
+        assert_eq!(report.version.as_deref(), Some("99.0.0"));
         assert_eq!(report.version_status(), VersionStatus::Unsupported);
         assert_eq!(report.data[0].files.len(), 1);
     }
 
     #[test]
-    fn supported_version_is_recognised() {
+    fn v2_is_supported() {
         let report = CoverageReport::from_str(SINGLE_FILE).expect("single_file is well-formed");
+        assert_eq!(report.version.as_deref(), Some("2.0.1"));
         assert_eq!(report.version_status(), VersionStatus::Supported);
+    }
+
+    #[test]
+    fn v3_is_supported() {
+        let report = CoverageReport::from_str(V3).expect("v3 fixture is well-formed");
+        assert_eq!(report.version.as_deref(), Some("3.0.1"));
+        assert_eq!(report.version_status(), VersionStatus::Supported);
+        assert_eq!(report.data[0].files.len(), 1);
     }
 
     #[test]

@@ -464,11 +464,19 @@ multiple workspaces invoke the tool once per workspace.
 
 ### 10.4 Versioning of the JSON schema
 
-LLVM coverage JSON has a `type` and `version` field at the top level. The
-tool accepts `version: "2.0.x"` (the current schema as of llvm-tools
-1.93). Newer schemas: refuse to run with a clear error pointing at the
-expected version. Older schemas: support is not implemented in v1; users
-upgrade `cargo-llvm-cov` to a current release.
+LLVM coverage JSON has a `type` and `version` field at the top level.
+The tool currently accepts any major version in the set `{2, 3}`
+without comment — both shapes are structurally compatible at the
+fields this parser consumes (`data[*].files[*].filename` and
+`summary.lines.{count, covered}`). cargo-llvm-cov 0.6.x emits `"3.0.x"`
+on recent toolchains; older releases emitted `"2.0.x"`.
+
+A missing `version` field or a major outside the accepted set
+produces a single `tracing::warn!` but continues. Only structural
+parse failures (missing required fields, bad JSON) are hard errors.
+When llvm-tools next bumps the major in a way that *does* break the
+fields we read, parsing will fail loudly on the missing/renamed
+field and a code change is required.
 
 ### 10.5 Float comparison
 
