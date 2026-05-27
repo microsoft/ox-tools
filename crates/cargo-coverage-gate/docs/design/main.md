@@ -69,8 +69,9 @@ lower-coverage code.
 
 Corollaries:
 
-- Each workspace member gets its own threshold or no threshold at all
-  (silent opt-out).
+- Each workspace member gets an effective threshold via the
+  three-layer resolution (per-crate → workspace → built-in `100.0`).
+  Opting a crate out of gating is explicit: set `min-lines = 0.0`.
 - The gate compares **measured percentage for crate X against the threshold
   for crate X**, in isolation. There is no cross-crate dependency.
 - Whether the build that produced the coverage data ran one crate's tests
