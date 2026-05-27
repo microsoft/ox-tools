@@ -84,9 +84,9 @@ pub(crate) struct SummaryBlock {
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub(crate) struct LineCounters {
     /// Total number of executable lines.
-    pub(crate) count: u64,
+    pub(crate) count: u32,
     /// Number of executable lines that ran at least once.
-    pub(crate) covered: u64,
+    pub(crate) covered: u32,
 }
 
 impl CoverageReport {
@@ -165,8 +165,8 @@ mod tests {
         let files = &report.data[0].files;
         assert_eq!(files.len(), 4);
         // Sum lines across files.
-        let total_lines: u64 = files.iter().map(|f| f.summary.lines.count).sum();
-        let total_covered: u64 = files.iter().map(|f| f.summary.lines.covered).sum();
+        let total_lines: u32 = files.iter().map(|f| f.summary.lines.count).sum();
+        let total_covered: u32 = files.iter().map(|f| f.summary.lines.covered).sum();
         assert_eq!(total_lines, 100 + 40 + 50 + 80);
         assert_eq!(total_covered, 95 + 30 + 25 + 80);
     }

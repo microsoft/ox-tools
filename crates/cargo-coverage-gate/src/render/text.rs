@@ -96,7 +96,7 @@ mod tests {
     use crate::threshold::{Threshold, ThresholdSource};
     use crate::verdict::{CrateOutcome, Status};
 
-    fn outcome(name: &str, count: u64, covered: u64, threshold: f64, source: ThresholdSource, status: Status) -> CrateOutcome {
+    fn outcome(name: &str, count: u32, covered: u32, threshold: f64, source: ThresholdSource, status: Status) -> CrateOutcome {
         let _ = PathBuf::new();
         CrateOutcome {
             name: name.to_owned(),

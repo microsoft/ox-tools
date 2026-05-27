@@ -14,9 +14,9 @@ use crate::llvm_cov::FileEntry;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct LineTotals {
     /// Total executable lines.
-    pub(crate) count: u64,
+    pub(crate) count: u32,
     /// Executable lines that ran at least once.
-    pub(crate) covered: u64,
+    pub(crate) covered: u32,
 }
 
 impl LineTotals {
@@ -26,10 +26,9 @@ impl LineTotals {
         if self.count == 0 {
             None
         } else {
-            // Cast is intentional: u64 → f64 is lossy only beyond
-            // ~2^53, which we will never see for line counts.
-            #[expect(clippy::cast_precision_loss, reason = "line counts will never exceed f64 mantissa width")]
-            let pct = 100.0 * self.covered as f64 / self.count as f64;
+            // u32 → f64 is lossless: 32 bits fits inside the 53-bit
+            // f64 mantissa with room to spare.
+            let pct = 100.0 * f64::from(self.covered) / f64::from(self.count);
             Some(pct)
         }
     }
@@ -57,7 +56,7 @@ mod tests {
     use super::*;
     use crate::llvm_cov::{LineCounters, SummaryBlock};
 
-    fn entry(path: &str, count: u64, covered: u64) -> FileEntry {
+    fn entry(path: &str, count: u32, covered: u32) -> FileEntry {
         FileEntry {
             filename: PathBuf::from(path),
             summary: SummaryBlock {

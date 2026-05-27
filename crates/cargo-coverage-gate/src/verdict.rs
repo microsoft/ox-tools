@@ -178,7 +178,7 @@ mod tests {
     use crate::llvm_cov::{Export, FileEntry, LineCounters, SummaryBlock};
     use crate::threshold::ThresholdSource;
 
-    fn make_file(path: &str, count: u64, covered: u64) -> FileEntry {
+    fn make_file(path: &str, count: u32, covered: u32) -> FileEntry {
         FileEntry {
             filename: PathBuf::from(path),
             summary: SummaryBlock {
