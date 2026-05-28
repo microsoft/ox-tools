@@ -18,13 +18,13 @@ use predicates::prelude::*;
 use tempfile::TempDir;
 
 /// Write a workspace at `dir` containing the given members. Each
-/// member entry is `(name, optional min-lines)`. The workspace root
+/// member entry is `(name, optional min-lines-percent)`. The workspace root
 /// gets a `[workspace.metadata.coverage-gate]` block when
-/// `workspace_min_lines` is `Some`.
-fn make_workspace(dir: &Path, members: &[(&str, Option<&str>)], workspace_min_lines: Option<&str>) {
+/// `workspace_min_lines_percent` is `Some`.
+fn make_workspace(dir: &Path, members: &[(&str, Option<&str>)], workspace_min_lines_percent: Option<&str>) {
     let names: Vec<&&str> = members.iter().map(|(n, _)| n).collect();
     let members_list = names.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ");
-    let workspace_meta = workspace_min_lines
+    let workspace_meta = workspace_min_lines_percent
         .map(|m| format!("\n[workspace.metadata.coverage-gate]\nmin-lines-percent = {m}\n"))
         .unwrap_or_default();
     fs::write(
@@ -33,10 +33,10 @@ fn make_workspace(dir: &Path, members: &[(&str, Option<&str>)], workspace_min_li
     )
     .expect("write workspace root Cargo.toml");
 
-    for (name, min_lines) in members {
+    for (name, min_lines_percent) in members {
         let member_dir = dir.join(name);
         fs::create_dir_all(member_dir.join("src")).expect("mkdir member src");
-        let metadata = min_lines
+        let metadata = min_lines_percent
             .map(|m| format!("\n[package.metadata.coverage-gate]\nmin-lines-percent = {m}\n"))
             .unwrap_or_default();
         fs::write(

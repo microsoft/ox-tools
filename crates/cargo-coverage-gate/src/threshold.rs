@@ -50,7 +50,7 @@ impl ThresholdSource {
 pub(crate) struct Threshold {
     /// The minimum line-coverage percentage required, in `[0.0, 100.0]`.
     pub(crate) min_lines_percent: f64,
-    /// Which configuration layer supplied [`Threshold::min_lines`].
+    /// Which configuration layer supplied [`Threshold::min_lines_percent`].
     pub(crate) source: ThresholdSource,
 }
 

@@ -96,10 +96,10 @@ impl Report {
 ///
 /// `gated_packages` is the result of applying `--packages` to the
 /// workspace's member list: when empty, every member is gated.
-/// packages listed in `gated_crates` that aren't workspace members
+/// packages listed in `gated_packages` that aren't workspace members
 /// produce a [`CoverageGateError`].
-pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_crates: &[String]) -> Result<Report, CoverageGateError> {
-    let gated = resolve_gated(workspace, gated_crates)?;
+pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_packages: &[String]) -> Result<Report, CoverageGateError> {
+    let gated = resolve_gated(workspace, gated_packages)?;
 
     // Flatten every file entry across all data[] elements.
     let files: Vec<_> = report.data.iter().flat_map(|d| d.files.iter()).cloned().collect();

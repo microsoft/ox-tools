@@ -22,7 +22,7 @@
 //! For each workspace member, the effective threshold is the first match
 //! among:
 //!
-//! 1. `[package.metadata.coverage-gate] min-lines-percent = N` in the crate's
+//! 1. `[package.metadata.coverage-gate] min-lines-percent = N` in the package's
 //!    `Cargo.toml`,
 //! 2. `[workspace.metadata.coverage-gate] min-lines-percent = N` in the workspace
 //!    root `Cargo.toml`, or
@@ -167,20 +167,20 @@ impl EvaluatedReport {
 /// the workspace anchored at `manifest_path` and return the resolved
 /// [`EvaluatedReport`].
 ///
-/// `gated_crates` restricts the operation to a named subset; when
+/// `gated_packages` restricts the operation to a named subset; when
 /// empty, every workspace member is in scope.
 ///
 /// # Errors
 ///
 /// Returns a [`CoverageGateError`] when the JSON does not parse,
 /// workspace discovery fails, an unknown package appears in
-/// `gated_crates`, or a configured `min-lines` value is outside
+/// `gated_packages`, or a configured `min-lines-percent` value is outside
 /// `[0.0, 100.0]`. The error message identifies which case occurred;
 /// callers usually just propagate it.
-pub fn evaluate(json_text: &str, manifest_path: Option<&Path>, gated_crates: &[String]) -> Result<EvaluatedReport, CoverageGateError> {
+pub fn evaluate(json_text: &str, manifest_path: Option<&Path>, gated_packages: &[String]) -> Result<EvaluatedReport, CoverageGateError> {
     let report = llvm_cov::CoverageReport::from_str(json_text)?;
     let ws = workspace::Workspace::load(manifest_path)?;
-    let inner = verdict::evaluate(&report, &ws, gated_crates)?;
+    let inner = verdict::evaluate(&report, &ws, gated_packages)?;
     Ok(EvaluatedReport { inner })
 }
 

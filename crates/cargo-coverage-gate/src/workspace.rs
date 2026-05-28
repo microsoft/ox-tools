@@ -17,9 +17,9 @@ use serde_json::Value;
 
 use crate::error::CoverageGateError;
 
-/// Lower bound on `min-lines` values.
+/// Lower bound on `min-lines-percent` values.
 const MIN_LINES_LOWER: f64 = 0.0;
-/// Upper bound on `min-lines` values.
+/// Upper bound on `min-lines-percent` values.
 const MIN_LINES_UPPER: f64 = 100.0;
 
 /// A resolved view of the cargo workspace the gate is operating on.
@@ -27,7 +27,7 @@ const MIN_LINES_UPPER: f64 = 100.0;
 pub(crate) struct Workspace {
     /// One entry per workspace member, in alphabetical order by name.
     pub(crate) members: Vec<Member>,
-    /// `min-lines` value from `[workspace.metadata.coverage-gate]`, if set.
+    /// `min-lines-percent` value from `[workspace.metadata.coverage-gate]`, if set.
     pub(crate) default_min_lines_percent: Option<f64>,
 }
 
@@ -38,7 +38,7 @@ pub(crate) struct Member {
     pub(crate) name: String,
     /// Directory containing the member's `Cargo.toml`.
     pub(crate) manifest_dir: PathBuf,
-    /// `min-lines` value from this member's
+    /// `min-lines-percent` value from this member's
     /// `[package.metadata.coverage-gate]`, if set.
     pub(crate) min_lines_percent: Option<f64>,
 }

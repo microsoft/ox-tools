@@ -31,7 +31,7 @@ the implementation plan tracking the build is in
 For each workspace member, the effective threshold is the first match
 among:
 
-1. `[package.metadata.coverage-gate] min-lines-percent = N` in the crate’s
+1. `[package.metadata.coverage-gate] min-lines-percent = N` in the package’s
    `Cargo.toml`,
 1. `[workspace.metadata.coverage-gate] min-lines-percent = N` in the workspace
    root `Cargo.toml`, or
@@ -82,7 +82,7 @@ the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQbcrxsV6dC9CIbyZDNMa2Fu0cbvQO2jWINs7kbl4YwvEeZ8r5hZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQbUBKTYzRZmq0bmF6i30162uwbdMg0fE44SOYboGNXxcCKf-NhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/design/main.md
  [__link2]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/implementation-plans/0000.md
