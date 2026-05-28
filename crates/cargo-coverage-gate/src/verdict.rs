@@ -94,7 +94,7 @@ impl Report {
 
 /// Evaluate a parsed coverage report against the resolved workspace.
 ///
-/// `gated_crates` is the result of applying `--crates` to the
+/// `gated_packages` is the result of applying `--packages` to the
 /// workspace's member list: when empty, every member is gated.
 /// packages listed in `gated_crates` that aren't workspace members
 /// produce a [`CoverageGateError`].
@@ -149,7 +149,7 @@ fn resolve_gated<'w>(workspace: &'w Workspace, crates: &[String]) -> Result<Vec<
     for name in crates {
         let Some(m) = workspace.members.iter().find(|m| m.name == *name) else {
             return Err(CoverageGateError::new(format!(
-                "`--crates` lists `{name}`, but it is not a workspace member"
+                "`--packages` lists `{name}`, but it is not a workspace member"
             )));
         };
         out.push(m);
@@ -299,7 +299,7 @@ mod tests {
         let err = evaluate(&report, &ws, &["typo".to_owned()]).expect_err("unknown package must error");
         let rendered = err.to_string();
         assert!(rendered.contains("typo"));
-        assert!(rendered.contains("--crates"));
+        assert!(rendered.contains("--packages"));
     }
 
     #[test]

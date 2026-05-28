@@ -42,14 +42,14 @@ Setting `min-lines-percent = 0.0` explicitly opts a package out of gating.
 ### Binary usage
 
 ```text
-cargo coverage-gate  [--json <path>] [--crates <name>,<name>,...]
+cargo coverage-gate  [--llvm-cov-json <path>] [--packages <name>,<name>,...]
                      [--summary-file <path>] [--quiet]
 ```
 
 Exit codes: `0` if every gated package meets its threshold, `1` if any
 gated package falls below its threshold, and `2` for configuration
 errors (unparseable JSON, missing data for a gated package, an unknown
-package name in `--crates`, an out-of-range `min-lines` value, …).
+package name in `--packages`, an out-of-range `min-lines-percent` value, …).
 
 When `--summary-file` is unset, the binary falls back to
 `$GITHUB_STEP_SUMMARY` and then `$COVERAGE_GATE_SUMMARY` to decide
@@ -82,7 +82,7 @@ the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQb6bqi8B6bv3gbadjb5dLNpu0bBajB_y-X0IAb9nN3lN2O_bphZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQbcrxsV6dC9CIbyZDNMa2Fu0cbvQO2jWINs7kbl4YwvEeZ8r5hZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/design/main.md
  [__link2]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/implementation-plans/0000.md

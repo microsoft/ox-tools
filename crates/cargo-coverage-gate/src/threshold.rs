@@ -3,14 +3,15 @@
 
 //! Three-layer threshold resolution.
 //!
-//! Each workspace member's effective `min-lines` value is the first match
-//! among:
+//! Each workspace member's effective `min-lines-percent` value is the
+//! first match among:
 //!
-//! 1. [`Member::min_lines`] — per-package `[package.metadata.coverage-gate]`.
-//! 2. [`Workspace::DEFAULT_MIN_LINES_PERCENT`] — workspace-level
+//! 1. [`Member::min_lines_percent`] — per-package
+//!    `[package.metadata.coverage-gate]`.
+//! 2. [`Workspace::default_min_lines_percent`] — workspace-level
 //!    `[workspace.metadata.coverage-gate]`.
-//! 3. [`DEFAULT_MIN_LINES_PERCENT`] — the built-in default of `100.0` (full
-//!    coverage required).
+//! 3. [`DEFAULT_MIN_LINES_PERCENT`] — the built-in default of `100.0`
+//!    (full coverage required).
 //!
 //! The resolved [`Threshold`] carries both the value and a
 //! [`ThresholdSource`] tag so the verdict table can report which layer

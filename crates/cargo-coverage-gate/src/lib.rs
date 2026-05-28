@@ -33,14 +33,14 @@
 //! ## Binary usage
 //!
 //! ```text
-//! cargo coverage-gate  [--json <path>] [--crates <name>,<name>,...]
+//! cargo coverage-gate  [--llvm-cov-json <path>] [--packages <name>,<name>,...]
 //!                      [--summary-file <path>] [--quiet]
 //! ```
 //!
 //! Exit codes: `0` if every gated package meets its threshold, `1` if any
 //! gated package falls below its threshold, and `2` for configuration
 //! errors (unparseable JSON, missing data for a gated package, an unknown
-//! package name in `--crates`, an out-of-range `min-lines` value, …).
+//! package name in `--packages`, an out-of-range `min-lines-percent` value, …).
 //!
 //! When `--summary-file` is unset, the binary falls back to
 //! `$GITHUB_STEP_SUMMARY` and then `$COVERAGE_GATE_SUMMARY` to decide
