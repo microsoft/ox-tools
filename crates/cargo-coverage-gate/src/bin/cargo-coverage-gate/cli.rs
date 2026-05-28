@@ -25,12 +25,12 @@ pub(crate) enum CargoCli {
 #[derive(Args, Debug, Clone)]
 #[command(version, about = "Gate pull requests on per-package line coverage")]
 pub(crate) struct CoverageGateArgs {
-    /// Path to the cargo-llvm-cov JSON report.
+    /// Path to the cargo-llvm-cov lcov tracefile.
     ///
-    /// Defaults to `target/coverage/coverage.json`, matching the
-    /// recommended `cargo llvm-cov report --json --output-path` invocation.
-    #[arg(long = "llvm-cov-json", value_name = "PATH")]
-    pub(crate) llvm_cov_json: Option<PathBuf>,
+    /// Defaults to `target/coverage/lcov.info`, matching the recommended
+    /// `cargo llvm-cov report --lcov --output-path` invocation.
+    #[arg(long = "lcov", value_name = "PATH")]
+    pub(crate) lcov: Option<PathBuf>,
 
     /// Restrict the operation to a comma-separated list of package names.
     ///
@@ -53,8 +53,9 @@ pub(crate) struct CoverageGateArgs {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use clap::CommandFactory;
+
+    use super::*;
 
     #[test]
     fn cli_definition_is_well_formed() {

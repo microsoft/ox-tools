@@ -19,7 +19,7 @@ use crate::Verdict;
 use crate::aggregate::{LineTotals, aggregate};
 use crate::attribute::{AttributionOutcome, attribute};
 use crate::error::CoverageGateError;
-use crate::llvm_cov::CoverageReport;
+use crate::lcov_cov::CoverageReport;
 use crate::threshold::Threshold;
 use crate::workspace::{Member, Workspace};
 
@@ -102,7 +102,7 @@ pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_pac
     let gated = resolve_gated(workspace, gated_packages)?;
 
     // Flatten every file entry across all data[] elements.
-    let files: Vec<_> = report.data.iter().flat_map(|d| d.files.iter()).cloned().collect();
+    let files: Vec<_> = report.files.clone();
 
     let AttributionOutcome { by_member, unattributed } = attribute(&files, &workspace.members);
 
@@ -138,15 +138,21 @@ pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_pac
 
 /// Resolve the gated subset of workspace members.
 ///
-/// An empty `crates` list selects every member. Any non-empty list is
+/// An empty `packages` list selects every member. Any non-empty list is
 /// validated: every name must correspond to an actual workspace
-/// member.
-fn resolve_gated<'w>(workspace: &'w Workspace, crates: &[String]) -> Result<Vec<&'w Member>, CoverageGateError> {
-    if crates.is_empty() {
+/// member, and duplicates are silently de-duplicated so that
+/// `--packages alpha,alpha` does not produce two rows in the verdict
+/// table.
+fn resolve_gated<'w>(workspace: &'w Workspace, packages: &[String]) -> Result<Vec<&'w Member>, CoverageGateError> {
+    if packages.is_empty() {
         return Ok(workspace.members.iter().collect());
     }
-    let mut out = Vec::with_capacity(crates.len());
-    for name in crates {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(packages.len());
+    for name in packages {
+        if !seen.insert(name.as_str()) {
+            continue;
+        }
         let Some(m) = workspace.members.iter().find(|m| m.name == *name) else {
             return Err(CoverageGateError::new(format!(
                 "`--packages` lists `{name}`, but it is not a workspace member"
@@ -183,15 +189,14 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::llvm_cov::{Export, FileEntry, LineCounters, SummaryBlock};
+    use crate::lcov_cov::FileEntry;
     use crate::threshold::ThresholdSource;
 
     fn make_file(path: &str, count: u32, covered: u32) -> FileEntry {
         FileEntry {
             filename: PathBuf::from(path),
-            summary: SummaryBlock {
-                lines: LineCounters { count, covered },
-            },
+            lines_total: count,
+            lines_covered: covered,
         }
     }
 
@@ -204,10 +209,7 @@ mod tests {
     }
 
     fn make_report(files: Vec<FileEntry>) -> CoverageReport {
-        CoverageReport {
-            version: Some("2.0.1".to_owned()),
-            data: vec![Export { files }],
-        }
+        CoverageReport { files }
     }
 
     fn make_workspace(members: Vec<Member>, default: Option<f64>) -> Workspace {

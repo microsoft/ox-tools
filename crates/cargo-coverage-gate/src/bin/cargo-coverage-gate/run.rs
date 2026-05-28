@@ -15,13 +15,10 @@ use ohno::{AppError, IntoAppError};
 use crate::cli::CoverageGateArgs;
 
 pub(crate) fn run(args: &CoverageGateArgs) -> Result<ExitCode, AppError> {
-    let json_path = args
-        .llvm_cov_json
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("target/coverage/coverage.json"));
-    let json_text = fs::read_to_string(&json_path).into_app_err(format!("failed to read coverage JSON `{}`", json_path.display()))?;
+    let lcov_path = args.lcov.clone().unwrap_or_else(|| PathBuf::from("target/coverage/lcov.info"));
+    let lcov_text = fs::read_to_string(&lcov_path).into_app_err(format!("failed to read lcov tracefile `{}`", lcov_path.display()))?;
 
-    let report = cargo_coverage_gate::evaluate(&json_text, None, &args.packages).map_err(|e| AppError::new(e.to_string()))?;
+    let report = cargo_coverage_gate::evaluate(&lcov_text, None, &args.packages).map_err(|e| AppError::new(e.to_string()))?;
 
     write_text_output(&report, args.quiet).into_app_err("failed to write verdict to stdout")?;
 

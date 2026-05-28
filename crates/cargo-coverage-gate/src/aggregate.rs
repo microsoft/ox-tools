@@ -8,7 +8,7 @@
 //! is commutative and associative, so two runs over the same data
 //! always produce byte-identical counters.
 
-use crate::llvm_cov::FileEntry;
+use crate::lcov_cov::FileEntry;
 
 /// Aggregated line totals for a single crate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -42,8 +42,8 @@ impl LineTotals {
 pub(crate) fn aggregate(files: &[&FileEntry]) -> LineTotals {
     let mut totals = LineTotals::default();
     for f in files {
-        totals.count += f.summary.lines.count;
-        totals.covered += f.summary.lines.covered;
+        totals.count += f.lines_total;
+        totals.covered += f.lines_covered;
     }
     totals
 }
@@ -54,14 +54,12 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::llvm_cov::{LineCounters, SummaryBlock};
 
     fn entry(path: &str, count: u32, covered: u32) -> FileEntry {
         FileEntry {
             filename: PathBuf::from(path),
-            summary: SummaryBlock {
-                lines: LineCounters { count, covered },
-            },
+            lines_total: count,
+            lines_covered: covered,
         }
     }
 

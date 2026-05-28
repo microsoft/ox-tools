@@ -46,9 +46,9 @@ lower-coverage code.
 
 ## 3. Non-Goals
 
-- Running tests or producing coverage data. The tool consumes JSON produced
-  by [`cargo-llvm-cov`][cargo-llvm-cov]; it does not invoke the toolchain
-  itself.
+- Running tests or producing coverage data. The tool consumes the lcov
+  tracefile produced by [`cargo-llvm-cov`][cargo-llvm-cov]; it does not
+  invoke the toolchain itself.
 - Diff coverage (per-line annotation of changed lines). Different concern,
   different consumers (review tooling like Codecov); this tool answers a
   separable question.
@@ -92,12 +92,12 @@ want to reproduce the gate locally.
 ### 5.2 CLI surface
 
 ```text
-cargo coverage-gate  [--llvm-cov-json <path>] [--packages <name>,<name>,...]
+cargo coverage-gate  [--lcov <path>] [--packages <name>,<name>,...]
                      [--summary-file <path>] [--quiet]
 ```
 
 A single command — no subcommands. The tool reads the cargo-llvm-cov
-JSON, resolves the effective per-package threshold (per-package metadata,
+lcov tracefile, resolves the effective per-package threshold (per-package metadata,
 then workspace default, then the built-in default of `100.0`), computes
 per-package percentages, and emits a verdict table. Exit `0` if every
 in-scope package meets its threshold; exit `1` if any in-scope package
@@ -105,9 +105,9 @@ fails; exit `2` on configuration error.
 
 Flags:
 
-- `--llvm-cov-json <path>` — path to the cargo-llvm-cov JSON report. Defaults to
-  `target/coverage/coverage.json` (matching the recommended
-  `cargo llvm-cov report --json --output-path <path>` invocation).
+- `--lcov <path>` — path to the cargo-llvm-cov lcov tracefile. Defaults to
+  `target/coverage/lcov.info` (matching the recommended
+  `cargo llvm-cov report --lcov --output-path <path>` invocation).
 - `--packages <list>` — restrict the operation to a comma-separated list of
   package names. Default: every workspace member. CI integrations pass
   the impacted-package list from their test-impact step (e.g., a
@@ -175,7 +175,7 @@ coverage-gate
   Result: 2 package(s) below threshold.
 ```
 
-The `Source` column reports which layer supplied the threshold: `crate`,
+The `Source` column reports which layer supplied the threshold: `package`,
 `workspace`, or `default` (the built-in `100.0`).
 
 Markdown variant uses the same columns and a leading `### coverage-gate`
@@ -184,9 +184,9 @@ header so it renders cleanly in GitHub job summaries and ADO build summaries.
 ### 5.5 Local invocation
 
 ```sh
-# Run coverage tests (cargo-llvm-cov produces target/coverage/coverage.json).
+# Run coverage tests (cargo-llvm-cov produces target/coverage/lcov.info).
 cargo llvm-cov nextest --workspace --all-features --locked --no-report
-cargo llvm-cov report --json --output-path target/coverage/coverage.json
+cargo llvm-cov report --lcov --output-path target/coverage/lcov.info
 
 # Apply the gate.
 cargo coverage-gate
@@ -197,40 +197,62 @@ whatever task-runner the repo uses (`just`, `make`, `cargo xtask`, …).
 
 ## 6. Inputs & Outputs in Detail
 
-### 6.1 The cargo-llvm-cov JSON
+### 6.1 The cargo-llvm-cov lcov tracefile
 
-`cargo llvm-cov report --json` emits the LLVM coverage JSON v2 schema:
+`cargo llvm-cov report --lcov` emits the [LCOV tracefile][lcov]
+format. The tool reads its per-source-file sections:
 
-```json
-{
-  "data": [
-    {
-      "files": [
-        {
-          "filename": "/abs/.../crates/alpha/src/lib.rs",
-          "summary": {
-            "lines":     { "count": 100, "covered": 82, "percent": 82.0 },
-            "functions": { "count": 12,  "covered": 11, "percent": 91.67 },
-            "regions":   { "count": 140, "covered": 110, "percent": 78.57 }
-          }
-        }
-      ],
-      "totals": { ... }
-    }
-  ]
-}
+```text
+TN:
+SF:/abs/.../crates/alpha/src/lib.rs
+DA:1,5
+DA:2,3
+DA:3,0
+...
+LF:100
+LH:82
+end_of_record
 ```
 
-The tool reads `data[*].files[*]`. The top-level `totals` is ignored — the
-tool computes its own per-package aggregates so opt-in/opt-out via
-`--packages` and `--ignore-filename-regex` (passed to cargo-llvm-cov
-upstream) doesn't desync from the displayed verdict.
+For each `SF:` section the tool counts:
+
+- `lines_total` — number of distinct `DA:` records (executable lines
+  the instrumentation knows about).
+- `lines_covered` — number of those with a non-zero hit count.
+
+Records other than `SF:` / `DA:` / `LF:` / `LH:` (function `FN:`,
+branch `BRDA:`, etc.) are accepted by the parser but not used; the
+gate is a line-coverage tool.
+
+#### Why lcov, not the JSON
+
+`cargo-llvm-cov` can also export the same data as JSON v2/v3, cobertura
+XML, or Codecov's custom JSON. We pick lcov because it matches every
+other coverage UI fed by the same data:
+
+- Codecov.io ingests lcov uploads directly.
+- ADO ingests cobertura, which cargo-llvm-cov derives from lcov
+  internally (same line set).
+- `cargo llvm-cov report --codecov` emits Codecov's custom JSON, also
+  derived from lcov.
+
+The JSON export uses a stricter line-coverage semantics ("every region
+on a line must be hit"); lcov uses the lenient "any region hit" rule
+that everything else understands. Picking lcov keeps the gate's
+numbers aligned with what adopters see in codecov / ADO when they
+calibrate their `min-lines-percent` thresholds.
+
+The tool computes its own per-package aggregates so that
+`--packages` filtering, plus any `--ignore-filename-regex` passed
+upstream to cargo-llvm-cov, doesn't desync from the displayed verdict.
+
+[lcov]: https://github.com/linux-test-project/lcov
 
 ### 6.2 File-to-package attribution
 
-For each file path in the JSON, the tool determines which workspace member
-owns it by **longest-prefix match** against the workspace members'
-canonicalized manifest directories. A file under
+For each `SF:` path in the tracefile, the tool determines which
+workspace member owns it by **longest-prefix match** against the
+workspace members' canonicalized manifest directories. A file under
 `workspace_root/crates/alpha/src/lib.rs` belongs to the member whose
 manifest is `workspace_root/crates/alpha/Cargo.toml`.
 
@@ -249,7 +271,7 @@ attributed file, then computes percentage as
 
 A package that is in the gated set (either listed in `--packages`, or
 implicitly via the default of "every workspace member") but has **zero
-attributed files** in the coverage JSON is a configuration error: it
+attributed files** in the lcov tracefile is a configuration error: it
 means no test binary that touched that package's source actually ran.
 The tool reports such packages in the table as `(no data)` and exits
 with code `2`. This converts a silent gap — a typo in `--packages`,
@@ -295,7 +317,7 @@ The reverse-dep closure includes every such package by construction, so
 the set of test binaries that exercise `X` is the same in PR1 and PR2,
 and so is `X`'s measured percentage.
 
-The tool cannot verify the contract directly — the coverage JSON
+The tool cannot verify the contract directly — the lcov tracefile
 doesn't record which test binaries ran. The mitigation is the §6.3
 rule above: a package listed in `--packages` but with no attributed files
 is treated as a configuration error, so the most common
@@ -448,7 +470,7 @@ Three escape valves, in increasing severity:
 ### 10.1 Determinism
 
 per-package aggregation must produce the same percentage byte-for-byte given
-the same JSON input, regardless of file iteration order. This holds for
+the same lcov input, regardless of file iteration order. This holds for
 free because the aggregation step sums integer line counters (commutative
 and associative), and the f64 percentage is computed once at the end.
 The displayed value rounds to one decimal place (matching
@@ -457,7 +479,7 @@ comparison uses the unrounded `f64`.
 
 ### 10.2 Security
 
-The tool reads `Cargo.toml` files and a coverage JSON file. It never
+The tool reads `Cargo.toml` files and a coverage lcov tracefile. It never
 writes; the only output channels are stdout and the optional summary
 file. No network access, no shell-out, no privileged operations.
 
@@ -467,26 +489,25 @@ v1 supports one workspace per invocation, located by walking up from
 CWD to the nearest `Cargo.toml` with a `[workspace]` table. Repos with
 multiple workspaces invoke the tool once per workspace.
 
-### 10.4 Versioning of the JSON schema
+### 10.4 lcov tracefile compatibility
 
-LLVM coverage JSON has a `type` and `version` field at the top level.
-The tool currently accepts any major version in the set `{2, 3}`
-without comment — both shapes are structurally compatible at the
-fields this parser consumes (`data[*].files[*].filename` and
-`summary.lines.{count, covered}`). cargo-llvm-cov 0.7.x and 0.8.x emit
-`"3.0.x"`; older 0.6.x releases emitted `"2.0.x"`.
+The LCOV tracefile format has no version number. It is a line-oriented
+record format that has been stable across the LCOV project for over a
+decade, with new record types added over time (function `FN:` /
+`FNDA:`, branch `BRDA:`, etc.). The tool reads only `SF:` (source
+file) and `DA:` (line count) records; everything else is ignored, so
+new record types added by future cargo-llvm-cov releases will not
+break parsing.
 
-A missing `version` field or a major outside the accepted set
-produces a single `tracing::warn!` but continues. Only structural
-parse failures (missing required fields, bad JSON) are hard errors.
-When llvm-tools next bumps the major in a way that *does* break the
-fields we read, parsing will fail loudly on the missing/renamed
-field and a code change is required.
+If a tracefile contains no `SF:` sections — empty file, or a corrupted
+upload — the tool exits with a configuration error (no files attributed
+to any package). Structural parse errors (e.g., malformed `DA:`
+records) are hard errors with exit code 2.
 
 #### Tooling requirements
 
-To get faithful numbers, run the JSON-producing step on **nightly Rust
-with `cargo-llvm-cov ≥ 0.7`**. Two reasons:
+To get faithful numbers, run the tracefile-producing step on **nightly
+Rust with `cargo-llvm-cov ≥ 0.7`**. Two reasons:
 
 - `#[coverage(off)]` is gated behind `feature(coverage_attribute)`,
   which is nightly-only. On stable, files annotated with
@@ -511,16 +532,17 @@ preclude them.
 
 - **Function and region thresholds** in parallel to `min-lines-percent`. Same
   data, additive keys, no architectural change.
-- **lcov / cobertura input** in addition to the cargo-llvm-cov JSON. lcov
-  has the data we need but a different schema; small wrapper if a real
-  need surfaces.
+- **cobertura input** in addition to the cargo-llvm-cov lcov tracefile.
+  cargo-llvm-cov derives cobertura from the same lcov data, so the
+  numbers would be identical; a small parser wrapper if a real need
+  surfaces.
 - **Per-file thresholds.** Rejected for v1: at the file level, thresholds
   become noisy and brittle (renames, splits, new files). the package is
   the right granularity unit.
 - **Reporting the absolute number of lines** (covered/total) alongside
   the percentage. Useful for small packages where 1 line moves the
   percentage by 10pp. Could be a `--verbose` flag.
-- **Optional baseline JSON for delta display**. The gate is comparing
+- **Optional baseline tracefile for delta display**. The gate is comparing
   observed vs. threshold, not observed vs. previous-run, by design.
   Trend reporting is the dashboard's job, not the gate's.
 

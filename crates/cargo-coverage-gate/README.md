@@ -18,7 +18,7 @@
 A pull-request-time gate that compares per-package line coverage produced
 by [`cargo-llvm-cov`][__link0] against per-package thresholds carried in
 `Cargo.toml`. The accompanying `cargo-coverage-gate` binary reads the
-coverage JSON report, resolves each package’s threshold from a small
+coverage lcov tracefile, resolves each package’s threshold from a small
 three-layer lookup, and emits a verdict table to stdout (and,
 optionally, to a Markdown summary file for CI step summaries).
 
@@ -39,16 +39,30 @@ among:
 
 Setting `min-lines-percent = 0.0` explicitly opts a package out of gating.
 
+### Why lcov, not the JSON?
+
+`cargo-llvm-cov` exports the same instrumentation run in several
+formats (JSON, lcov, cobertura, codecov-custom-JSON). The gate
+consumes lcov because that is what every other coverage UI fed by
+the same data sees: Codecov ingests lcov uploads directly, ADO
+consumes cobertura that cargo-llvm-cov derives from lcov, and the
+lcov line semantics (“a line is covered if any region on it was
+hit”) match the human reading of “did we hit this line”. The JSON
+export uses a stricter “every region on the line must be hit”
+interpretation that systematically reports a couple of
+percentage-points lower, which makes calibrating thresholds against
+codecov / ADO numbers confusing.
+
 ### Binary usage
 
 ```text
-cargo coverage-gate  [--llvm-cov-json <path>] [--packages <name>,<name>,...]
+cargo coverage-gate  [--lcov <path>] [--packages <name>,<name>,...]
                      [--summary-file <path>] [--quiet]
 ```
 
 Exit codes: `0` if every gated package meets its threshold, `1` if any
 gated package falls below its threshold, and `2` for configuration
-errors (unparseable JSON, missing data for a gated package, an unknown
+errors (unparseable lcov, missing data for a gated package, an unknown
 package name in `--packages`, an out-of-range `min-lines-percent` value, …).
 
 When `--summary-file` is unset, the binary falls back to
@@ -60,8 +74,8 @@ where to write the Markdown verdict table.
 ```rust
 use std::io;
 
-let json = std::fs::read_to_string("target/coverage/coverage.json")?;
-let report = cargo_coverage_gate::evaluate(&json, None, &[])?;
+let lcov = std::fs::read_to_string("target/coverage/lcov.info")?;
+let report = cargo_coverage_gate::evaluate(&lcov, None, &[])?;
 report.render_text(&mut io::stdout())?;
 let code = report.verdict().exit_code();
 ```
@@ -73,8 +87,8 @@ The library exposes [`evaluate`][__link3], which returns an
 [`EvaluatedReport::render_text`][__link5] or as GitHub-flavored Markdown
 via [`EvaluatedReport::render_markdown`][__link6], and reduced to a single
 [`Verdict`][__link7] via [`EvaluatedReport::verdict`][__link8]. The accompanying
-binary loads the JSON from disk and orchestrates rendering plus
-the appropriate exit code.
+binary loads the lcov tracefile from disk and orchestrates rendering
+plus the appropriate exit code.
 
 
 <hr/>
@@ -82,7 +96,7 @@ the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQbUBKTYzRZmq0bmF6i30162uwbdMg0fE44SOYboGNXxcCKf-NhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQbuuRsKfuYcRUbrRLi4iUM_AIbPWCRzwdraNMbf-ZiEQVq4WZhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/design/main.md
  [__link2]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/implementation-plans/0000.md

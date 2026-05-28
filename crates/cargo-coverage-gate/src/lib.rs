@@ -9,7 +9,7 @@
 //! A pull-request-time gate that compares per-package line coverage produced
 //! by [`cargo-llvm-cov`] against per-package thresholds carried in
 //! `Cargo.toml`. The accompanying `cargo-coverage-gate` binary reads the
-//! coverage JSON report, resolves each package's threshold from a small
+//! coverage lcov tracefile, resolves each package's threshold from a small
 //! three-layer lookup, and emits a verdict table to stdout (and,
 //! optionally, to a Markdown summary file for CI step summaries).
 //!
@@ -30,16 +30,30 @@
 //!
 //! Setting `min-lines-percent = 0.0` explicitly opts a package out of gating.
 //!
+//! ## Why lcov, not the JSON?
+//!
+//! `cargo-llvm-cov` exports the same instrumentation run in several
+//! formats (JSON, lcov, cobertura, codecov-custom-JSON). The gate
+//! consumes lcov because that is what every other coverage UI fed by
+//! the same data sees: Codecov ingests lcov uploads directly, ADO
+//! consumes cobertura that cargo-llvm-cov derives from lcov, and the
+//! lcov line semantics ("a line is covered if any region on it was
+//! hit") match the human reading of "did we hit this line". The JSON
+//! export uses a stricter "every region on the line must be hit"
+//! interpretation that systematically reports a couple of
+//! percentage-points lower, which makes calibrating thresholds against
+//! codecov / ADO numbers confusing.
+//!
 //! ## Binary usage
 //!
 //! ```text
-//! cargo coverage-gate  [--llvm-cov-json <path>] [--packages <name>,<name>,...]
+//! cargo coverage-gate  [--lcov <path>] [--packages <name>,<name>,...]
 //!                      [--summary-file <path>] [--quiet]
 //! ```
 //!
 //! Exit codes: `0` if every gated package meets its threshold, `1` if any
 //! gated package falls below its threshold, and `2` for configuration
-//! errors (unparseable JSON, missing data for a gated package, an unknown
+//! errors (unparseable lcov, missing data for a gated package, an unknown
 //! package name in `--packages`, an out-of-range `min-lines-percent` value, …).
 //!
 //! When `--summary-file` is unset, the binary falls back to
@@ -51,8 +65,8 @@
 //! ```no_run
 //! use std::io;
 //!
-//! let json = std::fs::read_to_string("target/coverage/coverage.json")?;
-//! let report = cargo_coverage_gate::evaluate(&json, None, &[])?;
+//! let lcov = std::fs::read_to_string("target/coverage/lcov.info")?;
+//! let report = cargo_coverage_gate::evaluate(&lcov, None, &[])?;
 //! report.render_text(&mut io::stdout())?;
 //! let code = report.verdict().exit_code();
 //! # let _ = code;
@@ -66,8 +80,8 @@
 //! [`EvaluatedReport::render_text`] or as GitHub-flavored Markdown
 //! via [`EvaluatedReport::render_markdown`], and reduced to a single
 //! [`Verdict`] via [`EvaluatedReport::verdict`]. The accompanying
-//! binary loads the JSON from disk and orchestrates rendering plus
-//! the appropriate exit code.
+//! binary loads the lcov tracefile from disk and orchestrates rendering
+//! plus the appropriate exit code.
 //!
 //! [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
 //! [`docs/design/main.md`]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/design/main.md
@@ -85,7 +99,7 @@ use std::path::Path;
 mod aggregate;
 mod attribute;
 mod error;
-mod llvm_cov;
+mod lcov_cov;
 mod render;
 mod threshold;
 mod verdict;
@@ -104,7 +118,7 @@ pub enum Verdict {
     /// At least one gated package fell below its threshold.
     Fail,
     /// A configuration error prevented evaluation (for example, a gated
-    /// crate had no coverage data, or the JSON failed to parse).
+    /// package had no coverage data, or the lcov tracefile failed to parse).
     ConfigError,
 }
 
@@ -163,7 +177,7 @@ impl EvaluatedReport {
     }
 }
 
-/// Evaluate `json_text` (a `cargo-llvm-cov` JSON v2 report) against
+/// Evaluate `lcov_text` (a [`cargo-llvm-cov`] lcov tracefile) against
 /// the workspace anchored at `manifest_path` and return the resolved
 /// [`EvaluatedReport`].
 ///
@@ -172,13 +186,15 @@ impl EvaluatedReport {
 ///
 /// # Errors
 ///
-/// Returns a [`CoverageGateError`] when the JSON does not parse,
+/// Returns a [`CoverageGateError`] when the tracefile does not parse,
 /// workspace discovery fails, an unknown package appears in
 /// `gated_packages`, or a configured `min-lines-percent` value is outside
 /// `[0.0, 100.0]`. The error message identifies which case occurred;
 /// callers usually just propagate it.
-pub fn evaluate(json_text: &str, manifest_path: Option<&Path>, gated_packages: &[String]) -> Result<EvaluatedReport, CoverageGateError> {
-    let report = llvm_cov::CoverageReport::from_str(json_text)?;
+///
+/// [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
+pub fn evaluate(lcov_text: &str, manifest_path: Option<&Path>, gated_packages: &[String]) -> Result<EvaluatedReport, CoverageGateError> {
+    let report = lcov_cov::CoverageReport::from_str(lcov_text)?;
     let ws = workspace::Workspace::load(manifest_path)?;
     let inner = verdict::evaluate(&report, &ws, gated_packages)?;
     Ok(EvaluatedReport { inner })
@@ -197,9 +213,9 @@ mod tests {
     }
 
     #[test]
-    fn evaluate_rejects_malformed_json() {
-        let err = evaluate("not json", None, &[]).expect_err("malformed JSON must error");
-        assert!(err.to_string().contains("coverage JSON"));
+    fn evaluate_rejects_malformed_lcov() {
+        let err = evaluate("not lcov", None, &[]).expect_err("malformed lcov must error");
+        assert!(err.to_string().contains("lcov tracefile"));
     }
 
     #[test]

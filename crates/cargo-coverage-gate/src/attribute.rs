@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::llvm_cov::FileEntry;
+use crate::lcov_cov::FileEntry;
 use crate::workspace::Member;
 
 /// The result of attributing a list of coverage entries to workspace
@@ -55,14 +55,12 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::llvm_cov::{LineCounters, SummaryBlock};
 
     fn entry(path: &str) -> FileEntry {
         FileEntry {
             filename: PathBuf::from(path),
-            summary: SummaryBlock {
-                lines: LineCounters { count: 10, covered: 5 },
-            },
+            lines_total: 10,
+            lines_covered: 5,
         }
     }
 
