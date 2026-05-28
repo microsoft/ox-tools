@@ -56,14 +56,15 @@ codecov / ADO numbers confusing.
 ### Binary usage
 
 ```text
-cargo coverage-gate  [--lcov <path>] [--packages <name>,<name>,...]
+cargo coverage-gate  [--lcov <path>] [-p <spec>]... [--package <spec>]...
                      [--summary-file <path>] [--quiet]
 ```
 
 Exit codes: `0` if every gated package meets its threshold, `1` if any
 gated package falls below its threshold, and `2` for configuration
-errors (unparseable lcov, missing data for a gated package, an unknown
-package name in `--packages`, an out-of-range `min-lines-percent` value, …).
+errors (unparseable lcov, missing data for a gated package, a `--package`
+selector that matches no member, an out-of-range `min-lines-percent`
+value, …).
 
 When `--summary-file` is unset, the binary falls back to
 `$GITHUB_STEP_SUMMARY` and then `$COVERAGE_GATE_SUMMARY` to decide
@@ -96,7 +97,7 @@ plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQbuuRsKfuYcRUbrRLi4iUM_AIbPWCRzwdraNMbf-ZiEQVq4WZhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQbeMd-OXFcBm0bmRUrCNlaa-Mbh5mmtfAjdb0bXEoRTJRFNyZhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/design/main.md
  [__link2]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/implementation-plans/0000.md

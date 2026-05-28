@@ -172,10 +172,69 @@ fn crates_flag_restricts_scope() {
 
     // Only gate alpha; beta would fail but is out of scope.
     coverage_gate(tmp.path())
-        .args(["--lcov", &json, "--packages", "alpha"])
+        .args(["--lcov", &json, "-p", "alpha"])
         .assert()
         .success()
         .stdout(predicate::str::contains("alpha"))
+        .stdout(predicate::str::contains("beta").not());
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
+fn package_flag_accepts_repeated_short_form() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(
+        tmp.path(),
+        &[("alpha", Some("80")), ("beta", Some("80")), ("gamma", Some("80"))],
+        None,
+    );
+    let json = write_lcov(
+        tmp.path(),
+        &[
+            ("alpha/src/lib.rs", 100, 95),
+            ("beta/src/lib.rs", 100, 95),
+            ("gamma/src/lib.rs", 100, 50),
+        ],
+    );
+
+    // -p repeated, cargo-style. gamma should be excluded.
+    coverage_gate(tmp.path())
+        .args(["--lcov", &json, "-p", "alpha", "-p", "beta"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("alpha"))
+        .stdout(predicate::str::contains("beta"))
+        .stdout(predicate::str::contains("gamma").not());
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
+fn package_flag_accepts_glob_pattern() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(
+        tmp.path(),
+        &[
+            ("alpha", Some("80")),
+            ("alpha_macros", Some("80")),
+            ("beta", Some("80")),
+        ],
+        None,
+    );
+    let json = write_lcov(
+        tmp.path(),
+        &[
+            ("alpha/src/lib.rs", 100, 95),
+            ("alpha_macros/src/lib.rs", 100, 95),
+            ("beta/src/lib.rs", 100, 50),
+        ],
+    );
+
+    coverage_gate(tmp.path())
+        .args(["--lcov", &json, "-p", "alpha*"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("alpha "))
+        .stdout(predicate::str::contains("alpha_macros"))
         .stdout(predicate::str::contains("beta").not());
 }
 
@@ -187,7 +246,7 @@ fn crates_flag_with_unknown_name_exits_2() {
     let json = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 100)]);
 
     coverage_gate(tmp.path())
-        .args(["--lcov", &json, "--packages", "typo"])
+        .args(["--lcov", &json, "-p", "typo"])
         .assert()
         .code(2)
         .stderr(predicate::str::contains("typo"));

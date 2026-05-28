@@ -92,7 +92,7 @@ want to reproduce the gate locally.
 ### 5.2 CLI surface
 
 ```text
-cargo coverage-gate  [--lcov <path>] [--packages <name>,<name>,...]
+cargo coverage-gate  [--lcov <path>] [-p <spec>]... [--package <spec>]...
                      [--summary-file <path>] [--quiet]
 ```
 
@@ -108,11 +108,15 @@ Flags:
 - `--lcov <path>` — path to the cargo-llvm-cov lcov tracefile. Defaults to
   `target/coverage/lcov.info` (matching the recommended
   `cargo llvm-cov report --lcov --output-path <path>` invocation).
-- `--packages <list>` — restrict the operation to a comma-separated list of
-  package names. Default: every workspace member. CI integrations pass
-  the impacted-package list from their test-impact step (e.g., a
-  comma-separated env var set by the surrounding pipeline) so that
-  impact-scoped runs only gate the packages whose tests actually ran.
+- `-p` / `--package <spec>` — restrict the operation to one or more
+  package selectors. Accepts the same idiom as `cargo build`: repeat
+  the flag (`-p foo -p bar`) and/or use Unix shell glob patterns
+  (`-p 'tokio-*'`, `-p '*macros'`). The legacy comma-separated form
+  `--package foo,bar` is also accepted. Default: every workspace
+  member. CI integrations pass the impacted-package list from their
+  test-impact step so that impact-scoped runs only gate the packages
+  whose tests actually ran. A selector that matches no member is a
+  configuration error (exit 2).
 - `--summary-file <path>` — write a Markdown verdict table to this file.
   When unset, the tool honors the environment variables
   `GITHUB_STEP_SUMMARY` (GitHub Actions) and
@@ -243,7 +247,7 @@ numbers aligned with what adopters see in codecov / ADO when they
 calibrate their `min-lines-percent` thresholds.
 
 The tool computes its own per-package aggregates so that
-`--packages` filtering, plus any `--ignore-filename-regex` passed
+`--package` filtering, plus any `--ignore-filename-regex` passed
 upstream to cargo-llvm-cov, doesn't desync from the displayed verdict.
 
 [lcov]: https://github.com/linux-test-project/lcov
@@ -269,12 +273,12 @@ Per package, the tool sums `lines.count` and `lines.covered` over every
 attributed file, then computes percentage as
 `100.0 * sum(covered) / sum(count)`.
 
-A package that is in the gated set (either listed in `--packages`, or
+A package that is in the gated set (either listed in `--package`, or
 implicitly via the default of "every workspace member") but has **zero
 attributed files** in the lcov tracefile is a configuration error: it
 means no test binary that touched that package's source actually ran.
 The tool reports such packages in the table as `(no data)` and exits
-with code `2`. This converts a silent gap — a typo in `--packages`,
+with code `2`. This converts a silent gap — a typo in `--package`,
 a broken impact tool, a `--ignore-filename-regex` mismatch — into a
 loud failure that surfaces immediately in CI.
 
@@ -319,7 +323,7 @@ and so is `X`'s measured percentage.
 
 The tool cannot verify the contract directly — the lcov tracefile
 doesn't record which test binaries ran. The mitigation is the §6.3
-rule above: a package listed in `--packages` but with no attributed files
+rule above: a package listed in `--package` but with no attributed files
 is treated as a configuration error, so the most common
 contract-violating shape (the impact tool omits A package's
 reverse-dep that owns the only test binary covering it) surfaces as a
@@ -414,12 +418,12 @@ the lcov / cobertura artifacts. After the test step:
 ```yaml
 - name: Coverage gate
   shell: bash
-  run: cargo coverage-gate --packages "$IMPACTED_PACKAGES"
+  run: cargo coverage-gate -p "$IMPACTED_PACKAGES"
 ```
 
 `$IMPACTED_PACKAGES` is whatever comma-separated list the surrounding
 pipeline produces from its test-impact step (e.g., from `cargo-delta`
-or an equivalent). If you don't do impact scoping, drop the `--packages`
+or an equivalent). If you don't do impact scoping, drop the `--package`
 flag and gate every workspace member every run.
 
 The job picks up `$GITHUB_STEP_SUMMARY` automatically and writes the
@@ -431,7 +435,7 @@ verdict table to the workflow-run page above the job log.
 - bash: |
     summary="$(mktemp).md"
     cargo coverage-gate \
-        --packages "$(IMPACTED_PACKAGES)" \
+        -p "$(IMPACTED_PACKAGES)" \
         --summary-file "$summary"
     echo "##vso[task.uploadsummary]$summary"
   displayName: Coverage gate
@@ -458,7 +462,7 @@ Three escape valves, in increasing severity:
 
 1. **Set, raise, or remove `min-lines-percent`** in A package's `Cargo.toml`. The
    normal flow.
-2. **Limit scope with `--packages`** to gate only a subset of packages per
+2. **Limit scope with `--package`** to gate only a subset of packages per
    run. Useful for impact-scoped builds; the CI templates use this by
    default.
 3. **Stop running the gate.** Remove the `cargo coverage-gate` step

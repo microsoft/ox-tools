@@ -32,11 +32,21 @@ pub(crate) struct CoverageGateArgs {
     #[arg(long = "lcov", value_name = "PATH")]
     pub(crate) lcov: Option<PathBuf>,
 
-    /// Restrict the operation to a comma-separated list of package names.
+    /// Restrict the operation to one or more package selectors.
     ///
-    /// When unset, every workspace member is in scope. CI integrations
-    /// typically pass the impacted-package list from their test-impact step.
-    #[arg(long = "packages", value_name = "NAME,NAME,...", value_delimiter = ',')]
+    /// Accepts the same `-p` / `--package` idiom as `cargo build`:
+    /// repeat the flag (`-p foo -p bar`) and/or use Unix glob patterns
+    /// (`-p 'tokio-*'`, `-p 'ohno*'`). The legacy comma-separated form
+    /// `--package foo,bar` is also accepted for back-compat. When unset,
+    /// every workspace member is in scope. CI integrations typically
+    /// pass the impacted-package list from their test-impact step.
+    #[arg(
+        long = "package",
+        short = 'p',
+        alias = "packages",
+        value_name = "SPEC",
+        value_delimiter = ','
+    )]
     pub(crate) packages: Vec<String>,
 
     /// Write the Markdown verdict table to this file.

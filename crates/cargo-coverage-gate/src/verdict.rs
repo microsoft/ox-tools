@@ -94,10 +94,11 @@ impl Report {
 
 /// Evaluate a parsed coverage report against the resolved workspace.
 ///
-/// `gated_packages` is the result of applying `--packages` to the
-/// workspace's member list: when empty, every member is gated.
-/// packages listed in `gated_packages` that aren't workspace members
-/// produce a [`CoverageGateError`].
+/// `gated_packages` is the result of applying `--package` to the
+/// workspace's member list: when empty, every member is gated. Each
+/// entry is a cargo-style package selector — a literal name or a Unix
+/// glob pattern (`*` and `?`). A literal that matches no workspace
+/// member, or a glob that matches none, produces a [`CoverageGateError`].
 pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_packages: &[String]) -> Result<Report, CoverageGateError> {
     let gated = resolve_gated(workspace, gated_packages)?;
 
@@ -136,31 +137,92 @@ pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_pac
     })
 }
 
-/// Resolve the gated subset of workspace members.
+/// Resolve `packages` (each a cargo-style selector) against the
+/// workspace.
 ///
-/// An empty `packages` list selects every member. Any non-empty list is
-/// validated: every name must correspond to an actual workspace
-/// member, and duplicates are silently de-duplicated so that
-/// `--packages alpha,alpha` does not produce two rows in the verdict
-/// table.
+/// An empty `packages` list selects every member. Otherwise each
+/// selector is matched against member names: bare identifiers require
+/// exact match, while selectors containing `*` or `?` are matched as
+/// Unix shell globs (mirroring `cargo build -p 'tokio-*'`). A selector
+/// that matches no member is a configuration error. Members matched by
+/// multiple selectors appear only once.
 fn resolve_gated<'w>(workspace: &'w Workspace, packages: &[String]) -> Result<Vec<&'w Member>, CoverageGateError> {
     if packages.is_empty() {
         return Ok(workspace.members.iter().collect());
     }
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(packages.len());
-    for name in packages {
-        if !seen.insert(name.as_str()) {
-            continue;
-        }
-        let Some(m) = workspace.members.iter().find(|m| m.name == *name) else {
-            return Err(CoverageGateError::new(format!(
-                "`--packages` lists `{name}`, but it is not a workspace member"
-            )));
+    for spec in packages {
+        let matches: Vec<&Member> = if is_glob(spec) {
+            workspace.members.iter().filter(|m| glob_matches(spec, &m.name)).collect()
+        } else {
+            workspace.members.iter().filter(|m| m.name == *spec).collect()
         };
-        out.push(m);
+        if matches.is_empty() {
+            return Err(CoverageGateError::new(format!(
+                "`--package` selector `{spec}` did not match any workspace member"
+            )));
+        }
+        for m in matches {
+            if seen.insert(m.name.as_str()) {
+                out.push(m);
+            }
+        }
     }
     Ok(out)
+}
+
+/// True when `spec` contains any cargo-style glob metacharacter.
+fn is_glob(spec: &str) -> bool {
+    spec.contains('*') || spec.contains('?')
+}
+
+/// Tiny Unix-style glob matcher: `*` matches any run of characters
+/// (including empty), `?` matches exactly one character. Everything
+/// else matches literally. No character classes, no escapes — package
+/// names are simple identifiers, so this is sufficient.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    glob_inner(&p, 0, &n, 0)
+}
+
+fn glob_inner(p: &[char], mut pi: usize, n: &[char], mut ni: usize) -> bool {
+    while pi < p.len() {
+        match p[pi] {
+            '*' => {
+                // Collapse runs of `*` and try every possible match
+                // length for the next literal segment.
+                while pi < p.len() && p[pi] == '*' {
+                    pi += 1;
+                }
+                if pi == p.len() {
+                    return true;
+                }
+                for k in ni..=n.len() {
+                    if glob_inner(p, pi, n, k) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+            '?' => {
+                if ni >= n.len() {
+                    return false;
+                }
+                pi += 1;
+                ni += 1;
+            }
+            c => {
+                if ni >= n.len() || n[ni] != c {
+                    return false;
+                }
+                pi += 1;
+                ni += 1;
+            }
+        }
+    }
+    ni == n.len()
 }
 
 /// Compare `totals` against `threshold` and classify the outcome.
@@ -301,7 +363,72 @@ mod tests {
         let err = evaluate(&report, &ws, &["typo".to_owned()]).expect_err("unknown package must error");
         let rendered = err.to_string();
         assert!(rendered.contains("typo"));
-        assert!(rendered.contains("--packages"));
+        assert!(rendered.contains("--package"));
+    }
+
+    #[test]
+    fn glob_selector_matches_multiple_members() {
+        let ws = make_workspace(
+            vec![
+                make_member("alpha", "/repo/crates/alpha", None),
+                make_member("alpha_macros", "/repo/crates/alpha_macros", None),
+                make_member("beta", "/repo/crates/beta", None),
+            ],
+            None,
+        );
+        let report = make_report(vec![
+            make_file("/repo/crates/alpha/src/lib.rs", 10, 10),
+            make_file("/repo/crates/alpha_macros/src/lib.rs", 10, 10),
+        ]);
+        let r = evaluate(&report, &ws, &["alpha*".to_owned()]).expect("evaluate");
+        let names: Vec<_> = r.outcomes.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "alpha_macros"]);
+    }
+
+    #[test]
+    fn glob_matching_no_member_errors() {
+        let ws = make_workspace(vec![make_member("alpha", "/repo/crates/alpha", None)], None);
+        let report = make_report(Vec::new());
+        let err = evaluate(&report, &ws, &["beta*".to_owned()]).expect_err("no match must error");
+        assert!(err.to_string().contains("beta*"));
+    }
+
+    #[test]
+    fn overlapping_selectors_dedupe_members() {
+        let ws = make_workspace(
+            vec![
+                make_member("alpha", "/repo/crates/alpha", None),
+                make_member("alpha_macros", "/repo/crates/alpha_macros", None),
+            ],
+            None,
+        );
+        let report = make_report(vec![
+            make_file("/repo/crates/alpha/src/lib.rs", 10, 10),
+            make_file("/repo/crates/alpha_macros/src/lib.rs", 10, 10),
+        ]);
+        let r = evaluate(
+            &report,
+            &ws,
+            &["alpha".to_owned(), "alpha*".to_owned()],
+        )
+        .expect("evaluate");
+        let names: Vec<_> = r.outcomes.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "alpha_macros"]);
+    }
+
+    #[test]
+    fn glob_matcher_handles_wildcards() {
+        assert!(super::glob_matches("alpha*", "alpha"));
+        assert!(super::glob_matches("alpha*", "alpha_macros"));
+        assert!(super::glob_matches("*macros", "alpha_macros"));
+        assert!(super::glob_matches("*alpha*", "my_alpha_lib"));
+        assert!(super::glob_matches("a?pha", "alpha"));
+        assert!(!super::glob_matches("alpha", "alphax"));
+        assert!(!super::glob_matches("alpha*", "beta"));
+        assert!(!super::glob_matches("a?pha", "axxpha"));
+        // Multiple consecutive `*` collapse.
+        assert!(super::glob_matches("a**b", "ab"));
+        assert!(super::glob_matches("a**b", "axyzb"));
     }
 
     #[test]

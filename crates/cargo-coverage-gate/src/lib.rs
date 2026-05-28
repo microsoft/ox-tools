@@ -47,14 +47,15 @@
 //! ## Binary usage
 //!
 //! ```text
-//! cargo coverage-gate  [--lcov <path>] [--packages <name>,<name>,...]
+//! cargo coverage-gate  [--lcov <path>] [-p <spec>]... [--package <spec>]...
 //!                      [--summary-file <path>] [--quiet]
 //! ```
 //!
 //! Exit codes: `0` if every gated package meets its threshold, `1` if any
 //! gated package falls below its threshold, and `2` for configuration
-//! errors (unparseable lcov, missing data for a gated package, an unknown
-//! package name in `--packages`, an out-of-range `min-lines-percent` value, …).
+//! errors (unparseable lcov, missing data for a gated package, a `--package`
+//! selector that matches no member, an out-of-range `min-lines-percent`
+//! value, …).
 //!
 //! When `--summary-file` is unset, the binary falls back to
 //! `$GITHUB_STEP_SUMMARY` and then `$COVERAGE_GATE_SUMMARY` to decide
