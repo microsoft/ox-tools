@@ -15,9 +15,9 @@ use crate::verdict::Report;
 
 /// Render `report` as a GFM table to `out`.
 pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()> {
-    writeln!(out, "### ox coverage-gate")?;
+    writeln!(out, "### coverage-gate")?;
     writeln!(out)?;
-    writeln!(out, "| Crate | Lines | Threshold | Δ vs threshold | Status | Source |")?;
+    writeln!(out, "| Package | Lines | Threshold | Δ vs threshold | Status | Source |")?;
     writeln!(out, "|-------|------:|----------:|---------------:|:------:|:-------|")?;
     for o in &report.outcomes {
         writeln!(
@@ -36,10 +36,10 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
     let failures = count_failures(&report.outcomes);
     let no_data = count_no_data(&report.outcomes);
     match (failures, no_data) {
-        (0, 0) => writeln!(out, "**Result:** all crates meet their threshold.")?,
-        (n, 0) => writeln!(out, "**Result:** {n} crate(s) below threshold.")?,
-        (0, n) => writeln!(out, "**Result:** {n} crate(s) with no attributed coverage data.")?,
-        (f, d) => writeln!(out, "**Result:** {f} crate(s) below threshold, {d} with no attributed data.")?,
+        (0, 0) => writeln!(out, "**Result:** all packages meet their threshold.")?,
+        (n, 0) => writeln!(out, "**Result:** {n} package(s) below threshold.")?,
+        (0, n) => writeln!(out, "**Result:** {n} package(s) with no attributed coverage data.")?,
+        (f, d) => writeln!(out, "**Result:** {f} package(s) below threshold, {d} with no attributed data.")?,
     }
     Ok(())
 }
@@ -56,7 +56,7 @@ mod tests {
         CrateOutcome {
             name: name.to_owned(),
             threshold: Threshold {
-                min_lines: threshold,
+                min_lines_percent: threshold,
                 source,
             },
             totals: LineTotals { count, covered },
@@ -73,12 +73,12 @@ mod tests {
     #[test]
     fn renders_gfm_table_header() {
         let report = Report {
-            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Crate, Status::Ok)],
+            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok)],
             unattributed: 0,
         };
         let s = render_to_string(&report);
-        assert!(s.starts_with("### ox coverage-gate"));
-        assert!(s.contains("| Crate | Lines |"));
+        assert!(s.starts_with("### coverage-gate"));
+        assert!(s.contains("| Package | Lines |"));
         assert!(s.contains("|-------|------:|"));
     }
 
@@ -86,7 +86,7 @@ mod tests {
     fn uses_check_emoji_for_pass_and_cross_for_fail() {
         let report = Report {
             outcomes: vec![
-                outcome("alpha", 100, 95, 80.0, ThresholdSource::Crate, Status::Ok),
+                outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok),
                 outcome("beta", 100, 50, 80.0, ThresholdSource::Workspace, Status::Fail),
             ],
             unattributed: 0,
@@ -94,7 +94,7 @@ mod tests {
         let s = render_to_string(&report);
         assert!(s.contains("| ✅ |"));
         assert!(s.contains("| ❌ |"));
-        assert!(s.contains("1 crate(s) below threshold"));
+        assert!(s.contains("1 package(s) below threshold"));
     }
 
     #[test]

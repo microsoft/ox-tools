@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Per-crate line-coverage aggregation.
+//! per-package line-coverage aggregation.
 //!
 //! Sums `lines.count` and `lines.covered` across every file attributed
 //! to a crate. The result is order-independent because integer addition

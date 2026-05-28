@@ -70,7 +70,7 @@ mod tests {
         Member {
             name: name.to_owned(),
             manifest_dir: PathBuf::from(manifest_dir),
-            min_lines: None,
+            min_lines_percent: None,
         }
     }
 

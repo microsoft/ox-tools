@@ -27,7 +27,7 @@ fn format_lines(outcome: &CrateOutcome) -> String {
 
 /// Human-readable text for the `Threshold` column.
 fn format_threshold(outcome: &CrateOutcome) -> String {
-    format!("{:.1}%", outcome.threshold.min_lines)
+    format!("{:.1}%", outcome.threshold.min_lines_percent)
 }
 
 /// Human-readable text for the `Δ vs threshold` column.
@@ -35,7 +35,7 @@ fn format_delta(outcome: &CrateOutcome) -> String {
     let Some(pct) = outcome.percent() else {
         return "—".to_owned();
     };
-    let delta = pct - outcome.threshold.min_lines;
+    let delta = pct - outcome.threshold.min_lines_percent;
     if delta >= 0.0 {
         format!("+{delta:.1}pp")
     } else {

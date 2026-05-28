@@ -1,12 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Workspace discovery and per-crate threshold metadata extraction.
+//! Workspace discovery and per-package threshold metadata extraction.
 //!
 //! Wraps [`cargo_metadata`] to enumerate workspace members and reads
 //! the optional `[package.metadata.coverage-gate]` block from each
 //! member, plus the optional `[workspace.metadata.coverage-gate]`
-//! block at the root. Threshold resolution itself (per-crate →
+//! block at the root. Threshold resolution itself (per-package →
 //! workspace default → built-in `100.0`) lives in [`crate::threshold`]
 //! and consumes the values surfaced here.
 
@@ -28,7 +28,7 @@ pub(crate) struct Workspace {
     /// One entry per workspace member, in alphabetical order by name.
     pub(crate) members: Vec<Member>,
     /// `min-lines` value from `[workspace.metadata.coverage-gate]`, if set.
-    pub(crate) default_min_lines: Option<f64>,
+    pub(crate) default_min_lines_percent: Option<f64>,
 }
 
 /// A single workspace member.
@@ -40,7 +40,7 @@ pub(crate) struct Member {
     pub(crate) manifest_dir: PathBuf,
     /// `min-lines` value from this member's
     /// `[package.metadata.coverage-gate]`, if set.
-    pub(crate) min_lines: Option<f64>,
+    pub(crate) min_lines_percent: Option<f64>,
 }
 
 impl Workspace {
@@ -59,7 +59,7 @@ impl Workspace {
             .exec()
             .map_err(|source| CoverageGateError::caused_by("failed to load workspace metadata".to_owned(), source))?;
 
-        let workspace_default = extract_min_lines(&metadata.workspace_metadata, "workspace")?;
+        let workspace_default = extract_min_lines_percent(&metadata.workspace_metadata, "workspace")?;
 
         let mut members: Vec<Member> = metadata
             .workspace_packages()
@@ -69,11 +69,11 @@ impl Workspace {
                     .manifest_path
                     .parent()
                     .map_or_else(|| PathBuf::from(pkg.manifest_path.as_str()), |p| PathBuf::from(p.as_str()));
-                let min_lines = extract_min_lines(&pkg.metadata, &pkg.name)?;
+                let min_lines_percent = extract_min_lines_percent(&pkg.metadata, &pkg.name)?;
                 Ok::<Member, CoverageGateError>(Member {
                     name: pkg.name.to_string(),
                     manifest_dir,
-                    min_lines,
+                    min_lines_percent,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -81,26 +81,26 @@ impl Workspace {
 
         Ok(Self {
             members,
-            default_min_lines: workspace_default,
+            default_min_lines_percent: workspace_default,
         })
     }
 }
 
-/// Pull `coverage-gate.min-lines` out of a freeform metadata `Value`
+/// Pull `coverage-gate.min-lines-percent` out of a freeform metadata `Value`
 /// and validate that it falls in `[0.0, 100.0]`.
 ///
 /// Accepts either integer or float JSON numbers (the TOML
 /// representation may have used either form).
-fn extract_min_lines(metadata: &Value, source: &str) -> Result<Option<f64>, CoverageGateError> {
-    let Some(min) = metadata.get("coverage-gate").and_then(|v| v.get("min-lines")) else {
+fn extract_min_lines_percent(metadata: &Value, source: &str) -> Result<Option<f64>, CoverageGateError> {
+    let Some(min) = metadata.get("coverage-gate").and_then(|v| v.get("min-lines-percent")) else {
         return Ok(None);
     };
     let value = min
         .as_f64()
-        .ok_or_else(|| CoverageGateError::new(format!("{source}: `coverage-gate.min-lines` must be a number, got {min}")))?;
+        .ok_or_else(|| CoverageGateError::new(format!("{source}: `coverage-gate.min-lines-percent` must be a number, got {min}")))?;
     if !(MIN_LINES_LOWER..=MIN_LINES_UPPER).contains(&value) {
         return Err(CoverageGateError::new(format!(
-            "invalid coverage-gate min-lines value `{value}` for {source}: \
+            "invalid coverage-gate min-lines-percent value `{value}` for {source}: \
              expected a number in {MIN_LINES_LOWER}.0..={MIN_LINES_UPPER}.0"
         )));
     }
@@ -138,11 +138,13 @@ resolver = "2"
 members = ["alpha", "beta"]
 
 [workspace.metadata.coverage-gate]
-min-lines = 80
+min-lines-percent = 80
 "#;
 
-    fn member(name: &str, min_lines: Option<&str>) -> String {
-        let extra = min_lines.map_or(String::new(), |m| format!("\n[package.metadata.coverage-gate]\nmin-lines = {m}\n"));
+    fn member(name: &str, min_lines_percent: Option<&str>) -> String {
+        let extra = min_lines_percent.map_or(String::new(), |m| {
+            format!("\n[package.metadata.coverage-gate]\nmin-lines-percent = {m}\n")
+        });
         format!(
             r#"
 [package]
@@ -168,12 +170,12 @@ edition = "2021"
             ],
         );
         let ws = Workspace::load(Some(&tmp.path().join("Cargo.toml"))).expect("workspace load should succeed");
-        assert!(ws.default_min_lines.is_none());
+        assert!(ws.default_min_lines_percent.is_none());
         assert_eq!(ws.members.len(), 3);
         let names: Vec<&str> = ws.members.iter().map(|m| m.name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "beta", "gamma"]);
         for m in &ws.members {
-            assert!(m.min_lines.is_none());
+            assert!(m.min_lines_percent.is_none());
             assert!(m.manifest_dir.is_dir());
         }
     }
@@ -188,7 +190,7 @@ edition = "2021"
             &[("alpha", &member("alpha", None)), ("beta", &member("beta", None))],
         );
         let ws = Workspace::load(Some(&tmp.path().join("Cargo.toml"))).expect("workspace load should succeed");
-        assert_eq!(ws.default_min_lines, Some(80.0));
+        assert_eq!(ws.default_min_lines_percent, Some(80.0));
     }
 
     #[test]
@@ -203,9 +205,9 @@ edition = "2021"
         let ws = Workspace::load(Some(&tmp.path().join("Cargo.toml"))).expect("workspace load should succeed");
         let alpha = ws.members.iter().find(|m| m.name == "alpha").expect("alpha");
         let beta = ws.members.iter().find(|m| m.name == "beta").expect("beta");
-        assert_eq!(alpha.min_lines, Some(90.5));
-        assert_eq!(beta.min_lines, Some(0.0));
-        assert_eq!(ws.default_min_lines, Some(80.0));
+        assert_eq!(alpha.min_lines_percent, Some(90.5));
+        assert_eq!(beta.min_lines_percent, Some(0.0));
+        assert_eq!(ws.default_min_lines_percent, Some(80.0));
     }
 
     #[test]
@@ -237,7 +239,7 @@ resolver = "2"
 members = ["alpha"]
 
 [workspace.metadata.coverage-gate]
-min-lines = -1
+min-lines-percent = -1
 "#;
         write_workspace(tmp.path(), root, &[("alpha", &member("alpha", None))]);
         let err = Workspace::load(Some(&tmp.path().join("Cargo.toml"))).expect_err("negative workspace value must error");
@@ -256,7 +258,7 @@ resolver = "2"
 members = ["alpha"]
 
 [workspace.metadata.coverage-gate]
-min-lines = "ninety"
+min-lines-percent = "ninety"
 "#;
         write_workspace(tmp.path(), root, &[("alpha", &member("alpha", None))]);
         let err = Workspace::load(Some(&tmp.path().join("Cargo.toml"))).expect_err("string threshold must error");

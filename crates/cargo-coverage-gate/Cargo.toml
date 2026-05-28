@@ -3,7 +3,7 @@
 
 [package]
 name = "cargo-coverage-gate"
-description = "A cargo subcommand that gates pull requests on per-crate line coverage measured by cargo-llvm-cov"
+description = "A cargo subcommand that gates pull requests on per-package line coverage measured by cargo-llvm-cov"
 version = "0.1.0"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "coverage", "ci"]

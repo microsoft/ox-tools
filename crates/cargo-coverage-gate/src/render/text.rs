@@ -8,7 +8,7 @@ use std::io;
 use crate::render::{count_failures, count_no_data, format_delta, format_lines, format_source, format_status_text, format_threshold};
 use crate::verdict::Report;
 
-const HEADERS: [&str; 6] = ["Crate", "Lines", "Threshold", "Δ vs threshold", "Status", "Source"];
+const HEADERS: [&str; 6] = ["Package", "Lines", "Threshold", "Δ vs threshold", "Status", "Source"];
 
 /// Render `report` as a plain-text table to `out`.
 pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()> {
@@ -38,7 +38,7 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
         }
     }
 
-    writeln!(out, "ox coverage-gate")?;
+    writeln!(out, "coverage-gate")?;
     writeln!(out)?;
     write_row(out, &HEADERS.map(str::to_owned), &widths)?;
     write_separator(out, &widths)?;
@@ -51,9 +51,9 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
     let no_data = count_no_data(&report.outcomes);
     match (failures, no_data) {
         (0, 0) => writeln!(out, "Result: all crates meet their threshold.")?,
-        (n, 0) => writeln!(out, "Result: {n} crate(s) below threshold.")?,
-        (0, n) => writeln!(out, "Result: {n} crate(s) with no attributed coverage data.")?,
-        (f, d) => writeln!(out, "Result: {f} crate(s) below threshold, {d} with no attributed data.")?,
+        (n, 0) => writeln!(out, "Result: {n} package(s) below threshold.")?,
+        (0, n) => writeln!(out, "Result: {n} package(s) with no attributed coverage data.")?,
+        (f, d) => writeln!(out, "Result: {f} package(s) below threshold, {d} with no attributed data.")?,
     }
     Ok(())
 }
@@ -101,7 +101,7 @@ mod tests {
         CrateOutcome {
             name: name.to_owned(),
             threshold: Threshold {
-                min_lines: threshold,
+                min_lines_percent: threshold,
                 source,
             },
             totals: LineTotals { count, covered },
@@ -118,11 +118,11 @@ mod tests {
     #[test]
     fn renders_pass_table() {
         let report = Report {
-            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Crate, Status::Ok)],
+            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok)],
             unattributed: 0,
         };
         let s = render_to_string(&report);
-        assert!(s.contains("ox coverage-gate"));
+        assert!(s.contains("coverage-gate"));
         assert!(s.contains("alpha"));
         assert!(s.contains("95.0%"));
         assert!(s.contains("80.0%"));
@@ -137,7 +137,7 @@ mod tests {
         // The text renderer wraps the data rows with ─-bar separators
         // above and below; both must appear.
         let report = Report {
-            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Crate, Status::Ok)],
+            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok)],
             unattributed: 0,
         };
         let s = render_to_string(&report);
@@ -149,7 +149,7 @@ mod tests {
     fn renders_fail_with_negative_delta() {
         let report = Report {
             outcomes: vec![
-                outcome("alpha", 100, 95, 80.0, ThresholdSource::Crate, Status::Ok),
+                outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok),
                 outcome("beta", 100, 60, 80.0, ThresholdSource::Workspace, Status::Fail),
             ],
             unattributed: 0,
@@ -159,7 +159,7 @@ mod tests {
         assert!(s.contains("-20.0pp"));
         assert!(s.contains("FAIL"));
         assert!(s.contains("workspace"));
-        assert!(s.contains("1 crate(s) below threshold"));
+        assert!(s.contains("1 package(s) below threshold"));
     }
 
     #[test]
@@ -180,20 +180,20 @@ mod tests {
     fn renders_combined_fail_and_no_data_summary() {
         let report = Report {
             outcomes: vec![
-                outcome("alpha", 100, 60, 80.0, ThresholdSource::Crate, Status::Fail),
+                outcome("alpha", 100, 60, 80.0, ThresholdSource::Package, Status::Fail),
                 outcome("beta", 0, 0, 100.0, ThresholdSource::Default, Status::NoData),
             ],
             unattributed: 0,
         };
         let s = render_to_string(&report);
-        assert!(s.contains("1 crate(s) below threshold, 1 with no attributed data"));
+        assert!(s.contains("1 package(s) below threshold, 1 with no attributed data"));
     }
 
     #[test]
     fn output_is_deterministic() {
         let report = Report {
             outcomes: vec![
-                outcome("alpha", 10, 10, 50.0, ThresholdSource::Crate, Status::Ok),
+                outcome("alpha", 10, 10, 50.0, ThresholdSource::Package, Status::Ok),
                 outcome("beta", 10, 5, 80.0, ThresholdSource::Workspace, Status::Fail),
             ],
             unattributed: 0,

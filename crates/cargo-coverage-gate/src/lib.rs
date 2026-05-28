@@ -6,10 +6,10 @@
 
 //! # cargo-coverage-gate
 //!
-//! A pull-request-time gate that compares per-crate line coverage produced
-//! by [`cargo-llvm-cov`] against per-crate thresholds carried in
+//! A pull-request-time gate that compares per-package line coverage produced
+//! by [`cargo-llvm-cov`] against per-package thresholds carried in
 //! `Cargo.toml`. The accompanying `cargo-coverage-gate` binary reads the
-//! coverage JSON report, resolves each crate's threshold from a small
+//! coverage JSON report, resolves each package's threshold from a small
 //! three-layer lookup, and emits a verdict table to stdout (and,
 //! optionally, to a Markdown summary file for CI step summaries).
 //!
@@ -22,13 +22,13 @@
 //! For each workspace member, the effective threshold is the first match
 //! among:
 //!
-//! 1. `[package.metadata.coverage-gate] min-lines = N` in the crate's
+//! 1. `[package.metadata.coverage-gate] min-lines-percent = N` in the crate's
 //!    `Cargo.toml`,
-//! 2. `[workspace.metadata.coverage-gate] min-lines = N` in the workspace
+//! 2. `[workspace.metadata.coverage-gate] min-lines-percent = N` in the workspace
 //!    root `Cargo.toml`, or
 //! 3. The built-in default of `100.0` — full coverage required.
 //!
-//! Setting `min-lines = 0.0` explicitly opts a crate out of gating.
+//! Setting `min-lines-percent = 0.0` explicitly opts a package out of gating.
 //!
 //! ## Binary usage
 //!
@@ -37,10 +37,10 @@
 //!                      [--summary-file <path>] [--quiet]
 //! ```
 //!
-//! Exit codes: `0` if every gated crate meets its threshold, `1` if any
-//! gated crate falls below its threshold, and `2` for configuration
-//! errors (unparseable JSON, missing data for a gated crate, an unknown
-//! crate name in `--crates`, an out-of-range `min-lines` value, …).
+//! Exit codes: `0` if every gated package meets its threshold, `1` if any
+//! gated package falls below its threshold, and `2` for configuration
+//! errors (unparseable JSON, missing data for a gated package, an unknown
+//! package name in `--crates`, an out-of-range `min-lines` value, …).
 //!
 //! When `--summary-file` is unset, the binary falls back to
 //! `$GITHUB_STEP_SUMMARY` and then `$COVERAGE_GATE_SUMMARY` to decide
@@ -99,9 +99,9 @@ pub use error::CoverageGateError;
 /// [`Verdict::Fail`] is `1`, and [`Verdict::ConfigError`] is `2`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
-    /// Every gated crate met its threshold.
+    /// Every gated package met its threshold.
     Pass,
-    /// At least one gated crate fell below its threshold.
+    /// At least one gated package fell below its threshold.
     Fail,
     /// A configuration error prevented evaluation (for example, a gated
     /// crate had no coverage data, or the JSON failed to parse).
@@ -173,7 +173,7 @@ impl EvaluatedReport {
 /// # Errors
 ///
 /// Returns a [`CoverageGateError`] when the JSON does not parse,
-/// workspace discovery fails, an unknown crate appears in
+/// workspace discovery fails, an unknown package appears in
 /// `gated_crates`, or a configured `min-lines` value is outside
 /// `[0.0, 100.0]`. The error message identifies which case occurred;
 /// callers usually just propagate it.

@@ -15,10 +15,10 @@
 
 ## cargo-coverage-gate
 
-A pull-request-time gate that compares per-crate line coverage produced
-by [`cargo-llvm-cov`][__link0] against per-crate thresholds carried in
+A pull-request-time gate that compares per-package line coverage produced
+by [`cargo-llvm-cov`][__link0] against per-package thresholds carried in
 `Cargo.toml`. The accompanying `cargo-coverage-gate` binary reads the
-coverage JSON report, resolves each crate’s threshold from a small
+coverage JSON report, resolves each package’s threshold from a small
 three-layer lookup, and emits a verdict table to stdout (and,
 optionally, to a Markdown summary file for CI step summaries).
 
@@ -31,13 +31,13 @@ the implementation plan tracking the build is in
 For each workspace member, the effective threshold is the first match
 among:
 
-1. `[package.metadata.coverage-gate] min-lines = N` in the crate’s
+1. `[package.metadata.coverage-gate] min-lines-percent = N` in the crate’s
    `Cargo.toml`,
-1. `[workspace.metadata.coverage-gate] min-lines = N` in the workspace
+1. `[workspace.metadata.coverage-gate] min-lines-percent = N` in the workspace
    root `Cargo.toml`, or
 1. The built-in default of `100.0` — full coverage required.
 
-Setting `min-lines = 0.0` explicitly opts a crate out of gating.
+Setting `min-lines-percent = 0.0` explicitly opts a package out of gating.
 
 ### Binary usage
 
@@ -46,10 +46,10 @@ cargo coverage-gate  [--json <path>] [--crates <name>,<name>,...]
                      [--summary-file <path>] [--quiet]
 ```
 
-Exit codes: `0` if every gated crate meets its threshold, `1` if any
-gated crate falls below its threshold, and `2` for configuration
-errors (unparseable JSON, missing data for a gated crate, an unknown
-crate name in `--crates`, an out-of-range `min-lines` value, …).
+Exit codes: `0` if every gated package meets its threshold, `1` if any
+gated package falls below its threshold, and `2` for configuration
+errors (unparseable JSON, missing data for a gated package, an unknown
+package name in `--crates`, an out-of-range `min-lines` value, …).
 
 When `--summary-file` is unset, the binary falls back to
 `$GITHUB_STEP_SUMMARY` and then `$COVERAGE_GATE_SUMMARY` to decide
@@ -82,7 +82,7 @@ the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQbP-8cqWEOtXwbMM-s6Ic4_tUbvKIQoxjk1TobshmFp8qNqMZhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQb6bqi8B6bv3gbadjb5dLNpu0bBajB_y-X0IAb9nN3lN2O_bphZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/design/main.md
  [__link2]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/implementation-plans/0000.md

@@ -4,7 +4,7 @@
 //! End-to-end verdict computation.
 //!
 //! Ties together [`attribute`], [`aggregate`], and [`threshold`] to
-//! produce a [`Report`] — one [`CrateOutcome`] per gated crate, each
+//! produce a [`Report`] — one [`CrateOutcome`] per gated package, each
 //! classified as [`Status::Ok`], [`Status::Fail`], or
 //! [`Status::NoData`] — and a derived [`Verdict`] usable as a process
 //! exit code.
@@ -38,7 +38,7 @@ pub(crate) enum Status {
     /// Measured percentage fell below the threshold.
     Fail,
     /// No coverage data was attributed to the crate. This is treated as
-    /// a configuration error: a crate that we asked to gate must have
+    /// a configuration error: a package that we asked to gate must have
     /// some test binary contributing data.
     NoData,
 }
@@ -63,10 +63,10 @@ impl CrateOutcome {
     }
 }
 
-/// Full verdict report — one row per gated crate.
+/// Full verdict report — one row per gated package.
 #[derive(Debug, Clone)]
 pub(crate) struct Report {
-    /// One outcome per gated crate, in alphabetical order by name.
+    /// One outcome per gated package, in alphabetical order by name.
     pub(crate) outcomes: Vec<CrateOutcome>,
     /// Number of coverage entries that matched no workspace member.
     /// Surfaced as a single aggregated warning rather than per-file.
@@ -74,7 +74,7 @@ pub(crate) struct Report {
 }
 
 impl Report {
-    /// Roll the per-crate outcomes up into an overall [`Verdict`].
+    /// Roll the per-package outcomes up into an overall [`Verdict`].
     ///
     /// `NoData` dominates `Fail` dominates `Ok`: any `NoData` produces
     /// [`Verdict::ConfigError`]; otherwise any `Fail` produces
@@ -96,7 +96,7 @@ impl Report {
 ///
 /// `gated_crates` is the result of applying `--crates` to the
 /// workspace's member list: when empty, every member is gated.
-/// Crates listed in `gated_crates` that aren't workspace members
+/// packages listed in `gated_crates` that aren't workspace members
 /// produce a [`CoverageGateError`].
 pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_crates: &[String]) -> Result<Report, CoverageGateError> {
     let gated = resolve_gated(workspace, gated_crates)?;
@@ -162,15 +162,15 @@ fn classify(totals: LineTotals, threshold: Threshold) -> Status {
     // A zero threshold is the explicit opt-out documented in the
     // design: the crate passes regardless of how much (or whether
     // any) coverage data was attributed to it. Check this before the
-    // no-data path so that opting a crate out doesn't turn its
+    // no-data path so that opting a package out doesn't turn its
     // missing data into a configuration error.
-    if threshold.min_lines <= COMPARE_EPSILON {
+    if threshold.min_lines_percent <= COMPARE_EPSILON {
         return Status::Ok;
     }
     let Some(pct) = totals.percent() else {
         return Status::NoData;
     };
-    if pct + COMPARE_EPSILON >= threshold.min_lines {
+    if pct + COMPARE_EPSILON >= threshold.min_lines_percent {
         Status::Ok
     } else {
         Status::Fail
@@ -195,11 +195,11 @@ mod tests {
         }
     }
 
-    fn make_member(name: &str, manifest_dir: &str, min_lines: Option<f64>) -> Member {
+    fn make_member(name: &str, manifest_dir: &str, min_lines_percent: Option<f64>) -> Member {
         Member {
             name: name.to_owned(),
             manifest_dir: PathBuf::from(manifest_dir),
-            min_lines,
+            min_lines_percent,
         }
     }
 
@@ -213,7 +213,7 @@ mod tests {
     fn make_workspace(members: Vec<Member>, default: Option<f64>) -> Workspace {
         Workspace {
             members,
-            default_min_lines: default,
+            default_min_lines_percent: default,
         }
     }
 
@@ -296,7 +296,7 @@ mod tests {
     fn crates_flag_with_unknown_name_errors() {
         let ws = make_workspace(vec![make_member("alpha", "/repo/crates/alpha", None)], None);
         let report = make_report(Vec::new());
-        let err = evaluate(&report, &ws, &["typo".to_owned()]).expect_err("unknown crate must error");
+        let err = evaluate(&report, &ws, &["typo".to_owned()]).expect_err("unknown package must error");
         let rendered = err.to_string();
         assert!(rendered.contains("typo"));
         assert!(rendered.contains("--crates"));
@@ -333,7 +333,7 @@ mod tests {
         ]);
         let r = evaluate(&report, &ws, &[]).expect("evaluate");
         let by_name: std::collections::HashMap<_, _> = r.outcomes.iter().map(|o| (o.name.as_str(), o)).collect();
-        assert_eq!(by_name["alpha"].threshold.source, ThresholdSource::Crate);
+        assert_eq!(by_name["alpha"].threshold.source, ThresholdSource::Package);
         assert_eq!(by_name["beta"].threshold.source, ThresholdSource::Workspace);
         // gamma also inherits from workspace, not default, because the
         // workspace default is set.
@@ -345,7 +345,7 @@ mod tests {
         // 82.0 = 82.0 must not fail due to f64 representation jitter.
         let totals = LineTotals { count: 100, covered: 82 };
         let threshold = Threshold {
-            min_lines: 82.0,
+            min_lines_percent: 82.0,
             source: ThresholdSource::Default,
         };
         assert_eq!(classify(totals, threshold), Status::Ok);
@@ -353,13 +353,13 @@ mod tests {
 
     #[test]
     fn zero_threshold_opts_out_even_with_no_data() {
-        // `min-lines = 0.0` is the documented opt-out; a crate with no
+        // `min-lines-percent = 0.0` is the documented opt-out; a package with no
         // attributed coverage data must still pass rather than be
         // flagged as a configuration error.
         let totals = LineTotals { count: 0, covered: 0 };
         let threshold = Threshold {
-            min_lines: 0.0,
-            source: ThresholdSource::Crate,
+            min_lines_percent: 0.0,
+            source: ThresholdSource::Package,
         };
         assert_eq!(classify(totals, threshold), Status::Ok);
     }
@@ -368,8 +368,8 @@ mod tests {
     fn zero_threshold_opts_out_even_when_well_covered() {
         let totals = LineTotals { count: 100, covered: 100 };
         let threshold = Threshold {
-            min_lines: 0.0,
-            source: ThresholdSource::Crate,
+            min_lines_percent: 0.0,
+            source: ThresholdSource::Package,
         };
         assert_eq!(classify(totals, threshold), Status::Ok);
     }

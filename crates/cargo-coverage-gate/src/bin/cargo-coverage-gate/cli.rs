@@ -17,27 +17,27 @@ use clap::{Args, Parser};
 #[derive(Parser, Debug)]
 #[command(name = "cargo", bin_name = "cargo")]
 pub(crate) enum CargoCli {
-    /// Gate pull requests on per-crate line coverage.
+    /// Gate pull requests on per-package line coverage.
     CoverageGate(CoverageGateArgs),
 }
 
 /// Arguments for the `cargo coverage-gate` command.
 #[derive(Args, Debug, Clone)]
-#[command(version, about = "Gate pull requests on per-crate line coverage")]
+#[command(version, about = "Gate pull requests on per-package line coverage")]
 pub(crate) struct CoverageGateArgs {
     /// Path to the cargo-llvm-cov JSON report.
     ///
     /// Defaults to `target/coverage/coverage.json`, matching the
     /// recommended `cargo llvm-cov report --json --output-path` invocation.
-    #[arg(long, value_name = "PATH")]
-    pub(crate) json: Option<PathBuf>,
+    #[arg(long = "llvm-cov-json", value_name = "PATH")]
+    pub(crate) llvm_cov_json: Option<PathBuf>,
 
     /// Restrict the operation to a comma-separated list of package names.
     ///
     /// When unset, every workspace member is in scope. CI integrations
-    /// typically pass the impacted-crate list from their test-impact step.
-    #[arg(long, value_name = "NAME,NAME,...", value_delimiter = ',')]
-    pub(crate) crates: Vec<String>,
+    /// typically pass the impacted-package list from their test-impact step.
+    #[arg(long = "packages", value_name = "NAME,NAME,...", value_delimiter = ',')]
+    pub(crate) packages: Vec<String>,
 
     /// Write the Markdown verdict table to this file.
     ///

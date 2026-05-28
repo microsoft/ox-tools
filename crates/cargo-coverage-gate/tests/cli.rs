@@ -25,7 +25,7 @@ fn make_workspace(dir: &Path, members: &[(&str, Option<&str>)], workspace_min_li
     let names: Vec<&&str> = members.iter().map(|(n, _)| n).collect();
     let members_list = names.iter().map(|n| format!("\"{n}\"")).collect::<Vec<_>>().join(", ");
     let workspace_meta = workspace_min_lines
-        .map(|m| format!("\n[workspace.metadata.coverage-gate]\nmin-lines = {m}\n"))
+        .map(|m| format!("\n[workspace.metadata.coverage-gate]\nmin-lines-percent = {m}\n"))
         .unwrap_or_default();
     fs::write(
         dir.join("Cargo.toml"),
@@ -37,7 +37,7 @@ fn make_workspace(dir: &Path, members: &[(&str, Option<&str>)], workspace_min_li
         let member_dir = dir.join(name);
         fs::create_dir_all(member_dir.join("src")).expect("mkdir member src");
         let metadata = min_lines
-            .map(|m| format!("\n[package.metadata.coverage-gate]\nmin-lines = {m}\n"))
+            .map(|m| format!("\n[package.metadata.coverage-gate]\nmin-lines-percent = {m}\n"))
             .unwrap_or_default();
         fs::write(
             member_dir.join("Cargo.toml"),
@@ -114,7 +114,7 @@ fn all_pass_mixed_sources() {
     );
 
     coverage_gate(tmp.path())
-        .args(["--json", &json])
+        .args(["--llvm-cov-json", &json])
         .assert()
         .success()
         .stdout(predicate::str::contains("alpha"))
@@ -134,11 +134,11 @@ fn one_crate_below_threshold_exits_1() {
     let json = write_json(tmp.path(), &[("alpha/src/lib.rs", 100, 95), ("beta/src/lib.rs", 100, 60)]);
 
     coverage_gate(tmp.path())
-        .args(["--json", &json])
+        .args(["--llvm-cov-json", &json])
         .assert()
         .code(1)
         .stdout(predicate::str::contains("FAIL"))
-        .stdout(predicate::str::contains("1 crate(s) below threshold"));
+        .stdout(predicate::str::contains("1 package(s) below threshold"));
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn gated_crate_with_no_data_exits_2() {
     let json = write_json(tmp.path(), &[("alpha/src/lib.rs", 100, 95)]);
 
     coverage_gate(tmp.path())
-        .args(["--json", &json])
+        .args(["--llvm-cov-json", &json])
         .assert()
         .code(2)
         .stdout(predicate::str::contains("NO DATA"))
@@ -166,7 +166,7 @@ fn crates_flag_restricts_scope() {
 
     // Only gate alpha; beta would fail but is out of scope.
     coverage_gate(tmp.path())
-        .args(["--json", &json, "--crates", "alpha"])
+        .args(["--llvm-cov-json", &json, "--packages", "alpha"])
         .assert()
         .success()
         .stdout(predicate::str::contains("alpha"))
@@ -181,7 +181,7 @@ fn crates_flag_with_unknown_name_exits_2() {
     let json = write_json(tmp.path(), &[("alpha/src/lib.rs", 100, 100)]);
 
     coverage_gate(tmp.path())
-        .args(["--json", &json, "--crates", "typo"])
+        .args(["--llvm-cov-json", &json, "--packages", "typo"])
         .assert()
         .code(2)
         .stderr(predicate::str::contains("typo"));
@@ -196,12 +196,12 @@ fn summary_file_flag_writes_markdown() {
     let summary = tmp.path().join("summary.md");
 
     coverage_gate(tmp.path())
-        .args(["--json", &json, "--summary-file", summary.to_str().expect("utf-8")])
+        .args(["--llvm-cov-json", &json, "--summary-file", summary.to_str().expect("utf-8")])
         .assert()
         .success();
 
     let body = fs::read_to_string(&summary).expect("summary file written");
-    assert!(body.contains("### ox coverage-gate"), "got:\n{body}");
+    assert!(body.contains("### coverage-gate"), "got:\n{body}");
     assert!(body.contains("| alpha |"), "got:\n{body}");
     assert!(body.contains("✅"), "got:\n{body}");
 }
@@ -220,13 +220,13 @@ fn github_step_summary_env_is_auto_detected() {
         .arg("coverage-gate")
         .env("GITHUB_STEP_SUMMARY", &summary)
         .env_remove("COVERAGE_GATE_SUMMARY")
-        .args(["--json", &json])
+        .args(["--llvm-cov-json", &json])
         .assert()
         .success();
 
     assert!(summary.exists(), "GITHUB_STEP_SUMMARY file must be written");
     let body = fs::read_to_string(&summary).expect("read summary");
-    assert!(body.contains("### ox coverage-gate"));
+    assert!(body.contains("### coverage-gate"));
 }
 
 #[test]
@@ -238,7 +238,13 @@ fn quiet_suppresses_stdout_but_still_writes_summary() {
     let summary = tmp.path().join("summary.md");
 
     coverage_gate(tmp.path())
-        .args(["--json", &json, "--summary-file", summary.to_str().expect("utf-8"), "--quiet"])
+        .args([
+            "--llvm-cov-json",
+            &json,
+            "--summary-file",
+            summary.to_str().expect("utf-8"),
+            "--quiet",
+        ])
         .assert()
         .success()
         .stdout(predicate::str::is_empty());
@@ -260,7 +266,7 @@ fn unknown_version_string_warns_but_continues() {
     fs::write(&json_path, body).expect("write json");
 
     coverage_gate(tmp.path())
-        .args(["--json", json_path.to_str().expect("utf-8")])
+        .args(["--llvm-cov-json", json_path.to_str().expect("utf-8")])
         .assert()
         .success();
 }
@@ -274,7 +280,7 @@ fn malformed_json_exits_2() {
     fs::write(&json_path, "this is not json\n").expect("write json");
 
     coverage_gate(tmp.path())
-        .args(["--json", json_path.to_str().expect("utf-8")])
+        .args(["--llvm-cov-json", json_path.to_str().expect("utf-8")])
         .assert()
         .code(2)
         .stderr(predicate::str::contains("coverage JSON"));
@@ -287,7 +293,7 @@ fn missing_json_file_exits_2() {
     make_workspace(tmp.path(), &[("alpha", None)], None);
 
     coverage_gate(tmp.path())
-        .args(["--json", "does-not-exist.json"])
+        .args(["--llvm-cov-json", "does-not-exist.json"])
         .assert()
         .code(2)
         .stderr(predicate::str::contains("does-not-exist.json"));
@@ -302,7 +308,7 @@ fn default_threshold_is_100_when_nothing_configured() {
     let json = write_json(tmp.path(), &[("alpha/src/lib.rs", 100, 95)]);
 
     coverage_gate(tmp.path())
-        .args(["--json", &json])
+        .args(["--llvm-cov-json", &json])
         .assert()
         .code(1)
         .stdout(predicate::str::contains("100.0%"))
