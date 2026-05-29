@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use cargo_heather::HeatherError;
 use cargo_heather::license;
 use serde::Deserialize;
-use tracing::info;
 
 /// The default configuration file name.
 pub(crate) const CONFIG_FILE_NAME: &str = ".cargo-heather.toml";
@@ -87,7 +86,7 @@ pub(crate) fn load_config(project_dir: &Path) -> Result<HeatherConfig, HeatherEr
     if cargo_toml_path.exists()
         && let Some(config) = try_load_from_cargo_toml(&cargo_toml_path)?
     {
-        info!("No {} found, using license from Cargo.toml.", CONFIG_FILE_NAME);
+        println!("No {CONFIG_FILE_NAME} found, using license from Cargo.toml.");
         return Ok(config);
     }
 
