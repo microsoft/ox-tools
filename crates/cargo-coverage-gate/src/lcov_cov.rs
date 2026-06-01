@@ -13,7 +13,7 @@
 //! formats. We pick lcov because it matches what every other coverage
 //! UI consuming this data sees:
 //!
-//! - Codecov.io ingests lcov uploads directly.
+//! - Codecov ingests lcov uploads directly.
 //! - Azure DevOps ingests cobertura XML, which cargo-llvm-cov derives
 //!   from lcov internally — same line set.
 //! - `cargo llvm-cov report --codecov` emits Codecov's custom JSON,
@@ -21,9 +21,9 @@
 //!
 //! Using the JSON export instead gives stricter "every region on a
 //! line must be hit" line semantics — defensible for gating but
-//! systematically reports 0.5–2pp lower than the other UIs, which
-//! makes calibrating thresholds against codecov / ADO numbers
-//! confusing for adopters.
+//! systematically reports 0.5 to 2 percentage points lower than the
+//! other coverage UIs, which makes calibrating thresholds against
+//! Codecov / ADO numbers confusing for adopters.
 //!
 //! [lcov]: https://github.com/linux-test-project/lcov
 

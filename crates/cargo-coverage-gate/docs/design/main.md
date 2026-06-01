@@ -234,7 +234,7 @@ gate is a line-coverage tool.
 XML, or Codecov's custom JSON. We pick lcov because it matches every
 other coverage UI fed by the same data:
 
-- Codecov.io ingests lcov uploads directly.
+- Codecov ingests lcov uploads directly.
 - ADO ingests cobertura, which cargo-llvm-cov derives from lcov
   internally (same line set).
 - `cargo llvm-cov report --codecov` emits Codecov's custom JSON, also

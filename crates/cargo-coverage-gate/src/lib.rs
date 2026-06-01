@@ -34,7 +34,7 @@
 //!
 //! `cargo-llvm-cov` exports the same instrumentation run in several
 //! formats (JSON, lcov, cobertura, codecov-custom-JSON). The gate
-//! consumes lcov because that is what every other coverage UI fed by
+//! consumes lcov because that is what every other coverage report fed by
 //! the same data sees: Codecov ingests lcov uploads directly, ADO
 //! consumes cobertura that cargo-llvm-cov derives from lcov, and the
 //! lcov line semantics ("a line is covered if any region on it was
@@ -42,7 +42,7 @@
 //! export uses a stricter "every region on the line must be hit"
 //! interpretation that systematically reports a couple of
 //! percentage-points lower, which makes calibrating thresholds against
-//! codecov / ADO numbers confusing.
+//! Codecov / ADO numbers confusing.
 //!
 //! ## Binary usage
 //!
