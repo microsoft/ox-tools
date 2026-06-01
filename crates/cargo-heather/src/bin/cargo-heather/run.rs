@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 
 use cargo_heather::{CheckResult, CommentStyle, FileKind, HeatherError};
 use ohno::AppError;
-use tracing::info;
 
 use crate::cli::HeatherArgs;
 use crate::config::{self, HeatherConfig};
@@ -24,11 +23,11 @@ pub(crate) fn run(args: &HeatherArgs) -> Result<(), AppError> {
     let files = scanner::find_source_files(&project_dir, Some(&config_path), &config);
 
     if files.is_empty() {
-        info!("No source files found in '{}'.", project_dir.display());
+        println!("No source files found in '{}'.", project_dir.display());
         return Ok(());
     }
 
-    info!("Checking {} file(s)...", files.len());
+    println!("Checking {} file(s)...", files.len());
 
     if args.fix {
         run_fix(&files, &config, &project_dir)?;
@@ -69,13 +68,13 @@ fn run_check(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> R
         match &result {
             CheckResult::Ok => {}
             CheckResult::Missing => {
-                info!("  MISSING header: {}", relative.display());
+                println!("  MISSING header: {}", relative.display());
                 failures += 1;
             }
             CheckResult::Mismatch { expected, actual } => {
-                info!("  MISMATCH header: {}", relative.display());
+                println!("  MISMATCH header: {}", relative.display());
                 for line in format_mismatch_details(expected, actual).lines() {
-                    info!("{line}");
+                    println!("{line}");
                 }
                 failures += 1;
             }
@@ -86,7 +85,7 @@ fn run_check(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> R
         ohno::bail!(HeatherError::ValidationFailed(failures));
     }
 
-    info!("All {checked} file(s) have correct license headers.");
+    println!("All {checked} file(s) have correct license headers.");
     Ok(())
 }
 
@@ -111,7 +110,7 @@ fn run_fix(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> Res
                     path: path.clone(),
                     source: e,
                 })?;
-                info!("  Fixed (added header): {}", relative.display());
+                println!("  Fixed (added header): {}", relative.display());
                 fixed_count += 1;
             }
             CheckResult::Mismatch { .. } => {
@@ -119,15 +118,15 @@ fn run_fix(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> Res
                     path: path.clone(),
                     source: e,
                 })?;
-                info!("  Fixed (replaced header): {}", relative.display());
+                println!("  Fixed (replaced header): {}", relative.display());
                 fixed_count += 1;
             }
         }
     }
 
     match fixed_count {
-        0 => info!("All files already have correct headers."),
-        n => info!("Fixed {n} file(s)."),
+        0 => println!("All files already have correct headers."),
+        n => println!("Fixed {n} file(s)."),
     }
 
     Ok(fixed_count)

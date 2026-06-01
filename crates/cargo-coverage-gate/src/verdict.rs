@@ -13,8 +13,6 @@
 //! [`aggregate`]: crate::aggregate
 //! [`threshold`]: crate::threshold
 
-use tracing::warn;
-
 use crate::Verdict;
 use crate::aggregate::{LineTotals, aggregate};
 use crate::attribute::{AttributionOutcome, attribute};
@@ -108,9 +106,9 @@ pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_pac
     let AttributionOutcome { by_member, unattributed } = attribute(&files, &workspace.members);
 
     if !unattributed.is_empty() {
-        warn!(
-            count = unattributed.len(),
-            "coverage entries did not match any workspace member; ignoring"
+        eprintln!(
+            "warning: {} coverage entries did not match any workspace member; ignoring",
+            unattributed.len()
         );
     }
 
