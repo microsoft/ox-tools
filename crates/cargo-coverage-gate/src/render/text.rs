@@ -55,6 +55,13 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
         (0, n) => writeln!(out, "Result: {n} package(s) with no attributed coverage data.")?,
         (f, d) => writeln!(out, "Result: {f} package(s) below threshold, {d} with no attributed data.")?,
     }
+    if report.unattributed > 0 {
+        writeln!(
+            out,
+            "Note: {n} file(s) had paths outside any workspace member and were not attributed.",
+            n = report.unattributed,
+        )?;
+    }
     Ok(())
 }
 
@@ -196,5 +203,26 @@ mod tests {
             unattributed: 0,
         };
         assert_eq!(render_to_string(&report), render_to_string(&report));
+    }
+
+    #[test]
+    fn renders_unattributed_warning_when_present() {
+        let report = Report {
+            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok)],
+            unattributed: 3,
+        };
+        let s = render_to_string(&report);
+        assert!(s.contains("Note:"), "expected aggregated unattributed warning, got:\n{s}");
+        assert!(s.contains("3 file(s)"), "expected warning to include count, got:\n{s}");
+    }
+
+    #[test]
+    fn omits_unattributed_warning_when_zero() {
+        let report = Report {
+            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok)],
+            unattributed: 0,
+        };
+        let s = render_to_string(&report);
+        assert!(!s.contains("Note:"), "did not expect unattributed warning, got:\n{s}");
     }
 }

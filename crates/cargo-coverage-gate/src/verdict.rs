@@ -105,8 +105,8 @@ pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_pac
     let mut outcomes: Vec<CrateOutcome> = gated
         .iter()
         .map(|m| {
-            let attrib: Vec<&_> = by_member.get(m.name.as_str()).cloned().unwrap_or_default();
-            let totals = aggregate(&attrib);
+            let attrib = by_member.get(m.name.as_str()).map(Vec::as_slice).unwrap_or(&[]);
+            let totals = aggregate(attrib);
             let threshold = Threshold::resolve(m, workspace);
             let status = classify(totals, threshold);
             CrateOutcome {
@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn crates_flag_restricts_scope() {
+    fn package_flag_restricts_scope() {
         let report = make_report(vec![
             make_file("/repo/crates/alpha/src/lib.rs", 100, 95),
             make_file("/repo/crates/beta/src/lib.rs", 100, 50),
@@ -344,7 +344,7 @@ mod tests {
     }
 
     #[test]
-    fn crates_flag_with_unknown_name_errors() {
+    fn package_flag_with_unknown_name_errors() {
         let ws = make_workspace(vec![make_member("alpha", "/repo/crates/alpha", None)], None);
         let report = make_report(Vec::new());
         let err = evaluate(&report, &ws, &["typo".to_owned()]).expect_err("unknown package must error");

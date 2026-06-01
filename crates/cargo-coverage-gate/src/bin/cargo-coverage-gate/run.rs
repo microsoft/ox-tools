@@ -56,7 +56,7 @@ fn summary_target(args: &CoverageGateArgs) -> Option<PathBuf> {
         return Some(p.clone());
     }
     for var in ["GITHUB_STEP_SUMMARY", "COVERAGE_GATE_SUMMARY"] {
-        if let Ok(v) = env::var(var)
+        if let Some(v) = env::var_os(var)
             && !v.is_empty()
         {
             return Some(PathBuf::from(v));

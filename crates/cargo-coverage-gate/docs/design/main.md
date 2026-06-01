@@ -256,7 +256,9 @@ upstream to cargo-llvm-cov, doesn't desync from the displayed verdict.
 
 For each `SF:` path in the tracefile, the tool determines which
 workspace member owns it by **longest-prefix match** against the
-workspace members' canonicalized manifest directories. A file under
+workspace members' manifest directories as reported by `cargo metadata`
+(no further canonicalization is performed; the matcher trusts the
+metadata-reported paths). A file under
 `workspace_root/crates/alpha/src/lib.rs` belongs to the member whose
 manifest is `workspace_root/crates/alpha/Cargo.toml`.
 

@@ -165,7 +165,7 @@ fn gated_crate_with_no_data_exits_2() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
-fn crates_flag_restricts_scope() {
+fn package_flag_restricts_scope() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80")), ("beta", Some("80"))], None);
     let json = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95), ("beta/src/lib.rs", 100, 50)]);
@@ -236,7 +236,7 @@ fn package_flag_accepts_glob_pattern() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
-fn crates_flag_with_unknown_name_exits_2() {
+fn package_flag_with_unknown_name_exits_2() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", None)], None);
     let json = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 100)]);

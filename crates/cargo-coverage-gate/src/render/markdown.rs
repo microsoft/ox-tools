@@ -41,6 +41,13 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
         (0, n) => writeln!(out, "**Result:** {n} package(s) with no attributed coverage data.")?,
         (f, d) => writeln!(out, "**Result:** {f} package(s) below threshold, {d} with no attributed data.")?,
     }
+    if report.unattributed > 0 {
+        writeln!(
+            out,
+            "_Note: {n} file(s) had paths outside any workspace member and were not attributed._",
+            n = report.unattributed,
+        )?;
+    }
     Ok(())
 }
 
@@ -107,5 +114,26 @@ mod tests {
         assert!(s.contains("| (no data) |"));
         assert!(s.contains("| ⚠️ |"));
         assert!(s.contains("no attributed coverage data"));
+    }
+
+    #[test]
+    fn renders_unattributed_warning_when_present() {
+        let report = Report {
+            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok)],
+            unattributed: 2,
+        };
+        let s = render_to_string(&report);
+        assert!(s.contains("_Note:"), "expected italicized unattributed warning, got:\n{s}");
+        assert!(s.contains("2 file(s)"));
+    }
+
+    #[test]
+    fn omits_unattributed_warning_when_zero() {
+        let report = Report {
+            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok)],
+            unattributed: 0,
+        };
+        let s = render_to_string(&report);
+        assert!(!s.contains("_Note:"));
     }
 }
