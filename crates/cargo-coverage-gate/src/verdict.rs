@@ -105,7 +105,7 @@ pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_pac
     let mut outcomes: Vec<CrateOutcome> = gated
         .iter()
         .map(|m| {
-            let attrib = by_member.get(m.name.as_str()).map(Vec::as_slice).unwrap_or(&[]);
+            let attrib = by_member.get(m.name.as_str()).map_or(&[][..], Vec::as_slice);
             let totals = aggregate(attrib);
             let threshold = Threshold::resolve(m, workspace);
             let status = classify(totals, threshold);
