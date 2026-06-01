@@ -216,10 +216,13 @@ fn glob_inner(p: &[char], mut pi: usize, n: &[char], mut ni: usize) -> bool {
 fn classify(totals: LineTotals, threshold: Threshold) -> Status {
     // A zero threshold is the explicit opt-out documented in the
     // design: the crate passes regardless of how much (or whether
-    // any) coverage data was attributed to it. Check this before the
-    // no-data path so that opting a package out doesn't turn its
-    // missing data into a configuration error.
-    if threshold.min_lines_percent <= COMPARE_EPSILON {
+    // any) coverage data was attributed to it. The schema rejects
+    // negative values, so this is effectively an exact-zero check;
+    // expressing it as `<= 0.0` keeps the predicate robust against
+    // any future plumbing that might surface a `-0.0`. We deliberately
+    // do NOT use `COMPARE_EPSILON` here -- a tiny but non-zero
+    // configured threshold should still gate.
+    if threshold.min_lines_percent <= 0.0 {
         return Status::Ok;
     }
     let Some(pct) = totals.percent() else {
@@ -487,6 +490,20 @@ mod tests {
             source: ThresholdSource::Package,
         };
         assert_eq!(classify(totals, threshold), Status::Ok);
+    }
+
+    #[test]
+    fn sub_epsilon_threshold_is_not_treated_as_opt_out() {
+        // Only an exact zero threshold opts a package out. A tiny but
+        // non-zero configured threshold (well below COMPARE_EPSILON)
+        // must still gate: a package with no attributed coverage data
+        // is reported as NoData, not silently passed.
+        let totals = LineTotals { count: 0, covered: 0 };
+        let threshold = Threshold {
+            min_lines_percent: 1e-9,
+            source: ThresholdSource::Package,
+        };
+        assert_eq!(classify(totals, threshold), Status::NoData);
     }
 
     #[test]
