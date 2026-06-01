@@ -128,6 +128,18 @@ mod tests {
         };
         // 82.000001 - 82.0 = 1e-6 -> rounds to 0.0pp.
         assert_eq!(format_delta(&o), "0.0pp");
+
+        // Tiny negative drift below the displayed precision must also render as
+        // unsigned "0.0pp", not "-0.0pp". `f64::round` on a sub-precision negative
+        // value yields `-0.0`, so the `< 0.0` branch must reject it (and not be
+        // weakened to `<= 0.0`, which would print "-0.0pp").
+        let mut o = outcome(100, 82, 82.0);
+        o.totals = LineTotals {
+            count: 100_000_000,
+            covered: 81_999_999,
+        };
+        // 81.999999 - 82.0 = -1e-6 -> rounds to -0.0 -> must render as "0.0pp".
+        assert_eq!(format_delta(&o), "0.0pp");
     }
 
     #[test]
