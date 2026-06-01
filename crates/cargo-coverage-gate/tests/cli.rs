@@ -213,11 +213,7 @@ fn package_flag_accepts_glob_pattern() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(
         tmp.path(),
-        &[
-            ("alpha", Some("80")),
-            ("alpha_macros", Some("80")),
-            ("beta", Some("80")),
-        ],
+        &[("alpha", Some("80")), ("alpha_macros", Some("80")), ("beta", Some("80"))],
         None,
     );
     let json = write_lcov(

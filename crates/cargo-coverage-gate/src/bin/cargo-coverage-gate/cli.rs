@@ -40,13 +40,7 @@ pub(crate) struct CoverageGateArgs {
     /// `--package foo,bar` is also accepted for back-compat. When unset,
     /// every workspace member is in scope. CI integrations typically
     /// pass the impacted-package list from their test-impact step.
-    #[arg(
-        long = "package",
-        short = 'p',
-        alias = "packages",
-        value_name = "SPEC",
-        value_delimiter = ','
-    )]
+    #[arg(long = "package", short = 'p', alias = "packages", value_name = "SPEC", value_delimiter = ',')]
     pub(crate) packages: Vec<String>,
 
     /// Write the Markdown verdict table to this file.

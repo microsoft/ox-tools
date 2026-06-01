@@ -401,12 +401,7 @@ mod tests {
             make_file("/repo/crates/alpha/src/lib.rs", 10, 10),
             make_file("/repo/crates/alpha_macros/src/lib.rs", 10, 10),
         ]);
-        let r = evaluate(
-            &report,
-            &ws,
-            &["alpha".to_owned(), "alpha*".to_owned()],
-        )
-        .expect("evaluate");
+        let r = evaluate(&report, &ws, &["alpha".to_owned(), "alpha*".to_owned()]).expect("evaluate");
         let names: Vec<_> = r.outcomes.iter().map(|o| o.name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "alpha_macros"]);
     }
