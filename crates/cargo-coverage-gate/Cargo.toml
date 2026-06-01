@@ -35,6 +35,7 @@ path = "src/bin/cargo-coverage-gate/main.rs"
 cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
 lcov = { workspace = true }
+mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 serde_json = { workspace = true, features = ["std"] }
 

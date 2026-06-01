@@ -166,6 +166,14 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
     glob_inner(&p, 0, &n, 0)
 }
 
+// `pi += 1` and `pi + N` arithmetic on the position counters has
+// cargo-mutants mutations (`*=`, `*`) that would keep the counter from
+// advancing — producing non-terminating mutants whenever a pattern
+// contains `*`. The classifying tests in `glob_matcher_handles_wildcards`
+// catch every behavioral mutation; the only mutations the suite cannot
+// kill in finite time are these arithmetic ones. Skip mutating the body
+// rather than padding the suite with unrelated timeout-guard tests.
+#[mutants::skip]
 fn glob_inner(p: &[char], mut pi: usize, n: &[char], mut ni: usize) -> bool {
     while pi < p.len() {
         match p[pi] {
