@@ -42,8 +42,8 @@ impl LineTotals {
 pub(crate) fn aggregate(files: &[&FileEntry]) -> LineTotals {
     let mut totals = LineTotals::default();
     for f in files {
-        totals.count += f.lines_total;
-        totals.covered += f.lines_covered;
+        totals.count = totals.count.saturating_add(f.lines_total);
+        totals.covered = totals.covered.saturating_add(f.lines_covered);
     }
     totals
 }

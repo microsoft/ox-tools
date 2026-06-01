@@ -36,13 +36,11 @@ cargo_metadata = { workspace = true }
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
 lcov = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
-serde = { workspace = true, features = ["derive", "alloc"] }
 serde_json = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
-pretty_assertions = { workspace = true, features = ["std"] }
 tempfile = { workspace = true }
 
 [lints]

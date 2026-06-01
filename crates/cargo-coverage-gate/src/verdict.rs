@@ -100,10 +100,7 @@ impl Report {
 pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_packages: &[String]) -> Result<Report, CoverageGateError> {
     let gated = resolve_gated(workspace, gated_packages)?;
 
-    // Flatten every file entry across all data[] elements.
-    let files: Vec<_> = report.files.clone();
-
-    let AttributionOutcome { by_member, unattributed } = attribute(&files, &workspace.members);
+    let AttributionOutcome { by_member, unattributed } = attribute(&report.files, &workspace.members);
 
     if !unattributed.is_empty() {
         eprintln!(

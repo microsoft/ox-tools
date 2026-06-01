@@ -127,8 +127,8 @@ fn all_pass_mixed_sources() {
         .stdout(predicate::str::contains("beta"))
         .stdout(predicate::str::contains("gamma"))
         .stdout(predicate::str::contains("all crates meet their threshold"))
-        // Both Crate and Workspace sources appear in the table.
-        .stdout(predicate::str::contains("crate"))
+        // Both per-package and workspace-default sources appear in the Source column.
+        .stdout(predicate::str::contains("package"))
         .stdout(predicate::str::contains("workspace"));
 }
 

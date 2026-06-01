@@ -89,15 +89,12 @@ fn write_separator(out: &mut dyn io::Write, widths: &[usize; 6]) -> io::Result<(
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
     use crate::aggregate::LineTotals;
     use crate::threshold::{Threshold, ThresholdSource};
     use crate::verdict::{CrateOutcome, Status};
 
     fn outcome(name: &str, count: u32, covered: u32, threshold: f64, source: ThresholdSource, status: Status) -> CrateOutcome {
-        let _ = PathBuf::new();
         CrateOutcome {
             name: name.to_owned(),
             threshold: Threshold {
@@ -128,7 +125,7 @@ mod tests {
         assert!(s.contains("80.0%"));
         assert!(s.contains("+15.0pp"));
         assert!(s.contains("OK"));
-        assert!(s.contains("crate"));
+        assert!(s.contains("package"));
         assert!(s.contains("all crates meet their threshold"));
     }
 
