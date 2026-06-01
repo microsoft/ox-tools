@@ -162,6 +162,7 @@ end_of_record
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses real filesystem; Miri isolation forbids open()")]
     fn from_path_reads_from_disk() {
         let tmp = tempfile::NamedTempFile::new().expect("tempfile");
         std::fs::write(tmp.path(), SINGLE_FILE).expect("write fixture");
