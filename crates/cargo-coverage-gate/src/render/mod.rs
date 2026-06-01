@@ -122,7 +122,10 @@ mod tests {
 
         // Tiny positive drift below the displayed precision rounds to zero too.
         let mut o = outcome(100, 82, 82.0);
-        o.totals = LineTotals { count: 100_000_000, covered: 82_000_001 };
+        o.totals = LineTotals {
+            count: 100_000_000,
+            covered: 82_000_001,
+        };
         // 82.000001 - 82.0 = 1e-6 -> rounds to 0.0pp.
         assert_eq!(format_delta(&o), "0.0pp");
     }
