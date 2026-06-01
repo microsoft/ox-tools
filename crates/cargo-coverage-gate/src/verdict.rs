@@ -483,8 +483,8 @@ mod tests {
 
     #[test]
     fn opt_out_crate_does_not_force_config_error_verdict() {
-        // End-to-end: an opt-out crate with no JSON data must not push
-        // the overall verdict to ConfigError.
+        // End-to-end: an opt-out crate with no attributed coverage data
+        // must not push the overall verdict to ConfigError.
         let report = make_report(vec![make_file("/repo/crates/alpha/src/lib.rs", 100, 95)]);
         let ws = make_workspace(
             vec![

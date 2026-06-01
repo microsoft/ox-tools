@@ -50,7 +50,7 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
     let failures = count_failures(&report.outcomes);
     let no_data = count_no_data(&report.outcomes);
     match (failures, no_data) {
-        (0, 0) => writeln!(out, "Result: all crates meet their threshold.")?,
+        (0, 0) => writeln!(out, "Result: all packages meet their threshold.")?,
         (n, 0) => writeln!(out, "Result: {n} package(s) below threshold.")?,
         (0, n) => writeln!(out, "Result: {n} package(s) with no attributed coverage data.")?,
         (f, d) => writeln!(out, "Result: {f} package(s) below threshold, {d} with no attributed data.")?,
@@ -126,7 +126,7 @@ mod tests {
         assert!(s.contains("+15.0pp"));
         assert!(s.contains("OK"));
         assert!(s.contains("package"));
-        assert!(s.contains("all crates meet their threshold"));
+        assert!(s.contains("all packages meet their threshold"));
     }
 
     #[test]

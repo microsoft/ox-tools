@@ -66,13 +66,13 @@ fn format_source(source: ThresholdSource) -> &'static str {
     source.label()
 }
 
-/// Number of crates below threshold (`Fail` only — `NoData` is a
+/// Number of packages below threshold (`Fail` only — `NoData` is a
 /// configuration error and is summarized separately).
 fn count_failures(outcomes: &[CrateOutcome]) -> usize {
     outcomes.iter().filter(|o| o.status == Status::Fail).count()
 }
 
-/// Number of crates with no attributed coverage data.
+/// Number of packages with no attributed coverage data.
 fn count_no_data(outcomes: &[CrateOutcome]) -> usize {
     outcomes.iter().filter(|o| o.status == Status::NoData).count()
 }

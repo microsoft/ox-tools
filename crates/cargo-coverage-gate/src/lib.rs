@@ -47,7 +47,7 @@
 //! ## Binary usage
 //!
 //! ```text
-//! cargo coverage-gate  [--lcov <path>] [-p <spec>]... [--package <spec>]...
+//! cargo coverage-gate  [--lcov <path>] [-p|--package <spec>]...
 //!                      [--summary-file <path>] [--quiet]
 //! ```
 //!

@@ -56,7 +56,7 @@ Codecov / ADO numbers confusing.
 ### Binary usage
 
 ```text
-cargo coverage-gate  [--lcov <path>] [-p <spec>]... [--package <spec>]...
+cargo coverage-gate  [--lcov <path>] [-p|--package <spec>]...
                      [--summary-file <path>] [--quiet]
 ```
 
@@ -97,7 +97,7 @@ plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQbZaxTVU4bFjAbQFGIavV3lAEbu9febtGK_WwbKIAqxzdQy4RhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQb4M9WxX2urrob3CUaovPkShUblckLlGIN-O0bJwk2aN4xpslhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/design/main.md
  [__link2]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/implementation-plans/0000.md

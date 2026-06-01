@@ -3,8 +3,8 @@
 
 //! File-to-crate attribution by longest-prefix path match.
 //!
-//! Every file path that appears in the coverage JSON is mapped to at
-//! most one workspace member, by comparing the path against each
+//! Every file path that appears in the coverage tracefile is mapped to
+//! at most one workspace member, by comparing the path against each
 //! member's manifest directory. The match is component-aware (so we
 //! don't, for example, fold `crates/alpha-extras` into `crates/alpha`)
 //! and longest-prefix-first, so a nested member crate wins over an
