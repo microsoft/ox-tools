@@ -36,10 +36,16 @@ fn format_delta(outcome: &CrateOutcome) -> String {
         return "—".to_owned();
     };
     let delta = pct - outcome.threshold.min_lines_percent;
-    if delta >= 0.0 {
-        format!("+{delta:.1}pp")
+    // Round to the displayed precision (one decimal place) before choosing a sign so
+    // sub-precision floating-point noise doesn't render as a misleading "-0.0pp" or
+    // "+0.0pp". Verdict classification uses an epsilon; the rendered value should agree.
+    let rounded = (delta * 10.0).round() / 10.0;
+    if rounded > 0.0 {
+        format!("+{rounded:.1}pp")
+    } else if rounded < 0.0 {
+        format!("{rounded:.1}pp")
     } else {
-        format!("{delta:.1}pp")
+        "0.0pp".to_owned()
     }
 }
 
@@ -75,4 +81,55 @@ fn count_failures(outcomes: &[CrateOutcome]) -> usize {
 /// Number of packages with no attributed coverage data.
 fn count_no_data(outcomes: &[CrateOutcome]) -> usize {
     outcomes.iter().filter(|o| o.status == Status::NoData).count()
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use crate::aggregate::LineTotals;
+    use crate::threshold::Threshold;
+
+    fn outcome(count: u32, covered: u32, threshold: f64) -> CrateOutcome {
+        CrateOutcome {
+            name: "x".to_owned(),
+            threshold: Threshold {
+                min_lines_percent: threshold,
+                source: ThresholdSource::Package,
+            },
+            totals: LineTotals { count, covered },
+            status: Status::Ok,
+        }
+    }
+
+    #[test]
+    fn format_delta_renders_positive_with_sign() {
+        assert_eq!(format_delta(&outcome(100, 95, 80.0)), "+15.0pp");
+    }
+
+    #[test]
+    fn format_delta_renders_negative_with_sign() {
+        assert_eq!(format_delta(&outcome(100, 60, 80.0)), "-20.0pp");
+    }
+
+    #[test]
+    fn format_delta_collapses_sub_precision_noise_to_unsigned_zero() {
+        // 82/100 - 82.0 is exactly zero algebraically but the recomputed
+        // percentage can drift by ~1e-13 due to f64 representation.
+        // We must not render "-0.0pp" or "+0.0pp" — just "0.0pp".
+        let o = outcome(100, 82, 82.0);
+        assert_eq!(format_delta(&o), "0.0pp");
+
+        // Tiny positive drift below the displayed precision rounds to zero too.
+        let mut o = outcome(100, 82, 82.0);
+        o.totals = LineTotals { count: 100_000_000, covered: 82_000_001 };
+        // 82.000001 - 82.0 = 1e-6 -> rounds to 0.0pp.
+        assert_eq!(format_delta(&o), "0.0pp");
+    }
+
+    #[test]
+    fn format_delta_returns_dash_for_no_data() {
+        let o = outcome(0, 0, 80.0);
+        assert_eq!(format_delta(&o), "—");
+    }
 }

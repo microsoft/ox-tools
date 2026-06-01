@@ -101,7 +101,7 @@ fn extract_min_lines_percent(metadata: &Value, source: &str) -> Result<Option<f6
     if !(MIN_LINES_LOWER..=MIN_LINES_UPPER).contains(&value) {
         return Err(CoverageGateError::new(format!(
             "invalid coverage-gate min-lines-percent value `{value}` for {source}: \
-             expected a number in {MIN_LINES_LOWER:.1}..={MIN_LINES_UPPER:.1}"
+             expected a value in {MIN_LINES_LOWER:.1}..={MIN_LINES_UPPER:.1}"
         )));
     }
     Ok(Some(value))
