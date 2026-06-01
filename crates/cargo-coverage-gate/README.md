@@ -43,7 +43,7 @@ Setting `min-lines-percent = 0.0` explicitly opts a package out of gating.
 
 `cargo-llvm-cov` exports the same instrumentation run in several
 formats (JSON, lcov, cobertura, codecov-custom-JSON). The gate
-consumes lcov because that is what every other coverage UI fed by
+consumes lcov because that is what every other coverage report fed by
 the same data sees: Codecov ingests lcov uploads directly, ADO
 consumes cobertura that cargo-llvm-cov derives from lcov, and the
 lcov line semantics (“a line is covered if any region on it was
@@ -51,7 +51,7 @@ hit”) match the human reading of “did we hit this line”. The JSON
 export uses a stricter “every region on the line must be hit”
 interpretation that systematically reports a couple of
 percentage-points lower, which makes calibrating thresholds against
-codecov / ADO numbers confusing.
+Codecov / ADO numbers confusing.
 
 ### Binary usage
 
@@ -97,7 +97,7 @@ plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQbeMd-OXFcBm0bmRUrCNlaa-Mbh5mmtfAjdb0bXEoRTJRFNyZhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQbZaxTVU4bFjAbQFGIavV3lAEbu9febtGK_WwbKIAqxzdQy4RhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/design/main.md
  [__link2]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/implementation-plans/0000.md
