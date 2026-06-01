@@ -485,7 +485,10 @@ comparison uses the unrounded `f64`.
 
 The tool reads `Cargo.toml` files and a coverage lcov tracefile. It never
 writes; the only output channels are stdout and the optional summary
-file. No network access, no shell-out, no privileged operations.
+file. No network access, no privileged operations. The only subprocess
+invocation is the read-only `cargo metadata` call performed by
+`cargo_metadata::MetadataCommand::exec()` during workspace discovery
+(used to enumerate workspace members and resolve the workspace root).
 
 ### 10.3 Monorepo / multi-workspace
 
