@@ -102,13 +102,6 @@ pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_pac
 
     let AttributionOutcome { by_member, unattributed } = attribute(&report.files, &workspace.members);
 
-    if !unattributed.is_empty() {
-        eprintln!(
-            "warning: {} coverage entries did not match any workspace member; ignoring",
-            unattributed.len()
-        );
-    }
-
     let mut outcomes: Vec<CrateOutcome> = gated
         .iter()
         .map(|m| {
@@ -148,11 +141,7 @@ fn resolve_gated<'w>(workspace: &'w Workspace, packages: &[String]) -> Result<Ve
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(packages.len());
     for spec in packages {
-        let matches: Vec<&Member> = if is_glob(spec) {
-            workspace.members.iter().filter(|m| glob_matches(spec, &m.name)).collect()
-        } else {
-            workspace.members.iter().filter(|m| m.name == *spec).collect()
-        };
+        let matches: Vec<&Member> = workspace.members.iter().filter(|m| glob_matches(spec, &m.name)).collect();
         if matches.is_empty() {
             return Err(CoverageGateError::new(format!(
                 "`--package` selector `{spec}` did not match any workspace member"
@@ -165,11 +154,6 @@ fn resolve_gated<'w>(workspace: &'w Workspace, packages: &[String]) -> Result<Ve
         }
     }
     Ok(out)
-}
-
-/// True when `spec` contains any cargo-style glob metacharacter.
-fn is_glob(spec: &str) -> bool {
-    spec.contains('*') || spec.contains('?')
 }
 
 /// Tiny Unix-style glob matcher: `*` matches any run of characters
@@ -419,6 +403,10 @@ mod tests {
         // Multiple consecutive `*` collapse.
         assert!(super::glob_matches("a**b", "ab"));
         assert!(super::glob_matches("a**b", "axyzb"));
+        // Pattern with literal chars after `*` that the name doesn't satisfy.
+        // Guards the `pi == p.len()` shortcut in glob_inner from being short-circuited.
+        assert!(!super::glob_matches("a*b", "ac"));
+        assert!(!super::glob_matches("a*b", "axyz"));
     }
 
     #[test]
