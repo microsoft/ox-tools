@@ -569,4 +569,20 @@ mod tests {
         let beta = r.outcomes.iter().find(|o| o.name == "beta").unwrap();
         assert_eq!(beta.status, Status::Ok);
     }
+
+    #[test]
+    fn round_to_displayed_precision_keeps_one_decimal() {
+        // Direct unit test for the rounding helper used by both the renderer
+        // and the pass/fail comparison. Pinning these exact values kills
+        // arithmetic mutants like `*` <-> `/` on the `10.0` factor.
+        fn close(a: f64, b: f64) -> bool {
+            (a - b).abs() < 1e-9
+        }
+        assert!(close(round_to_displayed_precision(0.0), 0.0));
+        assert!(close(round_to_displayed_precision(100.0), 100.0));
+        assert!(close(round_to_displayed_precision(99.94), 99.9));
+        assert!(close(round_to_displayed_precision(99.95), 100.0));
+        assert!(close(round_to_displayed_precision(80.05), 80.1));
+        assert!(close(round_to_displayed_precision(80.04), 80.0));
+    }
 }
