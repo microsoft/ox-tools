@@ -111,7 +111,7 @@ Flags:
 - `-p` / `--package <spec>` — restrict the operation to one or more
   package selectors. Accepts the same idiom as `cargo build`: repeat
   the flag (`-p foo -p bar`) and/or use Unix shell glob patterns
-  (`-p 'tokio-*'`, `-p '*macros'`). The legacy comma-separated form
+  (`-p 'tokio-*'`, `-p '*macros'`). The comma-separated form
   `--package foo,bar` is also accepted. Default: every workspace
   member. CI integrations pass the impacted-package list from their
   test-impact step so that impact-scoped runs only gate the packages
@@ -482,8 +482,9 @@ the same lcov input, regardless of file iteration order. This holds for
 free because the aggregation step sums integer line counters (commutative
 and associative), and the f64 percentage is computed once at the end.
 The displayed value rounds to one decimal place (matching
-cargo-llvm-cov's default text-summary precision); the underlying
-comparison uses the unrounded `f64`.
+cargo-llvm-cov's default text-summary precision), and the pass/fail
+comparison rounds to the same precision before comparing — see
+§10.5 for the rationale.
 
 ### 10.2 Security
 
