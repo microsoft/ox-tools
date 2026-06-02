@@ -5,7 +5,8 @@
 //!
 //! Output is suitable for `$GITHUB_STEP_SUMMARY` (GitHub Actions),
 //! `##vso[task.uploadsummary]` (Azure DevOps), and any other CI
-//! integration that renders GFM-style tables.
+//! integration that renders GFM-style tables. The format matches
+//! section 6.5 of the design doc.
 
 use std::io;
 
