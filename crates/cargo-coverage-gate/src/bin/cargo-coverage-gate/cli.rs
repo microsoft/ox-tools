@@ -36,11 +36,10 @@ pub(crate) struct CoverageGateArgs {
     ///
     /// Accepts the same `-p` / `--package` idiom as `cargo build`:
     /// repeat the flag (`-p foo -p bar`) and/or use Unix glob patterns
-    /// (`-p 'tokio-*'`, `-p 'ohno*'`). The legacy comma-separated form
-    /// `--package foo,bar` is also accepted for back-compat. When unset,
-    /// every workspace member is in scope. CI integrations typically
-    /// pass the impacted-package list from their test-impact step.
-    #[arg(long = "package", short = 'p', alias = "packages", value_name = "SPEC", value_delimiter = ',')]
+    /// (`-p 'tokio-*'`, `-p 'ohno*'`). When unset, every workspace
+    /// member is in scope. CI integrations typically pass the
+    /// impacted-package list from their test-impact step.
+    #[arg(long = "package", short = 'p', value_name = "SPEC")]
     pub(crate) packages: Vec<String>,
 
     /// Write the Markdown verdict table to this file.

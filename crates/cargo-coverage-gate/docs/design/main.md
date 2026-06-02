@@ -111,8 +111,7 @@ Flags:
 - `-p` / `--package <spec>` — restrict the operation to one or more
   package selectors. Accepts the same idiom as `cargo build`: repeat
   the flag (`-p foo -p bar`) and/or use Unix shell glob patterns
-  (`-p 'tokio-*'`, `-p '*macros'`). The comma-separated form
-  `--package foo,bar` is also accepted. Default: every workspace
+  (`-p 'tokio-*'`, `-p '*macros'`). Default: every workspace
   member. CI integrations pass the impacted-package list from their
   test-impact step so that impact-scoped runs only gate the packages
   whose tests actually ran. A selector that matches no member is a
@@ -422,13 +421,13 @@ the lcov / cobertura artifacts. After the test step:
 ```yaml
 - name: Coverage gate
   shell: bash
-  run: cargo coverage-gate -p "$IMPACTED_PACKAGES"
+  run: cargo coverage-gate $PACKAGE_FLAGS
 ```
 
-`$IMPACTED_PACKAGES` is whatever comma-separated list the surrounding
-pipeline produces from its test-impact step (e.g., from `cargo-delta`
-or an equivalent). If you don't do impact scoping, drop the `--package`
-flag and gate every workspace member every run.
+`$PACKAGE_FLAGS` is whatever the surrounding pipeline produces from its
+test-impact step (e.g., from `cargo-delta` or an equivalent), formatted
+as repeated `-p` arguments (`-p alpha -p beta`). If you don't do impact
+scoping, drop the variable and gate every workspace member every run.
 
 The job picks up `$GITHUB_STEP_SUMMARY` automatically and writes the
 verdict table to the workflow-run page above the job log.
@@ -439,7 +438,7 @@ verdict table to the workflow-run page above the job log.
 - bash: |
     summary="$(mktemp).md"
     cargo coverage-gate \
-        -p "$(IMPACTED_PACKAGES)" \
+        $(PACKAGE_FLAGS) \
         --summary-file "$summary"
     echo "##vso[task.uploadsummary]$summary"
   displayName: Coverage gate
