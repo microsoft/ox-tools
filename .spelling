@@ -14,6 +14,7 @@ acyclic
 addrs
 ADO
 agentic
+Agentic
 allocator
 Ani
 api
@@ -23,11 +24,13 @@ AppError
 args
 AspNet
 async
+Async
 auditable
 backend
 backends
 backoff
 backtrace
+Backtraces
 backtraces
 Barbosa
 Base64-encoded
@@ -66,13 +69,16 @@ cfg
 chainable
 Changelog
 chrono
+Chrono
 clippt
+clippy
 Clippy
 clonable
 cobertura
 codebase
 codebases
 Codecov
+codecov
 Codecov's
 combinators
 composability
@@ -90,14 +96,17 @@ Debuggability
 Deduplicate
 deduplicating
 deduplication
+deque
 Deque
 dereferenced
 deserialization
 deserialized
 deserializer
 destructors
+Destructors
 destructured
 dev
+Dev
 DevOps
 DI
 DLLs
@@ -109,6 +118,7 @@ dSMS
 Dyn
 e.g.
 emoji
+enum
 Enum
 enums
 FFI-compatible
@@ -123,6 +133,7 @@ freeform
 frontend
 frontmatter
 fundle
+Fundle
 Fundle's
 getters
 GFM
@@ -146,6 +157,7 @@ inlining
 insta
 integrations
 interop
+Interop
 interoperability
 interoperate
 IOCP
@@ -157,6 +169,7 @@ kebab
 KiB
 Kubernetes
 LCOV
+lcov
 libc
 libs
 libunwind-devel
@@ -165,6 +178,7 @@ liveness
 llvm
 llvm-cov
 llvm-tools
+Macros
 macros
 Makefile
 Markdown
@@ -176,7 +190,9 @@ Metas
 Microservices
 microsoft.com
 middleware
+mimalloc
 Mimalloc
+Miri
 miri
 misconfigured
 mitigations
@@ -195,6 +211,7 @@ Namespace
 NeutralMemoryPool
 NewRelic
 newtype
+newtypes
 Newtypes
 nextest
 Nomicon
@@ -205,6 +222,7 @@ NUMA
 observability
 ohno
 ok
+Ok
 onboard
 onboarding
 oneshot
@@ -223,6 +241,7 @@ pre-heating
 prefixed
 prepend
 prepends
+proc
 Proc
 profiler
 PullRequest
@@ -245,6 +264,7 @@ RPC
 runtime
 runtimes
 rustc
+rustdoc
 Rustdoc
 rustfmt
 Sandana
@@ -254,6 +274,7 @@ scopeguard
 SDKs
 seeked
 SemVer
+serde
 Serde
 Serde-based
 Serde's
@@ -272,6 +293,7 @@ stdout
 struct
 struct's
 structs
+Structs
 subcommand
 subcommands
 submodule
@@ -327,6 +349,7 @@ v4
 v6
 vec
 versioning
+Versioning
 Vijay
 VMs
 vs
