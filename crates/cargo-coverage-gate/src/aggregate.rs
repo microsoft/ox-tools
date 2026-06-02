@@ -8,7 +8,7 @@
 //! is commutative and associative, so two runs over the same data
 //! always produce byte-identical counters.
 
-use crate::lcov_cov::FileEntry;
+use crate::lcov_cov::FileReport;
 
 /// Aggregated line totals for a single crate.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -39,7 +39,7 @@ impl LineTotals {
 /// Order-independent: integer addition is commutative and associative,
 /// so two calls with the same files in any permutation produce the same
 /// totals.
-pub(crate) fn aggregate(files: &[&FileEntry]) -> LineTotals {
+pub(crate) fn aggregate(files: &[&FileReport]) -> LineTotals {
     let mut totals = LineTotals::default();
     for f in files {
         totals.count = totals.count.saturating_add(f.lines_total);
@@ -55,8 +55,8 @@ mod tests {
 
     use super::*;
 
-    fn entry(path: &str, count: u32, covered: u32) -> FileEntry {
-        FileEntry {
+    fn entry(path: &str, count: u32, covered: u32) -> FileReport {
+        FileReport {
             filename: PathBuf::from(path),
             lines_total: count,
             lines_covered: covered,

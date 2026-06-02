@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::lcov_cov::FileEntry;
+use crate::lcov_cov::FileReport;
 use crate::workspace::Member;
 
 /// The result of attributing a list of coverage entries to workspace
@@ -25,13 +25,13 @@ use crate::workspace::Member;
 #[derive(Debug, Default)]
 pub(crate) struct AttributionOutcome<'f> {
     /// File entries grouped by owning member name.
-    pub(crate) by_member: BTreeMap<String, Vec<&'f FileEntry>>,
+    pub(crate) by_member: BTreeMap<String, Vec<&'f FileReport>>,
     /// Files whose path did not match any member's manifest directory.
-    pub(crate) unattributed: Vec<&'f FileEntry>,
+    pub(crate) unattributed: Vec<&'f FileReport>,
 }
 
 /// Group `files` by owning workspace member.
-pub(crate) fn attribute<'f>(files: &'f [FileEntry], members: &[Member]) -> AttributionOutcome<'f> {
+pub(crate) fn attribute<'f>(files: &'f [FileReport], members: &[Member]) -> AttributionOutcome<'f> {
     // Longest-prefix-first: when paths nest, the deeper member wins.
     let mut order: Vec<usize> = (0..members.len()).collect();
     order.sort_by_key(|&i| std::cmp::Reverse(members[i].manifest_dir.components().count()));
@@ -56,8 +56,8 @@ mod tests {
 
     use super::*;
 
-    fn entry(path: &str) -> FileEntry {
-        FileEntry {
+    fn entry(path: &str) -> FileReport {
+        FileReport {
             filename: PathBuf::from(path),
             lines_total: 10,
             lines_covered: 5,
@@ -125,7 +125,7 @@ mod tests {
 
     #[test]
     fn empty_inputs() {
-        let files: Vec<FileEntry> = Vec::new();
+        let files: Vec<FileReport> = Vec::new();
         let members: Vec<Member> = Vec::new();
         let out = attribute(&files, &members);
         assert!(out.by_member.is_empty());

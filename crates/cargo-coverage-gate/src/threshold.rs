@@ -35,8 +35,9 @@ pub(crate) enum ThresholdSource {
 }
 
 impl ThresholdSource {
-    /// Short label used in the verdict table's `Source` column.
-    pub(crate) fn label(self) -> &'static str {
+    /// Short string form of the variant, used in the verdict table's
+    /// `Source` column.
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Package => "package",
             Self::Workspace => "workspace",
@@ -137,9 +138,9 @@ mod tests {
     }
 
     #[test]
-    fn source_labels() {
-        assert_eq!(ThresholdSource::Package.label(), "package");
-        assert_eq!(ThresholdSource::Workspace.label(), "workspace");
-        assert_eq!(ThresholdSource::Default.label(), "default");
+    fn source_as_str() {
+        assert_eq!(ThresholdSource::Package.as_str(), "package");
+        assert_eq!(ThresholdSource::Workspace.as_str(), "workspace");
+        assert_eq!(ThresholdSource::Default.as_str(), "default");
     }
 }

@@ -13,10 +13,6 @@
 //! three-layer lookup, and emits a verdict table to stdout (and,
 //! optionally, to a Markdown summary file for CI step summaries).
 //!
-//! The full design is in [`docs/design/main.md`] in the source tree;
-//! the implementation plan tracking the build is in
-//! [`docs/implementation-plans/0000.md`].
-//!
 //! ## Threshold resolution
 //!
 //! For each workspace member, the effective threshold is the first match
@@ -69,7 +65,7 @@
 //! let lcov = std::fs::read_to_string("target/coverage/lcov.info")?;
 //! let report = cargo_coverage_gate::evaluate(&lcov, None, &[])?;
 //! report.render_text(&mut io::stdout())?;
-//! let code = report.verdict().exit_code();
+//! let code = report.verdict().as_exit_code();
 //! # let _ = code;
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
@@ -85,8 +81,6 @@
 //! plus the appropriate exit code.
 //!
 //! [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
-//! [`docs/design/main.md`]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/design/main.md
-//! [`docs/implementation-plans/0000.md`]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/implementation-plans/0000.md
 
 #![doc(html_logo_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-coverage-gate/logo.png")]
 #![doc(
@@ -126,7 +120,7 @@ pub enum Verdict {
 impl Verdict {
     /// The process exit code associated with this verdict.
     #[must_use]
-    pub fn exit_code(self) -> i32 {
+    pub fn as_exit_code(self) -> i32 {
         match self {
             Self::Pass => 0,
             Self::Fail => 1,
@@ -152,8 +146,10 @@ impl EvaluatedReport {
         self.inner.verdict()
     }
 
-    /// Number of coverage entries whose file paths did not match any
-    /// workspace member. These files are dropped from the aggregation.
+    /// Number of source files in the lcov tracefile whose path did not
+    /// match any workspace member. Such files are dropped from the
+    /// per-package aggregation; this count surfaces them as a single
+    /// aggregated warning rather than per-file noise.
     #[must_use]
     pub fn unattributed_count(&self) -> usize {
         self.inner.unattributed
@@ -208,9 +204,9 @@ mod tests {
 
     #[test]
     fn exit_codes() {
-        assert_eq!(Verdict::Pass.exit_code(), 0);
-        assert_eq!(Verdict::Fail.exit_code(), 1);
-        assert_eq!(Verdict::ConfigError.exit_code(), 2);
+        assert_eq!(Verdict::Pass.as_exit_code(), 0);
+        assert_eq!(Verdict::Fail.as_exit_code(), 1);
+        assert_eq!(Verdict::ConfigError.as_exit_code(), 2);
     }
 
     #[test]

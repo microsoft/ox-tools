@@ -37,12 +37,12 @@ use crate::error::CoverageGateError;
 #[derive(Debug, Clone)]
 pub(crate) struct CoverageReport {
     /// One entry per source file in the tracefile.
-    pub(crate) files: Vec<FileEntry>,
+    pub(crate) files: Vec<FileReport>,
 }
 
 /// Coverage counters for a single source file.
 #[derive(Debug, Clone)]
-pub(crate) struct FileEntry {
+pub(crate) struct FileReport {
     /// Absolute path to the source file as recorded by lcov.
     pub(crate) filename: PathBuf,
     /// Number of distinct executable lines instrumented in the file.
@@ -89,7 +89,7 @@ impl CoverageReport {
                     covered = covered.saturating_add(1);
                 }
             }
-            files.push(FileEntry {
+            files.push(FileReport {
                 filename: key.source_file,
                 lines_total: total,
                 lines_covered: covered,

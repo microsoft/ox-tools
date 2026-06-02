@@ -26,7 +26,7 @@ pub(crate) fn run(args: &CoverageGateArgs) -> Result<ExitCode, AppError> {
         write_summary_file(&report, &path).into_app_err(format!("failed to write summary file `{}`", path.display()))?;
     }
 
-    let code = u8::try_from(report.verdict().exit_code()).expect("Verdict::exit_code only ever produces values in 0..=2");
+    let code = u8::try_from(report.verdict().as_exit_code()).expect("Verdict::as_exit_code only ever produces values in 0..=2");
     Ok(ExitCode::from(code))
 }
 

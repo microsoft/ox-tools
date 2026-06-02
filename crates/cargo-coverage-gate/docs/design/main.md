@@ -188,6 +188,8 @@ header so it renders cleanly in GitHub job summaries and ADO build summaries.
 ### 5.5 Local invocation
 
 ```sh
+# Wipe any stale coverage data so the run reflects only this invocation.
+cargo llvm-cov clean --workspace
 # Run coverage tests (cargo-llvm-cov produces target/coverage/lcov.info).
 cargo llvm-cov nextest --workspace --all-features --locked --no-report
 cargo llvm-cov report --lcov --output-path target/coverage/lcov.info

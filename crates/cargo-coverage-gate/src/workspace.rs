@@ -36,7 +36,7 @@ pub(crate) struct Workspace {
 pub(crate) struct Member {
     /// Cargo package name.
     pub(crate) name: String,
-    /// Directory containing the member's `Cargo.toml`.
+    /// Absolute directory containing this member's `Cargo.toml`.
     pub(crate) manifest_dir: PathBuf,
     /// `min-lines-percent` value from this member's
     /// `[package.metadata.coverage-gate]`, if set.
@@ -44,11 +44,12 @@ pub(crate) struct Member {
 }
 
 impl Workspace {
-    /// Discover the workspace enclosing `manifest_path` (or `CWD` if
-    /// `None`) and load every member's threshold metadata.
+    /// Load workspace metadata for the workspace enclosing
+    /// `manifest_path` (or `CWD` if `None`), capturing each member's
+    /// threshold-related metadata.
     ///
-    /// Does not resolve dependencies — `cargo metadata --no-deps` is
-    /// invoked, which is fast and side-effect-free.
+    /// Runs `cargo metadata --no-deps`, which does not fetch or build
+    /// dependencies and is therefore fast and side-effect-free.
     pub(crate) fn load(manifest_path: Option<&Path>) -> Result<Self, CoverageGateError> {
         let mut cmd = MetadataCommand::new();
         cmd.no_deps();

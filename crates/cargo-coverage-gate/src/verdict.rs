@@ -4,7 +4,7 @@
 //! End-to-end verdict computation.
 //!
 //! Ties together [`attribute`], [`aggregate`], and [`threshold`] to
-//! produce a [`Report`] — one [`CrateOutcome`] per gated package, each
+//! produce a [`Report`] — one [`PackageOutcome`] per gated package, each
 //! classified as [`Status::Ok`], [`Status::Fail`], or
 //! [`Status::NoData`] — and a derived [`Verdict`] usable as a process
 //! exit code.
@@ -12,6 +12,8 @@
 //! [`attribute`]: crate::attribute
 //! [`aggregate`]: crate::aggregate
 //! [`threshold`]: crate::threshold
+
+use std::collections::HashSet;
 
 use crate::Verdict;
 use crate::aggregate::{LineTotals, aggregate};
@@ -28,22 +30,22 @@ use crate::workspace::{Member, Workspace};
 /// the last representable `f64` digit.
 const COMPARE_EPSILON: f64 = 1e-6;
 
-/// Status of a single crate against its threshold.
+/// Status of a single package against its threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Status {
     /// Measured percentage met or exceeded the threshold.
     Ok,
     /// Measured percentage fell below the threshold.
     Fail,
-    /// No coverage data was attributed to the crate. This is treated as
-    /// a configuration error: a package that we asked to gate must have
-    /// some test binary contributing data.
+    /// No coverage data was attributed to the package. This is treated
+    /// as a configuration error: a package that we asked to gate must
+    /// have some test binary contributing data.
     NoData,
 }
 
 /// One row of the verdict report.
 #[derive(Debug, Clone)]
-pub(crate) struct CrateOutcome {
+pub(crate) struct PackageOutcome {
     /// Cargo package name.
     pub(crate) name: String,
     /// Resolved threshold and the layer it came from.
@@ -54,8 +56,9 @@ pub(crate) struct CrateOutcome {
     pub(crate) status: Status,
 }
 
-impl CrateOutcome {
-    /// Measured percentage, or `None` when no data was attributed.
+impl PackageOutcome {
+    /// Measured line-coverage percentage for this package, or `None`
+    /// when no coverage data was attributed (status `NoData`).
     pub(crate) fn percent(&self) -> Option<f64> {
         self.totals.percent()
     }
@@ -65,9 +68,10 @@ impl CrateOutcome {
 #[derive(Debug, Clone)]
 pub(crate) struct Report {
     /// One outcome per gated package, in alphabetical order by name.
-    pub(crate) outcomes: Vec<CrateOutcome>,
-    /// Number of coverage entries that matched no workspace member.
-    /// Surfaced as a single aggregated warning rather than per-file.
+    pub(crate) outcomes: Vec<PackageOutcome>,
+    /// Number of source files in the lcov tracefile whose paths did
+    /// not match any workspace member. Surfaced as a single aggregated
+    /// warning rather than per-file noise.
     pub(crate) unattributed: usize,
 }
 
@@ -102,14 +106,14 @@ pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_pac
 
     let AttributionOutcome { by_member, unattributed } = attribute(&report.files, &workspace.members);
 
-    let mut outcomes: Vec<CrateOutcome> = gated
+    let mut outcomes: Vec<PackageOutcome> = gated
         .iter()
         .map(|m| {
             let attrib = by_member.get(m.name.as_str()).map_or(&[][..], Vec::as_slice);
             let totals = aggregate(attrib);
             let threshold = Threshold::resolve(m, workspace);
             let status = classify(totals, threshold);
-            CrateOutcome {
+            PackageOutcome {
                 name: m.name.clone(),
                 threshold,
                 totals,
@@ -138,7 +142,7 @@ fn resolve_gated<'w>(workspace: &'w Workspace, packages: &[String]) -> Result<Ve
     if packages.is_empty() {
         return Ok(workspace.members.iter().collect());
     }
-    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut seen: HashSet<&str> = HashSet::new();
     let mut out = Vec::with_capacity(packages.len());
     for spec in packages {
         let matches: Vec<&Member> = workspace.members.iter().filter(|m| glob_matches(spec, &m.name)).collect();
@@ -241,11 +245,11 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
-    use crate::lcov_cov::FileEntry;
+    use crate::lcov_cov::FileReport;
     use crate::threshold::ThresholdSource;
 
-    fn make_file(path: &str, count: u32, covered: u32) -> FileEntry {
-        FileEntry {
+    fn make_file(path: &str, count: u32, covered: u32) -> FileReport {
+        FileReport {
             filename: PathBuf::from(path),
             lines_total: count,
             lines_covered: covered,
@@ -260,7 +264,7 @@ mod tests {
         }
     }
 
-    fn make_report(files: Vec<FileEntry>) -> CoverageReport {
+    fn make_report(files: Vec<FileReport>) -> CoverageReport {
         CoverageReport { files }
     }
 

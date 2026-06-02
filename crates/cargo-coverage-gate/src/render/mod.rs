@@ -18,20 +18,20 @@ pub(crate) mod markdown;
 pub(crate) mod text;
 
 use crate::threshold::ThresholdSource;
-use crate::verdict::{CrateOutcome, Status};
+use crate::verdict::{PackageOutcome, Status};
 
 /// Human-readable text for the `Lines` column.
-fn format_lines(outcome: &CrateOutcome) -> String {
+fn format_lines(outcome: &PackageOutcome) -> String {
     outcome.percent().map_or_else(|| "(no data)".to_owned(), |p| format!("{p:.1}%"))
 }
 
 /// Human-readable text for the `Threshold` column.
-fn format_threshold(outcome: &CrateOutcome) -> String {
+fn format_threshold(outcome: &PackageOutcome) -> String {
     format!("{:.1}%", outcome.threshold.min_lines_percent)
 }
 
 /// Human-readable text for the `Δ vs threshold` column.
-fn format_delta(outcome: &CrateOutcome) -> String {
+fn format_delta(outcome: &PackageOutcome) -> String {
     let Some(pct) = outcome.percent() else {
         return "—".to_owned();
     };
@@ -63,24 +63,43 @@ fn format_status_markdown(status: Status) -> &'static str {
     match status {
         Status::Ok => "✅",
         Status::Fail => "❌",
-        Status::NoData => "⚠️",
+        Status::NoData => "💥",
     }
 }
 
 /// Source-column label.
 fn format_source(source: ThresholdSource) -> &'static str {
-    source.label()
+    source.as_str()
 }
 
 /// Number of packages below threshold (`Fail` only — `NoData` is a
 /// configuration error and is summarized separately).
-fn count_failures(outcomes: &[CrateOutcome]) -> usize {
+fn count_failures(outcomes: &[PackageOutcome]) -> usize {
     outcomes.iter().filter(|o| o.status == Status::Fail).count()
 }
 
 /// Number of packages with no attributed coverage data.
-fn count_no_data(outcomes: &[CrateOutcome]) -> usize {
+fn count_no_data(outcomes: &[PackageOutcome]) -> usize {
     outcomes.iter().filter(|o| o.status == Status::NoData).count()
+}
+
+/// Format `n` followed by `singular` when `n == 1`, else `plural`.
+fn plural(n: usize, singular: &str, plural: &str) -> String {
+    if n == 1 {
+        format!("{n} {singular}")
+    } else {
+        format!("{n} {plural}")
+    }
+}
+
+/// "1 package" / "N packages".
+fn packages(n: usize) -> String {
+    plural(n, "package", "packages")
+}
+
+/// "1 file" / "N files".
+fn files(n: usize) -> String {
+    plural(n, "file", "files")
 }
 
 #[cfg(test)]
@@ -90,8 +109,8 @@ mod tests {
     use crate::aggregate::LineTotals;
     use crate::threshold::Threshold;
 
-    fn outcome(count: u32, covered: u32, threshold: f64) -> CrateOutcome {
-        CrateOutcome {
+    fn outcome(count: u32, covered: u32, threshold: f64) -> PackageOutcome {
+        PackageOutcome {
             name: "x".to_owned(),
             threshold: Threshold {
                 min_lines_percent: threshold,
@@ -146,5 +165,15 @@ mod tests {
     fn format_delta_returns_dash_for_no_data() {
         let o = outcome(0, 0, 80.0);
         assert_eq!(format_delta(&o), "—");
+    }
+
+    #[test]
+    fn plural_helpers_pick_singular_only_for_one() {
+        assert_eq!(packages(0), "0 packages");
+        assert_eq!(packages(1), "1 package");
+        assert_eq!(packages(2), "2 packages");
+        assert_eq!(files(0), "0 files");
+        assert_eq!(files(1), "1 file");
+        assert_eq!(files(2), "2 files");
     }
 }

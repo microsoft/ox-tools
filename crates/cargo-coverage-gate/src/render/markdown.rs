@@ -10,7 +10,9 @@
 
 use std::io;
 
-use crate::render::{count_failures, count_no_data, format_delta, format_lines, format_source, format_status_markdown, format_threshold};
+use crate::render::{
+    count_failures, count_no_data, files, format_delta, format_lines, format_source, format_status_markdown, format_threshold, packages,
+};
 use crate::verdict::Report;
 
 /// Render `report` as a GFM table to `out`.
@@ -37,15 +39,15 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
     let no_data = count_no_data(&report.outcomes);
     match (failures, no_data) {
         (0, 0) => writeln!(out, "**Result:** all packages meet their threshold.")?,
-        (n, 0) => writeln!(out, "**Result:** {n} package(s) below threshold.")?,
-        (0, n) => writeln!(out, "**Result:** {n} package(s) with no attributed coverage data.")?,
-        (f, d) => writeln!(out, "**Result:** {f} package(s) below threshold, {d} with no attributed data.")?,
+        (n, 0) => writeln!(out, "**Result:** {} below threshold.", packages(n))?,
+        (0, n) => writeln!(out, "**Result:** {} with no attributed coverage data.", packages(n))?,
+        (f, d) => writeln!(out, "**Result:** {} below threshold, {d} with no attributed data.", packages(f))?,
     }
     if report.unattributed > 0 {
         writeln!(
             out,
-            "_Note: {n} file(s) had paths outside any workspace member and were not attributed._",
-            n = report.unattributed,
+            "_Note: {} had paths outside any workspace member and were not attributed._",
+            files(report.unattributed),
         )?;
     }
     Ok(())
@@ -57,10 +59,10 @@ mod tests {
     use super::*;
     use crate::aggregate::LineTotals;
     use crate::threshold::{Threshold, ThresholdSource};
-    use crate::verdict::{CrateOutcome, Status};
+    use crate::verdict::{PackageOutcome, Status};
 
-    fn outcome(name: &str, count: u32, covered: u32, threshold: f64, source: ThresholdSource, status: Status) -> CrateOutcome {
-        CrateOutcome {
+    fn outcome(name: &str, count: u32, covered: u32, threshold: f64, source: ThresholdSource, status: Status) -> PackageOutcome {
+        PackageOutcome {
             name: name.to_owned(),
             threshold: Threshold {
                 min_lines_percent: threshold,
@@ -101,7 +103,7 @@ mod tests {
         let s = render_to_string(&report);
         assert!(s.contains("| ✅ |"));
         assert!(s.contains("| ❌ |"));
-        assert!(s.contains("1 package(s) below threshold"));
+        assert!(s.contains("1 package below threshold"));
     }
 
     #[test]
@@ -112,7 +114,7 @@ mod tests {
         };
         let s = render_to_string(&report);
         assert!(s.contains("| (no data) |"));
-        assert!(s.contains("| ⚠️ |"));
+        assert!(s.contains("| 💥 |"));
         assert!(s.contains("no attributed coverage data"));
     }
 
@@ -124,7 +126,7 @@ mod tests {
         };
         let s = render_to_string(&report);
         assert!(s.contains("_Note:"), "expected italicized unattributed warning, got:\n{s}");
-        assert!(s.contains("2 file(s)"));
+        assert!(s.contains("2 files"));
     }
 
     #[test]
