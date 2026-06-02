@@ -68,7 +68,9 @@ impl Workspace {
                 let manifest_dir = pkg
                     .manifest_path
                     .parent()
-                    .map_or_else(|| PathBuf::from(pkg.manifest_path.as_str()), |p| PathBuf::from(p.as_str()));
+                    .expect("cargo-metadata always reports a manifest file path with a parent directory")
+                    .as_std_path()
+                    .to_path_buf();
                 let min_lines_percent = extract_min_lines_percent(&pkg.metadata, &pkg.name)?;
                 Ok::<Member, CoverageGateError>(Member {
                     name: pkg.name.to_string(),
