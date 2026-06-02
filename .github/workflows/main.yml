@@ -20,7 +20,7 @@ jobs:
     steps:
       # prep
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v6.0.3
       - name: Setup
         uses: ./.github/actions/setup
         with:
@@ -54,7 +54,7 @@ jobs:
     steps:
       # prep
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v6.0.3
       - name: Setup
         uses: ./.github/actions/setup
         with:
@@ -94,7 +94,7 @@ jobs:
     steps:
       # prep
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v6.0.3
         with:
           fetch-depth: 1
       - name: Setup
@@ -114,7 +114,7 @@ jobs:
     steps:
       # prep
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v6.0.3
         with:
           fetch-depth: 0
       - name: Setup
@@ -180,7 +180,7 @@ jobs:
     steps:
       # prep
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v6.0.3
       - name: Setup
         uses: ./.github/actions/setup
         with:
@@ -206,7 +206,7 @@ jobs:
     steps:
       # prep
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v6.0.3
         with:
           fetch-depth: 0
       - name: Setup
@@ -235,7 +235,7 @@ jobs:
     steps:
       # prep
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v6.0.3
       - name: Setup
         uses: ./.github/actions/setup
         with:
@@ -285,7 +285,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v6.0.3
       - name: Setup
         uses: ./.github/actions/setup
         with:
@@ -301,7 +301,7 @@ jobs:
     steps:
       # prep
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        uses: actions/checkout@v6.0.3
       - name: Setup
         uses: ./.github/actions/setup
         with:
