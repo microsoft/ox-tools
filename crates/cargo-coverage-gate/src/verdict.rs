@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use crate::Verdict;
 use crate::aggregate::{LineTotals, aggregate};
 use crate::attribute::{AttributionOutcome, attribute};
-use crate::error::CoverageGateError;
+use crate::error::{CoverageGateError, UnknownPackageSelectorError};
 use crate::lcov_cov::CoverageReport;
 use crate::threshold::Threshold;
 use crate::workspace::{Member, Workspace};
@@ -140,9 +140,7 @@ fn resolve_gated<'w>(workspace: &'w Workspace, packages: &[String]) -> Result<Ve
     for spec in packages {
         let matches: Vec<&Member> = workspace.members.iter().filter(|m| glob_matches(spec, &m.name)).collect();
         if matches.is_empty() {
-            return Err(CoverageGateError::new(format!(
-                "`--package` selector `{spec}` did not match any workspace member"
-            )));
+            return Err(UnknownPackageSelectorError::new(spec.clone()).into());
         }
         for m in matches {
             if seen.insert(m.name.as_str()) {

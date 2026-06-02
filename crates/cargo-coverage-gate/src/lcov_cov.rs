@@ -31,7 +31,9 @@
 use std::path::Path;
 use std::path::PathBuf;
 
-use crate::error::CoverageGateError;
+#[cfg(test)]
+use crate::error::ReadLcovError;
+use crate::error::{CoverageGateError, ParseLcovError};
 
 /// Per-file line-coverage view of a parsed lcov tracefile.
 #[derive(Debug, Clone)]
@@ -58,10 +60,10 @@ impl CoverageReport {
     ///
     /// Returns [`CoverageGateError`] if the input is not a well-formed
     /// lcov tracefile.
+    #[ohno::enrich_err("failed to parse lcov tracefile")]
     pub(crate) fn from_str(input: &str) -> Result<Self, CoverageGateError> {
         let reader = lcov::Reader::new(input.as_bytes());
-        let report =
-            lcov::Report::from_reader(reader).map_err(|e| CoverageGateError::caused_by("failed to parse lcov tracefile".to_owned(), e))?;
+        let report = lcov::Report::from_reader(reader).map_err(ParseLcovError::from)?;
         Ok(Self::from_lcov_report(report))
     }
 
@@ -72,9 +74,9 @@ impl CoverageReport {
     /// Returns [`CoverageGateError`] if the file cannot be read or is
     /// not a well-formed lcov tracefile.
     #[cfg(test)]
+    #[ohno::enrich_err("failed to read lcov tracefile `{}`", path.display())]
     pub(crate) fn from_path(path: &Path) -> Result<Self, CoverageGateError> {
-        let report = lcov::Report::from_file(path)
-            .map_err(|e| CoverageGateError::caused_by(format!("failed to read lcov tracefile `{}`", path.display()), e))?;
+        let report = lcov::Report::from_file(path).map_err(|e| ReadLcovError::caused_by(path.display().to_string(), e))?;
         Ok(Self::from_lcov_report(report))
     }
 

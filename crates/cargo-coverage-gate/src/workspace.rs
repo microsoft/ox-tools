@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use cargo_metadata::MetadataCommand;
 use serde_json::Value;
 
-use crate::error::CoverageGateError;
+use crate::error::{CoverageGateError, InvalidThresholdValueError, LoadMetadataError, ThresholdOutOfRangeError};
 
 /// Lower bound on `min-lines-percent` values.
 const MIN_LINES_LOWER: f64 = 0.0;
@@ -50,15 +50,14 @@ impl Workspace {
     ///
     /// Runs `cargo metadata --no-deps`, which does not fetch or build
     /// dependencies and is therefore fast and side-effect-free.
+    #[ohno::enrich_err("failed to load cargo workspace metadata")]
     pub(crate) fn load(manifest_path: Option<&Path>) -> Result<Self, CoverageGateError> {
         let mut cmd = MetadataCommand::new();
         cmd.no_deps();
         if let Some(path) = manifest_path {
             cmd.manifest_path(path);
         }
-        let metadata = cmd
-            .exec()
-            .map_err(|source| CoverageGateError::caused_by("failed to load workspace metadata".to_owned(), source))?;
+        let metadata = cmd.exec().map_err(LoadMetadataError::caused_by)?;
 
         let workspace_default = extract_min_lines_percent(&metadata.workspace_metadata, "workspace")?;
 
@@ -98,12 +97,9 @@ fn extract_min_lines_percent(metadata: &Value, source: &str) -> Result<Option<f6
     };
     let value = min
         .as_f64()
-        .ok_or_else(|| CoverageGateError::new(format!("{source}: `coverage-gate.min-lines-percent` must be a number, got {min}")))?;
+        .ok_or_else(|| InvalidThresholdValueError::new(source.to_owned(), min.clone()))?;
     if !(MIN_LINES_LOWER..=MIN_LINES_UPPER).contains(&value) {
-        return Err(CoverageGateError::new(format!(
-            "invalid coverage-gate min-lines-percent value `{value}` for {source}: \
-             expected a value in {MIN_LINES_LOWER:.1}..={MIN_LINES_UPPER:.1}"
-        )));
+        return Err(ThresholdOutOfRangeError::new(source.to_owned(), value, MIN_LINES_LOWER, MIN_LINES_UPPER).into());
     }
     Ok(Some(value))
 }
