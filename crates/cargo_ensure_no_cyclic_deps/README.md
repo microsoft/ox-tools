@@ -3,7 +3,7 @@
 
 # Cargo-Ensure-No-Cyclic-Deps
 
-[![crate.io](https://img.shields.io/crates/v/cargo-ensure-no-cyclic-deps.svg)](https://crates.io/crates/cargo-ensure-no-cyclic-deps)
+[![crates.io](https://img.shields.io/crates/v/cargo-ensure-no-cyclic-deps.svg)](https://crates.io/crates/cargo-ensure-no-cyclic-deps)
 [![docs.rs](https://docs.rs/cargo-ensure-no-cyclic-deps/badge.svg)](https://docs.rs/cargo-ensure-no-cyclic-deps)
 [![MSRV](https://img.shields.io/crates/msrv/cargo-ensure-no-cyclic-deps)](https://crates.io/crates/cargo-ensure-no-cyclic-deps)
 [![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
