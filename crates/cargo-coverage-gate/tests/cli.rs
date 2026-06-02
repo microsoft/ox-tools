@@ -110,7 +110,7 @@ fn all_pass_mixed_sources() {
         ],
         Some("75"),
     );
-    let json = write_lcov(
+    let lcov_path = write_lcov(
         tmp.path(),
         &[
             ("alpha/src/lib.rs", 100, 95),
@@ -120,7 +120,7 @@ fn all_pass_mixed_sources() {
     );
 
     coverage_gate(tmp.path())
-        .args(["--lcov", &json])
+        .args(["--lcov", &lcov_path])
         .assert()
         .success()
         .stdout(predicate::str::contains("alpha"))
@@ -137,10 +137,10 @@ fn all_pass_mixed_sources() {
 fn one_crate_below_threshold_exits_1() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80")), ("beta", Some("80"))], None);
-    let json = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95), ("beta/src/lib.rs", 100, 60)]);
+    let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95), ("beta/src/lib.rs", 100, 60)]);
 
     coverage_gate(tmp.path())
-        .args(["--lcov", &json])
+        .args(["--lcov", &lcov_path])
         .assert()
         .code(1)
         .stdout(predicate::str::contains("FAIL"))
@@ -153,10 +153,10 @@ fn gated_crate_with_no_data_exits_2() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80")), ("beta", Some("80"))], None);
     // Only alpha has data; beta has none.
-    let json = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95)]);
+    let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95)]);
 
     coverage_gate(tmp.path())
-        .args(["--lcov", &json])
+        .args(["--lcov", &lcov_path])
         .assert()
         .code(2)
         .stdout(predicate::str::contains("NO DATA"))
@@ -168,11 +168,11 @@ fn gated_crate_with_no_data_exits_2() {
 fn package_flag_restricts_scope() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80")), ("beta", Some("80"))], None);
-    let json = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95), ("beta/src/lib.rs", 100, 50)]);
+    let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95), ("beta/src/lib.rs", 100, 50)]);
 
     // Only gate alpha; beta would fail but is out of scope.
     coverage_gate(tmp.path())
-        .args(["--lcov", &json, "-p", "alpha"])
+        .args(["--lcov", &lcov_path, "-p", "alpha"])
         .assert()
         .success()
         .stdout(predicate::str::contains("alpha"))
@@ -188,7 +188,7 @@ fn package_flag_accepts_repeated_short_form() {
         &[("alpha", Some("80")), ("beta", Some("80")), ("gamma", Some("80"))],
         None,
     );
-    let json = write_lcov(
+    let lcov_path = write_lcov(
         tmp.path(),
         &[
             ("alpha/src/lib.rs", 100, 95),
@@ -199,7 +199,7 @@ fn package_flag_accepts_repeated_short_form() {
 
     // -p repeated, cargo-style. gamma should be excluded.
     coverage_gate(tmp.path())
-        .args(["--lcov", &json, "-p", "alpha", "-p", "beta"])
+        .args(["--lcov", &lcov_path, "-p", "alpha", "-p", "beta"])
         .assert()
         .success()
         .stdout(predicate::str::contains("alpha"))
@@ -216,7 +216,7 @@ fn package_flag_accepts_glob_pattern() {
         &[("alpha", Some("80")), ("alpha_macros", Some("80")), ("beta", Some("80"))],
         None,
     );
-    let json = write_lcov(
+    let lcov_path = write_lcov(
         tmp.path(),
         &[
             ("alpha/src/lib.rs", 100, 95),
@@ -226,7 +226,7 @@ fn package_flag_accepts_glob_pattern() {
     );
 
     coverage_gate(tmp.path())
-        .args(["--lcov", &json, "-p", "alpha*"])
+        .args(["--lcov", &lcov_path, "-p", "alpha*"])
         .assert()
         .success()
         .stdout(predicate::str::contains("alpha "))
@@ -239,10 +239,10 @@ fn package_flag_accepts_glob_pattern() {
 fn package_flag_with_unknown_name_exits_2() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", None)], None);
-    let json = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 100)]);
+    let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 100)]);
 
     coverage_gate(tmp.path())
-        .args(["--lcov", &json, "-p", "typo"])
+        .args(["--lcov", &lcov_path, "-p", "typo"])
         .assert()
         .code(2)
         .stderr(predicate::str::contains("typo"));
@@ -253,11 +253,11 @@ fn package_flag_with_unknown_name_exits_2() {
 fn summary_file_flag_writes_markdown() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80"))], None);
-    let json = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95)]);
+    let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95)]);
     let summary = tmp.path().join("summary.md");
 
     coverage_gate(tmp.path())
-        .args(["--lcov", &json, "--summary-file", summary.to_str().expect("utf-8")])
+        .args(["--lcov", &lcov_path, "--summary-file", summary.to_str().expect("utf-8")])
         .assert()
         .success();
 
@@ -272,7 +272,7 @@ fn summary_file_flag_writes_markdown() {
 fn github_step_summary_env_is_auto_detected() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80"))], None);
-    let json = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95)]);
+    let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95)]);
     let summary = tmp.path().join("step-summary.md");
 
     Command::cargo_bin("cargo-coverage-gate")
@@ -281,7 +281,7 @@ fn github_step_summary_env_is_auto_detected() {
         .arg("coverage-gate")
         .env("GITHUB_STEP_SUMMARY", &summary)
         .env_remove("COVERAGE_GATE_SUMMARY")
-        .args(["--lcov", &json])
+        .args(["--lcov", &lcov_path])
         .assert()
         .success();
 
@@ -295,11 +295,11 @@ fn github_step_summary_env_is_auto_detected() {
 fn quiet_suppresses_stdout_but_still_writes_summary() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80"))], None);
-    let json = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95)]);
+    let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95)]);
     let summary = tmp.path().join("summary.md");
 
     coverage_gate(tmp.path())
-        .args(["--lcov", &json, "--summary-file", summary.to_str().expect("utf-8"), "--quiet"])
+        .args(["--lcov", &lcov_path, "--summary-file", summary.to_str().expect("utf-8"), "--quiet"])
         .assert()
         .success()
         .stdout(predicate::str::is_empty());
@@ -360,10 +360,10 @@ fn default_threshold_is_100_when_nothing_configured() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", None)], None);
     // 95% < 100% built-in default, so this must fail.
-    let json = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95)]);
+    let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95)]);
 
     coverage_gate(tmp.path())
-        .args(["--lcov", &json])
+        .args(["--lcov", &lcov_path])
         .assert()
         .code(1)
         .stdout(predicate::str::contains("100.0%"))

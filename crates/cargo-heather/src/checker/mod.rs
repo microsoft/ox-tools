@@ -14,9 +14,9 @@ mod extract;
 mod matcher;
 mod strip;
 
-use crate::comment::{CommentStyle, FileKind};
-
 use matcher::header_matches;
+
+use crate::comment::{CommentStyle, FileKind};
 
 /// Result of checking a single file's header.
 #[derive(Debug, Clone, PartialEq, Eq)]
