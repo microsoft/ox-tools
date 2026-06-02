@@ -23,13 +23,6 @@ use crate::lcov_cov::CoverageReport;
 use crate::threshold::Threshold;
 use crate::workspace::{Member, Workspace};
 
-/// Tolerance used when comparing measured percentages to thresholds.
-///
-/// A tight epsilon avoids spurious failures when the stored JSON
-/// percentage and the recomputed-from-counters percentage differ at
-/// the last representable `f64` digit.
-const COMPARE_EPSILON: f64 = 1e-6;
-
 /// Status of a single package against its threshold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Status {
@@ -223,20 +216,28 @@ fn classify(totals: LineTotals, threshold: Threshold) -> Status {
     // any) coverage data was attributed to it. The schema rejects
     // negative values, so this is effectively an exact-zero check;
     // expressing it as `<= 0.0` keeps the predicate robust against
-    // any future plumbing that might surface a `-0.0`. We deliberately
-    // do NOT use `COMPARE_EPSILON` here -- a tiny but non-zero
-    // configured threshold should still gate.
+    // any future plumbing that might surface a `-0.0`.
     if threshold.min_lines_percent <= 0.0 {
         return Status::Ok;
     }
     let Some(pct) = totals.percent() else {
         return Status::NoData;
     };
-    if pct + COMPARE_EPSILON >= threshold.min_lines_percent {
+    // Compare at the displayed precision (one decimal place) by rounding
+    // both sides. This guarantees the rendered "Δ vs threshold" column
+    // always agrees with the pass/fail verdict: anything that prints as
+    // ≥ the threshold passes, anything that prints as below it fails.
+    // No separate tolerance constant to tune.
+    if round_to_displayed_precision(pct) >= round_to_displayed_precision(threshold.min_lines_percent) {
         Status::Ok
     } else {
         Status::Fail
     }
+}
+
+/// Round to the one-decimal-place precision used by the renderer.
+fn round_to_displayed_precision(pct: f64) -> f64 {
+    (pct * 10.0).round() / 10.0
 }
 
 #[cfg(test)]
@@ -463,11 +464,53 @@ mod tests {
     }
 
     #[test]
-    fn epsilon_protects_against_floating_point_equality() {
-        // 82.0 = 82.0 must not fail due to f64 representation jitter.
+    fn exact_threshold_match_passes() {
+        // 82.0 = 82.0 must pass even if f64 arithmetic introduces sub-bit jitter,
+        // because both sides round to the same displayed value.
         let totals = LineTotals { count: 100, covered: 82 };
         let threshold = Threshold {
             min_lines_percent: 82.0,
+            source: ThresholdSource::Default,
+        };
+        assert_eq!(classify(totals, threshold), Status::Ok);
+    }
+
+    #[test]
+    fn measured_rounds_up_to_threshold_passes() {
+        // 81.95% renders as "82.0%" — it must pass an 82.0 threshold so the
+        // rendered Δ column ("0.0pp" or "+0.1pp") agrees with the verdict.
+        let totals = LineTotals {
+            count: 10_000,
+            covered: 8_195,
+        };
+        let threshold = Threshold {
+            min_lines_percent: 82.0,
+            source: ThresholdSource::Default,
+        };
+        assert_eq!(classify(totals, threshold), Status::Ok);
+    }
+
+    #[test]
+    fn measured_rounds_down_below_threshold_fails() {
+        // 81.94% renders as "81.9%" — it must fail an 82.0 threshold so the
+        // rendered Δ column ("-0.1pp") agrees with the verdict.
+        let totals = LineTotals {
+            count: 10_000,
+            covered: 8_194,
+        };
+        let threshold = Threshold {
+            min_lines_percent: 82.0,
+            source: ThresholdSource::Default,
+        };
+        assert_eq!(classify(totals, threshold), Status::Fail);
+    }
+
+    #[test]
+    fn threshold_rounds_to_match_measured() {
+        // 82.04 threshold renders as "82.0%", so 82.0% measured must pass.
+        let totals = LineTotals { count: 100, covered: 82 };
+        let threshold = Threshold {
+            min_lines_percent: 82.04,
             source: ThresholdSource::Default,
         };
         assert_eq!(classify(totals, threshold), Status::Ok);
@@ -497,11 +540,11 @@ mod tests {
     }
 
     #[test]
-    fn sub_epsilon_threshold_is_not_treated_as_opt_out() {
+    fn tiny_non_zero_threshold_is_not_treated_as_opt_out() {
         // Only an exact zero threshold opts a package out. A tiny but
-        // non-zero configured threshold (well below COMPARE_EPSILON)
-        // must still gate: a package with no attributed coverage data
-        // is reported as NoData, not silently passed.
+        // non-zero configured threshold must still gate: a package with
+        // no attributed coverage data is reported as NoData, not silently
+        // passed.
         let totals = LineTotals { count: 0, covered: 0 };
         let threshold = Threshold {
             min_lines_percent: 1e-9,

@@ -36,9 +36,10 @@ fn format_delta(outcome: &PackageOutcome) -> String {
         return "—".to_owned();
     };
     let delta = pct - outcome.threshold.min_lines_percent;
-    // Round to the displayed precision (one decimal place) before choosing a sign so
-    // sub-precision floating-point noise doesn't render as a misleading "-0.0pp" or
-    // "+0.0pp". Verdict classification uses an epsilon; the rendered value should agree.
+    // Round to the displayed precision (one decimal place) before choosing a sign
+    // so sub-precision floating-point noise doesn't render as a misleading
+    // "-0.0pp" or "+0.0pp". Verdict classification also rounds to one decimal
+    // place, so the rendered value always agrees with the OK/FAIL status.
     let rounded = (delta * 10.0).round() / 10.0;
     if rounded > 0.0 {
         format!("+{rounded:.1}pp")

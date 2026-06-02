@@ -531,10 +531,12 @@ Rust with `cargo-llvm-cov ≥ 0.7`**. Two reasons:
 
 ### 10.5 Float comparison
 
-Percentage comparisons use a small epsilon (`1e-6`) to avoid "82.0% <
-82.0%" failures from floating-point representation of either side. The
-displayed value is rounded to one decimal; the underlying compare uses
-the raw value plus epsilon.
+Percentage comparisons round both sides to the displayed precision (one
+decimal place) before comparing: `round(pct * 10) >= round(threshold * 10)`.
+This guarantees the rendered "Δ vs threshold" column always agrees with the
+pass/fail verdict — anything that prints as ≥ the threshold passes,
+anything that prints as below it fails. There is no separate tolerance
+constant to tune.
 
 ## 11. Out-of-Scope, Possible Extensions
 
