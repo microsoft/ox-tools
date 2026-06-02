@@ -22,7 +22,6 @@ homepage = "https://github.com/microsoft/ox-tools"
 
 [workspace.dependencies]
 # local dependencies
-cargo-coverage-gate = { path = "crates/cargo-coverage-gate", default-features = false, version = "0.1.0" }
 cargo-heather = { path = "crates/cargo-heather", default-features = false, version = "0.2.1" }
 
 # external dependencies

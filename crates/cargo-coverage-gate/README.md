@@ -22,10 +22,6 @@ coverage lcov tracefile, resolves each package’s threshold from a small
 three-layer lookup, and emits a verdict table to stdout (and,
 optionally, to a Markdown summary file for CI step summaries).
 
-The full design is in [`docs/design/main.md`][__link1] in the source tree;
-the implementation plan tracking the build is in
-[`docs/implementation-plans/0000.md`][__link2].
-
 ### Threshold resolution
 
 For each workspace member, the effective threshold is the first match
@@ -78,16 +74,16 @@ use std::io;
 let lcov = std::fs::read_to_string("target/coverage/lcov.info")?;
 let report = cargo_coverage_gate::evaluate(&lcov, None, &[])?;
 report.render_text(&mut io::stdout())?;
-let code = report.verdict().exit_code();
+let code = report.verdict().as_exit_code();
 ```
 
 ### Public API
 
-The library exposes [`evaluate`][__link3], which returns an
-[`EvaluatedReport`][__link4]. The report can be rendered as plain text via
-[`EvaluatedReport::render_text`][__link5] or as GitHub-flavored Markdown
-via [`EvaluatedReport::render_markdown`][__link6], and reduced to a single
-[`Verdict`][__link7] via [`EvaluatedReport::verdict`][__link8]. The accompanying
+The library exposes [`evaluate`][__link1], which returns an
+[`EvaluatedReport`][__link2]. The report can be rendered as plain text via
+[`EvaluatedReport::render_text`][__link3] or as GitHub-flavored Markdown
+via [`EvaluatedReport::render_markdown`][__link4], and reduced to a single
+[`Verdict`][__link5] via [`EvaluatedReport::verdict`][__link6]. The accompanying
 binary loads the lcov tracefile from disk and orchestrates rendering
 plus the appropriate exit code.
 
@@ -97,13 +93,11 @@ plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQb4M9WxX2urrob3CUaovPkShUblckLlGIN-O0bJwk2aN4xpslhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbYLuo4OFUWT8bvMCT2d1BCU8bCvLHCBSvMr0bKR38GpAvnJ5hYvRhcoQbeF2LfR_ePK8byPyoats3EC8bsrxruYf7nAgbR5nohqd2NEZhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
- [__link1]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/design/main.md
- [__link2]: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-coverage-gate/docs/implementation-plans/0000.md
- [__link3]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/fn.evaluate.html
- [__link4]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/struct.EvaluatedReport.html
- [__link5]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
- [__link6]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
- [__link7]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/enum.Verdict.html
- [__link8]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
+ [__link1]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/fn.evaluate.html
+ [__link2]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/struct.EvaluatedReport.html
+ [__link3]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
+ [__link4]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
+ [__link5]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/enum.Verdict.html
+ [__link6]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
