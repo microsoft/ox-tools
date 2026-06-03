@@ -9,8 +9,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cargo_heather::HeatherError;
-use cargo_heather::license;
+use cargo_heather::{HeatherError, license};
 use serde::Deserialize;
 
 /// The default configuration file name.

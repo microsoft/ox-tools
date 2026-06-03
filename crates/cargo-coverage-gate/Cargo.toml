@@ -1,0 +1,47 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-coverage-gate"
+description = "A cargo subcommand that gates pull requests on per-package line coverage measured by cargo-llvm-cov"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["oxidizer", "cargo", "subcommand", "coverage", "ci"]
+categories = ["command-line-utilities", "development-tools::cargo-plugins"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.cargo_check_external_types]
+# The `#[ohno::error]` attribute on `CoverageGateError` implements
+# traits in `ohno` that transitively appear in the public API. Allow
+# the whole `ohno` namespace rather than tracking individual items
+# we are forced to re-expose.
+allowed_external_types = ["ohno::*"]
+
+[[bin]]
+name = "cargo-coverage-gate"
+path = "src/bin/cargo-coverage-gate/main.rs"
+
+[dependencies]
+cargo_metadata = { workspace = true }
+clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+lcov = { workspace = true }
+mutants = { workspace = true }
+ohno = { workspace = true, features = ["app-err"] }
+serde_json = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

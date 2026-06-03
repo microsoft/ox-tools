@@ -77,8 +77,9 @@ impl std::error::Error for HeatherError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::error::Error;
+
+    use super::*;
 
     #[test]
     fn file_read_error_exposes_source() {

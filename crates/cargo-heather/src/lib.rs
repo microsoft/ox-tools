@@ -23,7 +23,7 @@
 //! process, and writing results back to disk.
 //!
 //! ```no_run
-//! use cargo_heather::{check, fix, CheckResult, FileKind};
+//! use cargo_heather::{CheckResult, FileKind, check, fix};
 //!
 //! let input = b"fn main() {}\n";
 //! let header = "Licensed under the MIT License.";
