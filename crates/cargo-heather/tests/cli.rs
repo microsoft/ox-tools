@@ -361,6 +361,29 @@ fn scanner_exclude_list_filters_directory_subtree() {
 }
 
 #[test]
+fn scanner_warns_on_unresolvable_exclude_entry() {
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    // Mix a valid exclude ("vendor") with an invalid one ("nonexistent_dir").
+    let cfg = format!("{CONFIG_MIT}exclude = [\"vendor\", \"nonexistent_dir\"]\n");
+    write(&p.join(".cargo-heather.toml"), &cfg);
+    write(&p.join("a.rs"), &format!("{HEADER_TEXT}\nfn a() {{}}\n"));
+    write(&p.join("vendor/lib.rs"), "fn lib() {}\n"); // would fail if scanned
+
+    let out = run_heather(p, &[]);
+    let stderr = stderr_of(&out);
+    // Valid exclude still works — vendor/lib.rs is excluded, only a.rs is checked.
+    assert!(out.status.success(), "valid excludes must still work: {stderr}");
+    assert!(stderr.contains("Checking 1 file(s)"), "{stderr}");
+    // Warning is emitted for the unresolvable entry.
+    assert!(
+        stderr.contains("Warning: exclude entry 'nonexistent_dir'"),
+        "should warn about unresolvable exclude: {stderr}"
+    );
+    assert!(stderr.contains("will be ignored"), "warning must mention it is ignored: {stderr}");
+}
+
+#[test]
 fn scanner_includes_legacy_hash_comment_file_types() {
     let dir = TempDir::new().unwrap();
     let p = dir.path();

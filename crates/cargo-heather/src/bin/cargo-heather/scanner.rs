@@ -23,8 +23,14 @@ pub(crate) fn find_source_files(project_dir: &Path, exclude_path: Option<&Path>,
     let exclude_list: Vec<PathBuf> = config
         .exclude
         .iter()
-        .map(|rel| project_dir.join(rel))
-        .filter_map(|p| std::fs::canonicalize(&p).ok())
+        .filter_map(|rel| {
+            let full = project_dir.join(rel);
+            std::fs::canonicalize(&full)
+                .inspect_err(|err| {
+                    println!("  Warning: exclude entry '{rel}' could not be resolved and will be ignored: {err}");
+                })
+                .ok()
+        })
         .collect();
 
     let mut files: Vec<PathBuf> = WalkDir::new(project_dir)
