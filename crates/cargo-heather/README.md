@@ -36,6 +36,24 @@ All rights reserved.
 """
 ```
 
+#### Excluding Files and Directories
+
+Use the `exclude` key to skip specific files or directories from scanning.
+Entries are **literal paths**. Relative paths are resolved against the project root (the directory
+passed to `--project-dir`, or the current directory by default). Glob patterns
+and wildcards are **not** supported.
+
+```toml
+exclude = ["vendor", "generated/bindings.rs"]
+```
+
+A directory entry excludes its entire subtree recursively. Entries that do not
+exist on disk produce a warning and are ignored.
+
+> **Note:** `target/`, `.git/`, `.github/`, `.vscode/`, `.idea/`,
+> `node_modules/`, and other dot-prefixed directories are already skipped
+> automatically.
+
 ### Usage
 
 ```bash
