@@ -39,7 +39,7 @@ All rights reserved.
 #### Excluding Files and Directories
 
 Use the `exclude` key to skip specific files or directories from scanning.
-Entries are **literal paths relative to the project root** (the directory
+Entries are **literal paths**. Relative paths are resolved against the project root (the directory
 passed to `--project-dir`, or the current directory by default). Glob patterns
 and wildcards are **not** supported.
 
