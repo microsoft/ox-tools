@@ -42,7 +42,8 @@
 //!
 //! - [`FileKind::Rust`] — regular Rust source (`//` comments).
 //! - [`FileKind::Toml`] — TOML files (`#` comments).
-//! - [`FileKind::PowerShell`] — `PowerShell` scripts (`#` comments).
+//! - [`FileKind::PowerShell`] — `PowerShell` scripts (`.ps1`), data
+//!   files (`.psd1`), and module files (`.psm1`) (all use `#` comments).
 //! - [`FileKind::Just`] — Just recipes (`#` comments).
 //! - [`FileKind::Env`] — `constants.env` files (`#` comments).
 //! - [`FileKind::CargoScript`] — Rust script with shebang + `---`

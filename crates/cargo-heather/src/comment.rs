@@ -15,7 +15,8 @@ pub enum FileKind {
     Rust,
     /// A TOML file (`.toml`). Header uses `#` at the top.
     Toml,
-    /// A `PowerShell` script (`.ps1`). Header uses `#` at the top.
+    /// A `PowerShell` script (`.ps1`) or data/module file (`.psd1`, `.psm1`).
+    /// Header uses `#` at the top.
     PowerShell,
     /// A Just recipe file (`*.just` or `justfile`). Header uses `#` at the top.
     Just,
@@ -50,7 +51,9 @@ impl FileKind {
                 }
             }
             ext if ext.eq_ignore_ascii_case("toml") => Some(Self::Toml),
-            ext if ext.eq_ignore_ascii_case("ps1") => Some(Self::PowerShell),
+            ext if ext.eq_ignore_ascii_case("ps1") || ext.eq_ignore_ascii_case("psd1") || ext.eq_ignore_ascii_case("psm1") => {
+                Some(Self::PowerShell)
+            }
             ext if ext.eq_ignore_ascii_case("just") => Some(Self::Just),
             _ => None,
         }
@@ -208,5 +211,39 @@ mod tests {
         let style = CommentStyle::DoubleSlash;
         assert!(style.is_header_comment_line("// Copyright"));
         assert!(style.is_header_comment_line("//"));
+    }
+
+    #[test]
+    fn detect_powershell_script_by_ps1_extension() {
+        assert_eq!(FileKind::detect(Path::new("build.ps1"), None), Some(FileKind::PowerShell));
+        // Case-insensitive — Windows paths often surface as `.PS1`.
+        assert_eq!(FileKind::detect(Path::new("BUILD.PS1"), None), Some(FileKind::PowerShell));
+    }
+
+    #[test]
+    fn detect_powershell_data_file_by_psd1_extension() {
+        // `.psd1` is plain PowerShell data syntax with the same `#`
+        // line-comment style as `.ps1`; should be classified as
+        // PowerShell so `cargo-heather` can validate / fix headers.
+        assert_eq!(FileKind::detect(Path::new("Module.psd1"), None), Some(FileKind::PowerShell));
+        assert_eq!(FileKind::detect(Path::new("scenario.psd1"), None), Some(FileKind::PowerShell));
+        assert_eq!(FileKind::detect(Path::new("MODULE.PSD1"), None), Some(FileKind::PowerShell));
+    }
+
+    #[test]
+    fn detect_powershell_module_by_psm1_extension() {
+        // `.psm1` is a PowerShell module file; same `#` comment style as `.ps1`.
+        assert_eq!(FileKind::detect(Path::new("Module.psm1"), None), Some(FileKind::PowerShell));
+        assert_eq!(FileKind::detect(Path::new("MODULE.PSM1"), None), Some(FileKind::PowerShell));
+    }
+
+    #[test]
+    fn detect_returns_none_for_unsupported_extensions() {
+        assert_eq!(FileKind::detect(Path::new("notes.txt"), None), None);
+        assert_eq!(FileKind::detect(Path::new("README.md"), None), None);
+        // Confirm we did not start matching on a substring (e.g. `ps`, `psd`).
+        assert_eq!(FileKind::detect(Path::new("a.ps"), None), None);
+        assert_eq!(FileKind::detect(Path::new("a.psd"), None), None);
+        assert_eq!(FileKind::detect(Path::new("a.psm"), None), None);
     }
 }
