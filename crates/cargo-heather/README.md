@@ -118,18 +118,21 @@ Fixed 2 file(s).
 ### How it works
 
 1. **Config loading** — Reads `.cargo-heather.toml` from the project root and resolves the expected header text (from SPDX identifier or custom text).
-1. **File scanning** — Walks the project directory to find all supported source
-   files (`.rs`, `.toml`, `.ps1`, `.psd1`, `.psm1`, `.just`, `justfile`,
-   `constants.env`), skipping `target/`, hidden directories, and the config
-   file itself.
-1. **Header validation** — Extracts the header comment block from each file
-   in a way appropriate to the file kind: a `//` block at the top for Rust
-   sources, a `#` block at the top for TOML / Just / `constants.env`, a `#`
-   block after an optional `#!` shebang for PowerShell, and a `#` block
-   inside the `---` frontmatter for Rust cargo-scripts. The extracted block
-   is then compared to the expected header. Reports missing or mismatched
-   headers.
+1. **File scanning** — Walks the project directory for supported source files (see [Supported file kinds](#supported-file-kinds) below), skipping `target/`, hidden directories, and the config file itself.
+1. **Header validation** — Extracts the header comment block from each file (placement depends on the file kind) and compares it to the expected header. Reports missing or mismatched headers.
 1. **Fix mode** — When `--fix` is passed, automatically prepends the correct header to files that are missing it, or replaces incorrect headers.
+
+### Supported file kinds
+
+| File                          | Comment style | Header placement                                   |
+| ----------------------------- | ------------- | -------------------------------------------------- |
+| `.rs` (regular)               | `//`          | Top of file                                        |
+| `.rs` (cargo-script)          | `#`           | Inside the `---` frontmatter                       |
+| `.toml`                       | `#`           | Top of file                                        |
+| `.ps1`, `.psd1`, `.psm1`      | `#`           | Top of file, or after a leading `#!` shebang       |
+| `*.just`, `justfile`          | `#`           | Top of file                                        |
+| `constants.env`               | `#`           | Top of file                                        |
+
 
 
 <hr/>
