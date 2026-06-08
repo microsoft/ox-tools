@@ -122,9 +122,13 @@ Fixed 2 file(s).
    files (`.rs`, `.toml`, `.ps1`, `.psd1`, `.psm1`, `.just`, `justfile`,
    `constants.env`), skipping `target/`, hidden directories, and the config
    file itself.
-1. **Header validation** — Extracts the first comment block from each file
-   (`//` for Rust, `#` for the rest) and compares it to the expected header.
-   Reports missing or mismatched headers.
+1. **Header validation** — Extracts the header comment block from each file
+   in a way appropriate to the file kind: a `//` block at the top for Rust
+   sources, a `#` block at the top for TOML / Just / `constants.env`, a `#`
+   block after an optional `#!` shebang for PowerShell, and a `#` block
+   inside the `---` frontmatter for Rust cargo-scripts. The extracted block
+   is then compared to the expected header. Reports missing or mismatched
+   headers.
 1. **Fix mode** — When `--fix` is passed, automatically prepends the correct header to files that are missing it, or replaces incorrect headers.
 
 

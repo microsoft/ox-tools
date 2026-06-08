@@ -16,7 +16,8 @@ pub enum FileKind {
     /// A TOML file (`.toml`). Header uses `#` at the top.
     Toml,
     /// A `PowerShell` script (`.ps1`) or data/module file (`.psd1`, `.psm1`).
-    /// Header uses `#` at the top.
+    /// Header uses `#`, placed at the top of the file or immediately after a
+    /// leading `#!` shebang line if one is present.
     PowerShell,
     /// A Just recipe file (`*.just` or `justfile`). Header uses `#` at the top.
     Just,
