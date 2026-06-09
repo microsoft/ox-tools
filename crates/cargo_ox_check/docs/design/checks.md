@@ -34,7 +34,7 @@ in different tiers and makes the tier of any failing job obvious from its name a
 
 | Group              | OS scope                              | Purpose                                                                                                              |
 |--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
-| `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis. Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks (fmt, license-headers, …) run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
+| `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis (including `udeps` and `semver-check`). Cross-OS because clippy, doc-build, udeps, and semver-check all compile per host target. Text/metadata checks (fmt, license-headers, …) run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. `external-types` lives in `nightly-advisories` instead because it pins a specific nightly rustdoc JSON schema and breaks frequently on toolchain drift. |
 | `pr-test`          | Same default as `pr-fast`             | Code execution: tests (instrumented for coverage), doctests, examples. Coverage reporting is folded in via `cargo llvm-cov nextest`. |
 | `pr-mutants`       | Linux x86_64 + Windows x86_64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | Diff-scoped mutation testing on the change in this PR. Cross-OS to match `oxidizer`'s policy — mutations on cfg-gated code matter. **x86_64-only**: cargo-mutants currently doesn't build on `aarch64-pc-windows-msvc` (upstream `winapi` crate incompat), and the value of mutation testing on the ARM legs doesn't justify the extra wall-clock. |
 
@@ -43,7 +43,7 @@ in different tiers and makes the tier of any failing job obvious from its name a
 | Group                | OS scope                  | Purpose                                                                                                                                |
 |----------------------|---------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
 | `nightly-test`       | Same default as `pr-test` | Re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
-| `nightly-advisories` | Same default as `pr-fast` | Re-runs every check whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain), `udeps` (uses `cargo +nightly`, which evolves). Cross-OS because clippy and udeps compile per host. |
+| `nightly-advisories` | Same default as `pr-fast` | Re-runs every check whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain), plus `external-types` (which needs nightly rustdoc and is gated to nightly to avoid blocking PRs on JSON schema drift). Cross-OS because clippy compiles per host. |
 | `nightly-runtime`    | Same default as `pr-fast` | Tests under stricter runtimes that catch UB and timing/threading bugs: `miri`, `careful`. Both tools work on every Tier 1 Rust target; the surveyed repos (`oxidizer`, `oxidizer-github`) both run them cross-OS, so ox-check does too. |
 | `nightly-exhaustive` | Linux x86_64 + Windows x86_64 | The expensive whole-workspace permutations that don't fit the PR budget: full `cargo mutants`, `cargo-hack --feature-powerset`, and `cargo bench --no-run` plus a single-iteration smoke run per bench target. Cross-OS to match `oxidizer`'s policy and to give cargo-hack / bench compile coverage for cfg-gated code. **x86_64-only**: same `cargo-mutants` / `winapi` constraint as `pr-mutants`. Adopters who can't afford the full matrix (mutants-full can run for hours per leg) override the matrix in their root workflow / pipeline. |
 
@@ -189,10 +189,14 @@ What that means concretely:
   the pinned tool versions, so re-running on the same `main` commit can't surface anything
   new: `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`,
   `ensure-no-default-features`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`,
-  `semver-check`, `external-types`, diff-scoped `mutants`.
+  `semver-check`, diff-scoped `mutants`.
 - **Run only in nightly** — the expensive whole-workspace work that can't fit a PR
   budget: `miri`, `careful` (in `nightly-runtime`); full `mutants`,
   `cargo-hack --feature-powerset`, `bench` (in `nightly-exhaustive`).
+  Also `external-types` (in `nightly-advisories`) — it requires nightly rustdoc
+  + compiles cargo-check-external-types from source against nightly + runs
+  rustdoc JSON generation per package, which together exceeded the PR-tier
+  time budget when dogfooded on ox-tools-gh.
 
 The single-tier-per-group rule still holds: when a check appears in both tiers it lives in
 two different groups (one PR group, one nightly group). Repos that want a

@@ -72,6 +72,16 @@ runs:
       shell: bash
       run: rustup component add rustfmt clippy
 
+    # cargo-check-external-types and a few other catalog tools require
+    # a nightly toolchain (use unstable rustdoc -Z flags). `cargo
+    # +nightly` triggers rustup to auto-install on demand, but the
+    # auto-install can hang on some runners and isn't visible in the
+    # job log. Pre-install nightly explicitly so the +nightly
+    # invocations later in the recipe sequence are no-ops.
+    - name: Install nightly toolchain
+      shell: bash
+      run: rustup toolchain install nightly --profile minimal --no-self-update
+
     - name: Install just
       shell: bash
       run: |

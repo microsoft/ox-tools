@@ -23,7 +23,6 @@ ox-check-pr-fast: \
     ox-check-audit \
     ox-check-udeps \
     ox-check-semver-check \
-    ox-check-external-types \
     ox-check-aprz
 
 [group("ox-check")]
@@ -49,7 +48,7 @@ ox-check-nightly-advisories: \
     ox-check-audit \
     ox-check-aprz \
     ox-check-clippy \
-    ox-check-udeps
+    ox-check-external-types
 
 [group("ox-check")]
 ox-check-nightly-runtime: \

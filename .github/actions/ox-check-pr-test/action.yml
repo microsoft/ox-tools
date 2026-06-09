@@ -36,4 +36,7 @@ runs:
         OX_CHECK_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
         OX_CHECK_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
         OX_CHECK_INCLUDE_REQUIRED: ${{ inputs.include_required }}
+        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
+        # built-in token so it can use the 1000 req/hr authenticated quota.
+        GITHUB_TOKEN: ${{ github.token }}
       run: just ox-check-pr-test

@@ -95,7 +95,9 @@ workspace = true
 # >>> ox-check-managed: ox-check-deny
 [advisories]
 yanked = "deny"
-unmaintained = "warn"
+# Scope of unmaintained-crate checks: "all" surfaces transitive
+# dependencies too; tighten to "workspace" if the noise is high.
+unmaintained = "all"
 
 [licenses]
 allow = [
@@ -352,6 +354,16 @@ ox-check-udeps: (_ox-check-require "cargo-udeps")
 
 # Affected tier (compares published API of changed crates against the
 # baseline; only changed crates' surface is at risk).
+#
+# Several real-world conditions produce errors that aren't actually
+# SemVer violations:
+#   - bin-only crates have no API to compare ("no library targets found").
+#   - crates not yet published to crates.io ("not found in registry").
+#   - crates where the published baseline lacks a lib target the
+#     current source has (bin -> bin+lib transition).
+# We pre-filter to library-bearing crates from cargo metadata, then
+# run cargo-semver-checks per-package and tolerate the
+# "no-comparable-baseline" failure modes.
 [script("pwsh")]
 ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
     $ErrorActionPreference = 'Stop'
@@ -360,10 +372,54 @@ ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
         exit 0
     }
     $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
-    & cargo semver-checks @pkg
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # Build the candidate package list. With --workspace, defer to
+    # cargo-semver-checks which already does the right thing. With
+    # explicit --package args, extract them and filter to library
+    # crates only.
+    if ($pkg -contains '--workspace') {
+        & cargo semver-checks --workspace
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        return
+    }
+    $libPkgs = @{}
+    $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+    foreach ($p in $meta.packages) {
+        if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
+            $libPkgs[$p.name] = $true
+        }
+    }
+    $packages = @()
+    for ($i = 0; $i -lt $pkg.Count; $i++) {
+        if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
+            if ($libPkgs[$pkg[$i + 1]]) { $packages += $pkg[$i + 1] }
+            $i++
+        }
+    }
+    if ($packages.Count -eq 0) {
+        Write-Host 'ox-check-semver-check: no affected library crates; skipping'
+        exit 0
+    }
+    $hadRealFailure = $false
+    foreach ($p in $packages) {
+        Write-Host "ox-check-semver-check: $p"
+        $output = (& cargo semver-checks --package $p 2>&1) | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            if ($output -match 'not found in registry|no library targets found') {
+                Write-Host "  $p has no comparable baseline; skipping (likely unpublished or bin->lib transition)" -ForegroundColor Yellow
+            } else {
+                Write-Host $output
+                $hadRealFailure = $true
+            }
+        }
+    }
+    if ($hadRealFailure) { exit 1 }
 
 # Affected tier (lints public API of changed crates and rev-deps).
+#
+# cargo-check-external-types is per-manifest: no --package/--workspace,
+# only --manifest-path. Iterate the affected library crates and run
+# the tool once each, pointing at the crate's Cargo.toml. Bin-only
+# crates have no public API surface and are skipped.
 [script("pwsh")]
 ox-check-external-types: (_ox-check-require "cargo-check-external-types")
     $ErrorActionPreference = 'Stop'
@@ -372,12 +428,59 @@ ox-check-external-types: (_ox-check-require "cargo-check-external-types")
         exit 0
     }
     $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
-    & cargo check-external-types @pkg
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # Build pkg-name -> manifest-path map, restricted to library crates.
+    $libPkgs = @{}
+    $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+    foreach ($p in $meta.packages) {
+        if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
+            $libPkgs[$p.name] = $p.manifest_path
+        }
+    }
+    # Decide which packages to check.
+    $packages = @()
+    if ($pkg -contains '--workspace') {
+        $packages = $libPkgs.Keys
+    } else {
+        for ($i = 0; $i -lt $pkg.Count; $i++) {
+            if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
+                if ($libPkgs.ContainsKey($pkg[$i + 1])) { $packages += $pkg[$i + 1] }
+                $i++
+            }
+        }
+    }
+    if ($packages.Count -eq 0) {
+        Write-Host 'ox-check-external-types: no affected library crates; skipping'
+        exit 0
+    }
+    $failed = $false
+    foreach ($p in $packages) {
+        Write-Host "ox-check-external-types: $p"
+        # cargo-check-external-types requires a nightly Rust toolchain
+        # (uses unstable rustdoc -Z flags). Invoke via +nightly so
+        # rustup auto-installs nightly on demand. Adopters using
+        # msrustup without a nightly channel override this recipe.
+        #
+        # The tool pins a specific rustdoc-types schema version that
+        # tracks a narrow window of nightly rustdoc JSON output. Newer
+        # nightlies routinely drift past it, producing a "produces JSON
+        # format version X, but this tool requires format version Y"
+        # error that's a tooling-incompat issue, not a real API violation.
+        # We swallow that specific error as a warning and continue.
+        $output = (& cargo +nightly check-external-types --manifest-path $libPkgs[$p] 2>&1) | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            if ($output -match 'JSON format version \d+, but this tool requires format version \d+') {
+                Write-Host "  rustdoc/cargo-check-external-types JSON schema mismatch; skipping (nightly drift)" -ForegroundColor Yellow
+            } else {
+                Write-Host $output
+                $failed = $true
+            }
+        }
+    }
+    if ($failed) { exit 1 }
 
 # Unscoped (consults external risk DB).
 ox-check-aprz: (_ox-check-require "cargo-aprz")
-    cargo aprz check
+    cargo aprz deps --error-if-high-risk --console appraisal
 
 # === pr-test members ====================================================
 
@@ -576,7 +679,6 @@ ox-check-pr-fast: \
     ox-check-audit \
     ox-check-udeps \
     ox-check-semver-check \
-    ox-check-external-types \
     ox-check-aprz
 
 [group("ox-check")]
@@ -602,7 +704,7 @@ ox-check-nightly-advisories: \
     ox-check-audit \
     ox-check-aprz \
     ox-check-clippy \
-    ox-check-udeps
+    ox-check-external-types
 
 [group("ox-check")]
 ox-check-nightly-runtime: \
