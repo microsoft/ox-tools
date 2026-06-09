@@ -1,0 +1,47 @@
+# Catalog of opinionated lints, in dotted-key form so users can extend the
+# same scope (`[workspace.lints]` or `[lints]`) outside the sentinels.
+# The host-specific table header (`[workspace.lints]` or `[lints]`) is
+# prepended by cargo-ox-check based on whether the manifest is a workspace
+# root or a single-crate Cargo.toml.
+
+# --- rust ------------------------------------------------------------------
+rust.ambiguous_negative_literals = "warn"
+rust.missing_debug_implementations = "warn"
+rust.missing_docs = "warn"
+rust.redundant_imports = "warn"
+rust.redundant_lifetimes = "warn"
+rust.trivial_numeric_casts = "warn"
+rust.unsafe_op_in_unsafe_fn = "warn"
+rust.unused_lifetimes = "warn"
+
+# --- rustdoc ---------------------------------------------------------------
+rustdoc.missing_crate_level_docs = "warn"
+rustdoc.unescaped_backticks = "warn"
+
+# --- clippy: category gates (priority -1 so per-lint allows can override) --
+clippy.cargo = { level = "warn", priority = -1 }
+clippy.complexity = { level = "warn", priority = -1 }
+clippy.correctness = { level = "warn", priority = -1 }
+clippy.nursery = { level = "warn", priority = -1 }
+clippy.pedantic = { level = "warn", priority = -1 }
+clippy.perf = { level = "warn", priority = -1 }
+clippy.style = { level = "warn", priority = -1 }
+clippy.suspicious = { level = "warn", priority = -1 }
+
+# --- clippy: opinionated additions -----------------------------------------
+clippy.allow_attributes = "warn"
+clippy.allow_attributes_without_reason = "warn"
+clippy.clone_on_ref_ptr = "warn"
+clippy.disallowed_script_idents = "warn"
+clippy.map_err_ignore = "warn"
+clippy.panic = "warn"
+clippy.undocumented_unsafe_blocks = "warn"
+clippy.unnecessary_safety_comment = "warn"
+clippy.unwrap_used = "warn"
+
+# --- clippy: opinionated suppressions of category-enabled lints ------------
+clippy.option_if_let_else = "allow"
+clippy.missing_const_for_fn = "allow"
+clippy.multiple_crate_versions = "allow"
+clippy.significant_drop_tightening = "allow"
+clippy.wildcard_imports = "allow"

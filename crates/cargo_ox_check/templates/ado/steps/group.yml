@@ -1,0 +1,20 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# The token __GROUP__ is substituted by cargo-ox-check at emit time with
+# the concrete check-group name (pr-fast, pr-test, nightly-runtime, ...).
+parameters:
+  - name: excludes
+    type: string
+    default: ''
+  - name: skip
+    type: string
+    default: 'false'
+steps:
+  - template: setup.yml
+    condition: ne(parameters.skip, 'true')
+  - bash: just ox-check-__GROUP__
+    condition: ne(parameters.skip, 'true')
+    displayName: ox-check-__GROUP__
+    env:
+      OX_CHECK_EXCLUDES: ${{ parameters.excludes }}

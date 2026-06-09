@@ -1,0 +1,378 @@
+---
+source: crates/cargo_ox_check/tests/snapshots.rs
+expression: render_tree(tmp.path())
+---
+=== .delta.toml ===
+# >>> ox-check-managed: ox-check-delta
+[delta]
+# Include the workspace root files that should invalidate every member's
+# impact analysis when changed (lockfile, root manifest, toolchain).
+root-files = [
+    "Cargo.lock",
+    "Cargo.toml",
+    "rust-toolchain.toml",
+]
+# <<< ox-check-managed: ox-check-delta
+
+=== Cargo.toml ===
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+# >>> ox-check-managed: ox-check-workspace-lints
+[workspace.lints]
+# Catalog of opinionated lints, in dotted-key form so users can extend the
+# same scope (`[workspace.lints]` or `[lints]`) outside the sentinels.
+# The host-specific table header (`[workspace.lints]` or `[lints]`) is
+# prepended by cargo-ox-check based on whether the manifest is a workspace
+# root or a single-crate Cargo.toml.
+
+# --- rust ------------------------------------------------------------------
+rust.ambiguous_negative_literals = "warn"
+rust.missing_debug_implementations = "warn"
+rust.missing_docs = "warn"
+rust.redundant_imports = "warn"
+rust.redundant_lifetimes = "warn"
+rust.trivial_numeric_casts = "warn"
+rust.unsafe_op_in_unsafe_fn = "warn"
+rust.unused_lifetimes = "warn"
+
+# --- rustdoc ---------------------------------------------------------------
+rustdoc.missing_crate_level_docs = "warn"
+rustdoc.unescaped_backticks = "warn"
+
+# --- clippy: category gates (priority -1 so per-lint allows can override) --
+clippy.cargo = { level = "warn", priority = -1 }
+clippy.complexity = { level = "warn", priority = -1 }
+clippy.correctness = { level = "warn", priority = -1 }
+clippy.nursery = { level = "warn", priority = -1 }
+clippy.pedantic = { level = "warn", priority = -1 }
+clippy.perf = { level = "warn", priority = -1 }
+clippy.style = { level = "warn", priority = -1 }
+clippy.suspicious = { level = "warn", priority = -1 }
+
+# --- clippy: opinionated additions -----------------------------------------
+clippy.allow_attributes = "warn"
+clippy.allow_attributes_without_reason = "warn"
+clippy.clone_on_ref_ptr = "warn"
+clippy.disallowed_script_idents = "warn"
+clippy.map_err_ignore = "warn"
+clippy.panic = "warn"
+clippy.undocumented_unsafe_blocks = "warn"
+clippy.unnecessary_safety_comment = "warn"
+clippy.unwrap_used = "warn"
+
+# --- clippy: opinionated suppressions of category-enabled lints ------------
+clippy.option_if_let_else = "allow"
+clippy.missing_const_for_fn = "allow"
+clippy.multiple_crate_versions = "allow"
+clippy.significant_drop_tightening = "allow"
+clippy.wildcard_imports = "allow"
+# <<< ox-check-managed: ox-check-workspace-lints
+
+=== Justfile ===
+# >>> ox-check-managed: ox-check-imports
+import 'justfiles/ox-check/mod.just'
+# <<< ox-check-managed: ox-check-imports
+
+=== crates/alpha/Cargo.toml ===
+[package]
+name = "alpha"
+version = "0.1.0"
+edition = "2024"
+
+# >>> ox-check-managed: ox-check-lints
+[lints]
+workspace = true
+# <<< ox-check-managed: ox-check-lints
+
+=== crates/alpha/src/lib.rs ===
+
+
+=== deny.toml ===
+# >>> ox-check-managed: ox-check-deny
+[advisories]
+yanked = "deny"
+unmaintained = "warn"
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# <<< ox-check-managed: ox-check-deny
+
+=== justfiles/ox-check/checks.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# See ../../docs/design/checks.md for the catalog and rationale.
+
+set unstable
+
+# === pr-fast members ====================================================
+
+ox-check-fmt: ox-check-tools-check
+    cargo fmt --all --check
+
+ox-check-clippy: ox-check-tools-check
+    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+ox-check-cargo-sort: (_ox-check-require "cargo-sort")
+    cargo sort --workspace --check
+
+ox-check-license-headers: (_ox-check-require "cargo-heather")
+    cargo heather --workspace
+
+ox-check-ensure-no-cyclic-deps: (_ox-check-require "cargo-ensure-no-cyclic-deps")
+    cargo ensure-no-cyclic-deps --workspace
+
+ox-check-ensure-no-default-features: (_ox-check-require "cargo-ensure-no-default-features")
+    cargo ensure-no-default-features --workspace
+
+ox-check-doc-build:
+    RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps
+
+ox-check-readme-check: (_ox-check-require "cargo-doc2readme")
+    cargo doc2readme --check
+
+ox-check-spellcheck: (_ox-check-require "cargo-spellcheck")
+    cargo spellcheck check --code 1
+
+[script("pwsh")]
+ox-check-pr-title:
+    $title = $env:PR_TITLE
+    if (-not $title) { $title = git log -1 --pretty=%s HEAD }
+    if ($title -notmatch '^(feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(\([^)]+\))?!?: .+') {
+        Write-Error "PR title '$title' does not match Conventional Commits"
+        exit 1
+    }
+
+ox-check-deny: (_ox-check-require "cargo-deny")
+    cargo deny check
+
+ox-check-audit: (_ox-check-require "cargo-audit")
+    cargo audit
+
+ox-check-udeps: (_ox-check-require "cargo-udeps")
+    cargo +nightly udeps --workspace --all-targets --all-features
+
+ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
+    cargo semver-checks --workspace
+
+ox-check-external-types: (_ox-check-require "cargo-check-external-types")
+    cargo check-external-types --workspace
+
+ox-check-aprz: (_ox-check-require "cargo-aprz")
+    cargo aprz check
+
+# === pr-test members ====================================================
+
+ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "cargo-nextest")
+    # Wipe stale .profraw data so the report reflects only this run.
+    cargo llvm-cov clean --workspace --profraw-only
+    # Instrument and run tests; defer report generation so we can emit
+    # multiple formats from the same profraw set without re-running the
+    # tests.
+    cargo llvm-cov nextest --workspace --all-features --locked --no-report
+    # lcov.info feeds Codecov on GitHub; cobertura.xml feeds
+    # PublishCodeCoverageResults@2 on Azure DevOps.
+    cargo llvm-cov report --lcov      --output-path target/coverage/lcov.info
+    cargo llvm-cov report --cobertura --output-path target/coverage/cobertura.xml
+
+ox-check-doc-test:
+    cargo test --doc --workspace --all-features --locked
+
+ox-check-examples:
+    cargo build --workspace --examples --all-features --locked
+
+# === pr-mutants members =================================================
+
+ox-check-mutants: (_ox-check-require "cargo-mutants")
+    #!/usr/bin/env sh
+    set -eu
+    base="${BASE_REF:-origin/main}"
+    cargo mutants --in-diff "$base"..HEAD --no-shuffle --jobs 0
+
+# === nightly-runtime members ============================================
+
+ox-check-miri:
+    cargo +nightly miri nextest run --workspace
+
+ox-check-careful: (_ox-check-require "cargo-careful")
+    cargo +nightly careful test --workspace --all-features --locked
+
+# === nightly-exhaustive members =========================================
+
+ox-check-mutants-full: (_ox-check-require "cargo-mutants")
+    cargo mutants --workspace --no-shuffle --jobs 0
+
+ox-check-cargo-hack: (_ox-check-require "cargo-hack")
+    cargo hack --workspace --feature-powerset --depth 2 check
+
+ox-check-bench:
+    cargo bench --workspace --all-features --no-run
+
+=== justfiles/ox-check/groups.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# See ../../docs/design/checks.md for the catalog and rationale.
+
+# Each group is one CI job. Within a group, checks run sequentially.
+
+# === PR groups ==========================================================
+
+[group("ox-check")]
+ox-check-pr-fast: \
+    ox-check-fmt \
+    ox-check-clippy \
+    ox-check-cargo-sort \
+    ox-check-license-headers \
+    ox-check-ensure-no-cyclic-deps \
+    ox-check-ensure-no-default-features \
+    ox-check-doc-build \
+    ox-check-readme-check \
+    ox-check-spellcheck \
+    ox-check-pr-title \
+    ox-check-deny \
+    ox-check-audit \
+    ox-check-udeps \
+    ox-check-semver-check \
+    ox-check-external-types \
+    ox-check-aprz
+
+[group("ox-check")]
+ox-check-pr-test: \
+    ox-check-llvm-cov \
+    ox-check-doc-test \
+    ox-check-examples
+
+[group("ox-check")]
+ox-check-pr-mutants: ox-check-mutants
+
+# === Nightly groups =====================================================
+
+[group("ox-check")]
+ox-check-nightly-test: \
+    ox-check-llvm-cov \
+    ox-check-doc-test \
+    ox-check-examples
+
+[group("ox-check")]
+ox-check-nightly-advisories: \
+    ox-check-deny \
+    ox-check-audit \
+    ox-check-aprz \
+    ox-check-clippy \
+    ox-check-udeps
+
+[group("ox-check")]
+ox-check-nightly-runtime: \
+    ox-check-miri \
+    ox-check-careful
+
+[group("ox-check")]
+ox-check-nightly-exhaustive: \
+    ox-check-mutants-full \
+    ox-check-cargo-hack \
+    ox-check-bench
+
+=== justfiles/ox-check/mod.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# Entry point for the ox-check just recipe tree. The user's root Justfile
+# imports this single file; everything else lives in sibling .just files
+# pulled in here.
+
+import 'checks.just'
+import 'groups.just'
+import 'tiers.just'
+import 'tools.just'
+
+# Friendly default: `just ox-check` runs the PR tier.
+alias ox-check := ox-check-pr
+
+=== justfiles/ox-check/tiers.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# See ../../docs/design/checks.md for the tier structure.
+
+# PR tier: every fast check that should run on every pull request.
+[group("ox-check")]
+ox-check-pr: \
+    ox-check-pr-fast \
+    ox-check-pr-test \
+    ox-check-pr-mutants
+
+# Nightly tier: slow / non-deterministic checks. Runs on a schedule against
+# `main`, not on PRs.
+[group("ox-check")]
+ox-check-nightly: \
+    ox-check-nightly-test \
+    ox-check-nightly-advisories \
+    ox-check-nightly-runtime \
+    ox-check-nightly-exhaustive
+
+# Full tier: PR + nightly, end-to-end. Useful before tagging a release.
+[group("ox-check")]
+ox-check-full: \
+    ox-check-pr \
+    ox-check-nightly
+
+=== justfiles/ox-check/tools.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# See ../../docs/design/local.md for the policy.
+
+# Public: assert that every tool the catalog uses is present at or above its
+# minimum version. Called by every check group as a dependency.
+[group("ox-check")]
+ox-check-tools-check:
+    @just _ox-check-require "cargo"
+
+# Public: install (or upgrade) every catalog tool to its minimum version.
+# Idempotent — `cargo install --locked` is a no-op if the version is already
+# present. Tools added to the catalog show up here automatically on the next
+# `cargo ox-check update`.
+[group("ox-check")]
+ox-check-tools-install:
+    @echo "ox-check: nothing to install yet (catalog is being built up across commits)"
+
+# Internal: assert that `name` is installed. Currently only checks presence —
+# future commits parse `cargo install --list` for version comparison.
+_ox-check-require name:
+    @if ! command -v {{name}} >/dev/null 2>&1 && ! cargo --list 2>/dev/null | grep -q " {{name}}$"; then \
+        echo "ox-check: required tool '{{name}}' not found." >&2 ; \
+        echo "Install it with: cargo install --locked {{name}}" >&2 ; \
+        exit 1 ; \
+    fi
+
+=== rustfmt.toml ===
+# >>> ox-check-managed: ox-check-rustfmt
+edition = "2024"
+max_width = 110
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_try_shorthand = true
+# <<< ox-check-managed: ox-check-rustfmt

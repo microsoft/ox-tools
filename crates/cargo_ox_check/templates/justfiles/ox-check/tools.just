@@ -1,7 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# >>> ox-check-managed: ox-check-tools
-# Tool-version gate. Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
 # See ../../docs/design/local.md for the policy.
 
 # Public: assert that every tool the catalog uses is present at or above its
@@ -26,4 +25,3 @@ _ox-check-require name:
         echo "Install it with: cargo install --locked {{name}}" >&2 ; \
         exit 1 ; \
     fi
-# <<< ox-check-managed: ox-check-tools

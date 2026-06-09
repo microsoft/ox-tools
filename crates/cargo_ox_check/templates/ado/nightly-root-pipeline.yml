@@ -8,7 +8,7 @@ schedules:
   - cron: "0 6 * * *"
     displayName: ox-check nightly
     branches:
-      include: [main]
+      include: [main, master]
     always: true
 
 stages:

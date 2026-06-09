@@ -10,11 +10,14 @@
 //!   time, or `None` if never seen.
 //! - `disk` (`D`) — what is on disk right now. `None` if the file is
 //!   missing or the region's host file is missing.
-//! - `template` (`T`) — what ox-check's current catalog would write right
+//! - `template` (`T`) — what ox-check's current catalog would render right
 //!   now.
 //!
-//! Plus a per-item `emptied` flag indicating the user has opted out by
-//! emptying the file (or, for regions, the region body).
+//! Opt-out via emptying needs no separate flag: an empty file or
+//! whitespace-only region body has a stable checksum that no template
+//! ever produces, so `D ≠ L` lands the item in `LeaveAlone` (when the
+//! template is unchanged) or `Propose` (when it has moved). Both
+//! outcomes preserve the user's empty stub.
 //!
 //! See [updates.md §5](../../docs/design/updates.md) for the decision table.
 
@@ -25,14 +28,10 @@ pub struct DecisionInputs<'a> {
     /// the item is new (never tracked).
     pub last_rendered: Option<&'a str>,
     /// Checksum of the current on-disk content. `None` if the host file
-    /// is missing entirely. For an empty file or empty region body, the
-    /// `emptied` flag is set; this checksum should be `Some` in that case.
+    /// is missing entirely.
     pub disk: Option<&'a str>,
     /// Checksum of what the current template would render.
     pub template: &'a str,
-    /// True iff the user has opted out: an empty file (for owned files)
-    /// or an empty region body between sentinels (for regions).
-    pub emptied: bool,
 }
 
 /// Decision the driver should carry out for one item.
@@ -41,17 +40,16 @@ pub enum Decision {
     /// Item is in sync with the current template. Do nothing; manifest
     /// entry stays.
     InSync,
-    /// Item is opted out by the user (empty stub). Do nothing; manifest
-    /// entry stays. Acts the same as `InSync` for exit-code purposes.
-    Skipped,
     /// Render the current template to disk and refresh the manifest.
     Write,
     /// User has diverged AND the template changed since last render —
     /// write a `.ox-check-proposed` sibling and leave the user's content
     /// alone. Manifest stays unchanged.
     Propose,
-    /// User has diverged but the template hasn't changed; leave the user's
-    /// content alone with no proposed file. Manifest stays unchanged.
+    /// User has diverged but the template hasn't changed; leave the
+    /// user's content alone with no proposed file. Manifest stays
+    /// unchanged. Also the steady-state outcome for opt-out (empty file
+    /// or empty region body) when the template hasn't moved.
     LeaveAlone,
 }
 
@@ -60,7 +58,7 @@ impl Decision {
     /// exit-code purposes.
     #[must_use]
     pub const fn is_in_sync(self) -> bool {
-        matches!(self, Self::InSync | Self::Skipped | Self::LeaveAlone)
+        matches!(self, Self::InSync | Self::LeaveAlone)
     }
 
     /// Whether this decision causes writes (the file or the manifest).
@@ -73,15 +71,6 @@ impl Decision {
 /// Compute the decision for one item.
 #[must_use]
 pub fn decide(inputs: &DecisionInputs<'_>) -> Decision {
-    // Opt-out wins as long as it isn't a brand-new item the user has never
-    // seen. If the user emptied the file/region, we always skip; whether we
-    // *also* emit a proposed file when the template changes is handled by
-    // the caller (it needs both the proposed content and the comparison
-    // against `last_rendered`). See `should_emit_proposed_for_opt_out`.
-    if inputs.emptied {
-        return Decision::Skipped;
-    }
-
     match (inputs.disk, inputs.last_rendered) {
         // The on-disk file (or host file) is missing entirely. Either the
         // user deleted it to re-bless, or it has never been written.
@@ -96,8 +85,10 @@ pub fn decide(inputs: &DecisionInputs<'_>) -> Decision {
             Decision::Write
         }
         (Some(_), Some(l)) if l == inputs.template => {
-            // User has diverged but the template hasn't changed since last
-            // render. Don't pester them.
+            // User has diverged but the template hasn't changed since
+            // last render. Don't pester them. (This is also the
+            // steady-state outcome for opt-out: empty content stays
+            // empty, template hasn't moved.)
             Decision::LeaveAlone
         }
         (Some(_), Some(_)) => {
@@ -113,23 +104,6 @@ pub fn decide(inputs: &DecisionInputs<'_>) -> Decision {
     }
 }
 
-/// Whether to emit a proposed file for an opted-out item.
-///
-/// True exactly when the current template differs from what was last
-/// rendered — i.e. there is genuine upstream churn the user might want
-/// to see. For first-time encounters (no `last_rendered`) we propose so
-/// the user can review.
-#[must_use]
-pub fn should_emit_proposed_for_opt_out(
-    last_rendered: Option<&str>,
-    template: &str,
-) -> bool {
-    match last_rendered {
-        Some(l) => l != template,
-        None => true,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,47 +112,35 @@ mod tests {
         last: Option<&'a str>,
         disk: Option<&'a str>,
         template: &'a str,
-        emptied: bool,
     ) -> DecisionInputs<'a> {
         DecisionInputs {
             last_rendered: last,
             disk,
             template,
-            emptied,
         }
     }
 
     #[test]
     fn missing_disk_writes() {
-        assert_eq!(decide(&inputs(None, None, "T", false)), Decision::Write);
-        assert_eq!(decide(&inputs(Some("L"), None, "T", false)), Decision::Write);
+        assert_eq!(decide(&inputs(None, None, "T")), Decision::Write);
+        assert_eq!(decide(&inputs(Some("L"), None, "T")), Decision::Write);
     }
 
     #[test]
     fn disk_matches_template_in_sync() {
-        assert_eq!(
-            decide(&inputs(Some("L"), Some("T"), "T", false)),
-            Decision::InSync
-        );
-        // Even with no manifest entry, a perfect match is in sync.
-        assert_eq!(
-            decide(&inputs(None, Some("T"), "T", false)),
-            Decision::InSync
-        );
+        assert_eq!(decide(&inputs(Some("L"), Some("T"), "T")), Decision::InSync);
+        assert_eq!(decide(&inputs(None, Some("T"), "T")), Decision::InSync);
     }
 
     #[test]
     fn disk_matches_last_template_changed_writes() {
-        assert_eq!(
-            decide(&inputs(Some("L"), Some("L"), "T", false)),
-            Decision::Write
-        );
+        assert_eq!(decide(&inputs(Some("L"), Some("L"), "T")), Decision::Write);
     }
 
     #[test]
     fn user_diverged_template_unchanged_leaves_alone() {
         assert_eq!(
-            decide(&inputs(Some("L"), Some("D"), "L", false)),
+            decide(&inputs(Some("L"), Some("D"), "L")),
             Decision::LeaveAlone
         );
     }
@@ -186,40 +148,43 @@ mod tests {
     #[test]
     fn user_diverged_template_changed_proposes() {
         assert_eq!(
-            decide(&inputs(Some("L"), Some("D"), "T", false)),
+            decide(&inputs(Some("L"), Some("D"), "T")),
             Decision::Propose
         );
     }
 
     #[test]
     fn first_time_with_existing_user_content_proposes() {
+        assert_eq!(decide(&inputs(None, Some("D"), "T")), Decision::Propose);
+    }
+
+    #[test]
+    fn opt_out_via_empty_steady_state_leaves_alone() {
+        // After a successful render the manifest has L = template. The
+        // user empties the file (D = empty-checksum, never equal to L).
+        // Template hasn't moved (T == L). Result: LeaveAlone, silent.
+        let empty = "sha256:empty";
+        let tmpl = "sha256:template";
         assert_eq!(
-            decide(&inputs(None, Some("D"), "T", false)),
+            decide(&inputs(Some(tmpl), Some(empty), tmpl)),
+            Decision::LeaveAlone
+        );
+    }
+
+    #[test]
+    fn opt_out_via_empty_with_template_change_proposes() {
+        // Same as above but the template has since moved — the user gets
+        // a proposed sibling so they can see what's new.
+        let empty = "sha256:empty";
+        assert_eq!(
+            decide(&inputs(Some("sha256:old"), Some(empty), "sha256:new")),
             Decision::Propose
         );
     }
 
     #[test]
-    fn emptied_skips_regardless_of_other_checksums() {
-        assert_eq!(
-            decide(&inputs(Some("L"), Some(""), "T", true)),
-            Decision::Skipped
-        );
-        assert_eq!(decide(&inputs(None, Some(""), "T", true)), Decision::Skipped);
-    }
-
-    #[test]
-    fn opt_out_proposal_only_on_template_change() {
-        assert!(should_emit_proposed_for_opt_out(Some("L"), "T"));
-        assert!(!should_emit_proposed_for_opt_out(Some("L"), "L"));
-        // First time seeing the item — propose so the user can review.
-        assert!(should_emit_proposed_for_opt_out(None, "T"));
-    }
-
-    #[test]
     fn decision_in_sync_predicate() {
         assert!(Decision::InSync.is_in_sync());
-        assert!(Decision::Skipped.is_in_sync());
         assert!(Decision::LeaveAlone.is_in_sync());
         assert!(!Decision::Write.is_in_sync());
         assert!(!Decision::Propose.is_in_sync());
@@ -228,7 +193,6 @@ mod tests {
     #[test]
     fn decision_writes_predicate() {
         assert!(!Decision::InSync.writes());
-        assert!(!Decision::Skipped.writes());
         assert!(!Decision::LeaveAlone.writes());
         assert!(Decision::Write.writes());
         assert!(Decision::Propose.writes());

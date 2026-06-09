@@ -49,6 +49,12 @@ stages:
             parameters:
               excludes: $(excludes)
               skip: $(skip)
+          - task: PublishCodeCoverageResults@2
+            condition: and(succeededOrFailed(), ne(variables.skip, 'true'))
+            displayName: Publish coverage
+            inputs:
+              summaryFileLocation: target/coverage/cobertura.xml
+              failIfCoverageEmpty: false
       - job: windows
         pool: ${{ parameters.windowsPool }}
         steps:

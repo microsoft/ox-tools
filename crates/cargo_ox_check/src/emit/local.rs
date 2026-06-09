@@ -11,12 +11,21 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use ohno::AppError;
 
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
 
 use super::owned_file::plan_owned_file;
+
+/// Contents of `justfiles/ox-check/mod.just` baked into the binary.
+///
+/// This is the single-import entry point: it pulls in the four sibling
+/// recipe files and defines `alias ox-check := ox-check-pr`.
+pub const MOD_JUST: &str = include_str!("../../templates/justfiles/ox-check/mod.just");
+
+/// Repo-root-relative path of the entry-point recipe file.
+pub const MOD_JUST_PATH: &str = "justfiles/ox-check/mod.just";
 
 /// Contents of `justfiles/ox-check/tools.just` baked into the binary.
 pub const TOOLS_JUST: &str =
@@ -46,12 +55,25 @@ pub const TIERS_JUST: &str =
 /// Repo-root-relative path of the tier aggregator file.
 pub const TIERS_JUST_PATH: &str = "justfiles/ox-check/tiers.just";
 
+/// Embedded body of the `ox-check-imports` region in the user's Justfile.
+pub const JUSTFILE_IMPORTS_BODY: &str =
+    include_str!("../../templates/regions/justfile-imports.just");
+
+/// Emit a [`PlanItem`] for `justfiles/ox-check/mod.just`.
+///
+/// # Errors
+///
+/// Propagates I/O errors from [`plan_owned_file`].
+pub fn plan_mod_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
+    plan_owned_file(repo_root, manifest, MOD_JUST_PATH, MOD_JUST)
+}
+
 /// Emit a [`PlanItem`] for `justfiles/ox-check/tools.just`.
 ///
 /// # Errors
 ///
 /// Propagates I/O errors from [`plan_owned_file`].
-pub fn plan_tools_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
+pub fn plan_tools_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
     plan_owned_file(repo_root, manifest, TOOLS_JUST_PATH, TOOLS_JUST)
 }
 
@@ -60,7 +82,7 @@ pub fn plan_tools_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem
 /// # Errors
 ///
 /// Propagates I/O errors from [`plan_owned_file`].
-pub fn plan_checks_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
+pub fn plan_checks_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
     plan_owned_file(repo_root, manifest, CHECKS_JUST_PATH, CHECKS_JUST)
 }
 
@@ -69,7 +91,7 @@ pub fn plan_checks_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanIte
 /// # Errors
 ///
 /// Propagates I/O errors from [`plan_owned_file`].
-pub fn plan_groups_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
+pub fn plan_groups_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
     plan_owned_file(repo_root, manifest, GROUPS_JUST_PATH, GROUPS_JUST)
 }
 
@@ -78,7 +100,7 @@ pub fn plan_groups_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanIte
 /// # Errors
 ///
 /// Propagates I/O errors from [`plan_owned_file`].
-pub fn plan_tiers_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
+pub fn plan_tiers_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
     plan_owned_file(repo_root, manifest, TIERS_JUST_PATH, TIERS_JUST)
 }
 
@@ -88,37 +110,26 @@ pub const JUSTFILE_REGION_ID: &str = "ox-check-imports";
 /// Repo-root-relative path of the user's `Justfile`.
 pub const JUSTFILE_PATH: &str = "Justfile";
 
-/// Render the body of the Justfile imports region.
-///
-/// The four `import` lines plus the `ox-check` alias.
-#[must_use]
-pub fn render_justfile_imports() -> String {
-    "import 'justfiles/ox-check/checks.just'\n\
-     import 'justfiles/ox-check/groups.just'\n\
-     import 'justfiles/ox-check/tiers.just'\n\
-     import 'justfiles/ox-check/tools.just'\n\
-     alias ox-check := ox-check-pr\n"
-        .to_owned()
-}
-
 /// Emit a [`PlanItem`] for the `Justfile` imports region.
 ///
 /// # Errors
 ///
 /// Propagates I/O and region-parsing errors.
-pub fn plan_justfile_imports(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem> {
-    let body = render_justfile_imports();
+pub fn plan_justfile_imports(
+    repo_root: &Path,
+    manifest: &Manifest,
+) -> Result<PlanItem, AppError> {
     super::managed_region::plan_managed_region(
         repo_root,
         manifest,
         JUSTFILE_PATH,
         JUSTFILE_REGION_ID,
-        &body,
+        JUSTFILE_IMPORTS_BODY,
         crate::region::CommentSyntax::Hash,
     )
 }
 
-/// Plan all four files of the `justfiles/ox-check/` tree.
+/// Plan all five files of the `justfiles/ox-check/` tree.
 ///
 /// # Errors
 ///
@@ -126,8 +137,9 @@ pub fn plan_justfile_imports(repo_root: &Path, manifest: &Manifest) -> Result<Pl
 pub fn plan_local_just_tree(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
+        plan_mod_just(repo_root, manifest)?,
         plan_tools_just(repo_root, manifest)?,
         plan_checks_just(repo_root, manifest)?,
         plan_groups_just(repo_root, manifest)?,
@@ -200,23 +212,32 @@ mod tests {
     }
 
     #[test]
-    fn plan_local_just_tree_emits_four_items() {
+    fn plan_local_just_tree_emits_five_items() {
         let tmp = TempDir::new().unwrap();
         let items = plan_local_just_tree(tmp.path(), &Manifest::default()).unwrap();
-        assert_eq!(items.len(), 4);
+        assert_eq!(items.len(), 5);
         for item in &items {
             assert_eq!(item.decision, Decision::Write);
         }
     }
 
     #[test]
-    fn justfile_imports_renders_expected_lines() {
-        let body = render_justfile_imports();
-        assert!(body.contains("import 'justfiles/ox-check/checks.just'"));
-        assert!(body.contains("import 'justfiles/ox-check/groups.just'"));
-        assert!(body.contains("import 'justfiles/ox-check/tiers.just'"));
-        assert!(body.contains("import 'justfiles/ox-check/tools.just'"));
-        assert!(body.contains("alias ox-check := ox-check-pr"));
+    fn mod_just_imports_siblings_and_defines_alias() {
+        for needle in [
+            "import 'checks.just'",
+            "import 'groups.just'",
+            "import 'tiers.just'",
+            "import 'tools.just'",
+            "alias ox-check := ox-check-pr",
+        ] {
+            assert!(MOD_JUST.contains(needle), "mod.just missing '{needle}'");
+        }
+    }
+
+    #[test]
+    fn justfile_imports_body_is_a_single_import_line() {
+        let body = JUSTFILE_IMPORTS_BODY.trim();
+        assert_eq!(body, "import 'justfiles/ox-check/mod.just'");
     }
 
     #[test]
@@ -226,7 +247,9 @@ mod tests {
         assert_eq!(item.decision, Decision::Write);
         let spliced = item.spliced_host.as_deref().unwrap();
         assert!(spliced.contains("# >>> ox-check-managed: ox-check-imports"));
-        assert!(spliced.contains("alias ox-check := ox-check-pr"));
+        assert!(spliced.contains("import 'justfiles/ox-check/mod.just'"));
+        // The alias lives in mod.just, not in the user's Justfile.
+        assert!(!spliced.contains("alias ox-check"));
     }
 
     #[test]

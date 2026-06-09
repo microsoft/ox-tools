@@ -1,7 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# >>> ox-check-managed: ox-check-tiers
-# Tier aggregators. Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
 # See ../../docs/design/checks.md for the tier structure.
 
 # PR tier: every fast check that should run on every pull request.
@@ -25,4 +24,3 @@ ox-check-nightly: \
 ox-check-full: \
     ox-check-pr \
     ox-check-nightly
-# <<< ox-check-managed: ox-check-tiers

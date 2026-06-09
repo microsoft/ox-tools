@@ -2,9 +2,6 @@
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
 trigger: none
-pr:
-  branches:
-    include: [main]
 
 stages:
   - template: ox-check/pr.yml

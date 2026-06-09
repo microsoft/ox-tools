@@ -10,7 +10,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use ohno::AppError;
 
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
@@ -33,85 +33,39 @@ pub const DELTA_PATH: &str = ".delta.toml";
 /// Region id for the managed section of `.delta.toml`.
 pub const DELTA_REGION_ID: &str = "ox-check-delta";
 
-/// Render the body of the deny.toml managed region.
+/// Embedded body of the deny.toml managed region — a permissive license
+/// allow-list, deny-yanked advisories, and a sources-allowlist baseline.
+pub const DENY_BODY: &str = include_str!("../../templates/regions/deny.toml");
+
+/// Embedded body of the rustfmt.toml managed region.
 ///
-/// Opinionated baseline that covers the union of policies observed in
-/// the surveyed repos: SPDX license allow-list rooted at the standard
-/// permissive cluster + a denylist for advisories and yanked crates.
-#[must_use]
-pub fn render_deny_body() -> &'static str {
-    r#"[advisories]
-yanked = "deny"
-unmaintained = "warn"
+/// A minimal opinion set. Contested choices stay at rustfmt defaults to
+/// keep adoption friction low; users who want different formatting
+/// empty the region.
+pub const RUSTFMT_BODY: &str = include_str!("../../templates/regions/rustfmt.toml");
 
-[licenses]
-allow = [
-    "MIT",
-    "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
-    "BSD-2-Clause",
-    "BSD-3-Clause",
-    "ISC",
-    "MPL-2.0",
-    "Unicode-DFS-2016",
-    "Unicode-3.0",
-    "Zlib",
-]
-confidence-threshold = 0.93
-
-[bans]
-multiple-versions = "warn"
-wildcards = "deny"
-
-[sources]
-unknown-registry = "deny"
-unknown-git = "deny"
-"#
-}
-
-/// Render the body of the rustfmt.toml managed region.
+/// Embedded body of the .delta.toml managed region.
 ///
-/// The opinions here are deliberately minimal — the most contested
-/// formatting choices are left at rustfmt defaults so adoption friction
-/// is low. Users who want different formatting empty the region.
-#[must_use]
-pub fn render_rustfmt_body() -> &'static str {
-    "edition = \"2024\"\n\
-     max_width = 110\n\
-     newline_style = \"Unix\"\n\
-     use_field_init_shorthand = true\n\
-     use_try_shorthand = true\n"
-}
-
-/// Render the body of the .delta.toml managed region.
-///
-/// Minimal cargo-delta configuration covering the impact-scoping inputs
-/// used by the CI emitter. Most repos won't need to customize this.
-#[must_use]
-pub fn render_delta_body() -> &'static str {
-    "[delta]\n\
-     # Include the workspace root files that should invalidate every member's\n\
-     # impact analysis when changed (lockfile, root manifest, toolchain).\n\
-     root-files = [\n\
-         \"Cargo.lock\",\n\
-         \"Cargo.toml\",\n\
-         \"rust-toolchain.toml\",\n\
-     ]\n"
-}
+/// Minimum cargo-delta config covering the impact-scoping inputs used
+/// by the CI emitter.
+pub const DELTA_BODY: &str = include_str!("../../templates/regions/delta.toml");
 
 /// Plan all three shared-config regions.
 ///
 /// # Errors
 ///
 /// Propagates I/O and region-parsing errors.
-pub fn plan_shared_configs(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>> {
+pub fn plan_shared_configs(
+    repo_root: &Path,
+    manifest: &Manifest,
+) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
         plan_managed_region(
             repo_root,
             manifest,
             DENY_PATH,
             DENY_REGION_ID,
-            render_deny_body(),
+            DENY_BODY,
             CommentSyntax::Hash,
         )?,
         plan_managed_region(
@@ -119,7 +73,7 @@ pub fn plan_shared_configs(repo_root: &Path, manifest: &Manifest) -> Result<Vec<
             manifest,
             RUSTFMT_PATH,
             RUSTFMT_REGION_ID,
-            render_rustfmt_body(),
+            RUSTFMT_BODY,
             CommentSyntax::Hash,
         )?,
         plan_managed_region(
@@ -127,7 +81,7 @@ pub fn plan_shared_configs(repo_root: &Path, manifest: &Manifest) -> Result<Vec<
             manifest,
             DELTA_PATH,
             DELTA_REGION_ID,
-            render_delta_body(),
+            DELTA_BODY,
             CommentSyntax::Hash,
         )?,
     ])
@@ -143,36 +97,31 @@ mod tests {
 
     #[test]
     fn deny_body_includes_allowlist_and_advisories() {
-        let b = render_deny_body();
-        assert!(b.contains("[licenses]"));
-        assert!(b.contains("\"MIT\""));
-        assert!(b.contains("\"Apache-2.0\""));
-        assert!(b.contains("[advisories]"));
-        assert!(b.contains("yanked = \"deny\""));
+        assert!(DENY_BODY.contains("[licenses]"));
+        assert!(DENY_BODY.contains("\"MIT\""));
+        assert!(DENY_BODY.contains("\"Apache-2.0\""));
+        assert!(DENY_BODY.contains("[advisories]"));
+        assert!(DENY_BODY.contains("yanked = \"deny\""));
     }
 
     #[test]
     fn rustfmt_body_sets_edition_and_width() {
-        let b = render_rustfmt_body();
-        assert!(b.contains("edition = \"2024\""));
-        assert!(b.contains("max_width = 110"));
+        assert!(RUSTFMT_BODY.contains("edition = \"2024\""));
+        assert!(RUSTFMT_BODY.contains("max_width = 110"));
     }
 
     #[test]
     fn delta_body_has_root_files() {
-        let b = render_delta_body();
-        assert!(b.contains("root-files"));
-        assert!(b.contains("Cargo.lock"));
+        assert!(DELTA_BODY.contains("root-files"));
+        assert!(DELTA_BODY.contains("Cargo.lock"));
     }
 
     #[test]
     fn bodies_round_trip_through_toml_parser() {
-        // The spliced files (in a fresh repo, no host content) must parse
-        // as valid TOML — the regions are toml-shaped after all.
         for (id, body) in [
-            (DENY_REGION_ID, render_deny_body()),
-            (RUSTFMT_REGION_ID, render_rustfmt_body()),
-            (DELTA_REGION_ID, render_delta_body()),
+            (DENY_REGION_ID, DENY_BODY),
+            (RUSTFMT_REGION_ID, RUSTFMT_BODY),
+            (DELTA_REGION_ID, DELTA_BODY),
         ] {
             let spliced = upsert_region("", id, body, CommentSyntax::Hash).unwrap();
             let _: toml_edit::DocumentMut = spliced

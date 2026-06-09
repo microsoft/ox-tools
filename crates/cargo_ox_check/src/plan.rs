@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context as _, Result};
+use ohno::{AppError, IntoAppError as _};
 
 use crate::decision::Decision;
 use crate::manifest::{Manifest, RegionKey};
@@ -224,7 +224,7 @@ impl Plan {
     ///   targets, the sibling is on the *host* file:
     ///   `<host>.ox-check-proposed`. The manifest is NOT updated for
     ///   proposals — see [updates.md §7](../../docs/design/updates.md).
-    /// - `InSync`, `Skipped`, `LeaveAlone` items preserve their existing
+    /// - `InSync`, `LeaveAlone` items preserve their existing
     ///   manifest entries from `previous_manifest`.
     ///
     /// # Errors
@@ -238,7 +238,7 @@ impl Plan {
     /// items must carry a spliced host. These invariants are enforced
     /// by the `PlanItem::*` constructors, so violations only happen if
     /// callers build `PlanItem` directly with inconsistent fields.
-    pub fn apply(&self, repo_root: &Path, previous_manifest: &Manifest) -> Result<Manifest> {
+    pub fn apply(&self, repo_root: &Path, previous_manifest: &Manifest) -> Result<Manifest, AppError> {
         let mut next = Manifest {
             rendered_by: Some(format!(
                 "{} {}",
@@ -295,7 +295,7 @@ impl Plan {
                     let abs = repo_root.join(format!("{host}.ox-check-proposed"));
                     write_file(&abs, spliced)?;
                 }
-                (_, Decision::InSync | Decision::Skipped | Decision::LeaveAlone) => {
+                (_, Decision::InSync | Decision::LeaveAlone) => {
                     // No-op; manifest entry already preserved.
                 }
             }
@@ -308,24 +308,23 @@ impl Plan {
 const fn decision_label(d: Decision) -> &'static str {
     match d {
         Decision::InSync => "in-sync",
-        Decision::Skipped => "skipped",
         Decision::Write => "write",
         Decision::Propose => "propose",
         Decision::LeaveAlone => "leave-alone",
     }
 }
 
-fn write_file(path: &Path, content: &str) -> Result<()> {
+fn write_file(path: &Path, content: &str) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).with_context(|| {
+        std::fs::create_dir_all(parent).into_app_err_with(|| {
             format!("failed to create parent directory {}", parent.display())
         })?;
     }
     let tmp = make_temp_path(path);
     std::fs::write(&tmp, content)
-        .with_context(|| format!("failed to write {}", tmp.display()))?;
+        .into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
     std::fs::rename(&tmp, path)
-        .with_context(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
+        .into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
@@ -371,7 +370,7 @@ mod tests {
                 host: "Justfile".into(),
                 id: "x".into(),
             },
-            Decision::Skipped,
+            Decision::LeaveAlone,
         ));
         assert!(!plan.has_changes());
     }

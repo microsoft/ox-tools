@@ -16,3 +16,4 @@ jobs:
     uses: ./.github/workflows/ox-check-nightly-impl.yml
     permissions:
       contents: read
+    secrets: inherit

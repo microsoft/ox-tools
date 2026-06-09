@@ -1,7 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# >>> ox-check-managed: ox-check-checks
-# Per-check recipes. Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
 # See ../../docs/design/checks.md for the catalog and rationale.
 
 set unstable
@@ -65,8 +64,16 @@ ox-check-aprz: (_ox-check-require "cargo-aprz")
 # === pr-test members ====================================================
 
 ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "cargo-nextest")
-    cargo llvm-cov nextest --workspace --all-features --locked --lcov \
-        --output-path target/coverage/lcov.info
+    # Wipe stale .profraw data so the report reflects only this run.
+    cargo llvm-cov clean --workspace --profraw-only
+    # Instrument and run tests; defer report generation so we can emit
+    # multiple formats from the same profraw set without re-running the
+    # tests.
+    cargo llvm-cov nextest --workspace --all-features --locked --no-report
+    # lcov.info feeds Codecov on GitHub; cobertura.xml feeds
+    # PublishCodeCoverageResults@2 on Azure DevOps.
+    cargo llvm-cov report --lcov      --output-path target/coverage/lcov.info
+    cargo llvm-cov report --cobertura --output-path target/coverage/cobertura.xml
 
 ox-check-doc-test:
     cargo test --doc --workspace --all-features --locked
@@ -100,4 +107,3 @@ ox-check-cargo-hack: (_ox-check-require "cargo-hack")
 
 ox-check-bench:
     cargo bench --workspace --all-features --no-run
-# <<< ox-check-managed: ox-check-checks

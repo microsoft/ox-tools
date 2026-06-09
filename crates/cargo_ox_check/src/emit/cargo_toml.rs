@@ -15,7 +15,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use ohno::AppError;
 
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
@@ -32,92 +32,33 @@ pub const WORKSPACE_LINTS_REGION_ID: &str = "ox-check-workspace-lints";
 /// (just `workspace = true`).
 pub const CRATE_LINTS_REGION_ID: &str = "ox-check-lints";
 
-/// Render the body of the workspace-scope lints region.
-///
-/// Emits a single `[workspace.lints]` table populated with the catalog
-/// in dotted-key form.
+/// Embedded body of the lint catalog, in dotted-key form (no table header).
+/// The header (`[workspace.lints]` or `[lints]`) is prepended per host.
+pub const LINTS_BODY: &str = include_str!("../../templates/regions/cargo-lints-body.toml");
+
+/// Embedded body of a workspace-member lints region.
+pub const MEMBER_LINTS_BODY: &str =
+    include_str!("../../templates/regions/cargo-member-lints.toml");
+
+/// Render the body of the workspace-scope lints region: `[workspace.lints]`
+/// header followed by the embedded catalog.
 #[must_use]
 pub fn render_workspace_lints_body() -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(LINTS_BODY.len() + 32);
     out.push_str("[workspace.lints]\n");
-    push_catalog_lints(&mut out, "rust", RUST_LINTS);
-    push_catalog_lints(&mut out, "rustdoc", RUSTDOC_LINTS);
-    push_catalog_lints(&mut out, "clippy", CLIPPY_LINTS);
+    out.push_str(LINTS_BODY);
     out
 }
 
-/// Render the body of the single-crate lints region. Same catalog as
-/// [`render_workspace_lints_body`] but rooted at `[lints]`.
+/// Render the body of the single-crate lints region: `[lints]` header
+/// followed by the embedded catalog.
 #[must_use]
 pub fn render_single_crate_lints_body() -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(LINTS_BODY.len() + 16);
     out.push_str("[lints]\n");
-    push_catalog_lints(&mut out, "rust", RUST_LINTS);
-    push_catalog_lints(&mut out, "rustdoc", RUSTDOC_LINTS);
-    push_catalog_lints(&mut out, "clippy", CLIPPY_LINTS);
+    out.push_str(LINTS_BODY);
     out
 }
-
-/// Render the body of a workspace-member lints region.
-#[must_use]
-pub fn render_member_lints_body() -> &'static str {
-    "[lints]\nworkspace = true\n"
-}
-
-fn push_catalog_lints(out: &mut String, group: &str, lints: &[(&str, &str)]) {
-    for (name, value) in lints {
-        out.push_str(group);
-        out.push('.');
-        out.push_str(name);
-        out.push_str(" = ");
-        out.push_str(value);
-        out.push('\n');
-    }
-}
-
-const RUST_LINTS: &[(&str, &str)] = &[
-    ("ambiguous_negative_literals", "\"warn\""),
-    ("missing_debug_implementations", "\"warn\""),
-    ("missing_docs", "\"warn\""),
-    ("redundant_imports", "\"warn\""),
-    ("redundant_lifetimes", "\"warn\""),
-    ("trivial_numeric_casts", "\"warn\""),
-    ("unsafe_op_in_unsafe_fn", "\"warn\""),
-    ("unused_lifetimes", "\"warn\""),
-];
-
-const RUSTDOC_LINTS: &[(&str, &str)] = &[
-    ("missing_crate_level_docs", "\"warn\""),
-    ("unescaped_backticks", "\"warn\""),
-];
-
-const CLIPPY_LINTS: &[(&str, &str)] = &[
-    // Category gates (priority -1 so per-lint allows below override them).
-    ("cargo", "{ level = \"warn\", priority = -1 }"),
-    ("complexity", "{ level = \"warn\", priority = -1 }"),
-    ("correctness", "{ level = \"warn\", priority = -1 }"),
-    ("nursery", "{ level = \"warn\", priority = -1 }"),
-    ("pedantic", "{ level = \"warn\", priority = -1 }"),
-    ("perf", "{ level = \"warn\", priority = -1 }"),
-    ("style", "{ level = \"warn\", priority = -1 }"),
-    ("suspicious", "{ level = \"warn\", priority = -1 }"),
-    // Per-lint opinions.
-    ("allow_attributes", "\"warn\""),
-    ("allow_attributes_without_reason", "\"warn\""),
-    ("clone_on_ref_ptr", "\"warn\""),
-    ("disallowed_script_idents", "\"warn\""),
-    ("map_err_ignore", "\"warn\""),
-    ("panic", "\"warn\""),
-    ("undocumented_unsafe_blocks", "\"warn\""),
-    ("unnecessary_safety_comment", "\"warn\""),
-    ("unwrap_used", "\"warn\""),
-    // Allows that override category defaults that misfire too often.
-    ("option_if_let_else", "\"allow\""),
-    ("missing_const_for_fn", "\"allow\""),
-    ("multiple_crate_versions", "\"allow\""),
-    ("significant_drop_tightening", "\"allow\""),
-    ("wildcard_imports", "\"allow\""),
-];
 
 /// Emit lint-region plan items for every appropriate `Cargo.toml` in the
 /// workspace.
@@ -133,7 +74,7 @@ pub fn plan_cargo_lints(
     repo_root: &Path,
     workspace: &Workspace,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::new();
     if workspace.has_workspace_table {
         let body = render_workspace_lints_body();
@@ -151,7 +92,7 @@ pub fn plan_cargo_lints(
                 manifest,
                 &member.manifest_relpath,
                 CRATE_LINTS_REGION_ID,
-                render_member_lints_body(),
+                MEMBER_LINTS_BODY,
                 CommentSyntax::Hash,
             )?);
         }
@@ -185,34 +126,48 @@ mod tests {
     }
 
     #[test]
-    fn workspace_body_uses_dotted_keys() {
-        let body = render_workspace_lints_body();
-        assert!(body.starts_with("[workspace.lints]\n"));
-        assert!(body.contains("rust.unsafe_op_in_unsafe_fn = \"warn\""));
-        assert!(body.contains("clippy.unwrap_used = \"warn\""));
-        // No bracketed sub-tables.
-        assert!(!body.contains("[workspace.lints.rust]"));
-        assert!(!body.contains("[workspace.lints.clippy]"));
-        assert!(!body.contains("[workspace.lints.rustdoc]"));
+    fn embedded_catalog_uses_dotted_keys() {
+        // The catalog body has no TOML table headers — only dotted keys.
+        // (A reference to "[workspace.lints]" can appear in a comment.)
+        for line in LINTS_BODY.lines() {
+            let trimmed = line.trim_start();
+            assert!(
+                !trimmed.starts_with('['),
+                "unexpected table header in cargo-lints-body.toml: {line}"
+            );
+        }
+        assert!(LINTS_BODY.contains("rust.unsafe_op_in_unsafe_fn = \"warn\""));
+        assert!(LINTS_BODY.contains("clippy.unwrap_used = \"warn\""));
     }
 
     #[test]
-    fn workspace_body_inline_tables_for_categories() {
+    fn workspace_body_prepends_workspace_lints_header() {
         let body = render_workspace_lints_body();
+        assert!(body.starts_with("[workspace.lints]\n"));
         assert!(body.contains("clippy.pedantic = { level = \"warn\", priority = -1 }"));
     }
 
     #[test]
-    fn single_crate_body_uses_plain_lints_table() {
+    fn single_crate_body_prepends_lints_header() {
         let body = render_single_crate_lints_body();
         assert!(body.starts_with("[lints]\n"));
         assert!(body.contains("clippy.unwrap_used = \"warn\""));
-        assert!(!body.contains("[workspace.lints]"));
+        // No second header would appear (no `[workspace.lints]` line).
+        for line in body.lines() {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with('[') {
+                assert_eq!(
+                    trimmed, "[lints]",
+                    "unexpected table header in single-crate body: {line}"
+                );
+            }
+        }
     }
 
     #[test]
     fn member_body_is_workspace_inheritance_stub() {
-        assert_eq!(render_member_lints_body(), "[lints]\nworkspace = true\n");
+        assert!(MEMBER_LINTS_BODY.contains("[lints]"));
+        assert!(MEMBER_LINTS_BODY.contains("workspace = true"));
     }
 
     #[test]
@@ -228,7 +183,7 @@ mod tests {
 
         let ws = crate::workspace::load_workspace(root).unwrap();
         let items = plan_cargo_lints(root, &ws, &Manifest::default()).unwrap();
-        assert_eq!(items.len(), 3); // 1 workspace region + 2 member regions
+        assert_eq!(items.len(), 3);
         for item in &items {
             assert_eq!(item.decision, Decision::Write);
         }
@@ -247,8 +202,6 @@ mod tests {
 
     #[test]
     fn dotted_key_body_parses_as_valid_toml_when_appended_to_workspace() {
-        // Sanity-check: splice the rendered body into a real Cargo.toml
-        // and ensure the result still parses.
         let host = "[workspace]\nmembers = [\"crates/a\"]\n";
         let region_body = render_workspace_lints_body();
         let spliced = crate::region::upsert_region(
@@ -272,7 +225,6 @@ mod tests {
             CommentSyntax::Hash,
         )
         .unwrap();
-        // User adds another lint in the same scope right after the sentinel.
         spliced.push_str("clippy.todo = \"warn\"\n");
         let _: toml_edit::DocumentMut =
             spliced.parse().expect("user extension keeps document valid");
@@ -280,8 +232,6 @@ mod tests {
 
     #[test]
     fn member_relpaths_use_forward_slashes() {
-        // The Workspace contract: forward slashes in manifest_relpath. Make
-        // sure the emitter consumes them as-is.
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
         write(
@@ -302,9 +252,6 @@ mod tests {
             })
             .collect();
         assert_eq!(member_targets, vec!["crates/a/Cargo.toml"]);
-
-        // Suppress unused-import lint when WorkspaceMember isn't exercised
-        // in this test (kept as a reminder).
         let _ = std::any::type_name::<WorkspaceMember>();
     }
 }

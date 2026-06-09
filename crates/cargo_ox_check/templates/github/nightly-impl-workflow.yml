@@ -22,6 +22,12 @@ on:
         description: Runner label for macOS jobs.
         type: string
         default: macos-latest
+    secrets:
+      CODECOV_TOKEN:
+        description: |
+          Codecov upload token. Optional for public repos that have OIDC
+          configured at Codecov; required for private repos.
+        required: false
 
 jobs:
   nightly-test:
@@ -35,13 +41,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-check-nightly-test
-      - name: Upload coverage
-        if: matrix.os == 'linux' && always()
-        uses: actions/upload-artifact@v4
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'linux'
+        uses: codecov/codecov-action@v5
         with:
-          name: nightly-coverage-lcov
-          path: target/llvm-cov/nightly.lcov
-          if-no-files-found: ignore
+          files: target/coverage/lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+          flags: nightly
+          fail_ci_if_error: false
 
   nightly-advisories:
     runs-on: ${{ inputs.linux_runner }}

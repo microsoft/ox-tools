@@ -13,7 +13,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context as _, Result, anyhow, bail};
+use ohno::{AppError, IntoAppError as _, app_err, bail};
 use toml_edit::DocumentMut;
 
 /// A discovered Cargo workspace.
@@ -53,10 +53,10 @@ pub struct WorkspaceMember {
 /// # Errors
 ///
 /// Returns an error if no `Cargo.toml` is found at or above `start`.
-pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
+pub fn find_workspace_root(start: &Path) -> Result<PathBuf, AppError> {
     let start = start
         .canonicalize()
-        .with_context(|| format!("cannot canonicalize start path '{}'", start.display()))?;
+        .into_app_err_with(|| format!("cannot canonicalize start path '{}'", start.display()))?;
 
     let mut nearest: Option<PathBuf> = None;
     for ancestor in start.ancestors() {
@@ -65,10 +65,10 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
             continue;
         }
         let text = std::fs::read_to_string(&manifest)
-            .with_context(|| format!("failed to read {}", manifest.display()))?;
+            .into_app_err_with(|| format!("failed to read {}", manifest.display()))?;
         let doc: DocumentMut = text
-            .parse()
-            .with_context(|| format!("failed to parse {} as TOML", manifest.display()))?;
+            .parse::<DocumentMut>()
+            .into_app_err_with(|| format!("failed to parse {} as TOML", manifest.display()))?;
         if doc.get("workspace").is_some() {
             return Ok(ancestor.to_path_buf());
         }
@@ -78,7 +78,7 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
     }
 
     nearest.ok_or_else(|| {
-        anyhow!(
+        app_err!(
             "no Cargo.toml found at or above '{}'; cargo-ox-check must be run inside a Cargo workspace",
             start.display()
         )
@@ -91,13 +91,13 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf> {
 ///
 /// Returns an error if the manifest can't be read, parsed, or its
 /// `[workspace] members` glob list can't be resolved.
-pub fn load_workspace(root: &Path) -> Result<Workspace> {
+pub fn load_workspace(root: &Path) -> Result<Workspace, AppError> {
     let manifest_path = root.join("Cargo.toml");
     let text = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+        .into_app_err_with(|| format!("failed to read {}", manifest_path.display()))?;
     let doc: DocumentMut = text
-        .parse()
-        .with_context(|| format!("failed to parse {} as TOML", manifest_path.display()))?;
+        .parse::<DocumentMut>()
+        .into_app_err_with(|| format!("failed to parse {} as TOML", manifest_path.display()))?;
 
     let has_workspace_table = doc.get("workspace").is_some();
     let members = if has_workspace_table {
@@ -128,21 +128,21 @@ pub fn load_workspace(root: &Path) -> Result<Workspace> {
     })
 }
 
-fn resolve_workspace_members(root: &Path, doc: &DocumentMut) -> Result<Vec<WorkspaceMember>> {
+fn resolve_workspace_members(root: &Path, doc: &DocumentMut) -> Result<Vec<WorkspaceMember>, AppError> {
     let members_item = doc
         .get("workspace")
         .and_then(|w| w.get("members"))
-        .ok_or_else(|| anyhow!("[workspace] is missing the `members` array"))?;
+        .ok_or_else(|| app_err!("[workspace] is missing the `members` array"))?;
 
     let array = members_item
         .as_array()
-        .ok_or_else(|| anyhow!("[workspace] `members` must be an array"))?;
+        .ok_or_else(|| app_err!("[workspace] `members` must be an array"))?;
 
     let mut out = Vec::new();
     for entry in array {
         let pattern = entry
             .as_str()
-            .ok_or_else(|| anyhow!("`members` entries must be strings"))?;
+            .ok_or_else(|| app_err!("`members` entries must be strings"))?;
         expand_member_pattern(root, pattern, &mut out)?;
     }
 
@@ -158,7 +158,7 @@ fn resolve_workspace_members(root: &Path, doc: &DocumentMut) -> Result<Vec<Works
 /// last path segment (the form Cargo uses in the surveyed repos: `crates/*`).
 /// More elaborate globbing isn't observed in the wild and can be added
 /// later if needed.
-fn expand_member_pattern(root: &Path, pattern: &str, out: &mut Vec<WorkspaceMember>) -> Result<()> {
+fn expand_member_pattern(root: &Path, pattern: &str, out: &mut Vec<WorkspaceMember>) -> Result<(), AppError> {
     let pattern = pattern.trim_end_matches('/');
     if pattern.is_empty() {
         bail!("workspace member pattern is empty");
@@ -171,7 +171,7 @@ fn expand_member_pattern(root: &Path, pattern: &str, out: &mut Vec<WorkspaceMemb
             return Ok(());
         }
         let mut entries: Vec<_> = std::fs::read_dir(&parent_path)
-            .with_context(|| format!("failed to read directory {}", parent_path.display()))?
+            .into_app_err_with(|| format!("failed to read directory {}", parent_path.display()))?
             .filter_map(Result::ok)
             .filter(|e| e.path().is_dir())
             .filter(|e| e.path().join("Cargo.toml").is_file())
@@ -181,7 +181,7 @@ fn expand_member_pattern(root: &Path, pattern: &str, out: &mut Vec<WorkspaceMemb
             let name = entry.file_name();
             let name_str = name
                 .to_str()
-                .ok_or_else(|| anyhow!("non-UTF-8 directory name in {}", parent_path.display()))?;
+                .ok_or_else(|| app_err!("non-UTF-8 directory name in {}", parent_path.display()))?;
             let relpath = format!("{parent}/{name_str}/Cargo.toml");
             out.push(WorkspaceMember {
                 manifest_relpath: normalize_relpath(&relpath),

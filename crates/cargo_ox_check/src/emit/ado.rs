@@ -11,7 +11,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use ohno::AppError;
 
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
@@ -50,9 +50,18 @@ pub const GROUPS: &[&str] = &[
     "nightly-exhaustive",
 ];
 
+/// Embedded template for one per-group step. `__GROUP__` is substituted
+/// with the group name at emit time.
+pub const GROUP_STEP_TEMPLATE: &str =
+    include_str!("../../templates/ado/steps/group.yml");
+
+/// Placeholder token the per-group template uses for the group name.
+const GROUP_PLACEHOLDER: &str = "__GROUP__";
+
 /// Render the step template for one group.
 ///
-/// The step template:
+/// Substitutes the group name into [`GROUP_STEP_TEMPLATE`]. The
+/// resulting template:
 ///
 /// - Skips itself if the `skip` parameter is `'true'` (set from the
 ///   impact stage's `skip` output in the stages template).
@@ -60,26 +69,7 @@ pub const GROUPS: &[&str] = &[
 /// - Invokes `just ox-check-<group>` via bash.
 #[must_use]
 pub fn render_group_step(group: &str) -> String {
-    format!(
-        "# Copyright (c) Microsoft Corporation.\n\
-         # Licensed under the MIT License.\n\
-         # Owned by cargo-ox-check; edit via `cargo ox-check update`.\n\
-         parameters:\n  \
-           - name: excludes\n    \
-             type: string\n    \
-             default: ''\n  \
-           - name: skip\n    \
-             type: string\n    \
-             default: 'false'\n\
-         steps:\n  \
-           - template: setup.yml\n    \
-             condition: ne(parameters.skip, 'true')\n  \
-           - bash: just ox-check-{group}\n    \
-             condition: ne(parameters.skip, 'true')\n    \
-             displayName: ox-check-{group}\n    \
-             env:\n      \
-               OX_CHECK_EXCLUDES: ${{{{ parameters.excludes }}}}\n"
-    )
+    GROUP_STEP_TEMPLATE.replace(GROUP_PLACEHOLDER, group)
 }
 
 /// Repo-root-relative path for one group's step template.
@@ -96,7 +86,7 @@ pub fn group_step_path(group: &str) -> String {
 pub fn plan_stages_templates(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
         plan_owned_file(
             repo_root,
@@ -121,7 +111,7 @@ pub fn plan_stages_templates(
 pub fn plan_root_pipelines(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
         plan_owned_file(
             repo_root,
@@ -146,7 +136,7 @@ pub fn plan_root_pipelines(
 pub fn plan_ado_backend(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::new();
     items.extend(plan_step_templates(repo_root, manifest)?);
     items.extend(plan_stages_templates(repo_root, manifest)?);
@@ -162,7 +152,7 @@ pub fn plan_ado_backend(
 pub fn plan_step_templates(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::with_capacity(GROUPS.len() + 2);
     items.push(plan_owned_file(
         repo_root,
@@ -239,7 +229,8 @@ mod tests {
         ] {
             assert!(NIGHTLY_STAGES.contains(needle), "nightly stages missing '{needle}'");
         }
-        assert!(NIGHTLY_STAGES.contains("artifact: nightly-coverage-lcov"));
+        // Nightly publishes coverage via PublishCodeCoverageResults@2.
+        assert!(NIGHTLY_STAGES.contains("PublishCodeCoverageResults@2"));
     }
 
     #[test]

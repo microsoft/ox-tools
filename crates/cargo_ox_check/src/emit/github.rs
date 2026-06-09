@@ -14,7 +14,7 @@
 
 use std::path::Path;
 
-use anyhow::Result;
+use ohno::AppError;
 
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
@@ -58,40 +58,23 @@ pub const GROUPS: &[&str] = &[
     "nightly-exhaustive",
 ];
 
+/// Embedded template for one per-group composite action. `__GROUP__` is
+/// substituted with the group name at emit time.
+pub const GROUP_ACTION_TEMPLATE: &str =
+    include_str!("../../templates/github/group-action.yml");
+
+/// Placeholder token the per-group template uses for the group name.
+const GROUP_PLACEHOLDER: &str = "__GROUP__";
+
 /// Render the `action.yml` for one check group's composite action.
 ///
-/// The action takes two inputs (`excludes`, `skip`) supplied by the
-/// reusable workflow from the impact job's outputs, sets them as
-/// environment variables, and invokes `just ox-check-<group>`.
+/// Substitutes the group name into [`GROUP_ACTION_TEMPLATE`]. The action
+/// takes two inputs (`excludes`, `skip`) supplied by the reusable
+/// workflow from the impact job's outputs, sets them as environment
+/// variables, and invokes `just ox-check-<group>`.
 #[must_use]
 pub fn render_group_action(group: &str) -> String {
-    format!(
-        "# Copyright (c) Microsoft Corporation.\n\
-         # Licensed under the MIT License.\n\
-         # Owned by cargo-ox-check; edit via `cargo ox-check update`.\n\
-         name: ox-check-{group}\n\
-         description: Run the {group} check group.\n\
-         inputs:\n  \
-           excludes:\n    \
-             description: Comma-separated package excludes from the impact job.\n    \
-             default: \"\"\n    \
-             required: false\n  \
-           skip:\n    \
-             description: If \"true\", skip this group entirely.\n    \
-             default: \"false\"\n    \
-             required: false\n\
-         runs:\n  \
-           using: composite\n  \
-           steps:\n    \
-             - if: inputs.skip != 'true'\n      \
-               uses: ./.github/actions/ox-check-setup\n    \
-             - if: inputs.skip != 'true'\n      \
-               name: Run just ox-check-{group}\n      \
-               shell: bash\n      \
-               env:\n        \
-                 OX_CHECK_EXCLUDES: ${{{{ inputs.excludes }}}}\n      \
-               run: just ox-check-{group}\n"
-    )
+    GROUP_ACTION_TEMPLATE.replace(GROUP_PLACEHOLDER, group)
 }
 
 /// Repo-root-relative path for a per-group composite action.
@@ -108,7 +91,7 @@ pub fn group_action_path(group: &str) -> String {
 pub fn plan_composite_actions(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::with_capacity(GROUPS.len() + 2);
     items.push(plan_owned_file(
         repo_root,
@@ -142,7 +125,7 @@ pub fn plan_composite_actions(
 pub fn plan_reusable_workflows(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
         plan_owned_file(
             repo_root,
@@ -167,7 +150,7 @@ pub fn plan_reusable_workflows(
 pub fn plan_root_workflows(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
         plan_owned_file(
             repo_root,
@@ -192,7 +175,7 @@ pub fn plan_root_workflows(
 pub fn plan_github_backend(
     repo_root: &Path,
     manifest: &Manifest,
-) -> Result<Vec<PlanItem>> {
+) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::new();
     items.extend(plan_composite_actions(repo_root, manifest)?);
     items.extend(plan_reusable_workflows(repo_root, manifest)?);
@@ -288,7 +271,8 @@ mod tests {
             );
         }
         // Nightly uploads the lcov artifact.
-        assert!(NIGHTLY_IMPL_WORKFLOW.contains("upload-artifact"));
+        // Nightly uploads the lcov to Codecov.
+        assert!(NIGHTLY_IMPL_WORKFLOW.contains("codecov/codecov-action"));
     }
 
     #[test]

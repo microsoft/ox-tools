@@ -17,9 +17,12 @@ stages:
         pool: ${{ parameters.linuxPool }}
         steps:
           - template: steps/nightly-test.yml
-          - publish: target/llvm-cov/nightly.lcov
-            artifact: nightly-coverage-lcov
+          - task: PublishCodeCoverageResults@2
             condition: succeededOrFailed()
+            displayName: Publish coverage
+            inputs:
+              summaryFileLocation: target/coverage/cobertura.xml
+              failIfCoverageEmpty: false
       - job: windows
         pool: ${{ parameters.windowsPool }}
         steps:
