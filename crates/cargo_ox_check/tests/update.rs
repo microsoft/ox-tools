@@ -1,6 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "panic-on-failure idioms are appropriate in tests"
+)]
+
 //! Fixture-driven integration tests for `cargo ox-check update`.
 //!
 //! Each scenario lives under `tests/fixtures/<name>/`. The runner
@@ -12,10 +18,7 @@
 //! by reading actual files on disk, which helps when designing new
 //! migration paths or onboarding scenarios.
 
-#![expect(
-    clippy::unwrap_used,
-    reason = "integration tests favor concise assertions over Result plumbing"
-)]
+#![expect(clippy::unwrap_used, reason = "integration tests favor concise assertions over Result plumbing")]
 #![expect(
     clippy::panic,
     reason = "integration tests panic on unmet preconditions for readable failure output"
@@ -111,10 +114,7 @@ fn single_crate_emits_crate_lints_and_justfiles() {
         "justfiles/ox-check/tiers.just",
         "justfiles/ox-check/tool-minimums.txt",
     ] {
-        assert!(
-            tmp.path().join(rel).is_file(),
-            "expected {rel} to be written"
-        );
+        assert!(tmp.path().join(rel).is_file(), "expected {rel} to be written");
     }
 
     // Idempotence: a second run must not change anything.
@@ -139,16 +139,12 @@ fn empty_region_is_treated_as_opt_out() {
     // Simulate the user emptying the managed region.
     let rustfmt_path = tmp.path().join("rustfmt.toml");
     let body = std::fs::read_to_string(&rustfmt_path).unwrap();
-    let emptied =
-        upsert_region(&body, RUSTFMT_REGION_ID, "", CommentSyntax::Hash).unwrap();
+    let emptied = upsert_region(&body, RUSTFMT_REGION_ID, "", CommentSyntax::Hash).unwrap();
     std::fs::write(&rustfmt_path, &emptied).unwrap();
 
     // Re-run and check the rustfmt region is LeaveAlone.
     let outcome = run(&tmp);
-    assert_eq!(
-        region_decision(&outcome, "rustfmt.toml", RUSTFMT_REGION_ID),
-        Decision::LeaveAlone
-    );
+    assert_eq!(region_decision(&outcome, "rustfmt.toml", RUSTFMT_REGION_ID), Decision::LeaveAlone);
     let after = std::fs::read_to_string(&rustfmt_path).unwrap();
     assert_eq!(after, emptied, "opt-out region must not be re-populated");
 }
@@ -165,20 +161,11 @@ fn user_edit_inside_region_is_left_alone() {
 
     let rustfmt_path = tmp.path().join("rustfmt.toml");
     let body = std::fs::read_to_string(&rustfmt_path).unwrap();
-    let custom = upsert_region(
-        &body,
-        RUSTFMT_REGION_ID,
-        "edition = \"2021\"\n",
-        CommentSyntax::Hash,
-    )
-    .unwrap();
+    let custom = upsert_region(&body, RUSTFMT_REGION_ID, "edition = \"2021\"\n", CommentSyntax::Hash).unwrap();
     std::fs::write(&rustfmt_path, custom).unwrap();
 
     let outcome = run(&tmp);
-    assert_eq!(
-        region_decision(&outcome, "rustfmt.toml", RUSTFMT_REGION_ID),
-        Decision::LeaveAlone
-    );
+    assert_eq!(region_decision(&outcome, "rustfmt.toml", RUSTFMT_REGION_ID), Decision::LeaveAlone);
     let after = std::fs::read_to_string(&rustfmt_path).unwrap();
     assert!(
         after.contains("edition = \"2021\""),

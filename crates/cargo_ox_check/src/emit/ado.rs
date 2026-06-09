@@ -3,7 +3,7 @@
 
 //! Azure DevOps Pipelines backend emitter.
 //!
-//! Emits three layers per [ado.md](../../../docs/design/ado.md):
+//! Emits three layers per [`ado.md`](../../../docs/design/ado.md):
 //!
 //! 1. Step templates under `.pipelines/ox-check/steps/*.yml`.
 //! 2. Stages templates (`pr.yml`, `nightly.yml`).
@@ -29,23 +29,20 @@ pub const IMPACT_STEP: &str = include_str!("../../templates/ado/steps/impact.yml
 /// Every job in `pr.yml` / `nightly.yml` is rendered through this
 /// wrapper; 1ESPT (and similar extension-template) users take ownership
 /// of it to inject `templateContext:` blocks without forking the owned
-/// stages templates. See [ado.md §4](../../../docs/design/ado.md#4-owned-stages-templates).
+/// stages templates. See [`ado.md §4`](../../../docs/design/ado.md#4-owned-stages-templates).
 pub const JOB_WRAPPER: &str = include_str!("../../templates/ado/steps/job.yml");
 
 /// Embedded body of the PR-tier stages template.
 pub const PR_STAGES: &str = include_str!("../../templates/ado/pr-stages.yml");
 
 /// Embedded body of the nightly-tier stages template.
-pub const NIGHTLY_STAGES: &str =
-    include_str!("../../templates/ado/nightly-stages.yml");
+pub const NIGHTLY_STAGES: &str = include_str!("../../templates/ado/nightly-stages.yml");
 
 /// Embedded body of the PR root pipeline.
-pub const PR_ROOT_PIPELINE: &str =
-    include_str!("../../templates/ado/pr-root-pipeline.yml");
+pub const PR_ROOT_PIPELINE: &str = include_str!("../../templates/ado/pr-root-pipeline.yml");
 
 /// Embedded body of the nightly root pipeline.
-pub const NIGHTLY_ROOT_PIPELINE: &str =
-    include_str!("../../templates/ado/nightly-root-pipeline.yml");
+pub const NIGHTLY_ROOT_PIPELINE: &str = include_str!("../../templates/ado/nightly-root-pipeline.yml");
 
 /// All check groups that get a per-group step template.
 pub const GROUPS: &[&str] = &[
@@ -60,8 +57,7 @@ pub const GROUPS: &[&str] = &[
 
 /// Embedded template for one per-group step. `__GROUP__` is substituted
 /// with the group name at emit time.
-pub const GROUP_STEP_TEMPLATE: &str =
-    include_str!("../../templates/ado/steps/group.yml");
+pub const GROUP_STEP_TEMPLATE: &str = include_str!("../../templates/ado/steps/group.yml");
 
 /// Placeholder token the per-group template uses for the group name.
 const GROUP_PLACEHOLDER: &str = "__GROUP__";
@@ -91,23 +87,10 @@ pub fn group_step_path(group: &str) -> String {
 /// # Errors
 ///
 /// Propagates I/O errors from the owned-file driver.
-pub fn plan_stages_templates(
-    repo_root: &Path,
-    manifest: &Manifest,
-) -> Result<Vec<PlanItem>, AppError> {
+pub fn plan_stages_templates(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
-        plan_owned_file(
-            repo_root,
-            manifest,
-            ".pipelines/ox-check/pr.yml",
-            PR_STAGES,
-        )?,
-        plan_owned_file(
-            repo_root,
-            manifest,
-            ".pipelines/ox-check/nightly.yml",
-            NIGHTLY_STAGES,
-        )?,
+        plan_owned_file(repo_root, manifest, ".pipelines/ox-check/pr.yml", PR_STAGES)?,
+        plan_owned_file(repo_root, manifest, ".pipelines/ox-check/nightly.yml", NIGHTLY_STAGES)?,
     ])
 }
 
@@ -116,23 +99,10 @@ pub fn plan_stages_templates(
 /// # Errors
 ///
 /// Propagates I/O errors from the owned-file driver.
-pub fn plan_root_pipelines(
-    repo_root: &Path,
-    manifest: &Manifest,
-) -> Result<Vec<PlanItem>, AppError> {
+pub fn plan_root_pipelines(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
-        plan_owned_file(
-            repo_root,
-            manifest,
-            ".pipelines/ox-check-pr.yml",
-            PR_ROOT_PIPELINE,
-        )?,
-        plan_owned_file(
-            repo_root,
-            manifest,
-            ".pipelines/ox-check-nightly.yml",
-            NIGHTLY_ROOT_PIPELINE,
-        )?,
+        plan_owned_file(repo_root, manifest, ".pipelines/ox-check-pr.yml", PR_ROOT_PIPELINE)?,
+        plan_owned_file(repo_root, manifest, ".pipelines/ox-check-nightly.yml", NIGHTLY_ROOT_PIPELINE)?,
     ])
 }
 
@@ -141,10 +111,7 @@ pub fn plan_root_pipelines(
 /// # Errors
 ///
 /// Propagates I/O errors from any per-file emitter.
-pub fn plan_ado_backend(
-    repo_root: &Path,
-    manifest: &Manifest,
-) -> Result<Vec<PlanItem>, AppError> {
+pub fn plan_ado_backend(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::new();
     items.extend(plan_step_templates(repo_root, manifest)?);
     items.extend(plan_stages_templates(repo_root, manifest)?);
@@ -157,10 +124,7 @@ pub fn plan_ado_backend(
 /// # Errors
 ///
 /// Propagates I/O errors from any per-file emitter.
-pub fn plan_step_templates(
-    repo_root: &Path,
-    manifest: &Manifest,
-) -> Result<Vec<PlanItem>, AppError> {
+pub fn plan_step_templates(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::with_capacity(GROUPS.len() + 3);
     items.push(plan_owned_file(
         repo_root,
@@ -182,12 +146,7 @@ pub fn plan_step_templates(
     )?);
     for group in GROUPS {
         let body = render_group_step(group);
-        items.push(plan_owned_file(
-            repo_root,
-            manifest,
-            &group_step_path(group),
-            &body,
-        )?);
+        items.push(plan_owned_file(repo_root, manifest, &group_step_path(group), &body)?);
     }
     Ok(items)
 }
@@ -238,10 +197,7 @@ mod tests {
 
     #[test]
     fn group_step_path_is_under_pipelines() {
-        assert_eq!(
-            group_step_path("nightly-test"),
-            ".pipelines/ox-check/steps/nightly-test.yml"
-        );
+        assert_eq!(group_step_path("nightly-test"), ".pipelines/ox-check/steps/nightly-test.yml");
     }
 
     #[test]
@@ -253,7 +209,10 @@ mod tests {
         // Every job is rendered through the dirty-file wrapper.
         assert!(PR_STAGES.contains("- template: steps/job.yml"));
         // No bare `- job:` keys — they must all go through the wrapper.
-        assert!(!PR_STAGES.contains("\n      - job: "), "PR stages defines a bare `- job:` instead of going through steps/job.yml");
+        assert!(
+            !PR_STAGES.contains("\n      - job: "),
+            "PR stages defines a bare `- job:` instead of going through steps/job.yml"
+        );
     }
 
     #[test]
@@ -270,7 +229,10 @@ mod tests {
         assert!(NIGHTLY_STAGES.contains("PublishCodeCoverageResults@2"));
         // Every job is rendered through the dirty-file wrapper.
         assert!(NIGHTLY_STAGES.contains("- template: steps/job.yml"));
-        assert!(!NIGHTLY_STAGES.contains("\n      - job: "), "Nightly stages defines a bare `- job:` instead of going through steps/job.yml");
+        assert!(
+            !NIGHTLY_STAGES.contains("\n      - job: "),
+            "Nightly stages defines a bare `- job:` instead of going through steps/job.yml"
+        );
     }
 
     #[test]

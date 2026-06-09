@@ -10,7 +10,7 @@
 //! **Line endings are normalized to LF before hashing** so that a file
 //! committed once produces the same checksum regardless of host OS or
 //! Git's `core.autocrlf` setting. Without normalization, a region
-//! authored on Windows (CRLF source under autocrlf=true) and validated
+//! authored on Windows (CRLF source under `autocrlf=true`) and validated
 //! on Linux (LF after git normalizes the commit) would always diverge
 //! and confuse the three-checksum decision algorithm.
 

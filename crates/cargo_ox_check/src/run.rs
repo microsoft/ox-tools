@@ -67,7 +67,17 @@ pub fn run(command: Command) -> Result<(), AppError> {
 pub fn run_update(args: &UpdateArgs, start_dir: &Path) -> Result<RunOutcome, AppError> {
     let repo_root = workspace::find_workspace_root(start_dir)?;
     let ws = workspace::load_workspace(&repo_root)?;
-    let manifest = Manifest::load(&repo_root)?;
+    let mut manifest = Manifest::load(&repo_root)?;
+
+    // One-time legacy migration: an earlier version of cargo-ox-check
+    // emitted the Justfile imports region under a lowercase `justfile`
+    // host path. The canonical capitalization is `Justfile` (matching
+    // Makefile / Dockerfile / Rakefile convention and the surveyed
+    // Microsoft Rust repos). For repos whose manifest still carries
+    // the lowercase entry, transfer it to the canonical case so the
+    // orphan-detection pass doesn't spuriously try to splice the
+    // region back out.
+    local::migrate_legacy_justfile_case(&mut manifest);
 
     let backends = backend::resolve(&args.backends, args.no_backends, &repo_root)?;
     info!(
@@ -96,12 +106,7 @@ pub fn run_update(args: &UpdateArgs, start_dir: &Path) -> Result<RunOutcome, App
 }
 
 /// Build the full plan: local files + selected CI backends.
-fn build_plan(
-    repo_root: &Path,
-    workspace: &Workspace,
-    manifest: &Manifest,
-    backends: &[Backend],
-) -> Result<Plan, AppError> {
+fn build_plan(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, backends: &[Backend]) -> Result<Plan, AppError> {
     let mut plan = Plan::default();
 
     for item in local::plan_local_just_tree(repo_root, manifest)? {
@@ -138,17 +143,13 @@ fn build_plan(
 
 /// Scan the previous manifest for entries that the active plan items
 /// don't cover. For each, classify as Remove (user untouched since the
-/// last render) or OrphanedKept (user customized — preserve and
+/// last render) or `OrphanedKept` (user customized — preserve and
 /// transfer ownership).
 ///
 /// This is what removes orphaned CI artifacts, dropped catalog entries,
 /// disabled-backend files, and any other previously-tracked item that
 /// is no longer in scope.
-fn plan_removals(
-    repo_root: &Path,
-    previous: &Manifest,
-    plan: &mut Plan,
-) -> Result<(), AppError> {
+fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan) -> Result<(), AppError> {
     let live_files: BTreeSet<String> = plan
         .items()
         .iter()
@@ -174,15 +175,10 @@ fn plan_removals(
         let disk_checksum = disk.as_deref().map(checksum_str);
         match decide_removal(last, disk_checksum.as_deref()) {
             Decision::Remove => plan.push(PlanItem::remove_file(path.clone())),
-            Decision::OrphanedKept => plan.push(PlanItem::orphaned_kept(
-                Target::File { path: path.clone() },
-            )),
-            // `InSync` means the file is already gone; we still want to
-            // purge the manifest entry, so emit a no-op plan item that
-            // the apply step will drop the entry for.
-            Decision::InSync => plan.push(PlanItem::orphaned_kept(
-                Target::File { path: path.clone() },
-            )),
+            // `InSync` means the file is already gone but we still want
+            // to purge the manifest entry, same as a customized orphan —
+            // both surface as no-op plan items that drop the entry.
+            Decision::OrphanedKept | Decision::InSync => plan.push(PlanItem::orphaned_kept(Target::File { path: path.clone() })),
             other => unreachable!("decide_removal returned {other:?} for a file orphan"),
         }
     }
@@ -192,18 +188,15 @@ fn plan_removals(
             continue;
         }
         let host_path = repo_root.join(&key.host);
-        let host_text = match read_file_if_present(&host_path)? {
-            Some(t) => t,
-            None => {
-                // Host file is gone entirely; just drop the manifest
-                // entry. Emit OrphanedKept (no-op apply) so the plan
-                // can record the transfer of ownership consistently.
-                plan.push(PlanItem::orphaned_kept(Target::Region {
-                    host: key.host.clone(),
-                    id: key.id.clone(),
-                }));
-                continue;
-            }
+        let Some(host_text) = read_file_if_present(&host_path)? else {
+            // Host file is gone entirely; just drop the manifest
+            // entry. Emit OrphanedKept (no-op apply) so the plan
+            // can record the transfer of ownership consistently.
+            plan.push(PlanItem::orphaned_kept(Target::Region {
+                host: key.host.clone(),
+                id: key.id.clone(),
+            }));
+            continue;
         };
 
         // CommentSyntax is currently always Hash for managed regions.
@@ -215,11 +208,7 @@ fn plan_removals(
         match decide_removal(last, body_checksum.as_deref()) {
             Decision::Remove => {
                 let spliced = remove_region(&host_text, &key.id, syntax)?;
-                plan.push(PlanItem::remove_region(
-                    key.host.clone(),
-                    key.id.clone(),
-                    spliced,
-                ));
+                plan.push(PlanItem::remove_region(key.host.clone(), key.id.clone(), spliced));
             }
             Decision::OrphanedKept | Decision::InSync => {
                 plan.push(PlanItem::orphaned_kept(Target::Region {
@@ -238,8 +227,7 @@ fn read_file_if_present(path: &Path) -> Result<Option<String>, AppError> {
     match std::fs::read_to_string(path) {
         Ok(s) => Ok(Some(s)),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err::<Option<String>, _>(e)
-            .into_app_err_with(|| format!("failed to read {}", path.display())),
+        Err(e) => Err::<Option<String>, _>(e).into_app_err_with(|| format!("failed to read {}", path.display())),
     }
 }
 
@@ -299,16 +287,12 @@ mod tests {
             ".delta.toml",
             ".ox-check.lock",
         ] {
-            assert!(
-                tmp.path().join(expected).is_file(),
-                "expected '{expected}' after update"
-            );
+            assert!(tmp.path().join(expected).is_file(), "expected '{expected}' after update");
         }
 
         let root_manifest = fs::read_to_string(tmp.path().join("Cargo.toml")).unwrap();
         assert!(root_manifest.contains("# >>> ox-check-managed: ox-check-workspace-lints"));
-        let member_manifest =
-            fs::read_to_string(tmp.path().join("crates/alpha/Cargo.toml")).unwrap();
+        let member_manifest = fs::read_to_string(tmp.path().join("crates/alpha/Cargo.toml")).unwrap();
         assert!(member_manifest.contains("# >>> ox-check-managed: ox-check-lints"));
         assert!(member_manifest.contains("workspace = true"));
     }
@@ -353,13 +337,8 @@ mod tests {
 
         let path = tmp.path().join("rustfmt.toml");
         let host = fs::read_to_string(&path).unwrap();
-        let updated = crate::region::upsert_region(
-            &host,
-            shared_configs::RUSTFMT_REGION_ID,
-            "",
-            crate::region::CommentSyntax::Hash,
-        )
-        .unwrap();
+        let updated =
+            crate::region::upsert_region(&host, shared_configs::RUSTFMT_REGION_ID, "", crate::region::CommentSyntax::Hash).unwrap();
         fs::write(&path, updated).unwrap();
 
         let outcome = run_update(&args, tmp.path()).unwrap();
@@ -406,10 +385,7 @@ mod tests {
                     if host == "rustfmt.toml" && id == shared_configs::RUSTFMT_REGION_ID)
             })
             .unwrap();
-        assert_eq!(
-            rustfmt_item.decision,
-            crate::decision::Decision::LeaveAlone
-        );
+        assert_eq!(rustfmt_item.decision, crate::decision::Decision::LeaveAlone);
         let final_text = fs::read_to_string(&path).unwrap();
         assert!(final_text.contains("edition = \"2021\""));
     }
@@ -454,9 +430,7 @@ mod tests {
             host: "rustfmt.toml".to_owned(),
             id: shared_configs::RUSTFMT_REGION_ID.to_owned(),
         };
-        manifest
-            .regions
-            .insert(key, checksum_str("synthetic old template"));
+        manifest.regions.insert(key, checksum_str("synthetic old template"));
         manifest.save(tmp.path()).unwrap();
         let _ = manifest_path; // sanity
 
@@ -523,10 +497,7 @@ mod tests {
             ".github/workflows/ox-check-pr.yml",
             ".github/workflows/ox-check-nightly.yml",
         ] {
-            assert!(
-                tmp.path().join(expected).is_file(),
-                "expected '{expected}' after github update"
-            );
+            assert!(tmp.path().join(expected).is_file(), "expected '{expected}' after github update");
         }
     }
 
@@ -573,10 +544,7 @@ mod tests {
             ".pipelines/ox-check-pr.yml",
             ".pipelines/ox-check-nightly.yml",
         ] {
-            assert!(
-                tmp.path().join(expected).is_file(),
-                "expected '{expected}' after ado update"
-            );
+            assert!(tmp.path().join(expected).is_file(), "expected '{expected}' after ado update");
         }
     }
 

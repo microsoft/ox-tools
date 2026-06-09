@@ -1,23 +1,14 @@
-<div align="center">
- <img src="./logo.png" alt="Cargo Heather Logo" width="96">
-
-# Cargo Heather
-
-[![crate.io](https://img.shields.io/crates/v/cargo-heather.svg)](https://crates.io/crates/cargo-heather)
-[![docs.rs](https://docs.rs/cargo-heather/badge.svg)](https://docs.rs/cargo-heather)
-[![MSRV](https://img.shields.io/crates/msrv/cargo-heather)](https://crates.io/crates/cargo-heather)
-[![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
-[![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
-<a href="../.."><img src="../../logo.svg" alt="This crate was developed as part of the Oxidizer project" width="20"></a>
-
-</div>
+# cargo_heather ![License: MIT](https://img.shields.io/badge/license-MIT-blue) [![cargo_heather on crates.io](https://img.shields.io/crates/v/cargo_heather)](https://crates.io/crates/cargo_heather) [![cargo_heather on docs.rs](https://docs.rs/cargo_heather/badge.svg)](https://docs.rs/cargo_heather) [![Source Code Repository](https://img.shields.io/badge/Code-On%20GitHub-blue?logo=GitHub)](https://github.com/microsoft/ox-tools/tree/main/crates/cargo_heather) [![Rust Version: 1.88.0](https://img.shields.io/badge/rustc-1.88.0-orange.svg)](https://github.com/rust-lang/rust/releases/tag/1.88.0)
 
 ## cargo-heather
 
-A cargo sub-command to validate license headers in Rust (`.rs`), TOML (`.toml`),
-PowerShell (`.ps1`, `.psd1`, `.psm1`), Just (`justfile`, `*.just`), and env
-(`constants.env`) source files.
+A cargo sub-command to validate license headers in Rust (`.rs`) and TOML (`.toml`) source files.
+
+### Installation
+
+```bash
+cargo install --path .
+```
 
 ### Setup
 
@@ -38,28 +29,10 @@ All rights reserved.
 """
 ```
 
-#### Excluding Files and Directories
-
-Use the `exclude` key to skip specific files or directories from scanning.
-Entries are **literal paths**. Relative paths are resolved against the project root (the directory
-passed to `--project-dir`, or the current directory by default). Glob patterns
-and wildcards are **not** supported.
-
-```toml
-exclude = ["vendor", "generated/bindings.rs"]
-```
-
-A directory entry excludes its entire subtree recursively. Entries that do not
-exist on disk produce a warning and are ignored.
-
-> **Note:** `target/`, `.git/`, `.github/`, `.vscode/`, `.idea/`,
-> `node_modules/`, and other dot-prefixed directories are already skipped
-> automatically.
-
 ### Usage
 
 ```bash
-# Check all supported source files for correct license headers
+# Check all .rs and .toml files for correct license headers
 cargo heather
 
 # Automatically fix files by adding/replacing headers
@@ -118,24 +91,6 @@ Fixed 2 file(s).
 ### How it works
 
 1. **Config loading** — Reads `.cargo-heather.toml` from the project root and resolves the expected header text (from SPDX identifier or custom text).
-1. **File scanning** — Walks the project directory for supported source files (see [Supported file kinds](#supported-file-kinds) below), skipping `target/`, hidden directories, and the config file itself.
-1. **Header validation** — Extracts the header comment block from each file (placement depends on the file kind) and compares it to the expected header. Reports missing or mismatched headers.
+1. **File scanning** — Walks the project directory to find all `.rs` and `.toml` files, skipping `target/`, hidden directories, and the config file itself.
+1. **Header validation** — Extracts the first comment block from each file (`//` for Rust, `#` for TOML) and compares it to the expected header. Reports missing or mismatched headers.
 1. **Fix mode** — When `--fix` is passed, automatically prepends the correct header to files that are missing it, or replaces incorrect headers.
-
-### Supported file kinds
-
-| File                          | Comment style | Header placement                                   |
-| ----------------------------- | ------------- | -------------------------------------------------- |
-| `.rs` (regular)               | `//`          | Top of file                                        |
-| `.rs` (cargo-script)          | `#`           | Inside the `---` frontmatter                       |
-| `.toml`                       | `#`           | Top of file                                        |
-| `.ps1`, `.psd1`, `.psm1`      | `#`           | Top of file, or after a leading `#!` shebang       |
-| `*.just`, `justfile`          | `#`           | Top of file                                        |
-| `constants.env`               | `#`           | Top of file                                        |
-
-
-
-<hr/>
-<sub>
-This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-heather">source code</a>.
-</sub>

@@ -14,7 +14,7 @@
 //!   without touching disk. Returns a non-zero exit code if anything is
 //!   out of date.
 //!
-//! See [updates.md §7](../../docs/design/updates.md) for the proposed-file
+//! See [`updates.md §7`](../../docs/design/updates.md) for the proposed-file
 //! protocol.
 
 use std::fmt::Write as _;
@@ -66,7 +66,7 @@ pub struct PlanItem {
     pub rendered: Option<String>,
     /// The full host-file body that contains the rendered region after
     /// splice — used for `Region` targets in either `Write` or `Propose`
-    /// modes. Per [updates.md §7](../../docs/design/updates.md), proposed
+    /// modes. Per [`updates.md §7`](../../docs/design/updates.md), proposed
     /// outputs show the *full file* even for regions, not just the
     /// region body. `None` for `File` targets.
     pub spliced_host: Option<String>,
@@ -126,16 +126,12 @@ impl PlanItem {
     ///
     /// `template_checksum` is the checksum of `rendered`; the apply step
     /// records it in the manifest so the next run sees the user's
-    /// divergence as `LeaveAlone` (D ≠ L, L = T) rather than reproposing
+    /// divergence as `LeaveAlone` (`D ≠ L, L = T`) rather than reproposing
     /// the same content. The .ox-check-proposed sibling is the user's
     /// review artifact; the proposal "disappears" from the dry-run
     /// summary on subsequent runs unless the template moves again.
     #[must_use]
-    pub fn propose_file(
-        path: impl Into<String>,
-        rendered: String,
-        template_checksum: String,
-    ) -> Self {
+    pub fn propose_file(path: impl Into<String>, rendered: String, template_checksum: String) -> Self {
         Self {
             target: Target::File { path: path.into() },
             decision: Decision::Propose,
@@ -147,13 +143,7 @@ impl PlanItem {
 
     /// Construct a plan item for a `Write` decision on a region.
     #[must_use]
-    pub fn write_region(
-        host: impl Into<String>,
-        id: impl Into<String>,
-        body: String,
-        spliced_host: String,
-        body_checksum: String,
-    ) -> Self {
+    pub fn write_region(host: impl Into<String>, id: impl Into<String>, body: String, spliced_host: String, body_checksum: String) -> Self {
         Self {
             target: Target::Region {
                 host: host.into(),
@@ -174,12 +164,7 @@ impl PlanItem {
     /// manifest so subsequent runs see the proposal as resolved (see
     /// [`propose_file`](Self::propose_file)).
     #[must_use]
-    pub fn propose_region(
-        host: impl Into<String>,
-        id: impl Into<String>,
-        spliced_host: String,
-        body_checksum: String,
-    ) -> Self {
+    pub fn propose_region(host: impl Into<String>, id: impl Into<String>, spliced_host: String, body_checksum: String) -> Self {
         Self {
             target: Target::Region {
                 host: host.into(),
@@ -210,11 +195,7 @@ impl PlanItem {
     /// `spliced_host` is the host-file content with the region (markers
     /// + body) excised.
     #[must_use]
-    pub fn remove_region(
-        host: impl Into<String>,
-        id: impl Into<String>,
-        spliced_host: String,
-    ) -> Self {
+    pub fn remove_region(host: impl Into<String>, id: impl Into<String>, spliced_host: String) -> Self {
         Self {
             target: Target::Region {
                 host: host.into(),
@@ -278,7 +259,7 @@ impl Plan {
     /// When `previous_manifest` is provided, `Write` items are split
     /// into "Will create" (no prior manifest entry) and "Will update"
     /// (existing entry getting refreshed) per
-    /// [updates.md §9](../../docs/design/updates.md). The stale-entries
+    /// [`updates.md §9`](../../docs/design/updates.md). The stale-entries
     /// section enumerates manifest entries that were present before
     /// this run but are no longer in the plan; these are purged on
     /// non-dry-run application (see [`Plan::apply`]).
@@ -323,11 +304,7 @@ impl Plan {
         write_section(&mut out, "Will update", &updates);
         write_section(&mut out, "Will propose", &proposes);
         write_section(&mut out, "Will remove", &removes);
-        write_section(
-            &mut out,
-            "Orphaned (customized; transferring ownership)",
-            &orphans_kept,
-        );
+        write_section(&mut out, "Orphaned (customized; transferring ownership)", &orphans_kept);
         write_section(&mut out, "Will leave alone (silent)", &leave_alones);
 
         if !in_syncs.is_empty() {
@@ -346,7 +323,7 @@ impl Plan {
     ///   bump the manifest entry to the new template checksum so
     ///   subsequent runs see the divergence as resolved
     ///   (`LeaveAlone`) until the template moves again — see
-    ///   [updates.md §5](../../docs/design/updates.md).
+    ///   [`updates.md §5`](../../docs/design/updates.md).
     /// - `InSync`, `LeaveAlone` items preserve their existing
     ///   manifest entries from `previous_manifest`.
     /// - Stale entries — items present in `previous_manifest` but not
@@ -364,13 +341,14 @@ impl Plan {
     /// items must carry a spliced host. These invariants are enforced
     /// by the `PlanItem::*` constructors, so violations only happen if
     /// callers build `PlanItem` directly with inconsistent fields.
+    #[expect(
+        clippy::too_many_lines,
+        clippy::expect_used,
+        reason = "single dispatch site covering every (target × decision) pair; the expects encode constructor-enforced invariants"
+    )]
     pub fn apply(&self, repo_root: &Path, previous_manifest: &Manifest) -> Result<Manifest, AppError> {
         let mut next = Manifest {
-            rendered_by: Some(format!(
-                "{} {}",
-                env!("CARGO_PKG_NAME"),
-                env!("CARGO_PKG_VERSION")
-            )),
+            rendered_by: Some(format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))),
             files: previous_manifest.files.clone(),
             regions: previous_manifest.regions.clone(),
         };
@@ -378,10 +356,7 @@ impl Plan {
         for item in &self.items {
             match (&item.target, item.decision) {
                 (Target::File { path }, Decision::Write) => {
-                    let content = item
-                        .rendered
-                        .as_ref()
-                        .expect("Write decision must carry rendered content");
+                    let content = item.rendered.as_ref().expect("Write decision must carry rendered content");
                     let abs = repo_root.join(path);
                     write_file(&abs, content)?;
                     if let Some(checksum) = &item.rendered_checksum {
@@ -389,10 +364,7 @@ impl Plan {
                     }
                 }
                 (Target::File { path }, Decision::Propose) => {
-                    let content = item
-                        .rendered
-                        .as_ref()
-                        .expect("Propose decision must carry rendered content");
+                    let content = item.rendered.as_ref().expect("Propose decision must carry rendered content");
                     let abs = repo_root.join(format!("{path}.ox-check-proposed"));
                     write_file(&abs, content)?;
                     if let Some(checksum) = &item.rendered_checksum {
@@ -405,10 +377,7 @@ impl Plan {
                     }
                 }
                 (Target::Region { host, id }, Decision::Write) => {
-                    let spliced = item
-                        .spliced_host
-                        .as_ref()
-                        .expect("region Write must carry spliced host");
+                    let spliced = item.spliced_host.as_ref().expect("region Write must carry spliced host");
                     let abs = repo_root.join(host);
                     write_file(&abs, spliced)?;
                     if let Some(checksum) = &item.rendered_checksum {
@@ -422,10 +391,7 @@ impl Plan {
                     }
                 }
                 (Target::Region { host, id }, Decision::Propose) => {
-                    let spliced = item
-                        .spliced_host
-                        .as_ref()
-                        .expect("region Propose must carry spliced host");
+                    let spliced = item.spliced_host.as_ref().expect("region Propose must carry spliced host");
                     let abs = repo_root.join(format!("{host}.ox-check-proposed"));
                     write_file(&abs, spliced)?;
                     if let Some(checksum) = &item.rendered_checksum {
@@ -450,18 +416,14 @@ impl Plan {
                     if let Err(e) = std::fs::remove_file(&abs)
                         && e.kind() != std::io::ErrorKind::NotFound
                     {
-                        return Err::<Manifest, _>(e)
-                            .into_app_err_with(|| format!("failed to remove {}", abs.display()));
+                        return Err::<Manifest, _>(e).into_app_err_with(|| format!("failed to remove {}", abs.display()));
                     }
                     next.files.remove(path);
                 }
                 (Target::Region { host, id }, Decision::Remove) => {
                     // Untouched orphan region: splice the markers + body
                     // out of the host file and drop the manifest entry.
-                    let spliced = item
-                        .spliced_host
-                        .as_ref()
-                        .expect("region Remove must carry spliced host");
+                    let spliced = item.spliced_host.as_ref().expect("region Remove must carry spliced host");
                     let abs = repo_root.join(host);
                     write_file(&abs, spliced)?;
                     next.regions.remove(&RegionKey {
@@ -530,23 +492,16 @@ fn write_section(out: &mut String, header: &str, items: &[&PlanItem]) {
 
 fn write_file(path: &Path, content: &str) -> Result<(), AppError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).into_app_err_with(|| {
-            format!("failed to create parent directory {}", parent.display())
-        })?;
+        std::fs::create_dir_all(parent).into_app_err_with(|| format!("failed to create parent directory {}", parent.display()))?;
     }
     let tmp = make_temp_path(path);
-    std::fs::write(&tmp, content)
-        .into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
-    std::fs::rename(&tmp, path)
-        .into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
+    std::fs::write(&tmp, content).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
 }
 
 fn make_temp_path(path: &Path) -> PathBuf {
-    let mut name = path
-        .file_name()
-        .map(std::ffi::OsString::from)
-        .unwrap_or_default();
+    let mut name = path.file_name().map(std::ffi::OsString::from).unwrap_or_default();
     name.push(".ox-check-tmp");
     path.with_file_name(name)
 }
@@ -575,10 +530,7 @@ mod tests {
     #[test]
     fn plan_with_only_in_sync_items_is_in_sync() {
         let mut plan = Plan::default();
-        plan.push(PlanItem::noop(
-            Target::File { path: "a.txt".into() },
-            Decision::InSync,
-        ));
+        plan.push(PlanItem::noop(Target::File { path: "a.txt".into() }, Decision::InSync));
         plan.push(PlanItem::noop(
             Target::Region {
                 host: "Justfile".into(),
@@ -595,10 +547,7 @@ mod tests {
         // A fresh write (no prior manifest entry).
         plan.push(PlanItem::write_file("a.txt", "x".into(), "sha256:1".into()));
         // An item that was previously rendered and is now in sync.
-        plan.push(PlanItem::noop(
-            Target::File { path: "b.txt".into() },
-            Decision::InSync,
-        ));
+        plan.push(PlanItem::noop(Target::File { path: "b.txt".into() }, Decision::InSync));
         // No previous manifest → no "Will update" distinction, but the
         // categories still render.
         let s = plan.summary(Some(&Manifest::default()));
@@ -647,11 +596,7 @@ mod tests {
     fn apply_writes_owned_file() {
         let tmp = TempDir::new().unwrap();
         let mut plan = Plan::default();
-        plan.push(PlanItem::write_file(
-            "subdir/a.txt",
-            "hello\n".into(),
-            "sha256:abcd".into(),
-        ));
+        plan.push(PlanItem::write_file("subdir/a.txt", "hello\n".into(), "sha256:abcd".into()));
         let m = plan.apply(tmp.path(), &Manifest::default()).unwrap();
         let written = std::fs::read_to_string(tmp.path().join("subdir/a.txt")).unwrap();
         assert_eq!(written, "hello\n");
@@ -663,11 +608,7 @@ mod tests {
     fn apply_writes_proposed_file_sibling_and_bumps_manifest() {
         let tmp = TempDir::new().unwrap();
         let mut plan = Plan::default();
-        plan.push(PlanItem::propose_file(
-            "a.txt",
-            "new content\n".into(),
-            "sha256:newt".into(),
-        ));
+        plan.push(PlanItem::propose_file("a.txt", "new content\n".into(), "sha256:newt".into()));
         let m = plan.apply(tmp.path(), &Manifest::default()).unwrap();
         assert!(tmp.path().join("a.txt.ox-check-proposed").is_file());
         assert!(!tmp.path().join("a.txt").exists());
@@ -756,10 +697,7 @@ mod tests {
         let mut prev = Manifest::default();
         prev.set_file("a.txt", "sha256:original");
         let mut plan = Plan::default();
-        plan.push(PlanItem::noop(
-            Target::File { path: "a.txt".into() },
-            Decision::LeaveAlone,
-        ));
+        plan.push(PlanItem::noop(Target::File { path: "a.txt".into() }, Decision::LeaveAlone));
         let next = plan.apply(tmp.path(), &prev).unwrap();
         assert_eq!(
             next.files.get("a.txt").map(String::as_str),
@@ -781,15 +719,8 @@ mod tests {
         let mut plan = Plan::default();
         plan.push(PlanItem::remove_file("dropped.txt"));
         let next = plan.apply(tmp.path(), &prev).unwrap();
-        assert!(
-            !tmp.path().join("dropped.txt").exists(),
-            "Remove must delete the file from disk"
-        );
-        assert!(
-            next.files.is_empty(),
-            "Remove must drop the manifest entry: {:?}",
-            next.files
-        );
+        assert!(!tmp.path().join("dropped.txt").exists(), "Remove must delete the file from disk");
+        assert!(next.files.is_empty(), "Remove must drop the manifest entry: {:?}", next.files);
     }
 
     #[test]
@@ -807,11 +738,7 @@ mod tests {
         let mut prev = Manifest::default();
         prev.set_region("Justfile", "r", "sha256:body");
         let mut plan = Plan::default();
-        plan.push(PlanItem::remove_region(
-            "Justfile",
-            "r",
-            "before\nafter\n".to_string(),
-        ));
+        plan.push(PlanItem::remove_region("Justfile", "r", "before\nafter\n".to_string()));
         let next = plan.apply(tmp.path(), &prev).unwrap();
         let host = std::fs::read_to_string(tmp.path().join("Justfile")).unwrap();
         assert_eq!(host, "before\nafter\n");
@@ -828,9 +755,7 @@ mod tests {
         let mut prev = Manifest::default();
         prev.set_file("custom.txt", "sha256:original");
         let mut plan = Plan::default();
-        plan.push(PlanItem::orphaned_kept(Target::File {
-            path: "custom.txt".into(),
-        }));
+        plan.push(PlanItem::orphaned_kept(Target::File { path: "custom.txt".into() }));
         let next = plan.apply(tmp.path(), &prev).unwrap();
         let live = std::fs::read_to_string(tmp.path().join("custom.txt")).unwrap();
         assert_eq!(live, "user edited\n");
@@ -859,10 +784,7 @@ mod tests {
         let mut prev = Manifest::default();
         prev.set_file("kept.txt", "sha256:k");
         let mut plan = Plan::default();
-        plan.push(PlanItem::noop(
-            Target::File { path: "kept.txt".into() },
-            Decision::LeaveAlone,
-        ));
+        plan.push(PlanItem::noop(Target::File { path: "kept.txt".into() }, Decision::LeaveAlone));
         let next = plan.apply(tmp.path(), &prev).unwrap();
         assert_eq!(next.files.get("kept.txt").map(String::as_str), Some("sha256:k"));
     }

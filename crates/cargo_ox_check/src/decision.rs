@@ -19,7 +19,7 @@
 //! template is unchanged) or `Propose` (when it has moved). Both
 //! outcomes preserve the user's empty stub.
 //!
-//! See [updates.md §5](../../docs/design/updates.md) for the decision table.
+//! See [`updates.md §5`](../../docs/design/updates.md) for the decision table.
 
 /// Inputs to one decision.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,11 +137,7 @@ pub fn decide_removal(last_rendered: &str, disk: Option<&str>) -> Decision {
 mod tests {
     use super::*;
 
-    fn inputs<'a>(
-        last: Option<&'a str>,
-        disk: Option<&'a str>,
-        template: &'a str,
-    ) -> DecisionInputs<'a> {
+    fn inputs<'a>(last: Option<&'a str>, disk: Option<&'a str>, template: &'a str) -> DecisionInputs<'a> {
         DecisionInputs {
             last_rendered: last,
             disk,
@@ -168,18 +164,12 @@ mod tests {
 
     #[test]
     fn user_diverged_template_unchanged_leaves_alone() {
-        assert_eq!(
-            decide(&inputs(Some("L"), Some("D"), "L")),
-            Decision::LeaveAlone
-        );
+        assert_eq!(decide(&inputs(Some("L"), Some("D"), "L")), Decision::LeaveAlone);
     }
 
     #[test]
     fn user_diverged_template_changed_proposes() {
-        assert_eq!(
-            decide(&inputs(Some("L"), Some("D"), "T")),
-            Decision::Propose
-        );
+        assert_eq!(decide(&inputs(Some("L"), Some("D"), "T")), Decision::Propose);
     }
 
     #[test]
@@ -194,10 +184,7 @@ mod tests {
         // Template hasn't moved (T == L). Result: LeaveAlone, silent.
         let empty = "sha256:empty";
         let tmpl = "sha256:template";
-        assert_eq!(
-            decide(&inputs(Some(tmpl), Some(empty), tmpl)),
-            Decision::LeaveAlone
-        );
+        assert_eq!(decide(&inputs(Some(tmpl), Some(empty), tmpl)), Decision::LeaveAlone);
     }
 
     #[test]
@@ -205,10 +192,7 @@ mod tests {
         // Same as above but the template has since moved — the user gets
         // a proposed sibling so they can see what's new.
         let empty = "sha256:empty";
-        assert_eq!(
-            decide(&inputs(Some("sha256:old"), Some(empty), "sha256:new")),
-            Decision::Propose
-        );
+        assert_eq!(decide(&inputs(Some("sha256:old"), Some(empty), "sha256:new")), Decision::Propose);
     }
 
     #[test]
@@ -240,18 +224,12 @@ mod tests {
     #[test]
     fn removal_untouched_disk_removes() {
         // Disk matches what we wrote last; safe to delete.
-        assert_eq!(
-            decide_removal("sha256:abc", Some("sha256:abc")),
-            Decision::Remove
-        );
+        assert_eq!(decide_removal("sha256:abc", Some("sha256:abc")), Decision::Remove);
     }
 
     #[test]
     fn removal_customized_disk_orphans() {
         // User edited since last render — keep, transfer ownership.
-        assert_eq!(
-            decide_removal("sha256:abc", Some("sha256:xyz")),
-            Decision::OrphanedKept
-        );
+        assert_eq!(decide_removal("sha256:abc", Some("sha256:xyz")), Decision::OrphanedKept);
     }
 }

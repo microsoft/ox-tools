@@ -55,19 +55,9 @@ pub const DELTA_BODY: &str = include_str!("../../templates/regions/delta.toml");
 /// # Errors
 ///
 /// Propagates I/O and region-parsing errors.
-pub fn plan_shared_configs(
-    repo_root: &Path,
-    manifest: &Manifest,
-) -> Result<Vec<PlanItem>, AppError> {
+pub fn plan_shared_configs(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
-        plan_managed_region(
-            repo_root,
-            manifest,
-            DENY_PATH,
-            DENY_REGION_ID,
-            DENY_BODY,
-            CommentSyntax::Hash,
-        )?,
+        plan_managed_region(repo_root, manifest, DENY_PATH, DENY_REGION_ID, DENY_BODY, CommentSyntax::Hash)?,
         plan_managed_region(
             repo_root,
             manifest,
@@ -76,14 +66,7 @@ pub fn plan_shared_configs(
             RUSTFMT_BODY,
             CommentSyntax::Hash,
         )?,
-        plan_managed_region(
-            repo_root,
-            manifest,
-            DELTA_PATH,
-            DELTA_REGION_ID,
-            DELTA_BODY,
-            CommentSyntax::Hash,
-        )?,
+        plan_managed_region(repo_root, manifest, DELTA_PATH, DELTA_REGION_ID, DELTA_BODY, CommentSyntax::Hash)?,
     ])
 }
 

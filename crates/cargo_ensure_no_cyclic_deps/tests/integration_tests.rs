@@ -1,6 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "panic-on-failure idioms are appropriate in tests"
+)]
+
 //! Integration test
 
 use std::path::PathBuf;

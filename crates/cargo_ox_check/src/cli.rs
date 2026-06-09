@@ -29,7 +29,7 @@ pub struct Cli {
 
 /// Top-level subcommands.
 ///
-/// Only `update` exists by design — see [design.md §5.2](../docs/design/design.md).
+/// Only `update` exists by design — see [`design.md §5.2`](../docs/design/design.md).
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Update local recipes, CI building blocks, and managed regions.
@@ -118,14 +118,7 @@ mod tests {
 
     #[test]
     fn parse_update_multiple_backends() {
-        let cli = Cli::parse_from([
-            "cargo-ox-check",
-            "update",
-            "--backend",
-            "github",
-            "--backend",
-            "ado",
-        ]);
+        let cli = Cli::parse_from(["cargo-ox-check", "update", "--backend", "github", "--backend", "ado"]);
         let Command::Update(args) = cli.command;
         assert_eq!(args.backends, vec!["github", "ado"]);
     }
@@ -139,21 +132,13 @@ mod tests {
 
     #[test]
     fn backend_and_no_backends_conflict() {
-        let err = Cli::try_parse_from([
-            "cargo-ox-check",
-            "update",
-            "--backend",
-            "github",
-            "--no-backends",
-        ])
-        .unwrap_err();
+        let err = Cli::try_parse_from(["cargo-ox-check", "update", "--backend", "github", "--no-backends"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
     fn parse_from_cargo_args_strips_ox_check_token() {
-        let cli =
-            Cli::parse_from_cargo_args(["cargo-ox-check", "ox-check", "update", "--dry-run"]).unwrap();
+        let cli = Cli::parse_from_cargo_args(["cargo-ox-check", "ox-check", "update", "--dry-run"]).unwrap();
         let Command::Update(args) = cli.command;
         assert!(args.dry_run);
     }
@@ -168,10 +153,7 @@ mod tests {
     #[test]
     fn missing_subcommand_fails() {
         let err = Cli::try_parse_from(["cargo-ox-check"]).unwrap_err();
-        assert_eq!(
-            err.kind(),
-            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-        );
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand);
     }
 
     #[test]

@@ -83,6 +83,18 @@ runs:
         # Required), not lowercase. Format each tier into the
         # `--package X --package Y` shape recipes expect, or the
         # literal "--skip" sentinel when the tier is empty.
+        #
+        # cargo-delta's impact output uses *library names* (snake_case)
+        # rather than cargo *package names* (which may use hyphens). For
+        # hyphenated packages — e.g. `cargo-ox-check` — that means it
+        # emits `cargo_ox_check`, which cargo rejects as a --package
+        # specification. We build a lib-name -> package-name map from
+        # cargo metadata and translate each name through it.
+        declare -A pkg_map
+        while IFS=$'\t' read -r pkg_name lib_name; do
+            [ -n "$lib_name" ] && pkg_map["$lib_name"]="$pkg_name"
+        done < <(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] as $p | $p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)"')
         format_set() {
             local field="$1"
             local pkgs
@@ -93,7 +105,11 @@ runs:
                 local out=""
                 while IFS= read -r pkg ; do
                     [ -z "$pkg" ] && continue
-                    out="$out --package $pkg"
+                    # Translate lib name -> cargo package name; if
+                    # the name isn't in the map (binary-only crate,
+                    # already a package name, etc.), pass through.
+                    local mapped="${pkg_map[$pkg]:-$pkg}"
+                    out="$out --package $mapped"
                 done <<EOF
         $pkgs
         EOF
@@ -404,8 +420,9 @@ runs:
     - id: rustc-version
       shell: bash
       run: echo "version=$(rustc --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
-    - name: Cache cargo home and target
-      uses: actions/cache@v4
+    - name: Restore cargo cache
+      id: cargo-cache
+      uses: actions/cache/restore@v4
       with:
         # Key on OS + arch + rustc version + lockfile hashes + catalog
         # hash so a Rust toolchain bump, a cross-arch matrix leg, or a
@@ -413,14 +430,33 @@ runs:
         # runner.arch resolves to X64 / ARM64 / X86, which keeps the
         # x86_64 and aarch64 legs of the same OS from colliding on
         # arch-incompatible target/ contents.
-        key: ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt') }}
+        #
+        # ${{ github.job }} discriminates by workflow-job-id (`pr-fast`,
+        # `pr-test`, `pr-mutants`, etc.) so concurrent matrix legs that
+        # share OS+arch (e.g. pr-fast linux + pr-test linux) don't race
+        # on the same cache key. Without this, the first-to-finish job
+        # reserves the key, the others get "Unable to reserve cache:
+        # another job may be creating this cache" and silently skip
+        # the save — leaving the cache empty forever. The restore-keys
+        # fall back across jobs so the install work is still shared
+        # across sibling legs on subsequent runs.
+        key: ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt') }}-${{ github.job }}
         restore-keys: |
+          ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt') }}-
           ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-
           ox-check-v1-${{ runner.os }}-${{ runner.arch }}-
+        # `.crates.toml` and `.crates2.json` track which cargo-installed
+        # tools and versions live in ~/.cargo/bin/. Without them in the
+        # cache, `cargo install --list` and (downstream) the
+        # `_ox-check-require` early-skip check don't see the cached
+        # binaries — every run then tries to reinstall on top of them
+        # and fails with "binary X already exists in destination".
         path: |
           ~/.cargo/registry/cache/
           ~/.cargo/registry/index/
           ~/.cargo/bin/
+          ~/.cargo/.crates.toml
+          ~/.cargo/.crates2.json
           target/
 
     # System dependencies for the catalog's source builds.
@@ -453,6 +489,22 @@ runs:
         if ! command -v just >/dev/null 2>&1 ; then
           cargo install --locked just
         fi
+    # Bootstrap cargo-binstall so the catalog install can use it. We
+    # pay the cost of compiling binstall itself once (~1 min), then
+    # use it to fetch pre-built binaries for every other tool from
+    # GitHub Releases instead of compiling them from source. On a
+    # cold runner this drops the catalog install phase from
+    # ~30 minutes to ~1 minute. ADO doesn't use this path because
+    # cargo-binstall has unresolved compliance issues for internal
+    # ADO pipelines (the binary registry it pulls from isn't on the
+    # allow-list); ADO sticks with vanilla ``cargo install`` via
+    # the default ``ox-check-tools-install`` argument.
+    - name: Install cargo-binstall
+      shell: bash
+      run: |
+        if ! command -v cargo-binstall >/dev/null 2>&1 ; then
+          cargo install --locked cargo-binstall
+        fi
     - name: Install catalog tools
       shell: bash
       # ox-check-tools-install exits non-zero if any per-tool install
@@ -464,7 +516,36 @@ runs:
       # need it (e.g. clippy / fmt when cargo-mutants is missing)
       # proceed normally.
       continue-on-error: true
-      run: just ox-check-tools-install
+      run: just ox-check-tools-install binstall
+
+    # Save the cache as the LAST step of setup, regardless of whether
+    # any earlier install step partially failed. `actions/cache@v4`
+    # used to support this via `save-always: true`, but that knob is
+    # deprecated as of 2025 with the explicit message "does not work
+    # as intended" — failing runs simply don't save. The supported
+    # replacement is to call `actions/cache/save@v4` directly as its
+    # own step with `if: always()`.
+    #
+    # Without this, a single catalog issue that fails the install
+    # step locks the cache empty forever (chicken-and-egg: failed
+    # run -> no save -> next run cold-starts -> still fails -> still
+    # no save). Tool binaries installed by ox-check-tools-install are
+    # immutable once on disk, so partial state is strictly better
+    # than nothing — and subsequent runs accumulate into the cache
+    # until the catalog is complete.
+    - name: Save cargo cache
+      if: always() && steps.cargo-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+        path: |
+          ~/.cargo/registry/cache/
+          ~/.cargo/registry/index/
+          ~/.cargo/bin/
+          ~/.cargo/.crates.toml
+          ~/.cargo/.crates2.json
+          target/
+          target/
 
 === .github/workflows/ox-check-nightly-impl.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -806,6 +887,11 @@ clippy.significant_drop_tightening = "allow"
 clippy.wildcard_imports = "allow"
 # <<< ox-check-managed: ox-check-workspace-lints
 
+=== Justfile ===
+# >>> ox-check-managed: ox-check-imports
+import 'justfiles/ox-check/mod.just'
+# <<< ox-check-managed: ox-check-imports
+
 === crates/alpha/Cargo.toml ===
 [package]
 name = "alpha"
@@ -849,11 +935,6 @@ wildcards = "deny"
 unknown-registry = "deny"
 unknown-git = "deny"
 # <<< ox-check-managed: ox-check-deny
-
-=== justfile ===
-# >>> ox-check-managed: ox-check-imports
-import 'justfiles/ox-check/mod.just'
-# <<< ox-check-managed: ox-check-imports
 
 === justfiles/ox-check/checks.just ===
 # Copyright (c) Microsoft Corporation.
@@ -938,8 +1019,8 @@ ox-check-clippy:
         Write-Host 'ox-check-clippy: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
-    & cargo clippy @pkg --all-targets --all-features --locked -- '-D' 'warnings'
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
+    & cargo clippy @pkg --all-targets --all-features --locked "--" '-D' 'warnings'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
@@ -961,7 +1042,7 @@ ox-check-license-headers: (_ox-check-require "cargo-heather")
         Write-Host 'ox-check-license-headers: no modified packages; skipping'
         exit 0
     }
-    cargo heather --workspace
+    cargo heather
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
@@ -972,7 +1053,7 @@ ox-check-ensure-no-cyclic-deps: (_ox-check-require "cargo-ensure-no-cyclic-deps"
         Write-Host 'ox-check-ensure-no-cyclic-deps: no modified packages; skipping'
         exit 0
     }
-    cargo ensure-no-cyclic-deps --workspace
+    cargo ensure-no-cyclic-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
@@ -983,7 +1064,7 @@ ox-check-ensure-no-default-features: (_ox-check-require "cargo-ensure-no-default
         Write-Host 'ox-check-ensure-no-default-features: no modified packages; skipping'
         exit 0
     }
-    cargo ensure-no-default-features --workspace
+    cargo ensure-no-default-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Required tier. cargo doc resolves intra-doc links through the dep
@@ -996,7 +1077,7 @@ ox-check-doc-build:
         Write-Host 'ox-check-doc-build: no required packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { '--workspace' })
     $env:RUSTDOCFLAGS = '-D warnings'
     & cargo doc @pkg --all-features --no-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1009,10 +1090,21 @@ ox-check-readme-check: (_ox-check-require "cargo-doc2readme")
         Write-Host 'ox-check-readme-check: no modified packages; skipping'
         exit 0
     }
-    cargo doc2readme --check
+    cargo doc2readme --check --workspace
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
+#
+# cargo-spellcheck reads a Hunspell-compatible dictionary file at the
+# path configured in spellcheck.toml (typically `extra_dictionaries =
+# ["target/spelling.dic"]`). The convention used by the surveyed
+# Microsoft Rust repos is to keep the *source* word list in a
+# human-edited `.spelling` file at the repo root and preprocess it
+# into the .dic format at check time (Hunspell .dic requires:
+# alphabetical sort, blank/numeric lines removed, line-count header).
+# If `.spelling` is present, we generate `target/spelling.dic` from it
+# automatically; otherwise we run cargo-spellcheck against whatever
+# the repo has already set up.
 [script("pwsh")]
 ox-check-spellcheck: (_ox-check-require "cargo-spellcheck")
     $ErrorActionPreference = 'Stop'
@@ -1020,7 +1112,23 @@ ox-check-spellcheck: (_ox-check-require "cargo-spellcheck")
         Write-Host 'ox-check-spellcheck: no modified packages; skipping'
         exit 0
     }
-    cargo spellcheck check --code 1
+    if (Test-Path '.spelling') {
+        $output_file = 'target/spelling.dic'
+        $lines = Get-Content '.spelling' | Sort-Object
+        $filtered_lines = $lines | Where-Object { $_ -notmatch '^\d+$' -and $_ -ne '' }
+        $line_count = $filtered_lines.Count
+        [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($output_file)) | Out-Null
+        @($line_count) + $filtered_lines | Set-Content $output_file
+    }
+    # Pass --cfg explicitly when a spellcheck.toml exists at repo root,
+    # otherwise cargo-spellcheck falls back to its built-in defaults and
+    # ignores user-curated dictionaries (`extra_dictionaries`, custom
+    # hunspell langs, etc.).
+    if (Test-Path 'spellcheck.toml') {
+        cargo spellcheck --cfg spellcheck.toml check --code 1
+    } else {
+        cargo spellcheck check --code 1
+    }
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Unscoped (PR title is not source-related).
@@ -1053,7 +1161,7 @@ ox-check-udeps: (_ox-check-require "cargo-udeps")
         Write-Host 'ox-check-udeps: no required packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { '--workspace' })
     & cargo '+nightly' udeps @pkg --all-targets --all-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1066,7 +1174,7 @@ ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
         Write-Host 'ox-check-semver-check: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
     & cargo semver-checks @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1078,7 +1186,7 @@ ox-check-external-types: (_ox-check-require "cargo-check-external-types")
         Write-Host 'ox-check-external-types: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
     & cargo check-external-types @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1096,7 +1204,23 @@ ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "carg
         Write-Host 'ox-check-llvm-cov: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
+    # cargo-llvm-cov doesn't work on aarch64-pc-windows-msvc: the
+    # llvm-profdata that ships with the rust toolchain there fails
+    # to merge the .profraw set ("no profile can be merged"). Fall
+    # back to plain `cargo nextest run` on that target so we still
+    # get test execution; coverage data from this leg wouldn't have
+    # been used anyway (coverage upload is gated on Linux only).
+    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
+        Write-Host 'ox-check-llvm-cov: aarch64-pc-windows-msvc — skipping coverage; running plain nextest'
+        & cargo nextest run @pkg --all-features --locked
+        exit $LASTEXITCODE
+    }
+    # cargo llvm-cov writes the .profraw set into target/llvm-cov-target/
+    # but the *report* output directory (target/coverage/) is something
+    # we choose and must exist before --output-path runs.
+    [System.IO.Directory]::CreateDirectory('target/coverage') | Out-Null
+    [System.IO.Directory]::CreateDirectory('target/coverage/html') | Out-Null
     # Wipe stale .profraw data so the report reflects only this run.
     cargo llvm-cov clean --workspace --profraw-only
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1122,7 +1246,7 @@ ox-check-doc-test:
         Write-Host 'ox-check-doc-test: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
     & cargo test --doc @pkg --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1134,7 +1258,7 @@ ox-check-examples:
         Write-Host 'ox-check-examples: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
     & cargo build @pkg --examples --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1193,7 +1317,7 @@ ox-check-miri:
         Write-Host 'ox-check-miri: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
     & cargo '+nightly' miri nextest run @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1204,7 +1328,7 @@ ox-check-careful: (_ox-check-require "cargo-careful")
         Write-Host 'ox-check-careful: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
     & cargo '+nightly' careful test @pkg --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1225,7 +1349,7 @@ ox-check-cargo-hack: (_ox-check-require "cargo-hack")
         Write-Host 'ox-check-cargo-hack: no required packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { '--workspace' })
     & cargo hack @pkg --feature-powerset --depth 2 check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1237,7 +1361,7 @@ ox-check-bench:
         Write-Host 'ox-check-bench: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
     & cargo bench @pkg --all-features --no-run
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1450,6 +1574,19 @@ ox-check-tools-check:
 # version. Idempotent — ``cargo install --locked`` is a no-op when
 # the installed version already satisfies the requirement.
 #
+# `installer` selects the install backend:
+#   - "install"  (default): ``cargo install --locked`` — pure-source
+#     builds; works in any cargo environment, no extra runtime
+#     dependencies. Slow (~30 minutes for the full catalog on a cold
+#     runner). Used by ADO, where ``cargo-binstall`` has known
+#     compliance issues for internal pipelines.
+#   - "binstall": ``cargo binstall --no-confirm --locked`` — downloads
+#     a pre-built binary from each tool's GitHub Releases when
+#     available, falling back to ``cargo install`` per-tool when
+#     not. Cuts catalog install time from ~30 min to ~1 min on a
+#     cold runner. Requires ``cargo-binstall`` to be installed
+#     beforehand. Used by the GitHub Actions setup action.
+#
 # Per-tool failures don't abort the whole install — a tool that
 # doesn't build on the current host (e.g. cargo-mutants on
 # aarch64-pc-windows-msvc, where the upstream winapi dep doesn't
@@ -1460,8 +1597,13 @@ ox-check-tools-check:
 # CI surfaces the problem.
 [group("ox-check")]
 [script("pwsh")]
-ox-check-tools-install:
+ox-check-tools-install installer="install":
     $ErrorActionPreference = 'Continue'
+    $installer = '{{installer}}'
+    if ($installer -ne 'install' -and $installer -ne 'binstall') {
+        Write-Error "ox-check-tools-install: unknown installer '$installer' (expected 'install' or 'binstall')"
+        exit 2
+    }
     $catalog = 'justfiles/ox-check/tool-minimums.txt'
     $failed = [System.Collections.Generic.List[string]]::new()
     foreach ($line in Get-Content $catalog) {
@@ -1470,9 +1612,34 @@ ox-check-tools-install:
         if ($trimmed -match '^([^=]+)=(.+)$') {
             $tool = $Matches[1]
             $min = $Matches[2]
-            Write-Host "ox-check-tools-install: $tool >= $min"
-            cargo install --locked $tool --version ">=$min"
-            if ($LASTEXITCODE -ne 0) {
+            # Skip if the tool is already installed at or above the
+            # required version. This is what makes the actions/cache
+            # restore actually useful — without the early-exit, every
+            # post-restore run would try to re-install on top of the
+            # cached binaries and fail with "binary already exists in
+            # destination". The `2>$null` swallows the help-text noise
+            # _ox-check-require emits when the tool is missing.
+            & just _ox-check-require $tool 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "ox-check-tools-install ($installer): $tool >= $min (already satisfied)"
+                continue
+            }
+            Write-Host "ox-check-tools-install ($installer): $tool >= $min"
+            $installed = $false
+            if ($installer -eq 'binstall') {
+                cargo binstall --no-confirm --locked $tool --version ">=$min"
+                if ($LASTEXITCODE -eq 0) {
+                    $installed = $true
+                } else {
+                    Write-Host "  binstall failed for $tool; falling back to cargo install" -ForegroundColor Yellow
+                    cargo install --locked $tool --version ">=$min"
+                    if ($LASTEXITCODE -eq 0) { $installed = $true }
+                }
+            } else {
+                cargo install --locked $tool --version ">=$min"
+                if ($LASTEXITCODE -eq 0) { $installed = $true }
+            }
+            if (-not $installed) {
                 Write-Host "ox-check-tools-install: $tool install FAILED (continuing)" -ForegroundColor Yellow
                 $failed.Add($tool)
             }

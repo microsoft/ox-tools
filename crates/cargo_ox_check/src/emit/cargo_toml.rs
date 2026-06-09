@@ -9,7 +9,7 @@
 //! `workspace = true` so the member inherits the catalog.
 //!
 //! All lints are emitted in *dotted-key form* (`clippy.unwrap_used =
-//! "deny"`) — see [design.md §6](../../../docs/design/design.md) for the
+//! "deny"`) — see [`design.md §6`](../../../docs/design/design.md) for the
 //! rationale (TOML forbids re-declaring a table header, so dotted keys
 //! let users extend the scope outside the sentinels).
 
@@ -37,8 +37,7 @@ pub const CRATE_LINTS_REGION_ID: &str = "ox-check-lints";
 pub const LINTS_BODY: &str = include_str!("../../templates/regions/cargo-lints-body.toml");
 
 /// Embedded body of a workspace-member lints region.
-pub const MEMBER_LINTS_BODY: &str =
-    include_str!("../../templates/regions/cargo-member-lints.toml");
+pub const MEMBER_LINTS_BODY: &str = include_str!("../../templates/regions/cargo-member-lints.toml");
 
 /// Render the body of the workspace-scope lints region: `[workspace.lints]`
 /// header followed by the embedded catalog.
@@ -70,11 +69,7 @@ pub fn render_single_crate_lints_body() -> String {
 /// # Errors
 ///
 /// Propagates I/O and region-parsing errors.
-pub fn plan_cargo_lints(
-    repo_root: &Path,
-    workspace: &Workspace,
-    manifest: &Manifest,
-) -> Result<Vec<PlanItem>, AppError> {
+pub fn plan_cargo_lints(repo_root: &Path, workspace: &Workspace, manifest: &Manifest) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::new();
     if workspace.has_workspace_table {
         let body = render_workspace_lints_body();
@@ -156,10 +151,7 @@ mod tests {
         for line in body.lines() {
             let trimmed = line.trim_start();
             if trimmed.starts_with('[') {
-                assert_eq!(
-                    trimmed, "[lints]",
-                    "unexpected table header in single-crate body: {line}"
-                );
+                assert_eq!(trimmed, "[lints]", "unexpected table header in single-crate body: {line}");
             }
         }
     }
@@ -174,10 +166,7 @@ mod tests {
     fn plan_multi_crate_workspace_emits_root_plus_members() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        write(
-            &root.join("Cargo.toml"),
-            "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n",
-        );
+        write(&root.join("Cargo.toml"), "[workspace]\nmembers = [\"crates/a\", \"crates/b\"]\n");
         write(&root.join("crates/a/Cargo.toml"), "[package]\nname='a'\nversion='0.1.0'\n");
         write(&root.join("crates/b/Cargo.toml"), "[package]\nname='b'\nversion='0.1.0'\n");
 
@@ -204,13 +193,7 @@ mod tests {
     fn dotted_key_body_parses_as_valid_toml_when_appended_to_workspace() {
         let host = "[workspace]\nmembers = [\"crates/a\"]\n";
         let region_body = render_workspace_lints_body();
-        let spliced = crate::region::upsert_region(
-            host,
-            WORKSPACE_LINTS_REGION_ID,
-            &region_body,
-            CommentSyntax::Hash,
-        )
-        .unwrap();
+        let spliced = crate::region::upsert_region(host, WORKSPACE_LINTS_REGION_ID, &region_body, CommentSyntax::Hash).unwrap();
         let _: toml_edit::DocumentMut = spliced.parse().expect("spliced TOML must be valid");
     }
 
@@ -218,26 +201,16 @@ mod tests {
     fn user_extension_after_region_parses() {
         let host = "[workspace]\nmembers = [\"x\"]\n";
         let region_body = render_workspace_lints_body();
-        let mut spliced = crate::region::upsert_region(
-            host,
-            WORKSPACE_LINTS_REGION_ID,
-            &region_body,
-            CommentSyntax::Hash,
-        )
-        .unwrap();
+        let mut spliced = crate::region::upsert_region(host, WORKSPACE_LINTS_REGION_ID, &region_body, CommentSyntax::Hash).unwrap();
         spliced.push_str("clippy.todo = \"warn\"\n");
-        let _: toml_edit::DocumentMut =
-            spliced.parse().expect("user extension keeps document valid");
+        let _: toml_edit::DocumentMut = spliced.parse().expect("user extension keeps document valid");
     }
 
     #[test]
     fn member_relpaths_use_forward_slashes() {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        write(
-            &root.join("Cargo.toml"),
-            "[workspace]\nmembers = [\"crates/a\"]\n",
-        );
+        write(&root.join("Cargo.toml"), "[workspace]\nmembers = [\"crates/a\"]\n");
         write(&root.join("crates/a/Cargo.toml"), "[package]\nname='a'\nversion='0.1.0'\n");
 
         let ws = crate::workspace::load_workspace(root).unwrap();
@@ -245,9 +218,7 @@ mod tests {
         let member_targets: Vec<_> = items
             .iter()
             .filter_map(|i| match &i.target {
-                crate::plan::Target::Region { host, .. } if host != "Cargo.toml" => {
-                    Some(host.as_str())
-                }
+                crate::plan::Target::Region { host, .. } if host != "Cargo.toml" => Some(host.as_str()),
                 _ => None,
             })
             .collect();

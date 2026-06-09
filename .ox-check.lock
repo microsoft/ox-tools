@@ -3,7 +3,7 @@ rendered_by = "cargo-ox-check 0.1.0"
 
 [[file]]
 path = ".github/actions/ox-check-impact/action.yml"
-checksum = "sha256:20bea9e6fa732a9fc6180afb65e7c068f7caad5e4df8295318b220068cda85be"
+checksum = "sha256:3e2c2dece1e56a3a298087f6b275f9361b00c9a7657ac2fc8c042c19434103c8"
 
 [[file]]
 path = ".github/actions/ox-check-nightly-advisories/action.yml"
@@ -35,7 +35,7 @@ checksum = "sha256:3da3e27b0876eccf54dbf7b2cf9050ccd08ec174d7e9c8edaa8fcd29a0c0c
 
 [[file]]
 path = ".github/actions/ox-check-setup/action.yml"
-checksum = "sha256:7eb680204721a35c3ace9d6ef7076c37ae1d568c951e9ac972a5d85de89bc396"
+checksum = "sha256:7079d62730f5a1fce426a047f70b93b3f241de226a4a01a6ede0d207b01d567e"
 
 [[file]]
 path = ".github/workflows/ox-check-nightly-impl.yml"
@@ -55,7 +55,7 @@ checksum = "sha256:5ea0bea66f0223df032382056e12c88afb0481138c56898b95837fc767e30
 
 [[file]]
 path = "justfiles/ox-check/checks.just"
-checksum = "sha256:8454fc678028fea746ccf7e59efbe0d085ea9d112883965aa01357a735d3d9d9"
+checksum = "sha256:ca81061a4f14a0fabbf58f45e3cd40d0c884293cbce0cd40387e48a1b1492e58"
 
 [[file]]
 path = "justfiles/ox-check/groups.just"
@@ -75,7 +75,7 @@ checksum = "sha256:8b841b8ad787927621e2591af3c376c7e205e3014f86fd486436ec6ec3cab
 
 [[file]]
 path = "justfiles/ox-check/tools.just"
-checksum = "sha256:24aac28855a330f60799cd0a23986a531117edb23eb56aacb087f44bb4d79abb"
+checksum = "sha256:2cb6c8ea9e668fd87fd5f90a7e3c0db3261ec53d525f61addf04dc684985533b"
 
 [[region]]
 host = ".delta.toml"
@@ -86,6 +86,11 @@ checksum = "sha256:ef049abc4bba5e6dac7dfc07a4852d821de4682fe6ad46aace7ddfb2455cb
 host = "Cargo.toml"
 id = "ox-check-workspace-lints"
 checksum = "sha256:555535ebbddc1399a8488fce724969357e37cdf370827b89cdeff45623d3713c"
+
+[[region]]
+host = "Justfile"
+id = "ox-check-imports"
+checksum = "sha256:6ced9b1d085f58e73abcc28ba838b14414c4c338f8474322de05014639b367aa"
 
 [[region]]
 host = "crates/automation/Cargo.toml"
@@ -111,11 +116,6 @@ checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103a
 host = "deny.toml"
 id = "ox-check-deny"
 checksum = "sha256:16d9db629d1c110442d1fe0c2462d83fd1cda94f20fcabcc15cbd41d8ae63e42"
-
-[[region]]
-host = "justfile"
-id = "ox-check-imports"
-checksum = "sha256:6ced9b1d085f58e73abcc28ba838b14414c4c338f8474322de05014639b367aa"
 
 [[region]]
 host = "rustfmt.toml"

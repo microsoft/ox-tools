@@ -1,6 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "panic-on-failure idioms are appropriate in tests"
+)]
+
 //! Snapshot tests for the full emitted file tree.
 //!
 //! For a small set of representative input combinations, run
@@ -62,19 +68,13 @@ fn render_tree(root: &Path) -> String {
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
         .map(walkdir::DirEntry::into_path)
-        .filter(|p| {
-            p.file_name().and_then(|n| n.to_str()) != Some(MANIFEST_FILE_NAME)
-        })
+        .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some(MANIFEST_FILE_NAME))
         .collect();
     paths.sort();
 
     let mut out = String::new();
     for path in paths {
-        let rel = path
-            .strip_prefix(root)
-            .unwrap()
-            .to_string_lossy()
-            .replace('\\', "/");
+        let rel = path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
         let body = std::fs::read_to_string(&path).unwrap();
         out.push_str("=== ");
         out.push_str(&rel);

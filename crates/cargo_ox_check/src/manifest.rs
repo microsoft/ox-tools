@@ -9,7 +9,7 @@
 //! compares this against the current on-disk content and the current
 //! template content.
 //!
-//! Schema is documented in [updates.md §1](../../docs/design/updates.md).
+//! Schema is documented in [`updates.md §1`](../../docs/design/updates.md).
 //! The schema version is `1`. Newer schemas cause the tool to refuse
 //! running; older schemas are migrated automatically (no older schemas
 //! exist today).
@@ -70,10 +70,8 @@ impl Manifest {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let text = std::fs::read_to_string(&path)
-            .into_app_err_with(|| format!("failed to read {}", path.display()))?;
-        Self::parse(&text)
-            .into_app_err_with(|| format!("failed to parse manifest at {}", path.display()))
+        let text = std::fs::read_to_string(&path).into_app_err_with(|| format!("failed to read {}", path.display()))?;
+        Self::parse(&text).into_app_err_with(|| format!("failed to parse manifest at {}", path.display()))
     }
 
     /// Parse a manifest from a TOML string.
@@ -89,15 +87,10 @@ impl Manifest {
             .and_then(Item::as_integer)
             .ok_or_else(|| app_err!("manifest is missing a top-level `version` integer"))?;
         if version > SCHEMA_VERSION {
-            bail!(
-                "manifest schema version {version} is newer than supported ({SCHEMA_VERSION}); upgrade cargo-ox-check"
-            );
+            bail!("manifest schema version {version} is newer than supported ({SCHEMA_VERSION}); upgrade cargo-ox-check");
         }
 
-        let rendered_by = doc
-            .get("rendered_by")
-            .and_then(Item::as_str)
-            .map(str::to_owned);
+        let rendered_by = doc.get("rendered_by").and_then(Item::as_str).map(str::to_owned);
 
         let mut files = BTreeMap::new();
         if let Some(arr) = doc.get("file").and_then(Item::as_array_of_tables) {
@@ -134,17 +127,11 @@ impl Manifest {
                 let checksum = table
                     .get("checksum")
                     .and_then(Item::as_str)
-                    .ok_or_else(|| {
-                        app_err!("[[region]] entry '{host}'/'{id}' is missing `checksum`")
-                    })?
+                    .ok_or_else(|| app_err!("[[region]] entry '{host}'/'{id}' is missing `checksum`"))?
                     .to_owned();
                 let key = RegionKey { host, id };
                 if regions.insert(key.clone(), checksum).is_some() {
-                    bail!(
-                        "duplicate [[region]] entry for host '{}' id '{}'",
-                        key.host,
-                        key.id
-                    );
+                    bail!("duplicate [[region]] entry for host '{}' id '{}'", key.host, key.id);
                 }
             }
         }
@@ -209,10 +196,8 @@ impl Manifest {
         let path = Self::path_for(repo_root);
         let text = self.to_toml();
         let tmp = path.with_extension("lock.tmp");
-        std::fs::write(&tmp, text.as_bytes())
-            .into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
-        std::fs::rename(&tmp, &path)
-            .into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
+        std::fs::write(&tmp, text.as_bytes()).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
         Ok(())
     }
 
@@ -222,12 +207,7 @@ impl Manifest {
     }
 
     /// Insert or update one region entry.
-    pub fn set_region(
-        &mut self,
-        host: impl Into<String>,
-        id: impl Into<String>,
-        checksum: impl Into<String>,
-    ) {
+    pub fn set_region(&mut self, host: impl Into<String>, id: impl Into<String>, checksum: impl Into<String>) {
         self.regions.insert(
             RegionKey {
                 host: host.into(),

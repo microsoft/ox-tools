@@ -3,7 +3,7 @@
 
 //! GitHub Actions backend emitter.
 //!
-//! Emits three layers per [github.md](../../../docs/design/github.md):
+//! Emits three layers per [`github.md`](../../../docs/design/github.md):
 //!
 //! 1. Composite actions under `.github/actions/ox-check-*/action.yml`.
 //! 2. Reusable workflows (`ox-check-pr-impl.yml`, `ox-check-nightly-impl.yml`).
@@ -22,32 +22,26 @@ use crate::plan::PlanItem;
 use super::owned_file::plan_owned_file;
 
 /// Embedded body of the shared setup composite action.
-pub const SETUP_ACTION: &str =
-    include_str!("../../templates/github/setup-action.yml");
+pub const SETUP_ACTION: &str = include_str!("../../templates/github/setup-action.yml");
 
 /// Embedded body of the cargo-delta impact composite action.
-pub const IMPACT_ACTION: &str =
-    include_str!("../../templates/github/impact-action.yml");
+pub const IMPACT_ACTION: &str = include_str!("../../templates/github/impact-action.yml");
 
 /// Embedded body of the PR reusable workflow.
-pub const PR_IMPL_WORKFLOW: &str =
-    include_str!("../../templates/github/pr-impl-workflow.yml");
+pub const PR_IMPL_WORKFLOW: &str = include_str!("../../templates/github/pr-impl-workflow.yml");
 
 /// Embedded body of the nightly reusable workflow.
-pub const NIGHTLY_IMPL_WORKFLOW: &str =
-    include_str!("../../templates/github/nightly-impl-workflow.yml");
+pub const NIGHTLY_IMPL_WORKFLOW: &str = include_str!("../../templates/github/nightly-impl-workflow.yml");
 
 /// Embedded body of the PR root workflow.
-pub const PR_ROOT_WORKFLOW: &str =
-    include_str!("../../templates/github/pr-root-workflow.yml");
+pub const PR_ROOT_WORKFLOW: &str = include_str!("../../templates/github/pr-root-workflow.yml");
 
 /// Embedded body of the nightly root workflow.
-pub const NIGHTLY_ROOT_WORKFLOW: &str =
-    include_str!("../../templates/github/nightly-root-workflow.yml");
+pub const NIGHTLY_ROOT_WORKFLOW: &str = include_str!("../../templates/github/nightly-root-workflow.yml");
 
 /// All check groups for which the GitHub backend emits a composite action.
 ///
-/// Mirrors [`checks.md`](../../../docs/design/checks.md) §1.
+/// Mirrors [`checks.md`](../../../docs/design/checks.md) `§1`.
 pub const GROUPS: &[&str] = &[
     "pr-fast",
     "pr-test",
@@ -60,8 +54,7 @@ pub const GROUPS: &[&str] = &[
 
 /// Embedded template for one per-group composite action. `__GROUP__` is
 /// substituted with the group name at emit time.
-pub const GROUP_ACTION_TEMPLATE: &str =
-    include_str!("../../templates/github/group-action.yml");
+pub const GROUP_ACTION_TEMPLATE: &str = include_str!("../../templates/github/group-action.yml");
 
 /// Placeholder token the per-group template uses for the group name.
 const GROUP_PLACEHOLDER: &str = "__GROUP__";
@@ -88,10 +81,7 @@ pub fn group_action_path(group: &str) -> String {
 /// # Errors
 ///
 /// Propagates I/O errors from any per-file emitter.
-pub fn plan_composite_actions(
-    repo_root: &Path,
-    manifest: &Manifest,
-) -> Result<Vec<PlanItem>, AppError> {
+pub fn plan_composite_actions(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::with_capacity(GROUPS.len() + 2);
     items.push(plan_owned_file(
         repo_root,
@@ -107,12 +97,7 @@ pub fn plan_composite_actions(
     )?);
     for group in GROUPS {
         let body = render_group_action(group);
-        items.push(plan_owned_file(
-            repo_root,
-            manifest,
-            &group_action_path(group),
-            &body,
-        )?);
+        items.push(plan_owned_file(repo_root, manifest, &group_action_path(group), &body)?);
     }
     Ok(items)
 }
@@ -122,17 +107,9 @@ pub fn plan_composite_actions(
 /// # Errors
 ///
 /// Propagates I/O errors from the owned-file driver.
-pub fn plan_reusable_workflows(
-    repo_root: &Path,
-    manifest: &Manifest,
-) -> Result<Vec<PlanItem>, AppError> {
+pub fn plan_reusable_workflows(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
-        plan_owned_file(
-            repo_root,
-            manifest,
-            ".github/workflows/ox-check-pr-impl.yml",
-            PR_IMPL_WORKFLOW,
-        )?,
+        plan_owned_file(repo_root, manifest, ".github/workflows/ox-check-pr-impl.yml", PR_IMPL_WORKFLOW)?,
         plan_owned_file(
             repo_root,
             manifest,
@@ -147,23 +124,10 @@ pub fn plan_reusable_workflows(
 /// # Errors
 ///
 /// Propagates I/O errors from the owned-file driver.
-pub fn plan_root_workflows(
-    repo_root: &Path,
-    manifest: &Manifest,
-) -> Result<Vec<PlanItem>, AppError> {
+pub fn plan_root_workflows(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
-        plan_owned_file(
-            repo_root,
-            manifest,
-            ".github/workflows/ox-check-pr.yml",
-            PR_ROOT_WORKFLOW,
-        )?,
-        plan_owned_file(
-            repo_root,
-            manifest,
-            ".github/workflows/ox-check-nightly.yml",
-            NIGHTLY_ROOT_WORKFLOW,
-        )?,
+        plan_owned_file(repo_root, manifest, ".github/workflows/ox-check-pr.yml", PR_ROOT_WORKFLOW)?,
+        plan_owned_file(repo_root, manifest, ".github/workflows/ox-check-nightly.yml", NIGHTLY_ROOT_WORKFLOW)?,
     ])
 }
 
@@ -172,10 +136,7 @@ pub fn plan_root_workflows(
 /// # Errors
 ///
 /// Propagates I/O errors from any per-file emitter.
-pub fn plan_github_backend(
-    repo_root: &Path,
-    manifest: &Manifest,
-) -> Result<Vec<PlanItem>, AppError> {
+pub fn plan_github_backend(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>, AppError> {
     let mut items = Vec::new();
     items.extend(plan_composite_actions(repo_root, manifest)?);
     items.extend(plan_reusable_workflows(repo_root, manifest)?);
@@ -226,11 +187,7 @@ mod tests {
             }
             let trimmed_indent = line.trim_start_matches(' ').len();
             let indent = line.len() - trimmed_indent;
-            assert_eq!(
-                indent % 2,
-                0,
-                "non-aligned indent in:\n{body}\n>>> at line: {line}"
-            );
+            assert_eq!(indent % 2, 0, "non-aligned indent in:\n{body}\n>>> at line: {line}");
         }
     }
 
@@ -248,10 +205,7 @@ mod tests {
     fn pr_impl_workflow_has_expected_jobs() {
         assert!(PR_IMPL_WORKFLOW.contains("workflow_call:"));
         for needle in ["impact:", "pr-fast:", "pr-test:", "pr-mutants:"] {
-            assert!(
-                PR_IMPL_WORKFLOW.contains(needle),
-                "PR impl workflow missing job '{needle}'"
-            );
+            assert!(PR_IMPL_WORKFLOW.contains(needle), "PR impl workflow missing job '{needle}'");
         }
         // Every multi-OS group hardcodes its matrix as an inline
         // YAML array — we deliberately do NOT support input-driven
@@ -269,12 +223,7 @@ mod tests {
 
     #[test]
     fn nightly_impl_workflow_has_expected_jobs() {
-        for needle in [
-            "nightly-test:",
-            "nightly-advisories:",
-            "nightly-runtime:",
-            "nightly-exhaustive:",
-        ] {
+        for needle in ["nightly-test:", "nightly-advisories:", "nightly-runtime:", "nightly-exhaustive:"] {
             assert!(
                 NIGHTLY_IMPL_WORKFLOW.contains(needle),
                 "nightly impl workflow missing job '{needle}'"
@@ -314,9 +263,6 @@ mod tests {
 
     #[test]
     fn group_action_path_is_under_dot_github() {
-        assert_eq!(
-            group_action_path("pr-fast"),
-            ".github/actions/ox-check-pr-fast/action.yml"
-        );
+        assert_eq!(group_action_path("pr-fast"), ".github/actions/ox-check-pr-fast/action.yml");
     }
 }

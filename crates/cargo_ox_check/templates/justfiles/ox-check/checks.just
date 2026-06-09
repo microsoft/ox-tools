@@ -80,8 +80,8 @@ ox-check-clippy:
         Write-Host 'ox-check-clippy: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
-    & cargo clippy @pkg --all-targets --all-features --locked -- '-D' 'warnings'
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
+    & cargo clippy @pkg --all-targets --all-features --locked "--" '-D' 'warnings'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
@@ -103,7 +103,7 @@ ox-check-license-headers: (_ox-check-require "cargo-heather")
         Write-Host 'ox-check-license-headers: no modified packages; skipping'
         exit 0
     }
-    cargo heather --workspace
+    cargo heather
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
@@ -114,7 +114,7 @@ ox-check-ensure-no-cyclic-deps: (_ox-check-require "cargo-ensure-no-cyclic-deps"
         Write-Host 'ox-check-ensure-no-cyclic-deps: no modified packages; skipping'
         exit 0
     }
-    cargo ensure-no-cyclic-deps --workspace
+    cargo ensure-no-cyclic-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
@@ -125,7 +125,7 @@ ox-check-ensure-no-default-features: (_ox-check-require "cargo-ensure-no-default
         Write-Host 'ox-check-ensure-no-default-features: no modified packages; skipping'
         exit 0
     }
-    cargo ensure-no-default-features --workspace
+    cargo ensure-no-default-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Required tier. cargo doc resolves intra-doc links through the dep
@@ -138,7 +138,7 @@ ox-check-doc-build:
         Write-Host 'ox-check-doc-build: no required packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { '--workspace' })
     $env:RUSTDOCFLAGS = '-D warnings'
     & cargo doc @pkg --all-features --no-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -151,10 +151,21 @@ ox-check-readme-check: (_ox-check-require "cargo-doc2readme")
         Write-Host 'ox-check-readme-check: no modified packages; skipping'
         exit 0
     }
-    cargo doc2readme --check
+    cargo doc2readme --check --workspace
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
+#
+# cargo-spellcheck reads a Hunspell-compatible dictionary file at the
+# path configured in spellcheck.toml (typically `extra_dictionaries =
+# ["target/spelling.dic"]`). The convention used by the surveyed
+# Microsoft Rust repos is to keep the *source* word list in a
+# human-edited `.spelling` file at the repo root and preprocess it
+# into the .dic format at check time (Hunspell .dic requires:
+# alphabetical sort, blank/numeric lines removed, line-count header).
+# If `.spelling` is present, we generate `target/spelling.dic` from it
+# automatically; otherwise we run cargo-spellcheck against whatever
+# the repo has already set up.
 [script("pwsh")]
 ox-check-spellcheck: (_ox-check-require "cargo-spellcheck")
     $ErrorActionPreference = 'Stop'
@@ -162,7 +173,23 @@ ox-check-spellcheck: (_ox-check-require "cargo-spellcheck")
         Write-Host 'ox-check-spellcheck: no modified packages; skipping'
         exit 0
     }
-    cargo spellcheck check --code 1
+    if (Test-Path '.spelling') {
+        $output_file = 'target/spelling.dic'
+        $lines = Get-Content '.spelling' | Sort-Object
+        $filtered_lines = $lines | Where-Object { $_ -notmatch '^\d+$' -and $_ -ne '' }
+        $line_count = $filtered_lines.Count
+        [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($output_file)) | Out-Null
+        @($line_count) + $filtered_lines | Set-Content $output_file
+    }
+    # Pass --cfg explicitly when a spellcheck.toml exists at repo root,
+    # otherwise cargo-spellcheck falls back to its built-in defaults and
+    # ignores user-curated dictionaries (`extra_dictionaries`, custom
+    # hunspell langs, etc.).
+    if (Test-Path 'spellcheck.toml') {
+        cargo spellcheck --cfg spellcheck.toml check --code 1
+    } else {
+        cargo spellcheck check --code 1
+    }
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Unscoped (PR title is not source-related).
@@ -195,7 +222,7 @@ ox-check-udeps: (_ox-check-require "cargo-udeps")
         Write-Host 'ox-check-udeps: no required packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { '--workspace' })
     & cargo '+nightly' udeps @pkg --all-targets --all-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -208,7 +235,7 @@ ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
         Write-Host 'ox-check-semver-check: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
     & cargo semver-checks @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -220,7 +247,7 @@ ox-check-external-types: (_ox-check-require "cargo-check-external-types")
         Write-Host 'ox-check-external-types: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
     & cargo check-external-types @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -238,7 +265,23 @@ ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "carg
         Write-Host 'ox-check-llvm-cov: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
+    # cargo-llvm-cov doesn't work on aarch64-pc-windows-msvc: the
+    # llvm-profdata that ships with the rust toolchain there fails
+    # to merge the .profraw set ("no profile can be merged"). Fall
+    # back to plain `cargo nextest run` on that target so we still
+    # get test execution; coverage data from this leg wouldn't have
+    # been used anyway (coverage upload is gated on Linux only).
+    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
+        Write-Host 'ox-check-llvm-cov: aarch64-pc-windows-msvc — skipping coverage; running plain nextest'
+        & cargo nextest run @pkg --all-features --locked
+        exit $LASTEXITCODE
+    }
+    # cargo llvm-cov writes the .profraw set into target/llvm-cov-target/
+    # but the *report* output directory (target/coverage/) is something
+    # we choose and must exist before --output-path runs.
+    [System.IO.Directory]::CreateDirectory('target/coverage') | Out-Null
+    [System.IO.Directory]::CreateDirectory('target/coverage/html') | Out-Null
     # Wipe stale .profraw data so the report reflects only this run.
     cargo llvm-cov clean --workspace --profraw-only
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -264,7 +307,7 @@ ox-check-doc-test:
         Write-Host 'ox-check-doc-test: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
     & cargo test --doc @pkg --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -276,7 +319,7 @@ ox-check-examples:
         Write-Host 'ox-check-examples: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
     & cargo build @pkg --examples --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -335,7 +378,7 @@ ox-check-miri:
         Write-Host 'ox-check-miri: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
     & cargo '+nightly' miri nextest run @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -346,7 +389,7 @@ ox-check-careful: (_ox-check-require "cargo-careful")
         Write-Host 'ox-check-careful: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
     & cargo '+nightly' careful test @pkg --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -367,7 +410,7 @@ ox-check-cargo-hack: (_ox-check-require "cargo-hack")
         Write-Host 'ox-check-cargo-hack: no required packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { '--workspace' })
     & cargo hack @pkg --feature-powerset --depth 2 check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -379,6 +422,6 @@ ox-check-bench:
         Write-Host 'ox-check-bench: no affected packages; skipping'
         exit 0
     }
-    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
     & cargo bench @pkg --all-features --no-run
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

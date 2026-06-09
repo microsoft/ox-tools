@@ -24,12 +24,7 @@ use crate::plan::{PlanItem, Target};
 /// # Errors
 ///
 /// Returns an error if the file exists but can't be read.
-pub fn plan_owned_file(
-    repo_root: &Path,
-    manifest: &Manifest,
-    relpath: &str,
-    rendered: &str,
-) -> Result<PlanItem, AppError> {
+pub fn plan_owned_file(repo_root: &Path, manifest: &Manifest, relpath: &str, rendered: &str) -> Result<PlanItem, AppError> {
     let abs = repo_root.join(relpath);
     let on_disk = read_optional(&abs)?;
     let disk_checksum = on_disk.as_deref().map(checksum_str);
@@ -43,15 +38,11 @@ pub fn plan_owned_file(
     };
     let decision = decide(&inputs);
 
-    let target = Target::File {
-        path: relpath.to_owned(),
-    };
+    let target = Target::File { path: relpath.to_owned() };
     let item = match decision {
         Decision::InSync => PlanItem::insync(target, template_checksum),
         Decision::LeaveAlone => PlanItem::noop(target, decision),
-        Decision::Write => {
-            PlanItem::write_file(relpath, rendered.to_owned(), template_checksum)
-        }
+        Decision::Write => PlanItem::write_file(relpath, rendered.to_owned(), template_checksum),
         Decision::Propose => PlanItem::propose_file(relpath, rendered.to_owned(), template_checksum),
         Decision::Remove | Decision::OrphanedKept => {
             unreachable!("decide() never returns removal decisions; those come from plan_removals")
@@ -78,8 +69,7 @@ mod tests {
     #[test]
     fn missing_file_writes() {
         let tmp = TempDir::new().unwrap();
-        let item =
-            plan_owned_file(tmp.path(), &Manifest::default(), "a.txt", "content\n").unwrap();
+        let item = plan_owned_file(tmp.path(), &Manifest::default(), "a.txt", "content\n").unwrap();
         assert_eq!(item.decision, Decision::Write);
     }
 
@@ -87,8 +77,7 @@ mod tests {
     fn matching_file_in_sync() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("a.txt"), "content\n").unwrap();
-        let item =
-            plan_owned_file(tmp.path(), &Manifest::default(), "a.txt", "content\n").unwrap();
+        let item = plan_owned_file(tmp.path(), &Manifest::default(), "a.txt", "content\n").unwrap();
         assert_eq!(item.decision, Decision::InSync);
     }
 

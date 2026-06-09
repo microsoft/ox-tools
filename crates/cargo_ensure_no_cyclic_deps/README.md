@@ -1,17 +1,4 @@
-<div align="center">
- <img src="./logo.png" alt="Cargo-Ensure-No-Cyclic-Deps Logo" width="96">
-
-# Cargo-Ensure-No-Cyclic-Deps
-
-[![crates.io](https://img.shields.io/crates/v/cargo-ensure-no-cyclic-deps.svg)](https://crates.io/crates/cargo-ensure-no-cyclic-deps)
-[![docs.rs](https://docs.rs/cargo-ensure-no-cyclic-deps/badge.svg)](https://docs.rs/cargo-ensure-no-cyclic-deps)
-[![MSRV](https://img.shields.io/crates/msrv/cargo-ensure-no-cyclic-deps)](https://crates.io/crates/cargo-ensure-no-cyclic-deps)
-[![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
-[![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
-[![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
-<a href="../.."><img src="../../logo.svg" alt="This crate was developed as part of the Oxidizer project" width="20"></a>
-
-</div>
+# cargo-ensure-no-cyclic-deps ![License: MIT](https://img.shields.io/badge/license-MIT-blue) [![cargo-ensure-no-cyclic-deps on crates.io](https://img.shields.io/crates/v/cargo-ensure-no-cyclic-deps)](https://crates.io/crates/cargo-ensure-no-cyclic-deps) [![cargo-ensure-no-cyclic-deps on docs.rs](https://docs.rs/cargo-ensure-no-cyclic-deps/badge.svg)](https://docs.rs/cargo-ensure-no-cyclic-deps) [![Source Code Repository](https://img.shields.io/badge/Code-On%20GitHub-blue?logo=GitHub)](https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ensure-no-cyclic-deps) [![Rust Version: 1.88.0](https://img.shields.io/badge/rustc-1.88.0-orange.svg)](https://github.com/rust-lang/rust/releases/tag/1.88.0)
 
 A cargo sub-command that detects cyclic dependencies between crates in a workspace. This is useful if you
 want to prevent dev-dependencies from creating dependency cycles as that can cause issues,
@@ -66,10 +53,5 @@ No cyclic dependencies found.
 
 The tool will exit with code 0 if no cycles are found, or code 1 if cycles are detected.
 
-
-<hr/>
-<sub>
-This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ensure-no-cyclic-deps">source code</a>.
-</sub>
 
  [__link0]: https://github.com/crate-ci/cargo-release

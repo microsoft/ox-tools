@@ -56,8 +56,7 @@ pub fn plan_managed_region(
 
     let disk_checksum = match host_text.as_deref() {
         None => None,
-        Some(text) => find_region(text, region_id, syntax)?
-            .map(|region| checksum_str(region.body_str())),
+        Some(text) => find_region(text, region_id, syntax)?.map(|region| checksum_str(region.body_str())),
     };
 
     let inputs = DecisionInputs {
@@ -76,13 +75,7 @@ pub fn plan_managed_region(
         Decision::LeaveAlone => PlanItem::noop(target, decision),
         Decision::Write => {
             let spliced = splice(host_text.as_deref(), region_id, rendered_body, syntax)?;
-            PlanItem::write_region(
-                host_relpath,
-                region_id,
-                rendered_body.to_owned(),
-                spliced,
-                template_checksum,
-            )
+            PlanItem::write_region(host_relpath, region_id, rendered_body.to_owned(), spliced, template_checksum)
         }
         Decision::Propose => {
             let spliced = splice(host_text.as_deref(), region_id, rendered_body, syntax)?;
@@ -96,12 +89,7 @@ pub fn plan_managed_region(
     Ok(item)
 }
 
-fn splice(
-    host_text: Option<&str>,
-    region_id: &str,
-    rendered_body: &str,
-    syntax: CommentSyntax,
-) -> Result<String, AppError> {
+fn splice(host_text: Option<&str>, region_id: &str, rendered_body: &str, syntax: CommentSyntax) -> Result<String, AppError> {
     let base = host_text.unwrap_or("");
     upsert_region(base, region_id, rendered_body, syntax)
 }
@@ -117,15 +105,7 @@ mod tests {
     #[test]
     fn missing_host_writes_new_file() {
         let tmp = TempDir::new().unwrap();
-        let item = plan_managed_region(
-            tmp.path(),
-            &Manifest::default(),
-            "Justfile",
-            "r",
-            "body line\n",
-            SYN,
-        )
-        .unwrap();
+        let item = plan_managed_region(tmp.path(), &Manifest::default(), "Justfile", "r", "body line\n", SYN).unwrap();
         assert_eq!(item.decision, Decision::Write);
         let spliced = item.spliced_host.as_deref().unwrap();
         assert!(spliced.contains("# >>> ox-check-managed: r"));
@@ -136,15 +116,7 @@ mod tests {
     fn existing_host_without_region_appends_region() {
         let tmp = TempDir::new().unwrap();
         std::fs::write(tmp.path().join("Justfile"), "user content\n").unwrap();
-        let item = plan_managed_region(
-            tmp.path(),
-            &Manifest::default(),
-            "Justfile",
-            "r",
-            "body\n",
-            SYN,
-        )
-        .unwrap();
+        let item = plan_managed_region(tmp.path(), &Manifest::default(), "Justfile", "r", "body\n", SYN).unwrap();
         assert_eq!(item.decision, Decision::Write);
         let spliced = item.spliced_host.as_deref().unwrap();
         assert!(spliced.starts_with("user content\n"));
@@ -160,15 +132,7 @@ mod tests {
                     # <<< ox-check-managed: r\n\
                     after\n";
         std::fs::write(tmp.path().join("Justfile"), host).unwrap();
-        let item = plan_managed_region(
-            tmp.path(),
-            &Manifest::default(),
-            "Justfile",
-            "r",
-            "body\n",
-            SYN,
-        )
-        .unwrap();
+        let item = plan_managed_region(tmp.path(), &Manifest::default(), "Justfile", "r", "body\n", SYN).unwrap();
         assert_eq!(item.decision, Decision::InSync);
     }
 
@@ -179,15 +143,7 @@ mod tests {
         std::fs::write(tmp.path().join("Justfile"), host).unwrap();
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("old body\n"));
-        let item = plan_managed_region(
-            tmp.path(),
-            &manifest,
-            "Justfile",
-            "r",
-            "new body\n",
-            SYN,
-        )
-        .unwrap();
+        let item = plan_managed_region(tmp.path(), &manifest, "Justfile", "r", "new body\n", SYN).unwrap();
         assert_eq!(item.decision, Decision::Propose);
         assert!(item.spliced_host.is_some());
     }
@@ -199,15 +155,7 @@ mod tests {
         std::fs::write(tmp.path().join("Justfile"), host).unwrap();
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("body\n"));
-        let item = plan_managed_region(
-            tmp.path(),
-            &manifest,
-            "Justfile",
-            "r",
-            "body\n",
-            SYN,
-        )
-        .unwrap();
+        let item = plan_managed_region(tmp.path(), &manifest, "Justfile", "r", "body\n", SYN).unwrap();
         assert_eq!(item.decision, Decision::LeaveAlone);
     }
 
@@ -219,15 +167,7 @@ mod tests {
         std::fs::write(tmp.path().join("Justfile"), host).unwrap();
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("body\n"));
-        let item = plan_managed_region(
-            tmp.path(),
-            &manifest,
-            "Justfile",
-            "r",
-            "body\n",
-            SYN,
-        )
-        .unwrap();
+        let item = plan_managed_region(tmp.path(), &manifest, "Justfile", "r", "body\n", SYN).unwrap();
         assert_eq!(item.decision, Decision::LeaveAlone);
     }
 
@@ -238,15 +178,7 @@ mod tests {
         std::fs::write(tmp.path().join("Justfile"), host).unwrap();
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("old\n"));
-        let item = plan_managed_region(
-            tmp.path(),
-            &manifest,
-            "Justfile",
-            "r",
-            "new\n",
-            SYN,
-        )
-        .unwrap();
+        let item = plan_managed_region(tmp.path(), &manifest, "Justfile", "r", "new\n", SYN).unwrap();
         // Opt-out remains in place but the user gets a proposed host file.
         assert_eq!(item.decision, Decision::Propose);
     }

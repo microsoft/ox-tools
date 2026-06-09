@@ -35,6 +35,18 @@ steps:
       # cargo-delta emits TitleCase keys (Modified / Affected /
       # Required). Format each tier into the --package args shape
       # recipes expect, with --skip as the empty-set sentinel.
+      #
+      # cargo-delta's impact output uses *library names* (snake_case)
+      # rather than cargo *package names* (which may use hyphens). For
+      # hyphenated packages — e.g. `cargo-ox-check` — that means it
+      # emits `cargo_ox_check`, which cargo rejects as a --package
+      # specification. We build a lib-name -> package-name map from
+      # cargo metadata and translate each name through it.
+      declare -A pkg_map
+      while IFS=$'\t' read -r pkg_name lib_name; do
+          [ -n "$lib_name" ] && pkg_map["$lib_name"]="$pkg_name"
+      done < <(cargo metadata --no-deps --format-version 1 \
+          | jq -r '.packages[] as $p | $p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)"')
       format_set() {
           local field="$1"
           local pkgs
@@ -45,7 +57,8 @@ steps:
               local out=""
               while IFS= read -r pkg ; do
                   [ -z "$pkg" ] && continue
-                  out="$out --package $pkg"
+                  local mapped="${pkg_map[$pkg]:-$pkg}"
+                  out="$out --package $mapped"
               done <<EOF
       $pkgs
       EOF

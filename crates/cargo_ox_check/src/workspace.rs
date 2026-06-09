@@ -9,7 +9,7 @@
 //! directory by walking up from a starting path, then enumerates the
 //! workspace members so emitters can write per-crate managed regions.
 //!
-//! See [design.md §6](../../docs/design/design.md) for the file layout.
+//! See [`design.md §6`](../../docs/design/design.md) for the file layout.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -64,8 +64,7 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf, AppError> {
         if !manifest.is_file() {
             continue;
         }
-        let text = std::fs::read_to_string(&manifest)
-            .into_app_err_with(|| format!("failed to read {}", manifest.display()))?;
+        let text = std::fs::read_to_string(&manifest).into_app_err_with(|| format!("failed to read {}", manifest.display()))?;
         let doc: DocumentMut = text
             .parse::<DocumentMut>()
             .into_app_err_with(|| format!("failed to parse {} as TOML", manifest.display()))?;
@@ -93,8 +92,7 @@ pub fn find_workspace_root(start: &Path) -> Result<PathBuf, AppError> {
 /// `[workspace] members` glob list can't be resolved.
 pub fn load_workspace(root: &Path) -> Result<Workspace, AppError> {
     let manifest_path = root.join("Cargo.toml");
-    let text = std::fs::read_to_string(&manifest_path)
-        .into_app_err_with(|| format!("failed to read {}", manifest_path.display()))?;
+    let text = std::fs::read_to_string(&manifest_path).into_app_err_with(|| format!("failed to read {}", manifest_path.display()))?;
     let doc: DocumentMut = text
         .parse::<DocumentMut>()
         .into_app_err_with(|| format!("failed to parse {} as TOML", manifest_path.display()))?;
@@ -140,9 +138,7 @@ fn resolve_workspace_members(root: &Path, doc: &DocumentMut) -> Result<Vec<Works
 
     let mut out = Vec::new();
     for entry in array {
-        let pattern = entry
-            .as_str()
-            .ok_or_else(|| app_err!("`members` entries must be strings"))?;
+        let pattern = entry.as_str().ok_or_else(|| app_err!("`members` entries must be strings"))?;
         expand_member_pattern(root, pattern, &mut out)?;
     }
 
@@ -196,10 +192,7 @@ fn expand_member_pattern(root: &Path, pattern: &str, out: &mut Vec<WorkspaceMemb
 
     let manifest = root.join(pattern).join("Cargo.toml");
     if !manifest.is_file() {
-        bail!(
-            "workspace member '{pattern}' has no Cargo.toml at {}",
-            manifest.display()
-        );
+        bail!("workspace member '{pattern}' has no Cargo.toml at {}", manifest.display());
     }
     out.push(WorkspaceMember {
         manifest_relpath: normalize_relpath(&format!("{pattern}/Cargo.toml")),
@@ -310,10 +303,7 @@ members = ["alpha", "nested/beta"]
 members = ["crates/alpha"]
 "#,
         );
-        write(
-            &root.join("crates/alpha/Cargo.toml"),
-            "[package]\nname='a'\nversion='0.1.0'\n",
-        );
+        write(&root.join("crates/alpha/Cargo.toml"), "[package]\nname='a'\nversion='0.1.0'\n");
         write(&root.join("crates/alpha/src/lib.rs"), "");
 
         // Starting deep inside a member should still find the workspace root.

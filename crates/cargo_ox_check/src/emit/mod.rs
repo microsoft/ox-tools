@@ -3,9 +3,9 @@
 
 //! Owned-file and managed-region emitters.
 //!
-//! Each emitter produces a [`PlanItem`] given the workspace and the
-//! previous manifest. The driver in [`crate::run`] collects them into a
-//! [`Plan`] and either applies or summarizes it.
+//! Each emitter produces a [`crate::plan::PlanItem`] given the workspace
+//! and the previous manifest. The driver in [`mod@crate::run`] collects
+//! them into a [`crate::plan::Plan`] and either applies or summarizes it.
 
 pub mod ado;
 pub mod cargo_toml;

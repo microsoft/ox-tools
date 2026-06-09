@@ -1,6 +1,15 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        reason = "panic-on-failure idioms are appropriate in tests"
+    )
+)]
+
 //! # cargo-ox-check
 //!
 //! Opinionated, unified Rust build/CI scaffolding for GitHub Actions and

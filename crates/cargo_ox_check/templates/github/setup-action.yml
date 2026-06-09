@@ -9,8 +9,9 @@ runs:
     - id: rustc-version
       shell: bash
       run: echo "version=$(rustc --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
-    - name: Cache cargo home and target
-      uses: actions/cache@v4
+    - name: Restore cargo cache
+      id: cargo-cache
+      uses: actions/cache/restore@v4
       with:
         # Key on OS + arch + rustc version + lockfile hashes + catalog
         # hash so a Rust toolchain bump, a cross-arch matrix leg, or a
@@ -18,14 +19,33 @@ runs:
         # runner.arch resolves to X64 / ARM64 / X86, which keeps the
         # x86_64 and aarch64 legs of the same OS from colliding on
         # arch-incompatible target/ contents.
-        key: ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt') }}
+        #
+        # ${{ github.job }} discriminates by workflow-job-id (`pr-fast`,
+        # `pr-test`, `pr-mutants`, etc.) so concurrent matrix legs that
+        # share OS+arch (e.g. pr-fast linux + pr-test linux) don't race
+        # on the same cache key. Without this, the first-to-finish job
+        # reserves the key, the others get "Unable to reserve cache:
+        # another job may be creating this cache" and silently skip
+        # the save — leaving the cache empty forever. The restore-keys
+        # fall back across jobs so the install work is still shared
+        # across sibling legs on subsequent runs.
+        key: ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt') }}-${{ github.job }}
         restore-keys: |
+          ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt') }}-
           ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-
           ox-check-v1-${{ runner.os }}-${{ runner.arch }}-
+        # `.crates.toml` and `.crates2.json` track which cargo-installed
+        # tools and versions live in ~/.cargo/bin/. Without them in the
+        # cache, `cargo install --list` and (downstream) the
+        # `_ox-check-require` early-skip check don't see the cached
+        # binaries — every run then tries to reinstall on top of them
+        # and fails with "binary X already exists in destination".
         path: |
           ~/.cargo/registry/cache/
           ~/.cargo/registry/index/
           ~/.cargo/bin/
+          ~/.cargo/.crates.toml
+          ~/.cargo/.crates2.json
           target/
 
     # System dependencies for the catalog's source builds.
@@ -58,6 +78,22 @@ runs:
         if ! command -v just >/dev/null 2>&1 ; then
           cargo install --locked just
         fi
+    # Bootstrap cargo-binstall so the catalog install can use it. We
+    # pay the cost of compiling binstall itself once (~1 min), then
+    # use it to fetch pre-built binaries for every other tool from
+    # GitHub Releases instead of compiling them from source. On a
+    # cold runner this drops the catalog install phase from
+    # ~30 minutes to ~1 minute. ADO doesn't use this path because
+    # cargo-binstall has unresolved compliance issues for internal
+    # ADO pipelines (the binary registry it pulls from isn't on the
+    # allow-list); ADO sticks with vanilla ``cargo install`` via
+    # the default ``ox-check-tools-install`` argument.
+    - name: Install cargo-binstall
+      shell: bash
+      run: |
+        if ! command -v cargo-binstall >/dev/null 2>&1 ; then
+          cargo install --locked cargo-binstall
+        fi
     - name: Install catalog tools
       shell: bash
       # ox-check-tools-install exits non-zero if any per-tool install
@@ -69,4 +105,33 @@ runs:
       # need it (e.g. clippy / fmt when cargo-mutants is missing)
       # proceed normally.
       continue-on-error: true
-      run: just ox-check-tools-install
+      run: just ox-check-tools-install binstall
+
+    # Save the cache as the LAST step of setup, regardless of whether
+    # any earlier install step partially failed. `actions/cache@v4`
+    # used to support this via `save-always: true`, but that knob is
+    # deprecated as of 2025 with the explicit message "does not work
+    # as intended" — failing runs simply don't save. The supported
+    # replacement is to call `actions/cache/save@v4` directly as its
+    # own step with `if: always()`.
+    #
+    # Without this, a single catalog issue that fails the install
+    # step locks the cache empty forever (chicken-and-egg: failed
+    # run -> no save -> next run cold-starts -> still fails -> still
+    # no save). Tool binaries installed by ox-check-tools-install are
+    # immutable once on disk, so partial state is strictly better
+    # than nothing — and subsequent runs accumulate into the cache
+    # until the catalog is complete.
+    - name: Save cargo cache
+      if: always() && steps.cargo-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+        path: |
+          ~/.cargo/registry/cache/
+          ~/.cargo/registry/index/
+          ~/.cargo/bin/
+          ~/.cargo/.crates.toml
+          ~/.cargo/.crates2.json
+          target/
+          target/

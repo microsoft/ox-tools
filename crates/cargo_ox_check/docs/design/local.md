@@ -136,11 +136,27 @@ cares about (all the cargo-* checks). For the small number of non-cargo dependen
 
 ### 3.3 Installing tools
 
-`ox-check-tools-install` is a plain `just` recipe that loops over the catalog and runs
-`cargo install --locked <tool> --version '>=<min>'`. It's the *only* mechanism the
-tool uses to install cargo-managed tools — there is no separate code path for CI. CI
-setup just calls the recipe. Locally, the user runs the recipe once when
-`ox-check-tools-check` complains.
+`ox-check-tools-install [installer]` is a plain `just` recipe that loops over the
+catalog and installs each tool. It takes one optional positional argument selecting
+the install backend:
+
+- `install` (default) — `cargo install --locked <tool> --version '>=<min>'`. Pure
+  source builds; works in any cargo environment with no extra runtime dependency.
+  Slow on a cold runner (~30 min for the full catalog) because every tool re-compiles
+  the same common deps (`clap`, `syn`, `quote`, etc.) from scratch independently.
+- `binstall` — `cargo binstall --no-confirm --locked <tool> --version '>=<min>'`.
+  Downloads a pre-built binary from each tool's GitHub Releases when available,
+  falls back to `cargo install` per-tool otherwise. Cuts the cold-runner install
+  phase from ~30 min to ~1 min. Requires `cargo-binstall` to be installed
+  beforehand (the GH setup action bootstraps it via one `cargo install`).
+
+The GitHub composite setup action calls `just ox-check-tools-install binstall`.
+The ADO setup template calls `just ox-check-tools-install` (default `install`):
+cargo-binstall has unresolved compliance issues for internal ADO pipelines (the
+binary registry it pulls from isn't on the standard allow-list), so the slower
+pure-cargo path is the conservative choice there. Locally, users pick whichever
+matches their environment — `just ox-check-tools-install binstall` if they have
+`cargo-binstall` installed, plain `just ox-check-tools-install` otherwise.
 
 Two prerequisites are not cargo-installable and must be present before the recipe can
 run:

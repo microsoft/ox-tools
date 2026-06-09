@@ -10,7 +10,7 @@
 //! 2. Explicit `--no-backends` switch (yields the empty set).
 //! 3. Autodetection from the `origin` git remote URL.
 //!
-//! See [design.md §5.2](../../docs/design/design.md) for the resolution order.
+//! See [`design.md §5.2`](../../docs/design/design.md) for the resolution order.
 
 use std::path::Path;
 use std::process::Command;
@@ -45,9 +45,7 @@ impl Backend {
         match name {
             "github" => Ok(Self::GitHub),
             "ado" => Ok(Self::Ado),
-            other => Err(app_err!(
-                "unknown backend '{other}' (valid values: github, ado)"
-            )),
+            other => Err(app_err!("unknown backend '{other}' (valid values: github, ado)")),
         }
     }
 }
@@ -62,10 +60,7 @@ pub fn detect_from_url(url: &str) -> Vec<Backend> {
         if host == "github.com" || host.ends_with(".github.com") {
             return vec![Backend::GitHub];
         }
-        if host == "dev.azure.com"
-            || host == "ssh.dev.azure.com"
-            || host.ends_with(".visualstudio.com")
-        {
+        if host == "dev.azure.com" || host == "ssh.dev.azure.com" || host.ends_with(".visualstudio.com") {
             return vec![Backend::Ado];
         }
     }
@@ -136,10 +131,7 @@ pub fn read_origin_url(repo_root: &Path) -> Result<String, AppError> {
         .to_owned();
 
     if url.is_empty() {
-        return Err(app_err!(
-            "no `origin` remote configured in {}",
-            repo_root.display()
-        ));
+        return Err(app_err!("no `origin` remote configured in {}", repo_root.display()));
     }
 
     Ok(url)
@@ -157,11 +149,7 @@ pub fn read_origin_url(repo_root: &Path) -> Result<String, AppError> {
 /// - Returns an error if a `--backend` name is invalid.
 /// - Returns an error if no backends are specified, `--no-backends` is not
 ///   set, and autodetection fails (unrecognized host or no remote).
-pub fn resolve(
-    flag_backends: &[String],
-    no_backends: bool,
-    repo_root: &Path,
-) -> Result<Vec<Backend>, AppError> {
+pub fn resolve(flag_backends: &[String], no_backends: bool, repo_root: &Path) -> Result<Vec<Backend>, AppError> {
     if no_backends {
         return Ok(Vec::new());
     }
@@ -208,10 +196,7 @@ mod tests {
     #[test]
     fn extract_host_https() {
         assert_eq!(extract_host("https://github.com/foo/bar.git"), Some("github.com"));
-        assert_eq!(
-            extract_host("https://dev.azure.com/org/proj/_git/repo"),
-            Some("dev.azure.com")
-        );
+        assert_eq!(extract_host("https://dev.azure.com/org/proj/_git/repo"), Some("dev.azure.com"));
         assert_eq!(
             extract_host("https://acme.visualstudio.com/proj/_git/repo"),
             Some("acme.visualstudio.com")
@@ -220,10 +205,7 @@ mod tests {
 
     #[test]
     fn extract_host_ssh_url() {
-        assert_eq!(
-            extract_host("ssh://git@github.com:22/foo/bar.git"),
-            Some("github.com")
-        );
+        assert_eq!(extract_host("ssh://git@github.com:22/foo/bar.git"), Some("github.com"));
         assert_eq!(
             extract_host("ssh://git@ssh.dev.azure.com/v3/org/proj/repo"),
             Some("ssh.dev.azure.com")
@@ -233,10 +215,7 @@ mod tests {
     #[test]
     fn extract_host_scp_style() {
         assert_eq!(extract_host("git@github.com:foo/bar.git"), Some("github.com"));
-        assert_eq!(
-            extract_host("git@ssh.dev.azure.com:v3/org/proj/repo"),
-            Some("ssh.dev.azure.com")
-        );
+        assert_eq!(extract_host("git@ssh.dev.azure.com:v3/org/proj/repo"), Some("ssh.dev.azure.com"));
     }
 
     #[test]
@@ -249,30 +228,15 @@ mod tests {
 
     #[test]
     fn detect_github() {
-        assert_eq!(
-            detect_from_url("https://github.com/foo/bar.git"),
-            vec![Backend::GitHub]
-        );
-        assert_eq!(
-            detect_from_url("git@github.com:foo/bar.git"),
-            vec![Backend::GitHub]
-        );
+        assert_eq!(detect_from_url("https://github.com/foo/bar.git"), vec![Backend::GitHub]);
+        assert_eq!(detect_from_url("git@github.com:foo/bar.git"), vec![Backend::GitHub]);
     }
 
     #[test]
     fn detect_ado() {
-        assert_eq!(
-            detect_from_url("https://dev.azure.com/org/proj/_git/repo"),
-            vec![Backend::Ado]
-        );
-        assert_eq!(
-            detect_from_url("https://acme.visualstudio.com/proj/_git/repo"),
-            vec![Backend::Ado]
-        );
-        assert_eq!(
-            detect_from_url("ssh://git@ssh.dev.azure.com/v3/org/proj/repo"),
-            vec![Backend::Ado]
-        );
+        assert_eq!(detect_from_url("https://dev.azure.com/org/proj/_git/repo"), vec![Backend::Ado]);
+        assert_eq!(detect_from_url("https://acme.visualstudio.com/proj/_git/repo"), vec![Backend::Ado]);
+        assert_eq!(detect_from_url("ssh://git@ssh.dev.azure.com/v3/org/proj/repo"), vec![Backend::Ado]);
     }
 
     #[test]
@@ -289,23 +253,13 @@ mod tests {
 
     #[test]
     fn resolve_explicit_backends_skip_autodetect() {
-        let result = resolve(
-            &["github".to_owned(), "ado".to_owned()],
-            false,
-            Path::new("/nonexistent"),
-        )
-        .unwrap();
+        let result = resolve(&["github".to_owned(), "ado".to_owned()], false, Path::new("/nonexistent")).unwrap();
         assert_eq!(result, vec![Backend::GitHub, Backend::Ado]);
     }
 
     #[test]
     fn resolve_explicit_backends_deduplicate() {
-        let result = resolve(
-            &["github".to_owned(), "github".to_owned()],
-            false,
-            Path::new("/nonexistent"),
-        )
-        .unwrap();
+        let result = resolve(&["github".to_owned(), "github".to_owned()], false, Path::new("/nonexistent")).unwrap();
         assert_eq!(result, vec![Backend::GitHub]);
     }
 

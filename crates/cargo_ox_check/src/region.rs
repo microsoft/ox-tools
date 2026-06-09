@@ -18,7 +18,7 @@
 //! `ox-check-workspace-lints`).
 //!
 //! Empty body (just the sentinels with no content between them) is the
-//! opt-out signal — see [updates.md §6](../../docs/design/updates.md).
+//! opt-out signal — see [`updates.md §6`](../../docs/design/updates.md).
 
 use ohno::{AppError, app_err, bail};
 
@@ -93,11 +93,7 @@ impl<'a> Region<'a> {
 /// Returns an error if the region is malformed: multiple opening
 /// sentinels for the same id, an opening sentinel with no matching close,
 /// or a close before its open.
-pub fn find_region<'a>(
-    text: &'a str,
-    id: &str,
-    syntax: CommentSyntax,
-) -> Result<Option<Region<'a>>, AppError> {
+pub fn find_region<'a>(text: &'a str, id: &str, syntax: CommentSyntax) -> Result<Option<Region<'a>>, AppError> {
     let opener = format!("{} >>> ox-check-managed: {id}", syntax.prefix());
     let closer = format!("{} <<< ox-check-managed: {id}", syntax.prefix());
 
@@ -126,13 +122,9 @@ pub fn find_region<'a>(
 
     match (start_line, end_line) {
         (None, None) => Ok(None),
-        (Some(_), None) => Err(app_err!(
-            "region '{id}' has an opening sentinel but no closing sentinel"
-        )),
+        (Some(_), None) => Err(app_err!("region '{id}' has an opening sentinel but no closing sentinel")),
         // (None, Some(_)) was already caught above; left as a safety net.
-        (None, Some(_)) => Err(app_err!(
-            "region '{id}' has a closing sentinel with no opener"
-        )),
+        (None, Some(_)) => Err(app_err!("region '{id}' has a closing sentinel with no opener")),
         (Some(start), Some(end)) => {
             if end.start < start.end {
                 bail!("closing sentinel for region '{id}' precedes its opener");
@@ -162,12 +154,7 @@ pub fn find_region<'a>(
 /// # Errors
 ///
 /// Returns an error if an existing region is malformed.
-pub fn upsert_region(
-    text: &str,
-    id: &str,
-    new_body: &str,
-    syntax: CommentSyntax,
-) -> Result<String, AppError> {
+pub fn upsert_region(text: &str, id: &str, new_body: &str, syntax: CommentSyntax) -> Result<String, AppError> {
     let rendered = render_region(id, new_body, syntax);
 
     if let Some(region) = find_region(text, id, syntax)? {
@@ -216,10 +203,11 @@ pub fn render_region(id: &str, body: &str, syntax: CommentSyntax) -> String {
 }
 
 /// Splice the named region out of `text`, returning the host content
-/// with the markers + body excised entirely. To avoid leaving an
-/// asymmetric blank-line gap, one adjacent blank line is consumed:
-/// the trailing blank if present, else the leading blank if the
-/// region sits at end-of-file.
+/// with the markers + body excised entirely.
+///
+/// To avoid leaving an asymmetric blank-line gap, one adjacent blank
+/// line is consumed: the trailing blank if present, else the leading
+/// blank if the region sits at end-of-file.
 ///
 /// If the region is not present the input is returned unchanged.
 ///
@@ -227,11 +215,7 @@ pub fn render_region(id: &str, body: &str, syntax: CommentSyntax) -> String {
 ///
 /// Returns an error if the host file contains a malformed region with
 /// the requested id (mismatched/missing sentinels).
-pub fn remove_region(
-    text: &str,
-    id: &str,
-    syntax: CommentSyntax,
-) -> Result<String, AppError> {
+pub fn remove_region(text: &str, id: &str, syntax: CommentSyntax) -> Result<String, AppError> {
     let Some(region) = find_region(text, id, syntax)? else {
         return Ok(text.to_owned());
     };
@@ -384,10 +368,7 @@ mod tests {
     #[test]
     fn upsert_into_empty_file() {
         let new = upsert_region("", "x", "body\n", SYN).unwrap();
-        assert_eq!(
-            new,
-            "# >>> ox-check-managed: x\nbody\n# <<< ox-check-managed: x\n"
-        );
+        assert_eq!(new, "# >>> ox-check-managed: x\nbody\n# <<< ox-check-managed: x\n");
     }
 
     #[test]
@@ -407,10 +388,7 @@ mod tests {
     #[test]
     fn render_region_adds_trailing_newline() {
         let s = render_region("x", "body", SYN);
-        assert_eq!(
-            s,
-            "# >>> ox-check-managed: x\nbody\n# <<< ox-check-managed: x\n"
-        );
+        assert_eq!(s, "# >>> ox-check-managed: x\nbody\n# <<< ox-check-managed: x\n");
     }
 
     #[test]
@@ -448,9 +426,7 @@ mod tests {
     #[test]
     fn slash_slash_syntax_works() {
         let text = "// >>> ox-check-managed: x\nbody\n// <<< ox-check-managed: x\n";
-        let region = find_region(text, "x", CommentSyntax::SlashSlash)
-            .unwrap()
-            .unwrap();
+        let region = find_region(text, "x", CommentSyntax::SlashSlash).unwrap().unwrap();
         assert_eq!(region.body_str(), "body\n");
     }
 

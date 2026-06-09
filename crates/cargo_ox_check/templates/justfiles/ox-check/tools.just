@@ -29,6 +29,19 @@ ox-check-tools-check:
 # version. Idempotent — ``cargo install --locked`` is a no-op when
 # the installed version already satisfies the requirement.
 #
+# `installer` selects the install backend:
+#   - "install"  (default): ``cargo install --locked`` — pure-source
+#     builds; works in any cargo environment, no extra runtime
+#     dependencies. Slow (~30 minutes for the full catalog on a cold
+#     runner). Used by ADO, where ``cargo-binstall`` has known
+#     compliance issues for internal pipelines.
+#   - "binstall": ``cargo binstall --no-confirm --locked`` — downloads
+#     a pre-built binary from each tool's GitHub Releases when
+#     available, falling back to ``cargo install`` per-tool when
+#     not. Cuts catalog install time from ~30 min to ~1 min on a
+#     cold runner. Requires ``cargo-binstall`` to be installed
+#     beforehand. Used by the GitHub Actions setup action.
+#
 # Per-tool failures don't abort the whole install — a tool that
 # doesn't build on the current host (e.g. cargo-mutants on
 # aarch64-pc-windows-msvc, where the upstream winapi dep doesn't
@@ -39,8 +52,13 @@ ox-check-tools-check:
 # CI surfaces the problem.
 [group("ox-check")]
 [script("pwsh")]
-ox-check-tools-install:
+ox-check-tools-install installer="install":
     $ErrorActionPreference = 'Continue'
+    $installer = '{{installer}}'
+    if ($installer -ne 'install' -and $installer -ne 'binstall') {
+        Write-Error "ox-check-tools-install: unknown installer '$installer' (expected 'install' or 'binstall')"
+        exit 2
+    }
     $catalog = 'justfiles/ox-check/tool-minimums.txt'
     $failed = [System.Collections.Generic.List[string]]::new()
     foreach ($line in Get-Content $catalog) {
@@ -49,9 +67,34 @@ ox-check-tools-install:
         if ($trimmed -match '^([^=]+)=(.+)$') {
             $tool = $Matches[1]
             $min = $Matches[2]
-            Write-Host "ox-check-tools-install: $tool >= $min"
-            cargo install --locked $tool --version ">=$min"
-            if ($LASTEXITCODE -ne 0) {
+            # Skip if the tool is already installed at or above the
+            # required version. This is what makes the actions/cache
+            # restore actually useful — without the early-exit, every
+            # post-restore run would try to re-install on top of the
+            # cached binaries and fail with "binary already exists in
+            # destination". The `2>$null` swallows the help-text noise
+            # _ox-check-require emits when the tool is missing.
+            & just _ox-check-require $tool 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "ox-check-tools-install ($installer): $tool >= $min (already satisfied)"
+                continue
+            }
+            Write-Host "ox-check-tools-install ($installer): $tool >= $min"
+            $installed = $false
+            if ($installer -eq 'binstall') {
+                cargo binstall --no-confirm --locked $tool --version ">=$min"
+                if ($LASTEXITCODE -eq 0) {
+                    $installed = $true
+                } else {
+                    Write-Host "  binstall failed for $tool; falling back to cargo install" -ForegroundColor Yellow
+                    cargo install --locked $tool --version ">=$min"
+                    if ($LASTEXITCODE -eq 0) { $installed = $true }
+                }
+            } else {
+                cargo install --locked $tool --version ">=$min"
+                if ($LASTEXITCODE -eq 0) { $installed = $true }
+            }
+            if (-not $installed) {
                 Write-Host "ox-check-tools-install: $tool install FAILED (continuing)" -ForegroundColor Yellow
                 $failed.Add($tool)
             }
