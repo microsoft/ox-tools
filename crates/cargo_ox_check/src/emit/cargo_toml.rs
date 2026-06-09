@@ -226,6 +226,7 @@ mod tests {
         assert!(MEMBER_LINTS_BODY.contains("workspace = true"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn plan_multi_crate_workspace_emits_root_plus_members() {
         let tmp = TempDir::new().unwrap();
@@ -242,6 +243,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn plan_single_crate_emits_one_region() {
         let tmp = TempDir::new().unwrap();
@@ -270,6 +272,7 @@ mod tests {
         let _: toml_edit::DocumentMut = spliced.parse().expect("user extension keeps document valid");
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn member_relpaths_use_forward_slashes() {
         let tmp = TempDir::new().unwrap();

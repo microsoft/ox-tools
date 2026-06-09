@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg(not(miri))] // miri can't sandbox FS ops these tests do (TempDir, assert_cmd, etc.)
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,
@@ -113,6 +114,7 @@ fn single_crate_emits_crate_lints_and_justfiles() {
         "justfiles/ox-check/groups.just",
         "justfiles/ox-check/tiers.just",
         "justfiles/ox-check/tool-minimums.txt",
+        "justfiles/ox-check/rustup-components.txt",
     ] {
         assert!(tmp.path().join(rel).is_file(), "expected {rel} to be written");
     }

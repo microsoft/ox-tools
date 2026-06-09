@@ -120,7 +120,12 @@ jobs:
           header: ox-check-semver
           delete: true
 
-  pr-test:
+  pr-slow1:
+    # Tests + coverage: llvm-cov / doc-test / examples.
+    # 4-leg matrix -- compile and runtime behaviour can differ across
+    # OS and arch for cfg-gated code, so we exercise tests on every leg.
+    # Coverage uploads from the canonical x86_64 Linux leg only to
+    # avoid Codecov double-counting.
     needs: [impact-linux, impact-windows]
     strategy:
       fail-fast: false
@@ -132,7 +137,7 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/ox-check-pr-test
+      - uses: ./.github/actions/ox-check-pr-slow1
         with:
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
@@ -141,7 +146,8 @@ jobs:
         # Upload from one leg only to avoid double-counting; pick the
         # canonical x86_64 Linux leg. oxidizer-github also excludes
         # windows-11-arm from coverage due to LLVM-coverage
-        # instrumentation bugs.
+        # instrumentation bugs. lcov.info is produced by the
+        # ox-check-llvm-cov recipe inside ox-check-pr-slow1.
         if: matrix.os == 'linux' && needs.impact-linux.outputs.include_affected != '--skip'
         uses: codecov/codecov-action@v5
         with:
@@ -149,25 +155,51 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
-  pr-mutants:
-    # x86_64-only by design: cargo-mutants currently doesn't build on
-    # aarch64-pc-windows-msvc (upstream winapi crate incompat), and
-    # mutation testing on the cross-arch legs adds wall-clock without
-    # commensurate coverage benefit.
+  pr-slow2:
+    # Stricter-runtime correctness: miri + careful.
+    # 4-leg matrix -- both checks compile per host target and can
+    # surface OS/arch-specific UB. Both are impact-scoped so the
+    # wall-clock is proportional to the PR's blast radius.
     needs: [impact-linux, impact-windows]
     strategy:
       fail-fast: false
       matrix:
-        os: [linux, windows]
-    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/ox-check-pr-slow2
+        with:
+          include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
+          include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
+          include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
+
+  pr-slow3:
+    # Mutation testing: cargo mutants (diff-scoped against the PR base).
+    # 4-leg matrix. cargo-mutants doesn't build on aarch64-pc-windows-msvc
+    # (upstream winapi crate incompat); the ox-check-mutants recipe
+    # self-skips on that target so this is a no-op (not a failure) on
+    # the windows-arm leg.
+    needs: [impact-linux, impact-windows]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: ./.github/actions/ox-check-pr-mutants
+      - uses: ./.github/actions/ox-check-pr-slow3
         with:
-          include_modified: ${{ matrix.os == 'linux' && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
-          include_affected: ${{ matrix.os == 'linux' && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
-          include_required: ${{ matrix.os == 'linux' && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
+          include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
+          include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
+          include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha }}

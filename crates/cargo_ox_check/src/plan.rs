@@ -592,6 +592,7 @@ mod tests {
         assert!(s.contains("- Justfile [ox-check-old]"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn apply_writes_owned_file() {
         let tmp = TempDir::new().unwrap();
@@ -604,6 +605,7 @@ mod tests {
         assert!(m.rendered_by.is_some());
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn apply_writes_proposed_file_sibling_and_bumps_manifest() {
         let tmp = TempDir::new().unwrap();
@@ -618,6 +620,7 @@ mod tests {
         assert_eq!(m.files.get("a.txt").map(String::as_str), Some("sha256:newt"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn apply_region_write_splices_host() {
         let tmp = TempDir::new().unwrap();
@@ -639,6 +642,7 @@ mod tests {
         assert_eq!(m.regions.get(&key).map(String::as_str), Some("sha256:body"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn apply_region_propose_writes_sibling_and_bumps_manifest() {
         let tmp = TempDir::new().unwrap();
@@ -660,6 +664,7 @@ mod tests {
         assert_eq!(m.regions.get(&key).map(String::as_str), Some("sha256:newt"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn apply_insync_refreshes_stale_manifest_l() {
         // Regression test: when an older binary recorded an L using
@@ -686,6 +691,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn apply_leave_alone_does_not_refresh_manifest_l() {
         // Dual of the above: LeaveAlone explicitly preserves L. The
@@ -706,6 +712,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn apply_remove_deletes_file_and_purges_manifest() {
         // A Remove plan item deletes the file from disk and drops
@@ -723,6 +730,7 @@ mod tests {
         assert!(next.files.is_empty(), "Remove must drop the manifest entry: {:?}", next.files);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn apply_remove_region_splices_out_markers_and_body() {
         // A Region Remove plan item replaces the host file with
@@ -745,6 +753,7 @@ mod tests {
         assert!(next.regions.is_empty());
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn apply_orphaned_kept_preserves_disk_and_drops_manifest() {
         // An OrphanedKept plan item leaves the file/region alone and
@@ -762,6 +771,7 @@ mod tests {
         assert!(next.files.is_empty());
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn apply_remove_missing_file_is_idempotent() {
         // Race: the file is already gone (someone deleted it
@@ -776,6 +786,7 @@ mod tests {
         assert!(next.files.is_empty());
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn apply_preserves_in_plan_manifest_entries() {
         // The dual of the purging test: a manifest entry whose target IS

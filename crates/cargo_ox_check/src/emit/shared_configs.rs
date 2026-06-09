@@ -198,6 +198,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn plan_shared_configs_emits_five_items() {
         let tmp = TempDir::new().unwrap();

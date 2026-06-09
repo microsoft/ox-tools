@@ -7,6 +7,7 @@
 //! warnings here are spurious — every test file pulls in only what it
 //! needs.
 
+#![cfg(not(miri))] // miri can't sandbox FS ops these tests do (TempDir, assert_cmd, etc.)
 #![allow(
     dead_code,
     reason = "each integration test file is its own crate; not all helpers are used by every file"

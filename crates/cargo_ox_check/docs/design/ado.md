@@ -39,6 +39,113 @@ See also:
   ADO YAML; 1ESPT/SubstratePT/CloudBuild composition happens in the user's root pipeline
   by way of `extends:` and `parameters.stages`.
 
+The PR pipeline:
+
+```mermaid
+flowchart LR
+    pr_evt([PR build-validation<br/>branch policy]):::trigger
+    pr_root[".pipelines/<br/>ox-check-pr.yml<br/>(root, ~15 lines)"]:::root
+    pr_stages[".pipelines/ox-check/pr.yml<br/>(stages template)"]:::impl
+    impact_s["stage: impact_linux + stage: impact_windows<br/>(2 stages, cargo-delta;<br/>outputs consumed by every group below)"]:::stage
+    pr_fast_s["stage: pr_fast<br/>linux + windows jobs"]:::stage
+    pr_slow1_s["stage: pr_slow1<br/>(tests + coverage)"]:::stage
+    pr_slow2_s["stage: pr_slow2<br/>(miri + careful)"]:::stage
+    pr_slow3_s["stage: pr_slow3<br/>(mutants)"]:::stage
+    impact_step[".pipelines/ox-check/<br/>steps/impact.yml"]:::step
+    fast_step[".pipelines/ox-check/<br/>steps/pr-fast.yml"]:::step
+    slow1_step[".pipelines/ox-check/<br/>steps/pr-slow1.yml"]:::step
+    slow2_step[".pipelines/ox-check/<br/>steps/pr-slow2.yml"]:::step
+    slow3_step[".pipelines/ox-check/<br/>steps/pr-slow3.yml"]:::step
+    job_wrap[".pipelines/ox-check/<br/>steps/job.yml<br/>(1ESPT extensibility point;<br/>wraps every job)"]:::wrapper
+    fast_just["just ox-check-pr-fast"]:::recipe
+    slow1_just["just ox-check-pr-slow1"]:::recipe
+    slow2_just["just ox-check-pr-slow2"]:::recipe
+    slow3_just["just ox-check-pr-slow3<br/>(self-skips on aarch64-pc-windows-msvc)"]:::recipe
+
+    pr_evt --> pr_root
+    pr_root -. extends/template .-> pr_stages
+    pr_stages --> impact_s
+    pr_stages --> pr_fast_s
+    pr_stages --> pr_slow1_s
+    pr_stages --> pr_slow2_s
+    pr_stages --> pr_slow3_s
+
+    impact_s ==> impact_step
+    pr_fast_s ==> fast_step
+    pr_slow1_s ==> slow1_step
+    pr_slow2_s ==> slow2_step
+    pr_slow3_s ==> slow3_step
+
+    fast_step ==> fast_just
+    slow1_step ==> slow1_just
+    slow2_step ==> slow2_just
+    slow3_step ==> slow3_just
+
+    classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
+    classDef root fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
+    classDef impl fill:#dff0d8,stroke:#28a745,stroke-width:1px;
+    classDef stage fill:#f6f8fa,stroke:#586069,stroke-width:1px;
+    classDef step fill:#fce5e5,stroke:#cb2431,stroke-width:1px;
+    classDef wrapper fill:#fff0db,stroke:#d97706,stroke-width:2px;
+    classDef recipe fill:#f3e8ff,stroke:#6f42c1,stroke-width:1px;
+```
+
+(`steps/job.yml` is the per-job wrapper that every step template invokes; rather than draw four dotted "wraps via" edges from each `pr-*` step into the wrapper -- which the auto-layout struggles with -- the relationship is summarised inside the wrapper node and in §4.1.)
+
+The scheduled pipeline (same colour key):
+
+```mermaid
+flowchart LR
+    sched_evt([schedule]):::trigger
+    sched_root[".pipelines/<br/>ox-check-scheduled.yml<br/>(root)"]:::root
+    sched_stages[".pipelines/ox-check/scheduled.yml<br/>(stages template)"]:::impl
+    stest_s["stage: scheduled_test<br/>linux + windows jobs"]:::stage
+    sadv_s["stage: scheduled_advisories<br/>linux + windows jobs"]:::stage
+    sexh_s["stage: scheduled_exhaustive<br/>linux + windows jobs"]:::stage
+    stest_step[".pipelines/ox-check/<br/>steps/scheduled-test.yml"]:::step
+    sadv_step[".pipelines/ox-check/<br/>steps/scheduled-advisories.yml"]:::step
+    sexh_step[".pipelines/ox-check/<br/>steps/scheduled-exhaustive.yml"]:::step
+    stest_just["just ox-check-scheduled-test"]:::recipe
+    sadv_just["just ox-check-scheduled-advisories"]:::recipe
+    sexh_just["just ox-check-scheduled-exhaustive"]:::recipe
+
+    sched_evt --> sched_root
+    sched_root -. extends .-> sched_stages
+    sched_stages --> stest_s
+    sched_stages --> sadv_s
+    sched_stages --> sexh_s
+
+    stest_s ==> stest_step
+    sadv_s ==> sadv_step
+    sexh_s ==> sexh_step
+
+    stest_step ==> stest_just
+    sadv_step ==> sadv_just
+    sexh_step ==> sexh_just
+
+    classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
+    classDef root fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
+    classDef impl fill:#dff0d8,stroke:#28a745,stroke-width:1px;
+    classDef stage fill:#f6f8fa,stroke:#586069,stroke-width:1px;
+    classDef step fill:#fce5e5,stroke:#cb2431,stroke-width:1px;
+    classDef recipe fill:#f3e8ff,stroke:#6f42c1,stroke-width:1px;
+```
+
+Legend:
+- **Yellow** triggers — branch-policy PR validation (ADO ignores the YAML `pr:` trigger on Azure Repos) and `schedule:` for the scheduled tier.
+- **Blue** root pipeline — user-customizable, minimal; this is where adopters insert `extends: template: 1es-pt-pipeline.yml` or other compliance harnesses.
+- **Green** stages template — owned, carries the wiring (stage set, `dependsOn:`, output variable plumbing).
+- **Grey** stages — one per group; the PR-tier group stages fan in via `dependsOn:` from both impact stages.
+- **Red** step templates — per-group, the unit invoked by each job in a stage.
+- **Orange** job wrapper — owned but expected to be edited by adopters whose ADO instance requires `templateContext:` blocks (1ESPT/SDL/build provenance). Once edited, the dirty-file flow Proposes future updates as siblings.
+- **Purple** just recipe — the actual check execution.
+
+The diagrams flow left-to-right; mermaid stacks same-rank siblings vertically by default. Every per-group step template (`pr-fast.yml`, `pr-slow{1,2,3}.yml`, `scheduled-*.yml`) `template:`s `setup.yml` as its first step; that uniform dependency is elided from the diagram to keep it readable. Every PR-tier group stage declares `dependsOn: [impact_linux, impact_windows]` so it can read the cargo-delta output variables; this fan-in is summarised inside the impact node rather than drawn as edges.
+
+Note the ADO topology differs from GitHub Actions in two places:
+1. **No reusable workflow indirection**: ADO `extends:` is one-shot; the root pipeline extends a single template. We compensate by putting all stages in `pr.yml` / `scheduled.yml` as direct templates.
+2. **Per-job wrapper**: the `steps/job.yml` template is ADO-specific. GitHub composite actions are uniform; ADO 1ESPT requires per-job extensibility hooks that the wrapper exposes through its `name`/`pool`/`steps`/`artifacts` parameter contract (see §4.1).
+
 ## 2. Emitted artifacts
 
 ```text
@@ -57,11 +164,11 @@ See also:
         │                                    users edit to inject 1ESPT
         │                                    `templateContext:` etc.)
         ├── pr-fast.yml             owned   (one step template per group)
-        ├── pr-test.yml             owned
-        ├── pr-mutants.yml          owned
+        ├── pr-slow1.yml            owned
+        ├── pr-slow2.yml            owned
+        ├── pr-slow3.yml            owned
         ├── scheduled-test.yml        owned
         ├── scheduled-advisories.yml  owned
-        ├── scheduled-runtime.yml     owned
         └── scheduled-exhaustive.yml  owned
 ```
 
@@ -313,7 +420,8 @@ stages:
             - template: steps/pr-fast.yml
               parameters: { ...same... }
 
-  # pr_test, pr_mutants follow the same shape.
+  # pr_slow1, pr_slow2, and pr_slow3 each follow the same shape and
+  # run as independent parallel stages.
 ```
 
 The wiring never gates jobs on impact output. Each group always runs; recipes inside
@@ -387,9 +495,8 @@ Per-group additions (only where the group consumes PR-context strings the recipe
 | Template                  | Extra parameters                                                        |
 |---------------------------|-------------------------------------------------------------------------|
 | `pr-fast.yml`             | `prTitle` (default `$(System.PullRequest.Title)`)                       |
-| `pr-mutants.yml`          | `prBaseRef` (default `$(System.PullRequest.TargetBranch)`)              |
-| `pr-test.yml`             | —                                                                       |
-| `scheduled-*.yml`           | —                                                                       |
+| `pr-slow3.yml`            | `prBaseRef` (default `$(System.PullRequest.TargetBranch)`)              |
+| `pr-slow1.yml`, `pr-slow2.yml`, `scheduled-*.yml` | —                                                                       |
 
 `$(System.PullRequest.*)` are auto-populated by ADO on PR build-validation runs. No
 manual web-UI wiring is needed.
@@ -407,8 +514,8 @@ passing any include parameters — they default to empty (recipes fall back to
 
 ### `setup.yml` and `impact.yml`
 
-`setup.yml` installs `just` (`cargo install just --locked --version >=<min>`) and runs
-`just ox-check-tools-install`. Does not install Rust; expects `cargo` on PATH —
+`setup.yml` installs `just` (`cargo install just --locked`) and runs
+`just ox-check-setup`. Does not install Rust; expects `cargo` on PATH --
 provided by the user's msrustup step in 1ESPT pipelines or by a previous step in OSS
 pipelines (see §6).
 
@@ -462,8 +569,8 @@ pinned to a workspace-scratch location to keep cache scoping predictable.
 
 The cache covers:
 
-- The `cargo install`-ed tools from `ox-check-tools-install-missing`.
-- The `target/` directory (per ox-check recipe; a per-recipe cache scope means a `pr-test`
+- The `cargo install`-ed tools from `ox-check-setup` (step 4 of the recipe).
+- The `target/` directory (per ox-check recipe; a per-recipe cache scope means a `pr-slow1`
   cache hit doesn't have to wait on a `pr-fast` cache miss).
 
 Cache scoping inside 1ESPT-compliant pipelines is bounded by the template's allowed cache
@@ -508,7 +615,7 @@ it just contributes a stage.
 
 ## 10. Coverage upload
 
-After `pr-test` (and `scheduled-test`) runs the `ox-check-llvm-cov` recipe, the stages
+After `pr-slow1` (and `scheduled-test`) runs the `ox-check-llvm-cov` recipe, the stages
 template adds a `PublishCodeCoverageResults@2` step on the Linux job that ingests
 `target/coverage/cobertura.xml`. The cobertura format is the modern recommendation for
 the task (lcov is not accepted) and is produced alongside lcov.info by the same

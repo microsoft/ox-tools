@@ -5,7 +5,8 @@
 
 # Each group is one CI job. Within a group, checks run sequentially.
 
-# === PR groups ==========================================================
+# PR groups
+# ===========================================================================
 
 [group("ox-check")]
 ox-check-pr-fast: \
@@ -23,18 +24,45 @@ ox-check-pr-fast: \
     ox-check-audit \
     ox-check-udeps \
     ox-check-semver-check \
+    ox-check-external-types \
     ox-check-aprz
 
+# pr-slow is the single PR-tier group for everything that takes more
+# than ~30s per crate (tests, stricter runtimes, mutation testing).
+# It's internally split into three sub-recipes so individual concerns
+# can be invoked locally without dragging the others along:
+#
+#   slow1: tests + coverage (replaces the former pr-test group)
+#   slow2: stricter-runtime correctness (miri, careful)
+#   slow3: mutation testing
+#
+# CI runs pr-slow as ONE job per OS leg -- the sub-recipes run
+# sequentially within. This trades per-leg wall-clock for fewer
+# orchestration jobs and a flatter PR check graph. Individual sub-
+# recipes are runnable on their own locally:
+#
+#   $ just ox-check-pr-slow1   # tests + coverage only
+#   $ just ox-check-pr-slow2   # miri + careful only
+#   $ just ox-check-pr-slow3   # mutants only
 [group("ox-check")]
-ox-check-pr-test: \
+ox-check-pr-slow: ox-check-pr-slow1 ox-check-pr-slow2 ox-check-pr-slow3
+
+[group("ox-check")]
+ox-check-pr-slow1: \
     ox-check-llvm-cov \
     ox-check-doc-test \
     ox-check-examples
 
 [group("ox-check")]
-ox-check-pr-mutants: ox-check-mutants
+ox-check-pr-slow2: \
+    ox-check-miri \
+    ox-check-careful
 
-# === Scheduled groups =====================================================
+[group("ox-check")]
+ox-check-pr-slow3: ox-check-mutants
+
+# Scheduled groups
+# ===========================================================================
 
 [group("ox-check")]
 ox-check-scheduled-test: \
@@ -47,13 +75,7 @@ ox-check-scheduled-advisories: \
     ox-check-deny \
     ox-check-audit \
     ox-check-aprz \
-    ox-check-clippy \
-    ox-check-external-types
-
-[group("ox-check")]
-ox-check-scheduled-runtime: \
-    ox-check-miri \
-    ox-check-careful
+    ox-check-clippy
 
 [group("ox-check")]
 ox-check-scheduled-exhaustive: \

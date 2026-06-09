@@ -28,10 +28,14 @@ repo/
     ├── checks.just         per-check recipes (ox-check-fmt, ox-check-clippy, ox-check-llvm-cov, …).
     │                       Starts with `set unstable` (needed for the `[script("pwsh")]`
     │                       attribute on `ox-check-pr-title`).
-    ├── groups.just         group recipes (ox-check-pr-fast, ox-check-pr-test, ox-check-scheduled-test, …).
+    ├── groups.just         group recipes (ox-check-pr-fast, ox-check-pr-slow1,
+    │                       ox-check-pr-slow2, ox-check-pr-slow3, ox-check-scheduled-test, …)
+    │                       plus a convenience `ox-check-pr-slow` umbrella that
+    │                       invokes the three pr-slow* sub-recipes sequentially.
     ├── tiers.just          tier aggregators (ox-check-pr, ox-check-scheduled, ox-check-full).
-    ├── tools.just          ox-check-tools-check + ox-check-tools-install + helpers.
-    ├── tool-minimums.txt   data file: <cargo-subcommand>=<minimum-version> per line.
+    ├── tools.just          ox-check-tools-check + ox-check-setup + helpers.
+    ├── tool-minimums.txt   data file: <cargo-subcommand>=<pinned-version> per line.
+    ├── rustup-components.txt data file: <toolchain-key>:<component> per line.
     └── versions.just       pinned nightly toolchains (rust_nightly, rust_nightly_external_types).
                             Read by recipes via `{{ var }}` interpolation and by the
                             setup composites via `just --evaluate`. See §3.6.
@@ -74,12 +78,17 @@ tools fail with a one-line `cargo install` hint. The cost is one cheap `cargo in
 
 ### groups.just
 
-One recipe per group, named `ox-check-<tier>-<group>`. The check-recipe and group-recipe
+One recipe per CI-visible group, named `ox-check-<tier>-<group>`. The check-recipe and group-recipe
 namespaces are kept disjoint by naming choice: no check is named `<tier>-<group>` for
 any tier × group combination (e.g. the coverage-instrumented test check is named
-`llvm-cov`, not `test`, so that `ox-check-pr-test` unambiguously refers to the PR-tier
-test group). The `pr-mutants` group runs the diff-scoped recipe; `scheduled-exhaustive`
-runs the full-workspace recipe:
+`llvm-cov`, not `test`, so that group names like `ox-check-pr-slow1` unambiguously refer to a group recipe).
+
+The `pr-slow` work is split into three independent CI-visible sub-groups
+(`pr-slow1`, `pr-slow2`, `pr-slow3`) so they run as parallel CI jobs/stages.
+A convenience umbrella `ox-check-pr-slow` recipe is also provided for local
+use; it invokes the three sub-recipes sequentially. `pr-slow3` (mutants) is
+diff-scoped against the PR base; `scheduled-exhaustive` runs the
+full-workspace mutants recipe:
 
 ```just
 ox-check-pr-fast: ox-check-fmt ox-check-clippy ox-check-cargo-sort ox-check-license-headers \
@@ -88,12 +97,13 @@ ox-check-pr-fast: ox-check-fmt ox-check-clippy ox-check-cargo-sort ox-check-lice
                ox-check-deny ox-check-audit ox-check-udeps ox-check-semver-check \
                ox-check-external-types ox-check-aprz
 
-ox-check-pr-test: ox-check-llvm-cov ox-check-doc-test ox-check-examples
-ox-check-pr-mutants: ox-check-mutants
+ox-check-pr-slow: ox-check-pr-slow1 ox-check-pr-slow2 ox-check-pr-slow3
+ox-check-pr-slow1: ox-check-llvm-cov ox-check-doc-test ox-check-examples
+ox-check-pr-slow2: ox-check-miri ox-check-careful
+ox-check-pr-slow3: ox-check-mutants
 
 ox-check-scheduled-test: ox-check-llvm-cov ox-check-doc-test ox-check-examples
-ox-check-scheduled-advisories: ox-check-deny ox-check-audit ox-check-aprz ox-check-clippy ox-check-udeps
-ox-check-scheduled-runtime: ox-check-miri ox-check-careful
+ox-check-scheduled-advisories: ox-check-deny ox-check-audit ox-check-aprz ox-check-clippy
 ox-check-scheduled-exhaustive: ox-check-mutants-full ox-check-cargo-hack ox-check-bench
 ```
 
@@ -103,9 +113,9 @@ Three tier aggregators. Each tier is a recipe that depends on the appropriate se
 in a deterministic order:
 
 ```just
-ox-check-pr: ox-check-tools-check ox-check-pr-fast ox-check-pr-test ox-check-pr-mutants
+ox-check-pr: ox-check-tools-check ox-check-pr-fast ox-check-pr-slow
 ox-check-scheduled: ox-check-tools-check ox-check-scheduled-test ox-check-scheduled-advisories \
-               ox-check-scheduled-runtime ox-check-scheduled-exhaustive
+               ox-check-scheduled-exhaustive
 ox-check-full: ox-check-pr ox-check-scheduled
 ```
 
@@ -115,108 +125,152 @@ ox-check-full: ox-check-pr ox-check-scheduled
   build from source (currently: `libclang` for `cargo-spellcheck`). Best-effort presence
   check; on missing deps emits per-OS install hints and exits non-zero. No auto-install.
   See §3.3.1 for the scope policy.
-- `ox-check-tools-check` — print a status table of every tool's installed version vs. minimum.
-- `ox-check-tools-install` — install (or upgrade) every catalog tool to its minimum
-  version. Idempotent: `cargo install --locked` is a no-op when the installed version
-  already satisfies the requirement, so calling this recipe on every CI run costs
-  nothing on a cache hit. There is intentionally no separate `tools-install-missing`
-  variant — the install recipe IS the install-missing recipe. Runs `ox-check-system-deps-check`
-  first when the source-build (`install`) backend is selected, so missing system libs
-  surface as a clear "install libclang" hint instead of a cryptic build error 10 minutes
-  in.
+- `ox-check-tools-check` -- print a status table of every tool's installed version vs. the pin.
+- `ox-check-setup` -- install everything ox-check needs in one shot: system library
+  dependencies, rustup toolchains and components, cargo-binstall (if requested),
+  and every cargo subcommand pinned in `tool-minimums.txt`. Idempotent: each
+  sub-step is a no-op when the artifact is already present at or above the pin,
+  so calling this recipe on every CI run costs nothing on a cache hit. There is
+  intentionally no separate `tools-install-missing` variant -- this recipe IS
+  the install-missing recipe. Runs `ox-check-system-deps-check` first when the
+  source-build (`install`) backend is selected, so missing system libs surface
+  as a clear "install libclang" hint instead of a cryptic build error 10 minutes
+  in. Version policy: installs `=<pin>` exact, but accepts already-installed
+  versions `>= <pin>` (see §3 for the rationale).
 - `_ox-check-require <tool>` — internal helper called by each check.
 
 The full tool-version policy these recipes implement is detailed in §3 below.
 
-## 3. Tool versions and installation
+## 3. Tool versions, toolchains, and installation
 
 ### 3.1 Policy
 
-The tool **never pins exact versions** for the user. The catalog records, for each tool, a
-*minimum required version* (e.g. `cargo-nextest >= 0.9.122`). Users are free to install
-newer versions, use `mise`/`asdf`, install via package manager, etc.
+The catalog records, for each cargo subcommand, a **pinned version** (e.g.
+`cargo-nextest=0.9.122`). The pin is used two different ways:
+
+- **On install** (`ox-check-setup` writing into `~/.cargo/bin`): the recipe installs
+  *exactly* that version (`=<pin>`), never `>=`. Pulling latest-matching at install
+  time is a CI reproducibility risk -- an upstream release between yesterday's green
+  build and today's PR can break things, even though the catalog hasn't moved.
+  `cargo-spellcheck 0.15.7`'s em-dash word-boundary regression is the canonical
+  example: with `>=0.15.1` the catalog would have silently picked it up, breaking
+  every PR until the catalog was edited. With `=0.15.1` the catalog locks in the
+  version it was validated against.
+- **On runtime check** (`_ox-check-require <tool>`): the recipe enforces
+  `installed >= pin`. A local developer who has manually upgraded a tool for their
+  own reasons (e.g. needing a bugfix the catalog hasn't pinned yet) is not
+  downgraded by setup. Their newer version still satisfies the gate; recipes run
+  against it.
+
+This asymmetry -- "install exact, accept newer if already present" -- gives CI
+reproducibility *and* leaves the user in control. Bumping a pin is a deliberate
+catalog edit (`tool-minimums.txt`), not an upstream-release-triggered surprise.
+
+The catalog file is still named `tool-minimums.txt` (historical name; no churn). The
+semantics described above are documented at the top of the file.
 
 ### 3.2 Detecting installed versions
 
 `_ox-check-require <tool>` (a private `just` recipe in `tools.just`) uses
 `cargo install --list` to enumerate currently-installed cargo subcommands and their
-versions, then compares against the catalog minimum. This avoids the problem of tools
-without a stable `--version` flag, is fast, and works uniformly for everything the tool
-cares about (all the cargo-* checks). For the small number of non-cargo dependencies
-(`just` itself and `pwsh`), the recipe falls back to `tool --version` and a known parser.
+versions, then checks `installed >= pin`. This avoids the problem of tools without a
+stable `--version` flag, is fast, and works uniformly for everything the catalog
+cares about. For non-cargo dependencies (`just` itself and `pwsh`), the recipe falls
+back to `tool --version` and a known parser.
 
-### 3.3 Installing tools
+### 3.3 Installing tools (and toolchains, and components)
 
-`ox-check-tools-install [installer]` is a plain `just` recipe that loops over the
-catalog and installs each tool. It takes one optional positional argument selecting
-the install backend:
+`ox-check-setup [installer]` is a single `just` recipe that brings an empty
+environment up to where every ox-check recipe runs. It is fully idempotent; safe to
+re-run. The four steps it performs in order:
 
-- `install` (default) — `cargo install --locked <tool> --version '>=<min>'`. Pure
+1. **System library dependencies** (libclang for cargo-spellcheck's build script).
+   Source-install path only -- the binstall path downloads prebuilt binaries that
+   don't need libclang. See §3.3.1.
+2. **Rustup toolchains and components**. Pinned nightlies from `versions.just` plus
+   the components listed in `rustup-components.txt` -- `clippy` and `rustfmt` on the
+   default toolchain; `rustfmt`, `miri`, and `rust-src` on the pinned nightly; etc.
+   Without this step, `ox-check-miri` and `ox-check-careful` fail locally with
+   "`cargo-miri` is not installed for the toolchain ...".
+3. **`cargo-binstall` bootstrap** (binstall path only). Compiles binstall once via
+   `cargo install --locked`; subsequent runs are no-ops.
+4. **Cargo subcommands** from `tool-minimums.txt`. Per the policy above, each
+   missing tool is installed at `=<pin>`; tools already at or above the pin are
+   skipped (no downgrade).
+
+The `installer` argument selects the backend for step 4 (and dictates whether
+steps 1 and 3 run):
+
+- `install` (default) -- `cargo install --locked <tool> --version '=<pin>'`. Pure
   source builds; works in any cargo environment with no extra runtime dependency.
-  Slow on a cold runner (~30 min for the full catalog) because every tool re-compiles
-  the same common deps (`clap`, `syn`, `quote`, etc.) from scratch independently.
-- `binstall` — `cargo binstall --no-confirm --locked <tool> --version '>=<min>'`.
-  Downloads a pre-built binary from each tool's GitHub Releases when available,
-  falls back to `cargo install` per-tool otherwise. Cuts the cold-runner install
-  phase from ~30 min to ~1 min. Requires `cargo-binstall` to be installed
-  beforehand (the GH setup action bootstraps it via one `cargo install`).
+  Slow on a cold runner (~30 min for the full catalog) because every tool
+  re-compiles common deps (`clap`, `syn`, `quote`, ...) from scratch independently.
+- `binstall` -- `cargo binstall --no-confirm --locked <tool> --version '=<pin>'`.
+  Downloads a prebuilt binary from each tool's GitHub Releases when available, falls
+  back to `cargo install` per-tool otherwise. Cuts the cold-runner install phase
+  from ~30 min to ~1 min. Bootstraps `cargo-binstall` itself in step 3.
 
-The GitHub composite setup action calls `just ox-check-tools-install binstall`.
-The ADO setup template calls `just ox-check-tools-install` (default `install`):
-cargo-binstall has unresolved compliance issues for internal ADO pipelines (the
-binary registry it pulls from isn't on the standard allow-list), so the slower
-pure-cargo path is the conservative choice there. Locally, users pick whichever
-matches their environment — `just ox-check-tools-install binstall` if they have
-`cargo-binstall` installed, plain `just ox-check-tools-install` otherwise.
+The GitHub composite setup action calls `just ox-check-setup binstall`. The ADO
+setup template calls `just ox-check-setup` (default `install`): cargo-binstall has
+unresolved compliance issues for internal ADO pipelines (the binary registry it
+pulls from isn't on the standard allow-list), so the slower pure-cargo path is the
+conservative choice there. Locally, users pick whichever matches their environment.
 
-Two prerequisites are not cargo-installable and must be present before the recipe can
-run:
+#### Two data files
 
-- **`just`** itself — bootstrap with `cargo install just --locked` once, or use a system
-  package. Every backend's setup composite/template installs it via cargo as a one-shot.
-- **`pwsh`** (PowerShell Core) — used by the `pr-title` `[script]` recipe (regex
-  match on `$PR_TITLE`; no equivalent cargo subcommand and `just` lacks a
-  boolean-regex primitive). The other historically-scripted checks
-  (`license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features`) are now
-  plain cargo subcommands from the ox-tools family and don't need pwsh. `pwsh` is
-  preinstalled on every relevant CI runner (GH-hosted Linux/Windows/macOS,
-  Microsoft-hosted ADO agents). On a developer machine without pwsh,
-  `_ox-check-require pwsh` fails with a per-OS install hint pointing at
-  <https://github.com/PowerShell/PowerShell>. The dependency is kept (rather than
-  dropped to remove the one script) so future additions that don't fit cleanly as
-  cargo subcommands have an established escape hatch.
+- `tool-minimums.txt` -- cargo subcommand pins (step 4).
+- `rustup-components.txt` -- rustup components per toolchain key (step 2). Format
+  `<toolchain-key>:<component>` per line; keys are `default` / `nightly` /
+  `nightly_external_types`. `nightly` and `nightly_external_types` resolve to the
+  pins in `versions.just`.
 
-Trade-off acknowledged: `cargo install --locked` is slow on a cold cache (several minutes
-for the full catalog). It is also the most reliable mechanism in restricted networks.
-Caching (via the GH cache action and the ADO pipeline workspace cache) is configured by the
-setup action/template to key on `Cargo.lock`, the toolchain channel, and the binary's
-catalog hash. See [github.md](./github.md#caching) and [ado.md](./ado.md#caching).
+Both are owned files; edits survive `cargo ox-check update`, and the dirty-file
+flow re-asks before overwriting if the catalog ships a different default.
+
+Two prerequisites are not cargo-installable and must be present before
+`ox-check-setup` can run:
+
+- **`just`** itself -- bootstrap with `cargo install just --locked` once, or use a
+  system package. Every backend's setup composite/template installs it via cargo as
+  a one-shot before calling `ox-check-setup`.
+- **`pwsh`** (PowerShell Core) -- used by every `[script("pwsh")]` recipe in
+  `checks.just`. Preinstalled on every relevant CI runner (GH-hosted
+  Linux/Windows/macOS, Microsoft-hosted ADO agents). On a developer machine
+  without pwsh, `_ox-check-require pwsh` fails with a per-OS install hint pointing
+  at <https://github.com/PowerShell/PowerShell>.
+
+Trade-off acknowledged: `cargo install --locked` is slow on a cold cache (several
+minutes for the full catalog). It is also the most reliable mechanism in restricted
+networks. Caching (via the GH cache action and the ADO pipeline workspace cache) is
+configured by the setup action/template to key on `Cargo.lock`, the toolchain
+channel, `tool-minimums.txt`, and `rustup-components.txt`. See
+[github.md](./github.md#caching) and [ado.md](./ado.md#caching).
 
 #### 3.3.1 System-level prerequisites
 
-A small set of catalog tools have non-Rust build dependencies that `cargo install` can't
-satisfy on its own. Today the only entry is `libclang`, needed by `cargo-spellcheck`
-(via `clang-sys` / `hunspell-rs`) at build time. The `binstall` install path sidesteps
-these entirely by downloading pre-built binaries.
+A small set of catalog tools have non-Rust build dependencies that `cargo install`
+can't satisfy on its own. Today the only entry is `libclang`, needed by
+`cargo-spellcheck` (via `clang-sys` / `hunspell-rs`) at build time. The `binstall`
+install path sidesteps these entirely by downloading prebuilt binaries.
 
 Scope policy: only check for system libs that an ox-check catalog tool **directly**
-requires. ox-check is not a general-purpose dev-env doctor. Repository-specific system
-deps (e.g. `openssl-devel`, `symcrypt` for the adopter's own crates) belong in the
-adopter's `setup.yml` customization, not in the ox-check catalog.
+requires. ox-check is not a general-purpose dev-env doctor. Repository-specific
+system deps (e.g. `openssl-devel`, `symcrypt` for the adopter's own crates) belong
+in the adopter's `setup.yml` customization, not in the ox-check catalog.
 
-Detection (`ox-check-system-deps-check`) uses presence-only probes — file existence in
-standard install dirs plus the `LIBCLANG_PATH` env var override. No version checks:
-system libs upgrade independently of the catalog and any reasonably modern libclang
-satisfies clang-sys.
+Detection (`ox-check-system-deps-check`) uses presence-only probes -- file existence
+in standard install dirs plus the `LIBCLANG_PATH` env var override. No version
+checks: system libs upgrade independently of the catalog and any reasonably modern
+libclang satisfies clang-sys.
 
-On a missing dep the recipe prints per-OS install hints (apt-get / tdnf / brew / scoop /
-winget) and exits non-zero. **No auto-install** — admin/sudo decisions and
-package-manager choice stay with the user. `ox-check-tools-install` runs the recipe
-first (only on the source-build `install` backend), so missing system libs surface as a
+On a missing dep the recipe prints per-OS install hints (apt-get / tdnf / brew /
+scoop / winget) and exits non-zero. **No auto-install** -- admin/sudo decisions and
+package-manager choice stay with the user. `ox-check-setup` runs the recipe first
+(only on the source-build `install` backend), so missing system libs surface as a
 clear hint instead of a cryptic clang-sys build error 10 minutes into the install.
 
-Adding a new system dep is a one-block catalog change in `tools.just`; it propagates to
-adopters via `cargo ox-check update` like any other catalog edit.
+Adding a new system dep is a one-block catalog change in `tools.just`; it
+propagates to adopters via `cargo ox-check update` like any other catalog edit.
 
 ### 3.4 Per-check warnings
 
@@ -355,7 +409,7 @@ env vars:
 ```sh
 # Compute the affected-tier include list (--package … form) against origin/main.
 export OX_CHECK_INCLUDE_AFFECTED="$(cargo delta impact --base origin/main --format cargo-args --affected)"
-just ox-check-pr-test
+just ox-check-pr-slow1
 ```
 
 A wrapper recipe to compute and export all three vars in one shot is left to v2: it has
@@ -368,13 +422,12 @@ developer actually wants to reproduce CI scoping locally.
 $ just ox-check
 [just] running ox-check-tools-check
 [just] running ox-check-pr-fast
-[just] running ox-check-pr-test
-[just] running ox-check-pr-mutants
+[just] running ox-check-pr-slow
 ox-check OK
 ```
 
 `ox-check` is an alias for `ox-check-pr` (set in the managed `Justfile` region). All three tiers
-(`ox-check-pr`, `ox-check-scheduled`, `ox-check-full`) are first-class — locally reproducible with
+(`ox-check-pr`, `ox-check-scheduled`, `ox-check-full`) are first-class -- locally reproducible with
 exactly the same arguments CI uses, because CI invokes the same `just` recipes.
 
 ## 6. No-tooling fallback

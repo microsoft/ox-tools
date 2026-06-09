@@ -304,11 +304,18 @@ ox-check-audit: (_ox-check-require "cargo-audit")
 # the full crate graph and seeing which deps are referenced; that's
 # precisely what the required tier is for. Pinned to the general
 # nightly defined in versions.just.
+#
+# Deliberately omits `--all-targets`: with `--all-targets`, a dep
+# that's listed in BOTH `[dependencies]` and `[dev-dependencies]` and
+# used only by tests is reported as "all used" because the dev-deps
+# target satisfies the lookup, masking the unused entry in main
+# `[dependencies]`. Restricting to the default targets (lib + bins)
+# matches main repo CI's check and surfaces the real bug.
 [script("pwsh")]
 ox-check-udeps: (_ox-check-require "cargo-udeps")
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
-    & cargo '+{{ rust_nightly }}' udeps @(-split ($env:OX_CHECK_INCLUDE_REQUIRED ?? "--workspace")) --all-targets --all-features
+    & cargo '+{{ rust_nightly }}' udeps @(-split ($env:OX_CHECK_INCLUDE_REQUIRED ?? "--workspace")) --all-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier (compares published API of changed crates against the
@@ -511,7 +518,7 @@ ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "carg
     # get test execution; coverage data from this leg wouldn't have
     # been used anyway (coverage upload is gated on Linux only).
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
-        Write-Host 'ox-check-llvm-cov: aarch64-pc-windows-msvc — skipping coverage; running plain nextest'
+        Write-Host 'ox-check-llvm-cov: aarch64-pc-windows-msvc -- skipping coverage; running plain nextest'
         & cargo nextest run @pkg --all-features --locked
         exit $LASTEXITCODE
     }
@@ -525,6 +532,12 @@ ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "carg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # Instrument and run tests; defer report generation so we can emit
     # multiple formats from the same profraw set without re-running.
+    # Note: nextest's exit-4 ("no tests to run") IS treated as a
+    # failure here -- a llvm-cov run that finds no tests almost
+    # always means a config mistake (wrong package filter, missing
+    # test target, etc.), not a legitimate empty set. ox-check-miri
+    # is the exception (see its comment): miri-skipped tests are an
+    # expected design point for FS-heavy crates.
     & cargo llvm-cov nextest @pkg --all-features --locked --no-report
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # lcov.info feeds Codecov on GitHub; cobertura.xml feeds
@@ -553,14 +566,26 @@ ox-check-examples:
     & cargo build @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --examples --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# === pr-mutants members =================================================
+# === pr-slow3 member ====================================================
 
 # Affected tier. cargo-mutants does its own diff-scoping via --in-diff;
 # the affected-tier guard is the wiring-layer's coarse filter (if no
 # affected packages exist, the entire mutants run is pointless).
+#
+# Skip on aarch64-pc-windows-msvc: cargo-mutants doesn't build there
+# (upstream winapi incompatibility), so `_ox-check-require cargo-mutants`
+# would fail. The merged pr-slow group runs on all four OS legs; mutants
+# is the only sub-recipe that can't follow, so it bails out early on the
+# affected leg. Coverage on the other three legs is unchanged.
 [script("pwsh")]
-ox-check-mutants: (_ox-check-require "cargo-mutants")
+ox-check-mutants:
     $ErrorActionPreference = 'Stop'
+    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
+        Write-Host 'ox-check-mutants: aarch64-pc-windows-msvc -- cargo-mutants does not build here (winapi); skipping'
+        exit 0
+    }
+    & just _ox-check-require cargo-mutants
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
         Write-Host 'ox-check-mutants: no affected packages; skipping'
         exit 0
@@ -605,7 +630,17 @@ ox-check-mutants: (_ox-check-require "cargo-mutants")
 ox-check-miri:
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    & cargo '+{{ rust_nightly }}' miri nextest run @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace"))
+    # `--no-tests=pass`: miri-only exception. Tests that touch the
+    # filesystem, spawn subprocesses, or use other miri-incompatible
+    # APIs commonly carry `#[cfg_attr(miri, ignore)]` (this is the
+    # canonical opt-out for build-tooling / CLI crates). A crate
+    # whose test set ends up entirely-skipped under miri legitimately
+    # produces zero runnable tests; nextest's default exit-4 ("no
+    # tests to run") would fail the recipe in that case. We treat
+    # empty test runs as success for miri only. Other nextest-using
+    # recipes (llvm-cov) keep exit-4 as a failure because zero tests
+    # there almost always indicates a config mistake.
+    & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace"))
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 [script("pwsh")]

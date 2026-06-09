@@ -4,6 +4,7 @@
 //! Fixture-driven integration tests for cargo-script files (shebang +
 //! `---` frontmatter) against an MIT-style single-line license header.
 
+#![cfg(not(miri))] // miri can't sandbox FS ops these tests do (TempDir, assert_cmd, etc.)
 mod common;
 
 use cargo_heather::{CheckResult, FileKind};

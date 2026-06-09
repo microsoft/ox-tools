@@ -40,14 +40,24 @@ pub const SCHEDULED_ROOT_WORKFLOW: &str = include_str!("../../templates/github/s
 
 /// All check groups for which the GitHub backend emits a composite action.
 ///
+/// All ox-check groups that get a per-group composite action.
+///
 /// Mirrors [`checks.md`](../../../docs/design/checks.md) `§1`.
+///
+/// The PR-tier "pr-slow" umbrella is split into three CI-visible
+/// sub-groups (`pr-slow1`, `pr-slow2`, `pr-slow3`) so each runs as
+/// its own job and they execute in parallel across the matrix. The
+/// umbrella `ox-check-pr-slow` recipe is preserved in `groups.just`
+/// for local convenience but does not appear in CI as a discrete
+/// job. `pr-slow3` (mutants) self-skips on aarch64-pc-windows-msvc
+/// where cargo-mutants doesn't build.
 pub const GROUPS: &[&str] = &[
     "pr-fast",
-    "pr-test",
-    "pr-mutants",
+    "pr-slow1",
+    "pr-slow2",
+    "pr-slow3",
     "scheduled-test",
     "scheduled-advisories",
-    "scheduled-runtime",
     "scheduled-exhaustive",
 ];
 
@@ -184,7 +194,7 @@ mod tests {
     fn rendered_action_is_valid_yaml() {
         // Use serde_yaml? Not in workspace. Use a string-based sanity check:
         // every line is either empty, a comment, or 2-space indented.
-        let body = render_group_action("pr-test");
+        let body = render_group_action("pr-slow1");
         for line in body.lines() {
             if line.is_empty() || line.starts_with('#') {
                 continue;
@@ -195,10 +205,12 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
-    fn plan_composite_actions_emits_setup_impact_and_seven_groups() {
+    fn plan_composite_actions_emits_setup_impact_and_all_groups() {
         let tmp = TempDir::new().unwrap();
         let items = plan_composite_actions(tmp.path(), &Manifest::default()).unwrap();
+        // GROUPS.len() per-group composites + 2 shared composites (setup, impact)
         assert_eq!(items.len(), GROUPS.len() + 2);
         for item in &items {
             assert_eq!(item.decision, Decision::Write);
@@ -208,33 +220,47 @@ mod tests {
     #[test]
     fn pr_impl_workflow_has_expected_jobs() {
         assert!(PR_IMPL_WORKFLOW.contains("workflow_call:"));
-        for needle in ["impact-linux:", "impact-windows:", "pr-fast:", "pr-test:", "pr-mutants:"] {
+        // pr-slow is split into three CI-visible jobs (pr-slow1/2/3)
+        // that run in parallel. The umbrella `ox-check-pr-slow` recipe
+        // exists in groups.just for local convenience but does NOT
+        // appear as a CI job here. pr-test was merged into pr-slow1
+        // and must not exist either.
+        for needle in [
+            "impact-linux:",
+            "impact-windows:",
+            "pr-fast:",
+            "pr-slow1:",
+            "pr-slow2:",
+            "pr-slow3:",
+        ] {
             assert!(PR_IMPL_WORKFLOW.contains(needle), "PR impl workflow missing job '{needle}'");
+        }
+        for needle in ["\n  pr-test:\n", "\n  pr-slow:\n"] {
+            assert!(
+                !PR_IMPL_WORKFLOW.contains(needle),
+                "Stale job '{needle}' should be gone after the pr-slow split"
+            );
         }
         // Downstream groups must fan in BOTH per-OS impact jobs.
         assert!(PR_IMPL_WORKFLOW.contains("needs: [impact-linux, impact-windows]"));
-        // Every multi-OS group hardcodes its matrix as an inline
-        // YAML array — we deliberately do NOT support input-driven
-        // matrices (the fromJSON(inputs.X) pattern adds silent
-        // failure modes and the surveyed repos use hardcoded
-        // matrices too).
+        // All three pr-slow* jobs run on the 4-leg matrix.
         assert!(PR_IMPL_WORKFLOW.contains("os: [linux, windows, linux-arm, windows-arm]"));
-        assert!(PR_IMPL_WORKFLOW.contains("os: [linux, windows]"));
         assert!(!PR_IMPL_WORKFLOW.contains("fromJSON"));
         // pr-fast carries the PR title for the ox-check-pr-title check.
         assert!(PR_IMPL_WORKFLOW.contains("PR_TITLE"));
-        // pr-mutants needs the base SHA for diff scoping.
+        // pr-slow3 needs the base SHA for diff-scoped mutants.
         assert!(PR_IMPL_WORKFLOW.contains("BASE_REF"));
+        // Coverage upload lives in pr-slow1 only (where llvm-cov runs).
+        assert_eq!(
+            PR_IMPL_WORKFLOW.matches("codecov/codecov-action").count(),
+            1,
+            "Codecov upload should appear exactly once (inside the pr-slow1 job)"
+        );
     }
 
     #[test]
     fn scheduled_impl_workflow_has_expected_jobs() {
-        for needle in [
-            "scheduled-test:",
-            "scheduled-advisories:",
-            "scheduled-runtime:",
-            "scheduled-exhaustive:",
-        ] {
+        for needle in ["scheduled-test:", "scheduled-advisories:", "scheduled-exhaustive:"] {
             assert!(
                 SCHEDULED_IMPL_WORKFLOW.contains(needle),
                 "scheduled impl workflow missing job '{needle}'"
@@ -245,6 +271,7 @@ mod tests {
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("codecov/codecov-action"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn plan_reusable_workflows_emits_two() {
         let tmp = TempDir::new().unwrap();
@@ -264,11 +291,12 @@ mod tests {
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("schedule:"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn plan_github_backend_emits_full_file_set() {
         let tmp = TempDir::new().unwrap();
         let items = plan_github_backend(tmp.path(), &Manifest::default()).unwrap();
-        // 2 shared actions + 7 group actions + 2 reusable workflows + 2 root workflows
+        // 2 shared actions + 6 group actions + 2 reusable workflows + 2 root workflows
         assert_eq!(items.len(), 2 + GROUPS.len() + 2 + 2);
     }
 

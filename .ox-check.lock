@@ -10,12 +10,16 @@ path = ".github/actions/ox-check-pr-fast/action.yml"
 checksum = "sha256:c307351452292fb0c87ff2fcb08514de5e06a01669004045aaaf173554999540"
 
 [[file]]
-path = ".github/actions/ox-check-pr-mutants/action.yml"
-checksum = "sha256:77f61858c380c8867100266688792860f0c9c2d91fbed78ac64f9bf6af73b8ee"
+path = ".github/actions/ox-check-pr-slow1/action.yml"
+checksum = "sha256:c9c1b8ff823e59b6ee990e558bfd090f3197dc1cb12b08a4a80ce2fff1c03e75"
 
 [[file]]
-path = ".github/actions/ox-check-pr-test/action.yml"
-checksum = "sha256:9e809f96f42cc444716e11330a4893731433e9adc3f4150f9d332ecf1aaf52c8"
+path = ".github/actions/ox-check-pr-slow2/action.yml"
+checksum = "sha256:c5ad1b32f9bfa820358f37e4dc3e7de71d81dd111718595877734913558e4c40"
+
+[[file]]
+path = ".github/actions/ox-check-pr-slow3/action.yml"
+checksum = "sha256:3e64ee7f757d32d4ecc59ac931359ffd6837ccaea0963af95686fce47e88d44f"
 
 [[file]]
 path = ".github/actions/ox-check-scheduled-advisories/action.yml"
@@ -26,28 +30,24 @@ path = ".github/actions/ox-check-scheduled-exhaustive/action.yml"
 checksum = "sha256:b12bfe3aab39ddb49a7c01e7171646e8c31a2a2114fa1b591056864cb19669ff"
 
 [[file]]
-path = ".github/actions/ox-check-scheduled-runtime/action.yml"
-checksum = "sha256:68faece11c2d309db50d5f3da888a03c31b4bcc4feefdc1be0c174b56f756f5a"
-
-[[file]]
 path = ".github/actions/ox-check-scheduled-test/action.yml"
 checksum = "sha256:c3f7952cf581a75d699530de4c4c7fd14c69b29f9839558e925dd4c7bc2531e2"
 
 [[file]]
 path = ".github/actions/ox-check-setup/action.yml"
-checksum = "sha256:5d0420b3ce92a7602da3832140b5fb2f04df9405a73fa002d097d7e4557aed6c"
+checksum = "sha256:ec217dcdfd21e9dbec0e6275e98287032371c8d51a9e0cd1f2a6dee148ded5f0"
 
 [[file]]
 path = ".github/workflows/ox-check-pr-impl.yml"
-checksum = "sha256:0f43d394b413528aaaec27a2cd1d776eddf9ca9c65b85e6b83d394c381da5d50"
+checksum = "sha256:f90a928e99891737f92db8101fa4b5356d64151872b54722d8dd5dfed1773cdf"
 
 [[file]]
 path = ".github/workflows/ox-check-pr.yml"
-checksum = "sha256:5ea0bea66f0223df032382056e12c88afb0481138c56898b95837fc767e30cd3"
+checksum = "sha256:6620b6da51135ca8a112c0bbe1cca4d8d1c829572437dcc00fb037188af16d3d"
 
 [[file]]
 path = ".github/workflows/ox-check-scheduled-impl.yml"
-checksum = "sha256:083ea5d0d41347a3b72850ead982c715b6c1f3d7de6cbea90d16952e1a9abeeb"
+checksum = "sha256:d86a1db81745017642165c611c8ba13da6709db4c6da9666dcc684d025464c1e"
 
 [[file]]
 path = ".github/workflows/ox-check-scheduled.yml"
@@ -55,27 +55,31 @@ checksum = "sha256:5717e91e07d18609c6b43f60291bd15de8221d63feeb0cb5e426cfe05bc5f
 
 [[file]]
 path = "justfiles/ox-check/checks.just"
-checksum = "sha256:8b3679c59ecbae7344e4d04482829cba8ffd5debae86456cbc0e43b7960535ef"
+checksum = "sha256:810f0ade8de7906847c244b45910f7792184cf0a6e2f7d6844f0685cf060d013"
 
 [[file]]
 path = "justfiles/ox-check/groups.just"
-checksum = "sha256:869ef9b4a8670d84e53ffc92b78141980e3d4b4f76af5acd132f4a3ecea5f948"
+checksum = "sha256:796852b4618a36982b8f8f6a4b3011bef076c583d81bef3bbfe1e50fab26a011"
 
 [[file]]
 path = "justfiles/ox-check/mod.just"
 checksum = "sha256:2733bad873a59e91db558e38b48f9b01a1a23f0830333afa33c0790495bcaa5b"
 
 [[file]]
+path = "justfiles/ox-check/rustup-components.txt"
+checksum = "sha256:fa45052aa50387de84fc8b2b19b750f2b47e4c2af18472d700162076e99b8232"
+
+[[file]]
 path = "justfiles/ox-check/tiers.just"
-checksum = "sha256:cdea9963277f3948443da7fddcc9ed9f354dd09d1322322cb3c12f43ec896afe"
+checksum = "sha256:7c2dc0720dc7c83a65d14370407f256d16842b40a4233537a46e1c47fdd681a7"
 
 [[file]]
 path = "justfiles/ox-check/tool-minimums.txt"
-checksum = "sha256:8b841b8ad787927621e2591af3c376c7e205e3014f86fd486436ec6ec3cab544"
+checksum = "sha256:7f2dda3d342865227aca46d73e31e864f779da5cb2f54182eb4478d07696adc9"
 
 [[file]]
 path = "justfiles/ox-check/tools.just"
-checksum = "sha256:f1e19b8d0e0770f2da0e8f6616a19de874280eae7af4fd56b4a0336ecfe12cf2"
+checksum = "sha256:8b658b173d23398d739554186aca15df7d635df8d98eee165c4206914bd583cb"
 
 [[file]]
 path = "justfiles/ox-check/versions.just"
@@ -139,4 +143,4 @@ checksum = "sha256:d67fe13388a69380fdf7e53b80d309fd69a2c1cb39d92bb0d79a4a0a5dbf5
 [[region]]
 host = "spellcheck.toml"
 id = "ox-check-spellcheck"
-checksum = "sha256:fabd920064a418d15e56783ffd1b364448b3a96f5645da7448663c89569185d3"
+checksum = "sha256:d10e8444c8868b5b02c2db52cc50831f142ec789ea22024a6ad22ae6e2098d3e"

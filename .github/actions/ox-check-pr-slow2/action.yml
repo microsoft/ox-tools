@@ -1,10 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
-# The token pr-mutants is substituted by cargo-ox-check at emit time with
+# The token pr-slow2 is substituted by cargo-ox-check at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
-name: ox-check-pr-mutants
-description: Run the pr-mutants check group.
+name: ox-check-pr-slow2
+description: Run the pr-slow2 check group.
 inputs:
   include_modified:
     description: |
@@ -30,7 +30,7 @@ runs:
   using: composite
   steps:
     - uses: ./.github/actions/ox-check-setup
-    - name: Run just ox-check-pr-mutants
+    - name: Run just ox-check-pr-slow2
       shell: bash
       env:
         OX_CHECK_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
@@ -39,4 +39,4 @@ runs:
         # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
         # built-in token so it can use the 1000 req/hr authenticated quota.
         GITHUB_TOKEN: ${{ github.token }}
-      run: just ox-check-pr-mutants
+      run: just ox-check-pr-slow2

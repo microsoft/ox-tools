@@ -313,6 +313,7 @@ mod tests {
         assert!(err.to_string().contains("duplicate"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn load_missing_file_yields_empty_manifest() {
         let tmp = TempDir::new().unwrap();
@@ -320,6 +321,7 @@ mod tests {
         assert_eq!(m, Manifest::default());
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn save_then_load_round_trip() {
         let tmp = TempDir::new().unwrap();
@@ -331,6 +333,7 @@ mod tests {
         assert_eq!(m1, m2);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn save_overwrites_existing() {
         let tmp = TempDir::new().unwrap();

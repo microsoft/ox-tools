@@ -147,8 +147,7 @@ The local UX is plain `just`:
 $ just ox-check
 [just] running ox-check-tools-check
 [just] running ox-check-pr-fast
-[just] running ox-check-pr-test
-[just] running ox-check-pr-mutants
+[just] running ox-check-pr-slow
 ox-check OK
 ```
 
@@ -347,10 +346,10 @@ pipeline.
 
 | Group                                                       | OS / arch scope (default)              | Rationale                                                                                                                                          |
 |-------------------------------------------------------------|----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
-| `pr-fast`, `scheduled-advisories`                             | All legs above                         | Contain compile-sensitive checks (clippy, doc-build, udeps, semver-check, external-types) that only see the host's compiled crate graph — cfg-gated code is invisible to a single-leg run. Text/metadata checks running redundantly is cheaper than splitting jobs. |
-| `pr-test`, `scheduled-test`                                   | All legs above                         | Where compile-time and runtime OS / arch bugs actually surface.                                                                                    |
-| `pr-mutants`, `scheduled-exhaustive`                          | Linux x86_64 + Windows x86_64 | `cargo-mutants` currently doesn't build on `aarch64-pc-windows-msvc` (upstream `winapi` crate incompat), and mutation testing's value-per-leg is highest on the x86_64 targets that match production runtimes. Adopters with ARM-specific concerns extend the matrix in their root workflow.   |
-| `scheduled-runtime`                                           | All legs above                         | Both surveyed repos run `miri` and `careful` cross-OS. Both tools work on every Tier 1 Rust target; the earlier "Linux-primary" framing was incorrect.                                  |
+| `pr-fast`, `scheduled-advisories`                             | All legs above                         | Contain compile-sensitive checks (clippy, doc-build, udeps, semver-check, external-types) that only see the host's compiled crate graph -- cfg-gated code is invisible to a single-leg run. Text/metadata checks running redundantly is cheaper than splitting jobs. |
+| `pr-slow1`, `pr-slow2`, `scheduled-test`                     | All legs above                         | Where compile-time and runtime OS / arch bugs actually surface. The three `pr-slow*` groups run as parallel CI jobs (split out from a former single `pr-slow`) for shorter wall-clock per leg. |
+| `pr-slow3`                                                    | GH: Linux x86_64 + Windows x86_64 + Linux aarch64 (windows-arm self-skips). ADO: Linux x86_64 + Windows x86_64 | Diff-scoped mutation testing. cargo-mutants doesn't build on `aarch64-pc-windows-msvc`; the recipe self-skips so the windows-arm leg is a no-op. |
+| `scheduled-exhaustive`                                       | Linux x86_64 + Windows x86_64 | Full `cargo-mutants` / `cargo-hack` / `bench`. cargo-mutants doesn't build on `aarch64-pc-windows-msvc`; rather than splitting the matrix to add an ARM-Linux leg for cargo-hack and bench, the whole group is x86-only. Adopters with ARM-specific concerns extend the matrix in their root workflow. |
 
 macOS is not in the default matrix — adopters who need it fork the owned reusable
 workflow (GH) or override `testPools` (ADO). The GH-side knob set is intentionally
@@ -358,7 +357,7 @@ limited to per-leg runner labels; the OS axis shape itself is part of the workfl
 identity. See [github.md §4](./github.md#4-owned-reusable-workflows) and
 [ado.md §4](./ado.md#4-owned-stages-templates) for full details.
 
-Locally there is no matrix — `just ox-check-pr-test` runs against whatever OS the developer
+Locally there is no matrix — `just ox-check-pr-slow` runs against whatever OS the developer
 is on. CI fan-out lives entirely in the owned wiring layer (the reusable workflow / stages
 template), so users don't write per-OS jobs.
 

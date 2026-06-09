@@ -255,6 +255,7 @@ mod tests {
         tmp
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn first_run_writes_everything_local_only() {
         let tmp = empty_workspace();
@@ -276,6 +277,7 @@ mod tests {
             "justfiles/ox-check/tiers.just",
             "justfiles/ox-check/tools.just",
             "justfiles/ox-check/tool-minimums.txt",
+            "justfiles/ox-check/rustup-components.txt",
             "justfiles/ox-check/versions.just",
             "deny.toml",
             "rustfmt.toml",
@@ -294,6 +296,7 @@ mod tests {
         assert!(member_manifest.contains("workspace = true"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn second_run_is_idempotent_and_in_sync() {
         let tmp = empty_workspace();
@@ -307,6 +310,7 @@ mod tests {
         assert!(!second.plan.has_changes(), "second run should be a no-op");
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn dry_run_does_not_write() {
         let tmp = empty_workspace();
@@ -322,6 +326,7 @@ mod tests {
         assert!(!tmp.path().join(".ox-check.lock").exists());
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn opted_out_region_is_skipped_on_second_run() {
         let tmp = empty_workspace();
@@ -351,6 +356,7 @@ mod tests {
         assert_eq!(rustfmt_item.decision, crate::decision::Decision::LeaveAlone);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn user_edit_inside_region_left_alone_when_template_unchanged() {
         let tmp = empty_workspace();
@@ -390,6 +396,7 @@ mod tests {
     /// Verifies B6: after a Propose decision, the next run sees the
     /// divergence as `LeaveAlone` (no re-proposal) until the template
     /// itself moves again.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn propose_burns_through_after_one_run() {
         use crate::checksum::checksum_str;
@@ -468,6 +475,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn github_backend_writes_full_dotgithub_tree() {
         let tmp = empty_workspace();
@@ -483,11 +491,11 @@ mod tests {
             ".github/actions/ox-check-setup/action.yml",
             ".github/actions/ox-check-impact/action.yml",
             ".github/actions/ox-check-pr-fast/action.yml",
-            ".github/actions/ox-check-pr-test/action.yml",
-            ".github/actions/ox-check-pr-mutants/action.yml",
+            ".github/actions/ox-check-pr-slow1/action.yml",
+            ".github/actions/ox-check-pr-slow2/action.yml",
+            ".github/actions/ox-check-pr-slow3/action.yml",
             ".github/actions/ox-check-scheduled-test/action.yml",
             ".github/actions/ox-check-scheduled-advisories/action.yml",
-            ".github/actions/ox-check-scheduled-runtime/action.yml",
             ".github/actions/ox-check-scheduled-exhaustive/action.yml",
             ".github/workflows/ox-check-pr-impl.yml",
             ".github/workflows/ox-check-scheduled-impl.yml",
@@ -498,6 +506,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn github_backend_idempotent() {
         let tmp = empty_workspace();
@@ -515,6 +524,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn ado_backend_writes_full_pipelines_tree() {
         let tmp = empty_workspace();
@@ -529,12 +539,13 @@ mod tests {
         for expected in [
             ".pipelines/ox-check/steps/setup.yml",
             ".pipelines/ox-check/steps/impact.yml",
+            ".pipelines/ox-check/steps/advisory-comments.yml",
             ".pipelines/ox-check/steps/pr-fast.yml",
-            ".pipelines/ox-check/steps/pr-test.yml",
-            ".pipelines/ox-check/steps/pr-mutants.yml",
+            ".pipelines/ox-check/steps/pr-slow1.yml",
+            ".pipelines/ox-check/steps/pr-slow2.yml",
+            ".pipelines/ox-check/steps/pr-slow3.yml",
             ".pipelines/ox-check/steps/scheduled-test.yml",
             ".pipelines/ox-check/steps/scheduled-advisories.yml",
-            ".pipelines/ox-check/steps/scheduled-runtime.yml",
             ".pipelines/ox-check/steps/scheduled-exhaustive.yml",
             ".pipelines/ox-check/pr.yml",
             ".pipelines/ox-check/scheduled.yml",
@@ -545,6 +556,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn both_backends_idempotent() {
         let tmp = empty_workspace();
@@ -562,6 +574,7 @@ mod tests {
     /// (e.g., a backend was disabled) must surface as `Remove` plan items
     /// when the on-disk content still matches what we last wrote. This
     /// exercises the `plan_removals` path end-to-end.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn disabling_a_backend_removes_its_orphaned_files() {
         use crate::decision::Decision;
@@ -612,6 +625,7 @@ mod tests {
     /// User-customized orphans (file no longer in scope, but the on-disk
     /// contents diverge from what we last wrote) must be left alone via
     /// `OrphanedKept`, not deleted.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn customized_orphans_are_kept_not_removed() {
         use crate::decision::Decision;

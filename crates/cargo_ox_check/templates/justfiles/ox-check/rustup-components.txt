@@ -1,0 +1,50 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+#
+# Rustup toolchains + components needed by the ox-check check tree.
+# Consumed by the `ox-check-setup` recipe (tools.just), which runs
+#   rustup toolchain install <pin> --profile minimal --component <c>...
+# per pinned nightly, and
+#   rustup component add <c>...
+# on the workspace's default toolchain.
+#
+# Format: <toolchain-key>:<component> -- one entry per line. Lines
+# starting with `#` and blank lines are ignored.
+#
+# Toolchain keys:
+#   default                  - the workspace's default toolchain (rustup
+#                              resolves this from `rust-toolchain.toml`
+#                              if present, otherwise from `rustup default`).
+#   nightly                  - the value of `rust_nightly` in versions.just.
+#                              Used by ox-check-fmt, ox-check-udeps,
+#                              ox-check-miri, ox-check-careful.
+#   nightly_external_types   - the value of `rust_nightly_external_types`
+#                              in versions.just. Used by
+#                              ox-check-external-types. Often the same
+#                              as `nightly`; pinned separately to track
+#                              the rustdoc JSON schema cargo-check-
+#                              external-types expects.
+#
+# Per-toolchain notes:
+#   - `default:clippy`       - needed by ox-check-clippy.
+#   - `default:rustfmt`      - convenience; ox-check-fmt uses the pinned
+#                              nightly's rustfmt for unstable_features,
+#                              but adopters often invoke `cargo fmt` ad
+#                              hoc and expect the stable rustfmt to be
+#                              present too.
+#   - `nightly:rustfmt`      - ox-check-fmt uses unstable rustfmt
+#                              features (imports_granularity etc.) only
+#                              available on nightly.
+#   - `nightly:miri`         - ox-check-miri.
+#   - `nightly:rust-src`     - ox-check-careful recompiles std with
+#                              debug instrumentation; needs the std
+#                              source. Also needed by miri's xargo-style
+#                              libstd build.
+
+default:clippy
+default:rustfmt
+
+nightly:rustfmt
+nightly:miri
+nightly:rust-src

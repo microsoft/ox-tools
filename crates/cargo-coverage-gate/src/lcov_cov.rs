@@ -163,6 +163,7 @@ end_of_record
         assert!(err.to_string().contains("lcov tracefile"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     #[cfg_attr(miri, ignore = "uses real filesystem; Miri isolation forbids open()")]
     fn from_path_reads_from_disk() {

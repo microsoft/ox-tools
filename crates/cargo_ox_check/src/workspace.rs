@@ -227,6 +227,7 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn discovers_single_crate_workspace() {
         let tmp = TempDir::new().unwrap();
@@ -253,6 +254,7 @@ version = "0.1.0"
         );
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn discovers_glob_workspace() {
         let tmp = TempDir::new().unwrap();
@@ -275,6 +277,7 @@ members = ["crates/*"]
         assert_eq!(paths, vec!["crates/alpha/Cargo.toml", "crates/beta/Cargo.toml"]);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn discovers_explicit_members() {
         let tmp = TempDir::new().unwrap();
@@ -293,6 +296,7 @@ members = ["alpha", "nested/beta"]
         assert_eq!(paths, vec!["alpha/Cargo.toml", "nested/beta/Cargo.toml"]);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn walks_up_to_workspace_root() {
         let tmp = TempDir::new().unwrap();
@@ -311,6 +315,7 @@ members = ["crates/alpha"]
         assert_eq!(found.canonicalize().unwrap(), root.canonicalize().unwrap());
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn errors_when_no_cargo_toml_above() {
         let tmp = TempDir::new().unwrap();
@@ -320,6 +325,7 @@ members = ["crates/alpha"]
         assert!(err.to_string().contains("no Cargo.toml"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn errors_when_explicit_member_missing() {
         let tmp = TempDir::new().unwrap();
@@ -334,6 +340,7 @@ members = ["alpha"]
         assert!(err.to_string().contains("has no Cargo.toml"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn unsupported_glob_pattern_errors() {
         let tmp = TempDir::new().unwrap();
@@ -348,6 +355,7 @@ members = ["cra*tes"]
         assert!(err.to_string().contains("unsupported glob pattern"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn manifest_without_workspace_or_package_errors() {
         let tmp = TempDir::new().unwrap();

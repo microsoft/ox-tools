@@ -59,6 +59,7 @@ mod tests {
 
     use super::*;
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn missing_file_writes() {
         let tmp = TempDir::new().unwrap();
@@ -66,6 +67,7 @@ mod tests {
         assert_eq!(item.decision, Decision::Write);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn matching_file_in_sync() {
         let tmp = TempDir::new().unwrap();
@@ -74,6 +76,7 @@ mod tests {
         assert_eq!(item.decision, Decision::InSync);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn user_modified_after_render_proposes_when_template_changed() {
         let tmp = TempDir::new().unwrap();
@@ -85,6 +88,7 @@ mod tests {
         assert_eq!(item.decision, Decision::Propose);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn user_modified_template_unchanged_leaves_alone() {
         let tmp = TempDir::new().unwrap();
@@ -96,6 +100,7 @@ mod tests {
         assert_eq!(item.decision, Decision::LeaveAlone);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn empty_file_opts_out_when_template_unchanged() {
         // After a previous render, user empties the file. Template hasn't
@@ -108,6 +113,7 @@ mod tests {
         assert_eq!(item.decision, Decision::LeaveAlone);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn empty_file_with_changed_template_proposes() {
         let tmp = TempDir::new().unwrap();
@@ -118,6 +124,7 @@ mod tests {
         assert_eq!(item.decision, Decision::Propose);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn whitespace_only_file_is_treated_as_user_divergence() {
         // No special-casing for whitespace any more — it's just user

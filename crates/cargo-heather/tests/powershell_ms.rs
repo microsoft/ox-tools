@@ -8,6 +8,7 @@
 //! but no license header is present — the fixer must *prepend* the
 //! license header, not strip and replace the existing comments.
 
+#![cfg(not(miri))] // miri can't sandbox FS ops these tests do (TempDir, assert_cmd, etc.)
 mod common;
 
 use cargo_heather::{CheckResult, FileKind};

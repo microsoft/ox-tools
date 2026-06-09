@@ -53,13 +53,20 @@ pub const PR_ROOT_PIPELINE: &str = include_str!("../../templates/ado/pr-root-pip
 pub const SCHEDULED_ROOT_PIPELINE: &str = include_str!("../../templates/ado/scheduled-root-pipeline.yml");
 
 /// All check groups that get a per-group step template.
+///
+/// See [`emit::github::GROUPS`](super::github::GROUPS) for the
+/// rationale around splitting `pr-slow` into three CI-visible
+/// sub-stages (`pr-slow1`, `pr-slow2`, `pr-slow3`) that run in
+/// parallel. The `ox-check-pr-slow` umbrella recipe is preserved in
+/// `groups.just` for local convenience but does not appear as a
+/// discrete CI stage here.
 pub const GROUPS: &[&str] = &[
     "pr-fast",
-    "pr-test",
-    "pr-mutants",
+    "pr-slow1",
+    "pr-slow2",
+    "pr-slow3",
     "scheduled-test",
     "scheduled-advisories",
-    "scheduled-runtime",
     "scheduled-exhaustive",
 ];
 
@@ -174,7 +181,7 @@ mod tests {
 
     #[test]
     fn setup_and_impact_step_templates_are_non_empty() {
-        assert!(SETUP_STEP.contains("just ox-check-tools-install"));
+        assert!(SETUP_STEP.contains("just ox-check-setup"));
         assert!(IMPACT_STEP.contains("cargo-delta"));
         assert!(IMPACT_STEP.contains("##vso[task.setvariable"));
     }
@@ -216,36 +223,55 @@ mod tests {
 
     #[test]
     fn pr_stages_has_impact_and_group_stages() {
+        // pr_slow1 / pr_slow2 / pr_slow3 run as independent stages in
+        // parallel. The umbrella `pr_slow` stage no longer exists; the
+        // former pr_test stage was merged into pr_slow1.
         for needle in [
             "stage: impact_linux",
             "stage: impact_windows",
             "stage: pr_fast",
-            "stage: pr_test",
-            "stage: pr_mutants",
+            "stage: pr_slow1",
+            "stage: pr_slow2",
+            "stage: pr_slow3",
         ] {
             assert!(PR_STAGES.contains(needle), "PR stages missing '{needle}'");
+        }
+        for needle in ["stage: pr_test\n", "stage: pr_slow\n"] {
+            assert!(
+                !PR_STAGES.contains(needle),
+                "Stale stage '{needle}' should be gone after the pr_slow split"
+            );
         }
         assert!(PR_STAGES.contains("stageDependencies.impact_linux.compute.outputs"));
         assert!(PR_STAGES.contains("stageDependencies.impact_windows.compute.outputs"));
         // Every job is rendered through the dirty-file wrapper.
         assert!(PR_STAGES.contains("- template: steps/job.yml"));
-        // No bare `- job:` keys — they must all go through the wrapper.
+        // No bare `- job:` keys -- they must all go through the wrapper.
         assert!(
             !PR_STAGES.contains("\n      - job: "),
             "PR stages defines a bare `- job:` instead of going through steps/job.yml"
         );
+        // PublishCodeCoverageResults@2 lives in pr_slow1's Linux job
+        // (where the ox-check-llvm-cov recipe runs); still exactly one
+        // publish step.
+        assert_eq!(
+            PR_STAGES.matches("PublishCodeCoverageResults@2").count(),
+            1,
+            "cobertura publish should appear exactly once (in pr_slow1's linux job)"
+        );
     }
 
     #[test]
-    fn scheduled_stages_has_four_groups() {
+    fn scheduled_stages_has_three_groups() {
         for needle in [
             "stage: scheduled_test",
             "stage: scheduled_advisories",
-            "stage: scheduled_runtime",
             "stage: scheduled_exhaustive",
         ] {
             assert!(SCHEDULED_STAGES.contains(needle), "scheduled stages missing '{needle}'");
         }
+        // scheduled-runtime was deleted; miri + careful moved to pr-slow.
+        assert!(!SCHEDULED_STAGES.contains("scheduled_runtime"));
         // Scheduled tier publishes coverage via PublishCodeCoverageResults@2.
         assert!(SCHEDULED_STAGES.contains("PublishCodeCoverageResults@2"));
         // Every job is rendered through the dirty-file wrapper.
@@ -256,6 +282,7 @@ mod tests {
         );
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn plan_stages_templates_emits_two() {
         let tmp = TempDir::new().unwrap();
@@ -263,6 +290,7 @@ mod tests {
         assert_eq!(items.len(), 2);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn plan_step_templates_emits_setup_impact_advisory_job_wrapper_plus_groups() {
         let tmp = TempDir::new().unwrap();

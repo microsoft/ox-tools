@@ -99,6 +99,7 @@ mod tests {
 
     const SYN: CommentSyntax = CommentSyntax::Hash;
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn missing_host_writes_new_file() {
         let tmp = TempDir::new().unwrap();
@@ -109,6 +110,7 @@ mod tests {
         assert!(spliced.contains("body line"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn existing_host_without_region_appends_region() {
         let tmp = TempDir::new().unwrap();
@@ -120,6 +122,7 @@ mod tests {
         assert!(spliced.contains("# >>> ox-check-managed: r"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn matching_region_is_in_sync() {
         let tmp = TempDir::new().unwrap();
@@ -133,6 +136,7 @@ mod tests {
         assert_eq!(item.decision, Decision::InSync);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn user_modified_proposes_when_template_changed() {
         let tmp = TempDir::new().unwrap();
@@ -145,6 +149,7 @@ mod tests {
         assert!(item.spliced_host.is_some());
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn user_modified_template_unchanged_leaves_alone() {
         let tmp = TempDir::new().unwrap();
@@ -156,6 +161,7 @@ mod tests {
         assert_eq!(item.decision, Decision::LeaveAlone);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn empty_region_opts_out_when_template_unchanged() {
         // Steady-state opt-out: user emptied the region, template hasn't moved.
@@ -168,6 +174,7 @@ mod tests {
         assert_eq!(item.decision, Decision::LeaveAlone);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn empty_region_with_new_template_proposes() {
         let tmp = TempDir::new().unwrap();

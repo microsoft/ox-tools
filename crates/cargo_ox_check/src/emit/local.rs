@@ -53,6 +53,16 @@ pub const TOOL_MINIMUMS: &str = include_str!("../../templates/justfiles/ox-check
 /// Repo-root-relative path of the tool minimums catalog.
 pub const TOOL_MINIMUMS_PATH: &str = "justfiles/ox-check/tool-minimums.txt";
 
+/// Contents of `justfiles/ox-check/rustup-components.txt` baked into the binary.
+///
+/// Data file consumed by the `ox-check-setup` recipe; one line per
+/// rustup component, format `<toolchain-key>:<component>`. See
+/// [`local.md §3`](../../docs/design/local.md) for the policy.
+pub const RUSTUP_COMPONENTS: &str = include_str!("../../templates/justfiles/ox-check/rustup-components.txt");
+
+/// Repo-root-relative path of the rustup components catalog.
+pub const RUSTUP_COMPONENTS_PATH: &str = "justfiles/ox-check/rustup-components.txt";
+
 /// Contents of `justfiles/ox-check/checks.just` baked into the binary.
 pub const CHECKS_JUST: &str = include_str!("../../templates/justfiles/ox-check/checks.just");
 
@@ -108,6 +118,15 @@ pub fn plan_versions_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanI
 /// Propagates I/O errors from [`plan_owned_file`].
 pub fn plan_tool_minimums(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
     plan_owned_file(repo_root, manifest, TOOL_MINIMUMS_PATH, TOOL_MINIMUMS)
+}
+
+/// Emit a [`PlanItem`] for `justfiles/ox-check/rustup-components.txt`.
+///
+/// # Errors
+///
+/// Propagates I/O errors from [`plan_owned_file`].
+pub fn plan_rustup_components(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
+    plan_owned_file(repo_root, manifest, RUSTUP_COMPONENTS_PATH, RUSTUP_COMPONENTS)
 }
 
 /// Emit a [`PlanItem`] for `justfiles/ox-check/checks.just`.
@@ -252,6 +271,7 @@ pub fn plan_local_just_tree(repo_root: &Path, manifest: &Manifest) -> Result<Vec
         plan_mod_just(repo_root, manifest)?,
         plan_tools_just(repo_root, manifest)?,
         plan_tool_minimums(repo_root, manifest)?,
+        plan_rustup_components(repo_root, manifest)?,
         plan_versions_just(repo_root, manifest)?,
         plan_checks_just(repo_root, manifest)?,
         plan_groups_just(repo_root, manifest)?,
@@ -291,6 +311,7 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn checks_just_emitter_writes_on_first_render() {
         let tmp = TempDir::new().unwrap();
@@ -299,18 +320,29 @@ mod tests {
     }
 
     #[test]
-    fn groups_just_template_includes_all_seven_groups() {
+    fn groups_just_template_includes_all_groups_and_pr_slow_sub_recipes() {
+        // pr-slow has three CI-visible sub-groups (pr-slow1, pr-slow2,
+        // pr-slow3) that each get their own composite action / step
+        // template / CI job. The umbrella `ox-check-pr-slow` recipe is
+        // preserved for local convenience (it runs the three sub-
+        // recipes sequentially) but is not in GROUPS.
         for needle in [
             "ox-check-pr-fast:",
-            "ox-check-pr-test:",
-            "ox-check-pr-mutants:",
+            "ox-check-pr-slow:",
+            "ox-check-pr-slow1:",
+            "ox-check-pr-slow2:",
+            "ox-check-pr-slow3:",
             "ox-check-scheduled-test:",
             "ox-check-scheduled-advisories:",
-            "ox-check-scheduled-runtime:",
             "ox-check-scheduled-exhaustive:",
         ] {
             assert!(GROUPS_JUST.contains(needle), "groups.just missing '{needle}'");
         }
+        // pr-test was merged into pr-slow1; ox-check-pr-test should
+        // no longer exist as a group.
+        assert!(!GROUPS_JUST.contains("ox-check-pr-test:"));
+        // pr-slow umbrella recipe should depend on its three sub-recipes.
+        assert!(GROUPS_JUST.contains("ox-check-pr-slow: ox-check-pr-slow1 ox-check-pr-slow2 ox-check-pr-slow3"));
     }
 
     #[test]
@@ -327,11 +359,13 @@ mod tests {
         }
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
-    fn plan_local_just_tree_emits_seven_items() {
+    fn plan_local_just_tree_emits_eight_items() {
         let tmp = TempDir::new().unwrap();
         let items = plan_local_just_tree(tmp.path(), &Manifest::default()).unwrap();
-        assert_eq!(items.len(), 7);
+        // mod, tools, tool-minimums, rustup-components, versions, checks, groups, tiers
+        assert_eq!(items.len(), 8);
         for item in &items {
             assert_eq!(item.decision, Decision::Write);
         }
@@ -387,6 +421,7 @@ mod tests {
         assert_eq!(body, "import 'justfiles/ox-check/mod.just'");
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn justfile_imports_writes_into_empty_repo() {
         let tmp = TempDir::new().unwrap();
@@ -399,6 +434,7 @@ mod tests {
         assert!(!spliced.contains("alias ox-check"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn first_render_writes_tools_just() {
         let tmp = TempDir::new().unwrap();
@@ -407,6 +443,7 @@ mod tests {
         assert_eq!(item.rendered.as_deref(), Some(TOOLS_JUST));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn matching_file_is_in_sync() {
         let tmp = TempDir::new().unwrap();
@@ -416,12 +453,14 @@ mod tests {
         assert_eq!(item.decision, Decision::InSync);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn resolve_justfile_path_returns_canonical_when_empty() {
         let tmp = TempDir::new().unwrap();
         assert_eq!(resolve_justfile_path(tmp.path()), "Justfile");
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn resolve_justfile_path_prefers_existing_capital() {
         let tmp = TempDir::new().unwrap();
@@ -429,6 +468,7 @@ mod tests {
         assert_eq!(resolve_justfile_path(tmp.path()), "Justfile");
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn resolve_justfile_path_honors_existing_lowercase() {
         let tmp = TempDir::new().unwrap();

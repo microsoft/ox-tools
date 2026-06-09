@@ -40,6 +40,104 @@ See also:
 
 [1]: https://docs.github.com/en/actions/sharing-automations/reusing-workflows
 
+The PR pipeline:
+
+```mermaid
+flowchart LR
+    pr_evt([pull_request<br/>merge_group]):::trigger
+    pr_root[".github/workflows/<br/>ox-check-pr.yml<br/>(root, ~10 lines)"]:::root
+    pr_impl[".github/workflows/<br/>ox-check-pr-impl.yml<br/>(reusable workflow_call)"]:::impl
+    impact["impact-linux + impact-windows<br/>(2 jobs, cargo-delta;<br/>outputs consumed by every group below)"]:::job
+    pr_fast_job["pr-fast<br/>4-leg matrix"]:::job
+    pr_slow1_job["pr-slow1<br/>4-leg matrix<br/>(llvm-cov, doc-test, examples;<br/>codecov upload from linux)"]:::job
+    pr_slow2_job["pr-slow2<br/>4-leg matrix<br/>(miri, careful)"]:::job
+    pr_slow3_job["pr-slow3<br/>4-leg matrix<br/>(mutants; windows-arm self-skips)"]:::job
+    impact_act[".github/actions/<br/>ox-check-impact"]:::action
+    fast_act[".github/actions/<br/>ox-check-pr-fast"]:::action
+    slow1_act[".github/actions/<br/>ox-check-pr-slow1"]:::action
+    slow2_act[".github/actions/<br/>ox-check-pr-slow2"]:::action
+    slow3_act[".github/actions/<br/>ox-check-pr-slow3"]:::action
+    fast_just["just ox-check-pr-fast"]:::recipe
+    slow1_just["just ox-check-pr-slow1"]:::recipe
+    slow2_just["just ox-check-pr-slow2"]:::recipe
+    slow3_just["just ox-check-pr-slow3<br/>(self-skips on aarch64-pc-windows-msvc)"]:::recipe
+
+    pr_evt --> pr_root
+    pr_root -. uses .-> pr_impl
+    pr_impl --> impact
+    pr_impl --> pr_fast_job
+    pr_impl --> pr_slow1_job
+    pr_impl --> pr_slow2_job
+    pr_impl --> pr_slow3_job
+
+    impact ==> impact_act
+    pr_fast_job ==> fast_act
+    pr_slow1_job ==> slow1_act
+    pr_slow2_job ==> slow2_act
+    pr_slow3_job ==> slow3_act
+
+    fast_act ==> fast_just
+    slow1_act ==> slow1_just
+    slow2_act ==> slow2_just
+    slow3_act ==> slow3_just
+
+    classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
+    classDef root fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
+    classDef impl fill:#dff0d8,stroke:#28a745,stroke-width:1px;
+    classDef job fill:#f6f8fa,stroke:#586069,stroke-width:1px;
+    classDef action fill:#fce5e5,stroke:#cb2431,stroke-width:1px;
+    classDef recipe fill:#f3e8ff,stroke:#6f42c1,stroke-width:1px;
+```
+
+The scheduled pipeline (same colour key):
+
+```mermaid
+flowchart LR
+    sched_evt([schedule<br/>workflow_dispatch]):::trigger
+    sched_root[".github/workflows/<br/>ox-check-scheduled.yml<br/>(root, ~10 lines)"]:::root
+    sched_impl[".github/workflows/<br/>ox-check-scheduled-impl.yml<br/>(reusable workflow_call)"]:::impl
+    stest_job["scheduled-test<br/>4-leg matrix<br/>(codecov upload from linux)"]:::job
+    sadv_job["scheduled-advisories<br/>4-leg matrix"]:::job
+    sexh_job["scheduled-exhaustive<br/>linux + windows"]:::job
+    stest_act[".github/actions/<br/>ox-check-scheduled-test"]:::action
+    sadv_act[".github/actions/<br/>ox-check-scheduled-advisories"]:::action
+    sexh_act[".github/actions/<br/>ox-check-scheduled-exhaustive"]:::action
+    stest_just["just ox-check-scheduled-test"]:::recipe
+    sadv_just["just ox-check-scheduled-advisories"]:::recipe
+    sexh_just["just ox-check-scheduled-exhaustive"]:::recipe
+
+    sched_evt --> sched_root
+    sched_root -. uses .-> sched_impl
+    sched_impl --> stest_job
+    sched_impl --> sadv_job
+    sched_impl --> sexh_job
+
+    stest_job ==> stest_act
+    sadv_job ==> sadv_act
+    sexh_job ==> sexh_act
+
+    stest_act ==> stest_just
+    sadv_act ==> sadv_just
+    sexh_act ==> sexh_just
+
+    classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
+    classDef root fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
+    classDef impl fill:#dff0d8,stroke:#28a745,stroke-width:1px;
+    classDef job fill:#f6f8fa,stroke:#586069,stroke-width:1px;
+    classDef action fill:#fce5e5,stroke:#cb2431,stroke-width:1px;
+    classDef recipe fill:#f3e8ff,stroke:#6f42c1,stroke-width:1px;
+```
+
+Legend:
+- **Yellow** triggers — what events kick off the workflow.
+- **Blue** root workflow — user-customizable, minimal.
+- **Green** reusable impl workflow — owned, carries the wiring.
+- **Grey** jobs — one per group, fan out across a matrix.
+- **Red** composite actions — per-group orchestration.
+- **Purple** just recipe — the actual check execution.
+
+The diagrams flow left-to-right; mermaid stacks same-rank siblings vertically by default. Solid double arrows show "uses" relationships (job → composite, composite → just). Every per-group composite action (`ox-check-pr-fast`, `ox-check-pr-slow{1,2,3}`, `ox-check-scheduled-*`) invokes `ox-check-setup` as its first step; that uniform dependency is elided from the diagram to keep it readable. Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it can read the cargo-delta output variables; this fan-in is summarised inside the impact node rather than drawn as edges. The scheduled tier has no impact dependency because scheduled runs always operate on the full workspace.
+
 ## 2. Emitted artifacts
 
 ```text
@@ -48,11 +146,11 @@ See also:
 │   ├── ox-check-setup/action.yml         owned   (install just + catalog tools)
 │   ├── ox-check-impact/action.yml        owned   (cargo-delta; omitted if .delta.toml disabled)
 │   ├── ox-check-pr-fast/action.yml       owned   (one composite action per group)
-│   ├── ox-check-pr-test/action.yml       owned
-│   ├── ox-check-pr-mutants/action.yml    owned
+│   ├── ox-check-pr-slow1/action.yml      owned
+│   ├── ox-check-pr-slow2/action.yml      owned
+│   ├── ox-check-pr-slow3/action.yml      owned
 │   ├── ox-check-scheduled-test/action.yml  owned
 │   ├── ox-check-scheduled-advisories/action.yml  owned
-│   ├── ox-check-scheduled-runtime/action.yml     owned
 │   └── ox-check-scheduled-exhaustive/action.yml  owned
 └── workflows/
     ├── ox-check-pr-impl.yml              owned   (reusable workflow doing the wiring)
@@ -187,7 +285,9 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
 
-  pr-test:
+  pr-slow1:
+    # Tests + coverage: llvm-cov, doc-test, examples. Coverage upload
+    # is gated to the canonical x86_64 Linux leg (omitted here for brevity).
     needs: impact
     strategy:
       fail-fast: false
@@ -199,30 +299,16 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/ox-check-pr-test
+      - uses: ./.github/actions/ox-check-pr-slow1
         with:
           include_modified: ${{ needs.impact.outputs.include_modified }}
           include_affected: ${{ needs.impact.outputs.include_affected }}
           include_required: ${{ needs.impact.outputs.include_required }}
 
-  pr-mutants:
-    # x86_64 only — cargo-mutants doesn't build on aarch64-pc-windows-msvc.
-    needs: impact
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [linux, windows]
-    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}
-    steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-      - uses: ./.github/actions/ox-check-pr-mutants
-        with:
-          include_modified: ${{ needs.impact.outputs.include_modified }}
-          include_affected: ${{ needs.impact.outputs.include_affected }}
-          include_required: ${{ needs.impact.outputs.include_required }}
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.sha }}
+  # pr-slow2 (miri + careful) and pr-slow3 (mutants) follow the same
+  # shape; pr-slow3 additionally sets `env: BASE_REF` for diff-scoped
+  # cargo-mutants, and the ox-check-mutants recipe self-skips on
+  # aarch64-pc-windows-msvc (where cargo-mutants doesn't build).
 ```
 
 Every multi-OS job hardcodes its OS axis as an inline YAML array. Per-leg runner
@@ -277,18 +363,8 @@ jobs:
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
     steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-scheduled-advisories } ]
-  scheduled-runtime:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [linux, windows, linux-arm, windows-arm]
-    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
-      || matrix.os == 'windows' && inputs.windows_runner
-      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
-      || inputs.windows_arm_runner }}
-    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-scheduled-runtime } ]
   scheduled-exhaustive:
-    # x86_64 only — cargo-mutants constraint.
+    # x86_64 only -- cargo-mutants constraint.
     strategy:
       fail-fast: false
       matrix:
@@ -388,9 +464,8 @@ Per-action additions (only where the action consumes PR-context strings the reci
 | Action                       | Extra inputs                                                            |
 |------------------------------|-------------------------------------------------------------------------|
 | `ox-check-pr-fast`              | `pr_title`                                                              |
-| `ox-check-pr-mutants`           | `base_ref`                                                              |
-| `ox-check-pr-test`              | —                                                                       |
-| `ox-check-scheduled-*`            | —                                                                       |
+| `ox-check-pr-slow3`             | `base_ref`                                                              |
+| `ox-check-pr-slow1`, `ox-check-pr-slow2`, `ox-check-scheduled-*` | —                                                                       |
 
 The recipes themselves consume only the env vars they need; the catalog records the
 mapping (see [checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)).
@@ -403,8 +478,8 @@ plug individual groups into an unrelated workflow can `uses:` them directly.
 
 ### `ox-check-setup`
 
-`ox-check-setup` installs `just` (`cargo install just --locked --version >=<min>`) and runs
-`just ox-check-tools-install-missing`. Does not install Rust; expects `cargo` on PATH (see
+`ox-check-setup` installs `just` (`cargo install just --locked`) and runs
+`just ox-check-setup`. Does not install Rust; expects `cargo` on PATH (see
 §7). `ox-check-impact` is described in §6 below.
 
 ## 6. Impact scoping
@@ -476,8 +551,8 @@ workspace-scratch location to keep cache scoping predictable.
 
 The cache covers:
 
-- The `cargo install`-ed tools from `ox-check-tools-install-missing`.
-- The `target/` directory (per ox-check recipe; a per-recipe cache scope means a `pr-test`
+- The `cargo install`-ed tools from `ox-check-setup` (step 4 of the recipe).
+- The `target/` directory (per ox-check recipe; a per-recipe cache scope means a `pr-slow1`
   cache hit doesn't have to wait on a `pr-fast` cache miss).
 
 ## 9. Security
@@ -497,7 +572,7 @@ Recommended root workflow shape:
 
 ## 10. Coverage upload
 
-After `pr-test` (and `scheduled-test`) runs the `ox-check-llvm-cov` recipe, the reusable
+After `pr-slow1` (and `scheduled-test`) runs the `ox-check-llvm-cov` recipe, the reusable
 workflow uploads the resulting `target/coverage/lcov.info` to Codecov on the Linux leg
 of the matrix only (the other legs produce equivalent data; uploading once avoids
 double-counting in the Codecov UI).

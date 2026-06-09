@@ -497,11 +497,18 @@ ox-check-audit: (_ox-check-require "cargo-audit")
 # the full crate graph and seeing which deps are referenced; that's
 # precisely what the required tier is for. Pinned to the general
 # nightly defined in versions.just.
+#
+# Deliberately omits `--all-targets`: with `--all-targets`, a dep
+# that's listed in BOTH `[dependencies]` and `[dev-dependencies]` and
+# used only by tests is reported as "all used" because the dev-deps
+# target satisfies the lookup, masking the unused entry in main
+# `[dependencies]`. Restricting to the default targets (lib + bins)
+# matches main repo CI's check and surfaces the real bug.
 [script("pwsh")]
 ox-check-udeps: (_ox-check-require "cargo-udeps")
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
-    & cargo '+{{ rust_nightly }}' udeps @(-split ($env:OX_CHECK_INCLUDE_REQUIRED ?? "--workspace")) --all-targets --all-features
+    & cargo '+{{ rust_nightly }}' udeps @(-split ($env:OX_CHECK_INCLUDE_REQUIRED ?? "--workspace")) --all-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier (compares published API of changed crates against the
@@ -704,7 +711,7 @@ ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "carg
     # get test execution; coverage data from this leg wouldn't have
     # been used anyway (coverage upload is gated on Linux only).
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
-        Write-Host 'ox-check-llvm-cov: aarch64-pc-windows-msvc — skipping coverage; running plain nextest'
+        Write-Host 'ox-check-llvm-cov: aarch64-pc-windows-msvc -- skipping coverage; running plain nextest'
         & cargo nextest run @pkg --all-features --locked
         exit $LASTEXITCODE
     }
@@ -718,6 +725,12 @@ ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "carg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # Instrument and run tests; defer report generation so we can emit
     # multiple formats from the same profraw set without re-running.
+    # Note: nextest's exit-4 ("no tests to run") IS treated as a
+    # failure here -- a llvm-cov run that finds no tests almost
+    # always means a config mistake (wrong package filter, missing
+    # test target, etc.), not a legitimate empty set. ox-check-miri
+    # is the exception (see its comment): miri-skipped tests are an
+    # expected design point for FS-heavy crates.
     & cargo llvm-cov nextest @pkg --all-features --locked --no-report
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # lcov.info feeds Codecov on GitHub; cobertura.xml feeds
@@ -746,14 +759,26 @@ ox-check-examples:
     & cargo build @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --examples --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# === pr-mutants members =================================================
+# === pr-slow3 member ====================================================
 
 # Affected tier. cargo-mutants does its own diff-scoping via --in-diff;
 # the affected-tier guard is the wiring-layer's coarse filter (if no
 # affected packages exist, the entire mutants run is pointless).
+#
+# Skip on aarch64-pc-windows-msvc: cargo-mutants doesn't build there
+# (upstream winapi incompatibility), so `_ox-check-require cargo-mutants`
+# would fail. The merged pr-slow group runs on all four OS legs; mutants
+# is the only sub-recipe that can't follow, so it bails out early on the
+# affected leg. Coverage on the other three legs is unchanged.
 [script("pwsh")]
-ox-check-mutants: (_ox-check-require "cargo-mutants")
+ox-check-mutants:
     $ErrorActionPreference = 'Stop'
+    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
+        Write-Host 'ox-check-mutants: aarch64-pc-windows-msvc -- cargo-mutants does not build here (winapi); skipping'
+        exit 0
+    }
+    & just _ox-check-require cargo-mutants
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
         Write-Host 'ox-check-mutants: no affected packages; skipping'
         exit 0
@@ -798,7 +823,17 @@ ox-check-mutants: (_ox-check-require "cargo-mutants")
 ox-check-miri:
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    & cargo '+{{ rust_nightly }}' miri nextest run @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace"))
+    # `--no-tests=pass`: miri-only exception. Tests that touch the
+    # filesystem, spawn subprocesses, or use other miri-incompatible
+    # APIs commonly carry `#[cfg_attr(miri, ignore)]` (this is the
+    # canonical opt-out for build-tooling / CLI crates). A crate
+    # whose test set ends up entirely-skipped under miri legitimately
+    # produces zero runnable tests; nextest's default exit-4 ("no
+    # tests to run") would fail the recipe in that case. We treat
+    # empty test runs as success for miri only. Other nextest-using
+    # recipes (llvm-cov) keep exit-4 as a failure because zero tests
+    # there almost always indicates a config mistake.
+    & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace"))
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 [script("pwsh")]
@@ -842,7 +877,8 @@ ox-check-bench:
 
 # Each group is one CI job. Within a group, checks run sequentially.
 
-# === PR groups ==========================================================
+# PR groups
+# ===========================================================================
 
 [group("ox-check")]
 ox-check-pr-fast: \
@@ -860,18 +896,45 @@ ox-check-pr-fast: \
     ox-check-audit \
     ox-check-udeps \
     ox-check-semver-check \
+    ox-check-external-types \
     ox-check-aprz
 
+# pr-slow is the single PR-tier group for everything that takes more
+# than ~30s per crate (tests, stricter runtimes, mutation testing).
+# It's internally split into three sub-recipes so individual concerns
+# can be invoked locally without dragging the others along:
+#
+#   slow1: tests + coverage (replaces the former pr-test group)
+#   slow2: stricter-runtime correctness (miri, careful)
+#   slow3: mutation testing
+#
+# CI runs pr-slow as ONE job per OS leg -- the sub-recipes run
+# sequentially within. This trades per-leg wall-clock for fewer
+# orchestration jobs and a flatter PR check graph. Individual sub-
+# recipes are runnable on their own locally:
+#
+#   $ just ox-check-pr-slow1   # tests + coverage only
+#   $ just ox-check-pr-slow2   # miri + careful only
+#   $ just ox-check-pr-slow3   # mutants only
 [group("ox-check")]
-ox-check-pr-test: \
+ox-check-pr-slow: ox-check-pr-slow1 ox-check-pr-slow2 ox-check-pr-slow3
+
+[group("ox-check")]
+ox-check-pr-slow1: \
     ox-check-llvm-cov \
     ox-check-doc-test \
     ox-check-examples
 
 [group("ox-check")]
-ox-check-pr-mutants: ox-check-mutants
+ox-check-pr-slow2: \
+    ox-check-miri \
+    ox-check-careful
 
-# === Scheduled groups =====================================================
+[group("ox-check")]
+ox-check-pr-slow3: ox-check-mutants
+
+# Scheduled groups
+# ===========================================================================
 
 [group("ox-check")]
 ox-check-scheduled-test: \
@@ -884,13 +947,7 @@ ox-check-scheduled-advisories: \
     ox-check-deny \
     ox-check-audit \
     ox-check-aprz \
-    ox-check-clippy \
-    ox-check-external-types
-
-[group("ox-check")]
-ox-check-scheduled-runtime: \
-    ox-check-miri \
-    ox-check-careful
+    ox-check-clippy
 
 [group("ox-check")]
 ox-check-scheduled-exhaustive: \
@@ -943,26 +1000,80 @@ import 'versions.just'
 # Friendly default: `just ox-check` runs the PR tier.
 alias ox-check := ox-check-pr
 
+=== justfiles/ox-check/rustup-components.txt ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+#
+# Rustup toolchains + components needed by the ox-check check tree.
+# Consumed by the `ox-check-setup` recipe (tools.just), which runs
+#   rustup toolchain install <pin> --profile minimal --component <c>...
+# per pinned nightly, and
+#   rustup component add <c>...
+# on the workspace's default toolchain.
+#
+# Format: <toolchain-key>:<component> -- one entry per line. Lines
+# starting with `#` and blank lines are ignored.
+#
+# Toolchain keys:
+#   default                  - the workspace's default toolchain (rustup
+#                              resolves this from `rust-toolchain.toml`
+#                              if present, otherwise from `rustup default`).
+#   nightly                  - the value of `rust_nightly` in versions.just.
+#                              Used by ox-check-fmt, ox-check-udeps,
+#                              ox-check-miri, ox-check-careful.
+#   nightly_external_types   - the value of `rust_nightly_external_types`
+#                              in versions.just. Used by
+#                              ox-check-external-types. Often the same
+#                              as `nightly`; pinned separately to track
+#                              the rustdoc JSON schema cargo-check-
+#                              external-types expects.
+#
+# Per-toolchain notes:
+#   - `default:clippy`       - needed by ox-check-clippy.
+#   - `default:rustfmt`      - convenience; ox-check-fmt uses the pinned
+#                              nightly's rustfmt for unstable_features,
+#                              but adopters often invoke `cargo fmt` ad
+#                              hoc and expect the stable rustfmt to be
+#                              present too.
+#   - `nightly:rustfmt`      - ox-check-fmt uses unstable rustfmt
+#                              features (imports_granularity etc.) only
+#                              available on nightly.
+#   - `nightly:miri`         - ox-check-miri.
+#   - `nightly:rust-src`     - ox-check-careful recompiles std with
+#                              debug instrumentation; needs the std
+#                              source. Also needed by miri's xargo-style
+#                              libstd build.
+
+default:clippy
+default:rustfmt
+
+nightly:rustfmt
+nightly:miri
+nightly:rust-src
+
 === justfiles/ox-check/tiers.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
 # See ../../docs/design/checks.md for the tier structure.
 
-# PR tier: every fast check that should run on every pull request.
+# PR tier: every check that should run on every pull request, split
+# into two groups so the fast checks aren't blocked behind the slow
+# ones in CI.
 [group("ox-check")]
 ox-check-pr: \
     ox-check-pr-fast \
-    ox-check-pr-test \
-    ox-check-pr-mutants
+    ox-check-pr-slow
 
-# scheduled tier: slow / non-deterministic checks. Runs on a schedule against
-# `main`, not on PRs.
+# scheduled tier: full-workspace re-runs of things that can change
+# without a commit (advisories, flakes) + the truly expensive
+# exhaustive checks that don't fit in a PR budget. Runs on a schedule
+# against `main`, not on PRs.
 [group("ox-check")]
 ox-check-scheduled: \
     ox-check-scheduled-test \
     ox-check-scheduled-advisories \
-    ox-check-scheduled-runtime \
     ox-check-scheduled-exhaustive
 
 # Full tier: PR + scheduled, end-to-end. Useful before tagging a release.
@@ -977,19 +1088,29 @@ ox-check-full: \
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
 #
 # Tool-version catalog consumed by `tools.just` recipes
-# (_ox-check-require, ox-check-tools-install, ox-check-tools-check).
+# (_ox-check-require, ox-check-setup, ox-check-tools-check).
 #
-# Format: <cargo-subcommand-binary>=<minimum-version>
+# Format: <cargo-subcommand-binary>=<pinned-version>
 # One per line. Lines starting with `#` and blank lines are ignored.
-# Versions are SemVer; comparison uses `sort -V` (so "1.2.10" > "1.2.9").
+# Versions are SemVer; comparison uses `[version]` (so "1.2.10" > "1.2.9").
 #
-# To bump a minimum, edit the version in place. The dirty-file flow
-# preserves the edit on subsequent `cargo ox-check update` runs.
+# Version semantics:
+#   - On install (`ox-check-setup`): exactly this version (`=<pin>`).
+#     Pinning the install avoids the CI reproducibility risk of
+#     "upstream release between yesterday's green build and today's
+#     PR breaks things" (cargo-spellcheck 0.15.7's em-dash regression
+#     is the canonical example of why >= is the wrong policy here).
+#   - On runtime check (`_ox-check-require`): the installed version
+#     must be `>= <pin>`. A user who has manually upgraded a tool
+#     for their own reasons is not downgraded by setup.
+#
+# To bump a pin, edit the version in place and re-run `cargo ox-check
+# update`. The dirty-file flow preserves the edit on subsequent runs.
 # To add a new tool, append a line. To remove a tool, delete its line
 # (and any recipe in checks.just that depends on it).
 #
 # Non-catalog dependencies (rustc, pwsh, just itself) are handled
-# directly in tools.just rather than through this file — their
+# directly in tools.just rather than through this file -- their
 # install/upgrade paths are not cargo-managed.
 
 cargo-aprz=1.0.0
@@ -1002,7 +1123,7 @@ cargo-doc2readme=0.6.4
 cargo-ensure-no-cyclic-deps=0.2.0
 cargo-ensure-no-default-features=1.0.0
 cargo-hack=0.6.41
-cargo-heather=0.1.0
+cargo-heather=0.2.1
 cargo-llvm-cov=0.8.4
 cargo-mutants=26.1.2
 cargo-nextest=0.9.122
@@ -1126,24 +1247,60 @@ ox-check-tools-check:
     if ($LASTEXITCODE -ne 0) { $fail = 1 }
     exit $fail
 
-# Public: install (or upgrade) every catalog tool to its minimum
-# version. Idempotent — ``cargo install --locked`` is a no-op when
-# the installed version already satisfies the requirement.
+# Public: install everything ox-check needs in one shot. Idempotent --
+# every sub-step is a no-op when the artifact (rustup toolchain /
+# component / cargo subcommand) is already present at or above the
+# pinned version. Safe to re-run.
 #
-# `installer` selects the install backend:
-#   - "install"  (default): ``cargo install --locked`` — pure-source
+# Order:
+#   1. System library dependencies (libclang for cargo-spellcheck's
+#      build script). Source-install path only.
+#   2. Rustup toolchains and components: the pinned nightlies from
+#      versions.just plus the components listed in
+#      `rustup-components.txt` (clippy on default, miri / rust-src /
+#      rustfmt on the pinned nightly, etc.). This step is what makes
+#      `ox-check-miri` and `ox-check-careful` work locally without a
+#      separate one-time setup.
+#   3. cargo-binstall bootstrap (binstall path only).
+#   4. Cargo subcommands from `tool-minimums.txt`.
+#
+# Version policy for step 4:
+#   - The catalog file is named tool-minimums.txt for historical
+#     reasons, but each entry is treated as a *pin* on the install
+#     side and a *minimum* on the runtime side. Concretely:
+#       * If the tool is missing or older than the pin: install
+#         exactly `=<pin>` (NOT `>=<pin>`). This makes CI runs
+#         reproducible -- the version that ships is what the
+#         catalog was validated against, not whatever upstream
+#         released since.
+#       * If the tool is already installed at the pin or NEWER:
+#         leave it alone. Local devs who upgrade a tool for their
+#         own reasons (e.g. needing a bugfix not yet pinned in the
+#         catalog) are not downgraded. The `_ox-check-require`
+#         gate uses `installed >= pin`, so newer is fine.
+#   - Why the asymmetry: pulling "latest matching >=pin" from
+#     upstream is a CI reproducibility risk -- a tool released between
+#     yesterday's green build and today's PR can break things
+#     (cargo-spellcheck 0.15.7's em-dash regression was exactly
+#     this failure mode). Pinning the install removes that risk
+#     without forcing adopters to downgrade their existing setups.
+#
+# `installer` selects the backend for step 4 (and dictates whether
+# steps 1 and 3 run):
+#   - "install"  (default): ``cargo install --locked`` -- pure-source
 #     builds; works in any cargo environment, no extra runtime
 #     dependencies. Slow (~30 minutes for the full catalog on a cold
 #     runner). Used by ADO, where ``cargo-binstall`` has known
 #     compliance issues for internal pipelines.
-#   - "binstall": ``cargo binstall --no-confirm --locked`` — downloads
-#     a pre-built binary from each tool's GitHub Releases when
+#   - "binstall": ``cargo binstall --no-confirm --locked`` -- downloads
+#     a prebuilt binary from each tool's GitHub Releases when
 #     available, falling back to ``cargo install`` per-tool when
 #     not. Cuts catalog install time from ~30 min to ~1 min on a
-#     cold runner. Requires ``cargo-binstall`` to be installed
-#     beforehand. Used by the GitHub Actions setup action.
+#     cold runner. Bootstraps cargo-binstall itself in step 3 if
+#     it isn't already on PATH. Used by the GitHub Actions setup
+#     action.
 #
-# Per-tool failures don't abort the whole install — a tool that
+# Per-tool failures don't abort the whole install -- a tool that
 # doesn't build on the current host (e.g. cargo-mutants on
 # aarch64-pc-windows-msvc, where the upstream winapi dep doesn't
 # compile) shouldn't block other tools. Each failure is reported
@@ -1153,24 +1310,111 @@ ox-check-tools-check:
 # CI surfaces the problem.
 [group("ox-check")]
 [script("pwsh")]
-ox-check-tools-install installer="install":
+ox-check-setup installer="install":
     $ErrorActionPreference = 'Continue'
     $installer = '{{installer}}'
     if ($installer -ne 'install' -and $installer -ne 'binstall') {
-        Write-Error "ox-check-tools-install: unknown installer '$installer' (expected 'install' or 'binstall')"
+        Write-Error "ox-check-setup: unknown installer '$installer' (expected 'install' or 'binstall')"
         exit 2
     }
-    # System-level prerequisites first -- the binstall path downloads
-    # prebuilt binaries and does not need them, but the source-build
-    # path does. Failing fast with a clear install hint is much better
-    # than a cryptic clang-sys build error 10 minutes into the install.
+
+    # === Step 1: system library dependencies ===========================
+    # Only relevant for the source-install path -- binstall downloads
+    # prebuilt binaries that don't need libclang at build time. Fail
+    # fast with a clear hint instead of a cryptic clang-sys build error
+    # 10 minutes into the install.
     if ($installer -eq 'install') {
         & just ox-check-system-deps-check
         if ($LASTEXITCODE -ne 0) {
-            Write-Error "ox-check-tools-install: system dependency check failed; install the missing libs and re-run."
+            Write-Error "ox-check-setup: system dependency check failed; install the missing libs and re-run."
             exit $LASTEXITCODE
         }
     }
+
+    # === Step 2: rustup toolchains + components ========================
+    # Group components by toolchain key (see rustup-components.txt).
+    # Each pinned nightly is installed with all of its required
+    # components in a single `rustup toolchain install` invocation, so
+    # the toolchain download happens once and components are added
+    # atomically. Default-toolchain components are added separately
+    # with `rustup component add` -- the default toolchain is whatever
+    # rustup resolves at the moment (rust-toolchain.toml override or
+    # `rustup default`).
+    $componentCatalog = 'justfiles/ox-check/rustup-components.txt'
+    $byToolchain = @{}
+    foreach ($line in Get-Content $componentCatalog) {
+        $trimmed = $line.Trim()
+        if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
+        if ($trimmed -match '^([^:]+):(.+)$') {
+            $key = $Matches[1]
+            $comp = $Matches[2]
+            if (-not $byToolchain.ContainsKey($key)) {
+                $byToolchain[$key] = [System.Collections.Generic.List[string]]::new()
+            }
+            $byToolchain[$key].Add($comp) | Out-Null
+        }
+    }
+    # Resolve pinned nightlies from versions.just. Local invocation
+    # path matches what setup-action.yml / setup.yml do in CI; recipe
+    # interpolation `{{ rust_nightly }}` (used by ox-check-miri etc.)
+    # reads from the same place.
+    $nightly = (& just --evaluate rust_nightly) | Select-Object -Last 1
+    $nightlyExt = (& just --evaluate rust_nightly_external_types) | Select-Object -Last 1
+    $toolchainPins = @{ nightly = $nightly; nightly_external_types = $nightlyExt }
+    foreach ($key in $byToolchain.Keys) {
+        $components = $byToolchain[$key]
+        if ($key -eq 'default') {
+            Write-Host "ox-check-setup: rustup component add $($components -join ' ') (default toolchain)"
+            & rustup component add @components
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "ox-check-setup: 'rustup component add' failed for default toolchain"
+                exit $LASTEXITCODE
+            }
+        } else {
+            if (-not $toolchainPins.ContainsKey($key)) {
+                Write-Error "ox-check-setup: unknown toolchain key '$key' in $componentCatalog (expected 'default' / 'nightly' / 'nightly_external_types')"
+                exit 1
+            }
+            $pin = $toolchainPins[$key]
+            $componentArgs = @()
+            foreach ($c in $components) { $componentArgs += @('--component', $c) }
+            Write-Host "ox-check-setup: rustup toolchain install $pin --profile minimal $($componentArgs -join ' ') --no-self-update"
+            & rustup toolchain install $pin --profile minimal @componentArgs --no-self-update
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "ox-check-setup: 'rustup toolchain install' failed for $pin"
+                exit $LASTEXITCODE
+            }
+        }
+    }
+    # If a pinned toolchain has no entries in rustup-components.txt,
+    # ensure it's still installed (cargo-check-external-types needs
+    # `nightly_external_types` even though it requires no components
+    # beyond what `--profile minimal` provides).
+    foreach ($key in $toolchainPins.Keys) {
+        if ($byToolchain.ContainsKey($key)) { continue }
+        $pin = $toolchainPins[$key]
+        if ($pin -eq $nightly -and $byToolchain.ContainsKey('nightly')) { continue }
+        Write-Host "ox-check-setup: rustup toolchain install $pin --profile minimal --no-self-update"
+        & rustup toolchain install $pin --profile minimal --no-self-update
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "ox-check-setup: 'rustup toolchain install' failed for $pin"
+            exit $LASTEXITCODE
+        }
+    }
+
+    # === Step 3: cargo-binstall bootstrap (binstall path only) =========
+    if ($installer -eq 'binstall') {
+        if (-not (Get-Command cargo-binstall -ErrorAction SilentlyContinue)) {
+            Write-Host "ox-check-setup: bootstrapping cargo-binstall"
+            & cargo install --locked cargo-binstall
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "ox-check-setup: cargo-binstall bootstrap failed"
+                exit $LASTEXITCODE
+            }
+        }
+    }
+
+    # === Step 4: cargo subcommands =====================================
     $catalog = 'justfiles/ox-check/tool-minimums.txt'
     $failed = [System.Collections.Generic.List[string]]::new()
     foreach ($line in Get-Content $catalog) {
@@ -1178,43 +1422,53 @@ ox-check-tools-install installer="install":
         if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
         if ($trimmed -match '^([^=]+)=(.+)$') {
             $tool = $Matches[1]
-            $min = $Matches[2]
+            $pin = $Matches[2]
             # Skip if the tool is already installed at or above the
-            # required version. This is what makes the actions/cache
-            # restore actually useful — without the early-exit, every
-            # post-restore run would try to re-install on top of the
-            # cached binaries and fail with "binary already exists in
-            # destination". The `2>$null` swallows the help-text noise
-            # _ox-check-require emits when the tool is missing.
+            # pinned version. _ox-check-require uses `installed >= pin`,
+            # so a user who has manually upgraded a tool for their own
+            # reasons (e.g. needing a bugfix the catalog hasn't pinned
+            # yet) is not downgraded by setup. The early-exit is also
+            # what makes the actions/cache restore actually useful --
+            # without it, every post-restore run would try to re-install
+            # on top of the cached binaries and fail with "binary
+            # already exists in destination". The `2>$null` swallows
+            # the help-text noise _ox-check-require emits when the tool
+            # is missing.
             & just _ox-check-require $tool 2>$null
             if ($LASTEXITCODE -eq 0) {
-                Write-Host "ox-check-tools-install ($installer): $tool >= $min (already satisfied)"
+                Write-Host "ox-check-setup ($installer): $tool >= $pin (already satisfied)"
                 continue
             }
-            Write-Host "ox-check-tools-install ($installer): $tool >= $min"
+            # Install exactly the pinned version (NOT >=). Pulling
+            # latest-matching at install time is a CI reproducibility
+            # risk: an upstream release between yesterday's green
+            # build and today's PR can break things, even though the
+            # catalog hasn't moved. The `=` constraint locks the
+            # install to the version we validated.
+            Write-Host "ox-check-setup ($installer): $tool =$pin"
             $installed = $false
             if ($installer -eq 'binstall') {
-                cargo binstall --no-confirm --locked $tool --version ">=$min"
+                cargo binstall --no-confirm --locked $tool --version "=$pin"
                 if ($LASTEXITCODE -eq 0) {
                     $installed = $true
                 } else {
                     Write-Host "  binstall failed for $tool; falling back to cargo install" -ForegroundColor Yellow
-                    cargo install --locked $tool --version ">=$min"
+                    cargo install --locked $tool --version "=$pin"
                     if ($LASTEXITCODE -eq 0) { $installed = $true }
                 }
             } else {
-                cargo install --locked $tool --version ">=$min"
+                cargo install --locked $tool --version "=$pin"
                 if ($LASTEXITCODE -eq 0) { $installed = $true }
             }
             if (-not $installed) {
-                Write-Host "ox-check-tools-install: $tool install FAILED (continuing)" -ForegroundColor Yellow
+                Write-Host "ox-check-setup: $tool install FAILED (continuing)" -ForegroundColor Yellow
                 $failed.Add($tool)
             }
         }
     }
     if ($failed.Count -gt 0) {
         Write-Host ""
-        Write-Host "ox-check-tools-install: $($failed.Count) tool(s) failed to install:" -ForegroundColor Yellow
+        Write-Host "ox-check-setup: $($failed.Count) tool(s) failed to install:" -ForegroundColor Yellow
         foreach ($t in $failed) { Write-Host "  - $t" -ForegroundColor Yellow }
         Write-Host "Recipes that depend on these tools will fail at run time via _ox-check-require." -ForegroundColor Yellow
         exit 1
@@ -1286,7 +1540,7 @@ _ox-check-require name:
         exit 0
     }
 
-    $min = $spec
+    $pin = $spec
     # Parse `cargo install --list` for installed version. Lines look like:
     #   cargo-deny v0.18.5:
     #       cargo-deny
@@ -1300,19 +1554,26 @@ _ox-check-require name:
     }
 
     if (-not $installed) {
-        Write-Error "ox-check: '$name' not installed (need >=v$min). Install: cargo install --locked $name --version '>=$min'"
+        # Install hint pins the exact catalog version (`=$pin`),
+        # matching what ox-check-setup does. Users who want a newer
+        # version of the tool for their own reasons can upgrade
+        # manually; the gate below (installed >= pin) will still pass.
+        Write-Error "ox-check: '$name' not installed (need >=v$pin). Install: cargo install --locked $name --version '=$pin'  (or run: just ox-check-setup)"
         exit 1
     }
 
     # SemVer comparison via the [version] type. Strip any pre-release
-    # / build-metadata suffix (e.g. "1.2.3-alpha.4") for parsing —
+    # / build-metadata suffix (e.g. "1.2.3-alpha.4") for parsing --
     # [version] only handles dotted numeric components.
-    $minClean = ($min -split '[-+]', 2)[0]
+    $pinClean = ($pin -split '[-+]', 2)[0]
     $instClean = ($installed -split '[-+]', 2)[0]
-    $minV = [version]$minClean
+    $pinV = [version]$pinClean
     $instV = [version]$instClean
-    if ($instV -lt $minV) {
-        Write-Error "ox-check: '$name' is at v$installed; need >=v$min. Upgrade: cargo install --locked $name --version '>=$min'"
+    if ($instV -lt $pinV) {
+        # Upgrade hint pins the exact catalog version, not `>=$pin`,
+        # for the same CI-reproducibility reason as setup. Adopters
+        # who need newer can take it via plain `cargo install --locked`.
+        Write-Error "ox-check: '$name' is at v$installed; need >=v$pin. Upgrade: cargo install --locked $name --version '=$pin'  (or run: just ox-check-setup)"
         exit 1
     }
 

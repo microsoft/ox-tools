@@ -10,7 +10,7 @@ steps:
       # lockfile hashes + catalog hash. Including arch keeps any
       # future ARM pool an adopter adds from colliding with x86_64 on
       # the same OS namespace.
-      key: 'ox-check-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(ox_check_rustc_version) | Cargo.lock | .cargo/config.toml | rust-toolchain.toml | justfiles/ox-check/tool-minimums.txt | justfiles/ox-check/versions.just'
+      key: 'ox-check-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(ox_check_rustc_version) | Cargo.lock | .cargo/config.toml | rust-toolchain.toml | justfiles/ox-check/tool-minimums.txt | justfiles/ox-check/rustup-components.txt | justfiles/ox-check/versions.just'
       restoreKeys: |
         ox-check-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(ox_check_rustc_version)
         ox-check-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)"
@@ -40,39 +40,26 @@ steps:
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: ox-check setup (install libclang on Linux)
 
-  - bash: rustup component add rustfmt clippy
-    displayName: ox-check setup (ensure rustfmt + clippy components)
-
   - bash: |
       if ! command -v just >/dev/null 2>&1 ; then
         cargo install --locked just
       fi
     displayName: ox-check setup (install just)
 
-  # Install the pinned nightly toolchains needed by udeps, miri,
-  # careful, and check-external-types. The pins live in
-  # justfiles/ox-check/versions.just as `rust_nightly` and
-  # `rust_nightly_external_types`; we extract them here so there is
-  # exactly one source of truth shared with recipe interpolation.
-  - bash: |
-      set -euo pipefail
-      rust_nightly=$(just --evaluate rust_nightly)
-      rust_nightly_external_types=$(just --evaluate rust_nightly_external_types)
-      echo "ox-check: pinned nightly toolchains: $rust_nightly, $rust_nightly_external_types"
-      # --component rustfmt because ox-check-fmt uses nightly rustfmt
-      # for unstable_features (imports_granularity etc.).
-      rustup toolchain install "$rust_nightly" --profile minimal --component rustfmt --no-self-update
-      if [ "$rust_nightly" != "$rust_nightly_external_types" ]; then
-        rustup toolchain install "$rust_nightly_external_types" --profile minimal --no-self-update
-      fi
-    displayName: ox-check setup (install pinned nightly toolchains)
-
-  - bash: |
-      just ox-check-tools-install
-    # ox-check-tools-install exits non-zero if any per-tool install
-    # failed (e.g. cargo-mutants doesn't build on aarch64-pc-windows-
-    # msvc due to an upstream winapi incompatibility). We don't fail
-    # the whole job here — recipes that actually USE a missing tool
+  # Hand everything else off to the catalog recipe. Idempotent.
+  # See setup-action.yml (GitHub composite) for the same handoff
+  # rationale -- both backends bootstrap `just` here so the recipe
+  # can run, then delegate toolchain + component + cargo-subcommand
+  # install to a single source of truth in tools.just.
+  #
+  # ADO uses the default `install` backend (source builds) because
+  # cargo-binstall has unresolved compliance issues for internal
+  # ADO pipelines. GH uses `binstall` (downloads prebuilt binaries).
+  - bash: just ox-check-setup
+    # ox-check-setup exits non-zero if any per-tool install failed
+    # (e.g. cargo-mutants doesn't build on aarch64-pc-windows-msvc
+    # due to an upstream winapi incompatibility). We don't fail the
+    # whole job here -- recipes that actually USE a missing tool
     # will fail cleanly via _ox-check-require at recipe-run time.
     continueOnError: true
-    displayName: ox-check setup (install catalog tools)
+    displayName: ox-check setup (install toolchains + catalog tools)

@@ -15,23 +15,23 @@ runs:
       with:
         # Key on OS + arch + rustc version + lockfile hashes + catalog
         # hash so a Rust toolchain bump, a cross-arch matrix leg, or a
-        # tool-minimums.txt update all invalidate the cache cleanly.
-        # runner.arch resolves to X64 / ARM64 / X86, which keeps the
-        # x86_64 and aarch64 legs of the same OS from colliding on
-        # arch-incompatible target/ contents.
+        # tool-minimums.txt / rustup-components.txt update all invalidate
+        # the cache cleanly. runner.arch resolves to X64 / ARM64 / X86,
+        # which keeps the x86_64 and aarch64 legs of the same OS from
+        # colliding on arch-incompatible target/ contents.
         #
         # ${{ github.job }} discriminates by workflow-job-id (`pr-fast`,
-        # `pr-test`, `pr-mutants`, etc.) so concurrent matrix legs that
+        # `pr-test`, `pr-slow`, etc.) so concurrent matrix legs that
         # share OS+arch (e.g. pr-fast linux + pr-test linux) don't race
         # on the same cache key. Without this, the first-to-finish job
         # reserves the key, the others get "Unable to reserve cache:
         # another job may be creating this cache" and silently skip
-        # the save — leaving the cache empty forever. The restore-keys
+        # the save -- leaving the cache empty forever. The restore-keys
         # fall back across jobs so the install work is still shared
         # across sibling legs on subsequent runs.
-        key: ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt', 'justfiles/ox-check/versions.just') }}-${{ github.job }}
+        key: ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt', 'justfiles/ox-check/rustup-components.txt', 'justfiles/ox-check/versions.just') }}-${{ github.job }}
         restore-keys: |
-          ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt', 'justfiles/ox-check/versions.just') }}-
+          ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt', 'justfiles/ox-check/rustup-components.txt', 'justfiles/ox-check/versions.just') }}-
           ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-
           ox-check-v1-${{ runner.os }}-${{ runner.arch }}-
         # `.crates.toml` and `.crates2.json` track which cargo-installed
@@ -64,74 +64,46 @@ runs:
 
     # rustup auto-installs the toolchain from rust-toolchain.toml on
     # first cargo invocation, but it doesn't pull profile/component
-    # extras (rustfmt, clippy). Without them, ox-check-fmt and
-    # ox-check-clippy fail with "<tool> is not installed for the
-    # toolchain". This step is unconditional because every OS leg
-    # needs both components.
-    - name: Ensure rustfmt + clippy components are installed
+    # extras. The `ox-check-setup` recipe in step "Install ox-check
+    # toolchains + tools" below handles that exhaustively (reading
+    # `rustup-components.txt` for default-toolchain components and
+    # the pinned-nightly components for miri/careful/etc.) -- we
+    # don't add components inline here anymore. This step exists
+    # only to ensure rustup itself has the default toolchain set up
+    # so subsequent cargo / just calls work.
+    - name: Ensure default toolchain is installed
       shell: bash
-      run: rustup component add rustfmt clippy
+      run: rustup show active-toolchain || rustup default stable
 
-    # cargo-check-external-types and a few other catalog tools require
-    # nightly Rust. Pins live in justfiles/ox-check/versions.just so
-    # recipe interpolation (`{{ rust_nightly }}`) and setup composites
-    # share one source of truth — we extract them via `just --evaluate`
-    # below. Install just first so the extract works.
+    # The catalog recipe `ox-check-setup` needs `just` to run. We
+    # bootstrap just here (chicken-and-egg), then hand off everything
+    # else to `just ox-check-setup binstall`. The recipe is
+    # idempotent and handles its own caching via `_ox-check-require`,
+    # so re-running it on cache-hit runs is cheap.
     - name: Install just
       shell: bash
       run: |
         if ! command -v just >/dev/null 2>&1 ; then
           cargo install --locked just
         fi
-    - name: Resolve pinned nightly toolchains
-      id: nightly
+
+    - name: Install ox-check toolchains + tools
       shell: bash
-      run: |
-        set -euo pipefail
-        rust_nightly=$(just --evaluate rust_nightly)
-        rust_nightly_external_types=$(just --evaluate rust_nightly_external_types)
-        echo "rust_nightly=$rust_nightly" >> "$GITHUB_OUTPUT"
-        echo "rust_nightly_external_types=$rust_nightly_external_types" >> "$GITHUB_OUTPUT"
-        echo "ox-check: pinned nightly toolchains: $rust_nightly, $rust_nightly_external_types"
-    - name: Install pinned nightly toolchains
-      shell: bash
-      # `--component rustfmt` because ox-check-fmt now uses nightly
-      # rustfmt for unstable_features (imports_granularity etc.).
-      # External-types only needs core nightly + rustdoc.
-      run: |
-        set -euo pipefail
-        rustup toolchain install '${{ steps.nightly.outputs.rust_nightly }}' --profile minimal --component rustfmt --no-self-update
-        if [ '${{ steps.nightly.outputs.rust_nightly }}' != '${{ steps.nightly.outputs.rust_nightly_external_types }}' ]; then
-          rustup toolchain install '${{ steps.nightly.outputs.rust_nightly_external_types }}' --profile minimal --no-self-update
-        fi
-    # Bootstrap cargo-binstall so the catalog install can use it. We
-    # pay the cost of compiling binstall itself once (~1 min), then
-    # use it to fetch pre-built binaries for every other tool from
-    # GitHub Releases instead of compiling them from source. On a
-    # cold runner this drops the catalog install phase from
-    # ~30 minutes to ~1 minute. ADO doesn't use this path because
-    # cargo-binstall has unresolved compliance issues for internal
-    # ADO pipelines (the binary registry it pulls from isn't on the
-    # allow-list); ADO sticks with vanilla ``cargo install`` via
-    # the default ``ox-check-tools-install`` argument.
-    - name: Install cargo-binstall
-      shell: bash
-      run: |
-        if ! command -v cargo-binstall >/dev/null 2>&1 ; then
-          cargo install --locked cargo-binstall
-        fi
-    - name: Install catalog tools
-      shell: bash
-      # ox-check-tools-install exits non-zero if any per-tool install
-      # failed (e.g. cargo-mutants doesn't build on
-      # aarch64-pc-windows-msvc due to an upstream winapi
-      # incompatibility). We don't fail the whole job here — recipes
-      # that actually USE a missing tool will fail cleanly via
-      # _ox-check-require at recipe-run time. Recipes that don't
-      # need it (e.g. clippy / fmt when cargo-mutants is missing)
-      # proceed normally.
+      # Idempotent. binstall path downloads prebuilt tool binaries
+      # from each tool's GitHub Releases when available (~1 min cold,
+      # vs ~30 min for source builds). cargo-binstall has unresolved
+      # compliance issues for ADO pipelines, so the ADO backend uses
+      # the default `install` path; GH uses `binstall`.
+      #
+      # ox-check-setup exits non-zero if any per-tool install failed
+      # (e.g. cargo-mutants doesn't build on aarch64-pc-windows-msvc
+      # due to an upstream winapi incompatibility). We don't fail
+      # the whole job here -- recipes that actually USE a missing
+      # tool will fail cleanly via _ox-check-require at recipe-run
+      # time. Recipes that don't need it (e.g. clippy / fmt when
+      # cargo-mutants is missing) proceed normally.
       continue-on-error: true
-      run: just ox-check-tools-install binstall
+      run: just ox-check-setup binstall
 
     # Save the cache as the LAST step of setup, regardless of whether
     # any earlier install step partially failed. `actions/cache@v4`

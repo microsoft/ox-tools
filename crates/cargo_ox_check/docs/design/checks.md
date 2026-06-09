@@ -18,34 +18,62 @@ job per group) and the unit of local invocation through `just` (one `just` recip
 A user (or CI) never has to enumerate individual checks — they operate at the group level.
 
 The **single-tier-per-group** rule is deliberate: if you see `just ox-check-pr-fast` in CI logs,
-you know it is a PR-tier check; if you see `just ox-check-scheduled-runtime`, you know it is
+you know it is a PR-tier check; if you see `just ox-check-scheduled-exhaustive`, you know it is
 scheduled-only. This makes "what gets executed" trivially answerable from the group name.
 
-A consequence is that some checks must appear in two groups — one PR group and one scheduled
-group — when the check should run in both tiers. The two invocations may differ (e.g.
+A consequence is that some checks must appear in two groups -- one PR group and one scheduled
+group -- when the check should run in both tiers. The two invocations may differ (e.g.
 `mutants` runs diff-scoped in PR and full-workspace in scheduled) or be identical (e.g. `tests`
 runs the same way in both, but the scheduled run catches flakes/environmental drift on `main`).
 
 Group recipes follow the pattern `ox-check-<tier>-<group>` (e.g. `ox-check-pr-fast`,
-`ox-check-scheduled-runtime`). The tier prefix removes the need to pick distinct names for groups
+`ox-check-scheduled-exhaustive`). The tier prefix removes the need to pick distinct names for groups
 in different tiers and makes the tier of any failing job obvious from its name alone.
 
-### PR tier (3 groups)
+Visually:
+
+```mermaid
+flowchart LR
+    full([ox-check-full]):::tier
+    pr([ox-check-pr]):::tier
+    sched([ox-check-scheduled]):::tier
+
+    full --> pr
+    full --> sched
+
+    pr --> pr_fast[pr-fast<br/>fmt, clippy, cargo-sort,<br/>license-headers,<br/>ensure-no-cyclic-deps,<br/>ensure-no-default-features,<br/>doc-build, readme-check,<br/>spellcheck, pr-title,<br/>deny, audit, udeps,<br/>semver-check, external-types,<br/>aprz]:::group
+    pr --> pr_slow1[pr-slow1<br/>llvm-cov, doc-test, examples]:::group
+    pr --> pr_slow2[pr-slow2<br/>miri, careful]:::group
+    pr --> pr_slow3[pr-slow3<br/>mutants]:::group
+
+    sched --> s_test[scheduled-test<br/>llvm-cov, doc-test, examples]:::group
+    sched --> s_adv[scheduled-advisories<br/>deny, audit, aprz, clippy]:::group
+    sched --> s_exh[scheduled-exhaustive<br/>mutants-full, cargo-hack, bench]:::group
+
+    classDef tier fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
+    classDef group fill:#f6f8fa,stroke:#586069,stroke-width:1px,text-align:left;
+```
+
+(Tier nodes are the user-facing entry points; group nodes are the unit of CI parallelization. `pr-slow1/2/3` were split out from a single `pr-slow` group so the three workloads run as parallel CI jobs per OS leg rather than sequentially in one job. Locally, `just ox-check-pr-slow` is an umbrella recipe that invokes the three sub-recipes in order.)
+
+### PR tier (4 groups)
 
 | Group              | OS scope                              | Purpose                                                                                                              |
 |--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
-| `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis (including `udeps` and `semver-check`). Cross-OS because clippy, doc-build, udeps, and semver-check all compile per host target. Text/metadata checks (fmt, license-headers, …) run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. `external-types` lives in `scheduled-advisories` instead because it pins a specific nightly rustdoc JSON schema and breaks frequently on toolchain drift. |
-| `pr-test`          | Same default as `pr-fast`             | Code execution: tests (instrumented for coverage), doctests, examples. Coverage reporting is folded in via `cargo llvm-cov nextest`. |
-| `pr-mutants`       | Linux x86_64 + Windows x86_64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | Diff-scoped mutation testing on the change in this PR. Cross-OS to match `oxidizer`'s policy — mutations on cfg-gated code matter. **x86_64-only**: cargo-mutants currently doesn't build on `aarch64-pc-windows-msvc` (upstream `winapi` crate incompat), and the value of mutation testing on the ARM legs doesn't justify the extra wall-clock. |
+| `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `semver-check`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
+| `pr-slow1`         | Same default as `pr-fast`             | Tests + coverage: `llvm-cov` (instrumented `nextest`), `doc-test`, `examples`. Coverage is uploaded once from the canonical x86_64 Linux leg. |
+| `pr-slow2`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri` and `careful`. Impact-scoped via `OX_CHECK_INCLUDE_AFFECTED` so wall-clock is proportional to the PR's blast radius. |
+| `pr-slow3`         | Linux x86_64 + Windows x86_64 + Linux aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | Diff-scoped mutation testing (`mutants --in-diff`). The recipe self-skips on `aarch64-pc-windows-msvc` (cargo-mutants doesn't build there), so the GH windows-arm leg is a no-op rather than a job failure. |
 
-### scheduled tier (4 groups)
+The three `pr-slow*` groups are independent: failures in `pr-slow1` don't block `pr-slow2` or `pr-slow3` from running, and overall PR wall-clock is `max(pr-slow1, pr-slow2, pr-slow3)` per leg rather than the sum. Locally, `just ox-check-pr-slow` is an umbrella recipe that runs all three sub-recipes sequentially so adopters who want "run everything slow" don't have to type three commands.
+
+### scheduled tier (3 groups)
 
 | Group                | OS scope                  | Purpose                                                                                                                                |
 |----------------------|---------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
-| `scheduled-test`       | Same default as `pr-test` | Re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
-| `scheduled-advisories` | Same default as `pr-fast` | Re-runs every check whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain), plus `external-types` (which needs nightly rustdoc and is gated to nightly to avoid blocking PRs on JSON schema drift). Cross-OS because clippy compiles per host. |
-| `scheduled-runtime`    | Same default as `pr-fast` | Tests under stricter runtimes that catch UB and timing/threading bugs: `miri`, `careful`. Both tools work on every Tier 1 Rust target; the surveyed repos (`oxidizer`, `oxidizer-github`) both run them cross-OS, so ox-check does too. |
-| `scheduled-exhaustive` | Linux x86_64 + Windows x86_64 | The expensive whole-workspace permutations that don't fit the PR budget: full `cargo mutants`, `cargo-hack --feature-powerset`, and `cargo bench --no-run` plus a single-iteration smoke run per bench target. Cross-OS to match `oxidizer`'s policy and to give cargo-hack / bench compile coverage for cfg-gated code. **x86_64-only**: same `cargo-mutants` / `winapi` constraint as `pr-mutants`. Adopters who can't afford the full matrix (mutants-full can run for hours per leg) override the matrix in their root workflow / pipeline. |
+| `scheduled-test`       | Same default as `pr-slow1` | Re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
+| `scheduled-advisories` | Same default as `pr-fast` | Re-runs every check whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain). Cross-OS because clippy compiles per host. |
+| `scheduled-exhaustive` | Linux x86_64 + Windows x86_64 | The expensive whole-workspace permutations that don't fit the PR budget: full `cargo mutants`, `cargo-hack --feature-powerset`, and `cargo bench --no-run` plus a single-iteration smoke run per bench target. Cross-OS to match `oxidizer`'s policy and to give cargo-hack / bench compile coverage for cfg-gated code. **x86_64-only**: same `cargo-mutants` / `winapi` constraint as `pr-slow3`. Adopters who can't afford the full matrix (mutants-full can run for hours per leg) override the matrix in their root workflow / pipeline. |
 
 **Backend asymmetry on ARM coverage.** The GitHub backend ships a four-leg default matrix
 (Linux/Windows × x86_64/aarch64) because GH has Microsoft-hosted ARM runners
@@ -59,7 +87,7 @@ backend-specific knobs ([github.md §4](./github.md#4-owned-reusable-workflows) 
 the per-leg runner-label inputs and forking the workflow when the matrix shape itself
 needs to change, [ado.md §4](./ado.md#4-owned-stages-templates) for
 `linuxPool`/`windowsPool`).
-Locally there is no OS matrix; `just ox-check-pr-test` runs against whatever OS the
+Locally there is no OS matrix; `just ox-check-pr-slow` (the umbrella recipe) runs the three sub-recipes in sequence against whatever OS the
 developer is on. See [design.md §8.3](./design.md#83-cross-os-test-matrices) for the
 overall rationale.
 
@@ -90,33 +118,48 @@ that provided the strongest version of the check.
 | `pr-title`                     | Conventional-Commits regex applied to the title in the `PR_TITLE` env var, with a fallback to `git log -1 --pretty=%s HEAD` when unset. Written as a `[script("pwsh")]` recipe (the one check that needs scripting; see [design.md §8.3](./design.md#83-cross-os-test-matrices)). The CI emitter sets `PR_TITLE` on the pr-fast job: GitHub Actions reads `${{ github.event.pull_request.title }}`; ADO reads `$(System.PullRequest.Title)`. Local `just ox-check-pr-fast` works without setup via the git fallback. | oxidizer-github |
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
-| `udeps`                        | `cargo +nightly udeps --workspace --all-targets --all-features` | oxidizer, oxidizer-github |
+| `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` (deliberately NOT `--all-targets`: with it, a dep listed in both `[dependencies]` and `[dev-dependencies]` and used only by tests is reported as "all used" because the dev-deps target satisfies the lookup, masking the unused entry in main `[dependencies]`. Restricting to the default targets matches main repo CI's check and surfaces the real bug.) | oxidizer, oxidizer-github |
 | `semver-check`                 | `cargo semver-checks` per library crate (per-package because `--workspace` fails on bin-only members, and we tolerate "not found in registry" / "no library targets found" for unpublished or bin→lib-transition crates). **Advisory only**: findings do not fail the recipe (breaking changes between unreleased commits are normal — the major-version bump happens at release time, not on every PR). Instead the recipe writes a markdown body to `target/ox-check/comments/semver.md` when there are findings and removes the file when the tree is clean; CI wiring turns presence/absence into a sticky PR comment (see §6 below). | oxidizer-github |
-| `external-types`               | `cargo check-external-types --workspace`                  | oxidizer-github |
+| `external-types`               | `cargo +<pinned-nightly-rustdoc-schema> check-external-types --manifest-path` per library crate (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are skipped). Nightly is pinned narrowly to the rustdoc JSON schema version the tool expects (`rust_nightly_external_types` in `versions.just`); the pin is bumped alongside any cargo-check-external-types upgrade. With the pin in place, the check is deterministic and PR-suitable. | oxidizer-github |
 | `aprz`                         | `cargo aprz check` — third-party risk analysis published on crates.io | oxidizer |
 
-### `pr-test`
+### `pr-slow`
+
+The PR-tier slow checks are split into three independent CI-visible groups —
+`pr-slow1`, `pr-slow2`, `pr-slow3` — that each run as their own job (GitHub) or
+stage (ADO) in parallel. An umbrella `ox-check-pr-slow` recipe is also provided in
+`groups.just` for local use; it invokes the three sub-recipes sequentially so
+adopters can type one command to run "everything slow" without needing the CI
+matrix overhead.
+
+#### `pr-slow1` (tests + coverage)
 
 | Check        | Invocation                                                                  | Source |
 |--------------|-----------------------------------------------------------------------------|--------|
-| `llvm-cov`   | Three steps from one instrumented `cargo llvm-cov nextest --no-report` run: `report --lcov` → `target/coverage/lcov.info`, `report --cobertura` → `target/coverage/cobertura.xml`, `report --html` → `target/coverage/html/` (local viewer). The nextest run produces the test pass/fail signal; the three `report` invocations re-render the cached `.profraw` data in each format without re-running tests. lcov feeds Codecov on GitHub; cobertura feeds `PublishCodeCoverageResults@2` on ADO; HTML is purely a local affordance. No threshold enforcement at the check level. | oxidizer, oxidizer-github |
+| `llvm-cov`   | Three steps from one instrumented `cargo llvm-cov nextest --no-report` run: `report --lcov` -> `target/coverage/lcov.info`, `report --cobertura` -> `target/coverage/cobertura.xml`, `report --html` -> `target/coverage/html/` (local viewer). The nextest run produces the test pass/fail signal; the three `report` invocations re-render the cached `.profraw` data in each format without re-running tests. lcov feeds Codecov on GitHub; cobertura feeds `PublishCodeCoverageResults@2` on ADO; HTML is purely a local affordance. No threshold enforcement at the check level. | oxidizer, oxidizer-github |
 | `doc-test`   | `cargo test --doc --workspace --all-features --locked` (nextest does not run doctests, so this is a separate cargo-test invocation) | oxidizer, oxidizer-github |
-| `examples`   | `cargo build --workspace --examples --all-features --locked` — verifies that example targets compile. Running each example is intentionally not part of the check (examples are not test scaffolding; their runtime behavior isn't part of what we gate on). | oxidizer, oxidizer-github |
+| `examples`   | `cargo build --workspace --examples --all-features --locked` -- verifies that example targets compile. Running each example is intentionally not part of the check (examples are not test scaffolding; their runtime behavior isn't part of what we gate on). | oxidizer, oxidizer-github |
 
-### `pr-mutants`
+This is the same set of checks that used to live in the standalone `pr-test` group; merging into `pr-slow1` removes one CI job from the matrix without changing what runs.
 
-| Check     | Invocation                                                                 | Source |
-|-----------|----------------------------------------------------------------------------|--------|
-| `mutants` | `cargo mutants --in-diff <base>…HEAD --no-shuffle --jobs 0` (diff-scoped)  | oxidizer-github |
+#### `pr-slow2` (stricter-runtime correctness)
 
-The PR mode requires a base ref. Locally, the recipe resolves `BASE_REF` (if set), then
-`origin/main`, then `origin/master`, then errors out. In GitHub Actions the workflow
-passes `${{ github.event.pull_request.base.sha }}`; in ADO the impact step exports
-`$(System.PullRequest.TargetBranch)` as `BASE_REF` and the recipe picks it up.
+| Check     | Invocation                                                                                                                                                           | Source |
+|-----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------|
+| `miri`    | `cargo +<pinned-nightly> miri nextest run` over the impact-affected packages. Slow tests should opt out per-test with `#[cfg_attr(miri, ignore)]` -- ox-check doesn't pass exotic `MIRIFLAGS`; the per-test opt-out is the canonical mechanism. The recipe defaults to `--workspace` locally when no impact env vars are set, so plain `just ox-check-pr-slow2` runs the full miri suite. Recipe passes `--no-tests=pass` so crates with all-FS-tests (skipped under miri) don't fail the run. | oxidizer, oxidizer-github |
+| `careful` | `cargo +<pinned-nightly> careful test --all-features --locked` over the impact-affected packages. cargo-careful uses a debug-instrumented std (extra runtime checks, no validation skipped). Typical slowdown is 2-3x over plain `cargo test`; well within PR budget for the affected set. | oxidizer-github |
+
+#### `pr-slow3` (mutation testing)
+
+| Check     | Invocation                                                                  | Source |
+|-----------|-----------------------------------------------------------------------------|--------|
+| `mutants` | `cargo mutants --in-diff <base>..HEAD --no-shuffle --jobs 0` (diff-scoped). Self-skips on aarch64-pc-windows-msvc where cargo-mutants doesn't build (upstream winapi incompat); other ARM legs run normally. | oxidizer-github |
+
+The mutants check requires a base ref: locally the recipe resolves `BASE_REF` (if set), then `origin/main`, then `origin/master`, then errors out. In GitHub Actions the workflow passes `${{ github.event.pull_request.base.sha }}`; in ADO the impact step exports `$(System.PullRequest.TargetBranch)` as `BASE_REF`.
 
 ### `scheduled-test`
 
-Same three checks as `pr-test` — `llvm-cov`, `doc-test`, `examples` — and the same
+Same three checks as `pr-slow1` -- `llvm-cov`, `doc-test`, `examples` -- and the same
 recipe invocations, with the same output paths (`target/coverage/lcov.info` and
 `target/coverage/cobertura.xml`). The recipe is shared between tiers; only the CI
 wiring around it changes (PR uploads lcov to Codecov / cobertura to ADO from each
@@ -133,24 +176,19 @@ publish a full-coverage snapshot for the current state of `main`.
 | `audit`  | `cargo audit`                                                       | oxidizer |
 | `aprz`   | `cargo aprz check`                                                  | oxidizer |
 | `clippy` | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
-| `udeps`  | `cargo +nightly udeps --workspace --all-targets --all-features`     | oxidizer, oxidizer-github |
 
 These checks share a property: their outcome can change without a commit to this repo.
 `deny`/`audit`/`aprz` consult external databases (RustSec advisory DB, license registries,
 Azure risk indices). `clippy` reflects whatever lint set ships with the currently-installed
-toolchain — even when `rust-toolchain.toml` is pinned, repos using floating channels
+toolchain -- even when `rust-toolchain.toml` is pinned, repos using floating channels
 (`stable`, or msrustup channel pointers like `ms-prod-1.93`) can pick up new lints when the
-pointer is bumped upstream. `udeps` runs on `cargo +nightly` and reflects whatever nightly
-is installed on the runner. Re-running these on the scheduled tier turns "something landed upstream
-yesterday" into a tracked failure rather than an invisible regression discovered next time
-someone opens an unrelated PR.
+pointer is bumped upstream. Re-running these on the scheduled tier turns "something landed
+upstream yesterday" into a tracked failure rather than an invisible regression discovered
+next time someone opens an unrelated PR.
 
-### `scheduled-runtime`
-
-| Check     | Invocation                                                                          | Source |
-|-----------|-------------------------------------------------------------------------------------|--------|
-| `miri`    | `cargo +nightly miri nextest run --workspace`                                       | oxidizer, oxidizer-github |
-| `careful` | `cargo +nightly careful test --workspace --all-features --locked`                   | oxidizer-github |
+(`udeps` and `external-types` use pinned nightlies and are not re-run here: their outcome is
+deterministic given the source + pinned tool versions, so re-running on the same `main`
+commit can't surface anything new.)
 
 ### `scheduled-exhaustive`
 
@@ -182,21 +220,16 @@ duplicating PR signal.
 What that means concretely:
 
 - **Re-run in scheduled** (in addition to PR):
-  - `llvm-cov`, `doc-test`, `examples` (in `scheduled-test`) — non-determinism, environment
+  - `llvm-cov`, `doc-test`, `examples` (in `scheduled-test`) -- non-determinism, environment
     sensitivity, runner drift can produce flakes that the PR run missed.
-  - `deny`, `audit`, `aprz`, `clippy`, `udeps` (in `scheduled-advisories`) — see §2.
-- **Run only in PR** — checks whose outcome is fully determined by the source tree and
+  - `deny`, `audit`, `aprz`, `clippy` (in `scheduled-advisories`) -- see §2.
+- **Run only in PR** -- checks whose outcome is fully determined by the source tree and
   the pinned tool versions, so re-running on the same `main` commit can't surface anything
   new: `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`,
   `ensure-no-default-features`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`,
-  `semver-check`, diff-scoped `mutants`.
-- **Run only in scheduled** — the expensive whole-workspace work that can't fit a PR
-  budget: `miri`, `careful` (in `scheduled-runtime`); full `mutants`,
-  `cargo-hack --feature-powerset`, `bench` (in `scheduled-exhaustive`).
-  Also `external-types` (in `scheduled-advisories`) — it requires nightly rustdoc
-  + compiles cargo-check-external-types from source against nightly + runs
-  rustdoc JSON generation per package, which together exceeded the PR-tier
-  time budget when dogfooded on ox-tools-gh.
+  `udeps`, `semver-check`, `external-types`, `miri`, `careful`, diff-scoped `mutants`.
+- **Run only in scheduled** -- the expensive whole-workspace work that doesn't fit a PR
+  budget: full `mutants`, `cargo-hack --feature-powerset`, `bench` (in `scheduled-exhaustive`).
 
 The single-tier-per-group rule still holds: when a check appears in both tiers it lives in
 two different groups (one PR group, one scheduled group). Repos that want a

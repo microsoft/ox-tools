@@ -73,22 +73,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-check-scheduled-advisories
 
-  scheduled-runtime:
-    # Cross-OS / cross-arch to match the surveyed repos: oxidizer runs
-    # miri on every platform in its matrix; oxidizer-github runs miri
-    # + careful across four legs.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [linux, windows, linux-arm, windows-arm]
-    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
-      || matrix.os == 'windows' && inputs.windows_runner
-      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
-      || inputs.windows_arm_runner }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/ox-check-scheduled-runtime
-
   scheduled-exhaustive:
     # x86_64-only by design: this group includes mutants-full (which
     # doesn't build on aarch64-pc-windows-msvc — winapi crate
