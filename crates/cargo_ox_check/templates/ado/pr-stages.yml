@@ -76,6 +76,16 @@ stages:
                 include_modified: $(include_modified_linux)
                 include_affected: $(include_affected_linux)
                 include_required: $(include_required_linux)
+            # Advisory PR comments. Recipes that surface non-blocking findings
+            # (e.g. cargo-semver-checks) write a markdown body to
+            # `target/ox-check/comments/<name>.md` and exit 0; this step turns
+            # presence/absence of those files into upserts/closures of a
+            # sticky PR comment via the ADO REST API. Runs on the canonical
+            # Linux leg only so the Linux/Windows matrix doesn't race on the
+            # same thread. Skipped (silently) when the build identity lacks
+            # "Contribute to pull requests" so adopters who haven't opted in
+            # to write permissions aren't broken.
+            - template: steps/advisory-comments.yml
       - template: steps/job.yml
         parameters:
           name: windows

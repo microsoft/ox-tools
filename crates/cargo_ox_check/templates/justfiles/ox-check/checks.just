@@ -30,9 +30,29 @@
 #     here. Scheduled-exhaustive recipes (mutants-full) are also unscoped
 #     by design.
 #
-# Local invocation (no impact wiring): all three env vars are unset;
-# modified recipes run unconditionally and affected/required recipes
-# default to --workspace.
+# Local invocation (no impact wiring): all three env vars are unset
+# (recipes use the `?? "--workspace"` null-coalescing fallback below);
+# modified-tier recipes simply skip the splice and run their
+# workspace-wide tool; affected/required-tier recipes splat
+# "--workspace" when the env var is unset.
+#
+# Preparation contract: when a recipe reaches the cargo call, the
+# env var is one of:
+#
+#   * unset                       - local run; the recipe substitutes
+#                                    "--workspace" via `?? "--workspace"`
+#   * "--package A --package B"   - emitted by the CI impact step when
+#                                    the tier has members
+#   * "--skip"                    - emitted by the CI impact step when
+#                                    the tier is empty (recipe exits 0)
+#
+# This lets the simple recipes splat the var directly with
+#   & cargo X @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) ...
+# and reduces the per-recipe boilerplate to a single one-line skip
+# guard plus the cargo invocation.
+#
+# Modified-tier recipes never splice the env var into cargo (their
+# tools are workspace-wide); they only check the skip sentinel.
 #
 # Every recipe whose body uses multi-line conditionals or env-var
 # splicing is annotated with [script("pwsh")]. pwsh is preinstalled on
@@ -41,8 +61,9 @@
 # installer. We chose pwsh over bash because just's shebang dispatch
 # requires `cygpath` on Windows (only on PATH from inside Git Bash),
 # while [script("pwsh")] works from plain PowerShell with no PATH
-# augmentation. The existing _ox-check-require pwsh precedent already
-# established pwsh as a tools-floor requirement.
+# augmentation. The `??` null-coalescing operator used in the splat
+# requires pwsh 7+, which is the floor we already require via
+# _ox-check-require pwsh.
 #
 # Single-command recipes (cargo deny check, cargo audit) are plain
 # just recipes that inherit the adopter's default shell — they're
@@ -64,10 +85,7 @@
 [script("pwsh")]
 ox-check-fmt:
     $ErrorActionPreference = 'Stop'
-    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
-        Write-Host 'ox-check-fmt: no modified packages; skipping'
-        exit 0
-    }
+    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo '+{{ rust_nightly }}' fmt --all --check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -80,22 +98,15 @@ ox-check-fmt:
 [script("pwsh")]
 ox-check-clippy:
     $ErrorActionPreference = 'Stop'
-    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
-        Write-Host 'ox-check-clippy: no affected packages; skipping'
-        exit 0
-    }
-    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
-    & cargo clippy @pkg --all-targets --all-features --locked "--" '-D' 'warnings'
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    & cargo clippy @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --all-targets --all-features --locked "--" '-D' 'warnings'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
 [script("pwsh")]
 ox-check-cargo-sort: (_ox-check-require "cargo-sort")
     $ErrorActionPreference = 'Stop'
-    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
-        Write-Host 'ox-check-cargo-sort: no modified packages; skipping'
-        exit 0
-    }
+    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo sort --workspace --check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -103,10 +114,7 @@ ox-check-cargo-sort: (_ox-check-require "cargo-sort")
 [script("pwsh")]
 ox-check-license-headers: (_ox-check-require "cargo-heather")
     $ErrorActionPreference = 'Stop'
-    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
-        Write-Host 'ox-check-license-headers: no modified packages; skipping'
-        exit 0
-    }
+    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo heather
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -114,10 +122,7 @@ ox-check-license-headers: (_ox-check-require "cargo-heather")
 [script("pwsh")]
 ox-check-ensure-no-cyclic-deps: (_ox-check-require "cargo-ensure-no-cyclic-deps")
     $ErrorActionPreference = 'Stop'
-    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
-        Write-Host 'ox-check-ensure-no-cyclic-deps: no modified packages; skipping'
-        exit 0
-    }
+    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo ensure-no-cyclic-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -125,10 +130,7 @@ ox-check-ensure-no-cyclic-deps: (_ox-check-require "cargo-ensure-no-cyclic-deps"
 [script("pwsh")]
 ox-check-ensure-no-default-features: (_ox-check-require "cargo-ensure-no-default-features")
     $ErrorActionPreference = 'Stop'
-    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
-        Write-Host 'ox-check-ensure-no-default-features: no modified packages; skipping'
-        exit 0
-    }
+    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo ensure-no-default-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -138,13 +140,9 @@ ox-check-ensure-no-default-features: (_ox-check-require "cargo-ensure-no-default
 [script("pwsh")]
 ox-check-doc-build:
     $ErrorActionPreference = 'Stop'
-    if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') {
-        Write-Host 'ox-check-doc-build: no required packages; skipping'
-        exit 0
-    }
-    $pkg = @(if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { '--workspace' })
+    if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
     $env:RUSTDOCFLAGS = '-D warnings'
-    & cargo doc @pkg --all-features --no-deps
+    & cargo doc @(-split ($env:OX_CHECK_INCLUDE_REQUIRED ?? "--workspace")) --all-features --no-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
@@ -161,6 +159,14 @@ ox-check-doc-build:
 #
 # Bin-only crates have no library rustdoc to base a README on, so they
 # are skipped as well (cargo doc2readme requires a library target).
+# TODO(ox-check-runner): even after a `cargo ox-run` helper absorbs the
+# skip/splat preamble, this recipe stays multi-step: per-crate
+# iteration over library targets, cargo-metadata-driven opt-outs
+# (publish=false, [package.metadata.ox-gen-readme] disable), per-crate
+# Push-Location into the crate dir (cargo-doc2readme is CWD-sensitive
+# rather than --manifest-path-driven), and per-crate template-path
+# resolution. The OX_CHECK_INCLUDE_MODIFIED value would still need to
+# be intersected with the lib-crate set rather than splatted into cargo.
 [script("pwsh")]
 ox-check-readme-check: (_ox-check-require "cargo-doc2readme")
     $ErrorActionPreference = 'Stop'
@@ -301,12 +307,8 @@ ox-check-audit: (_ox-check-require "cargo-audit")
 [script("pwsh")]
 ox-check-udeps: (_ox-check-require "cargo-udeps")
     $ErrorActionPreference = 'Stop'
-    if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') {
-        Write-Host 'ox-check-udeps: no required packages; skipping'
-        exit 0
-    }
-    $pkg = @(if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { '--workspace' })
-    & cargo '+{{ rust_nightly }}' udeps @pkg --all-targets --all-features
+    if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
+    & cargo '+{{ rust_nightly }}' udeps @(-split ($env:OX_CHECK_INCLUDE_REQUIRED ?? "--workspace")) --all-targets --all-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier (compares published API of changed crates against the
@@ -321,11 +323,32 @@ ox-check-udeps: (_ox-check-require "cargo-udeps")
 # We pre-filter to library-bearing crates from cargo metadata, then
 # run cargo-semver-checks per-package and tolerate the
 # "no-comparable-baseline" failure modes.
+#
+# Findings policy: this recipe is *advisory*. Real SemVer findings do
+# NOT fail the recipe -- breaking changes between unreleased commits
+# are normal (the major-version bump happens at release time, not on
+# every PR). Instead, when there are findings we write a markdown
+# advisory body to `target/ox-check/comments/semver.md`; when the
+# tree is clean we remove that file. CI wiring (GH:
+# marocchino/sticky-pull-request-comment; ADO: pwsh + REST API)
+# inspects the file after the recipe and upserts / clears a sticky
+# PR comment accordingly. Local invocation gets the same file
+# written under target/ for inspection.
+#
+# TODO(ox-check-runner): even after a `cargo ox-run` helper absorbs the
+# skip/splat preamble, this recipe stays multi-step: cargo-metadata
+# filter to library crates (cargo-semver-checks --workspace fails on
+# bin-only workspaces), intersect OX_CHECK_INCLUDE_AFFECTED with that
+# set, then per-crate invocation with selective error tolerance for
+# unpublished crates ("not found in registry") and bin->bin+lib
+# transitions ("no library targets found").
 [script("pwsh")]
 ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
     $ErrorActionPreference = 'Stop'
+    $commentFile = 'target/ox-check/comments/semver.md'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
         Write-Host 'ox-check-semver-check: no affected packages; skipping'
+        Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
         exit 0
     }
     $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
@@ -355,9 +378,10 @@ ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
     }
     if ($packages.Count -eq 0) {
         Write-Host 'ox-check-semver-check: no affected library crates; skipping'
+        Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
         exit 0
     }
-    $hadRealFailure = $false
+    $findings = New-Object System.Collections.Generic.List[string]
     foreach ($p in $packages) {
         Write-Host "ox-check-semver-check: $p"
         $output = (& cargo semver-checks --package $p 2>&1) | Out-String
@@ -366,11 +390,45 @@ ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
                 Write-Host "  $p has no comparable baseline; skipping (likely unpublished or bin->lib transition)" -ForegroundColor Yellow
             } else {
                 Write-Host $output
-                $hadRealFailure = $true
+                # Append a per-crate findings block. Using one-line-at-a-time
+                # appends keeps the markdown free of pwsh backtick-escape
+                # gymnastics (single-quoted literals + the natural `n join
+                # produce clean LF newlines and unambiguous triple-backticks).
+                $findings.Add('### `' + $p + '`') | Out-Null
+                $findings.Add('') | Out-Null
+                $findings.Add('```') | Out-Null
+                foreach ($line in ($output.TrimEnd() -split "`r?`n")) {
+                    $findings.Add($line.TrimEnd()) | Out-Null
+                }
+                $findings.Add('```') | Out-Null
+                $findings.Add('') | Out-Null
             }
         }
     }
-    if ($hadRealFailure) { exit 1 }
+    [System.IO.Directory]::CreateDirectory((Split-Path -Parent $commentFile)) | Out-Null
+    if ($findings.Count -gt 0) {
+        # Body starts with an HTML-comment marker so the ADO wiring can
+        # locate the existing thread on subsequent runs (ADO has no
+        # native "sticky comment header"; the marker is invisible to
+        # human readers). Marocchino on GH uses its own `header:` input
+        # and ignores the marker, but having it in the body keeps a
+        # single source of truth across backends.
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add('<!-- ox-check-semver -->') | Out-Null
+        $lines.Add('## :warning: Potential breaking changes detected') | Out-Null
+        $lines.Add('') | Out-Null
+        $lines.Add('`cargo semver-checks` flagged the following on this PR. This is **informational** -- breaking changes between commits are expected; the major-version bump happens at release time, not on every PR.') | Out-Null
+        $lines.Add('') | Out-Null
+        foreach ($f in $findings) { $lines.Add($f) | Out-Null }
+        $body = ($lines -join "`n") + "`n"
+        Set-Content -LiteralPath $commentFile -Value $body -Encoding UTF8 -NoNewline
+        Write-Host ''
+        Write-Host "ox-check-semver-check: wrote advisory comment to $commentFile (recipe exits 0; CI will upsert a PR comment)" -ForegroundColor Yellow
+    } else {
+        Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
+    }
+    # Advisory: always exit 0. CI wiring posts/clears the PR comment.
+    exit 0
 
 # Affected tier (lints public API of changed crates and rev-deps).
 #
@@ -378,6 +436,12 @@ ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
 # only --manifest-path. Iterate the affected library crates and run
 # the tool once each, pointing at the crate's Cargo.toml. Bin-only
 # crates have no public API surface and are skipped.
+# TODO(ox-check-runner): even after a `cargo ox-run` helper absorbs the
+# skip/splat preamble, this recipe stays multi-step: cargo-check-
+# external-types is per-manifest (no --package/--workspace), so we
+# build a name->manifest map from cargo metadata, filter to lib crates,
+# intersect with OX_CHECK_INCLUDE_AFFECTED, and call the tool once per
+# crate. Hard-fails on errors (no tolerance, unlike semver-check).
 [script("pwsh")]
 ox-check-external-types: (_ox-check-require "cargo-check-external-types")
     $ErrorActionPreference = 'Stop'
@@ -477,24 +541,16 @@ ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "carg
 [script("pwsh")]
 ox-check-doc-test:
     $ErrorActionPreference = 'Stop'
-    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
-        Write-Host 'ox-check-doc-test: no affected packages; skipping'
-        exit 0
-    }
-    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
-    & cargo test --doc @pkg --all-features --locked
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    & cargo test --doc @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier.
 [script("pwsh")]
 ox-check-examples:
     $ErrorActionPreference = 'Stop'
-    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
-        Write-Host 'ox-check-examples: no affected packages; skipping'
-        exit 0
-    }
-    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
-    & cargo build @pkg --examples --all-features --locked
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    & cargo build @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --examples --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # === pr-mutants members =================================================
@@ -548,23 +604,15 @@ ox-check-mutants: (_ox-check-require "cargo-mutants")
 [script("pwsh")]
 ox-check-miri:
     $ErrorActionPreference = 'Stop'
-    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
-        Write-Host 'ox-check-miri: no affected packages; skipping'
-        exit 0
-    }
-    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
-    & cargo '+{{ rust_nightly }}' miri nextest run @pkg
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    & cargo '+{{ rust_nightly }}' miri nextest run @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace"))
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 [script("pwsh")]
 ox-check-careful: (_ox-check-require "cargo-careful")
     $ErrorActionPreference = 'Stop'
-    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
-        Write-Host 'ox-check-careful: no affected packages; skipping'
-        exit 0
-    }
-    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
-    & cargo '+{{ rust_nightly }}' careful test @pkg --all-features --locked
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    & cargo '+{{ rust_nightly }}' careful test @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # === nightly-exhaustive members =========================================
@@ -580,22 +628,15 @@ ox-check-mutants-full: (_ox-check-require "cargo-mutants")
 [script("pwsh")]
 ox-check-cargo-hack: (_ox-check-require "cargo-hack")
     $ErrorActionPreference = 'Stop'
-    if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') {
-        Write-Host 'ox-check-cargo-hack: no required packages; skipping'
-        exit 0
-    }
-    $pkg = @(if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { '--workspace' })
-    & cargo hack @pkg --feature-powerset --depth 2 check
+    if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
+    & cargo hack @(-split ($env:OX_CHECK_INCLUDE_REQUIRED ?? "--workspace")) --feature-powerset --depth 2 check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier.
 [script("pwsh")]
 ox-check-bench:
     $ErrorActionPreference = 'Stop'
-    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
-        Write-Host 'ox-check-bench: no affected packages; skipping'
-        exit 0
-    }
-    $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
-    & cargo bench @pkg --all-features --no-run
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    & cargo bench @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --all-features --no-run
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

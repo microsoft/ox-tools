@@ -133,6 +133,7 @@ e.g.
 emoji
 enum
 enums
+env
 EOF
 extens
 FFI-compatible
@@ -345,6 +346,7 @@ submodule
 submodules
 SubstratePT
 subtrait
+subtree
 sudo
 supertrait
 supertraits

@@ -527,3 +527,57 @@ On the scheduled upload the step additionally passes `flags: scheduled` so the t
 ox-check does not gate the PR on coverage. The lcov upload is informational; Codecov's
 own status check is the gating layer when the adopter wants one (configured in Codecov,
 visible as a separate required check in branch protection).
+
+## 11. Advisory PR comments
+
+Recipes that surface non-blocking findings exit 0 and write a markdown body to
+`target/ox-check/comments/<NAME>.md` (see [checks.md §6](./checks.md#6-advisory-pr-comments)
+for the cross-backend convention). The GitHub backend turns presence/absence of those
+files into upserts/deletions of a sticky PR comment via
+[`marocchino/sticky-pull-request-comment@v3`](https://github.com/marocchino/sticky-pull-request-comment).
+
+The wiring lives in the `pr-fast` job of `ox-check-pr-impl.yml` (the only group whose
+recipes emit comments today). Two steps run after the composite that executes the
+`pr-fast` group:
+
+```yaml
+- name: Upsert ox-check-semver advisory
+  if: always() && github.event_name == 'pull_request' && matrix.os == 'linux'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && hashFiles('target/ox-check/comments/semver.md') != ''
+  uses: marocchino/sticky-pull-request-comment@v3
+  with:
+    header: ox-check-semver
+    path: target/ox-check/comments/semver.md
+- name: Clear ox-check-semver advisory
+  if: always() && github.event_name == 'pull_request' && matrix.os == 'linux'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && hashFiles('target/ox-check/comments/semver.md') == ''
+  uses: marocchino/sticky-pull-request-comment@v3
+  with:
+    header: ox-check-semver
+    delete: true
+```
+
+Conditions explained:
+
+- `always()` keeps the comment in sync even if an unrelated `pr-fast` check failed; the
+  advisory state is independent of the rest of the job's pass/fail.
+- `github.event_name == 'pull_request'` skips the steps on `merge_group` and other
+  triggers where there's no PR thread to post to.
+- `matrix.os == 'linux'` picks the canonical x86_64 Linux leg so the four-OS matrix
+  doesn't race on the same comment.
+- `head.repo.full_name == github.repository` skips fork PRs. GitHub doesn't grant
+  `pull-requests: write` to fork-PR workflow runs by default, so the action would 403.
+
+Permissions: the reusable workflow's caller (`ox-check-pr.yml`) declares
+`pull-requests: write` on the `ox-check-pr` job that calls `ox-check-pr-impl.yml`. The
+top-level `permissions:` block stays at `contents: read` so unrelated reads in the same
+workflow are still least-privilege.
+
+Adding a new advisory check is a two-step change: the recipe writes
+`target/ox-check/comments/<NEW>.md` (and removes it on a clean run); the workflow gains
+a matching `Upsert ox-check-<NEW>` / `Clear ox-check-<NEW>` pair with
+`header: ox-check-<NEW>`. There's deliberately no auto-discovery loop over the
+convention dir — explicit per-check steps keep stale comments deterministically
+clearable when a check is removed from the catalog.

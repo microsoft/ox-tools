@@ -19,5 +19,8 @@ jobs:
     uses: ./.github/workflows/ox-check-pr-impl.yml
     permissions:
       contents: read
-      pull-requests: read
+      # Write needed so the pr-fast job can upsert/clear the sticky PR
+      # comment carrying the cargo-semver-checks advisory (and any
+      # future advisory checks that emit target/ox-check/comments/*).
+      pull-requests: write
     secrets: inherit

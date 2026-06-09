@@ -23,6 +23,15 @@ pub const SETUP_STEP: &str = include_str!("../../templates/ado/steps/setup.yml")
 /// Embedded body of the cargo-delta impact step template.
 pub const IMPACT_STEP: &str = include_str!("../../templates/ado/steps/impact.yml");
 
+/// Embedded body of the advisory-comments step template.
+///
+/// Posts/closes sticky PR comments for advisory checks (see
+/// [`checks.md §6`](../../../docs/design/checks.md#6-advisory-pr-comments)
+/// and [`ado.md §11`](../../../docs/design/ado.md#11-advisory-pr-comments)).
+/// Referenced from the `pr_fast` Linux job in `pr-stages.yml` via
+/// `- template: steps/advisory-comments.yml`.
+pub const ADVISORY_COMMENTS_STEP: &str = include_str!("../../templates/ado/steps/advisory-comments.yml");
+
 /// Embedded body of the dirty-file job wrapper.
 ///
 /// Every job in `pr.yml` / `nightly.yml` is rendered through this
@@ -124,7 +133,7 @@ pub fn plan_ado_backend(repo_root: &Path, manifest: &Manifest) -> Result<Vec<Pla
 ///
 /// Propagates I/O errors from any per-file emitter.
 pub fn plan_step_templates(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>, AppError> {
-    let mut items = Vec::with_capacity(GROUPS.len() + 3);
+    let mut items = Vec::with_capacity(GROUPS.len() + 4);
     items.push(plan_owned_file(
         repo_root,
         manifest,
@@ -136,6 +145,12 @@ pub fn plan_step_templates(repo_root: &Path, manifest: &Manifest) -> Result<Vec<
         manifest,
         ".pipelines/ox-check/steps/impact.yml",
         IMPACT_STEP,
+    )?);
+    items.push(plan_owned_file(
+        repo_root,
+        manifest,
+        ".pipelines/ox-check/steps/advisory-comments.yml",
+        ADVISORY_COMMENTS_STEP,
     )?);
     items.push(plan_owned_file(
         repo_root,
@@ -249,10 +264,11 @@ mod tests {
     }
 
     #[test]
-    fn plan_step_templates_emits_setup_impact_job_wrapper_plus_seven_groups() {
+    fn plan_step_templates_emits_setup_impact_advisory_job_wrapper_plus_groups() {
         let tmp = TempDir::new().unwrap();
         let items = plan_step_templates(tmp.path(), &Manifest::default()).unwrap();
-        assert_eq!(items.len(), GROUPS.len() + 3);
+        // 4 fixed step templates (setup, impact, advisory-comments, job) + one per group.
+        assert_eq!(items.len(), GROUPS.len() + 4);
         for item in &items {
             assert_eq!(item.decision, Decision::Write);
         }

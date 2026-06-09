@@ -91,7 +91,7 @@ that provided the strongest version of the check.
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
 | `udeps`                        | `cargo +nightly udeps --workspace --all-targets --all-features` | oxidizer, oxidizer-github |
-| `semver-check`                 | `cargo semver-checks --workspace`                         | oxidizer-github |
+| `semver-check`                 | `cargo semver-checks` per library crate (per-package because `--workspace` fails on bin-only members, and we tolerate "not found in registry" / "no library targets found" for unpublished or bin→lib-transition crates). **Advisory only**: findings do not fail the recipe (breaking changes between unreleased commits are normal — the major-version bump happens at release time, not on every PR). Instead the recipe writes a markdown body to `target/ox-check/comments/semver.md` when there are findings and removes the file when the tree is clean; CI wiring turns presence/absence into a sticky PR comment (see §6 below). | oxidizer-github |
 | `external-types`               | `cargo check-external-types --workspace`                  | oxidizer-github |
 | `aprz`                         | `cargo aprz check` — third-party risk analysis published on crates.io | oxidizer |
 
@@ -264,3 +264,56 @@ bias toward full runs whenever config changes; (2) `unscoped` checks (`deny`, `a
 `aprz`, `pr-title`, `mutants-full`) always run regardless of impact analysis;
 (3) scheduled always runs full-workspace, catching anything the PR-scoping missed within 24
 hours;
+
+## 6. Advisory PR comments
+
+Some checks surface findings that are informative for the reviewer but should not block
+the PR. The canonical example is `semver-check`: breaking changes between unreleased
+commits are normal, and forcing every breaking-API PR to bump the major version (or wait
+on a release) would push enforcement to the wrong moment in the lifecycle. The change is
+verifiable at release time, not per PR.
+
+To carry this signal without making the recipe non-zero, ox-check uses a single shared
+convention:
+
+1. **Recipe writes a file**. Advisory recipes write a complete markdown body to a
+   well-known path, then exit 0. The convention is
+   `target/ox-check/comments/<NAME>.md`, where `<NAME>` matches the recipe stem
+   (`semver` for `ox-check-semver-check`). When the recipe has nothing to report it
+   removes that file. The body's first line is an invisible HTML marker
+   (`<!-- ox-check-<NAME> -->`) so a backend without a native "sticky comment header"
+   concept (ADO) can find an existing thread to update.
+2. **CI wiring upserts a sticky PR comment**. After each PR job that runs an
+   advisory-emitting recipe, ox-check's CI templates inspect the convention directory
+   and:
+   - if `<NAME>.md` exists, upsert a sticky PR comment headed `ox-check-<NAME>` with the
+     file's contents;
+   - if `<NAME>.md` does not exist (the recipe removed it because the tree is now
+     clean), clear any prior sticky comment with that header.
+3. **One canonical leg per matrix**. CI runs the same recipe on multiple OS legs; the
+   upsert/clear steps run only on the x86_64 Linux leg so the matrix doesn't race on the
+   same PR thread. The recipe still writes the file on every leg (local-vs-CI parity).
+
+Backend wiring:
+
+- **GitHub Actions** — [`marocchino/sticky-pull-request-comment@v3`](https://github.com/marocchino/sticky-pull-request-comment)
+  is invoked twice: with `path:` to upsert when the file exists, and with `delete: true`
+  to clear when it does not. The workflow's reusable job declares
+  `permissions: pull-requests: write`. Fork PRs are skipped via a
+  `github.event.pull_request.head.repo.full_name == github.repository` guard because
+  forks can't be granted write tokens.
+- **Azure DevOps Pipelines** — a pwsh step uses the Azure DevOps REST API
+  (`$(System.AccessToken)` + the project-collection build identity's "Contribute to
+  pull requests" permission) to scan PR threads for the HTML marker, then `PATCH`s the
+  thread's first comment when the file exists or sets the thread `status: closed` when
+  it does not.
+
+Local runs (no PR context) just write/remove the file; nothing posts it. This keeps the
+file useful as a self-service diagnostic and makes the behaviour bit-identical between
+local and CI.
+
+Currently `semver-check` is the only advisory-emitting recipe. The convention extends
+to any future check that surfaces non-blocking findings (e.g. coverage deltas, security
+advisories) by following the same `target/ox-check/comments/<NAME>.md` ↔
+`ox-check-<NAME>` mapping; the catalog's wiring templates list each known file
+explicitly so stale comments can be cleared deterministically.

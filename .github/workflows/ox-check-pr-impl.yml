@@ -97,6 +97,28 @@ jobs:
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
+      # Advisory PR comments. Recipes that surface non-blocking findings
+      # (e.g. cargo-semver-checks) write a markdown body to
+      # `target/ox-check/comments/<name>.md` and exit 0. The steps below
+      # turn presence/absence of those files into upserts/deletions of
+      # a sticky PR comment. We post from the canonical x86_64 Linux leg
+      # only so the matrix doesn't race on the same comment, and we use
+      # `always()` so the comment is updated even when an unrelated
+      # check in pr-fast failed. The `head.repo.full_name ==
+      # github.repository` guard skips fork PRs (which can't be granted
+      # write tokens).
+      - name: Upsert ox-check-semver advisory
+        if: always() && github.event_name == 'pull_request' && matrix.os == 'linux' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('target/ox-check/comments/semver.md') != ''
+        uses: marocchino/sticky-pull-request-comment@v3
+        with:
+          header: ox-check-semver
+          path: target/ox-check/comments/semver.md
+      - name: Clear ox-check-semver advisory
+        if: always() && github.event_name == 'pull_request' && matrix.os == 'linux' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('target/ox-check/comments/semver.md') == ''
+        uses: marocchino/sticky-pull-request-comment@v3
+        with:
+          header: ox-check-semver
+          delete: true
 
   pr-test:
     needs: [impact-linux, impact-windows]
