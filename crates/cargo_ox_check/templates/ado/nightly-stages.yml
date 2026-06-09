@@ -1,0 +1,53 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+parameters:
+  - name: linuxPool
+    type: object
+    default: { vmImage: ubuntu-latest }
+  - name: windowsPool
+    type: object
+    default: { vmImage: windows-latest }
+
+stages:
+  - stage: nightly_test
+    displayName: ox-check nightly-test
+    jobs:
+      - job: linux
+        pool: ${{ parameters.linuxPool }}
+        steps:
+          - template: steps/nightly-test.yml
+          - publish: target/llvm-cov/nightly.lcov
+            artifact: nightly-coverage-lcov
+            condition: succeededOrFailed()
+      - job: windows
+        pool: ${{ parameters.windowsPool }}
+        steps:
+          - template: steps/nightly-test.yml
+
+  - stage: nightly_advisories
+    displayName: ox-check nightly-advisories
+    dependsOn: []
+    pool: ${{ parameters.linuxPool }}
+    jobs:
+      - job: nightly_advisories
+        steps:
+          - template: steps/nightly-advisories.yml
+
+  - stage: nightly_runtime
+    displayName: ox-check nightly-runtime
+    dependsOn: []
+    pool: ${{ parameters.linuxPool }}
+    jobs:
+      - job: nightly_runtime
+        steps:
+          - template: steps/nightly-runtime.yml
+
+  - stage: nightly_exhaustive
+    displayName: ox-check nightly-exhaustive
+    dependsOn: []
+    pool: ${{ parameters.linuxPool }}
+    jobs:
+      - job: nightly_exhaustive
+        steps:
+          - template: steps/nightly-exhaustive.yml

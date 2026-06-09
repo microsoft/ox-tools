@@ -1,0 +1,51 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# Verifies that the in-tree state of cargo-ox-check's emitted artifacts
+# matches what the binary built from this PR would render. The job:
+#
+# 1. Builds cargo-ox-check from the PR branch.
+# 2. Runs `cargo ox-check update --dry-run` against the repo root.
+# 3. Fails iff the binary would write or propose anything.
+#
+# This is the primary dogfooding mechanism described in
+# crates/cargo_ox_check/docs/verification.md.
+#
+# Adopters (the maintainers running `cargo ox-check update` after a
+# catalog change) are responsible for landing the regenerated files
+# alongside the catalog change in the same PR.
+name: regenerate-check
+
+on:
+  pull_request:
+    paths:
+      - "crates/cargo_ox_check/**"
+      - ".github/workflows/regenerate-check.yml"
+  merge_group: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: regenerate-check-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regenerate-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build cargo-ox-check
+        run: cargo build --locked -p cargo-ox-check
+      - name: Verify in-tree state matches templates
+        run: |
+          # Add target/debug to PATH so cargo finds the freshly built binary
+          # as a cargo subcommand.
+          export PATH="$PWD/target/debug:$PATH"
+          if ! cargo ox-check update --dry-run ; then
+            echo "::error::Repository ox-check state is out of date." \
+                 "Run 'cargo run -p cargo-ox-check -- ox-check update'" \
+                 "and commit the diff."
+            exit 1
+          fi

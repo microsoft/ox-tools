@@ -1,0 +1,31 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+name: ox-check-impact
+description: |
+  Compute the cargo-delta impact set for this PR and emit two outputs:
+    excludes - comma-separated list of crates not touched by the diff
+    skip     - "true" iff no ox-check-relevant files changed at all
+outputs:
+  excludes:
+    description: Comma-separated package excludes
+    value: ${{ steps.compute.outputs.excludes }}
+  skip:
+    description: Whether all ox-check groups should be skipped this run
+    value: ${{ steps.compute.outputs.skip }}
+runs:
+  using: composite
+  steps:
+    - name: Install cargo-delta
+      shell: bash
+      run: cargo install --locked cargo-delta
+    - id: compute
+      name: Compute impact
+      shell: bash
+      run: |
+        base="${BASE_REF:-${GITHUB_BASE_REF:-origin/main}}"
+        result="$(cargo delta impact --base "$base" --format json || echo '{}')"
+        excludes="$(printf '%s' "$result" | jq -r '.excludes // [] | join(",")')"
+        skip="$(printf '%s' "$result" | jq -r '.skip // false')"
+        echo "excludes=$excludes" >> "$GITHUB_OUTPUT"
+        echo "skip=$skip" >> "$GITHUB_OUTPUT"

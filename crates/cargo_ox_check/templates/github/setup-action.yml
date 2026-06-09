@@ -1,0 +1,17 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+name: ox-check-setup
+description: Install `just` and the catalog of cargo tools for ox-check check groups.
+runs:
+  using: composite
+  steps:
+    - name: Install just
+      shell: bash
+      run: |
+        if ! command -v just >/dev/null 2>&1 ; then
+          cargo install --locked just
+        fi
+    - name: Install catalog tools
+      shell: bash
+      run: just ox-check-tools-install

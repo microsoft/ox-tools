@@ -76,6 +76,7 @@ rustc-hash = { version = "2.1.0", default-features = false }
 serde = { version = "1.0.228", default-features = false }
 serde_core = { version = "1.0.228", default-features = false }
 serde_json = { version = "1.0.145", default-features = false }
+sha2 = { version = "0.10.9", default-features = false }
 smallvec = { version = "1.15.1", default-features = false }
 static_assertions = { version = "1.1.0", default-features = false }
 syn = { version = "2.0.111", default-features = false }
@@ -84,6 +85,7 @@ thiserror = { version = "2.0.17", default-features = false }
 time = { version = "0.3.47", default-features = false }
 tokio = { version = "1.48.0", default-features = false }
 toml = { version = "1.1.2", default-features = false }
+toml_edit = { version = "0.22.22", default-features = false, features = ["parse", "display"] }
 tower = { version = "0.5.2", default-features = false }
 tower-layer = { version = "0.3.3", default-features = false }
 tower-service = { version = "0.3.3", default-features = false }
