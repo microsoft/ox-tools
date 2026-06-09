@@ -7,19 +7,29 @@ on:
   workflow_call:
     inputs:
       test_os:
-        description: Comma-separated OS list for pr-test matrix (linux, windows, macos).
+        description: |
+          Comma-separated OS list for pr-test matrix. Recognized values:
+          linux, windows, linux-arm, windows-arm, macos.
         type: string
-        default: linux,windows
+        default: linux,windows,linux-arm,windows-arm
       linux_runner:
-        description: Runner label for Linux jobs.
+        description: Runner label for x86_64 Linux jobs.
         type: string
         default: ubuntu-latest
       windows_runner:
-        description: Runner label for Windows jobs.
+        description: Runner label for x86_64 Windows jobs.
         type: string
         default: windows-latest
+      linux_arm_runner:
+        description: Runner label for aarch64 Linux jobs.
+        type: string
+        default: ubuntu-24.04-arm
+      windows_arm_runner:
+        description: Runner label for aarch64 Windows jobs.
+        type: string
+        default: windows-11-arm
       macos_runner:
-        description: Runner label for macOS jobs.
+        description: Runner label for macOS jobs (only used when test_os includes macos).
         type: string
         default: macos-latest
     secrets:
@@ -33,8 +43,9 @@ jobs:
   impact:
     runs-on: ${{ inputs.linux_runner }}
     outputs:
-      excludes: ${{ steps.delta.outputs.excludes }}
-      skip: ${{ steps.delta.outputs.skip }}
+      include_modified: ${{ steps.delta.outputs.include_modified }}
+      include_affected: ${{ steps.delta.outputs.include_affected }}
+      include_required: ${{ steps.delta.outputs.include_required }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,14 +54,28 @@ jobs:
         uses: ./.github/actions/ox-check-impact
 
   pr-fast:
+    # Cross-OS because pr-fast contains compile-sensitive checks
+    # (clippy, doc-build, udeps, semver-check, external-types) whose
+    # results can differ across host OS / architecture for crates that
+    # use #[cfg(target_os = ...)] or #[cfg(target_arch = ...)] gating.
+    # Text/metadata checks in this group run on every leg too — the
+    # cost is negligible compared to a separate job's setup overhead.
     needs: impact
-    runs-on: ${{ inputs.linux_runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-check-pr-fast
         with:
-          excludes: ${{ needs.impact.outputs.excludes }}
-          skip: ${{ needs.impact.outputs.skip }}
+          include_modified: ${{ needs.impact.outputs.include_modified }}
+          include_affected: ${{ needs.impact.outputs.include_affected }}
+          include_required: ${{ needs.impact.outputs.include_required }}
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
 
@@ -62,15 +87,22 @@ jobs:
         os: ${{ fromJSON(format('[{0}]', inputs.test_os)) }}
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
       || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || matrix.os == 'windows-arm' && inputs.windows_arm_runner
       || inputs.macos_runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-check-pr-test
         with:
-          excludes: ${{ needs.impact.outputs.excludes }}
-          skip: ${{ needs.impact.outputs.skip }}
+          include_modified: ${{ needs.impact.outputs.include_modified }}
+          include_affected: ${{ needs.impact.outputs.include_affected }}
+          include_required: ${{ needs.impact.outputs.include_required }}
       - name: Upload coverage to Codecov
-        if: matrix.os == 'linux' && needs.impact.outputs.skip != 'true'
+        # Upload from one leg only to avoid double-counting; pick the
+        # canonical x86_64 Linux leg. oxidizer-github also excludes
+        # windows-11-arm from coverage due to LLVM-coverage
+        # instrumentation bugs.
+        if: matrix.os == 'linux' && needs.impact.outputs.include_affected != '--skip'
         uses: codecov/codecov-action@v5
         with:
           files: target/coverage/lcov.info
@@ -78,15 +110,26 @@ jobs:
           fail_ci_if_error: false
 
   pr-mutants:
+    # Cross-OS to match oxidizer's policy: mutation testing on
+    # cfg(target_os) / cfg(target_arch) gated code matters. Diff-scoped
+    # (--in-diff) keeps each leg's runtime bounded.
     needs: impact
-    runs-on: ${{ inputs.linux_runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: ./.github/actions/ox-check-pr-mutants
         with:
-          excludes: ${{ needs.impact.outputs.excludes }}
-          skip: ${{ needs.impact.outputs.skip }}
+          include_modified: ${{ needs.impact.outputs.include_modified }}
+          include_affected: ${{ needs.impact.outputs.include_affected }}
+          include_required: ${{ needs.impact.outputs.include_required }}
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha }}

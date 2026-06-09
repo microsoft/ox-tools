@@ -193,14 +193,16 @@ mod tests {
     }
 
     #[test]
-    fn render_group_step_has_skip_and_excludes() {
+    fn render_group_step_has_include_inputs_and_env() {
         let body = render_group_step("pr-fast");
         assert!(body.contains("parameters:"));
-        assert!(body.contains("name: skip"));
-        assert!(body.contains("name: excludes"));
+        assert!(body.contains("name: include_modified"));
+        assert!(body.contains("name: include_affected"));
+        assert!(body.contains("name: include_required"));
         assert!(body.contains("just ox-check-pr-fast"));
-        assert!(body.contains("ne(parameters.skip, 'true')"));
-        assert!(body.contains("OX_CHECK_EXCLUDES"));
+        assert!(body.contains("OX_CHECK_INCLUDE_MODIFIED"));
+        assert!(body.contains("OX_CHECK_INCLUDE_AFFECTED"));
+        assert!(body.contains("OX_CHECK_INCLUDE_REQUIRED"));
     }
 
     #[test]

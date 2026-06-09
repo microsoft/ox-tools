@@ -32,32 +32,41 @@ in different tiers and makes the tier of any failing job obvious from its name a
 
 ### PR tier (3 groups)
 
-| Group              | OS scope           | Purpose                                                                                                              |
-|--------------------|--------------------|----------------------------------------------------------------------------------------------------------------------|
-| `pr-fast`          | Linux only         | All static analysis: nothing here compiles user tests or examples through to execution. Fast feedback, fail-fast.    |
-| `pr-test`          | Linux + Windows    | Code execution: tests (instrumented for coverage), doctests, examples. Coverage reporting is folded in via `cargo llvm-cov nextest`. |
-| `pr-mutants`       | Linux only         | Diff-scoped mutation testing on the change in this PR.                                                               |
+| Group              | OS scope                              | Purpose                                                                                                              |
+|--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
+| `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis. Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks (fmt, license-headers, …) run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
+| `pr-test`          | Same default as `pr-fast`             | Code execution: tests (instrumented for coverage), doctests, examples. Coverage reporting is folded in via `cargo llvm-cov nextest`. |
+| `pr-mutants`       | Same default as `pr-fast`             | Diff-scoped mutation testing on the change in this PR. Cross-OS to match `oxidizer`'s policy — mutations on cfg-gated code matter. Diff-scoping keeps each leg's runtime bounded. |
 
 ### Nightly tier (4 groups)
 
-| Group                | OS scope        | Purpose                                                                                                                                |
-|----------------------|-----------------|----------------------------------------------------------------------------------------------------------------------------------------|
-| `nightly-test`       | Linux + Windows | Re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
-| `nightly-advisories` | Linux only      | Re-runs every check whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain), `udeps` (uses `cargo +nightly`, which evolves). |
-| `nightly-runtime`    | Linux only      | Tests under stricter runtimes that catch UB and timing/threading bugs: `miri`, `careful`. (Both tools are Linux-only.)                  |
-| `nightly-exhaustive` | Linux only      | The expensive whole-workspace permutations that don't fit the PR budget: full `cargo mutants`, `cargo-hack --feature-powerset`, and `cargo bench --no-run` plus a single-iteration smoke run per bench target. |
+| Group                | OS scope                  | Purpose                                                                                                                                |
+|----------------------|---------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
+| `nightly-test`       | Same default as `pr-test` | Re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
+| `nightly-advisories` | Same default as `pr-fast` | Re-runs every check whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain), `udeps` (uses `cargo +nightly`, which evolves). Cross-OS because clippy and udeps compile per host. |
+| `nightly-runtime`    | Same default as `pr-fast` | Tests under stricter runtimes that catch UB and timing/threading bugs: `miri`, `careful`. Both tools work on every Tier 1 Rust target; the surveyed repos (`oxidizer`, `oxidizer-github`) both run them cross-OS, so ox-check does too. |
+| `nightly-exhaustive` | Same default as `pr-fast` | The expensive whole-workspace permutations that don't fit the PR budget: full `cargo mutants`, `cargo-hack --feature-powerset`, and `cargo bench --no-run` plus a single-iteration smoke run per bench target. Cross-OS to match `oxidizer`'s policy and to give cargo-hack / bench compile coverage for cfg-gated code. Adopters who can't afford the full matrix (mutants-full can run for hours per leg) override the matrix in their root workflow / pipeline. |
+
+**Backend asymmetry on ARM coverage.** The GitHub backend ships a four-leg default matrix
+(Linux/Windows × x86_64/aarch64) because GH has Microsoft-hosted ARM runners
+(`ubuntu-24.04-arm`, `windows-11-arm`). The ADO backend ships a two-leg default
+(x86_64 only) because ADO has no hosted ARM agents; adopters with self-hosted ARM pools
+extend the stages template themselves. The catalog and recipes are identical across
+backends — the asymmetry is purely in the wiring layer's default OS matrix.
 
 OS-scope is an opinion ox-check ships and the user overrides per-repo through the
 backend-specific knobs ([github.md §4](./github.md#4-owned-reusable-workflows) for
-`test_os`, [ado.md §4](./ado.md#4-owned-stages-templates) for `linuxPool`/`windowsPool`).
+`test_os` and the runner-label inputs, [ado.md §4](./ado.md#4-owned-stages-templates) for
+`linuxPool`/`windowsPool`).
 Locally there is no OS matrix; `just ox-check-pr-test` runs against whatever OS the
 developer is on. See [design.md §8.3](./design.md#83-cross-os-test-matrices) for the
 overall rationale.
 
-The `nightly-exhaustive` group's checks are independent and could in principle live in three
-parallel jobs; they're folded into one group because each individually is just one check,
-and nightly tolerates the longer wall-clock that serial execution within one job implies.
-Repos that want to parallelize them can split the recipe into three group recipes locally.
+The `nightly-exhaustive` group's checks are independent and could in principle live in
+separate parallel jobs; they're folded into one group because each individually is just
+one check, and nightly tolerates the longer wall-clock that serial execution within one
+job implies. Repos that want to parallelize them can split the recipe into separate group
+recipes locally.
 
 ## 2. Checks by group
 
@@ -89,9 +98,9 @@ that provided the strongest version of the check.
 
 | Check        | Invocation                                                                  | Source |
 |--------------|-----------------------------------------------------------------------------|--------|
-| `llvm-cov`   | `cargo llvm-cov nextest --workspace --all-features --locked --lcov --output-path target/coverage/lcov.info` ＋ HTML report ＋ enforced minimum threshold. The instrumented `nextest` run produces both the test pass/fail signal and the coverage artifacts in a single pass. | oxidizer, oxidizer-github |
+| `llvm-cov`   | Three steps from one instrumented `cargo llvm-cov nextest --no-report` run: `report --lcov` → `target/coverage/lcov.info`, `report --cobertura` → `target/coverage/cobertura.xml`, `report --html` → `target/coverage/html/` (local viewer). The nextest run produces the test pass/fail signal; the three `report` invocations re-render the cached `.profraw` data in each format without re-running tests. lcov feeds Codecov on GitHub; cobertura feeds `PublishCodeCoverageResults@2` on ADO; HTML is purely a local affordance. No threshold enforcement at the check level. | oxidizer, oxidizer-github |
 | `doc-test`   | `cargo test --doc --workspace --all-features --locked` (nextest does not run doctests, so this is a separate cargo-test invocation) | oxidizer, oxidizer-github |
-| `examples`   | `cargo run --example <name>` for each example target                        | oxidizer, oxidizer-github |
+| `examples`   | `cargo build --workspace --examples --all-features --locked` — verifies that example targets compile. Running each example is intentionally not part of the check (examples are not test scaffolding; their runtime behavior isn't part of what we gate on). | oxidizer, oxidizer-github |
 
 ### `pr-mutants`
 
@@ -99,24 +108,21 @@ that provided the strongest version of the check.
 |-----------|----------------------------------------------------------------------------|--------|
 | `mutants` | `cargo mutants --in-diff <base>…HEAD --no-shuffle --jobs 0` (diff-scoped)  | oxidizer-github |
 
-The PR mode requires a base ref. Locally, the recipe defaults to `origin/main` (or `master`)
-and can be overridden via a `BASE_REF` env var; in GitHub Actions the workflow passes
-`${{ github.event.pull_request.base.sha }}`; in ADO the template parameter `prBaseRef` is
-wired to `System.PullRequest.TargetBranch`.
+The PR mode requires a base ref. Locally, the recipe resolves `BASE_REF` (if set), then
+`origin/main`, then `origin/master`, then errors out. In GitHub Actions the workflow
+passes `${{ github.event.pull_request.base.sha }}`; in ADO the impact step exports
+`$(System.PullRequest.TargetBranch)` as `BASE_REF` and the recipe picks it up.
 
 ### `nightly-test`
 
-| Check        | Invocation                                                                  | Source |
-|--------------|-----------------------------------------------------------------------------|--------|
-| `llvm-cov`   | `cargo llvm-cov nextest --workspace --all-features --locked --lcov --output-path target/llvm-cov/nightly.lcov` | oxidizer, oxidizer-github |
-| `doc-test`   | `cargo test --doc --workspace --all-features --locked`                      | oxidizer, oxidizer-github |
-| `examples`   | `cargo run --example <name>` for each example target                        | oxidizer, oxidizer-github |
-
-The same checks as `pr-test`, run on `main`. Two purposes: catch flakes/environmental
-sensitivities that didn't trip in PR, and publish a full coverage snapshot for the current
-state of `main` (the PR `llvm-cov` upload only reflects diffed code; this one reflects the
-whole codebase). The CI emitter wires the lcov artifact upload step in the nightly workflow
-only.
+Same three checks as `pr-test` — `llvm-cov`, `doc-test`, `examples` — and the same
+recipe invocations, with the same output paths (`target/coverage/lcov.info` and
+`target/coverage/cobertura.xml`). The recipe is shared between tiers; only the CI
+wiring around it changes (PR uploads lcov to Codecov / cobertura to ADO from each
+PR run; nightly does the same against `main` plus flags the upload as `nightly` in
+Codecov so the two streams stay distinguishable in the UI). Two purposes for re-running
+on nightly: catch flakes/environmental sensitivities that didn't trip in PR, and
+publish a full-coverage snapshot for the current state of `main`.
 
 ### `nightly-advisories`
 
@@ -147,11 +153,11 @@ someone opens an unrelated PR.
 
 ### `nightly-exhaustive`
 
-| Check                | Invocation                                                                                                   | Source |
-|----------------------|--------------------------------------------------------------------------------------------------------------|--------|
-| `mutants-full`       | `cargo mutants --workspace --no-shuffle --jobs 0`                                                            | oxidizer-github |
-| `cargo-hack` powerset| `cargo hack --workspace --feature-powerset --depth 2 check`                                                  | oxidizer, oxidizer-github |
-| `bench`              | `cargo bench --workspace --all-features --no-run` ＋ a single-iteration smoke benchmark for each bench target | oxidizer |
+| Check                 | Invocation                                                                                                   | Source |
+|-----------------------|--------------------------------------------------------------------------------------------------------------|--------|
+| `mutants-full`        | `cargo mutants --workspace --no-shuffle --jobs 0`                                                            | oxidizer-github, oxidizer (sharded cross-OS) |
+| `cargo-hack` powerset | `cargo hack --workspace --feature-powerset --depth 2 check`                                                  | oxidizer, oxidizer-github |
+| `bench`               | `cargo bench --workspace --all-features --no-run` ＋ a single-iteration smoke benchmark for each bench target | oxidizer |
 
 ## 3. Per-check vs grouped CI execution
 
@@ -196,31 +202,60 @@ workflow/pipeline file alongside the ox-check composite actions / step templates
 
 The tool uses [`cargo-delta`](https://crates.io/crates/cargo-delta) to skip checks for
 unaffected workspace members on PR runs. cargo-delta computes three concentric impact tiers
-(`required ⊇ affected ⊇ modified`) and emits each as a string of `--exclude X --exclude Y …`
-flags (the workspace complement of the relevant tier), which composes cleanly with `cargo
---workspace`. Each catalog check is tagged with the tier it consumes:
+(`required ⊇ affected ⊇ modified`) and emits each as a list of crate names. The
+`ox-check-impact` building block formats each tier into a pre-built `--package X --package Y`
+string (or the literal sentinel `--skip` when the tier is empty), publishes the result as
+`OX_CHECK_INCLUDE_MODIFIED`, `OX_CHECK_INCLUDE_AFFECTED`, and `OX_CHECK_INCLUDE_REQUIRED`
+env vars, and the recipes in `checks.just` consume them.
 
-| Env var                       | cargo-delta source                                     | Checks that consume it                               |
-|-------------------------------|--------------------------------------------------------|------------------------------------------------------|
-| `OX_CHECK_EXCLUDE_NOT_MODIFIED`  | `cargo delta impact -f cargo-excludes --modified`      | clippy, udeps                                        |
-| `OX_CHECK_EXCLUDE_NOT_AFFECTED`  | `cargo delta impact -f cargo-excludes --affected`      | llvm-cov, doc-test, examples, miri, careful, semver-check, mutants (diff and full), cargo-hack powerset, bench |
-| `OX_CHECK_EXCLUDE_NOT_REQUIRED`  | `cargo delta impact -f cargo-excludes --required`      | doc-build, readme-check, external-types              |
+Each catalog check is tagged with one of four buckets:
 
-Checks with no per-crate scope ignore the vars: `fmt` (always all files), `pr-title`,
-`spellcheck`, `deny`, `audit`, `aprz`, `cargo-sort`, `license-headers`,
-`ensure-no-cyclic-deps`, `ensure-no-default-features`. The mapping is hardcoded in the
-catalog alongside each check's invocation.
+| Bucket    | Env var consumed              | Behavior in CI                                                              | Behavior locally (env unset)        |
+|-----------|-------------------------------|-----------------------------------------------------------------------------|--------------------------------------|
+| modified  | `OX_CHECK_INCLUDE_MODIFIED`   | If `--skip`: exit 0. Otherwise run unconditionally (tool is workspace-wide). | Run unconditionally.                 |
+| affected  | `OX_CHECK_INCLUDE_AFFECTED`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
+| required  | `OX_CHECK_INCLUDE_REQUIRED`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
+| unscoped  | *(none)*                       | Always run.                                                                  | Always run.                          |
 
-The recipe-side mechanics are in [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars)
-(including the `OX_CHECK_IMPACT_SKIP` early-return hint). The CI-side wiring (the
-`ox-check-impact` building block, how downstream jobs consume the excludes) is in
+Bucket assignments per check:
+
+| Bucket    | Checks                                                                                                                |
+|-----------|-----------------------------------------------------------------------------------------------------------------------|
+| modified  | `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features`, `readme-check`, `spellcheck` |
+| affected  | `clippy`*, `llvm-cov`, `doc-test`, `examples`, `mutants` (diff and full), `miri`, `careful`, `semver-check`, `external-types`, `bench` |
+| required  | `doc-build`, `udeps`, `cargo-hack` (feature powerset)                                                                  |
+| unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`                                                                    |
+
+\* cargo-delta's README recommends `clippy` with the modified tier. ox-check deliberately
+runs it on the affected set instead: a change in a crate's API can introduce clippy lints
+(trait-bound mismatches, obviously-truthy-condition warnings keying off changed types) in a
+dependent crate, so downstream rev-deps need to lint too. The cost is small — clippy is
+incremental — and the recall benefit avoids a class of merge surprises.
+
+`required` is `affected ∪ workspace-internal transitive deps`, not "the whole workspace".
+For a small PR it can still be much narrower than `--workspace`. It is used for tools
+whose correctness resolves through the dep graph: `cargo doc` (intra-doc links walk into
+deps), `cargo udeps` (unused-deps detection needs the resolved graph), `cargo hack
+--feature-powerset` (feature combinations cascade through dep features).
+
+`unscoped` is for checks that have nothing to do with workspace-member identity:
+`deny`/`audit` read `Cargo.lock`, `pr-title` reads PR metadata, `aprz` consults an
+external risk DB. These ignore the env vars and always run.
+
+The sentinel `--skip` is a magic string that cannot be a valid cargo argument, so there
+is no collision with real package names. Recipes test for it with
+`[ "$VAR" = "--skip" ]` and exit 0 to keep the CI job green while signalling that
+nothing in that tier needed to run.
+
+The recipe-side mechanics are in
+[local.md §4](./local.md#4-impact-scoping-pass-through-env-vars). The CI-side wiring (the
+`ox-check-impact` building block, how downstream jobs consume the include vars) is in
 [github.md](./github.md#impact-scoping) and [ado.md](./ado.md#impact-scoping).
 
 Trade-off acknowledged: the risk cargo-delta introduces is that a misconfigured analysis
 silently skips checks that should have run, leaving "all green" on a PR that actually broke
 something. The design mitigates this with: (1) trip-wire patterns in `.delta.toml` that
-bias toward full runs whenever config changes; (2) the `skip` flag is advisory only and
-the CI wiring never gates whole jobs on it — non-scoping checks (`fmt`, `deny`, `audit`,
-`aprz`, `pr-title`, `spellcheck`) always run regardless of impact analysis; (3) nightly
-always runs full-workspace, catching anything the PR-scoping missed within 24 hours; and
-(4) any repo can disable scoping wholesale by emptying `.delta.toml`'s region.
+bias toward full runs whenever config changes; (2) `unscoped` checks (`deny`, `audit`,
+`aprz`, `pr-title`, `mutants-full`) always run regardless of impact analysis;
+(3) nightly always runs full-workspace, catching anything the PR-scoping missed within 24
+hours;

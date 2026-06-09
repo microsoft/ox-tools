@@ -1,0 +1,37 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+#
+# Tool-version catalog consumed by `tools.just` recipes
+# (_ox-check-require, ox-check-tools-install, ox-check-tools-check).
+#
+# Format: <cargo-subcommand-binary>=<minimum-version>
+# One per line. Lines starting with `#` and blank lines are ignored.
+# Versions are SemVer; comparison uses `sort -V` (so "1.2.10" > "1.2.9").
+#
+# To bump a minimum, edit the version in place. The dirty-file flow
+# preserves the edit on subsequent `cargo ox-check update` runs.
+# To add a new tool, append a line. To remove a tool, delete its line
+# (and any recipe in checks.just that depends on it).
+#
+# Non-catalog dependencies (rustc, pwsh, just itself) are handled
+# directly in tools.just rather than through this file — their
+# install/upgrade paths are not cargo-managed.
+
+cargo-aprz=0.6.0
+cargo-audit=0.21.0
+cargo-careful=0.4.7
+cargo-check-external-types=0.2.0
+cargo-deny=0.16.0
+cargo-doc2readme=0.6.0
+cargo-ensure-no-cyclic-deps=0.1.0
+cargo-ensure-no-default-features=0.1.0
+cargo-hack=0.6.36
+cargo-heather=0.1.0
+cargo-llvm-cov=0.6.13
+cargo-mutants=24.5.0
+cargo-nextest=0.9.122
+cargo-semver-checks=0.43.0
+cargo-sort=2.0.1
+cargo-spellcheck=0.15.5
+cargo-udeps=0.1.55

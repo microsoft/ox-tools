@@ -60,21 +60,22 @@ See also:
         └── nightly-exhaustive.yml  owned
 ```
 
-All files are regular owned files (carry an `ox-check-checksum` first line, governed by
-[updates.md §5](./updates.md#5-the-decision-algorithm)). Users who customize the root
-pipeline take ownership through the standard dirty-file flow.
+All files are regular owned files tracked by the sidecar `.ox-check.lock` manifest
+(no in-file checksum line; see [updates.md §1](./updates.md#1-the-manifest)). Users
+who customize the root pipeline take ownership through the standard dirty-file
+flow.
 
 ## 3. Root pipelines
 
 The default `ox-check-pr.yml` ox-check emits is the minimum needed to run ox-check's stages
-template:
+template. PR validation for the pipeline is configured via Azure DevOps branch policies in
+the project UI — the YAML `pr:` trigger is ignored for Azure Repos and only relevant for
+GitHub-hosted repos consumed via an Azure Pipelines service connection (in which case the
+adopter adds their own `pr:` block).
 
 ```yaml
 # .pipelines/ox-check-pr.yml
-trigger: none           # PR validation only; configure in branch policies
-pr:
-  branches:
-    include: [main]
+trigger: none
 
 stages:
 - template: ox-check/pr.yml
@@ -87,11 +88,14 @@ The nightly root pipeline adds a schedule:
 
 ```yaml
 # .pipelines/ox-check-nightly.yml
+trigger: none
+pr: none
+
 schedules:
 - cron: "0 6 * * *"
   displayName: ox-check nightly
   branches:
-    include: [main]
+    include: [main, master]
   always: true
 
 stages:
@@ -101,6 +105,11 @@ stages:
     windowsPool: { vmImage: windows-latest }
 ```
 
+The schedule lists both `main` and `master` so adopters using either canonical-branch
+name get coverage out of the box. ADO matches each entry against existing branches; an
+entry that matches nothing contributes nothing, so a repo using only `main` runs the
+schedule exactly once per cron tick.
+
 For an internal/compliance pipeline, the user replaces their root pipeline with one that
 extends 1ESPT/SubstratePT and passes ox-check's stages template as the stages parameter,
 overriding the pools with the team's 1ESPT pools:
@@ -108,7 +117,6 @@ overriding the pools with the team's 1ESPT pools:
 ```yaml
 # .pipelines/ox-check-pr.yml (user-edited for 1ESPT)
 trigger: none
-pr: { branches: { include: [main] } }
 
 resources:
   repositories:
@@ -129,16 +137,25 @@ extends:
 ```
 
 The `extends:` keyword, the resources block, and the pool definitions are entirely the
-user's business. ox-check's `pr.yml` is a plain stages template that drops in unchanged. To
-trim the matrix (run on Linux only), the user sets `windowsPool` to an empty object
-`{}` — `pr.yml` treats an empty pool as "skip this OS." Same shape for adding macOS via
-a future `macosPool` parameter (deferred to v2; ADO macOS adoption is rare in the
-surveyed repos).
+user's business. ox-check's `pr.yml` is a plain stages template that drops in unchanged.
+The default matrix is Linux + Windows in all cases — adopters who want a narrower or
+wider matrix edit the emitted stages template directly (taking ownership via the
+dirty-file flow).
 
 ## 4. Owned stages templates
 
+**ARM coverage gap (ADO).** Unlike GitHub, ADO has no Microsoft-hosted ARM agents
+(no `vmImage` exists for Linux aarch64 or Windows aarch64). The ADO backend's default
+matrix is therefore x86_64 only — `linuxPool` (`ubuntu-latest`) + `windowsPool`
+(`windows-latest`). This matches the platforms list `oxidizer`'s root pipelines emit.
+Adopters with self-hosted ARM agents extend the stages template in their own root
+pipeline (or fork the emitted stages); ox-check itself does not ship ARM legs on ADO.
+The catalog and recipes are identical across backends — the asymmetry is purely in the
+wiring layer's default OS matrix. See
+[checks.md §1](./checks.md#1-groups-and-tiers) for the per-group OS scope tables.
+
 The `pr.yml` stages template is where the wiring lives. Every per-group step template
-takes the same three impact-exclude parameters unconditionally; which ones a group's
+takes the same three impact-include parameters unconditionally; which ones a group's
 checks actually consume is the catalog's concern, not the wiring layer's. This means
 moving a check between groups (e.g. `clippy` from `pr-fast` to `nightly-advisories`)
 never changes the stages template.
@@ -169,40 +186,35 @@ stages:
       dependsOn: impact
       pool: ${{ parameters.linuxPool }}
       variables:
-        excludeNotModified: $[ dependencies.impact.outputs['delta.exclude_not_modified'] ]
-        excludeNotAffected: $[ dependencies.impact.outputs['delta.exclude_not_affected'] ]
-        excludeNotRequired: $[ dependencies.impact.outputs['delta.exclude_not_required'] ]
-        impactSkip:         $[ dependencies.impact.outputs['delta.skip'] ]
+        includeModified: $[ dependencies.impact.outputs['delta.include_modified'] ]
+        includeAffected: $[ dependencies.impact.outputs['delta.include_affected'] ]
+        includeRequired: $[ dependencies.impact.outputs['delta.include_required'] ]
       steps:
       - template: steps/${{ replace(group, '_', '-') }}.yml   # pseudo-syntax; real emitter unrolls
         parameters:
-          excludeNotModified: $(excludeNotModified)
-          excludeNotAffected: $(excludeNotAffected)
-          excludeNotRequired: $(excludeNotRequired)
-          impactSkip:         $(impactSkip)
+          includeModified: $(includeModified)
+          includeAffected: $(includeAffected)
+          includeRequired: $(includeRequired)
   - ${{ if ne(length(parameters.windowsPool), 0) }}:
     - job: pr_test_windows
       dependsOn: impact
       pool: ${{ parameters.windowsPool }}
       variables:
-        excludeNotModified: $[ dependencies.impact.outputs['delta.exclude_not_modified'] ]
-        excludeNotAffected: $[ dependencies.impact.outputs['delta.exclude_not_affected'] ]
-        excludeNotRequired: $[ dependencies.impact.outputs['delta.exclude_not_required'] ]
-        impactSkip:         $[ dependencies.impact.outputs['delta.skip'] ]
+        includeModified: $[ dependencies.impact.outputs['delta.include_modified'] ]
+        includeAffected: $[ dependencies.impact.outputs['delta.include_affected'] ]
+        includeRequired: $[ dependencies.impact.outputs['delta.include_required'] ]
       steps:
       - template: steps/pr-test.yml
         parameters:
-          excludeNotModified: $(excludeNotModified)
-          excludeNotAffected: $(excludeNotAffected)
-          excludeNotRequired: $(excludeNotRequired)
-          impactSkip:         $(impactSkip)
+          includeModified: $(includeModified)
+          includeAffected: $(includeAffected)
+          includeRequired: $(includeRequired)
 ```
 
-The wiring never short-circuits jobs on `skip=true`. Each group always runs; the
-recipes inside the group decide whether a given check can no-op. This matters because
-several PR-tier checks (`fmt`, `deny`, `audit`, `aprz`, `pr-title`, `spellcheck`) don't
-scope to workspace members and must run on every PR, including docs-only PRs where
-nothing in the workspace is "affected." See
+The wiring never gates jobs on impact output. Each group always runs; recipes inside
+the group decide whether a given check no-ops by testing for the literal sentinel
+`--skip` in the relevant include var. This matters because unscoped checks (`fmt`,
+`deny`, `audit`, `aprz`, `pr-title`, `mutants-full`) must run on every PR. See
 [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars) for the recipe-side
 contract.
 
@@ -217,9 +229,9 @@ so ox-check unrolls the OS axis into two explicit jobs (`pr_test_linux` and
 `windowsPool: {}` in the user's root pipeline elides `pr_test_windows` entirely.
 
 The nightly stages template is simpler — it omits the `impact` job and runs each group
-full-workspace, with the same `linuxPool` / `windowsPool` parameter shape. The exclude
-parameters are still threaded through (defaulted to empty) so step templates have a
-uniform interface across tiers:
+full-workspace, with the same `linuxPool` / `windowsPool` parameter shape. Nightly step
+templates don't receive any `include*` parameters; they default to empty strings and
+recipes fall through to `--workspace`:
 
 ```yaml
 # .pipelines/ox-check/nightly.yml  (owned by cargo-ox-check)
@@ -253,18 +265,17 @@ stages:
 ```
 
 If `.delta.toml`'s managed region is disabled
-([updates.md §opt-out](./updates.md#6-opting-out-in-file-stubs)), `pr.yml` is regenerated
-**without** the `impact` job: each group job becomes unconditional and the `exclude*` vars
-remain empty, so every group runs full-workspace. `steps/impact.yml` is not emitted in
-that mode.
+([updates.md §opt-out](./updates.md#6-opting-out-in-file-stubs)), the impact step is
+unaffected — `cargo delta impact` uses its own defaults when the config file is missing
+or empty.
 
 ## 5. Per-group step templates
 
 Each per-group step template has the **same** uniform parameter surface — the three
-impact-exclude variables plus a per-template handful of PR-context strings. This means
-the stages template doesn't need to know which excludes a group's checks consume; it
-just threads all three to every group. Moving a check between groups is a pure catalog
-change.
+impact-include variables plus a per-template handful of PR-context strings. This means
+the stages template doesn't need to know which include vars a group's checks consume;
+it just threads all three to every group. Moving a check between groups (or between
+buckets) is a pure catalog change.
 
 ```yaml
 # .pipelines/ox-check/steps/pr-fast.yml  (owned by cargo-ox-check)
@@ -272,38 +283,33 @@ parameters:
 - name: prTitle
   type: string
   default: $(System.PullRequest.Title)
-- name: excludeNotModified
+- name: includeModified
   type: string
   default: ""
-- name: excludeNotAffected
+- name: includeAffected
   type: string
   default: ""
-- name: excludeNotRequired
+- name: includeRequired
   type: string
   default: ""
-- name: impactSkip
-  type: string
-  default: "false"
 steps:
 - template: setup.yml
 - script: just ox-check-pr-fast
   displayName: ox-check pr-fast
   env:
     PR_TITLE: ${{ parameters.prTitle }}
-    OX_CHECK_EXCLUDE_NOT_MODIFIED: ${{ parameters.excludeNotModified }}
-    OX_CHECK_EXCLUDE_NOT_AFFECTED: ${{ parameters.excludeNotAffected }}
-    OX_CHECK_EXCLUDE_NOT_REQUIRED: ${{ parameters.excludeNotRequired }}
-    OX_CHECK_IMPACT_SKIP: ${{ parameters.impactSkip }}
+    OX_CHECK_INCLUDE_MODIFIED: ${{ parameters.includeModified }}
+    OX_CHECK_INCLUDE_AFFECTED: ${{ parameters.includeAffected }}
+    OX_CHECK_INCLUDE_REQUIRED: ${{ parameters.includeRequired }}
 ```
 
 Uniform parameter set on every per-group template:
 
-| Parameter             | Default      | Notes                                              |
-|-----------------------|--------------|----------------------------------------------------|
-| `excludeNotModified`  | `""`         | Forwarded as `OX_CHECK_EXCLUDE_NOT_MODIFIED`.         |
-| `excludeNotAffected`  | `""`         | Forwarded as `OX_CHECK_EXCLUDE_NOT_AFFECTED`.         |
-| `excludeNotRequired`  | `""`         | Forwarded as `OX_CHECK_EXCLUDE_NOT_REQUIRED`.         |
-| `impactSkip`          | `"false"`    | Forwarded as `OX_CHECK_IMPACT_SKIP`. Recipes that consume the excludes may early-return when this is `"true"`; non-scoping recipes (fmt, deny, audit, …) ignore it. See [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars). |
+| Parameter         | Default | Notes                                                                                                              |
+|-------------------|---------|--------------------------------------------------------------------------------------------------------------------|
+| `includeModified` | `""`    | Forwarded as `OX_CHECK_INCLUDE_MODIFIED`. `--skip` → recipe exits 0. Empty → recipe defaults to `--workspace`.     |
+| `includeAffected` | `""`    | Forwarded as `OX_CHECK_INCLUDE_AFFECTED`. Same semantics.                                                          |
+| `includeRequired` | `""`    | Forwarded as `OX_CHECK_INCLUDE_REQUIRED`. Same semantics.                                                          |
 
 Per-group additions (only where the group consumes PR-context strings the recipe needs):
 
@@ -325,36 +331,31 @@ about "which check needs which env var."
 
 These templates are consumed primarily by ox-check's own stages template. Users who want to
 plug individual groups into an unrelated pipeline can `template:` them directly without
-passing any exclude parameters — they default to empty (full workspace) — and only
-override what they want to scope.
+passing any include parameters — they default to empty (recipes fall back to
+`--workspace`) — and only override what they want to scope.
 
 ### `setup.yml` and `impact.yml`
 
 `setup.yml` installs `just` (`cargo install just --locked --version >=<min>`) and runs
-`just ox-check-tools-install-missing`. Does not install Rust; expects `cargo` on PATH —
+`just ox-check-tools-install`. Does not install Rust; expects `cargo` on PATH —
 provided by the user's msrustup step in 1ESPT pipelines or by a previous step in OSS
 pipelines (see §6).
 
-`impact.yml` takes one parameter `baseRef` and runs the cargo-delta logic described in
-[github.md §6](./github.md#6-impact-scoping). The four results are exported as ADO output
-variables via `##vso[task.setvariable variable=…;isOutput=true]`:
+`impact.yml` runs `cargo delta impact --format json` against
+`$(System.PullRequest.TargetBranch)` (or `$BASE_REF` if set) and formats each tier into
+a pre-built `--package …` string or the sentinel `--skip`. The three results are
+exported as ADO output variables via `##vso[task.setvariable variable=…;isOutput=true]`:
 
-- `delta.exclude_not_modified`
-- `delta.exclude_not_affected`
-- `delta.exclude_not_required`
-- `delta.skip` (advisory: `true` when no workspace member is in any tier)
+- `compute.include_modified`
+- `compute.include_affected`
+- `compute.include_required`
 
-Downstream jobs reference them via `dependencies.impact.outputs['delta.<name>']` inside
-the runtime macro `$[ … ]` (rather than the compile-time `${{ … }}` macro) because output
-variables aren't resolved until the producing job has finished. The stages template
-handles all that — users don't write it.
+Downstream jobs reference them via `dependencies.impact.outputs['compute.<name>']`
+inside the runtime macro `$[ … ]` (rather than the compile-time `${{ … }}` macro)
+because output variables aren't resolved until the producing job has finished. The
+stages template handles all that — users don't write it.
 
-When `System.PullRequest.TargetBranch` is empty (non-PR triggered run on `main`), the
-impact step short-circuits with `delta.skip=false` and empty `exclude*` values, so the
-downstream groups all run full-workspace. This makes the same stages template valid for
-CI runs that aren't PR validations.
-
-The check → tier mapping is in
+The check → bucket mapping is in
 [checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping). The recipe-side
 mechanics are in [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars).
 
@@ -433,3 +434,36 @@ group is its own job inside the `OX_CHECK_pr` stage, so 1ESPT can gate or split 
 needed. The pre-existing repo-specific compliance steps (msrustup, NuGet pushes, signing,
 …) keep running alongside the ox-check stage. ox-check does not own the pipeline's shape —
 it just contributes a stage.
+
+## 10. Coverage upload
+
+After `pr-test` (and `nightly-test`) runs the `ox-check-llvm-cov` recipe, the stages
+template adds a `PublishCodeCoverageResults@2` step on the Linux job that ingests
+`target/coverage/cobertura.xml`. The cobertura format is the modern recommendation for
+the task (lcov is not accepted) and is produced alongside lcov.info by the same
+instrumented test run.
+
+```yaml
+- task: PublishCodeCoverageResults@2
+  condition: and(succeededOrFailed(), ne(variables.skip, 'true'))
+  displayName: Publish coverage
+  inputs:
+    summaryFileLocation: target/coverage/cobertura.xml
+    failIfCoverageEmpty: false
+```
+
+Only the Linux leg uploads; the Windows leg produces equivalent data but uploading both
+would either overwrite or double-count depending on the ADO version. The
+`condition: ne(variables.skip, 'true')` skips the upload when impact scoping decided no
+tests needed to run; `failIfCoverageEmpty: false` keeps the step from failing the build
+when the upstream cobertura file is missing (e.g. a tooling issue or a skip outcome that
+didn't get caught by the condition).
+
+The data appears in the ADO build page's "Code Coverage" tab natively — totals, file
+tree, and a per-file annotation view. ADO does not natively compute diff coverage
+between PR and base; that's a known limitation of the platform (see `coverage.md`
+for the unified-coverage discussion).
+
+ox-check does not gate the PR on coverage. The cobertura upload is informational;
+adopters who want gating add `BuildQualityChecks@9` (Microsoft DevLabs marketplace
+task) downstream of the test step and configure it via their branch policy.

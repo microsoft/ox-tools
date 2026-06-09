@@ -1,14 +1,45 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# Computes per-tier include lists from cargo-delta and publishes them
+# as stage outputs for downstream group stages to consume.
+#
+# Output variables (consumed in pr-stages.yml via
+# stageDependencies.impact.compute.outputs['compute.<name>']):
+#   include_modified - "--package X --package Y" or "--skip" sentinel.
+#   include_affected - same shape, for the affected set (modified ∪ rev-deps).
+#   include_required - same shape, for the required set
+#                      (affected ∪ workspace-internal transitive deps).
+#
+# Unscoped recipes (deny, audit, aprz, pr-title) ignore all three.
 steps:
   - bash: |
+      set -euo pipefail
       cargo install --locked cargo-delta
       base="${BASE_REF:-$(System.PullRequest.TargetBranch)}"
-      result="$(cargo delta impact --base "$base" --format json || echo '{}')"
-      excludes="$(printf '%s' "$result" | jq -r '.excludes // [] | join(",")')"
-      skip="$(printf '%s' "$result" | jq -r '.skip // false')"
-      echo "##vso[task.setvariable variable=excludes;isOutput=true]$excludes"
-      echo "##vso[task.setvariable variable=skip;isOutput=true]$skip"
+      result="$(cargo delta impact --base "$base" --format json 2>/dev/null || echo '{}')"
+      format_set() {
+          local field="$1"
+          local pkgs
+          pkgs=$(printf '%s' "$result" | jq -r --arg f "$field" '(.[$f] // []) | .[]' 2>/dev/null || true)
+          if [ -z "$pkgs" ] ; then
+              printf '%s' "--skip"
+          else
+              local out=""
+              while IFS= read -r pkg ; do
+                  [ -z "$pkg" ] && continue
+                  out="$out --package $pkg"
+              done <<EOF
+      $pkgs
+      EOF
+              printf '%s' "${out# }"
+          fi
+      }
+      include_modified="$(format_set modified)"
+      include_affected="$(format_set affected)"
+      include_required="$(format_set required)"
+      echo "##vso[task.setvariable variable=include_modified;isOutput=true]$include_modified"
+      echo "##vso[task.setvariable variable=include_affected;isOutput=true]$include_affected"
+      echo "##vso[task.setvariable variable=include_required;isOutput=true]$include_required"
     name: compute
     displayName: ox-check impact (cargo-delta)

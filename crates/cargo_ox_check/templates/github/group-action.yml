@@ -6,22 +6,34 @@
 name: ox-check-__GROUP__
 description: Run the __GROUP__ check group.
 inputs:
-  excludes:
-    description: Comma-separated package excludes from the impact job.
+  include_modified:
+    description: |
+      Pre-formatted --package args (e.g. "--package alpha --package beta")
+      for the modified tier, or the sentinel "--skip" when nothing
+      modified. Local invocations leave it unset; recipes default to
+      --workspace.
     default: ""
     required: false
-  skip:
-    description: If "true", skip this group entirely.
-    default: "false"
+  include_affected:
+    description: |
+      Same shape as include_modified, but for the affected tier
+      (modified ∪ rev-deps).
+    default: ""
+    required: false
+  include_required:
+    description: |
+      Same shape as include_modified, but for the required tier
+      (affected ∪ workspace-internal transitive deps).
+    default: ""
     required: false
 runs:
   using: composite
   steps:
-    - if: inputs.skip != 'true'
-      uses: ./.github/actions/ox-check-setup
-    - if: inputs.skip != 'true'
-      name: Run just ox-check-__GROUP__
+    - uses: ./.github/actions/ox-check-setup
+    - name: Run just ox-check-__GROUP__
       shell: bash
       env:
-        OX_CHECK_EXCLUDES: ${{ inputs.excludes }}
+        OX_CHECK_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
+        OX_CHECK_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
+        OX_CHECK_INCLUDE_REQUIRED: ${{ inputs.include_required }}
       run: just ox-check-__GROUP__

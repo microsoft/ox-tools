@@ -6,6 +6,24 @@ description: Install `just` and the catalog of cargo tools for ox-check check gr
 runs:
   using: composite
   steps:
+    - id: rustc-version
+      shell: bash
+      run: echo "version=$(rustc --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+    - name: Cache cargo home and target
+      uses: actions/cache@v4
+      with:
+        # Key on OS + rustc version + lockfile hashes + catalog hash so
+        # a Rust toolchain bump or a tool-minimums.txt update both
+        # invalidate the cache cleanly.
+        key: ox-check-v1-${{ runner.os }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt') }}
+        restore-keys: |
+          ox-check-v1-${{ runner.os }}-rust${{ steps.rustc-version.outputs.version }}-
+          ox-check-v1-${{ runner.os }}-
+        path: |
+          ~/.cargo/registry/cache/
+          ~/.cargo/registry/index/
+          ~/.cargo/bin/
+          target/
     - name: Install just
       shell: bash
       run: |

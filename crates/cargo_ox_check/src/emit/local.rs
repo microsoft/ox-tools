@@ -34,6 +34,17 @@ pub const TOOLS_JUST: &str =
 /// Repo-root-relative path of the tools recipe file.
 pub const TOOLS_JUST_PATH: &str = "justfiles/ox-check/tools.just";
 
+/// Contents of `justfiles/ox-check/tool-minimums.txt` baked into the binary.
+///
+/// Data file consumed by the `tools.just` recipes; one line per cargo
+/// subcommand, format `<tool>=<minimum-version>`. See
+/// [local.md §3](../../docs/design/local.md) for the policy.
+pub const TOOL_MINIMUMS: &str =
+    include_str!("../../templates/justfiles/ox-check/tool-minimums.txt");
+
+/// Repo-root-relative path of the tool minimums catalog.
+pub const TOOL_MINIMUMS_PATH: &str = "justfiles/ox-check/tool-minimums.txt";
+
 /// Contents of `justfiles/ox-check/checks.just` baked into the binary.
 pub const CHECKS_JUST: &str =
     include_str!("../../templates/justfiles/ox-check/checks.just");
@@ -75,6 +86,15 @@ pub fn plan_mod_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, 
 /// Propagates I/O errors from [`plan_owned_file`].
 pub fn plan_tools_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
     plan_owned_file(repo_root, manifest, TOOLS_JUST_PATH, TOOLS_JUST)
+}
+
+/// Emit a [`PlanItem`] for `justfiles/ox-check/tool-minimums.txt`.
+///
+/// # Errors
+///
+/// Propagates I/O errors from [`plan_owned_file`].
+pub fn plan_tool_minimums(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
+    plan_owned_file(repo_root, manifest, TOOL_MINIMUMS_PATH, TOOL_MINIMUMS)
 }
 
 /// Emit a [`PlanItem`] for `justfiles/ox-check/checks.just`.
@@ -134,6 +154,11 @@ pub fn plan_justfile_imports(
 /// # Errors
 ///
 /// Propagates I/O errors from any per-file emitter.
+/// Plan all files of the `justfiles/ox-check/` tree (recipes + data).
+///
+/// # Errors
+///
+/// Propagates I/O errors from any per-file emitter.
 pub fn plan_local_just_tree(
     repo_root: &Path,
     manifest: &Manifest,
@@ -141,6 +166,7 @@ pub fn plan_local_just_tree(
     Ok(vec![
         plan_mod_just(repo_root, manifest)?,
         plan_tools_just(repo_root, manifest)?,
+        plan_tool_minimums(repo_root, manifest)?,
         plan_checks_just(repo_root, manifest)?,
         plan_groups_just(repo_root, manifest)?,
         plan_tiers_just(repo_root, manifest)?,
@@ -212,10 +238,25 @@ mod tests {
     }
 
     #[test]
-    fn plan_local_just_tree_emits_five_items() {
+    fn tool_minimums_template_has_known_tools() {
+        for needle in [
+            "cargo-nextest=",
+            "cargo-llvm-cov=",
+            "cargo-deny=",
+            "cargo-mutants=",
+        ] {
+            assert!(
+                TOOL_MINIMUMS.contains(needle),
+                "tool-minimums.txt missing entry '{needle}'"
+            );
+        }
+    }
+
+    #[test]
+    fn plan_local_just_tree_emits_six_items() {
         let tmp = TempDir::new().unwrap();
         let items = plan_local_just_tree(tmp.path(), &Manifest::default()).unwrap();
-        assert_eq!(items.len(), 5);
+        assert_eq!(items.len(), 6);
         for item in &items {
             assert_eq!(item.decision, Decision::Write);
         }

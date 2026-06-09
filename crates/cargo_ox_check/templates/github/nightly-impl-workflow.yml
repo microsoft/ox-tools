@@ -7,19 +7,29 @@ on:
   workflow_call:
     inputs:
       test_os:
-        description: Comma-separated OS list for nightly-test matrix (linux, windows, macos).
+        description: |
+          Comma-separated OS list for nightly-test matrix. Recognized
+          values: linux, windows, linux-arm, windows-arm, macos.
         type: string
-        default: linux,windows
+        default: linux,windows,linux-arm,windows-arm
       linux_runner:
-        description: Runner label for Linux jobs.
+        description: Runner label for x86_64 Linux jobs.
         type: string
         default: ubuntu-latest
       windows_runner:
-        description: Runner label for Windows jobs.
+        description: Runner label for x86_64 Windows jobs.
         type: string
         default: windows-latest
+      linux_arm_runner:
+        description: Runner label for aarch64 Linux jobs.
+        type: string
+        default: ubuntu-24.04-arm
+      windows_arm_runner:
+        description: Runner label for aarch64 Windows jobs.
+        type: string
+        default: windows-11-arm
       macos_runner:
-        description: Runner label for macOS jobs.
+        description: Runner label for macOS jobs (only used when test_os includes macos).
         type: string
         default: macos-latest
     secrets:
@@ -37,11 +47,16 @@ jobs:
         os: ${{ fromJSON(format('[{0}]', inputs.test_os)) }}
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
       || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || matrix.os == 'windows-arm' && inputs.windows_arm_runner
       || inputs.macos_runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-check-nightly-test
       - name: Upload coverage to Codecov
+        # Single canonical leg uploads coverage; matches the pr-test
+        # logic. oxidizer-github also excludes windows-11-arm from
+        # coverage due to LLVM-coverage instrumentation bugs.
         if: matrix.os == 'linux'
         uses: codecov/codecov-action@v5
         with:
@@ -51,19 +66,55 @@ jobs:
           fail_ci_if_error: false
 
   nightly-advisories:
-    runs-on: ${{ inputs.linux_runner }}
+    # Cross-OS / cross-arch because clippy and udeps in this group
+    # compile per host, so cfg-gated code must be linted/scanned on
+    # every leg. The external-DB checks (deny, audit, aprz) running
+    # multiple times is acceptable noise compared to splitting groups.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-check-nightly-advisories
 
   nightly-runtime:
-    runs-on: ${{ inputs.linux_runner }}
+    # Cross-OS / cross-arch to match the surveyed repos: oxidizer runs
+    # miri on every platform in its matrix (Windows_x64 + Linux_x64);
+    # oxidizer-github runs miri + careful across four legs (Linux/
+    # Windows × x86_64/aarch64). Both tools work on every Tier 1 Rust
+    # target; the Linux-only assumption was wrong.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-check-nightly-runtime
 
   nightly-exhaustive:
-    runs-on: ${{ inputs.linux_runner }}
+    # Cross-OS / cross-arch to match oxidizer's policy: full-workspace
+    # mutation testing + cargo-hack feature powerset + bench compile
+    # checks all benefit from running on every leg for cfg-gated code.
+    # Adopters who can't afford the four-leg matrix (mutants-full can
+    # run for hours per leg) override the matrix in their own root
+    # workflow.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-check-nightly-exhaustive

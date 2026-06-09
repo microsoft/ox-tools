@@ -17,7 +17,6 @@
 //! See [updates.md §7](../../docs/design/updates.md) for the proposed-file
 //! protocol.
 
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -104,14 +103,25 @@ impl PlanItem {
     }
 
     /// Construct a plan item for a `Propose` decision on an owned file.
+    ///
+    /// `template_checksum` is the checksum of `rendered`; the apply step
+    /// records it in the manifest so the next run sees the user's
+    /// divergence as `LeaveAlone` (D ≠ L, L = T) rather than reproposing
+    /// the same content. The .ox-check-proposed sibling is the user's
+    /// review artifact; the proposal "disappears" from the dry-run
+    /// summary on subsequent runs unless the template moves again.
     #[must_use]
-    pub fn propose_file(path: impl Into<String>, rendered: String) -> Self {
+    pub fn propose_file(
+        path: impl Into<String>,
+        rendered: String,
+        template_checksum: String,
+    ) -> Self {
         Self {
             target: Target::File { path: path.into() },
             decision: Decision::Propose,
             rendered: Some(rendered),
             spliced_host: None,
-            rendered_checksum: None,
+            rendered_checksum: Some(template_checksum),
         }
     }
 
@@ -139,12 +149,16 @@ impl PlanItem {
     /// Construct a plan item for a `Propose` decision on a region. The
     /// proposed payload is the *full host file* that would result from
     /// the splice (so the user can review by diffing the proposed file
-    /// against the live host).
+    /// against the live host). `body_checksum` is the checksum of the
+    /// rendered region body — the apply step records it in the
+    /// manifest so subsequent runs see the proposal as resolved (see
+    /// [`propose_file`](Self::propose_file)).
     #[must_use]
     pub fn propose_region(
         host: impl Into<String>,
         id: impl Into<String>,
         spliced_host: String,
+        body_checksum: String,
     ) -> Self {
         Self {
             target: Target::Region {
@@ -154,7 +168,7 @@ impl PlanItem {
             decision: Decision::Propose,
             rendered: None,
             spliced_host: Some(spliced_host),
-            rendered_checksum: None,
+            rendered_checksum: Some(body_checksum),
         }
     }
 }
@@ -190,28 +204,105 @@ impl Plan {
     }
 
     /// Render a stable, line-oriented summary suitable for stdout.
+    ///
+    /// When `previous_manifest` is provided, `Write` items are split
+    /// into "Will create" (no prior manifest entry) and "Will update"
+    /// (existing entry getting refreshed) per
+    /// [updates.md §9](../../docs/design/updates.md). The stale-entries
+    /// section enumerates manifest entries that were present before
+    /// this run but are no longer in the plan; these are purged on
+    /// non-dry-run application (see [`Plan::apply`]).
     #[must_use]
-    pub fn summary(&self) -> String {
-        let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    pub fn summary(&self, previous_manifest: Option<&Manifest>) -> String {
+        let mut creates: Vec<&PlanItem> = Vec::new();
+        let mut updates: Vec<&PlanItem> = Vec::new();
+        let mut leave_alones: Vec<&PlanItem> = Vec::new();
+        let mut proposes: Vec<&PlanItem> = Vec::new();
+        let mut in_syncs: Vec<&PlanItem> = Vec::new();
+
         for item in &self.items {
-            *counts.entry(decision_label(item.decision)).or_default() += 1;
+            match item.decision {
+                Decision::Write => {
+                    let existed = previous_manifest.is_some_and(|m| match &item.target {
+                        Target::File { path } => m.files.contains_key(path),
+                        Target::Region { host, id } => m.regions.contains_key(&RegionKey {
+                            host: host.clone(),
+                            id: id.clone(),
+                        }),
+                    });
+                    if existed {
+                        updates.push(item);
+                    } else {
+                        creates.push(item);
+                    }
+                }
+                Decision::LeaveAlone => leave_alones.push(item),
+                Decision::Propose => proposes.push(item),
+                Decision::InSync => in_syncs.push(item),
+            }
+        }
+
+        // Stale entries: in the prior manifest but no longer covered by
+        // any plan item. These are purged on application.
+        let mut stale_files: Vec<&str> = Vec::new();
+        let mut stale_regions: Vec<RegionKey> = Vec::new();
+        if let Some(prev) = previous_manifest {
+            let live_files: std::collections::BTreeSet<&str> = self
+                .items
+                .iter()
+                .filter_map(|i| match &i.target {
+                    Target::File { path } => Some(path.as_str()),
+                    Target::Region { .. } => None,
+                })
+                .collect();
+            let live_regions: std::collections::BTreeSet<RegionKey> = self
+                .items
+                .iter()
+                .filter_map(|i| match &i.target {
+                    Target::Region { host, id } => Some(RegionKey {
+                        host: host.clone(),
+                        id: id.clone(),
+                    }),
+                    Target::File { .. } => None,
+                })
+                .collect();
+            for path in prev.files.keys() {
+                if !live_files.contains(path.as_str()) {
+                    stale_files.push(path.as_str());
+                }
+            }
+            for key in prev.regions.keys() {
+                if !live_regions.contains(key) {
+                    stale_regions.push(key.clone());
+                }
+            }
         }
 
         let mut out = String::new();
         let _ = writeln!(out, "cargo-ox-check plan: {} item(s)", self.items.len());
-        for (k, v) in &counts {
-            let _ = writeln!(out, "  {k}: {v}");
+
+        write_section(&mut out, "Will create", &creates);
+        write_section(&mut out, "Will update", &updates);
+        write_section(&mut out, "Will propose", &proposes);
+        write_section(&mut out, "Will leave alone (silent)", &leave_alones);
+
+        if !in_syncs.is_empty() {
+            let _ = writeln!(out, "Unchanged: {} item(s)", in_syncs.len());
         }
-        for item in &self.items {
-            if item.decision.writes() {
-                let _ = writeln!(
-                    out,
-                    "  [{}] {}",
-                    decision_label(item.decision),
-                    item.target.label()
-                );
+        if !stale_files.is_empty() || !stale_regions.is_empty() {
+            let _ = writeln!(
+                out,
+                "Stale manifest entries (will be purged): {}",
+                stale_files.len() + stale_regions.len()
+            );
+            for path in &stale_files {
+                let _ = writeln!(out, "  - {path}");
+            }
+            for key in &stale_regions {
+                let _ = writeln!(out, "  - {} [{}]", key.host, key.id);
             }
         }
+
         out
     }
 
@@ -220,12 +311,16 @@ impl Plan {
     /// - `Write` items write their owned-file content or splice region
     ///   bodies into host files and record their checksums in the new
     ///   manifest.
-    /// - `Propose` items write a `.ox-check-proposed` sibling. For region
-    ///   targets, the sibling is on the *host* file:
-    ///   `<host>.ox-check-proposed`. The manifest is NOT updated for
-    ///   proposals — see [updates.md §7](../../docs/design/updates.md).
+    /// - `Propose` items write a `.ox-check-proposed` sibling and
+    ///   bump the manifest entry to the new template checksum so
+    ///   subsequent runs see the divergence as resolved
+    ///   (`LeaveAlone`) until the template moves again — see
+    ///   [updates.md §5](../../docs/design/updates.md).
     /// - `InSync`, `LeaveAlone` items preserve their existing
     ///   manifest entries from `previous_manifest`.
+    /// - Stale entries — items present in `previous_manifest` but not
+    ///   in this plan (e.g. a removed workspace member, a backend the
+    ///   user disabled) — are purged from the returned manifest.
     ///
     /// # Errors
     ///
@@ -269,6 +364,14 @@ impl Plan {
                         .expect("Propose decision must carry rendered content");
                     let abs = repo_root.join(format!("{path}.ox-check-proposed"));
                     write_file(&abs, content)?;
+                    if let Some(checksum) = &item.rendered_checksum {
+                        // Bump L to the new T so subsequent runs see the
+                        // divergence as resolved (LeaveAlone). The user's
+                        // .ox-check-proposed sibling stays on disk for
+                        // review; deleting or accepting it is the user's
+                        // job.
+                        next.files.insert(path.clone(), checksum.clone());
+                    }
                 }
                 (Target::Region { host, id }, Decision::Write) => {
                     let spliced = item
@@ -287,13 +390,25 @@ impl Plan {
                         );
                     }
                 }
-                (Target::Region { host, .. }, Decision::Propose) => {
+                (Target::Region { host, id }, Decision::Propose) => {
                     let spliced = item
                         .spliced_host
                         .as_ref()
                         .expect("region Propose must carry spliced host");
                     let abs = repo_root.join(format!("{host}.ox-check-proposed"));
                     write_file(&abs, spliced)?;
+                    if let Some(checksum) = &item.rendered_checksum {
+                        // Same rationale as the File/Propose branch: bump
+                        // L = T so subsequent runs see LeaveAlone until
+                        // the template moves again.
+                        next.regions.insert(
+                            RegionKey {
+                                host: host.clone(),
+                                id: id.clone(),
+                            },
+                            checksum.clone(),
+                        );
+                    }
                 }
                 (_, Decision::InSync | Decision::LeaveAlone) => {
                     // No-op; manifest entry already preserved.
@@ -301,16 +416,43 @@ impl Plan {
             }
         }
 
+        // Purge stale entries: anything in the previous manifest that the
+        // current run didn't touch (e.g. a removed workspace member, a
+        // disabled backend) is dropped. We use the items the plan covers
+        // as the active-key set; entries outside that set fall away.
+        let live_files: std::collections::BTreeSet<&str> = self
+            .items
+            .iter()
+            .filter_map(|i| match &i.target {
+                Target::File { path } => Some(path.as_str()),
+                Target::Region { .. } => None,
+            })
+            .collect();
+        let live_regions: std::collections::BTreeSet<RegionKey> = self
+            .items
+            .iter()
+            .filter_map(|i| match &i.target {
+                Target::Region { host, id } => Some(RegionKey {
+                    host: host.clone(),
+                    id: id.clone(),
+                }),
+                Target::File { .. } => None,
+            })
+            .collect();
+        next.files.retain(|path, _| live_files.contains(path.as_str()));
+        next.regions.retain(|key, _| live_regions.contains(key));
+
         Ok(next)
     }
 }
 
-const fn decision_label(d: Decision) -> &'static str {
-    match d {
-        Decision::InSync => "in-sync",
-        Decision::Write => "write",
-        Decision::Propose => "propose",
-        Decision::LeaveAlone => "leave-alone",
+fn write_section(out: &mut String, header: &str, items: &[&PlanItem]) {
+    if items.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "{header}: {} item(s)", items.len());
+    for item in items {
+        let _ = writeln!(out, "  - {}", item.target.label());
     }
 }
 
@@ -376,19 +518,49 @@ mod tests {
     }
 
     #[test]
-    fn summary_contains_counts_and_changed_items() {
+    fn summary_categorizes_items() {
         let mut plan = Plan::default();
+        // A fresh write (no prior manifest entry).
         plan.push(PlanItem::write_file("a.txt", "x".into(), "sha256:1".into()));
+        // An item that was previously rendered and is now in sync.
         plan.push(PlanItem::noop(
             Target::File { path: "b.txt".into() },
             Decision::InSync,
         ));
-        let s = plan.summary();
-        assert!(s.contains("write: 1"));
-        assert!(s.contains("in-sync: 1"));
-        assert!(s.contains("a.txt"));
-        // b.txt is in-sync, listed only in counts not in the changed list.
-        assert!(!s.contains("[in-sync] b.txt"));
+        // No previous manifest → no "Will update" distinction, but the
+        // categories still render.
+        let s = plan.summary(Some(&Manifest::default()));
+        assert!(s.contains("Will create: 1 item(s)"), "summary:\n{s}");
+        assert!(s.contains("- a.txt"));
+        assert!(s.contains("Unchanged: 1 item(s)"));
+        // b.txt is in-sync — listed in the unchanged count, not enumerated by path.
+        assert!(!s.contains("- b.txt"));
+    }
+
+    #[test]
+    fn summary_distinguishes_create_from_update() {
+        let mut plan = Plan::default();
+        plan.push(PlanItem::write_file("new.txt", "x".into(), "sha256:1".into()));
+        plan.push(PlanItem::write_file("existing.txt", "y".into(), "sha256:2".into()));
+        let mut prev = Manifest::default();
+        prev.set_file("existing.txt", "sha256:old");
+        let s = plan.summary(Some(&prev));
+        assert!(s.contains("Will create: 1 item(s)"), "summary:\n{s}");
+        assert!(s.contains("- new.txt"));
+        assert!(s.contains("Will update: 1 item(s)"));
+        assert!(s.contains("- existing.txt"));
+    }
+
+    #[test]
+    fn summary_lists_stale_entries() {
+        let plan = Plan::default();
+        let mut prev = Manifest::default();
+        prev.set_file("stale.txt", "sha256:old");
+        prev.set_region("stale-host.toml", "stale-region", "sha256:r");
+        let s = plan.summary(Some(&prev));
+        assert!(s.contains("Stale manifest entries (will be purged): 2"));
+        assert!(s.contains("- stale.txt"));
+        assert!(s.contains("- stale-host.toml [stale-region]"));
     }
 
     #[test]
@@ -408,13 +580,21 @@ mod tests {
     }
 
     #[test]
-    fn apply_writes_proposed_file_sibling() {
+    fn apply_writes_proposed_file_sibling_and_bumps_manifest() {
         let tmp = TempDir::new().unwrap();
         let mut plan = Plan::default();
-        plan.push(PlanItem::propose_file("a.txt", "new content\n".into()));
-        let _ = plan.apply(tmp.path(), &Manifest::default()).unwrap();
+        plan.push(PlanItem::propose_file(
+            "a.txt",
+            "new content\n".into(),
+            "sha256:newt".into(),
+        ));
+        let m = plan.apply(tmp.path(), &Manifest::default()).unwrap();
         assert!(tmp.path().join("a.txt.ox-check-proposed").is_file());
         assert!(!tmp.path().join("a.txt").exists());
+        // The manifest L is bumped to the new template checksum so the
+        // next run sees the divergence as resolved (LeaveAlone), not as
+        // a fresh proposal.
+        assert_eq!(m.files.get("a.txt").map(String::as_str), Some("sha256:newt"));
     }
 
     #[test]
@@ -439,31 +619,63 @@ mod tests {
     }
 
     #[test]
-    fn apply_region_propose_writes_proposed_host_sibling() {
+    fn apply_region_propose_writes_sibling_and_bumps_manifest() {
         let tmp = TempDir::new().unwrap();
         let mut plan = Plan::default();
         plan.push(PlanItem::propose_region(
             "Justfile",
             "ox-check-imports",
             "spliced host content\n".into(),
+            "sha256:newt".into(),
         ));
         let m = plan.apply(tmp.path(), &Manifest::default()).unwrap();
         assert!(tmp.path().join("Justfile.ox-check-proposed").is_file());
-        // Manifest region entries unchanged.
-        assert!(m.regions.is_empty());
+        // Region L is bumped to the new template checksum on propose;
+        // subsequent runs see LeaveAlone until the template changes.
+        let key = RegionKey {
+            host: "Justfile".into(),
+            id: "ox-check-imports".into(),
+        };
+        assert_eq!(m.regions.get(&key).map(String::as_str), Some("sha256:newt"));
     }
 
     #[test]
-    fn apply_preserves_unrelated_manifest_entries() {
+    fn apply_purges_stale_manifest_entries() {
+        // Items present in the previous manifest but not in the current
+        // plan (e.g. a removed workspace member, a disabled backend) are
+        // dropped from the returned manifest.
         let tmp = TempDir::new().unwrap();
         let mut prev = Manifest::default();
-        prev.set_file("unrelated.txt", "sha256:old");
+        prev.set_file("stale-owned.txt", "sha256:old");
+        prev.set_region("stale-host.toml", "stale-region", "sha256:r");
         let plan = Plan::default();
         let next = plan.apply(tmp.path(), &prev).unwrap();
-        assert_eq!(
-            next.files.get("unrelated.txt").map(String::as_str),
-            Some("sha256:old")
+        assert!(
+            next.files.is_empty(),
+            "stale file entry should be purged when not in plan: {:?}",
+            next.files
         );
+        assert!(
+            next.regions.is_empty(),
+            "stale region entry should be purged when not in plan: {:?}",
+            next.regions
+        );
+    }
+
+    #[test]
+    fn apply_preserves_in_plan_manifest_entries() {
+        // The dual of the purging test: a manifest entry whose target IS
+        // in the plan (even as InSync/LeaveAlone) survives.
+        let tmp = TempDir::new().unwrap();
+        let mut prev = Manifest::default();
+        prev.set_file("kept.txt", "sha256:k");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::noop(
+            Target::File { path: "kept.txt".into() },
+            Decision::LeaveAlone,
+        ));
+        let next = plan.apply(tmp.path(), &prev).unwrap();
+        assert_eq!(next.files.get("kept.txt").map(String::as_str), Some("sha256:k"));
     }
 
     #[test]

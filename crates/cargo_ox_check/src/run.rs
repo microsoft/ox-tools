@@ -23,6 +23,10 @@ use crate::workspace::{self, Workspace};
 pub struct RunOutcome {
     /// The plan that was built.
     pub plan: Plan,
+    /// The manifest as it existed before this run (useful for the
+    /// categorized summary so `Will create` and `Will update` can be
+    /// distinguished, and so stale entries can be enumerated).
+    pub previous_manifest: Manifest,
     /// Whether the plan was actually applied to disk.
     pub applied: bool,
     /// The resolved backend set.
@@ -38,7 +42,7 @@ pub fn run(command: Command) -> Result<(), AppError> {
     match command {
         Command::Update(args) => {
             let outcome = run_update(&args, &std::env::current_dir()?)?;
-            print!("{}", outcome.plan.summary());
+            print!("{}", outcome.plan.summary(Some(&outcome.previous_manifest)));
             if args.dry_run && outcome.plan.has_changes() {
                 std::process::exit(1);
             }
@@ -81,6 +85,7 @@ pub fn run_update(args: &UpdateArgs, start_dir: &Path) -> Result<RunOutcome, App
 
     Ok(RunOutcome {
         plan,
+        previous_manifest: manifest,
         applied,
         backends,
     })
@@ -175,6 +180,7 @@ mod tests {
             "justfiles/ox-check/groups.just",
             "justfiles/ox-check/tiers.just",
             "justfiles/ox-check/tools.just",
+            "justfiles/ox-check/tool-minimums.txt",
             "deny.toml",
             "rustfmt.toml",
             ".delta.toml",
@@ -295,6 +301,89 @@ mod tests {
         assert!(final_text.contains("edition = \"2021\""));
     }
 
+    /// Verifies B6: after a Propose decision, the next run sees the
+    /// divergence as `LeaveAlone` (no re-proposal) until the template
+    /// itself moves again.
+    #[test]
+    fn propose_burns_through_after_one_run() {
+        use crate::checksum::checksum_str;
+        use crate::manifest::{Manifest, RegionKey};
+
+        let tmp = empty_workspace();
+        let args = UpdateArgs {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+        };
+
+        // First update: write everything.
+        let _ = run_update(&args, tmp.path()).unwrap();
+
+        // User edits the rustfmt region.
+        let path = tmp.path().join("rustfmt.toml");
+        let host = fs::read_to_string(&path).unwrap();
+        let edited = crate::region::upsert_region(
+            &host,
+            shared_configs::RUSTFMT_REGION_ID,
+            "edition = \"2021\"\n",
+            crate::region::CommentSyntax::Hash,
+        )
+        .unwrap();
+        fs::write(&path, edited).unwrap();
+
+        // Simulate the template moving on by hand-editing the manifest's
+        // recorded checksum for the region to a value other than what
+        // the user has and other than the current template. That way
+        // the next run sees D ≠ L ≠ T → Propose.
+        let manifest_path = Manifest::path_for(tmp.path());
+        let mut manifest = Manifest::load(tmp.path()).unwrap();
+        let key = RegionKey {
+            host: "rustfmt.toml".to_owned(),
+            id: shared_configs::RUSTFMT_REGION_ID.to_owned(),
+        };
+        manifest
+            .regions
+            .insert(key, checksum_str("synthetic old template"));
+        manifest.save(tmp.path()).unwrap();
+        let _ = manifest_path; // sanity
+
+        // Second update: should Propose (user diverged + template moved).
+        let second = run_update(&args, tmp.path()).unwrap();
+        let item = second
+            .plan
+            .items()
+            .iter()
+            .find(|i| {
+                matches!(&i.target, crate::plan::Target::Region { host, id }
+                    if host == "rustfmt.toml" && id == shared_configs::RUSTFMT_REGION_ID)
+            })
+            .unwrap();
+        assert_eq!(item.decision, crate::decision::Decision::Propose);
+        assert!(
+            tmp.path().join("rustfmt.toml.ox-check-proposed").is_file(),
+            "expected a proposed sibling after the Propose run"
+        );
+
+        // Third update: nothing has changed since the second run; the
+        // proposal should have been "burned through" and the next run
+        // should see LeaveAlone (D ≠ L, L = T) — not Propose.
+        let third = run_update(&args, tmp.path()).unwrap();
+        let item = third
+            .plan
+            .items()
+            .iter()
+            .find(|i| {
+                matches!(&i.target, crate::plan::Target::Region { host, id }
+                    if host == "rustfmt.toml" && id == shared_configs::RUSTFMT_REGION_ID)
+            })
+            .unwrap();
+        assert_eq!(
+            item.decision,
+            crate::decision::Decision::LeaveAlone,
+            "Propose should bump L = T so subsequent runs see LeaveAlone"
+        );
+    }
+
     #[test]
     fn github_backend_writes_full_dotgithub_tree() {
         let tmp = empty_workspace();
@@ -341,7 +430,7 @@ mod tests {
         assert!(
             !second.plan.has_changes(),
             "second github run should be a no-op:\n{}",
-            second.plan.summary()
+            second.plan.summary(Some(&second.previous_manifest))
         );
     }
 

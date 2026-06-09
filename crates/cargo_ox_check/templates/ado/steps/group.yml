@@ -4,17 +4,20 @@
 # The token __GROUP__ is substituted by cargo-ox-check at emit time with
 # the concrete check-group name (pr-fast, pr-test, nightly-runtime, ...).
 parameters:
-  - name: excludes
+  - name: include_modified
     type: string
     default: ''
-  - name: skip
+  - name: include_affected
     type: string
-    default: 'false'
+    default: ''
+  - name: include_required
+    type: string
+    default: ''
 steps:
   - template: setup.yml
-    condition: ne(parameters.skip, 'true')
   - bash: just ox-check-__GROUP__
-    condition: ne(parameters.skip, 'true')
     displayName: ox-check-__GROUP__
     env:
-      OX_CHECK_EXCLUDES: ${{ parameters.excludes }}
+      OX_CHECK_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
+      OX_CHECK_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
+      OX_CHECK_INCLUDE_REQUIRED: ${{ parameters.include_required }}

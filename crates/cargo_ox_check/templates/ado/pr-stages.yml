@@ -22,35 +22,51 @@ stages:
     displayName: ox-check pr-fast
     dependsOn: impact
     condition: succeededOrFailed()
-    pool: ${{ parameters.linuxPool }}
     variables:
-      excludes: $[ stageDependencies.impact.compute.outputs['compute.excludes'] ]
-      skip: $[ stageDependencies.impact.compute.outputs['compute.skip'] ]
+      include_modified: $[ stageDependencies.impact.compute.outputs['compute.include_modified'] ]
+      include_affected: $[ stageDependencies.impact.compute.outputs['compute.include_affected'] ]
+      include_required: $[ stageDependencies.impact.compute.outputs['compute.include_required'] ]
     jobs:
-      - job: pr_fast
+      # Cross-OS because pr-fast contains compile-sensitive checks
+      # (clippy, doc-build, udeps, semver-check, external-types) whose
+      # results can differ across host OS for crates that use
+      # #[cfg(target_os = ...)] gating.
+      - job: linux
+        pool: ${{ parameters.linuxPool }}
         steps:
           - template: steps/pr-fast.yml
             parameters:
-              excludes: $(excludes)
-              skip: $(skip)
+              include_modified: $(include_modified)
+              include_affected: $(include_affected)
+              include_required: $(include_required)
+      - job: windows
+        pool: ${{ parameters.windowsPool }}
+        steps:
+          - template: steps/pr-fast.yml
+            parameters:
+              include_modified: $(include_modified)
+              include_affected: $(include_affected)
+              include_required: $(include_required)
 
   - stage: pr_test
     displayName: ox-check pr-test
     dependsOn: impact
     condition: succeededOrFailed()
     variables:
-      excludes: $[ stageDependencies.impact.compute.outputs['compute.excludes'] ]
-      skip: $[ stageDependencies.impact.compute.outputs['compute.skip'] ]
+      include_modified: $[ stageDependencies.impact.compute.outputs['compute.include_modified'] ]
+      include_affected: $[ stageDependencies.impact.compute.outputs['compute.include_affected'] ]
+      include_required: $[ stageDependencies.impact.compute.outputs['compute.include_required'] ]
     jobs:
       - job: linux
         pool: ${{ parameters.linuxPool }}
         steps:
           - template: steps/pr-test.yml
             parameters:
-              excludes: $(excludes)
-              skip: $(skip)
+              include_modified: $(include_modified)
+              include_affected: $(include_affected)
+              include_required: $(include_required)
           - task: PublishCodeCoverageResults@2
-            condition: and(succeededOrFailed(), ne(variables.skip, 'true'))
+            condition: and(succeededOrFailed(), ne(variables.include_affected, '--skip'))
             displayName: Publish coverage
             inputs:
               summaryFileLocation: target/coverage/cobertura.xml
@@ -60,21 +76,35 @@ stages:
         steps:
           - template: steps/pr-test.yml
             parameters:
-              excludes: $(excludes)
-              skip: $(skip)
+              include_modified: $(include_modified)
+              include_affected: $(include_affected)
+              include_required: $(include_required)
 
   - stage: pr_mutants
     displayName: ox-check pr-mutants
     dependsOn: impact
     condition: succeededOrFailed()
-    pool: ${{ parameters.linuxPool }}
     variables:
-      excludes: $[ stageDependencies.impact.compute.outputs['compute.excludes'] ]
-      skip: $[ stageDependencies.impact.compute.outputs['compute.skip'] ]
+      include_modified: $[ stageDependencies.impact.compute.outputs['compute.include_modified'] ]
+      include_affected: $[ stageDependencies.impact.compute.outputs['compute.include_affected'] ]
+      include_required: $[ stageDependencies.impact.compute.outputs['compute.include_required'] ]
     jobs:
-      - job: pr_mutants
+      # Cross-OS to match oxidizer's policy: mutation testing on
+      # cfg(target_os) gated code matters. Diff-scoped (--in-diff) keeps
+      # each leg's runtime bounded.
+      - job: linux
+        pool: ${{ parameters.linuxPool }}
         steps:
           - template: steps/pr-mutants.yml
             parameters:
-              excludes: $(excludes)
-              skip: $(skip)
+              include_modified: $(include_modified)
+              include_affected: $(include_affected)
+              include_required: $(include_required)
+      - job: windows
+        pool: ${{ parameters.windowsPool }}
+        steps:
+          - template: steps/pr-mutants.yml
+            parameters:
+              include_modified: $(include_modified)
+              include_affected: $(include_affected)
+              include_required: $(include_required)

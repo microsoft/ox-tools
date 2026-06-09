@@ -3,16 +3,37 @@
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
 name: ox-check-impact
 description: |
-  Compute the cargo-delta impact set for this PR and emit two outputs:
-    excludes - comma-separated list of crates not touched by the diff
-    skip     - "true" iff no ox-check-relevant files changed at all
+  Compute the cargo-delta impact set for this PR and emit per-tier
+  include lists.
+
+  Outputs:
+    include_modified - "--package X --package Y" string for crates whose
+                       source files changed in the diff, or "--skip" if
+                       the modified set is empty.
+    include_affected - same shape, for crates in the affected set
+                       (modified ∪ rev-deps).
+    include_required - same shape, for crates in the required set
+                       (affected ∪ workspace-internal transitive deps).
+
+  Recipes in checks.just interpret each variable per their tier:
+  modified-tier recipes (fmt, license-headers, spellcheck, ...) short-
+  circuit on "--skip"; affected-tier recipes (clippy, tests, ...) and
+  required-tier recipes (doc, cargo-hack, udeps) splice their include
+  list into the cargo invocation, defaulting to --workspace when unset
+  (local runs without impact wiring).
+
+  Unscoped recipes (deny, audit, aprz, pr-title) ignore all three
+  variables and always run unconditionally.
 outputs:
-  excludes:
-    description: Comma-separated package excludes
-    value: ${{ steps.compute.outputs.excludes }}
-  skip:
-    description: Whether all ox-check groups should be skipped this run
-    value: ${{ steps.compute.outputs.skip }}
+  include_modified:
+    description: Pre-formatted --package args for the modified tier.
+    value: ${{ steps.compute.outputs.include_modified }}
+  include_affected:
+    description: Pre-formatted --package args for the affected tier.
+    value: ${{ steps.compute.outputs.include_affected }}
+  include_required:
+    description: Pre-formatted --package args for the required tier.
+    value: ${{ steps.compute.outputs.include_required }}
 runs:
   using: composite
   steps:
@@ -23,9 +44,31 @@ runs:
       name: Compute impact
       shell: bash
       run: |
+        set -euo pipefail
         base="${BASE_REF:-${GITHUB_BASE_REF:-origin/main}}"
-        result="$(cargo delta impact --base "$base" --format json || echo '{}')"
-        excludes="$(printf '%s' "$result" | jq -r '.excludes // [] | join(",")')"
-        skip="$(printf '%s' "$result" | jq -r '.skip // false')"
-        echo "excludes=$excludes" >> "$GITHUB_OUTPUT"
-        echo "skip=$skip" >> "$GITHUB_OUTPUT"
+        # cargo delta impact handles a missing/empty .delta.toml
+        # gracefully via its own defaults. The JSON output names the
+        # crate sets directly; we format each into the --package args
+        # shape recipes expect, with "--skip" as the empty-set sentinel.
+        result="$(cargo delta impact --base "$base" --format json 2>/dev/null || echo '{}')"
+        format_set() {
+            local field="$1"
+            local pkgs
+            pkgs=$(printf '%s' "$result" | jq -r --arg f "$field" '(.[$f] // []) | .[]' 2>/dev/null || true)
+            if [ -z "$pkgs" ] ; then
+                printf '%s' "--skip"
+            else
+                local out=""
+                while IFS= read -r pkg ; do
+                    [ -z "$pkg" ] && continue
+                    out="$out --package $pkg"
+                done <<EOF
+        $pkgs
+        EOF
+                # shellcheck disable=SC2001
+                printf '%s' "${out# }"
+            fi
+        }
+        echo "include_modified=$(format_set modified)" >> "$GITHUB_OUTPUT"
+        echo "include_affected=$(format_set affected)" >> "$GITHUB_OUTPUT"
+        echo "include_required=$(format_set required)" >> "$GITHUB_OUTPUT"

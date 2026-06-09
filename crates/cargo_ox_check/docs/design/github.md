@@ -61,9 +61,10 @@ See also:
     └── ox-check-nightly.yml              owned
 ```
 
-All files are regular owned files (carry an `ox-check-checksum` first line, governed by
-[updates.md §5](./updates.md#5-the-decision-algorithm)). Users who customize the root
-workflow take ownership through the standard dirty-file flow.
+All files are regular owned files tracked by the sidecar `.ox-check.lock` manifest
+(no in-file checksum line; see [updates.md §1](./updates.md#1-the-manifest)). Users
+who customize the root workflow take ownership through the standard dirty-file
+flow.
 
 ## 3. Root workflows
 
@@ -102,17 +103,30 @@ Common edits users make to the root workflow (these flip the file to "dirty" and
 a `.ox-check-proposed` sibling on the next `update` — see
 [updates.md §5](./updates.md#5-the-decision-algorithm)):
 
-- **Self-hosted runners**: pass `with: { runs_on: 'self-hosted-rust' }` to the reusable
-  workflow.
-- **Trim or expand the test matrix**: pass `with: { test_os: '["ubuntu-latest"]' }` to
-  run tests on Linux only, or `'["ubuntu-latest","windows-latest","macos-latest"]'` to
-  add macOS. See §4 for the input contract.
-- **Required secrets**: add `secrets: inherit` (or specific secrets) under the `ox-check:`
-  job.
+- **Self-hosted runners**: pass `with: { linux_runner: 'self-hosted-rust', windows_runner: 'self-hosted-rust-win', linux_arm_runner: 'self-hosted-rust-arm', windows_arm_runner: 'self-hosted-rust-win-arm' }`
+  to the reusable workflow. The runner inputs are CSV-keyed by OS (see §4 for the
+  exact contract).
+- **Trim or expand the test matrix**: pass `with: { test_os: 'linux,windows' }` to drop
+  the ARM legs, or `'linux,windows,linux-arm,windows-arm,macos'` to add macOS. The CSV
+  uses logical names
+  (`linux`/`windows`/`macos`), not runner labels — runner labels come from the separate
+  `*_runner` inputs.
 - **Different schedule** for nightly.
-- **Concurrency groups**: add a `concurrency:` block.
-- **Path filters** to skip the workflow on docs-only PRs (though ox-check's own
-  `.delta.toml` trip-wire patterns already do impact-scoped skipping).
+- **Path filters** to skip the workflow on docs-only PRs (though ox-check's
+  `cargo delta impact` step already produces a `--skip` sentinel for the include lists
+  when nothing relevant changed).
+
+ox-check ships two defaults in the root workflow that adopters typically keep but can
+remove if they have specific reasons:
+
+- `concurrency: { group: ox-check-pr-${{ github.head_ref || github.ref }}, cancel-in-progress: true }`
+  on `ox-check-pr.yml`. Prevents two ox-check runs from racing on the same PR
+  branch — the newer push cancels the older. Removing it costs CI minutes but
+  is otherwise harmless.
+- `secrets: inherit` on the `ox-check:` job. Forwards the calling repo's
+  secrets (notably `CODECOV_TOKEN`) into the reusable workflow without each
+  adopter having to enumerate them. Removing it disables Codecov uploads
+  for private repos but doesn't affect anything else.
 
 ## 4. Owned reusable workflows
 
@@ -141,10 +155,9 @@ jobs:
   impact:
     runs-on: ${{ inputs.runs_on }}
     outputs:
-      exclude_not_modified: ${{ steps.impact.outputs.exclude_not_modified }}
-      exclude_not_affected: ${{ steps.impact.outputs.exclude_not_affected }}
-      exclude_not_required: ${{ steps.impact.outputs.exclude_not_required }}
-      skip: ${{ steps.impact.outputs.skip }}
+      include_modified: ${{ steps.impact.outputs.include_modified }}
+      include_affected: ${{ steps.impact.outputs.include_affected }}
+      include_required: ${{ steps.impact.outputs.include_required }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
@@ -160,11 +173,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-check-pr-fast
         with:
-          pr_title:             ${{ github.event.pull_request.title }}
-          exclude_not_modified: ${{ needs.impact.outputs.exclude_not_modified }}
-          exclude_not_affected: ${{ needs.impact.outputs.exclude_not_affected }}
-          exclude_not_required: ${{ needs.impact.outputs.exclude_not_required }}
-          impact_skip:          ${{ needs.impact.outputs.skip }}
+          pr_title:         ${{ github.event.pull_request.title }}
+          include_modified: ${{ needs.impact.outputs.include_modified }}
+          include_affected: ${{ needs.impact.outputs.include_affected }}
+          include_required: ${{ needs.impact.outputs.include_required }}
 
   pr-test:
     needs: impact
@@ -177,10 +189,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-check-pr-test
         with:
-          exclude_not_modified: ${{ needs.impact.outputs.exclude_not_modified }}
-          exclude_not_affected: ${{ needs.impact.outputs.exclude_not_affected }}
-          exclude_not_required: ${{ needs.impact.outputs.exclude_not_required }}
-          impact_skip:          ${{ needs.impact.outputs.skip }}
+          include_modified: ${{ needs.impact.outputs.include_modified }}
+          include_affected: ${{ needs.impact.outputs.include_affected }}
+          include_required: ${{ needs.impact.outputs.include_required }}
 
   pr-mutants:
     needs: impact
@@ -189,24 +200,23 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-check-pr-mutants
         with:
-          base_ref:             origin/${{ github.event.pull_request.base.ref }}
-          exclude_not_modified: ${{ needs.impact.outputs.exclude_not_modified }}
-          exclude_not_affected: ${{ needs.impact.outputs.exclude_not_affected }}
-          exclude_not_required: ${{ needs.impact.outputs.exclude_not_required }}
-          impact_skip:          ${{ needs.impact.outputs.skip }}
+          base_ref:         origin/${{ github.event.pull_request.base.ref }}
+          include_modified: ${{ needs.impact.outputs.include_modified }}
+          include_affected: ${{ needs.impact.outputs.include_affected }}
+          include_required: ${{ needs.impact.outputs.include_required }}
 ```
 
-The wiring never short-circuits jobs on `skip=true`. Each group always runs; the
-recipes inside the group decide whether a given check can no-op. This matters because
-several PR-tier checks (`fmt`, `deny`, `audit`, `aprz`, `pr-title`, `spellcheck`) don't
-scope to workspace members and must run on every PR, including docs-only PRs where
-nothing in the workspace is "affected." See
+The wiring never gates whole jobs on impact output. Each group always runs; recipes
+inside the group decide whether a given check no-ops, by testing for the literal sentinel
+`--skip` in the relevant include var. This matters because unscoped checks (`fmt`, `deny`,
+`audit`, `aprz`, `pr-title`, `mutants-full`) must run on every PR, including docs-only
+PRs where every tier comes back `--skip`. See
 [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars) for the recipe-side
 contract.
 
 The nightly reusable workflow is simpler — it omits the `impact` job and runs each group
-full-workspace. The exclude inputs are still passed (defaulted to empty) so the composite
-actions have a uniform interface across tiers:
+full-workspace. The include inputs default to empty strings, so recipes fall through to
+their local-default behavior (`--workspace`):
 
 ```yaml
 # .github/workflows/ox-check-nightly-impl.yml  (owned)
@@ -231,25 +241,42 @@ jobs:
   exhaustive:  { runs-on: ${{ inputs.runs_on }}, steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-nightly-exhaustive } ] }
 ```
 
-Nightly composite actions don't receive `exclude_*` at all — their inputs default to
-empty (full workspace) and the reusable workflow omits the passthrough. Threading them
-through is purely a PR-tier optimization; nightly never benefits.
+Nightly composite actions don't receive any `include_*` inputs at all — their inputs
+default to empty strings (recipes default to `--workspace`) and the reusable workflow
+omits the passthrough. Threading them through is purely a PR-tier optimization;
+nightly never benefits.
 
-If `.delta.toml`'s managed region is disabled
+If `.delta.toml`'s managed region is emptied
 ([updates.md §opt-out](./updates.md#6-opting-out-in-file-stubs)),
-`ox-check-pr-impl.yml` is regenerated **without** the `impact` job: each group job becomes
-unconditional and the `exclude_*` inputs default to empty, so every group runs
-full-workspace. `.github/actions/ox-check-impact/` is not emitted in that mode.
+`cargo delta impact` runs with its own defaults — the file is optional configuration, not
+a feature gate — and the `impact` job still emits include lists that recipes interpret
+normally. The user has opted out of *ox-check's curated cargo-delta config*, not out of
+impact scoping itself.
 
 The reusable workflow declares a small input set so the root workflow can pass overrides:
 
-| Input     | Type   | Default                                | Meaning                                                |
-|-----------|--------|----------------------------------------|--------------------------------------------------------|
-| `runs_on` | string | `ubuntu-latest`                        | Runner for single-OS jobs (impact, pr-fast, pr-mutants). |
-| `test_os` | string | `'["ubuntu-latest","windows-latest"]'` | JSON array of runners for the cross-OS `pr-test` matrix. Override to drop Windows for OSS-only repos, or to add `macos-latest`, `windows-2022`, a self-hosted label, etc. |
+| Input                | Type   | Default                              | Meaning                                                |
+|----------------------|--------|--------------------------------------|--------------------------------------------------------|
+| `test_os`            | string | `linux,windows,linux-arm,windows-arm` | CSV of logical OS names for the `pr-test` / `nightly-test` matrix. Recognized: `linux`, `windows`, `linux-arm`, `windows-arm`, `macos`. Override to trim or extend the matrix. |
+| `linux_runner`       | string | `ubuntu-latest`                      | Runner label for x86_64 Linux jobs and the single-OS impact job. |
+| `windows_runner`     | string | `windows-latest`                     | Runner label for x86_64 Windows jobs.                  |
+| `linux_arm_runner`   | string | `ubuntu-24.04-arm`                   | Runner label for aarch64 Linux jobs.                   |
+| `windows_arm_runner` | string | `windows-11-arm`                     | Runner label for aarch64 Windows jobs.                 |
+| `macos_runner`       | string | `macos-latest`                       | Runner label for macOS jobs (only consulted when `test_os` includes `macos`). |
 
-The nightly reusable workflow has the same two inputs; its `nightly-test` job uses
-`test_os` and every other job uses `runs_on`.
+The non-test groups (`pr-fast`, `pr-mutants`, `nightly-advisories`, `nightly-runtime`,
+`nightly-exhaustive`) all matrix over the same four-leg default
+(`linux,windows,linux-arm,windows-arm`). The single-leg `impact` job uses `linux_runner`.
+Adopters who want a narrower default matrix override `test_os` (which controls the test
+groups) and edit their root workflow to constrain the other groups; per-group matrix
+overrides are intentionally not supported as inputs since they would expand the wiring
+surface beyond what most adopters need.
+
+The nightly reusable workflow has the same four inputs; its `nightly-test` job uses the
+same matrix mechanism as `pr-test`, and every other job uses `linux_runner`.
+
+The reusable workflows also declare an optional `workflow_call` secret
+`CODECOV_TOKEN`. See §10 (Coverage upload) for how it's used.
 
 We deliberately keep this input surface minimal. Anything more elaborate (e.g.
 per-job runner overrides) lives in the user's own workflow, which can compose its own
@@ -258,10 +285,10 @@ per-job runner overrides) lives in the user's own workflow, which can compose it
 ## 5. Per-group composite actions
 
 Each per-group composite action has the **same** uniform input surface — the three
-impact-exclude variables plus a per-action handful of PR-context strings. This means
-the reusable workflow doesn't need to know which excludes a group's checks consume; it
-threads all three to every action. Moving a check between groups is a pure catalog
-change.
+impact-include variables plus a per-action handful of PR-context strings. This means
+the reusable workflow doesn't need to know which include vars a group's checks consume;
+it threads all three to every action. Moving a check between groups (or between
+buckets) is a pure catalog change.
 
 ```yaml
 # .github/actions/ox-check-pr-fast/action.yml  (owned)
@@ -272,22 +299,21 @@ inputs:
     description: PR title for the pr-title check.
     required: false
     default: ""
-  exclude_not_modified:
-    description: cargo-excludes string from ox-check-impact (--modified). Empty = full workspace.
+  include_modified:
+    description: |
+      Pre-formatted --package args from ox-check-impact for the modified
+      tier, or "--skip" when the modified set is empty. Empty string =
+      local invocation; recipes default to --workspace.
     required: false
     default: ""
-  exclude_not_affected:
-    description: cargo-excludes string from ox-check-impact (--affected). Empty = full workspace.
+  include_affected:
+    description: Same shape as include_modified, for the affected tier.
     required: false
     default: ""
-  exclude_not_required:
-    description: cargo-excludes string from ox-check-impact (--required). Empty = full workspace.
+  include_required:
+    description: Same shape as include_modified, for the required tier.
     required: false
     default: ""
-  impact_skip:
-    description: '"true" when no workspace member is in any impact tier. Recipes that scope to workspace members may early-return; non-scoping recipes ignore this.'
-    required: false
-    default: "false"
 runs:
   using: composite
   steps:
@@ -295,21 +321,19 @@ runs:
     - shell: bash
       env:
         PR_TITLE: ${{ inputs.pr_title }}
-        OX_CHECK_EXCLUDE_NOT_MODIFIED: ${{ inputs.exclude_not_modified }}
-        OX_CHECK_EXCLUDE_NOT_AFFECTED: ${{ inputs.exclude_not_affected }}
-        OX_CHECK_EXCLUDE_NOT_REQUIRED: ${{ inputs.exclude_not_required }}
-        OX_CHECK_IMPACT_SKIP: ${{ inputs.impact_skip }}
+        OX_CHECK_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
+        OX_CHECK_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
+        OX_CHECK_INCLUDE_REQUIRED: ${{ inputs.include_required }}
       run: just ox-check-pr-fast
 ```
 
 Uniform input set on every per-group composite action:
 
-| Input                     | Default     | Notes                                              |
-|---------------------------|-------------|----------------------------------------------------|
-| `exclude_not_modified`    | `""`        | Forwarded as `OX_CHECK_EXCLUDE_NOT_MODIFIED`.         |
-| `exclude_not_affected`    | `""`        | Forwarded as `OX_CHECK_EXCLUDE_NOT_AFFECTED`.         |
-| `exclude_not_required`    | `""`        | Forwarded as `OX_CHECK_EXCLUDE_NOT_REQUIRED`.         |
-| `impact_skip`             | `"false"`   | Forwarded as `OX_CHECK_IMPACT_SKIP`. Recipes that consume the excludes may early-return when `"true"`; non-scoping recipes (fmt, deny, audit, …) ignore it. See [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars). |
+| Input              | Default | Notes                                                                                                                                  |
+|--------------------|---------|----------------------------------------------------------------------------------------------------------------------------------------|
+| `include_modified` | `""`    | Forwarded as `OX_CHECK_INCLUDE_MODIFIED`. `--skip` → recipe exits 0. Empty → recipe defaults to `--workspace`.                          |
+| `include_affected` | `""`    | Forwarded as `OX_CHECK_INCLUDE_AFFECTED`. Same semantics.                                                                              |
+| `include_required` | `""`    | Forwarded as `OX_CHECK_INCLUDE_REQUIRED`. Same semantics.                                                                              |
 
 Per-action additions (only where the action consumes PR-context strings the recipe needs):
 
@@ -340,25 +364,28 @@ plug individual groups into an unrelated workflow can `uses:` them directly.
 `.github/actions/ox-check-impact/action.yml` is a composite action with input `base_ref`. It
 runs:
 
-1. `git checkout $base_ref` and `cargo delta -c .delta.toml snapshot > baseline.json`.
-2. `git checkout $head` and `cargo delta -c .delta.toml snapshot > current.json`.
-3. `cargo delta impact -c .delta.toml --baseline baseline.json --current current.json -f
-   cargo-excludes --modified|--affected|--required` once per tier.
+1. `cargo install --locked cargo-delta`.
+2. `cargo delta impact --base $base_ref --format json` once, capturing the JSON tier
+   sets in a single invocation.
+3. For each of the three tiers (`modified`, `affected`, `required`), format the crate
+   list into a pre-built `--package X --package Y …` string, or emit the sentinel
+   `--skip` when the tier is empty.
 
 Outputs:
 
-| Output                  | Meaning                                                                                                  |
-|-------------------------|----------------------------------------------------------------------------------------------------------|
-| `exclude_not_modified`  | `--exclude X --exclude Y …` string for the complement of cargo-delta's `modified` tier.                  |
-| `exclude_not_affected`  | Same, for the `affected` tier.                                                                           |
-| `exclude_not_required`  | Same, for the `required` tier.                                                                           |
-| `skip`                  | `"true"` when no workspace member is in any tier (no PR-relevant change). Propagated via `impact_skip` to every composite action; recipes that scope to workspace members may use it to early-return, but the wiring never gates whole jobs on it (see §4). |
+| Output             | Meaning                                                                                                                                                                |
+|--------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `include_modified` | `--package X --package Y …` for cargo-delta's `modified` tier, or `--skip` when empty.                                                                                  |
+| `include_affected` | Same shape, for the `affected` tier (modified ∪ workspace rev-deps).                                                                                                    |
+| `include_required` | Same shape, for the `required` tier (affected ∪ workspace-internal transitive deps).                                                                                    |
 
-The reusable workflow handles consumption — users never wire these outputs themselves.
+The wiring never gates jobs on these outputs — every job runs regardless of `--skip`
+status. Per-recipe interpretation lives in the recipes themselves (see [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars)).
+This is intentional: unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,
+`mutants-full`) must run on every PR even when every tier reports `--skip`.
 
-The check → tier mapping is in
-[checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping). The recipe-side
-mechanics are in [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars).
+The check → bucket mapping is in
+[checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping).
 
 ## 7. Rust toolchain
 
@@ -419,3 +446,36 @@ Recommended root workflow shape:
   payload, which is already in `${{ github.event.pull_request.title }}`).
 - Nightly secrets, if any, live on `ox-check-nightly.yml` only — never on `ox-check-pr.yml`.
 - All cargo-tool installs done by `ox-check-setup` use `--locked`. No `cargo-binstall`.
+
+## 10. Coverage upload
+
+After `pr-test` (and `nightly-test`) runs the `ox-check-llvm-cov` recipe, the reusable
+workflow uploads the resulting `target/coverage/lcov.info` to Codecov on the Linux leg
+of the matrix only (the other legs produce equivalent data; uploading once avoids
+double-counting in the Codecov UI).
+
+The upload step:
+
+```yaml
+- name: Upload coverage to Codecov
+  if: matrix.os == 'linux' && needs.impact.outputs.skip != 'true'
+  uses: codecov/codecov-action@v5
+  with:
+    files: target/coverage/lcov.info
+    token: ${{ secrets.CODECOV_TOKEN }}
+    fail_ci_if_error: false
+```
+
+The reusable workflow declares `CODECOV_TOKEN` as an optional `workflow_call` secret;
+the root workflow's default `secrets: inherit` (see §3) forwards it without each adopter
+having to enumerate. Public repos with Codecov OIDC trust configured need no token at
+all; private repos set `CODECOV_TOKEN` at the repo level. `fail_ci_if_error: false`
+keeps the build green when Codecov is unreachable (typical for internal repos that
+can't reach `codecov.io`).
+
+On the nightly upload the step additionally passes `flags: nightly` so the two streams
+(PR vs nightly) stay distinguishable in the Codecov UI.
+
+ox-check does not gate the PR on coverage. The lcov upload is informational; Codecov's
+own status check is the gating layer when the adopter wants one (configured in Codecov,
+visible as a separate required check in branch protection).

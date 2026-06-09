@@ -76,7 +76,9 @@ missed, and onboarding new Rust repos requires copying-and-praying.
   [local.md §3](./local.md#3-tool-versions-and-installation).
 - Hosting a service. The tool is a CLI binary; updates ship via crates.io.
 - Acting as a runtime: the tool emits `just` recipes and CI building blocks, then exits.
-  It is **not** invoked at build/test/CI time. `just` is the runtime.
+  It is **not** invoked at build/test/CI time. `just` is the runtime. (A narrow exception
+  may be made in the future for runtime subcommands tightly coupled to CI execution —
+  e.g. coverage gating — but the generator stance remains the default.)
 - Destructive operations: `cargo ox-check update` never deletes files. Removing a previously
   configured CI backend is a manual `rm -rf` by the user.
 
@@ -236,7 +238,7 @@ Detail on each host:
 - **`Cargo.toml` lints regions** — workspace `Cargo.toml` carries the
   `ox-check-workspace-lints` region containing a single `[workspace.lints]` table whose
   rust/clippy/rustdoc entries are written in dotted-key form
-  (`rust.unsafe_op_in_unsafe_fn = "deny"`, `clippy.unwrap_used = "deny"`, etc.). This
+  (`rust.unsafe_op_in_unsafe_fn = "warn"`, `clippy.unwrap_used = "warn"`, etc.). This
   form is chosen because TOML forbids re-declaring a table header — if ox-check wrote
   `[workspace.lints.clippy]` inside the region, users couldn't add another
   `[workspace.lints.clippy]` block elsewhere in the file. With dotted keys, users
@@ -327,12 +329,25 @@ adopters report friction.
 
 ### 8.3 Cross-OS test matrices
 
-CI fans out a small set of groups across operating systems. Default matrix:
+CI fans out the catalog across operating systems and architectures. The default matrix
+differs by backend:
 
-| Group                         | OS scope        | Rationale                                                |
-|-------------------------------|-----------------|----------------------------------------------------------|
-| `pr-test`, `nightly-test`     | Linux + Windows | Where compile-time and runtime OS bugs actually surface. |
-| All other groups              | Linux only      | Source-only checks (`pr-fast`), advisory DBs, miri/careful (Linux-only tooling), mutants & feature-powerset (already expensive). |
+**GitHub backend (default: four legs).** GH ships Microsoft-hosted ARM runners
+(`ubuntu-24.04-arm`, `windows-11-arm`), so the default matrix covers Linux/Windows ×
+x86_64/aarch64 for every group except groups with no cfg-sensitivity (none currently).
+Matches `oxidizer-github`'s `extended-analysis` matrix.
+
+**ADO backend (default: two legs).** ADO has no Microsoft-hosted ARM agents. The default
+matrix is x86_64 Linux + x86_64 Windows. Matches the platforms list in `oxidizer`'s root
+pipelines. Adopters with self-hosted ARM pools extend the stages template in their root
+pipeline.
+
+| Group                                                       | OS / arch scope (default)              | Rationale                                                                                                                                          |
+|-------------------------------------------------------------|----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
+| `pr-fast`, `nightly-advisories`                             | All legs above                         | Contain compile-sensitive checks (clippy, doc-build, udeps, semver-check, external-types) that only see the host's compiled crate graph — cfg-gated code is invisible to a single-leg run. Text/metadata checks running redundantly is cheaper than splitting jobs. |
+| `pr-test`, `nightly-test`                                   | All legs above                         | Where compile-time and runtime OS / arch bugs actually surface.                                                                                    |
+| `pr-mutants`, `nightly-exhaustive`                          | All legs above                         | Match `oxidizer`'s policy: mutation testing and full-workspace feature/bench compile checks on cfg-gated code matter. Adopters who can't afford `mutants-full` on every leg (hours-long) override the matrix in their root workflow / pipeline. |
+| `nightly-runtime`                                           | All legs above                         | Both surveyed repos run `miri` and `careful` cross-OS. Both tools work on every Tier 1 Rust target; the earlier "Linux-primary" framing was incorrect.                                  |
 
 macOS is not in the default matrix — adopters who need it add it via the root workflow's
 `test_os` input (GH) or root pipeline's `testPools` parameter (ADO). Both knobs are

@@ -51,7 +51,7 @@ pub fn plan_owned_file(
         Decision::Write => {
             PlanItem::write_file(relpath, rendered.to_owned(), template_checksum)
         }
-        Decision::Propose => PlanItem::propose_file(relpath, rendered.to_owned()),
+        Decision::Propose => PlanItem::propose_file(relpath, rendered.to_owned(), template_checksum),
     };
 
     Ok(item)

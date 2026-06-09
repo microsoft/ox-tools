@@ -16,26 +16,35 @@ See also:
 repo/
 ├── Justfile                                       managed-region: ox-check-imports
 │   # >>> ox-check-managed: ox-check-imports
-│   # checksum: sha256:…  rendered-by: cargo-ox-check 0.4.1
-│   import 'justfiles/ox-check/checks.just'
-│   import 'justfiles/ox-check/groups.just'
-│   import 'justfiles/ox-check/tiers.just'
-│   import 'justfiles/ox-check/tools.just'
-│   alias ox-check := ox-check-pr
+│   import 'justfiles/ox-check/mod.just'
 │   # <<< ox-check-managed: ox-check-imports
 │   …user content…
 │
 └── justfiles/ox-check/                               owned (one checksum per file)
-    ├── checks.just          per-check recipes (ox-check-fmt, ox-check-clippy, ox-check-llvm-cov, …)
-    ├── groups.just          group recipes (ox-check-pr-fast, ox-check-pr-test, ox-check-nightly-test, …)
-    ├── tiers.just           tier aggregators (ox-check-pr, ox-check-nightly, ox-check-full)
-    └── tools.just           ox-check-tools-check + ox-check-tools-install + helpers
+    ├── mod.just            entry point: imports the four sibling files and defines
+    │                       `alias ox-check := ox-check-pr`. The user's Justfile
+    │                       region pulls in this single file; everything else is
+    │                       reached transitively.
+    ├── checks.just         per-check recipes (ox-check-fmt, ox-check-clippy, ox-check-llvm-cov, …).
+    │                       Starts with `set unstable` (needed for the `[script("pwsh")]`
+    │                       attribute on `ox-check-pr-title`).
+    ├── groups.just         group recipes (ox-check-pr-fast, ox-check-pr-test, ox-check-nightly-test, …).
+    ├── tiers.just          tier aggregators (ox-check-pr, ox-check-nightly, ox-check-full).
+    └── tools.just          ox-check-tools-check + ox-check-tools-install + helpers.
 ```
 
-The Justfile region is the only file ox-check adds to that the user co-owns. The four files
-under `justfiles/ox-check/` are tool-owned (full file checksums). If the user wants to add
-project-specific recipes, they add them to the top-level `Justfile` outside the managed
-region, or to their own additional imported `.just` files.
+The Justfile region is the only file ox-check adds to that the user co-owns, and it's
+a single `import` line — everything ox-check-specific lives inside `justfiles/ox-check/`.
+All five files under that directory are tool-owned (tracked by full-file checksum in
+the sidecar manifest). If the user wants to add project-specific recipes, they add them
+to the top-level `Justfile` outside the managed region, or to their own additional
+imported `.just` files. The alias `ox-check := ox-check-pr` lives in `mod.just`, not in
+the user's `Justfile`, so renaming or retargeting the alias is a template update with
+no managed-region churn.
+
+Every recipe in `groups.just`, `tiers.just`, and `checks.just` is annotated with
+`[group("ox-check")]` so `just --groups` and `just --list --unsorted` cluster them
+cleanly in tooling output.
 
 ## 2. Recipe layers
 
@@ -76,12 +85,12 @@ ox-check-pr-fast: ox-check-fmt ox-check-clippy ox-check-cargo-sort ox-check-lice
                ox-check-external-types ox-check-aprz
 
 ox-check-pr-test: ox-check-llvm-cov ox-check-doc-test ox-check-examples
-ox-check-pr-mutants: ox-check-mutants-diff
+ox-check-pr-mutants: ox-check-mutants
 
 ox-check-nightly-test: ox-check-llvm-cov ox-check-doc-test ox-check-examples
 ox-check-nightly-advisories: ox-check-deny ox-check-audit ox-check-aprz ox-check-clippy ox-check-udeps
 ox-check-nightly-runtime: ox-check-miri ox-check-careful
-ox-check-nightly-exhaustive: ox-check-mutants-full ox-check-cargo-hack ox-check-bench-only
+ox-check-nightly-exhaustive: ox-check-mutants-full ox-check-cargo-hack ox-check-bench
 ```
 
 ### tiers.just
@@ -99,9 +108,11 @@ ox-check-full: ox-check-pr ox-check-nightly
 ### tools.just
 
 - `ox-check-tools-check` — print a status table of every tool's installed version vs. minimum.
-- `ox-check-tools-install` — install every catalog tool at the minimum version (or skip if
-  already satisfied). Used as a one-shot in CI setup and locally on first use.
-- `ox-check-tools-install-missing` — install only the tools that are missing or below minimum.
+- `ox-check-tools-install` — install (or upgrade) every catalog tool to its minimum
+  version. Idempotent: `cargo install --locked` is a no-op when the installed version
+  already satisfies the requirement, so calling this recipe on every CI run costs
+  nothing on a cache hit. There is intentionally no separate `tools-install-missing`
+  variant — the install recipe IS the install-missing recipe.
 - `_ox-check-require <tool>` — internal helper called by each check.
 
 The full tool-version policy these recipes implement is detailed in §3 below.
@@ -125,13 +136,13 @@ cares about (all the cargo-* checks). For the small number of non-cargo dependen
 
 ### 3.3 Installing tools
 
-`ox-check-tools-install` and `ox-check-tools-install-missing` are plain `just` recipes that loop
-over the catalog and run `cargo install --locked <tool> --version >=<min>`. They are the
-*only* mechanism the tool uses to install cargo-managed tools — there is no separate code
-path for CI. CI setup just calls the recipes. Locally, the user runs the recipes once
-when `ox-check-tools-check` complains.
+`ox-check-tools-install` is a plain `just` recipe that loops over the catalog and runs
+`cargo install --locked <tool> --version '>=<min>'`. It's the *only* mechanism the
+tool uses to install cargo-managed tools — there is no separate code path for CI. CI
+setup just calls the recipe. Locally, the user runs the recipe once when
+`ox-check-tools-check` complains.
 
-Two prerequisites are not cargo-installable and must be present before the recipes can
+Two prerequisites are not cargo-installable and must be present before the recipe can
 run:
 
 - **`just`** itself — bootstrap with `cargo install just --locked` once, or use a system
@@ -176,57 +187,63 @@ owner to add `nightly` to msrustup").
 
 ## 4. Impact-scoping pass-through env vars
 
-Every check recipe whose work is per-crate accepts three optional pass-through env vars
-and forwards them verbatim as `--workspace`-compatible exclude flags. Empty (the local
-default) means full workspace; CI populates them from the `ox-check-impact` building block:
+Every check recipe whose work is per-crate accepts an optional pass-through env var
+that the CI wiring populates from the `ox-check-impact` building block. There are three
+such env vars, one per cargo-delta tier:
+
+| Env var                      | Bucket    | What recipes do with it                                                                       |
+|------------------------------|-----------|------------------------------------------------------------------------------------------------|
+| `OX_CHECK_INCLUDE_MODIFIED`  | modified  | `--skip` → recipe exits 0. Otherwise: run unconditionally (modified-tier tools are workspace-wide). |
+| `OX_CHECK_INCLUDE_AFFECTED`  | affected  | `--skip` → recipe exits 0. Otherwise: splice the value into the cargo invocation, defaulting to `--workspace` when unset. |
+| `OX_CHECK_INCLUDE_REQUIRED`  | required  | Same semantics as `OX_CHECK_INCLUDE_AFFECTED`, but consumed by recipes that need transitive dep graph in scope (doc-build, cargo-hack, udeps). |
+
+Each var holds either the literal sentinel `--skip` (the tier is empty for this PR), or
+a pre-built argument string like `--package alpha --package beta`. The CI wiring sets
+exactly one form; local invocations leave the vars unset, and recipes fall back to
+`--workspace`.
+
+A typical affected-tier recipe:
 
 ```just
-ox-check-clippy: (_ox-check-require "cargo-clippy")
-    cargo clippy --workspace ${OX_CHECK_EXCLUDE_NOT_MODIFIED:-} --all-targets --all-features --locked -- -D warnings
-
-ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "cargo-nextest")
-    cargo llvm-cov nextest --workspace ${OX_CHECK_EXCLUDE_NOT_AFFECTED:-} --all-features --locked --lcov --output-path target/coverage/lcov.info
+ox-check-clippy:
+    @if [ "$OX_CHECK_INCLUDE_AFFECTED" = "--skip" ]; then \
+        echo "ox-check-clippy: no affected packages; skipping"; exit 0; \
+    fi; \
+    cargo clippy ${OX_CHECK_INCLUDE_AFFECTED:---workspace} --all-targets --all-features --locked -- -D warnings
 ```
 
-The mapping from check to env var is fixed in the catalog (see
-[checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)). Checks with no
-per-crate scope (`pr-title`, `aprz`, `deny`, `audit`, `spellcheck`, `fmt`, `cargo-sort`,
-`license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features`) ignore the
-vars. Group recipes do not interpolate the vars themselves — each underlying check
+A typical modified-tier recipe (the tool is workspace-wide, so there's nothing to
+splice — only the skip guard matters):
+
+```just
+ox-check-fmt:
+    @if [ "$OX_CHECK_INCLUDE_MODIFIED" = "--skip" ]; then \
+        echo "ox-check-fmt: no modified packages; skipping"; exit 0; \
+    fi; \
+    cargo fmt --all --check
+```
+
+The mapping from check to bucket is fixed in the catalog (see
+[checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)). Unscoped checks
+(`pr-title`, `deny`, `audit`, `aprz`, `mutants-full`) ignore the vars entirely — they
+always run. Group recipes do not interpolate the vars themselves; each underlying check
 recipe reads what it needs, so a group recipe is just a dependency list and nothing
 changes when scoping is disabled.
 
-### 4.1 `OX_CHECK_IMPACT_SKIP` early-return hint
+### 4.1 The `--skip` sentinel
 
-A fourth env var, `OX_CHECK_IMPACT_SKIP`, is set to `"true"` by the CI wiring when
-cargo-delta reports that no workspace member is in any impact tier (typically a
-docs-only PR or a PR touching only files cargo-delta's `file_exclude_patterns` ignore).
-It is **advisory**, not a kill switch:
+`--skip` is a magic string the impact step emits when a tier is empty for the PR
+(typically a docs-only PR or a PR touching only files cargo-delta's
+`file_exclude_patterns` ignore). It is not a valid cargo argument, so there is no risk
+of collision with a real package name. Recipes test for it with `[ "$VAR" = "--skip" ]`
+and exit 0 cleanly, keeping the CI job green while signalling that nothing in that tier
+needed to run.
 
-- The CI wiring **never** uses it to skip whole jobs. Every group runs on every PR.
-- Recipes that scope to workspace members **may** check it and early-return — for
-  example, `ox-check-clippy` skips the cargo invocation when `OX_CHECK_IMPACT_SKIP=true`,
-  saving the cargo-delta-computed exclude list from being parsed and the workspace from
-  being touched.
-- Recipes that don't scope to workspace members **ignore** it. `fmt` still runs (the
-  source tree may have non-Rust files affected by the PR), `deny`/`audit`/`aprz` still
-  run (their outcome doesn't depend on what was changed), `pr-title` still runs.
-
-This separation is what makes the wiring layer durably structural. "Which checks can
-no-op when nothing in the workspace is affected?" is a per-check property and lives in
-the catalog/recipe, not in the wiring layer. Moving a check between groups never
-requires touching the stages template / reusable workflow.
-
-A typical skip-aware recipe looks like:
-
-```just
-ox-check-clippy: (_ox-check-require "cargo-clippy")
-    @[ "${OX_CHECK_IMPACT_SKIP:-false}" = "true" ] && echo 'no affected crates; skipping clippy' && exit 0; \
-        cargo clippy --workspace ${OX_CHECK_EXCLUDE_NOT_MODIFIED:-} --all-targets --all-features --locked -- -D warnings
-```
-
-(On Windows, with `set shell := ["pwsh", "-NoProfile", "-Command"]`, the equivalent
-short-circuit uses `if ($env:OX_CHECK_IMPACT_SKIP -eq 'true') { exit 0 }`.)
+This separation is what makes the wiring layer durably structural: "which checks can
+no-op when nothing in the relevant tier is affected" is a per-check property living in
+the catalog/recipe, not in the wiring layer. Moving a check between buckets is a pure
+catalog change; the CI templates always thread all three vars and never gate jobs on
+their values.
 
 ### 4.2 Local impact-scoped runs
 
@@ -234,18 +251,14 @@ Not the default. To preview what CI would skip, run cargo-delta manually and exp
 env vars:
 
 ```sh
-git stash; git checkout origin/main
-cargo delta -c .delta.toml snapshot > /tmp/base.json
-git stash pop
-cargo delta -c .delta.toml snapshot > /tmp/head.json
-export OX_CHECK_EXCLUDE_NOT_AFFECTED="$(cargo delta -c .delta.toml impact \
-    --baseline /tmp/base.json --current /tmp/head.json -f cargo-excludes --affected)"
+# Compute the affected-tier include list (--package … form) against origin/main.
+export OX_CHECK_INCLUDE_AFFECTED="$(cargo delta impact --base origin/main --format cargo-args --affected)"
 just ox-check-pr-test
 ```
 
-A wrapper recipe (`ox-check-impact-set base=origin/main`) is left to v2: it has subtle
-git-state interactions and the manual flow is good enough for the rare case a developer
-actually wants to reproduce CI scoping locally.
+A wrapper recipe to compute and export all three vars in one shot is left to v2: it has
+subtle git-state interactions and the manual flow is good enough for the rare case a
+developer actually wants to reproduce CI scoping locally.
 
 ## 5. Daily driver
 

@@ -2,6 +2,23 @@
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
 steps:
+  - bash: echo "##vso[task.setvariable variable=ox_check_rustc_version]$(rustc --version | awk '{print $2}')"
+    displayName: ox-check setup (capture rustc version)
+  - task: Cache@2
+    inputs:
+      # Same key shape as the GitHub side: OS + rustc version + lockfile
+      # hashes + catalog hash. Cache invalidates cleanly on toolchain
+      # bumps, dependency churn, or tool-minimums.txt updates.
+      key: 'ox-check-v1 | "$(Agent.OS)" | rust$(ox_check_rustc_version) | Cargo.lock | .cargo/config.toml | rust-toolchain.toml | justfiles/ox-check/tool-minimums.txt'
+      restoreKeys: |
+        ox-check-v1 | "$(Agent.OS)" | rust$(ox_check_rustc_version)
+        ox-check-v1 | "$(Agent.OS)"
+      path: |
+        $(HOME)/.cargo/registry/cache/
+        $(HOME)/.cargo/registry/index/
+        $(HOME)/.cargo/bin/
+        target/
+    displayName: ox-check setup (cache cargo home and target)
   - bash: |
       if ! command -v just >/dev/null 2>&1 ; then
         cargo install --locked just

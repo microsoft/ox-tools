@@ -1,0 +1,11 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2024"
+
+# Pre-existing user customization that ox-check must not touch.
+[profile.release]
+lto = "thin"
+codegen-units = 1

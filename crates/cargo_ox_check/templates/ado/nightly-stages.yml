@@ -31,26 +31,54 @@ stages:
   - stage: nightly_advisories
     displayName: ox-check nightly-advisories
     dependsOn: []
-    pool: ${{ parameters.linuxPool }}
     jobs:
-      - job: nightly_advisories
+      # Cross-OS because clippy and udeps in this group compile per host,
+      # so cfg-gated code must be linted/scanned on both OSes.
+      - job: linux
+        pool: ${{ parameters.linuxPool }}
+        steps:
+          - template: steps/nightly-advisories.yml
+      - job: windows
+        pool: ${{ parameters.windowsPool }}
         steps:
           - template: steps/nightly-advisories.yml
 
   - stage: nightly_runtime
     displayName: ox-check nightly-runtime
     dependsOn: []
-    pool: ${{ parameters.linuxPool }}
     jobs:
-      - job: nightly_runtime
+      # Cross-OS to match the surveyed repos: oxidizer runs miri on
+      # every platform in its matrix (Windows_x64 + Linux_x64);
+      # oxidizer-github runs miri + careful across Linux/Windows.
+      # Both tools work on every Tier 1 Rust target.
+      #
+      # ADO has no Microsoft-hosted ARM agents (unlike GH), so the
+      # default ARM coverage that the GitHub backend ships is not
+      # available here. Adopters with self-hosted ARM pools extend
+      # this stage in their root pipeline.
+      - job: linux
+        pool: ${{ parameters.linuxPool }}
+        steps:
+          - template: steps/nightly-runtime.yml
+      - job: windows
+        pool: ${{ parameters.windowsPool }}
         steps:
           - template: steps/nightly-runtime.yml
 
   - stage: nightly_exhaustive
     displayName: ox-check nightly-exhaustive
     dependsOn: []
-    pool: ${{ parameters.linuxPool }}
     jobs:
-      - job: nightly_exhaustive
+      # Cross-OS to match oxidizer's policy: full-workspace mutation
+      # testing + cargo-hack powerset + bench compile checks all benefit
+      # from running on both OSes for cfg(target_os) coverage. Adopters
+      # who can't afford the Windows leg override the matrix in their
+      # root pipeline.
+      - job: linux
+        pool: ${{ parameters.linuxPool }}
+        steps:
+          - template: steps/nightly-exhaustive.yml
+      - job: windows
+        pool: ${{ parameters.windowsPool }}
         steps:
           - template: steps/nightly-exhaustive.yml

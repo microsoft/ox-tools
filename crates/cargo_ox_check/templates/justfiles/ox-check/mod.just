@@ -5,6 +5,11 @@
 # imports this single file; everything else lives in sibling .just files
 # pulled in here.
 
+# Some sibling files use the `[script("bash")]` and `[script("pwsh")]`
+# attributes, which require unstable features. `set unstable` here is
+# inherited by every imported file (justfile imports share scope).
+set unstable
+
 import 'checks.just'
 import 'groups.just'
 import 'tiers.just'

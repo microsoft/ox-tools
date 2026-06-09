@@ -15,6 +15,7 @@ rust.unsafe_op_in_unsafe_fn = "warn"
 rust.unused_lifetimes = "warn"
 
 # --- rustdoc ---------------------------------------------------------------
+rustdoc.broken_intra_doc_links = "warn"
 rustdoc.missing_crate_level_docs = "warn"
 rustdoc.unescaped_backticks = "warn"
 
@@ -33,6 +34,7 @@ clippy.allow_attributes = "warn"
 clippy.allow_attributes_without_reason = "warn"
 clippy.clone_on_ref_ptr = "warn"
 clippy.disallowed_script_idents = "warn"
+clippy.expect_used = "warn"
 clippy.map_err_ignore = "warn"
 clippy.panic = "warn"
 clippy.undocumented_unsafe_blocks = "warn"

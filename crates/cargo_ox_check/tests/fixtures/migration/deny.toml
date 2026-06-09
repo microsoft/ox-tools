@@ -1,0 +1,5 @@
+# Pre-existing user deny.toml. Ox-check should splice its managed
+# region without dropping these user-authored entries.
+
+[advisories]
+ignore = ["RUSTSEC-9999-0001"]

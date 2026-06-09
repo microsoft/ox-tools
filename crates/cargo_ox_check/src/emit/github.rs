@@ -202,13 +202,17 @@ mod tests {
         let body = render_group_action("pr-fast");
         assert!(body.contains("name: ox-check-pr-fast"));
         assert!(body.contains("just ox-check-pr-fast"));
-        assert!(body.contains("OX_CHECK_EXCLUDES"));
+        assert!(body.contains("OX_CHECK_INCLUDE_MODIFIED"));
+        assert!(body.contains("OX_CHECK_INCLUDE_AFFECTED"));
+        assert!(body.contains("OX_CHECK_INCLUDE_REQUIRED"));
     }
 
     #[test]
-    fn group_actions_skip_when_input_is_true() {
+    fn group_actions_declare_include_inputs() {
         let body = render_group_action("nightly-test");
-        assert!(body.contains("inputs.skip != 'true'"));
+        assert!(body.contains("include_modified:"));
+        assert!(body.contains("include_affected:"));
+        assert!(body.contains("include_required:"));
     }
 
     #[test]

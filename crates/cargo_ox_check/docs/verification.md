@@ -55,39 +55,46 @@ What this validates end-to-end:
 
 What this doesn't catch — see §2.4.
 
-### 2.2 Fixture-based integration tests
+### 2.2 Snapshot tests (shipping today)
 
-Under `crates/cargo_ox_check/tests/fixtures/`, a small set of fixture repos covers shapes
-ox-tools doesn't have. Each fixture is a directory tree plus an `expected/` snapshot.
-The test runner copies the fixture to a tmpdir, runs `cargo ox-check update`, and asserts
-byte-equal output against `expected/`.
+Under `crates/cargo_ox_check/tests/snapshots.rs`, three integration tests drive the full
+emitter against a bare-workspace tempdir for representative input combinations
+(`--no-backends`, `--backend github`, `--backend ado`) and snapshot the full collection of
+emitted files via [`insta`][insta]. Template edits then surface as reviewable diffs in
+PRs — `cargo insta review` accepts them.
 
-Initial fixture set:
+Snapshot files live committed under `tests/snapshots/`, one per backend combination.
+The `.ox-check.lock` manifest is filtered out of the snapshot input to keep the snapshots
+stable across version bumps (the manifest carries `rendered_by = "cargo-ox-check <ver>"`
+which would otherwise churn on every release).
 
-| Fixture            | Purpose                                                                                   |
-|--------------------|-------------------------------------------------------------------------------------------|
-| `fresh/`           | Empty repo. Exercises the "first run, no manifest" creation paths.                        |
-| `single-crate/`    | Non-workspace repo. Validates the `[lints]` (vs `[workspace.lints]`) branch.              |
-| `simple-workspace/`| Two-member workspace. The everyday case mirroring ox-tools at small scale.                |
-| `opt-outs/`        | Empty owned files, empty region bodies. Validates the "no proposal until template change" rule. |
-| `customized/`      | Dirty owned files and dirty regions. Validates the dirty-flow including `.ox-check-proposed` emission. |
-| `migration/`       | A repo with an old manifest schema and pre-existing emitted content. Validates the on-load migration logic. |
+### 2.3 Fixture-based integration tests
 
-Each fixture is exercised by at least three independent assertions:
+Alongside the snapshot tests, a `tests/fixtures/` corpus covers
+directory-tree scenarios that benefit from being reviewable as real
+files on disk:
 
-- **Idempotence** — running `update` twice in a row produces zero diff on the second run.
-- **Determinism** — running `update` against two identical clones produces identical
-  output (no time-, env-, or path-dependence).
-- **Manifest consistency** — after a clean run, every entry in `.ox-check.lock` matches the
-  checksum of the corresponding on-disk content.
+| Fixture            | What it pins                                                                                                                        |
+|--------------------|-------------------------------------------------------------------------------------------------------------------------------------|
+| `single-crate/`    | Non-workspace repo. Validates the `[lints]` (vs `[workspace.lints]`) branch and that the full `justfiles/ox-check/` tree is written. |
+| `opt-outs/`        | A user-emptied managed region stays empty across re-runs (steady-state opt-out, `LeaveAlone` decision).                              |
+| `customized/`      | A user edit inside a managed region is preserved verbatim across re-runs when the template is unchanged (`LeaveAlone` decision).     |
+| `migration/`       | A repo with pre-existing hand-written `Justfile`, `deny.toml`, and `[profile.release]` in `Cargo.toml`. Ox-check splices its regions without losing the user content. |
 
-The fixture corpus grows when a bug is fixed: the bug's repro becomes a fixture before
-the fix lands.
+`tests/update.rs` stages each fixture into a tempdir (via `walkdir` +
+`std::fs::copy`), runs `run_update`, and asserts the scenario-specific
+invariants above. The single-crate and migration scenarios additionally
+assert idempotence — a second run produces an empty plan.
 
-### 2.3 Schema validation
+The fixtures are complementary to the imperative scenarios in
+`src/run.rs`, which seed equivalent setups inline. The on-disk fixtures
+are easier to review and to copy when designing new migration paths.
 
-Run as part of `ox-check-pr-fast` against ox-tools's emitted output (and as part of each
-fixture's assertion suite):
+[insta]: https://crates.io/crates/insta
+
+### 2.4 Schema validation
+
+Run as part of `ox-check-pr-fast` against ox-tools's emitted output:
 
 - **`actionlint`** on every emitted `.github/workflows/*.yml` and
   `.github/actions/*/action.yml`. Catches GitHub-Actions-specific errors that plain
@@ -96,11 +103,17 @@ fixture's assertion suite):
   parse and dependency graph is well-formed.
 - **`taplo check`** on every TOML file ox-check writes to. Verifies the post-edit file is
   still parsable TOML and conforms to the cargo schema where applicable.
-- **ADO YAML**: no widely-available local validator. The fixture snapshots are the
-  contract; the manual release checklist (§2.4) covers semantic verification against
-  real ADO. We accept this gap because ox-tools cannot dogfood ADO emission anyway.
+- **ADO YAML**: no widely-available local validator. The snapshot tests
+  are the contract; the manual release checklist (§2.5) covers
+  semantic verification against real ADO. We accept this gap because
+  ox-tools cannot dogfood ADO emission anyway.
 
-### 2.4 Manual release verification
+A small in-process schema-validation suite at
+`crates/cargo_ox_check/tests/schemas.rs` covers the subset that can be
+checked without external tooling (TOML parseability of every emitted
+TOML region/file, the `.ox-check.lock` schema, etc.).
+
+### 2.5 Manual release verification
 
 Three things ox-tools dogfooding doesn't catch, addressed by a pre-release checklist
 maintained in `docs/release-checklist.md`:
@@ -219,7 +232,7 @@ in-flight PRs.
 Acknowledged limits of this strategy:
 
 - **1ESPT/SubstratePT/CloudBuild composition** — ox-tools is OSS; it cannot dogfood
-  internal compliance harnesses. Manual release checklist covers this.
+  internal compliance harnesses. Manual release checklist covers this (§2.5).
 - **Self-hosted runner pools** — ox-tools uses GH-hosted; the `runs_on` input is set
   to defaults. Self-hosted shapes are documented but exercised only by the manual
   release checklist.
@@ -228,15 +241,17 @@ Acknowledged limits of this strategy:
 - **Very deep workspaces or unusual layouts** — covered only by fixtures, not by
   real-world traffic. New layouts that adopters surface become new fixtures.
 - **Long-lived divergence** — a repo that's been on an old cargo-ox-check version for
-  many releases is only validated by the cross-repo migration step in §2.4.
+  many releases is only validated by the cross-repo migration step in §2.5.
 
 ## 6. Files and locations
 
 | Path                                                | Purpose                                                                 |
 |-----------------------------------------------------|-------------------------------------------------------------------------|
+| `crates/cargo_ox_check/tests/snapshots.rs`             | Snapshot tests over the three backend combinations (insta).             |
+| `crates/cargo_ox_check/tests/snapshots/`               | Committed snapshot files (one per backend combination).                 |
 | `crates/cargo_ox_check/tests/fixtures/`                | Integration test fixtures (one directory per shape).                    |
-| `crates/cargo_ox_check/tests/update.rs`                | Test runner: per-fixture idempotence/determinism/consistency assertions. |
-| `crates/cargo_ox_check/tests/schema.rs`                | actionlint / taplo / just-parse wrappers run against ox-tools and fixtures. |
+| `crates/cargo_ox_check/tests/update.rs`                | Per-fixture assertions for opt-outs, customizations, migrations, single-crate. |
+| `crates/cargo_ox_check/tests/schemas.rs`               | actionlint / taplo / just-parse wrappers run against the emitted output. |
 | `.github/workflows/ox-check-pr.yml`                    | Hand-written self-validation wrapper (the one bootstrap file).          |
 | `.github/workflows/ox-check-pr-impl.yml` (and friends) | Regenerated by `cargo ox-check update`. Subject to the regenerate-check.    |
 | `justfiles/ox-check/*.just`                            | Regenerated. Subject to the regenerate-check.                           |

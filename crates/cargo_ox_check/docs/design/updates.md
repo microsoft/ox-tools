@@ -133,10 +133,10 @@ any sub-table header:
 ```toml
 # >>> ox-check-managed: ox-check-workspace-lints
 [workspace.lints]
-rust.unsafe_op_in_unsafe_fn = "deny"
-clippy.unwrap_used = "deny"
-clippy.expect_used = "deny"
-rustdoc.broken_intra_doc_links = "deny"
+rust.unsafe_op_in_unsafe_fn = "warn"
+clippy.unwrap_used = "warn"
+clippy.expect_used = "warn"
+rustdoc.broken_intra_doc_links = "warn"
 # <<< ox-check-managed: ox-check-workspace-lints
 # User-added lints continue [workspace.lints] via dotted keys — valid TOML, ox-check
 # preserves them verbatim:
@@ -147,6 +147,14 @@ rust.missing_docs = "warn"
 Whitespace and comments inside the region are preserved verbatim by the rewrite — the
 tool computes the checksum over the body bytes literally.
 
+ox-check's baseline severity is `"warn"`, not `"deny"`. Promotion to deny happens at
+the lint-run boundary via `cargo clippy -- -D warnings`, which is what the `ox-check-clippy`
+recipe invokes. This keeps the baseline friendly to incremental adoption (a new repo
+running ox-check for the first time sees warnings rather than a wall of build failures)
+while still failing CI on anything the catalog covers. Users who want stricter local
+behavior set per-lint `"deny"` values inside the region — the dirty-file flow then
+preserves their edit.
+
 ### User-extension limits for TOML regions
 
 Three constraints follow from TOML's no-duplicate-tables rule and ox-check's chosen
@@ -155,8 +163,8 @@ dotted-key layout:
 - **Adding new keys** to the parent table from below the region works and is the
   recommended extension pattern (the example above).
 - **Overriding a key set inside the region** is *not* possible from outside —
-  repeating `clippy.unwrap_used = "warn"` below the region while ox-check wrote
-  `clippy.unwrap_used = "deny"` inside it is a duplicate-key TOML parse error. To
+  repeating `clippy.unwrap_used = "deny"` below the region while ox-check wrote
+  `clippy.unwrap_used = "warn"` inside it is a duplicate-key TOML parse error. To
   override, edit the value inside the region; the dirty-file flow (§5) takes over from
   there, and ox-check will leave the user's edit alone going forward.
 - **Extending a TOML array set inside the region** (e.g. `licenses.allow = [...]` in
