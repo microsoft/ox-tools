@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
-name: ox-check-nightly-impl
+name: ox-check-scheduled-impl
 
 on:
   workflow_call:
@@ -33,7 +33,7 @@ on:
 # matrices are hardcoded; per-leg runner labels are inputs.
 
 jobs:
-  nightly-test:
+  scheduled-test:
     strategy:
       fail-fast: false
       matrix:
@@ -44,7 +44,7 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/ox-check-nightly-test
+      - uses: ./.github/actions/ox-check-scheduled-test
       - name: Upload coverage to Codecov
         # Single canonical leg uploads coverage; matches the pr-test
         # logic. oxidizer-github also excludes windows-11-arm from
@@ -54,10 +54,10 @@ jobs:
         with:
           files: target/coverage/lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
-          flags: nightly
+          flags: scheduled
           fail_ci_if_error: false
 
-  nightly-advisories:
+  scheduled-advisories:
     # Cross-OS / cross-arch because clippy and udeps in this group
     # compile per host, so cfg-gated code must be linted/scanned on
     # every leg.
@@ -71,9 +71,9 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/ox-check-nightly-advisories
+      - uses: ./.github/actions/ox-check-scheduled-advisories
 
-  nightly-runtime:
+  scheduled-runtime:
     # Cross-OS / cross-arch to match the surveyed repos: oxidizer runs
     # miri on every platform in its matrix; oxidizer-github runs miri
     # + careful across four legs.
@@ -87,9 +87,9 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/ox-check-nightly-runtime
+      - uses: ./.github/actions/ox-check-scheduled-runtime
 
-  nightly-exhaustive:
+  scheduled-exhaustive:
     # x86_64-only by design: this group includes mutants-full (which
     # doesn't build on aarch64-pc-windows-msvc — winapi crate
     # incompatibility) plus cargo-hack feature powerset and bench.
@@ -100,4 +100,4 @@ jobs:
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}
     steps:
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/ox-check-nightly-exhaustive
+      - uses: ./.github/actions/ox-check-scheduled-exhaustive

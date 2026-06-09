@@ -485,14 +485,14 @@ mod tests {
             ".github/actions/ox-check-pr-fast/action.yml",
             ".github/actions/ox-check-pr-test/action.yml",
             ".github/actions/ox-check-pr-mutants/action.yml",
-            ".github/actions/ox-check-nightly-test/action.yml",
-            ".github/actions/ox-check-nightly-advisories/action.yml",
-            ".github/actions/ox-check-nightly-runtime/action.yml",
-            ".github/actions/ox-check-nightly-exhaustive/action.yml",
+            ".github/actions/ox-check-scheduled-test/action.yml",
+            ".github/actions/ox-check-scheduled-advisories/action.yml",
+            ".github/actions/ox-check-scheduled-runtime/action.yml",
+            ".github/actions/ox-check-scheduled-exhaustive/action.yml",
             ".github/workflows/ox-check-pr-impl.yml",
-            ".github/workflows/ox-check-nightly-impl.yml",
+            ".github/workflows/ox-check-scheduled-impl.yml",
             ".github/workflows/ox-check-pr.yml",
-            ".github/workflows/ox-check-nightly.yml",
+            ".github/workflows/ox-check-scheduled.yml",
         ] {
             assert!(tmp.path().join(expected).is_file(), "expected '{expected}' after github update");
         }
@@ -532,14 +532,14 @@ mod tests {
             ".pipelines/ox-check/steps/pr-fast.yml",
             ".pipelines/ox-check/steps/pr-test.yml",
             ".pipelines/ox-check/steps/pr-mutants.yml",
-            ".pipelines/ox-check/steps/nightly-test.yml",
-            ".pipelines/ox-check/steps/nightly-advisories.yml",
-            ".pipelines/ox-check/steps/nightly-runtime.yml",
-            ".pipelines/ox-check/steps/nightly-exhaustive.yml",
+            ".pipelines/ox-check/steps/scheduled-test.yml",
+            ".pipelines/ox-check/steps/scheduled-advisories.yml",
+            ".pipelines/ox-check/steps/scheduled-runtime.yml",
+            ".pipelines/ox-check/steps/scheduled-exhaustive.yml",
             ".pipelines/ox-check/pr.yml",
-            ".pipelines/ox-check/nightly.yml",
+            ".pipelines/ox-check/scheduled.yml",
             ".pipelines/ox-check-pr.yml",
-            ".pipelines/ox-check-nightly.yml",
+            ".pipelines/ox-check-scheduled.yml",
         ] {
             assert!(tmp.path().join(expected).is_file(), "expected '{expected}' after ado update");
         }

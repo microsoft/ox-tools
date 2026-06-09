@@ -7,11 +7,11 @@ ox-check emits three layers, all owned by ox-check with the standard owned-file 
 dirty → `.ox-check-proposed` sibling on next update). The split is by what users actually
 need to change:
 
-1. **Root workflows** (`ox-check-pr.yml`, `ox-check-nightly.yml` at `.github/workflows/`).
+1. **Root workflows** (`ox-check-pr.yml`, `ox-check-scheduled.yml` at `.github/workflows/`).
    Triggers, `permissions`, runner choice, any secret pass-through. ox-check ships an
    opinionated default; users who need to customize edit in place and accept the
    proposal-on-update flow.
-2. **Reusable workflows** (`ox-check-pr-impl.yml`, `ox-check-nightly-impl.yml`), containing the
+2. **Reusable workflows** (`ox-check-pr-impl.yml`, `ox-check-scheduled-impl.yml`), containing the
    impact job and the per-group jobs with all the `needs.impact.outputs.*` plumbing.
    These change when ox-check's groups or impact wiring evolve; most users won't ever edit
    them.
@@ -50,15 +50,15 @@ See also:
 │   ├── ox-check-pr-fast/action.yml       owned   (one composite action per group)
 │   ├── ox-check-pr-test/action.yml       owned
 │   ├── ox-check-pr-mutants/action.yml    owned
-│   ├── ox-check-nightly-test/action.yml  owned
-│   ├── ox-check-nightly-advisories/action.yml  owned
-│   ├── ox-check-nightly-runtime/action.yml     owned
-│   └── ox-check-nightly-exhaustive/action.yml  owned
+│   ├── ox-check-scheduled-test/action.yml  owned
+│   ├── ox-check-scheduled-advisories/action.yml  owned
+│   ├── ox-check-scheduled-runtime/action.yml     owned
+│   └── ox-check-scheduled-exhaustive/action.yml  owned
 └── workflows/
     ├── ox-check-pr-impl.yml              owned   (reusable workflow doing the wiring)
-    ├── ox-check-nightly-impl.yml         owned   (reusable workflow for nightly)
+    ├── ox-check-scheduled-impl.yml         owned   (reusable workflow for the scheduled tier)
     ├── ox-check-pr.yml                   owned   (root workflow; triggers/permissions/runner)
-    └── ox-check-nightly.yml              owned
+    └── ox-check-scheduled.yml              owned
 ```
 
 All files are regular owned files tracked by the sidecar `.ox-check.lock` manifest
@@ -84,11 +84,11 @@ jobs:
     uses: ./.github/workflows/ox-check-pr-impl.yml
 ```
 
-The nightly root workflow adds a schedule and `workflow_dispatch`:
+The scheduled root workflow adds a schedule and `workflow_dispatch`:
 
 ```yaml
-# .github/workflows/ox-check-nightly.yml
-name: ox-check-nightly
+# .github/workflows/ox-check-scheduled.yml
+name: ox-check-scheduled
 on:
   schedule: [{ cron: '0 6 * * *' }]
   workflow_dispatch: {}
@@ -96,7 +96,7 @@ permissions:
   contents: read
 jobs:
   ox-check:
-    uses: ./.github/workflows/ox-check-nightly-impl.yml
+    uses: ./.github/workflows/ox-check-scheduled-impl.yml
 ```
 
 Common edits users make to the root workflow (these flip the file to "dirty" and produce
@@ -106,19 +106,19 @@ a `.ox-check-proposed` sibling on the next `update` — see
 - **Self-hosted runners**: pass `with: { linux_runner: 'self-hosted-rust', windows_runner: 'self-hosted-rust-win', linux_arm_runner: 'self-hosted-rust-arm', windows_arm_runner: 'self-hosted-rust-win-arm' }`
 - **Different OS matrix scope**: not a workflow input. The matrices are part of the
   workflow's identity — adopters who want to add macOS, drop ARM, or otherwise change
-  the OS axis fork the emitted `ox-check-pr-impl.yml` / `ox-check-nightly-impl.yml`
+  the OS axis fork the emitted `ox-check-pr-impl.yml` / `ox-check-scheduled-impl.yml`
   in their own repo and dirty-file-flow takes over from there. Surveyed-repo precedent
   (`oxidizer-github`, `oxidizer`) does the same.
   to the reusable workflow. The runner inputs are CSV-keyed by OS (see §4 for the
   exact contract).
 - **Different OS matrix scope**: not a workflow input. The matrices are part of the
   workflow's identity — adopters who want to add macOS, drop ARM, or otherwise change
-  the OS axis fork the emitted `ox-check-pr-impl.yml` / `ox-check-nightly-impl.yml`
+  the OS axis fork the emitted `ox-check-pr-impl.yml` / `ox-check-scheduled-impl.yml`
   in their own repo and dirty-file-flow takes over from there. Surveyed-repo precedent
   (`oxidizer-github`, `oxidizer`) does the same.
   (`linux`/`windows`/`macos`), not runner labels — runner labels come from the separate
   `*_runner` inputs.
-- **Different schedule** for nightly.
+- **Different schedule** for the scheduled tier.
 - **Path filters** to skip the workflow on docs-only PRs (though ox-check's
   `cargo delta impact` step already produces a `--skip` sentinel for the include lists
   when nothing relevant changed).
@@ -243,12 +243,12 @@ PRs where every tier comes back `--skip`. See
 [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars) for the recipe-side
 contract.
 
-The nightly reusable workflow is simpler — it omits the `impact` job and runs each group
+The scheduled reusable workflow is simpler — it omits the `impact` job and runs each group
 full-workspace. The include inputs default to empty strings, so recipes fall through to
 their local-default behavior (`--workspace`):
 
 ```yaml
-# .github/workflows/ox-check-nightly-impl.yml  (owned)
+# .github/workflows/ox-check-scheduled-impl.yml  (owned)
 on:
   workflow_call:
     inputs:
@@ -257,7 +257,7 @@ on:
       linux_arm_runner:   { type: string, default: ubuntu-24.04-arm }
       windows_arm_runner: { type: string, default: windows-11-arm }
 jobs:
-  nightly-test:
+  scheduled-test:
     strategy:
       fail-fast: false
       matrix:
@@ -266,8 +266,8 @@ jobs:
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
-    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-nightly-test } ]
-  nightly-advisories:
+    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-scheduled-test } ]
+  scheduled-advisories:
     strategy:
       fail-fast: false
       matrix:
@@ -276,8 +276,8 @@ jobs:
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
-    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-nightly-advisories } ]
-  nightly-runtime:
+    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-scheduled-advisories } ]
+  scheduled-runtime:
     strategy:
       fail-fast: false
       matrix:
@@ -286,21 +286,21 @@ jobs:
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
-    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-nightly-runtime } ]
-  nightly-exhaustive:
+    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-scheduled-runtime } ]
+  scheduled-exhaustive:
     # x86_64 only — cargo-mutants constraint.
     strategy:
       fail-fast: false
       matrix:
         os: [linux, windows]
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}
-    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-nightly-exhaustive } ]
+    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-scheduled-exhaustive } ]
 ```
 
-Nightly composite actions don't receive any `include_*` inputs at all — their inputs
+Scheduled composite actions don't receive any `include_*` inputs at all — their inputs
 default to empty strings (recipes default to `--workspace`) and the reusable workflow
 omits the passthrough. Threading them through is purely a PR-tier optimization;
-nightly never benefits.
+the scheduled tier never benefits.
 
 If `.delta.toml`'s managed region is emptied
 ([updates.md §opt-out](./updates.md#6-opting-out-in-file-stubs)),
@@ -390,7 +390,7 @@ Per-action additions (only where the action consumes PR-context strings the reci
 | `ox-check-pr-fast`              | `pr_title`                                                              |
 | `ox-check-pr-mutants`           | `base_ref`                                                              |
 | `ox-check-pr-test`              | —                                                                       |
-| `ox-check-nightly-*`            | —                                                                       |
+| `ox-check-scheduled-*`            | —                                                                       |
 
 The recipes themselves consume only the env vars they need; the catalog records the
 mapping (see [checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)).
@@ -492,12 +492,12 @@ Recommended root workflow shape:
   this.
 - No `pull-requests: write` (the PR-title check only needs the title from the event
   payload, which is already in `${{ github.event.pull_request.title }}`).
-- Nightly secrets, if any, live on `ox-check-nightly.yml` only — never on `ox-check-pr.yml`.
+- Scheduled-tier secrets, if any, live on `ox-check-scheduled.yml` only — never on `ox-check-pr.yml`.
 - All cargo-tool installs done by `ox-check-setup` use `--locked`. No `cargo-binstall`.
 
 ## 10. Coverage upload
 
-After `pr-test` (and `nightly-test`) runs the `ox-check-llvm-cov` recipe, the reusable
+After `pr-test` (and `scheduled-test`) runs the `ox-check-llvm-cov` recipe, the reusable
 workflow uploads the resulting `target/coverage/lcov.info` to Codecov on the Linux leg
 of the matrix only (the other legs produce equivalent data; uploading once avoids
 double-counting in the Codecov UI).
@@ -521,8 +521,8 @@ all; private repos set `CODECOV_TOKEN` at the repo level. `fail_ci_if_error: fal
 keeps the build green when Codecov is unreachable (typical for internal repos that
 can't reach `codecov.io`).
 
-On the nightly upload the step additionally passes `flags: nightly` so the two streams
-(PR vs nightly) stay distinguishable in the Codecov UI.
+On the scheduled upload the step additionally passes `flags: scheduled` so the two streams
+(PR vs scheduled) stay distinguishable in the Codecov UI.
 
 ox-check does not gate the PR on coverage. The lcov upload is informational; Codecov's
 own status check is the gating layer when the adopter wants one (configured in Codecov,

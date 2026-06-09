@@ -14,111 +14,6 @@ root-files = [
 ]
 # <<< ox-check-managed: ox-check-delta
 
-=== .pipelines/ox-check/nightly.yml ===
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-# Owned by cargo-ox-check; edit via `cargo ox-check update`.
-#
-# Every job is rendered through `steps/job.yml` (user-customizable wrapper);
-# see pr-stages.yml for the rationale and template-path note.
-parameters:
-  - name: linuxPool
-    type: object
-    default: { vmImage: ubuntu-latest }
-  - name: windowsPool
-    type: object
-    default: { vmImage: windows-latest }
-
-stages:
-  - stage: nightly_test
-    displayName: ox-check nightly-test
-    jobs:
-      - template: steps/job.yml
-        parameters:
-          name: linux
-          pool: ${{ parameters.linuxPool }}
-          steps:
-            - template: steps/nightly-test.yml
-            - task: PublishCodeCoverageResults@2
-              condition: succeededOrFailed()
-              displayName: Publish coverage
-              inputs:
-                summaryFileLocation: target/coverage/cobertura.xml
-                failIfCoverageEmpty: false
-      - template: steps/job.yml
-        parameters:
-          name: windows
-          pool: ${{ parameters.windowsPool }}
-          steps:
-            - template: steps/nightly-test.yml
-
-  - stage: nightly_advisories
-    displayName: ox-check nightly-advisories
-    dependsOn: []
-    jobs:
-      # Cross-OS because clippy and udeps in this group compile per host,
-      # so cfg-gated code must be linted/scanned on both OSes.
-      - template: steps/job.yml
-        parameters:
-          name: linux
-          pool: ${{ parameters.linuxPool }}
-          steps:
-            - template: steps/nightly-advisories.yml
-      - template: steps/job.yml
-        parameters:
-          name: windows
-          pool: ${{ parameters.windowsPool }}
-          steps:
-            - template: steps/nightly-advisories.yml
-
-  - stage: nightly_runtime
-    displayName: ox-check nightly-runtime
-    dependsOn: []
-    jobs:
-      # Cross-OS to match the surveyed repos: oxidizer runs miri on
-      # every platform in its matrix (Windows_x64 + Linux_x64);
-      # oxidizer-github runs miri + careful across Linux/Windows.
-      # Both tools work on every Tier 1 Rust target.
-      #
-      # ADO has no Microsoft-hosted ARM agents (unlike GH), so the
-      # default ARM coverage that the GitHub backend ships is not
-      # available here. Adopters with self-hosted ARM pools extend
-      # this stage in their root pipeline.
-      - template: steps/job.yml
-        parameters:
-          name: linux
-          pool: ${{ parameters.linuxPool }}
-          steps:
-            - template: steps/nightly-runtime.yml
-      - template: steps/job.yml
-        parameters:
-          name: windows
-          pool: ${{ parameters.windowsPool }}
-          steps:
-            - template: steps/nightly-runtime.yml
-
-  - stage: nightly_exhaustive
-    displayName: ox-check nightly-exhaustive
-    dependsOn: []
-    jobs:
-      # Cross-OS to match oxidizer's policy: full-workspace mutation
-      # testing + cargo-hack powerset + bench compile checks all benefit
-      # from running on both OSes for cfg(target_os) coverage. Adopters
-      # who can't afford the Windows leg override the matrix in their
-      # root pipeline.
-      - template: steps/job.yml
-        parameters:
-          name: linux
-          pool: ${{ parameters.linuxPool }}
-          steps:
-            - template: steps/nightly-exhaustive.yml
-      - template: steps/job.yml
-        parameters:
-          name: windows
-          pool: ${{ parameters.windowsPool }}
-          steps:
-            - template: steps/nightly-exhaustive.yml
-
 === .pipelines/ox-check/pr.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
@@ -144,8 +39,16 @@ parameters:
     default: { vmImage: windows-latest }
 
 stages:
-  - stage: impact
-    displayName: ox-check impact
+  # cargo-delta impact runs per OS so that downstream legs consume an
+  # impact set computed against THEIR host's cargo-metadata depgraph.
+  # Without this, an OS-conditional dep change (under
+  # `[target.'cfg(target_os = ...)'.dependencies]`) computed on Linux
+  # wouldn't include the cross-OS reverse-deps that only show up in
+  # the Windows depgraph, so the Windows leg could skip tests that
+  # ought to run. We pay for one impact stage per OS family; downstream
+  # stages select the right one per leg.
+  - stage: impact_linux
+    displayName: ox-check impact (linux)
     jobs:
       - template: steps/job.yml
         parameters:
@@ -154,14 +57,27 @@ stages:
           steps:
             - template: steps/impact.yml
 
+  - stage: impact_windows
+    displayName: ox-check impact (windows)
+    jobs:
+      - template: steps/job.yml
+        parameters:
+          name: compute
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/impact.yml
+
   - stage: pr_fast
     displayName: ox-check pr-fast
-    dependsOn: impact
+    dependsOn: [impact_linux, impact_windows]
     condition: succeededOrFailed()
     variables:
-      include_modified: $[ stageDependencies.impact.compute.outputs['compute.include_modified'] ]
-      include_affected: $[ stageDependencies.impact.compute.outputs['compute.include_affected'] ]
-      include_required: $[ stageDependencies.impact.compute.outputs['compute.include_required'] ]
+      include_modified_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_modified'] ]
+      include_affected_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_affected'] ]
+      include_required_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_required'] ]
+      include_modified_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_modified'] ]
+      include_affected_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_affected'] ]
+      include_required_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_required'] ]
     jobs:
       # Cross-OS because pr-fast contains compile-sensitive checks
       # (clippy, doc-build, udeps, semver-check, external-types) whose
@@ -174,9 +90,9 @@ stages:
           steps:
             - template: steps/pr-fast.yml
               parameters:
-                include_modified: $(include_modified)
-                include_affected: $(include_affected)
-                include_required: $(include_required)
+                include_modified: $(include_modified_linux)
+                include_affected: $(include_affected_linux)
+                include_required: $(include_required_linux)
       - template: steps/job.yml
         parameters:
           name: windows
@@ -184,18 +100,21 @@ stages:
           steps:
             - template: steps/pr-fast.yml
               parameters:
-                include_modified: $(include_modified)
-                include_affected: $(include_affected)
-                include_required: $(include_required)
+                include_modified: $(include_modified_windows)
+                include_affected: $(include_affected_windows)
+                include_required: $(include_required_windows)
 
   - stage: pr_test
     displayName: ox-check pr-test
-    dependsOn: impact
+    dependsOn: [impact_linux, impact_windows]
     condition: succeededOrFailed()
     variables:
-      include_modified: $[ stageDependencies.impact.compute.outputs['compute.include_modified'] ]
-      include_affected: $[ stageDependencies.impact.compute.outputs['compute.include_affected'] ]
-      include_required: $[ stageDependencies.impact.compute.outputs['compute.include_required'] ]
+      include_modified_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_modified'] ]
+      include_affected_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_affected'] ]
+      include_required_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_required'] ]
+      include_modified_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_modified'] ]
+      include_affected_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_affected'] ]
+      include_required_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_required'] ]
     jobs:
       - template: steps/job.yml
         parameters:
@@ -204,14 +123,14 @@ stages:
           steps:
             - template: steps/pr-test.yml
               parameters:
-                include_modified: $(include_modified)
-                include_affected: $(include_affected)
-                include_required: $(include_required)
+                include_modified: $(include_modified_linux)
+                include_affected: $(include_affected_linux)
+                include_required: $(include_required_linux)
             # Coverage publish stays as a sibling task — it's a results
             # publish (not a pipeline artifact), so 1ESPT permits it at
             # step level and we don't need to route it through `artifacts:`.
             - task: PublishCodeCoverageResults@2
-              condition: and(succeededOrFailed(), ne(variables.include_affected, '--skip'))
+              condition: and(succeededOrFailed(), ne(variables.include_affected_linux, '--skip'))
               displayName: Publish coverage
               inputs:
                 summaryFileLocation: target/coverage/cobertura.xml
@@ -223,18 +142,21 @@ stages:
           steps:
             - template: steps/pr-test.yml
               parameters:
-                include_modified: $(include_modified)
-                include_affected: $(include_affected)
-                include_required: $(include_required)
+                include_modified: $(include_modified_windows)
+                include_affected: $(include_affected_windows)
+                include_required: $(include_required_windows)
 
   - stage: pr_mutants
     displayName: ox-check pr-mutants
-    dependsOn: impact
+    dependsOn: [impact_linux, impact_windows]
     condition: succeededOrFailed()
     variables:
-      include_modified: $[ stageDependencies.impact.compute.outputs['compute.include_modified'] ]
-      include_affected: $[ stageDependencies.impact.compute.outputs['compute.include_affected'] ]
-      include_required: $[ stageDependencies.impact.compute.outputs['compute.include_required'] ]
+      include_modified_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_modified'] ]
+      include_affected_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_affected'] ]
+      include_required_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_required'] ]
+      include_modified_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_modified'] ]
+      include_affected_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_affected'] ]
+      include_required_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_required'] ]
     jobs:
       # Cross-OS to match oxidizer's policy: mutation testing on
       # cfg(target_os) gated code matters. Diff-scoped (--in-diff) keeps
@@ -246,9 +168,9 @@ stages:
           steps:
             - template: steps/pr-mutants.yml
               parameters:
-                include_modified: $(include_modified)
-                include_affected: $(include_affected)
-                include_required: $(include_required)
+                include_modified: $(include_modified_linux)
+                include_affected: $(include_affected_linux)
+                include_required: $(include_required_linux)
       - template: steps/job.yml
         parameters:
           name: windows
@@ -256,9 +178,114 @@ stages:
           steps:
             - template: steps/pr-mutants.yml
               parameters:
-                include_modified: $(include_modified)
-                include_affected: $(include_affected)
-                include_required: $(include_required)
+                include_modified: $(include_modified_windows)
+                include_affected: $(include_affected_windows)
+                include_required: $(include_required_windows)
+
+=== .pipelines/ox-check/scheduled.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+#
+# Every job is rendered through `steps/job.yml` (user-customizable wrapper);
+# see pr-stages.yml for the rationale and template-path note.
+parameters:
+  - name: linuxPool
+    type: object
+    default: { vmImage: ubuntu-latest }
+  - name: windowsPool
+    type: object
+    default: { vmImage: windows-latest }
+
+stages:
+  - stage: scheduled_test
+    displayName: ox-check scheduled-test
+    jobs:
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/scheduled-test.yml
+            - task: PublishCodeCoverageResults@2
+              condition: succeededOrFailed()
+              displayName: Publish coverage
+              inputs:
+                summaryFileLocation: target/coverage/cobertura.xml
+                failIfCoverageEmpty: false
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/scheduled-test.yml
+
+  - stage: scheduled_advisories
+    displayName: ox-check scheduled-advisories
+    dependsOn: []
+    jobs:
+      # Cross-OS because clippy and udeps in this group compile per host,
+      # so cfg-gated code must be linted/scanned on both OSes.
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/scheduled-advisories.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/scheduled-advisories.yml
+
+  - stage: scheduled_runtime
+    displayName: ox-check scheduled-runtime
+    dependsOn: []
+    jobs:
+      # Cross-OS to match the surveyed repos: oxidizer runs miri on
+      # every platform in its matrix (Windows_x64 + Linux_x64);
+      # oxidizer-github runs miri + careful across Linux/Windows.
+      # Both tools work on every Tier 1 Rust target.
+      #
+      # ADO has no Microsoft-hosted ARM agents (unlike GH), so the
+      # default ARM coverage that the GitHub backend ships is not
+      # available here. Adopters with self-hosted ARM pools extend
+      # this stage in their root pipeline.
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/scheduled-runtime.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/scheduled-runtime.yml
+
+  - stage: scheduled_exhaustive
+    displayName: ox-check scheduled-exhaustive
+    dependsOn: []
+    jobs:
+      # Cross-OS to match oxidizer's policy: full-workspace mutation
+      # testing + cargo-hack powerset + bench compile checks all benefit
+      # from running on both OSes for cfg(target_os) coverage. Adopters
+      # who can't afford the Windows leg override the matrix in their
+      # root pipeline.
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/scheduled-exhaustive.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/scheduled-exhaustive.yml
 
 === .pipelines/ox-check/steps/impact.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -276,18 +303,40 @@ stages:
 #
 # Unscoped recipes (deny, audit, aprz, pr-title) ignore all three.
 steps:
+  # Reuse the per-job setup (toolchain, cargo cache, just install, tool
+  # install) so cargo + cargo-delta are on PATH and ~/.cargo/bin is
+  # restored from cache. Without this, a clean 1ESPT agent has no cargo
+  # on PATH and `cargo install --locked cargo-delta` exits 127.
+  - template: setup.yml
   - bash: |
       set -euo pipefail
       cargo install --locked cargo-delta
-      # System.PullRequest.TargetBranch is the unqualified target branch
-      # name (e.g. "main") on PR build-validation runs. Adopters can
-      # override via BASE_REF.
-      base="${BASE_REF:-origin/$(System.PullRequest.TargetBranch)}"
+      # Determine the baseline ref:
+      #   * Adopters can override via BASE_REF (full ref name, e.g.
+      #     `origin/release`).
+      #   * On PR build-validation runs, SYSTEM_PULLREQUEST_TARGETBRANCH
+      #     is set to the unqualified target branch (e.g. `main`).
+      #   * Otherwise fall back to `master` so manual / branch CI runs
+      #     produce a sensible diff against the default branch.
+      # The ADO macro form `$(System.PullRequest.TargetBranch)` is unsafe
+      # here: when the variable is unset (non-PR builds), ADO leaves the
+      # `$(...)` literal in the script, which bash then interprets as
+      # command substitution and fails with exit 127.
+      base="${BASE_REF:-origin/${SYSTEM_PULLREQUEST_TARGETBRANCH:-master}}"
       # Two snapshots + impact compare (cargo-delta has no --base
       # shortcut). The baseline runs in a worktree at the merge target
       # so the checked-out tree is untouched.
+      #
+      # GIT_LFS_SKIP_SMUDGE=1 prevents the worktree checkout from trying
+      # to fetch LFS objects -- the worktree inherits the parent repo's
+      # git config but NOT the credential helper that authenticated the
+      # initial checkout, so any LFS-tracked file would otherwise fail
+      # with "Git credentials ... not found". cargo-delta only needs
+      # file presence + content hashes; LFS pointer files hash
+      # consistently across baseline and current, so the impact analysis
+      # is unaffected.
       cargo delta snapshot > "$AGENT_TEMPDIRECTORY/ox-check-current.json"
-      git worktree add --detach "$AGENT_TEMPDIRECTORY/ox-check-baseline" "$base"
+      GIT_LFS_SKIP_SMUDGE=1 git worktree add --detach "$AGENT_TEMPDIRECTORY/ox-check-baseline" "$base"
       ( cd "$AGENT_TEMPDIRECTORY/ox-check-baseline" && cargo delta snapshot ) \
           > "$AGENT_TEMPDIRECTORY/ox-check-baseline.json"
       git worktree remove --force "$AGENT_TEMPDIRECTORY/ox-check-baseline"
@@ -303,13 +352,22 @@ steps:
       # rather than cargo *package names* (which may use hyphens). For
       # hyphenated packages — e.g. `cargo-ox-check` — that means it
       # emits `cargo_ox_check`, which cargo rejects as a --package
-      # specification. We build a lib-name -> package-name map from
-      # cargo metadata and translate each name through it.
+      # specification. We build:
+      #   * `pkg_map`: lib-name -> package-name (and identity for
+      #     package-name -> package-name), for translation;
+      #   * `valid_pkgs`: set of all known package names, for
+      #     validation. Names cargo-delta emits that aren't valid
+      #     packages (e.g. directory-leaf ambiguities like `ffi` /
+      #     `ffi_build` in deeply nested workspaces) are dropped with a
+      #     warning rather than failing the whole build.
       declare -A pkg_map
+      declare -A valid_pkgs
       while IFS=$'\t' read -r pkg_name lib_name; do
+          valid_pkgs["$pkg_name"]=1
+          pkg_map["$pkg_name"]="$pkg_name"
           [ -n "$lib_name" ] && pkg_map["$lib_name"]="$pkg_name"
       done < <(cargo metadata --no-deps --format-version 1 \
-          | jq -r '.packages[] as $p | $p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)"')
+          | jq -r '.packages[] as $p | ($p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)"), "\($p.name)\t"')
       format_set() {
           local field="$1"
           local pkgs
@@ -321,11 +379,19 @@ steps:
               while IFS= read -r pkg ; do
                   [ -z "$pkg" ] && continue
                   local mapped="${pkg_map[$pkg]:-$pkg}"
+                  if [ -z "${valid_pkgs[$mapped]:-}" ] ; then
+                      echo "ox-check impact: dropping unknown package '$pkg' (-> '$mapped') from $field set; see https://github.com/microsoft/ox-tools/issues for tracking" >&2
+                      continue
+                  fi
                   out="$out --package $mapped"
               done <<EOF
       $pkgs
       EOF
-              printf '%s' "${out# }"
+              if [ -z "$out" ] ; then
+                  printf '%s' "--skip"
+              else
+                  printf '%s' "${out# }"
+              fi
           fi
       }
       include_modified="$(format_set Modified)"
@@ -347,7 +413,7 @@ steps:
 # concrete `job:` block. Pipelines that use extension templates (1ES PT,
 # SubstratePT, M365PT, etc.) take ownership of THIS file once and add their
 # required `templateContext:` block — the owned stages templates
-# (pr-stages.yml / nightly-stages.yml) then continue to update normally
+# (pr-stages.yml / scheduled-stages.yml) then continue to update normally
 # because they only know about this wrapper's parameter contract.
 #
 # Once you edit this file, cargo-ox-check treats it as user-owned: subsequent
@@ -391,112 +457,12 @@ jobs:
               targetPath: ${{ artifact.path }}
               artifact: ${{ artifact.name }}
 
-=== .pipelines/ox-check/steps/nightly-advisories.yml ===
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-# Owned by cargo-ox-check; edit via `cargo ox-check update`.
-# The token nightly-advisories is substituted by cargo-ox-check at emit time with
-# the concrete check-group name (pr-fast, pr-test, nightly-runtime, ...).
-parameters:
-  - name: include_modified
-    type: string
-    default: ''
-  - name: include_affected
-    type: string
-    default: ''
-  - name: include_required
-    type: string
-    default: ''
-steps:
-  - template: setup.yml
-  - bash: just ox-check-nightly-advisories
-    displayName: ox-check-nightly-advisories
-    env:
-      OX_CHECK_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
-      OX_CHECK_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
-      OX_CHECK_INCLUDE_REQUIRED: ${{ parameters.include_required }}
-
-=== .pipelines/ox-check/steps/nightly-exhaustive.yml ===
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-# Owned by cargo-ox-check; edit via `cargo ox-check update`.
-# The token nightly-exhaustive is substituted by cargo-ox-check at emit time with
-# the concrete check-group name (pr-fast, pr-test, nightly-runtime, ...).
-parameters:
-  - name: include_modified
-    type: string
-    default: ''
-  - name: include_affected
-    type: string
-    default: ''
-  - name: include_required
-    type: string
-    default: ''
-steps:
-  - template: setup.yml
-  - bash: just ox-check-nightly-exhaustive
-    displayName: ox-check-nightly-exhaustive
-    env:
-      OX_CHECK_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
-      OX_CHECK_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
-      OX_CHECK_INCLUDE_REQUIRED: ${{ parameters.include_required }}
-
-=== .pipelines/ox-check/steps/nightly-runtime.yml ===
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-# Owned by cargo-ox-check; edit via `cargo ox-check update`.
-# The token nightly-runtime is substituted by cargo-ox-check at emit time with
-# the concrete check-group name (pr-fast, pr-test, nightly-runtime, ...).
-parameters:
-  - name: include_modified
-    type: string
-    default: ''
-  - name: include_affected
-    type: string
-    default: ''
-  - name: include_required
-    type: string
-    default: ''
-steps:
-  - template: setup.yml
-  - bash: just ox-check-nightly-runtime
-    displayName: ox-check-nightly-runtime
-    env:
-      OX_CHECK_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
-      OX_CHECK_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
-      OX_CHECK_INCLUDE_REQUIRED: ${{ parameters.include_required }}
-
-=== .pipelines/ox-check/steps/nightly-test.yml ===
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-# Owned by cargo-ox-check; edit via `cargo ox-check update`.
-# The token nightly-test is substituted by cargo-ox-check at emit time with
-# the concrete check-group name (pr-fast, pr-test, nightly-runtime, ...).
-parameters:
-  - name: include_modified
-    type: string
-    default: ''
-  - name: include_affected
-    type: string
-    default: ''
-  - name: include_required
-    type: string
-    default: ''
-steps:
-  - template: setup.yml
-  - bash: just ox-check-nightly-test
-    displayName: ox-check-nightly-test
-    env:
-      OX_CHECK_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
-      OX_CHECK_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
-      OX_CHECK_INCLUDE_REQUIRED: ${{ parameters.include_required }}
-
 === .pipelines/ox-check/steps/pr-fast.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
 # The token pr-fast is substituted by cargo-ox-check at emit time with
-# the concrete check-group name (pr-fast, pr-test, nightly-runtime, ...).
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
 parameters:
   - name: include_modified
     type: string
@@ -521,7 +487,7 @@ steps:
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
 # The token pr-mutants is substituted by cargo-ox-check at emit time with
-# the concrete check-group name (pr-fast, pr-test, nightly-runtime, ...).
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
 parameters:
   - name: include_modified
     type: string
@@ -546,7 +512,7 @@ steps:
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
 # The token pr-test is substituted by cargo-ox-check at emit time with
-# the concrete check-group name (pr-fast, pr-test, nightly-runtime, ...).
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
 parameters:
   - name: include_modified
     type: string
@@ -561,6 +527,106 @@ steps:
   - template: setup.yml
   - bash: just ox-check-pr-test
     displayName: ox-check-pr-test
+    env:
+      OX_CHECK_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
+      OX_CHECK_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
+      OX_CHECK_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+
+=== .pipelines/ox-check/steps/scheduled-advisories.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# The token scheduled-advisories is substituted by cargo-ox-check at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+parameters:
+  - name: include_modified
+    type: string
+    default: ''
+  - name: include_affected
+    type: string
+    default: ''
+  - name: include_required
+    type: string
+    default: ''
+steps:
+  - template: setup.yml
+  - bash: just ox-check-scheduled-advisories
+    displayName: ox-check-scheduled-advisories
+    env:
+      OX_CHECK_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
+      OX_CHECK_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
+      OX_CHECK_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+
+=== .pipelines/ox-check/steps/scheduled-exhaustive.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# The token scheduled-exhaustive is substituted by cargo-ox-check at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+parameters:
+  - name: include_modified
+    type: string
+    default: ''
+  - name: include_affected
+    type: string
+    default: ''
+  - name: include_required
+    type: string
+    default: ''
+steps:
+  - template: setup.yml
+  - bash: just ox-check-scheduled-exhaustive
+    displayName: ox-check-scheduled-exhaustive
+    env:
+      OX_CHECK_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
+      OX_CHECK_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
+      OX_CHECK_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+
+=== .pipelines/ox-check/steps/scheduled-runtime.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# The token scheduled-runtime is substituted by cargo-ox-check at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+parameters:
+  - name: include_modified
+    type: string
+    default: ''
+  - name: include_affected
+    type: string
+    default: ''
+  - name: include_required
+    type: string
+    default: ''
+steps:
+  - template: setup.yml
+  - bash: just ox-check-scheduled-runtime
+    displayName: ox-check-scheduled-runtime
+    env:
+      OX_CHECK_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
+      OX_CHECK_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
+      OX_CHECK_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+
+=== .pipelines/ox-check/steps/scheduled-test.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# The token scheduled-test is substituted by cargo-ox-check at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+parameters:
+  - name: include_modified
+    type: string
+    default: ''
+  - name: include_affected
+    type: string
+    default: ''
+  - name: include_required
+    type: string
+    default: ''
+steps:
+  - template: setup.yml
+  - bash: just ox-check-scheduled-test
+    displayName: ox-check-scheduled-test
     env:
       OX_CHECK_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
       OX_CHECK_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
@@ -592,7 +658,20 @@ steps:
 
   # System dependencies for catalog source builds. See the GitHub
   # composite setup-action.yml for the rationale — same pattern.
-  - bash: sudo apt-get update && sudo apt-get install -y libclang-dev
+  # Detect the distro's package manager so this works on Ubuntu agents
+  # (apt-get) and Azure Linux 3 agents (tdnf, common on 1ESPT) alike.
+  - bash: |
+      set -euo pipefail
+      if command -v tdnf >/dev/null 2>&1; then
+        sudo tdnf install -y clang-devel
+      elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y clang-devel
+      elif command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update && sudo apt-get install -y libclang-dev
+      else
+        echo "No supported package manager found (tdnf/dnf/apt-get)" >&2
+        exit 1
+      fi
     condition: eq(variables['Agent.OS'], 'Linux')
     displayName: ox-check setup (install libclang on Linux)
 
@@ -633,26 +712,6 @@ steps:
     continueOnError: true
     displayName: ox-check setup (install catalog tools)
 
-=== .pipelines/ox-check-nightly.yml ===
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-# Owned by cargo-ox-check; edit via `cargo ox-check update`.
-trigger: none
-pr: none
-
-schedules:
-  - cron: "0 6 * * *"
-    displayName: ox-check nightly
-    branches:
-      include: [main, master]
-    always: true
-
-stages:
-  - template: ox-check/nightly.yml
-    parameters:
-      linuxPool: { vmImage: ubuntu-latest }
-      windowsPool: { vmImage: windows-latest }
-
 === .pipelines/ox-check-pr.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
@@ -661,6 +720,26 @@ trigger: none
 
 stages:
   - template: ox-check/pr.yml
+    parameters:
+      linuxPool: { vmImage: ubuntu-latest }
+      windowsPool: { vmImage: windows-latest }
+
+=== .pipelines/ox-check-scheduled.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+trigger: none
+pr: none
+
+schedules:
+  - cron: "0 6 * * *"
+    displayName: ox-check scheduled
+    branches:
+      include: [main, master]
+    always: true
+
+stages:
+  - template: ox-check/scheduled.yml
     parameters:
       linuxPool: { vmImage: ubuntu-latest }
       windowsPool: { vmImage: windows-latest }
@@ -871,7 +950,7 @@ unknown-git = "deny"
 #
 #   - "unscoped": always run, no env var reference. External-input
 #     checks (deny, audit, aprz) and PR-context checks (pr-title) live
-#     here. Nightly-exhaustive recipes (mutants-full) are also unscoped
+#     here. Scheduled-exhaustive recipes (mutants-full) are also unscoped
 #     by design.
 #
 # Local invocation (no impact wiring): all three env vars are unset;
@@ -992,6 +1071,19 @@ ox-check-doc-build:
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
+#
+# cargo-doc2readme regenerates a crate's README.md from its rustdoc.
+# Two extension points users frequently need:
+#   * Workspace-level template (`crates/README.j2` or `README.j2` at repo
+#     root): a Tera template applied to every crate's README. ox-check
+#     auto-detects it and passes `--template` to the per-crate runs.
+#   * Per-crate opt-out: hand-crafted READMEs (e.g. a tool crate whose
+#     README is more freeform than the lib docs) opt out by adding
+#     `[package.metadata.ox-gen-readme]\ndisable = true` to their
+#     Cargo.toml. ox-check skips those crates.
+#
+# Bin-only crates have no library rustdoc to base a README on, so they
+# are skipped as well (cargo doc2readme requires a library target).
 [script("pwsh")]
 ox-check-readme-check: (_ox-check-require "cargo-doc2readme")
     $ErrorActionPreference = 'Stop'
@@ -999,8 +1091,74 @@ ox-check-readme-check: (_ox-check-require "cargo-doc2readme")
         Write-Host 'ox-check-readme-check: no modified packages; skipping'
         exit 0
     }
-    cargo doc2readme --check --workspace
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # Detect a workspace-level README template. Two conventional
+    # locations: crates/README.j2 (cargo-workspaces idiom) or
+    # README.j2 at repo root.
+    $template = $null
+    foreach ($candidate in 'crates/README.j2', 'README.j2') {
+        if (Test-Path $candidate) { $template = (Resolve-Path $candidate).Path; break }
+    }
+    # Iterate library crates. Filter by impact set when set, then drop
+    # bin-only crates and opt-outs.
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_MODIFIED) { -split $env:OX_CHECK_INCLUDE_MODIFIED } else { '--workspace' })
+    $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+    $byName = @{}
+    foreach ($p in $meta.packages) { $byName[$p.name] = $p }
+    $candidates = if ($pkg -contains '--workspace') {
+        @($meta.packages | ForEach-Object { $_.name })
+    } else {
+        $names = @()
+        for ($i = 0; $i -lt $pkg.Count; $i++) {
+            if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
+                $names += $pkg[$i + 1]; $i++
+            }
+        }
+        $names
+    }
+    $hadFailure = $false
+    foreach ($name in $candidates) {
+        $p = $byName[$name]
+        if (-not $p) { continue }
+        if (-not ($p.targets | Where-Object { $_.kind -contains 'lib' })) { continue }
+        # Skip private crates (publish = false). They aren't released
+        # and rarely have a polished README. Mirrors the
+        # `cargo workspaces exec --ignore-private` idiom adopters
+        # commonly use.
+        if ($p.publish -is [array] -and $p.publish.Count -eq 0) {
+            Write-Host "ox-check-readme-check: $name (skipped: publish = false)"
+            continue
+        }
+        $disabled = $false
+        if ($p.metadata -and $p.metadata.'ox-gen-readme' -and $p.metadata.'ox-gen-readme'.disable) {
+            $disabled = $true
+        }
+        if ($disabled) {
+            Write-Host "ox-check-readme-check: $name (opted out via [package.metadata.ox-gen-readme])"
+            continue
+        }
+        Write-Host "ox-check-readme-check: $name"
+        # cargo doc2readme writes / compares relative to its CWD (not
+        # --manifest-path), so chdir into the crate before invoking
+        # --check. We also compute a per-crate relative path to the
+        # workspace-level template so the same template file works for
+        # every crate (parallels the cargo-workspaces idiom).
+        $crateDir = Split-Path -Parent $p.manifest_path
+        Push-Location $crateDir
+        try {
+            $relTemplate = if ($template) {
+                Resolve-Path -Relative -LiteralPath $template
+            } else {
+                $null
+            }
+            $args = @('doc2readme', '--check')
+            if ($relTemplate) { $args += @('--template', $relTemplate) }
+            & cargo @args
+            if ($LASTEXITCODE -ne 0) { $hadFailure = $true }
+        } finally {
+            Pop-Location
+        }
+    }
+    if ($hadFailure) { exit 1 }
 
 # Modified tier.
 #
@@ -1094,15 +1252,12 @@ ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
         exit 0
     }
     $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
-    # Build the candidate package list. With --workspace, defer to
-    # cargo-semver-checks which already does the right thing. With
-    # explicit --package args, extract them and filter to library
-    # crates only.
-    if ($pkg -contains '--workspace') {
-        & cargo semver-checks --workspace
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        return
-    }
+    # Build the candidate package list. Always iterate per-package over
+    # library crates only -- cargo-semver-checks --workspace would fail
+    # on workspaces that contain bin-only crates ("no library targets
+    # found"), and we want the same tolerance for unpublished / bin->lib-
+    # transition crates regardless of whether we got here via impact-
+    # scoping (CI) or full-workspace fallback (local).
     $libPkgs = @{}
     $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
     foreach ($p in $meta.packages) {
@@ -1110,11 +1265,15 @@ ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
             $libPkgs[$p.name] = $true
         }
     }
-    $packages = @()
-    for ($i = 0; $i -lt $pkg.Count; $i++) {
-        if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
-            if ($libPkgs[$pkg[$i + 1]]) { $packages += $pkg[$i + 1] }
-            $i++
+    if ($pkg -contains '--workspace') {
+        $packages = @($libPkgs.Keys)
+    } else {
+        $packages = @()
+        for ($i = 0; $i -lt $pkg.Count; $i++) {
+            if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
+                if ($libPkgs[$pkg[$i + 1]]) { $packages += $pkg[$i + 1] }
+                $i++
+            }
         }
     }
     if ($packages.Count -eq 0) {
@@ -1306,7 +1465,7 @@ ox-check-mutants: (_ox-check-require "cargo-mutants")
 # === nightly-runtime members ============================================
 
 # Nightly checks always run full-workspace; impact env vars aren't set
-# by the nightly workflow, so the affected-tier default (--workspace)
+# by the scheduled workflow, so the affected-tier default (--workspace)
 # applies. Skip guards are still included for local diff-scoped runs.
 
 [script("pwsh")]
@@ -1333,7 +1492,7 @@ ox-check-careful: (_ox-check-require "cargo-careful")
 
 # === nightly-exhaustive members =========================================
 
-# Unscoped. Nightly-exhaustive deliberately runs over the whole
+# Unscoped. Scheduled-exhaustive deliberately runs over the whole
 # workspace regardless of diff.
 ox-check-mutants-full: (_ox-check-require "cargo-mutants")
     cargo mutants --workspace --no-shuffle --jobs 0
@@ -1401,16 +1560,16 @@ ox-check-pr-test: \
 [group("ox-check")]
 ox-check-pr-mutants: ox-check-mutants
 
-# === Nightly groups =====================================================
+# === Scheduled groups =====================================================
 
 [group("ox-check")]
-ox-check-nightly-test: \
+ox-check-scheduled-test: \
     ox-check-llvm-cov \
     ox-check-doc-test \
     ox-check-examples
 
 [group("ox-check")]
-ox-check-nightly-advisories: \
+ox-check-scheduled-advisories: \
     ox-check-deny \
     ox-check-audit \
     ox-check-aprz \
@@ -1418,12 +1577,12 @@ ox-check-nightly-advisories: \
     ox-check-external-types
 
 [group("ox-check")]
-ox-check-nightly-runtime: \
+ox-check-scheduled-runtime: \
     ox-check-miri \
     ox-check-careful
 
 [group("ox-check")]
-ox-check-nightly-exhaustive: \
+ox-check-scheduled-exhaustive: \
     ox-check-mutants-full \
     ox-check-cargo-hack \
     ox-check-bench
@@ -1486,20 +1645,20 @@ ox-check-pr: \
     ox-check-pr-test \
     ox-check-pr-mutants
 
-# Nightly tier: slow / non-deterministic checks. Runs on a schedule against
+# scheduled tier: slow / non-deterministic checks. Runs on a schedule against
 # `main`, not on PRs.
 [group("ox-check")]
-ox-check-nightly: \
-    ox-check-nightly-test \
-    ox-check-nightly-advisories \
-    ox-check-nightly-runtime \
-    ox-check-nightly-exhaustive
+ox-check-scheduled: \
+    ox-check-scheduled-test \
+    ox-check-scheduled-advisories \
+    ox-check-scheduled-runtime \
+    ox-check-scheduled-exhaustive
 
-# Full tier: PR + nightly, end-to-end. Useful before tagging a release.
+# Full tier: PR + scheduled, end-to-end. Useful before tagging a release.
 [group("ox-check")]
 ox-check-full: \
     ox-check-pr \
-    ox-check-nightly
+    ox-check-scheduled
 
 === justfiles/ox-check/tool-minimums.txt ===
 # Copyright (c) Microsoft Corporation.
@@ -1546,6 +1705,93 @@ cargo-udeps=0.1.60
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
 # See ../../docs/design/local.md for the policy.
+
+# Public: probe for system-level prerequisites that catalog tools need
+# to BUILD from source. The `binstall` install path downloads pre-built
+# binaries and does not need these, so this check is primarily relevant
+# for the source-build `install` path (used by local devs and the ADO
+# backend) and is best-effort (skipped silently) for `binstall`.
+#
+# Scope policy: only system libs that an ox-check catalog tool DIRECTLY
+# requires. We do not try to be a general-purpose dev-env doctor.
+# Current entries:
+#   - libclang: required by cargo-spellcheck (clang-sys / hunspell-rs)
+#     at build time.
+#
+# Detection uses presence-only probes (file existence in standard install
+# dirs + `LIBCLANG_PATH` env var). No version checks -- system libs upgrade
+# independently and any reasonably modern libclang works for clang-sys.
+#
+# On missing deps the recipe prints copy-paste install hints per OS /
+# package manager and exits non-zero. No auto-install: admin / sudo and
+# package-manager choice stay with the user.
+[group("ox-check")]
+[script("pwsh")]
+ox-check-system-deps-check:
+    $ErrorActionPreference = 'Stop'
+    $missing = @()
+
+    # libclang: required to BUILD cargo-spellcheck from source.
+    $haveLibclang = $false
+    $libclangFiles = @('libclang.dll', 'libclang.so', 'libclang.so.1', 'libclang.dylib')
+    if ($env:LIBCLANG_PATH) {
+        foreach ($f in $libclangFiles) {
+            if (Test-Path (Join-Path $env:LIBCLANG_PATH $f)) { $haveLibclang = $true; break }
+        }
+    }
+    if (-not $haveLibclang) {
+        $probes = if ($IsWindows) {
+            @(
+                'C:\Program Files\LLVM\bin\libclang.dll',
+                "$env:USERPROFILE\scoop\apps\llvm\current\bin\libclang.dll"
+            )
+        } elseif ($IsMacOS) {
+            @(
+                '/usr/local/opt/llvm/lib/libclang.dylib',
+                '/opt/homebrew/opt/llvm/lib/libclang.dylib'
+            )
+        } else {
+            @(
+                '/usr/lib/x86_64-linux-gnu/libclang.so.1',
+                '/usr/lib64/libclang.so',
+                '/usr/lib64/libclang.so.1'
+            )
+        }
+        foreach ($p in $probes) {
+            if (Get-Item -LiteralPath $p -ErrorAction SilentlyContinue) { $haveLibclang = $true; break }
+        }
+        # Linux distros often add a version suffix (libclang-19.so etc.); glob fallback.
+        if (-not $haveLibclang -and -not $IsWindows -and -not $IsMacOS) {
+            $glob = Get-ChildItem -Path '/usr/lib','/usr/lib64','/usr/lib/x86_64-linux-gnu' -Filter 'libclang*.so*' -ErrorAction SilentlyContinue
+            if ($glob) { $haveLibclang = $true }
+        }
+    }
+    if (-not $haveLibclang) {
+        $missing += [pscustomobject]@{
+            name = 'libclang'
+            why = 'cargo-spellcheck (clang-sys/hunspell-rs) needs libclang at build time'
+            hints = @(
+                'Linux (Ubuntu/Debian):    sudo apt-get install -y libclang-dev'
+                'Linux (Azure Linux/RHEL): sudo tdnf install -y clang-devel'
+                'macOS (homebrew):         brew install llvm'
+                'Windows (scoop):          scoop install llvm     # no admin'
+                'Windows (winget, admin):  winget install LLVM.LLVM'
+            )
+        }
+    }
+
+    if ($missing.Count -gt 0) {
+        Write-Host ''
+        foreach ($m in $missing) {
+            Write-Host "ox-check: missing system dependency '$($m.name)'" -ForegroundColor Yellow
+            Write-Host "  why: $($m.why)"
+            Write-Host '  install:'
+            foreach ($h in $m.hints) { Write-Host "    $h" }
+            Write-Host ''
+        }
+        Write-Host "If the dep is installed but not on the standard search path, set LIBCLANG_PATH and re-run." -ForegroundColor Yellow
+        exit 1
+    }
 
 # Public: assert that every catalog tool is present at or above its
 # minimum version. Called by `ox-check-tools-check` and as a dependency
@@ -1602,6 +1848,17 @@ ox-check-tools-install installer="install":
     if ($installer -ne 'install' -and $installer -ne 'binstall') {
         Write-Error "ox-check-tools-install: unknown installer '$installer' (expected 'install' or 'binstall')"
         exit 2
+    }
+    # System-level prerequisites first -- the binstall path downloads
+    # prebuilt binaries and does not need them, but the source-build
+    # path does. Failing fast with a clear install hint is much better
+    # than a cryptic clang-sys build error 10 minutes into the install.
+    if ($installer -eq 'install') {
+        & just ox-check-system-deps-check
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "ox-check-tools-install: system dependency check failed; install the missing libs and re-run."
+            exit $LASTEXITCODE
+        }
     }
     $catalog = 'justfiles/ox-check/tool-minimums.txt'
     $failed = [System.Collections.Generic.List[string]]::new()
@@ -1768,7 +2025,7 @@ _ox-check-require name:
 # nightly-dependent check. Bumped on a regular cadence (monthly is a
 # reasonable default) when an adopter has time to absorb formatting /
 # lint / API-surface drift. Pin only — do not use bare `nightly` here.
-rust_nightly := "nightly-2026-01-21"
+rust_nightly := "nightly-2026-02-10"
 
 # Pinned narrowly to the rustdoc JSON schema version that the currently
 # selected cargo-check-external-types release accepts. cargo-check-

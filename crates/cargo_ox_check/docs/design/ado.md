@@ -7,13 +7,13 @@ ox-check emits three layers, all owned by ox-check with the standard owned-file 
 dirty → `.ox-check-proposed` sibling on next update). The split is by what users actually
 need to change:
 
-1. **Root pipelines** (`ox-check-pr.yml`, `ox-check-nightly.yml` at `.pipelines/`). Triggers,
+1. **Root pipelines** (`ox-check-pr.yml`, `ox-check-scheduled.yml` at `.pipelines/`). Triggers,
    runner pool, secret variable groups, and the optional `extends:` to a compliance
    template (1ESPT/SubstratePT/CloudBuild) live here. ox-check ships an opinionated default;
    users who need to customize edit in place and accept the proposal-on-update flow.
    ox-check's emitted root pipelines contain **no** references to compliance harnesses —
    wrapping with 1ESPT is purely a user-side edit.
-2. **Stages templates** (`ox-check/pr.yml`, `ox-check/nightly.yml`), containing the impact job
+2. **Stages templates** (`ox-check/pr.yml`, `ox-check/scheduled.yml`), containing the impact job
    and the per-group jobs with all the dependency / output-variable plumbing. These
    change when ox-check's groups or impact wiring evolve; most users won't ever edit them.
 3. **Per-group step templates** (`ox-check/steps/*.yml`). Each is a multi-step template that
@@ -44,10 +44,10 @@ See also:
 ```text
 .pipelines/
 ├── ox-check-pr.yml                    owned   (root PR pipeline)
-├── ox-check-nightly.yml               owned   (root nightly pipeline)
+├── ox-check-scheduled.yml               owned   (root scheduled pipeline)
 └── ox-check/
     ├── pr.yml                      owned   (PR-tier stages template)
-    ├── nightly.yml                 owned   (nightly-tier stages template)
+    ├── scheduled.yml               owned   (scheduled-tier stages template)
     └── steps/
         ├── setup.yml               owned   (install just + catalog tools)
         ├── impact.yml              owned   (cargo-delta impact step; omitted if .delta.toml disabled)
@@ -59,10 +59,10 @@ See also:
         ├── pr-fast.yml             owned   (one step template per group)
         ├── pr-test.yml             owned
         ├── pr-mutants.yml          owned
-        ├── nightly-test.yml        owned
-        ├── nightly-advisories.yml  owned
-        ├── nightly-runtime.yml     owned
-        └── nightly-exhaustive.yml  owned
+        ├── scheduled-test.yml        owned
+        ├── scheduled-advisories.yml  owned
+        ├── scheduled-runtime.yml     owned
+        └── scheduled-exhaustive.yml  owned
 ```
 
 All files are regular owned files tracked by the sidecar `.ox-check.lock` manifest
@@ -95,22 +95,22 @@ stages:
     windowsPool: { vmImage: windows-latest }
 ```
 
-The nightly root pipeline adds a schedule:
+The scheduled root pipeline adds a schedule:
 
 ```yaml
-# .pipelines/ox-check-nightly.yml
+# .pipelines/ox-check-scheduled.yml
 trigger: none
 pr: none
 
 schedules:
 - cron: "0 6 * * *"
-  displayName: ox-check nightly
+  displayName: ox-check scheduled
   branches:
     include: [main, master]
   always: true
 
 stages:
-- template: ox-check/nightly.yml
+- template: ox-check/scheduled.yml
   parameters:
     linuxPool:   { vmImage: ubuntu-latest }
     windowsPool: { vmImage: windows-latest }
@@ -168,12 +168,12 @@ wiring layer's default OS matrix. See
 The `pr.yml` stages template is where the wiring lives. Every per-group step template
 takes the same three impact-include parameters unconditionally; which ones a group's
 checks actually consume is the catalog's concern, not the wiring layer's. This means
-moving a check between groups (e.g. `clippy` from `pr-fast` to `nightly-advisories`)
+moving a check between groups (e.g. `clippy` from `pr-fast` to `scheduled-advisories`)
 never changes the stages template.
 
 ### 4.1 Per-job wrapper (`steps/job.yml`) — the 1ESPT extensibility point
 
-Every job in `pr.yml` and `nightly.yml` is rendered through a wrapper template at
+Every job in `pr.yml` and `scheduled.yml` is rendered through a wrapper template at
 `.pipelines/ox-check/steps/job.yml` rather than declared inline. The wrapper exists
 to give adopters whose ADO instance requires extension templates (1ES PT,
 SubstratePT, M365PT, custom corporate templates) a single, narrow place to inject
@@ -258,7 +258,7 @@ internal adopters will customize.
 contains a `template:` reference (e.g. `template: steps/pr-fast.yml`). ADO
 resolves template paths relative to the file containing the `template:`
 keyword, which for parameters defined at the call site is the stages template
-itself — so the path is written relative to `pr.yml` / `nightly.yml`, *not*
+itself — so the path is written relative to `pr.yml` / `scheduled.yml`, *not*
 relative to `steps/job.yml`.
 
 ### 4.2 Stages template shape
@@ -329,9 +329,9 @@ run), so ox-check unrolls the OS axis into two explicit jobs (`linux` and `windo
 at template-compile time. Setting `windowsPool: {}` in the user's root pipeline can
 elide the Windows job entirely if their root pipeline is shaped to support that.
 
-The nightly stages template is simpler — it omits the `impact` stage and runs each
+The scheduled stages template is simpler — it omits the `impact` stage and runs each
 group full-workspace, with the same `linuxPool` / `windowsPool` parameter shape and
-the same `steps/job.yml` delegation. Nightly step templates don't receive any
+the same `steps/job.yml` delegation. Scheduled step templates don't receive any
 `include*` parameters; they default to empty strings and recipes fall through to
 `--workspace`.
 
@@ -389,7 +389,7 @@ Per-group additions (only where the group consumes PR-context strings the recipe
 | `pr-fast.yml`             | `prTitle` (default `$(System.PullRequest.Title)`)                       |
 | `pr-mutants.yml`          | `prBaseRef` (default `$(System.PullRequest.TargetBranch)`)              |
 | `pr-test.yml`             | —                                                                       |
-| `nightly-*.yml`           | —                                                                       |
+| `scheduled-*.yml`           | —                                                                       |
 
 `$(System.PullRequest.*)` are auto-populated by ADO on PR build-validation runs. No
 manual web-UI wiring is needed.
@@ -479,10 +479,10 @@ variable groups, and approval gates.
 
 Recommended user-pipeline shape:
 
-- PR pipelines and nightly pipelines are separate root files (so they can have separate
+- PR pipelines and scheduled pipelines are separate root files (so they can have separate
   triggers, separate variable groups, and different `extends:` if needed).
-- Nightly variable groups (with any external-service credentials) are referenced only by
-  the nightly pipeline.
+- Scheduled-tier variable groups (with any external-service credentials) are referenced only by
+  the scheduled pipeline.
 - All cargo-tool installs done by `setup.yml` use `--locked`. No `cargo-binstall`.
 
 ## 9. Incremental adoption
@@ -490,9 +490,9 @@ Recommended user-pipeline shape:
 For repos with an existing 1ESPT-extending pipeline, adopting ox-check is incremental:
 
 1. Run `cargo ox-check update --backend ado` to emit owned templates and root pipelines.
-2. Either delete the emitted root pipelines (`.pipelines/ox-check-{pr,nightly}.yml`) if they
+2. Either delete the emitted root pipelines (`.pipelines/ox-check-{pr,scheduled}.yml`) if they
    conflict with the repo's existing ones, or edit the existing pipelines to call out to
-   `ox-check/pr.yml` / `ox-check/nightly.yml`.
+   `ox-check/pr.yml` / `ox-check/scheduled.yml`.
 3. In the repo's existing pipeline, add a stage that does
    `template: /.pipelines/ox-check/pr.yml@self` under `parameters.stages` of the 1ESPT
    `extends:` block.
@@ -508,7 +508,7 @@ it just contributes a stage.
 
 ## 10. Coverage upload
 
-After `pr-test` (and `nightly-test`) runs the `ox-check-llvm-cov` recipe, the stages
+After `pr-test` (and `scheduled-test`) runs the `ox-check-llvm-cov` recipe, the stages
 template adds a `PublishCodeCoverageResults@2` step on the Linux job that ingests
 `target/coverage/cobertura.xml`. The cobertura format is the modern recommendation for
 the task (lcov is not accepted) and is produced alongside lcov.info by the same

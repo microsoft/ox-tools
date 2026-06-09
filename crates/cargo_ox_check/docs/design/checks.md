@@ -18,34 +18,34 @@ job per group) and the unit of local invocation through `just` (one `just` recip
 A user (or CI) never has to enumerate individual checks — they operate at the group level.
 
 The **single-tier-per-group** rule is deliberate: if you see `just ox-check-pr-fast` in CI logs,
-you know it is a PR-tier check; if you see `just ox-check-nightly-runtime`, you know it is
-nightly-only. This makes "what gets executed" trivially answerable from the group name.
+you know it is a PR-tier check; if you see `just ox-check-scheduled-runtime`, you know it is
+scheduled-only. This makes "what gets executed" trivially answerable from the group name.
 
-A consequence is that some checks must appear in two groups — one PR group and one nightly
+A consequence is that some checks must appear in two groups — one PR group and one scheduled
 group — when the check should run in both tiers. The two invocations may differ (e.g.
-`mutants` runs diff-scoped in PR and full-workspace in nightly) or be identical (e.g. `tests`
-runs the same way in both, but the nightly run catches flakes/environmental drift on `main`).
+`mutants` runs diff-scoped in PR and full-workspace in scheduled) or be identical (e.g. `tests`
+runs the same way in both, but the scheduled run catches flakes/environmental drift on `main`).
 
 Group recipes follow the pattern `ox-check-<tier>-<group>` (e.g. `ox-check-pr-fast`,
-`ox-check-nightly-runtime`). The tier prefix removes the need to pick distinct names for groups
+`ox-check-scheduled-runtime`). The tier prefix removes the need to pick distinct names for groups
 in different tiers and makes the tier of any failing job obvious from its name alone.
 
 ### PR tier (3 groups)
 
 | Group              | OS scope                              | Purpose                                                                                                              |
 |--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
-| `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis (including `udeps` and `semver-check`). Cross-OS because clippy, doc-build, udeps, and semver-check all compile per host target. Text/metadata checks (fmt, license-headers, …) run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. `external-types` lives in `nightly-advisories` instead because it pins a specific nightly rustdoc JSON schema and breaks frequently on toolchain drift. |
+| `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis (including `udeps` and `semver-check`). Cross-OS because clippy, doc-build, udeps, and semver-check all compile per host target. Text/metadata checks (fmt, license-headers, …) run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. `external-types` lives in `scheduled-advisories` instead because it pins a specific nightly rustdoc JSON schema and breaks frequently on toolchain drift. |
 | `pr-test`          | Same default as `pr-fast`             | Code execution: tests (instrumented for coverage), doctests, examples. Coverage reporting is folded in via `cargo llvm-cov nextest`. |
 | `pr-mutants`       | Linux x86_64 + Windows x86_64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | Diff-scoped mutation testing on the change in this PR. Cross-OS to match `oxidizer`'s policy — mutations on cfg-gated code matter. **x86_64-only**: cargo-mutants currently doesn't build on `aarch64-pc-windows-msvc` (upstream `winapi` crate incompat), and the value of mutation testing on the ARM legs doesn't justify the extra wall-clock. |
 
-### Nightly tier (4 groups)
+### scheduled tier (4 groups)
 
 | Group                | OS scope                  | Purpose                                                                                                                                |
 |----------------------|---------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
-| `nightly-test`       | Same default as `pr-test` | Re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
-| `nightly-advisories` | Same default as `pr-fast` | Re-runs every check whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain), plus `external-types` (which needs nightly rustdoc and is gated to nightly to avoid blocking PRs on JSON schema drift). Cross-OS because clippy compiles per host. |
-| `nightly-runtime`    | Same default as `pr-fast` | Tests under stricter runtimes that catch UB and timing/threading bugs: `miri`, `careful`. Both tools work on every Tier 1 Rust target; the surveyed repos (`oxidizer`, `oxidizer-github`) both run them cross-OS, so ox-check does too. |
-| `nightly-exhaustive` | Linux x86_64 + Windows x86_64 | The expensive whole-workspace permutations that don't fit the PR budget: full `cargo mutants`, `cargo-hack --feature-powerset`, and `cargo bench --no-run` plus a single-iteration smoke run per bench target. Cross-OS to match `oxidizer`'s policy and to give cargo-hack / bench compile coverage for cfg-gated code. **x86_64-only**: same `cargo-mutants` / `winapi` constraint as `pr-mutants`. Adopters who can't afford the full matrix (mutants-full can run for hours per leg) override the matrix in their root workflow / pipeline. |
+| `scheduled-test`       | Same default as `pr-test` | Re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
+| `scheduled-advisories` | Same default as `pr-fast` | Re-runs every check whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain), plus `external-types` (which needs nightly rustdoc and is gated to nightly to avoid blocking PRs on JSON schema drift). Cross-OS because clippy compiles per host. |
+| `scheduled-runtime`    | Same default as `pr-fast` | Tests under stricter runtimes that catch UB and timing/threading bugs: `miri`, `careful`. Both tools work on every Tier 1 Rust target; the surveyed repos (`oxidizer`, `oxidizer-github`) both run them cross-OS, so ox-check does too. |
+| `scheduled-exhaustive` | Linux x86_64 + Windows x86_64 | The expensive whole-workspace permutations that don't fit the PR budget: full `cargo mutants`, `cargo-hack --feature-powerset`, and `cargo bench --no-run` plus a single-iteration smoke run per bench target. Cross-OS to match `oxidizer`'s policy and to give cargo-hack / bench compile coverage for cfg-gated code. **x86_64-only**: same `cargo-mutants` / `winapi` constraint as `pr-mutants`. Adopters who can't afford the full matrix (mutants-full can run for hours per leg) override the matrix in their root workflow / pipeline. |
 
 **Backend asymmetry on ARM coverage.** The GitHub backend ships a four-leg default matrix
 (Linux/Windows × x86_64/aarch64) because GH has Microsoft-hosted ARM runners
@@ -63,9 +63,9 @@ Locally there is no OS matrix; `just ox-check-pr-test` runs against whatever OS 
 developer is on. See [design.md §8.3](./design.md#83-cross-os-test-matrices) for the
 overall rationale.
 
-The `nightly-exhaustive` group's checks are independent and could in principle live in
+The `scheduled-exhaustive` group's checks are independent and could in principle live in
 separate parallel jobs; they're folded into one group because each individually is just
-one check, and nightly tolerates the longer wall-clock that serial execution within one
+one check, and scheduled tolerates the longer wall-clock that serial execution within one
 job implies. Repos that want to parallelize them can split the recipe into separate group
 recipes locally.
 
@@ -114,18 +114,18 @@ The PR mode requires a base ref. Locally, the recipe resolves `BASE_REF` (if set
 passes `${{ github.event.pull_request.base.sha }}`; in ADO the impact step exports
 `$(System.PullRequest.TargetBranch)` as `BASE_REF` and the recipe picks it up.
 
-### `nightly-test`
+### `scheduled-test`
 
 Same three checks as `pr-test` — `llvm-cov`, `doc-test`, `examples` — and the same
 recipe invocations, with the same output paths (`target/coverage/lcov.info` and
 `target/coverage/cobertura.xml`). The recipe is shared between tiers; only the CI
 wiring around it changes (PR uploads lcov to Codecov / cobertura to ADO from each
-PR run; nightly does the same against `main` plus flags the upload as `nightly` in
+PR run; scheduled does the same against `main` plus flags the upload as `scheduled` in
 Codecov so the two streams stay distinguishable in the UI). Two purposes for re-running
-on nightly: catch flakes/environmental sensitivities that didn't trip in PR, and
+on scheduled: catch flakes/environmental sensitivities that didn't trip in PR, and
 publish a full-coverage snapshot for the current state of `main`.
 
-### `nightly-advisories`
+### `scheduled-advisories`
 
 | Check    | Invocation                                                          | Source |
 |----------|---------------------------------------------------------------------|--------|
@@ -141,18 +141,18 @@ Azure risk indices). `clippy` reflects whatever lint set ships with the currentl
 toolchain — even when `rust-toolchain.toml` is pinned, repos using floating channels
 (`stable`, or msrustup channel pointers like `ms-prod-1.93`) can pick up new lints when the
 pointer is bumped upstream. `udeps` runs on `cargo +nightly` and reflects whatever nightly
-is installed on the runner. Re-running these nightly turns "something landed upstream
+is installed on the runner. Re-running these on the scheduled tier turns "something landed upstream
 yesterday" into a tracked failure rather than an invisible regression discovered next time
 someone opens an unrelated PR.
 
-### `nightly-runtime`
+### `scheduled-runtime`
 
 | Check     | Invocation                                                                          | Source |
 |-----------|-------------------------------------------------------------------------------------|--------|
 | `miri`    | `cargo +nightly miri nextest run --workspace`                                       | oxidizer, oxidizer-github |
 | `careful` | `cargo +nightly careful test --workspace --all-features --locked`                   | oxidizer-github |
 
-### `nightly-exhaustive`
+### `scheduled-exhaustive`
 
 | Check                 | Invocation                                                                                                   | Source |
 |-----------------------|--------------------------------------------------------------------------------------------------------------|--------|
@@ -173,33 +173,33 @@ steps" (unmaintainable YAML, fragile, and the tool would have to re-emit the wor
 every time the catalog changes). Groups are stable units of meaning the user can talk about;
 checks are implementation details that can churn.
 
-## 4. What nightly does and does not re-run
+## 4. What scheduled does and does not re-run
 
-The rule is simple: **a check belongs in nightly iff its outcome can change without a
-commit to this repo.** Re-running everything else nightly would just burn CI time
+The rule is simple: **a check belongs in scheduled iff its outcome can change without a
+commit to this repo.** Re-running everything else on the scheduled tier would just burn CI time
 duplicating PR signal.
 
 What that means concretely:
 
-- **Re-run in nightly** (in addition to PR):
-  - `llvm-cov`, `doc-test`, `examples` (in `nightly-test`) — non-determinism, environment
+- **Re-run in scheduled** (in addition to PR):
+  - `llvm-cov`, `doc-test`, `examples` (in `scheduled-test`) — non-determinism, environment
     sensitivity, runner drift can produce flakes that the PR run missed.
-  - `deny`, `audit`, `aprz`, `clippy`, `udeps` (in `nightly-advisories`) — see §2.
+  - `deny`, `audit`, `aprz`, `clippy`, `udeps` (in `scheduled-advisories`) — see §2.
 - **Run only in PR** — checks whose outcome is fully determined by the source tree and
   the pinned tool versions, so re-running on the same `main` commit can't surface anything
   new: `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`,
   `ensure-no-default-features`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`,
   `semver-check`, diff-scoped `mutants`.
-- **Run only in nightly** — the expensive whole-workspace work that can't fit a PR
-  budget: `miri`, `careful` (in `nightly-runtime`); full `mutants`,
-  `cargo-hack --feature-powerset`, `bench` (in `nightly-exhaustive`).
-  Also `external-types` (in `nightly-advisories`) — it requires nightly rustdoc
+- **Run only in scheduled** — the expensive whole-workspace work that can't fit a PR
+  budget: `miri`, `careful` (in `scheduled-runtime`); full `mutants`,
+  `cargo-hack --feature-powerset`, `bench` (in `scheduled-exhaustive`).
+  Also `external-types` (in `scheduled-advisories`) — it requires nightly rustdoc
   + compiles cargo-check-external-types from source against nightly + runs
   rustdoc JSON generation per package, which together exceeded the PR-tier
   time budget when dogfooded on ox-tools-gh.
 
 The single-tier-per-group rule still holds: when a check appears in both tiers it lives in
-two different groups (one PR group, one nightly group). Repos that want a
+two different groups (one PR group, one scheduled group). Repos that want a
 belt-and-suspenders cron run of `just ox-check-pr` on `main` can wire one up in their own
 workflow/pipeline file alongside the ox-check composite actions / step templates.
 
@@ -262,5 +262,5 @@ silently skips checks that should have run, leaving "all green" on a PR that act
 something. The design mitigates this with: (1) trip-wire patterns in `.delta.toml` that
 bias toward full runs whenever config changes; (2) `unscoped` checks (`deny`, `audit`,
 `aprz`, `pr-title`, `mutants-full`) always run regardless of impact analysis;
-(3) nightly always runs full-workspace, catching anything the PR-scoping missed within 24
+(3) scheduled always runs full-workspace, catching anything the PR-scoping missed within 24
 hours;

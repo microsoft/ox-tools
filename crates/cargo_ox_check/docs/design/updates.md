@@ -102,8 +102,6 @@ edited the file.
 ## 3. Managed regions
 
 Co-owned files with one or more tool-managed sections delimited by sentinel comments.
-Sentinels persist; the inner `# checksum:` line that earlier designs carried no longer
-exists.
 
 ```just
 # >>> ox-check-managed: ox-check-imports
@@ -144,8 +142,13 @@ clippy.pedantic = "warn"
 rust.missing_docs = "warn"
 ```
 
-Whitespace and comments inside the region are preserved verbatim by the rewrite — the
-tool computes the checksum over the body bytes literally.
+Whitespace and comments inside the region are preserved verbatim by the rewrite.
+Checksums (in `.ox-check.lock`) are computed over the body bytes with line endings
+normalized to LF so a Git checkout setting `core.autocrlf=true` doesn't trigger
+spurious "user edited" detection. Trailing whitespace on individual lines and a
+trailing-newline-or-not difference are preserved (they're part of the body), but tools
+that strip them on save (most modern editors with "trim trailing whitespace" on) will
+register as a user edit on the next `cargo ox-check update`.
 
 ox-check's baseline severity is `"warn"`, not `"deny"`. Promotion to deny happens at
 the lint-run boundary via `cargo clippy -- -D warnings`, which is what the `ox-check-clippy`
@@ -296,7 +299,7 @@ it. Nagging them would be antagonistic. They can delete the orphan themselves at
 time, or rename it, or keep editing it — ox-check no longer has an opinion about it.
 
 The `Remove` path is what makes catalog churn safe to ship. When ox-check 0.5 drops
-`nightly-builds.yml` (collapsed into `nightly-exhaustive`), every adopter on 0.4 who
+`nightly-builds.yml` (collapsed into `scheduled-exhaustive`), every adopter on 0.4 who
 runs `cargo ox-check update` gets the file cleanly deleted, without manual janitorial
 work — provided they hadn't customized it.
 

@@ -73,7 +73,7 @@
 //! ```text
 //! $ just ox-check          # alias for `just ox-check-pr`
 //! $ just ox-check-pr       # the PR tier
-//! $ just ox-check-nightly  # the nightly tier
+//! $ just ox-check-scheduled  # the scheduled tier
 //! $ just ox-check-full     # both, sequentially
 //! ```
 //!

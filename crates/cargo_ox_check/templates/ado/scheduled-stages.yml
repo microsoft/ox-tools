@@ -13,15 +13,15 @@ parameters:
     default: { vmImage: windows-latest }
 
 stages:
-  - stage: nightly_test
-    displayName: ox-check nightly-test
+  - stage: scheduled_test
+    displayName: ox-check scheduled-test
     jobs:
       - template: steps/job.yml
         parameters:
           name: linux
           pool: ${{ parameters.linuxPool }}
           steps:
-            - template: steps/nightly-test.yml
+            - template: steps/scheduled-test.yml
             - task: PublishCodeCoverageResults@2
               condition: succeededOrFailed()
               displayName: Publish coverage
@@ -33,10 +33,10 @@ stages:
           name: windows
           pool: ${{ parameters.windowsPool }}
           steps:
-            - template: steps/nightly-test.yml
+            - template: steps/scheduled-test.yml
 
-  - stage: nightly_advisories
-    displayName: ox-check nightly-advisories
+  - stage: scheduled_advisories
+    displayName: ox-check scheduled-advisories
     dependsOn: []
     jobs:
       # Cross-OS because clippy and udeps in this group compile per host,
@@ -46,16 +46,16 @@ stages:
           name: linux
           pool: ${{ parameters.linuxPool }}
           steps:
-            - template: steps/nightly-advisories.yml
+            - template: steps/scheduled-advisories.yml
       - template: steps/job.yml
         parameters:
           name: windows
           pool: ${{ parameters.windowsPool }}
           steps:
-            - template: steps/nightly-advisories.yml
+            - template: steps/scheduled-advisories.yml
 
-  - stage: nightly_runtime
-    displayName: ox-check nightly-runtime
+  - stage: scheduled_runtime
+    displayName: ox-check scheduled-runtime
     dependsOn: []
     jobs:
       # Cross-OS to match the surveyed repos: oxidizer runs miri on
@@ -72,16 +72,16 @@ stages:
           name: linux
           pool: ${{ parameters.linuxPool }}
           steps:
-            - template: steps/nightly-runtime.yml
+            - template: steps/scheduled-runtime.yml
       - template: steps/job.yml
         parameters:
           name: windows
           pool: ${{ parameters.windowsPool }}
           steps:
-            - template: steps/nightly-runtime.yml
+            - template: steps/scheduled-runtime.yml
 
-  - stage: nightly_exhaustive
-    displayName: ox-check nightly-exhaustive
+  - stage: scheduled_exhaustive
+    displayName: ox-check scheduled-exhaustive
     dependsOn: []
     jobs:
       # Cross-OS to match oxidizer's policy: full-workspace mutation
@@ -94,10 +94,10 @@ stages:
           name: linux
           pool: ${{ parameters.linuxPool }}
           steps:
-            - template: steps/nightly-exhaustive.yml
+            - template: steps/scheduled-exhaustive.yml
       - template: steps/job.yml
         parameters:
           name: windows
           pool: ${{ parameters.windowsPool }}
           steps:
-            - template: steps/nightly-exhaustive.yml
+            - template: steps/scheduled-exhaustive.yml

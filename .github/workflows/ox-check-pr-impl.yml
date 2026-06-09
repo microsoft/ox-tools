@@ -39,8 +39,30 @@ on:
 # expanding what adopters could customize.
 
 jobs:
-  impact:
+  # cargo-delta impact runs per OS so that downstream legs consume an
+  # impact set computed against THEIR host's cargo-metadata depgraph.
+  # Without this, an OS-conditional dep change (under
+  # `[target.'cfg(target_os = ...)'.dependencies]`) computed on Linux
+  # wouldn't include the cross-OS reverse-deps that only show up in
+  # the Windows depgraph, so the Windows leg could skip tests that
+  # ought to run. We split per-OS-family (not per-arch) -- arch-only
+  # cfg gates are rare enough that paying for 4 impact jobs isn't
+  # justified; arm legs reuse their OS counterpart's impact set.
+  impact-linux:
     runs-on: ${{ inputs.linux_runner }}
+    outputs:
+      include_modified: ${{ steps.delta.outputs.include_modified }}
+      include_affected: ${{ steps.delta.outputs.include_affected }}
+      include_required: ${{ steps.delta.outputs.include_required }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: delta
+        uses: ./.github/actions/ox-check-impact
+
+  impact-windows:
+    runs-on: ${{ inputs.windows_runner }}
     outputs:
       include_modified: ${{ steps.delta.outputs.include_modified }}
       include_affected: ${{ steps.delta.outputs.include_affected }}
@@ -57,7 +79,7 @@ jobs:
     # checks (clippy, doc-build, udeps, semver-check, external-types)
     # whose results can differ across host for crates that use
     # #[cfg(target_os = ...)] or #[cfg(target_arch = ...)] gating.
-    needs: impact
+    needs: [impact-linux, impact-windows]
     strategy:
       fail-fast: false
       matrix:
@@ -70,14 +92,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-check-pr-fast
         with:
-          include_modified: ${{ needs.impact.outputs.include_modified }}
-          include_affected: ${{ needs.impact.outputs.include_affected }}
-          include_required: ${{ needs.impact.outputs.include_required }}
+          include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
+          include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
+          include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
 
   pr-test:
-    needs: impact
+    needs: [impact-linux, impact-windows]
     strategy:
       fail-fast: false
       matrix:
@@ -90,15 +112,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-check-pr-test
         with:
-          include_modified: ${{ needs.impact.outputs.include_modified }}
-          include_affected: ${{ needs.impact.outputs.include_affected }}
-          include_required: ${{ needs.impact.outputs.include_required }}
+          include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
+          include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
+          include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
       - name: Upload coverage to Codecov
         # Upload from one leg only to avoid double-counting; pick the
         # canonical x86_64 Linux leg. oxidizer-github also excludes
         # windows-11-arm from coverage due to LLVM-coverage
         # instrumentation bugs.
-        if: matrix.os == 'linux' && needs.impact.outputs.include_affected != '--skip'
+        if: matrix.os == 'linux' && needs.impact-linux.outputs.include_affected != '--skip'
         uses: codecov/codecov-action@v5
         with:
           files: target/coverage/lcov.info
@@ -110,7 +132,7 @@ jobs:
     # aarch64-pc-windows-msvc (upstream winapi crate incompat), and
     # mutation testing on the cross-arch legs adds wall-clock without
     # commensurate coverage benefit.
-    needs: impact
+    needs: [impact-linux, impact-windows]
     strategy:
       fail-fast: false
       matrix:
@@ -122,8 +144,8 @@ jobs:
           fetch-depth: 0
       - uses: ./.github/actions/ox-check-pr-mutants
         with:
-          include_modified: ${{ needs.impact.outputs.include_modified }}
-          include_affected: ${{ needs.impact.outputs.include_affected }}
-          include_required: ${{ needs.impact.outputs.include_required }}
+          include_modified: ${{ matrix.os == 'linux' && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
+          include_affected: ${{ matrix.os == 'linux' && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
+          include_required: ${{ matrix.os == 'linux' && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
         env:
           BASE_REF: ${{ github.event.pull_request.base.sha }}

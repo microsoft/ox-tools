@@ -256,11 +256,20 @@ mod tests {
     }
 
     #[test]
-    fn to_toml_always_ends_with_newline() {
+    fn to_toml_always_ends_with_exactly_one_newline() {
         // Catches mutation of the `if !out.ends_with('\n')` guard in to_toml.
+        // Asserting `ends_with('\n')` alone is insufficient: when toml_edit's
+        // serialization naturally ends with '\n' (the common case), the
+        // mutated guard would double the newline -- still ending with '\n',
+        // so a weaker assertion would pass.
         for m in [Manifest::default(), sample_manifest()] {
             let text = m.to_toml();
-            assert!(text.ends_with('\n'), "to_toml output must end with newline, got: {text:?}");
+            let stripped = text.trim_end_matches('\n');
+            assert_eq!(
+                format!("{stripped}\n"),
+                text,
+                "to_toml output must end with exactly one newline, got: {text:?}"
+            );
         }
     }
 

@@ -7,7 +7,7 @@
 # concrete `job:` block. Pipelines that use extension templates (1ES PT,
 # SubstratePT, M365PT, etc.) take ownership of THIS file once and add their
 # required `templateContext:` block — the owned stages templates
-# (pr-stages.yml / nightly-stages.yml) then continue to update normally
+# (pr-stages.yml / scheduled-stages.yml) then continue to update normally
 # because they only know about this wrapper's parameter contract.
 #
 # Once you edit this file, cargo-ox-check treats it as user-owned: subsequent

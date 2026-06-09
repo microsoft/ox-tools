@@ -56,6 +56,11 @@ fn normalize_line_endings(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
     let mut i = 0;
     while i < data.len() {
+        // Progress guard: each iteration must advance `i`. Catches
+        // infinite-loop regressions (and infinite-loop mutants generated
+        // by `cargo mutants` against the `+=` operators below) in debug
+        // builds.
+        let prev = i;
         if data[i] == b'\r' && data.get(i + 1) == Some(&b'\n') {
             out.push(b'\n');
             i += 2;
@@ -63,6 +68,7 @@ fn normalize_line_endings(data: &[u8]) -> Vec<u8> {
             out.push(data[i]);
             i += 1;
         }
+        debug_assert!(i > prev, "normalize_line_endings must make progress (prev={prev}, i={i})");
     }
     out
 }

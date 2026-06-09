@@ -126,7 +126,13 @@ fn just_lists_emitted_recipes() {
         String::from_utf8_lossy(&out.stderr)
     );
     let listing = String::from_utf8_lossy(&out.stdout);
-    for expected in ["ox-check", "ox-check-pr", "ox-check-pr-fast", "ox-check-nightly", "ox-check-clippy"] {
+    for expected in [
+        "ox-check",
+        "ox-check-pr",
+        "ox-check-pr-fast",
+        "ox-check-scheduled",
+        "ox-check-clippy",
+    ] {
         assert!(
             listing.contains(expected),
             "`just --list` did not contain recipe '{expected}':\n{listing}"

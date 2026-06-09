@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
 # The token pr-fast is substituted by cargo-ox-check at emit time with
-# the concrete check-group name (pr-fast, pr-test, nightly-runtime, ...).
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
 name: ox-check-pr-fast
 description: Run the pr-fast check group.
 inputs:

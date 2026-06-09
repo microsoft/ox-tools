@@ -3,6 +3,93 @@
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
 # See ../../docs/design/local.md for the policy.
 
+# Public: probe for system-level prerequisites that catalog tools need
+# to BUILD from source. The `binstall` install path downloads pre-built
+# binaries and does not need these, so this check is primarily relevant
+# for the source-build `install` path (used by local devs and the ADO
+# backend) and is best-effort (skipped silently) for `binstall`.
+#
+# Scope policy: only system libs that an ox-check catalog tool DIRECTLY
+# requires. We do not try to be a general-purpose dev-env doctor.
+# Current entries:
+#   - libclang: required by cargo-spellcheck (clang-sys / hunspell-rs)
+#     at build time.
+#
+# Detection uses presence-only probes (file existence in standard install
+# dirs + `LIBCLANG_PATH` env var). No version checks -- system libs upgrade
+# independently and any reasonably modern libclang works for clang-sys.
+#
+# On missing deps the recipe prints copy-paste install hints per OS /
+# package manager and exits non-zero. No auto-install: admin / sudo and
+# package-manager choice stay with the user.
+[group("ox-check")]
+[script("pwsh")]
+ox-check-system-deps-check:
+    $ErrorActionPreference = 'Stop'
+    $missing = @()
+
+    # libclang: required to BUILD cargo-spellcheck from source.
+    $haveLibclang = $false
+    $libclangFiles = @('libclang.dll', 'libclang.so', 'libclang.so.1', 'libclang.dylib')
+    if ($env:LIBCLANG_PATH) {
+        foreach ($f in $libclangFiles) {
+            if (Test-Path (Join-Path $env:LIBCLANG_PATH $f)) { $haveLibclang = $true; break }
+        }
+    }
+    if (-not $haveLibclang) {
+        $probes = if ($IsWindows) {
+            @(
+                'C:\Program Files\LLVM\bin\libclang.dll',
+                "$env:USERPROFILE\scoop\apps\llvm\current\bin\libclang.dll"
+            )
+        } elseif ($IsMacOS) {
+            @(
+                '/usr/local/opt/llvm/lib/libclang.dylib',
+                '/opt/homebrew/opt/llvm/lib/libclang.dylib'
+            )
+        } else {
+            @(
+                '/usr/lib/x86_64-linux-gnu/libclang.so.1',
+                '/usr/lib64/libclang.so',
+                '/usr/lib64/libclang.so.1'
+            )
+        }
+        foreach ($p in $probes) {
+            if (Get-Item -LiteralPath $p -ErrorAction SilentlyContinue) { $haveLibclang = $true; break }
+        }
+        # Linux distros often add a version suffix (libclang-19.so etc.); glob fallback.
+        if (-not $haveLibclang -and -not $IsWindows -and -not $IsMacOS) {
+            $glob = Get-ChildItem -Path '/usr/lib','/usr/lib64','/usr/lib/x86_64-linux-gnu' -Filter 'libclang*.so*' -ErrorAction SilentlyContinue
+            if ($glob) { $haveLibclang = $true }
+        }
+    }
+    if (-not $haveLibclang) {
+        $missing += [pscustomobject]@{
+            name = 'libclang'
+            why = 'cargo-spellcheck (clang-sys/hunspell-rs) needs libclang at build time'
+            hints = @(
+                'Linux (Ubuntu/Debian):    sudo apt-get install -y libclang-dev'
+                'Linux (Azure Linux/RHEL): sudo tdnf install -y clang-devel'
+                'macOS (homebrew):         brew install llvm'
+                'Windows (scoop):          scoop install llvm     # no admin'
+                'Windows (winget, admin):  winget install LLVM.LLVM'
+            )
+        }
+    }
+
+    if ($missing.Count -gt 0) {
+        Write-Host ''
+        foreach ($m in $missing) {
+            Write-Host "ox-check: missing system dependency '$($m.name)'" -ForegroundColor Yellow
+            Write-Host "  why: $($m.why)"
+            Write-Host '  install:'
+            foreach ($h in $m.hints) { Write-Host "    $h" }
+            Write-Host ''
+        }
+        Write-Host "If the dep is installed but not on the standard search path, set LIBCLANG_PATH and re-run." -ForegroundColor Yellow
+        exit 1
+    }
+
 # Public: assert that every catalog tool is present at or above its
 # minimum version. Called by `ox-check-tools-check` and as a dependency
 # of every check group via individual `_ox-check-require` invocations.
@@ -58,6 +145,17 @@ ox-check-tools-install installer="install":
     if ($installer -ne 'install' -and $installer -ne 'binstall') {
         Write-Error "ox-check-tools-install: unknown installer '$installer' (expected 'install' or 'binstall')"
         exit 2
+    }
+    # System-level prerequisites first -- the binstall path downloads
+    # prebuilt binaries and does not need them, but the source-build
+    # path does. Failing fast with a clear install hint is much better
+    # than a cryptic clang-sys build error 10 minutes into the install.
+    if ($installer -eq 'install') {
+        & just ox-check-system-deps-check
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "ox-check-tools-install: system dependency check failed; install the missing libs and re-run."
+            exit $LASTEXITCODE
+        }
     }
     $catalog = 'justfiles/ox-check/tool-minimums.txt'
     $failed = [System.Collections.Generic.List[string]]::new()

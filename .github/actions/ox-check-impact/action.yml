@@ -71,13 +71,22 @@ runs:
         # rather than cargo *package names* (which may use hyphens). For
         # hyphenated packages — e.g. `cargo-ox-check` — that means it
         # emits `cargo_ox_check`, which cargo rejects as a --package
-        # specification. We build a lib-name -> package-name map from
-        # cargo metadata and translate each name through it.
+        # specification. We build:
+        #   * `pkg_map`: lib-name -> package-name (and identity for
+        #     package-name -> package-name), for translation;
+        #   * `valid_pkgs`: set of all known package names, for
+        #     validation. Names cargo-delta emits that aren't valid
+        #     packages (e.g. directory-leaf ambiguities like `ffi` /
+        #     `ffi_build` in deeply nested workspaces) are dropped with a
+        #     warning rather than failing the whole build.
         declare -A pkg_map
+        declare -A valid_pkgs
         while IFS=$'\t' read -r pkg_name lib_name; do
+            valid_pkgs["$pkg_name"]=1
+            pkg_map["$pkg_name"]="$pkg_name"
             [ -n "$lib_name" ] && pkg_map["$lib_name"]="$pkg_name"
         done < <(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] as $p | $p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)"')
+            | jq -r '.packages[] as $p | ($p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)"), "\($p.name)\t"')
         format_set() {
             local field="$1"
             local pkgs
@@ -88,16 +97,21 @@ runs:
                 local out=""
                 while IFS= read -r pkg ; do
                     [ -z "$pkg" ] && continue
-                    # Translate lib name -> cargo package name; if
-                    # the name isn't in the map (binary-only crate,
-                    # already a package name, etc.), pass through.
                     local mapped="${pkg_map[$pkg]:-$pkg}"
+                    if [ -z "${valid_pkgs[$mapped]:-}" ] ; then
+                        echo "ox-check impact: dropping unknown package '$pkg' (-> '$mapped') from $field set" >&2
+                        continue
+                    fi
                     out="$out --package $mapped"
                 done <<EOF
         $pkgs
         EOF
-                # shellcheck disable=SC2001
-                printf '%s' "${out# }"
+                if [ -z "$out" ] ; then
+                    printf '%s' "--skip"
+                else
+                    # shellcheck disable=SC2001
+                    printf '%s' "${out# }"
+                fi
             fi
         }
         echo "include_modified=$(format_set Modified)" >> "$GITHUB_OUTPUT"

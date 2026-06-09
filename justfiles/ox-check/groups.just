@@ -34,16 +34,16 @@ ox-check-pr-test: \
 [group("ox-check")]
 ox-check-pr-mutants: ox-check-mutants
 
-# === Nightly groups =====================================================
+# === Scheduled groups =====================================================
 
 [group("ox-check")]
-ox-check-nightly-test: \
+ox-check-scheduled-test: \
     ox-check-llvm-cov \
     ox-check-doc-test \
     ox-check-examples
 
 [group("ox-check")]
-ox-check-nightly-advisories: \
+ox-check-scheduled-advisories: \
     ox-check-deny \
     ox-check-audit \
     ox-check-aprz \
@@ -51,12 +51,12 @@ ox-check-nightly-advisories: \
     ox-check-external-types
 
 [group("ox-check")]
-ox-check-nightly-runtime: \
+ox-check-scheduled-runtime: \
     ox-check-miri \
     ox-check-careful
 
 [group("ox-check")]
-ox-check-nightly-exhaustive: \
+ox-check-scheduled-exhaustive: \
     ox-check-mutants-full \
     ox-check-cargo-hack \
     ox-check-bench

@@ -6,8 +6,8 @@
 //! Emits three layers per [`github.md`](../../../docs/design/github.md):
 //!
 //! 1. Composite actions under `.github/actions/ox-check-*/action.yml`.
-//! 2. Reusable workflows (`ox-check-pr-impl.yml`, `ox-check-nightly-impl.yml`).
-//! 3. Root workflows (`ox-check-pr.yml`, `ox-check-nightly.yml`).
+//! 2. Reusable workflows (`ox-check-pr-impl.yml`, `ox-check-scheduled-impl.yml`).
+//! 3. Root workflows (`ox-check-pr.yml`, `ox-check-scheduled.yml`).
 //!
 //! All emitted files are owned files (no managed regions). Users who
 //! customize take ownership via the standard dirty-file flow.
@@ -29,14 +29,14 @@ pub const IMPACT_ACTION: &str = include_str!("../../templates/github/impact-acti
 /// Embedded body of the PR reusable workflow.
 pub const PR_IMPL_WORKFLOW: &str = include_str!("../../templates/github/pr-impl-workflow.yml");
 
-/// Embedded body of the nightly reusable workflow.
-pub const NIGHTLY_IMPL_WORKFLOW: &str = include_str!("../../templates/github/nightly-impl-workflow.yml");
+/// Embedded body of the scheduled reusable workflow.
+pub const SCHEDULED_IMPL_WORKFLOW: &str = include_str!("../../templates/github/scheduled-impl-workflow.yml");
 
 /// Embedded body of the PR root workflow.
 pub const PR_ROOT_WORKFLOW: &str = include_str!("../../templates/github/pr-root-workflow.yml");
 
-/// Embedded body of the nightly root workflow.
-pub const NIGHTLY_ROOT_WORKFLOW: &str = include_str!("../../templates/github/nightly-root-workflow.yml");
+/// Embedded body of the scheduled root workflow.
+pub const SCHEDULED_ROOT_WORKFLOW: &str = include_str!("../../templates/github/scheduled-root-workflow.yml");
 
 /// All check groups for which the GitHub backend emits a composite action.
 ///
@@ -45,10 +45,10 @@ pub const GROUPS: &[&str] = &[
     "pr-fast",
     "pr-test",
     "pr-mutants",
-    "nightly-test",
-    "nightly-advisories",
-    "nightly-runtime",
-    "nightly-exhaustive",
+    "scheduled-test",
+    "scheduled-advisories",
+    "scheduled-runtime",
+    "scheduled-exhaustive",
 ];
 
 /// Embedded template for one per-group composite action. `__GROUP__` is
@@ -112,8 +112,8 @@ pub fn plan_reusable_workflows(repo_root: &Path, manifest: &Manifest) -> Result<
         plan_owned_file(
             repo_root,
             manifest,
-            ".github/workflows/ox-check-nightly-impl.yml",
-            NIGHTLY_IMPL_WORKFLOW,
+            ".github/workflows/ox-check-scheduled-impl.yml",
+            SCHEDULED_IMPL_WORKFLOW,
         )?,
     ])
 }
@@ -126,7 +126,12 @@ pub fn plan_reusable_workflows(repo_root: &Path, manifest: &Manifest) -> Result<
 pub fn plan_root_workflows(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
         plan_owned_file(repo_root, manifest, ".github/workflows/ox-check-pr.yml", PR_ROOT_WORKFLOW)?,
-        plan_owned_file(repo_root, manifest, ".github/workflows/ox-check-nightly.yml", NIGHTLY_ROOT_WORKFLOW)?,
+        plan_owned_file(
+            repo_root,
+            manifest,
+            ".github/workflows/ox-check-scheduled.yml",
+            SCHEDULED_ROOT_WORKFLOW,
+        )?,
     ])
 }
 
@@ -169,7 +174,7 @@ mod tests {
 
     #[test]
     fn group_actions_declare_include_inputs() {
-        let body = render_group_action("nightly-test");
+        let body = render_group_action("scheduled-test");
         assert!(body.contains("include_modified:"));
         assert!(body.contains("include_affected:"));
         assert!(body.contains("include_required:"));
@@ -203,9 +208,11 @@ mod tests {
     #[test]
     fn pr_impl_workflow_has_expected_jobs() {
         assert!(PR_IMPL_WORKFLOW.contains("workflow_call:"));
-        for needle in ["impact:", "pr-fast:", "pr-test:", "pr-mutants:"] {
+        for needle in ["impact-linux:", "impact-windows:", "pr-fast:", "pr-test:", "pr-mutants:"] {
             assert!(PR_IMPL_WORKFLOW.contains(needle), "PR impl workflow missing job '{needle}'");
         }
+        // Downstream groups must fan in BOTH per-OS impact jobs.
+        assert!(PR_IMPL_WORKFLOW.contains("needs: [impact-linux, impact-windows]"));
         // Every multi-OS group hardcodes its matrix as an inline
         // YAML array — we deliberately do NOT support input-driven
         // matrices (the fromJSON(inputs.X) pattern adds silent
@@ -221,16 +228,21 @@ mod tests {
     }
 
     #[test]
-    fn nightly_impl_workflow_has_expected_jobs() {
-        for needle in ["nightly-test:", "nightly-advisories:", "nightly-runtime:", "nightly-exhaustive:"] {
+    fn scheduled_impl_workflow_has_expected_jobs() {
+        for needle in [
+            "scheduled-test:",
+            "scheduled-advisories:",
+            "scheduled-runtime:",
+            "scheduled-exhaustive:",
+        ] {
             assert!(
-                NIGHTLY_IMPL_WORKFLOW.contains(needle),
-                "nightly impl workflow missing job '{needle}'"
+                SCHEDULED_IMPL_WORKFLOW.contains(needle),
+                "scheduled impl workflow missing job '{needle}'"
             );
         }
         // Nightly uploads the lcov artifact.
         // Nightly uploads the lcov to Codecov.
-        assert!(NIGHTLY_IMPL_WORKFLOW.contains("codecov/codecov-action"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("codecov/codecov-action"));
     }
 
     #[test]
@@ -248,8 +260,8 @@ mod tests {
         assert!(PR_ROOT_WORKFLOW.contains("uses: ./.github/workflows/ox-check-pr-impl.yml"));
         assert!(PR_ROOT_WORKFLOW.contains("pull_request:"));
         assert!(PR_ROOT_WORKFLOW.contains("merge_group:"));
-        assert!(NIGHTLY_ROOT_WORKFLOW.contains("uses: ./.github/workflows/ox-check-nightly-impl.yml"));
-        assert!(NIGHTLY_ROOT_WORKFLOW.contains("schedule:"));
+        assert!(SCHEDULED_ROOT_WORKFLOW.contains("uses: ./.github/workflows/ox-check-scheduled-impl.yml"));
+        assert!(SCHEDULED_ROOT_WORKFLOW.contains("schedule:"));
     }
 
     #[test]

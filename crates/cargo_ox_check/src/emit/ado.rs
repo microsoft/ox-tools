@@ -7,7 +7,7 @@
 //!
 //! 1. Step templates under `.pipelines/ox-check/steps/*.yml`.
 //! 2. Stages templates (`pr.yml`, `nightly.yml`).
-//! 3. Root pipelines (`ox-check-pr.yml`, `ox-check-nightly.yml`).
+//! 3. Root pipelines (`ox-check-pr.yml`, `ox-check-scheduled.yml`).
 
 use std::path::Path;
 
@@ -34,24 +34,24 @@ pub const JOB_WRAPPER: &str = include_str!("../../templates/ado/steps/job.yml");
 /// Embedded body of the PR-tier stages template.
 pub const PR_STAGES: &str = include_str!("../../templates/ado/pr-stages.yml");
 
-/// Embedded body of the nightly-tier stages template.
-pub const NIGHTLY_STAGES: &str = include_str!("../../templates/ado/nightly-stages.yml");
+/// Embedded body of the scheduled-tier stages template.
+pub const SCHEDULED_STAGES: &str = include_str!("../../templates/ado/scheduled-stages.yml");
 
 /// Embedded body of the PR root pipeline.
 pub const PR_ROOT_PIPELINE: &str = include_str!("../../templates/ado/pr-root-pipeline.yml");
 
-/// Embedded body of the nightly root pipeline.
-pub const NIGHTLY_ROOT_PIPELINE: &str = include_str!("../../templates/ado/nightly-root-pipeline.yml");
+/// Embedded body of the scheduled root pipeline.
+pub const SCHEDULED_ROOT_PIPELINE: &str = include_str!("../../templates/ado/scheduled-root-pipeline.yml");
 
 /// All check groups that get a per-group step template.
 pub const GROUPS: &[&str] = &[
     "pr-fast",
     "pr-test",
     "pr-mutants",
-    "nightly-test",
-    "nightly-advisories",
-    "nightly-runtime",
-    "nightly-exhaustive",
+    "scheduled-test",
+    "scheduled-advisories",
+    "scheduled-runtime",
+    "scheduled-exhaustive",
 ];
 
 /// Embedded template for one per-group step. `__GROUP__` is substituted
@@ -89,7 +89,7 @@ pub fn group_step_path(group: &str) -> String {
 pub fn plan_stages_templates(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
         plan_owned_file(repo_root, manifest, ".pipelines/ox-check/pr.yml", PR_STAGES)?,
-        plan_owned_file(repo_root, manifest, ".pipelines/ox-check/nightly.yml", NIGHTLY_STAGES)?,
+        plan_owned_file(repo_root, manifest, ".pipelines/ox-check/scheduled.yml", SCHEDULED_STAGES)?,
     ])
 }
 
@@ -101,7 +101,7 @@ pub fn plan_stages_templates(repo_root: &Path, manifest: &Manifest) -> Result<Ve
 pub fn plan_root_pipelines(repo_root: &Path, manifest: &Manifest) -> Result<Vec<PlanItem>, AppError> {
     Ok(vec![
         plan_owned_file(repo_root, manifest, ".pipelines/ox-check-pr.yml", PR_ROOT_PIPELINE)?,
-        plan_owned_file(repo_root, manifest, ".pipelines/ox-check-nightly.yml", NIGHTLY_ROOT_PIPELINE)?,
+        plan_owned_file(repo_root, manifest, ".pipelines/ox-check-scheduled.yml", SCHEDULED_ROOT_PIPELINE)?,
     ])
 }
 
@@ -196,15 +196,22 @@ mod tests {
 
     #[test]
     fn group_step_path_is_under_pipelines() {
-        assert_eq!(group_step_path("nightly-test"), ".pipelines/ox-check/steps/nightly-test.yml");
+        assert_eq!(group_step_path("scheduled-test"), ".pipelines/ox-check/steps/scheduled-test.yml");
     }
 
     #[test]
     fn pr_stages_has_impact_and_group_stages() {
-        for needle in ["stage: impact", "stage: pr_fast", "stage: pr_test", "stage: pr_mutants"] {
+        for needle in [
+            "stage: impact_linux",
+            "stage: impact_windows",
+            "stage: pr_fast",
+            "stage: pr_test",
+            "stage: pr_mutants",
+        ] {
             assert!(PR_STAGES.contains(needle), "PR stages missing '{needle}'");
         }
-        assert!(PR_STAGES.contains("stageDependencies.impact.compute.outputs"));
+        assert!(PR_STAGES.contains("stageDependencies.impact_linux.compute.outputs"));
+        assert!(PR_STAGES.contains("stageDependencies.impact_windows.compute.outputs"));
         // Every job is rendered through the dirty-file wrapper.
         assert!(PR_STAGES.contains("- template: steps/job.yml"));
         // No bare `- job:` keys — they must all go through the wrapper.
@@ -215,22 +222,22 @@ mod tests {
     }
 
     #[test]
-    fn nightly_stages_has_four_groups() {
+    fn scheduled_stages_has_four_groups() {
         for needle in [
-            "stage: nightly_test",
-            "stage: nightly_advisories",
-            "stage: nightly_runtime",
-            "stage: nightly_exhaustive",
+            "stage: scheduled_test",
+            "stage: scheduled_advisories",
+            "stage: scheduled_runtime",
+            "stage: scheduled_exhaustive",
         ] {
-            assert!(NIGHTLY_STAGES.contains(needle), "nightly stages missing '{needle}'");
+            assert!(SCHEDULED_STAGES.contains(needle), "scheduled stages missing '{needle}'");
         }
-        // Nightly publishes coverage via PublishCodeCoverageResults@2.
-        assert!(NIGHTLY_STAGES.contains("PublishCodeCoverageResults@2"));
+        // Scheduled tier publishes coverage via PublishCodeCoverageResults@2.
+        assert!(SCHEDULED_STAGES.contains("PublishCodeCoverageResults@2"));
         // Every job is rendered through the dirty-file wrapper.
-        assert!(NIGHTLY_STAGES.contains("- template: steps/job.yml"));
+        assert!(SCHEDULED_STAGES.contains("- template: steps/job.yml"));
         assert!(
-            !NIGHTLY_STAGES.contains("\n      - job: "),
-            "Nightly stages defines a bare `- job:` instead of going through steps/job.yml"
+            !SCHEDULED_STAGES.contains("\n      - job: "),
+            "Scheduled stages defines a bare `- job:` instead of going through steps/job.yml"
         );
     }
 

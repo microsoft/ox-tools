@@ -1,10 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
-# The token nightly-advisories is substituted by cargo-ox-check at emit time with
-# the concrete check-group name (pr-fast, pr-test, nightly-runtime, ...).
-name: ox-check-nightly-advisories
-description: Run the nightly-advisories check group.
+# The token scheduled-test is substituted by cargo-ox-check at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+name: ox-check-scheduled-test
+description: Run the scheduled-test check group.
 inputs:
   include_modified:
     description: |
@@ -30,7 +30,7 @@ runs:
   using: composite
   steps:
     - uses: ./.github/actions/ox-check-setup
-    - name: Run just ox-check-nightly-advisories
+    - name: Run just ox-check-scheduled-test
       shell: bash
       env:
         OX_CHECK_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
@@ -39,4 +39,4 @@ runs:
         # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
         # built-in token so it can use the 1000 req/hr authenticated quota.
         GITHUB_TOKEN: ${{ github.token }}
-      run: just ox-check-nightly-advisories
+      run: just ox-check-scheduled-test

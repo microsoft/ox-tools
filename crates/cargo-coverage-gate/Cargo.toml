@@ -43,5 +43,7 @@ assert_cmd = { workspace = true }
 predicates = { workspace = true }
 tempfile = { workspace = true }
 
+# >>> ox-check-managed: ox-check-lints
 [lints]
 workspace = true
+# <<< ox-check-managed: ox-check-lints

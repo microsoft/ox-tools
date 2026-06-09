@@ -34,7 +34,7 @@ The same logical checks (clippy, fmt, deny, miri, mutants, coverage, hack featur
 semver, spellcheck, license headers, doc/doctest, careful, audit, ensure-no-cyclic-deps,
 ensure-no-default-features, doc2readme, …) are spelled in subtly different ways in each repo, with
 different argument sets, different tool versions, and different opinions about which tier (PR vs.
-nightly) a check belongs to.
+scheduled) a check belongs to.
 
 Maintaining six artisanal copies is expensive: improvements made in one repo (e.g. `cargo-delta`
 impact scoping in `oxidizer-github`) take months to propagate, security/policy upgrades are
@@ -44,7 +44,7 @@ missed, and onboarding new Rust repos requires copying-and-praying.
 
 1. **One opinionated build profile** for Rust repos, with sane defaults distilled from the
    strongest patterns observed across the existing repos.
-2. **Two tiers**: `pr` (blocking on every pull request) and `nightly` (slow, scheduled).
+2. **Two tiers**: `pr` (blocking on every pull request) and `scheduled` (slow, runs on a schedule).
 3. **Both CI backends** — GitHub Actions and Azure DevOps Pipelines — generated from the same
    source of truth. The user picks one or both per repo via a CLI flag.
 4. **Compliance preservation**: ADO pipelines that must `extends:` 1ESPT/SubstratePT continue to
@@ -52,8 +52,8 @@ missed, and onboarding new Rust repos requires copying-and-praying.
    root pipeline does the wrapping. See [ado.md](./ado.md).
 5. **Local/CI parity at every level**: every individual check, every group of checks, and the
    full tier are all reproducible locally with a single `just` invocation, using the exact same
-   arguments CI uses. The three commands `just ox-check-pr`, `just ox-check-nightly`, and
-   `just ox-check-full` (= pr + nightly) are first-class local entry points.
+   arguments CI uses. The three commands `just ox-check-pr`, `just ox-check-scheduled`, and
+   `just ox-check-full` (= pr + scheduled) are first-class local entry points.
 6. **Plain-cargo fallback**: a developer with only `cargo` installed (no `just`, no
    `cargo-ox-check`) can still build and run tests.
 7. **Friendly updates**: the tool detects, per file and per managed region, whether the user has
@@ -72,6 +72,8 @@ missed, and onboarding new Rust repos requires copying-and-praying.
 - Installing the Rust toolchain. msrustup owns it on 1ESPT; the runner image owns it on
   GitHub-hosted runners; the user owns it locally. The tool validates `rustc` version at
   recipe time and produces a clean failure when it doesn't meet the catalog minimum.
+  Future work: warn (not fail) when the locally-installed toolchain drifts materially
+  from the version the catalog targets, so local results stay predictive of CI.
 - Managing exact tool versions on the user's behalf — we enforce minimums only. See
   [local.md §3](./local.md#3-tool-versions-and-installation).
 - Hosting a service. The tool is a CLI binary; updates ship via crates.io.
@@ -159,7 +161,7 @@ CI parallelizes. See [checks.md](./checks.md) for the group → check mapping an
 Other tier entry points:
 
 - `just ox-check-pr` — fast checks suitable for every PR.
-- `just ox-check-nightly` — slow checks: miri, full mutants, feature-powerset, bench, etc.
+- `just ox-check-scheduled` — slow checks: miri, full mutants, feature-powerset, bench, etc.
 - `just ox-check-full` — both tiers, run sequentially.
 
 A user with only `just` installed (no `cargo-ox-check`) can run any check, any group, or any tier
@@ -220,16 +222,16 @@ repo/
 ├── .github/                                       only if --backend github (or autodetected) — see github.md
 │   ├── actions/ox-check-*/                             owned   (per-group composite actions)
 │   ├── workflows/ox-check-pr-impl.yml                  owned   (reusable workflow doing the wiring)
-│   ├── workflows/ox-check-nightly-impl.yml             owned
+│   ├── workflows/ox-check-scheduled-impl.yml             owned
 │   ├── workflows/ox-check-pr.yml                       owned   (root workflow: triggers/permissions/runner)
-│   └── workflows/ox-check-nightly.yml                  owned
+│   └── workflows/ox-check-scheduled.yml                  owned
 │
 └── .pipelines/                                    only if --backend ado (or autodetected) — see ado.md
     ├── ox-check/pr.yml                                 owned   (stages template doing the wiring)
-    ├── ox-check/nightly.yml                            owned
+    ├── ox-check/scheduled.yml                            owned
     ├── ox-check/steps/*.yml                            owned   (per-group step templates)
     ├── ox-check-pr.yml                                 owned   (root pipeline: triggers/pool/optional extends:)
-    └── ox-check-nightly.yml                            owned
+    └── ox-check-scheduled.yml                            owned
 ```
 
 Detail on each host:
@@ -316,9 +318,10 @@ outstanding proposed updates.
 - The tool never sources or executes content from any user-edited file at runtime;
   everything executable in the repo is plain `just` recipes the user can read.
 - Recommended user-workflow shape: `permissions: contents: read` on PR workflows; grant
-  `pull-requests: read` only on the pr-fast job (for PR title). Nightly secrets, if any, live
-  on the nightly workflow only — never on the PR workflow. See the snippets in
-  [github.md](./github.md) and [ado.md](./ado.md).
+  `pull-requests: read` only on the pr-fast job (the static-analysis group that runs the
+  PR-title check; see [checks.md](./checks.md) for the full group definition).
+  Scheduled-tier secrets, if any, live on the scheduled workflow only — never on the
+  PR workflow. See the snippets in [github.md](./github.md) and [ado.md](./ado.md).
 
 ### 8.2 Monorepo / multi-workspace
 
@@ -344,10 +347,10 @@ pipeline.
 
 | Group                                                       | OS / arch scope (default)              | Rationale                                                                                                                                          |
 |-------------------------------------------------------------|----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
-| `pr-fast`, `nightly-advisories`                             | All legs above                         | Contain compile-sensitive checks (clippy, doc-build, udeps, semver-check, external-types) that only see the host's compiled crate graph — cfg-gated code is invisible to a single-leg run. Text/metadata checks running redundantly is cheaper than splitting jobs. |
-| `pr-test`, `nightly-test`                                   | All legs above                         | Where compile-time and runtime OS / arch bugs actually surface.                                                                                    |
-| `pr-mutants`, `nightly-exhaustive`                          | Linux x86_64 + Windows x86_64 | `cargo-mutants` currently doesn't build on `aarch64-pc-windows-msvc` (upstream `winapi` crate incompat), and mutation testing's value-per-leg is highest on the x86_64 targets that match production runtimes. Adopters with ARM-specific concerns extend the matrix in their root workflow.   |
-| `nightly-runtime`                                           | All legs above                         | Both surveyed repos run `miri` and `careful` cross-OS. Both tools work on every Tier 1 Rust target; the earlier "Linux-primary" framing was incorrect.                                  |
+| `pr-fast`, `scheduled-advisories`                             | All legs above                         | Contain compile-sensitive checks (clippy, doc-build, udeps, semver-check, external-types) that only see the host's compiled crate graph — cfg-gated code is invisible to a single-leg run. Text/metadata checks running redundantly is cheaper than splitting jobs. |
+| `pr-test`, `scheduled-test`                                   | All legs above                         | Where compile-time and runtime OS / arch bugs actually surface.                                                                                    |
+| `pr-mutants`, `scheduled-exhaustive`                          | Linux x86_64 + Windows x86_64 | `cargo-mutants` currently doesn't build on `aarch64-pc-windows-msvc` (upstream `winapi` crate incompat), and mutation testing's value-per-leg is highest on the x86_64 targets that match production runtimes. Adopters with ARM-specific concerns extend the matrix in their root workflow.   |
+| `scheduled-runtime`                                           | All legs above                         | Both surveyed repos run `miri` and `careful` cross-OS. Both tools work on every Tier 1 Rust target; the earlier "Linux-primary" framing was incorrect.                                  |
 
 macOS is not in the default matrix — adopters who need it fork the owned reusable
 workflow (GH) or override `testPools` (ADO). The GH-side knob set is intentionally
@@ -359,8 +362,13 @@ Locally there is no matrix — `just ox-check-pr-test` runs against whatever OS 
 is on. CI fan-out lives entirely in the owned wiring layer (the reusable workflow / stages
 template), so users don't write per-OS jobs.
 
-cargo-delta impact runs once on Linux and feeds the same excludes to every matrix leg —
-the source tree is OS-invariant. Caching keys already include OS (see
+cargo-delta impact runs **per OS family** (one stage on Linux, one on Windows) and
+each downstream matrix leg consumes the impact set from its own OS. This way, an
+OS-conditional dep change (under `[target.'cfg(target_os = ...)'.dependencies]`) is
+correctly reflected in the per-OS depgraph cargo-delta walks. Arm legs reuse their OS
+counterpart's impact set — cfg(target_arch) gates are rare enough that paying for four
+impact jobs isn't justified; if a repo finds the gap matters, splitting further is a
+local catalog override. Caching keys already include OS (see
 [github.md §8](./github.md#8-caching) and [ado.md §7](./ado.md#7-caching)).
 
 **Helper scripts use PowerShell Core (`pwsh`) on every platform.** Almost every check

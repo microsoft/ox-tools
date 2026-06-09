@@ -27,7 +27,7 @@
 #
 #   - "unscoped": always run, no env var reference. External-input
 #     checks (deny, audit, aprz) and PR-context checks (pr-title) live
-#     here. Nightly-exhaustive recipes (mutants-full) are also unscoped
+#     here. Scheduled-exhaustive recipes (mutants-full) are also unscoped
 #     by design.
 #
 # Local invocation (no impact wiring): all three env vars are unset;
@@ -148,6 +148,19 @@ ox-check-doc-build:
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
+#
+# cargo-doc2readme regenerates a crate's README.md from its rustdoc.
+# Two extension points users frequently need:
+#   * Workspace-level template (`crates/README.j2` or `README.j2` at repo
+#     root): a Tera template applied to every crate's README. ox-check
+#     auto-detects it and passes `--template` to the per-crate runs.
+#   * Per-crate opt-out: hand-crafted READMEs (e.g. a tool crate whose
+#     README is more freeform than the lib docs) opt out by adding
+#     `[package.metadata.ox-gen-readme]\ndisable = true` to their
+#     Cargo.toml. ox-check skips those crates.
+#
+# Bin-only crates have no library rustdoc to base a README on, so they
+# are skipped as well (cargo doc2readme requires a library target).
 [script("pwsh")]
 ox-check-readme-check: (_ox-check-require "cargo-doc2readme")
     $ErrorActionPreference = 'Stop'
@@ -155,8 +168,74 @@ ox-check-readme-check: (_ox-check-require "cargo-doc2readme")
         Write-Host 'ox-check-readme-check: no modified packages; skipping'
         exit 0
     }
-    cargo doc2readme --check --workspace
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # Detect a workspace-level README template. Two conventional
+    # locations: crates/README.j2 (cargo-workspaces idiom) or
+    # README.j2 at repo root.
+    $template = $null
+    foreach ($candidate in 'crates/README.j2', 'README.j2') {
+        if (Test-Path $candidate) { $template = (Resolve-Path $candidate).Path; break }
+    }
+    # Iterate library crates. Filter by impact set when set, then drop
+    # bin-only crates and opt-outs.
+    $pkg = @(if ($env:OX_CHECK_INCLUDE_MODIFIED) { -split $env:OX_CHECK_INCLUDE_MODIFIED } else { '--workspace' })
+    $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+    $byName = @{}
+    foreach ($p in $meta.packages) { $byName[$p.name] = $p }
+    $candidates = if ($pkg -contains '--workspace') {
+        @($meta.packages | ForEach-Object { $_.name })
+    } else {
+        $names = @()
+        for ($i = 0; $i -lt $pkg.Count; $i++) {
+            if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
+                $names += $pkg[$i + 1]; $i++
+            }
+        }
+        $names
+    }
+    $hadFailure = $false
+    foreach ($name in $candidates) {
+        $p = $byName[$name]
+        if (-not $p) { continue }
+        if (-not ($p.targets | Where-Object { $_.kind -contains 'lib' })) { continue }
+        # Skip private crates (publish = false). They aren't released
+        # and rarely have a polished README. Mirrors the
+        # `cargo workspaces exec --ignore-private` idiom adopters
+        # commonly use.
+        if ($p.publish -is [array] -and $p.publish.Count -eq 0) {
+            Write-Host "ox-check-readme-check: $name (skipped: publish = false)"
+            continue
+        }
+        $disabled = $false
+        if ($p.metadata -and $p.metadata.'ox-gen-readme' -and $p.metadata.'ox-gen-readme'.disable) {
+            $disabled = $true
+        }
+        if ($disabled) {
+            Write-Host "ox-check-readme-check: $name (opted out via [package.metadata.ox-gen-readme])"
+            continue
+        }
+        Write-Host "ox-check-readme-check: $name"
+        # cargo doc2readme writes / compares relative to its CWD (not
+        # --manifest-path), so chdir into the crate before invoking
+        # --check. We also compute a per-crate relative path to the
+        # workspace-level template so the same template file works for
+        # every crate (parallels the cargo-workspaces idiom).
+        $crateDir = Split-Path -Parent $p.manifest_path
+        Push-Location $crateDir
+        try {
+            $relTemplate = if ($template) {
+                Resolve-Path -Relative -LiteralPath $template
+            } else {
+                $null
+            }
+            $args = @('doc2readme', '--check')
+            if ($relTemplate) { $args += @('--template', $relTemplate) }
+            & cargo @args
+            if ($LASTEXITCODE -ne 0) { $hadFailure = $true }
+        } finally {
+            Pop-Location
+        }
+    }
+    if ($hadFailure) { exit 1 }
 
 # Modified tier.
 #
@@ -250,15 +329,12 @@ ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
         exit 0
     }
     $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
-    # Build the candidate package list. With --workspace, defer to
-    # cargo-semver-checks which already does the right thing. With
-    # explicit --package args, extract them and filter to library
-    # crates only.
-    if ($pkg -contains '--workspace') {
-        & cargo semver-checks --workspace
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        return
-    }
+    # Build the candidate package list. Always iterate per-package over
+    # library crates only -- cargo-semver-checks --workspace would fail
+    # on workspaces that contain bin-only crates ("no library targets
+    # found"), and we want the same tolerance for unpublished / bin->lib-
+    # transition crates regardless of whether we got here via impact-
+    # scoping (CI) or full-workspace fallback (local).
     $libPkgs = @{}
     $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
     foreach ($p in $meta.packages) {
@@ -266,11 +342,15 @@ ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
             $libPkgs[$p.name] = $true
         }
     }
-    $packages = @()
-    for ($i = 0; $i -lt $pkg.Count; $i++) {
-        if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
-            if ($libPkgs[$pkg[$i + 1]]) { $packages += $pkg[$i + 1] }
-            $i++
+    if ($pkg -contains '--workspace') {
+        $packages = @($libPkgs.Keys)
+    } else {
+        $packages = @()
+        for ($i = 0; $i -lt $pkg.Count; $i++) {
+            if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
+                if ($libPkgs[$pkg[$i + 1]]) { $packages += $pkg[$i + 1] }
+                $i++
+            }
         }
     }
     if ($packages.Count -eq 0) {
@@ -462,7 +542,7 @@ ox-check-mutants: (_ox-check-require "cargo-mutants")
 # === nightly-runtime members ============================================
 
 # Nightly checks always run full-workspace; impact env vars aren't set
-# by the nightly workflow, so the affected-tier default (--workspace)
+# by the scheduled workflow, so the affected-tier default (--workspace)
 # applies. Skip guards are still included for local diff-scoped runs.
 
 [script("pwsh")]
@@ -489,7 +569,7 @@ ox-check-careful: (_ox-check-require "cargo-careful")
 
 # === nightly-exhaustive members =========================================
 
-# Unscoped. Nightly-exhaustive deliberately runs over the whole
+# Unscoped. Scheduled-exhaustive deliberately runs over the whole
 # workspace regardless of diff.
 ox-check-mutants-full: (_ox-check-require "cargo-mutants")
     cargo mutants --workspace --no-shuffle --jobs 0

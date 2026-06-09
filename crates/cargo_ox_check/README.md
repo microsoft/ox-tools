@@ -1,4 +1,17 @@
-# cargo-ox-check ![License: MIT](https://img.shields.io/badge/license-MIT-blue) [![cargo-ox-check on crates.io](https://img.shields.io/crates/v/cargo-ox-check)](https://crates.io/crates/cargo-ox-check) [![cargo-ox-check on docs.rs](https://docs.rs/cargo-ox-check/badge.svg)](https://docs.rs/cargo-ox-check) [![Source Code Repository](https://img.shields.io/badge/Code-On%20GitHub-blue?logo=GitHub)](https://github.com/microsoft/ox-tools/tree/main/crates/cargo_ox_check) [![Rust Version: 1.88.0](https://img.shields.io/badge/rustc-1.88.0-orange.svg)](https://github.com/rust-lang/rust/releases/tag/1.88.0)
+<div align="center">
+ <img src="./logo.png" alt="Cargo-Ox-Check Logo" width="96">
+
+# Cargo-Ox-Check
+
+[![crates.io](https://img.shields.io/crates/v/cargo-ox-check.svg)](https://crates.io/crates/cargo-ox-check)
+[![docs.rs](https://docs.rs/cargo-ox-check/badge.svg)](https://docs.rs/cargo-ox-check)
+[![MSRV](https://img.shields.io/crates/msrv/cargo-ox-check)](https://crates.io/crates/cargo-ox-check)
+[![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
+[![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](../../LICENSE)
+<a href="../.."><img src="../../logo.svg" alt="This crate was developed as part of the Oxidizer project" width="20"></a>
+
+</div>
 
 ## cargo-ox-check
 
@@ -62,7 +75,7 @@ After the first run, your daily workflow is plain `just`:
 ```text
 $ just ox-check          # alias for `just ox-check-pr`
 $ just ox-check-pr       # the PR tier
-$ just ox-check-nightly  # the nightly tier
+$ just ox-check-scheduled  # the scheduled tier
 $ just ox-check-full     # both, sequentially
 ```
 
@@ -97,3 +110,10 @@ See `docs/design/` for the full architecture:
 * `ado.md` — Azure DevOps Pipelines emission.
 
 And `docs/verification.md` for the continuous-validation strategy.
+
+
+<hr/>
+<sub>
+This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ox-check">source code</a>.
+</sub>
+

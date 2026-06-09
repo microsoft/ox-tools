@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
-name: ox-check-nightly
+name: ox-check-scheduled
 
 on:
   schedule:
@@ -12,8 +12,8 @@ permissions:
   contents: read
 
 jobs:
-  ox-check-nightly:
-    uses: ./.github/workflows/ox-check-nightly-impl.yml
+  ox-check-scheduled:
+    uses: ./.github/workflows/ox-check-scheduled-impl.yml
     permissions:
       contents: read
     secrets: inherit

@@ -304,10 +304,10 @@ mod tests {
             "ox-check-pr-fast:",
             "ox-check-pr-test:",
             "ox-check-pr-mutants:",
-            "ox-check-nightly-test:",
-            "ox-check-nightly-advisories:",
-            "ox-check-nightly-runtime:",
-            "ox-check-nightly-exhaustive:",
+            "ox-check-scheduled-test:",
+            "ox-check-scheduled-advisories:",
+            "ox-check-scheduled-runtime:",
+            "ox-check-scheduled-exhaustive:",
         ] {
             assert!(GROUPS_JUST.contains(needle), "groups.just missing '{needle}'");
         }
@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn tiers_just_template_has_three_tiers() {
-        for needle in ["ox-check-pr:", "ox-check-nightly:", "ox-check-full:"] {
+        for needle in ["ox-check-pr:", "ox-check-scheduled:", "ox-check-full:"] {
             assert!(TIERS_JUST.contains(needle), "tiers.just missing '{needle}'");
         }
     }

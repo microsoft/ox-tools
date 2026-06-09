@@ -3,63 +3,63 @@ rendered_by = "cargo-ox-check 0.1.0"
 
 [[file]]
 path = ".github/actions/ox-check-impact/action.yml"
-checksum = "sha256:3e2c2dece1e56a3a298087f6b275f9361b00c9a7657ac2fc8c042c19434103c8"
-
-[[file]]
-path = ".github/actions/ox-check-nightly-advisories/action.yml"
-checksum = "sha256:3c82a2da3446563b952a7a86662eca45e9b10710cca3014d36d11ee1ea8a2183"
-
-[[file]]
-path = ".github/actions/ox-check-nightly-exhaustive/action.yml"
-checksum = "sha256:6adaa4d7985779fc42582455fedc6b284a99fc95095b9fc20e45ab40856bd2e9"
-
-[[file]]
-path = ".github/actions/ox-check-nightly-runtime/action.yml"
-checksum = "sha256:51bc3cc734a64bd7f7ea01daeacba5fa5572a5c42d26c82775dd4dbee1573067"
-
-[[file]]
-path = ".github/actions/ox-check-nightly-test/action.yml"
-checksum = "sha256:2e18d115e4291bfc79e815c4f3addfccd13e0877983a56f483ba1e0722d06767"
+checksum = "sha256:d64a258411e025acf050e61d8dc8fd701deb6579489f5b83a135a0c3e6e5e6a4"
 
 [[file]]
 path = ".github/actions/ox-check-pr-fast/action.yml"
-checksum = "sha256:871b9bb87f18716e6c8e5552fb941009bd15dc1110f484fe639e554bfbc1ff97"
+checksum = "sha256:c307351452292fb0c87ff2fcb08514de5e06a01669004045aaaf173554999540"
 
 [[file]]
 path = ".github/actions/ox-check-pr-mutants/action.yml"
-checksum = "sha256:9307e4cddce123f500023f6114e9a85fb83d7059b6eca7772d77b48241b925fd"
+checksum = "sha256:77f61858c380c8867100266688792860f0c9c2d91fbed78ac64f9bf6af73b8ee"
 
 [[file]]
 path = ".github/actions/ox-check-pr-test/action.yml"
-checksum = "sha256:4fe2251d5ca54cdf5bcb31444ac4af380c834c910736d4a8b38f80c03ac57a5d"
+checksum = "sha256:9e809f96f42cc444716e11330a4893731433e9adc3f4150f9d332ecf1aaf52c8"
+
+[[file]]
+path = ".github/actions/ox-check-scheduled-advisories/action.yml"
+checksum = "sha256:3bf18e8b1009413c78227aa6853f6ae485e8d31e1257a945d17013f44e66a010"
+
+[[file]]
+path = ".github/actions/ox-check-scheduled-exhaustive/action.yml"
+checksum = "sha256:b12bfe3aab39ddb49a7c01e7171646e8c31a2a2114fa1b591056864cb19669ff"
+
+[[file]]
+path = ".github/actions/ox-check-scheduled-runtime/action.yml"
+checksum = "sha256:68faece11c2d309db50d5f3da888a03c31b4bcc4feefdc1be0c174b56f756f5a"
+
+[[file]]
+path = ".github/actions/ox-check-scheduled-test/action.yml"
+checksum = "sha256:c3f7952cf581a75d699530de4c4c7fd14c69b29f9839558e925dd4c7bc2531e2"
 
 [[file]]
 path = ".github/actions/ox-check-setup/action.yml"
 checksum = "sha256:5d0420b3ce92a7602da3832140b5fb2f04df9405a73fa002d097d7e4557aed6c"
 
 [[file]]
-path = ".github/workflows/ox-check-nightly-impl.yml"
-checksum = "sha256:28b80216ae1ce124d8f11a3879983079cf9491ca4dc83b98ab429b4164607696"
-
-[[file]]
-path = ".github/workflows/ox-check-nightly.yml"
-checksum = "sha256:88086ff455f4471351e9cf94c4d8c501fc5a827de955afe9e97364c1fba0e86e"
-
-[[file]]
 path = ".github/workflows/ox-check-pr-impl.yml"
-checksum = "sha256:a62ef58b9ad2885dbb56cff94f40f9cc3a82a5c1d8f6ab85e533b85bfdaa6476"
+checksum = "sha256:0f43d394b413528aaaec27a2cd1d776eddf9ca9c65b85e6b83d394c381da5d50"
 
 [[file]]
 path = ".github/workflows/ox-check-pr.yml"
 checksum = "sha256:5ea0bea66f0223df032382056e12c88afb0481138c56898b95837fc767e30cd3"
 
 [[file]]
+path = ".github/workflows/ox-check-scheduled-impl.yml"
+checksum = "sha256:083ea5d0d41347a3b72850ead982c715b6c1f3d7de6cbea90d16952e1a9abeeb"
+
+[[file]]
+path = ".github/workflows/ox-check-scheduled.yml"
+checksum = "sha256:5717e91e07d18609c6b43f60291bd15de8221d63feeb0cb5e426cfe05bc5fc79"
+
+[[file]]
 path = "justfiles/ox-check/checks.just"
-checksum = "sha256:1187918a9e9f6f7f58efd50b346b9398b0b49e2e698d5a1c56db4ad3099c446f"
+checksum = "sha256:8b3679c59ecbae7344e4d04482829cba8ffd5debae86456cbc0e43b7960535ef"
 
 [[file]]
 path = "justfiles/ox-check/groups.just"
-checksum = "sha256:6039f2514da4b061832cbb5ccbf9f435be1cffce16e5e85c40aa573b84c1aa4b"
+checksum = "sha256:869ef9b4a8670d84e53ffc92b78141980e3d4b4f76af5acd132f4a3ecea5f948"
 
 [[file]]
 path = "justfiles/ox-check/mod.just"
@@ -67,7 +67,7 @@ checksum = "sha256:2733bad873a59e91db558e38b48f9b01a1a23f0830333afa33c0790495bca
 
 [[file]]
 path = "justfiles/ox-check/tiers.just"
-checksum = "sha256:46518b2d3fd367c300b44d2b4699437b40c81134b608aa792466641567cfaf0b"
+checksum = "sha256:cdea9963277f3948443da7fddcc9ed9f354dd09d1322322cb3c12f43ec896afe"
 
 [[file]]
 path = "justfiles/ox-check/tool-minimums.txt"
@@ -75,7 +75,7 @@ checksum = "sha256:8b841b8ad787927621e2591af3c376c7e205e3014f86fd486436ec6ec3cab
 
 [[file]]
 path = "justfiles/ox-check/tools.just"
-checksum = "sha256:2cb6c8ea9e668fd87fd5f90a7e3c0db3261ec53d525f61addf04dc684985533b"
+checksum = "sha256:f1e19b8d0e0770f2da0e8f6616a19de874280eae7af4fd56b4a0336ecfe12cf2"
 
 [[file]]
 path = "justfiles/ox-check/versions.just"
@@ -107,12 +107,17 @@ id = "ox-check-lints"
 checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
 
 [[region]]
-host = "crates/cargo_ensure_no_cyclic_deps/Cargo.toml"
+host = "crates/cargo-coverage-gate/Cargo.toml"
 id = "ox-check-lints"
 checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
 
 [[region]]
-host = "crates/cargo_heather/Cargo.toml"
+host = "crates/cargo-heather/Cargo.toml"
+id = "ox-check-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo_ensure_no_cyclic_deps/Cargo.toml"
 id = "ox-check-lints"
 checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
 

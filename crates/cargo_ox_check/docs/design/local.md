@@ -28,8 +28,8 @@ repo/
     ├── checks.just         per-check recipes (ox-check-fmt, ox-check-clippy, ox-check-llvm-cov, …).
     │                       Starts with `set unstable` (needed for the `[script("pwsh")]`
     │                       attribute on `ox-check-pr-title`).
-    ├── groups.just         group recipes (ox-check-pr-fast, ox-check-pr-test, ox-check-nightly-test, …).
-    ├── tiers.just          tier aggregators (ox-check-pr, ox-check-nightly, ox-check-full).
+    ├── groups.just         group recipes (ox-check-pr-fast, ox-check-pr-test, ox-check-scheduled-test, …).
+    ├── tiers.just          tier aggregators (ox-check-pr, ox-check-scheduled, ox-check-full).
     ├── tools.just          ox-check-tools-check + ox-check-tools-install + helpers.
     ├── tool-minimums.txt   data file: <cargo-subcommand>=<minimum-version> per line.
     └── versions.just       pinned nightly toolchains (rust_nightly, rust_nightly_external_types).
@@ -78,7 +78,7 @@ One recipe per group, named `ox-check-<tier>-<group>`. The check-recipe and grou
 namespaces are kept disjoint by naming choice: no check is named `<tier>-<group>` for
 any tier × group combination (e.g. the coverage-instrumented test check is named
 `llvm-cov`, not `test`, so that `ox-check-pr-test` unambiguously refers to the PR-tier
-test group). The `pr-mutants` group runs the diff-scoped recipe; `nightly-exhaustive`
+test group). The `pr-mutants` group runs the diff-scoped recipe; `scheduled-exhaustive`
 runs the full-workspace recipe:
 
 ```just
@@ -91,10 +91,10 @@ ox-check-pr-fast: ox-check-fmt ox-check-clippy ox-check-cargo-sort ox-check-lice
 ox-check-pr-test: ox-check-llvm-cov ox-check-doc-test ox-check-examples
 ox-check-pr-mutants: ox-check-mutants
 
-ox-check-nightly-test: ox-check-llvm-cov ox-check-doc-test ox-check-examples
-ox-check-nightly-advisories: ox-check-deny ox-check-audit ox-check-aprz ox-check-clippy ox-check-udeps
-ox-check-nightly-runtime: ox-check-miri ox-check-careful
-ox-check-nightly-exhaustive: ox-check-mutants-full ox-check-cargo-hack ox-check-bench
+ox-check-scheduled-test: ox-check-llvm-cov ox-check-doc-test ox-check-examples
+ox-check-scheduled-advisories: ox-check-deny ox-check-audit ox-check-aprz ox-check-clippy ox-check-udeps
+ox-check-scheduled-runtime: ox-check-miri ox-check-careful
+ox-check-scheduled-exhaustive: ox-check-mutants-full ox-check-cargo-hack ox-check-bench
 ```
 
 ### tiers.just
@@ -104,19 +104,26 @@ in a deterministic order:
 
 ```just
 ox-check-pr: ox-check-tools-check ox-check-pr-fast ox-check-pr-test ox-check-pr-mutants
-ox-check-nightly: ox-check-tools-check ox-check-nightly-test ox-check-nightly-advisories \
-               ox-check-nightly-runtime ox-check-nightly-exhaustive
-ox-check-full: ox-check-pr ox-check-nightly
+ox-check-scheduled: ox-check-tools-check ox-check-scheduled-test ox-check-scheduled-advisories \
+               ox-check-scheduled-runtime ox-check-scheduled-exhaustive
+ox-check-full: ox-check-pr ox-check-scheduled
 ```
 
 ### tools.just
 
+- `ox-check-system-deps-check` — probe for system-level libs that catalog tools need to
+  build from source (currently: `libclang` for `cargo-spellcheck`). Best-effort presence
+  check; on missing deps emits per-OS install hints and exits non-zero. No auto-install.
+  See §3.3.1 for the scope policy.
 - `ox-check-tools-check` — print a status table of every tool's installed version vs. minimum.
 - `ox-check-tools-install` — install (or upgrade) every catalog tool to its minimum
   version. Idempotent: `cargo install --locked` is a no-op when the installed version
   already satisfies the requirement, so calling this recipe on every CI run costs
   nothing on a cache hit. There is intentionally no separate `tools-install-missing`
-  variant — the install recipe IS the install-missing recipe.
+  variant — the install recipe IS the install-missing recipe. Runs `ox-check-system-deps-check`
+  first when the source-build (`install`) backend is selected, so missing system libs
+  surface as a clear "install libclang" hint instead of a cryptic build error 10 minutes
+  in.
 - `_ox-check-require <tool>` — internal helper called by each check.
 
 The full tool-version policy these recipes implement is detailed in §3 below.
@@ -184,6 +191,32 @@ for the full catalog). It is also the most reliable mechanism in restricted netw
 Caching (via the GH cache action and the ADO pipeline workspace cache) is configured by the
 setup action/template to key on `Cargo.lock`, the toolchain channel, and the binary's
 catalog hash. See [github.md](./github.md#caching) and [ado.md](./ado.md#caching).
+
+#### 3.3.1 System-level prerequisites
+
+A small set of catalog tools have non-Rust build dependencies that `cargo install` can't
+satisfy on its own. Today the only entry is `libclang`, needed by `cargo-spellcheck`
+(via `clang-sys` / `hunspell-rs`) at build time. The `binstall` install path sidesteps
+these entirely by downloading pre-built binaries.
+
+Scope policy: only check for system libs that an ox-check catalog tool **directly**
+requires. ox-check is not a general-purpose dev-env doctor. Repository-specific system
+deps (e.g. `openssl-devel`, `symcrypt` for the adopter's own crates) belong in the
+adopter's `setup.yml` customization, not in the ox-check catalog.
+
+Detection (`ox-check-system-deps-check`) uses presence-only probes — file existence in
+standard install dirs plus the `LIBCLANG_PATH` env var override. No version checks:
+system libs upgrade independently of the catalog and any reasonably modern libclang
+satisfies clang-sys.
+
+On a missing dep the recipe prints per-OS install hints (apt-get / tdnf / brew / scoop /
+winget) and exits non-zero. **No auto-install** — admin/sudo decisions and
+package-manager choice stay with the user. `ox-check-tools-install` runs the recipe
+first (only on the source-build `install` backend), so missing system libs surface as a
+clear hint instead of a cryptic clang-sys build error 10 minutes into the install.
+
+Adding a new system dep is a one-block catalog change in `tools.just`; it propagates to
+adopters via `cargo ox-check update` like any other catalog edit.
 
 ### 3.4 Per-check warnings
 
@@ -341,7 +374,7 @@ ox-check OK
 ```
 
 `ox-check` is an alias for `ox-check-pr` (set in the managed `Justfile` region). All three tiers
-(`ox-check-pr`, `ox-check-nightly`, `ox-check-full`) are first-class — locally reproducible with
+(`ox-check-pr`, `ox-check-scheduled`, `ox-check-full`) are first-class — locally reproducible with
 exactly the same arguments CI uses, because CI invokes the same `just` recipes.
 
 ## 6. No-tooling fallback

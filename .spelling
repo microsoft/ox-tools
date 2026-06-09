@@ -10,7 +10,6 @@
 1ESPT
 1h
 1ms
-307
 ACLs
 acyclic
 addrs
@@ -76,6 +75,7 @@ cargo-llvm-cov
 Cargo.toml
 certificate_generator.rs
 cfg
+cfgs
 chainable
 Changelog
 checksum
@@ -204,6 +204,7 @@ llvm-cov
 llvm-tools
 lockfile
 lockfiles
+lookups
 M365PT
 macOS
 macros

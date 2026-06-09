@@ -22,6 +22,11 @@ all-features = true
 [package.metadata.cargo_check_external_types]
 allowed_external_types = []
 
+[package.metadata.ox-gen-readme]
+# README is hand-crafted (logo + crates.io/docs.rs badges); see ../README.j2
+# for the template ox-gen-readme uses for other crates.
+disable = true
+
 [[bin]]
 name = "cargo-heather"
 path = "src/bin/cargo-heather/main.rs"
