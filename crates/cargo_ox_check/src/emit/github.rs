@@ -16,10 +16,9 @@ use std::path::Path;
 
 use ohno::AppError;
 
+use super::owned_file::plan_owned_file;
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
-
-use super::owned_file::plan_owned_file;
 
 /// Embedded body of the shared setup composite action.
 pub const SETUP_ACTION: &str = include_str!("../../templates/github/setup-action.yml");

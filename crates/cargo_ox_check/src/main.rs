@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use cargo_ox_check::cli::Cli;
 use tracing_subscriber::fmt::format::FmtSpan;
 
+#[mutants::skip] // Entry point: tracing/clap setup + dispatch to lib::run; behavior is integration-tested.
 fn main() -> ExitCode {
     tracing_subscriber::fmt()
         .with_target(false)

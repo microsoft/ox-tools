@@ -9,10 +9,11 @@
 
 use std::path::Path;
 
-use ohno::{AppError, IntoAppError as _};
+use ohno::AppError;
 
 use crate::checksum::checksum_str;
 use crate::decision::{Decision, DecisionInputs, decide};
+use crate::io::read_file_if_present;
 use crate::manifest::Manifest;
 use crate::plan::{PlanItem, Target};
 
@@ -26,7 +27,7 @@ use crate::plan::{PlanItem, Target};
 /// Returns an error if the file exists but can't be read.
 pub fn plan_owned_file(repo_root: &Path, manifest: &Manifest, relpath: &str, rendered: &str) -> Result<PlanItem, AppError> {
     let abs = repo_root.join(relpath);
-    let on_disk = read_optional(&abs)?;
+    let on_disk = read_file_if_present(&abs)?;
     let disk_checksum = on_disk.as_deref().map(checksum_str);
     let template_checksum = checksum_str(rendered);
     let last_rendered = manifest.files.get(relpath).map(String::as_str);
@@ -50,14 +51,6 @@ pub fn plan_owned_file(repo_root: &Path, manifest: &Manifest, relpath: &str, ren
     };
 
     Ok(item)
-}
-
-fn read_optional(path: &Path) -> Result<Option<String>, AppError> {
-    match std::fs::read_to_string(path) {
-        Ok(s) => Ok(Some(s)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e).into_app_err_with(|| format!("failed to read {}", path.display())),
-    }
 }
 
 #[cfg(test)]

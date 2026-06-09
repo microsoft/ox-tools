@@ -13,10 +13,9 @@ use std::path::Path;
 
 use ohno::AppError;
 
+use super::owned_file::plan_owned_file;
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
-
-use super::owned_file::plan_owned_file;
 
 /// Embedded body of the shared setup step template.
 pub const SETUP_STEP: &str = include_str!("../../templates/ado/steps/setup.yml");

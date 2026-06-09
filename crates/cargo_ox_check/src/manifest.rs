@@ -256,6 +256,15 @@ mod tests {
     }
 
     #[test]
+    fn to_toml_always_ends_with_newline() {
+        // Catches mutation of the `if !out.ends_with('\n')` guard in to_toml.
+        for m in [Manifest::default(), sample_manifest()] {
+            let text = m.to_toml();
+            assert!(text.ends_with('\n'), "to_toml output must end with newline, got: {text:?}");
+        }
+    }
+
+    #[test]
     fn toml_output_is_deterministic() {
         // Same content via two different insertion orders should serialize identically.
         let mut a = Manifest::default();

@@ -116,6 +116,7 @@ pub mod checksum;
 pub mod cli;
 pub mod decision;
 pub mod emit;
+pub mod io;
 pub mod manifest;
 pub mod plan;
 pub mod region;

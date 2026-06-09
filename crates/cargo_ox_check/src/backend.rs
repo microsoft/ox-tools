@@ -110,6 +110,7 @@ fn extract_host(url: &str) -> Option<&str> {
 ///
 /// Returns an error if `git` is not on PATH, the command exits non-zero, or
 /// no `origin` remote is configured.
+#[mutants::skip] // Shells out to `git config`; behavior tested via backend autodetect integration paths, not unit-mutatable.
 pub fn read_origin_url(repo_root: &Path) -> Result<String, AppError> {
     let output = Command::new("git")
         .args(["config", "--get", "remote.origin.url"])

@@ -366,6 +366,24 @@ mod tests {
     }
 
     #[test]
+    fn upsert_appends_with_exactly_one_blank_separator() {
+        // Text ends with single \n: must add one extra blank line so there is
+        // exactly one blank line between user content and the sentinel.
+        let text = "user file\n";
+        let new = upsert_region(text, "x", "body\n", SYN).unwrap();
+        assert_eq!(new, "user file\n\n# >>> ox-check-managed: x\nbody\n# <<< ox-check-managed: x\n");
+    }
+
+    #[test]
+    fn upsert_does_not_add_extra_blank_when_text_ends_with_double_newline() {
+        // Catches mutation of the `&&` in `!ends_with("\n\n") && !is_empty()`:
+        // if flipped to `||`, an extra blank line would be inserted here.
+        let text = "user file\n\n";
+        let new = upsert_region(text, "x", "body\n", SYN).unwrap();
+        assert_eq!(new, "user file\n\n# >>> ox-check-managed: x\nbody\n# <<< ox-check-managed: x\n");
+    }
+
+    #[test]
     fn upsert_into_empty_file() {
         let new = upsert_region("", "x", "body\n", SYN).unwrap();
         assert_eq!(new, "# >>> ox-check-managed: x\nbody\n# <<< ox-check-managed: x\n");

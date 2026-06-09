@@ -1,7 +1,3 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
-# >>> ox-check-managed: ox-check-clippy
 # Fine-tuning settings for clippy lints. These cannot be expressed in
 # Cargo.toml's [lints] table (which only carries level: warn/allow/deny);
 # they configure lint *behavior* and live in clippy.toml only.
@@ -33,4 +29,3 @@ allow-unwrap-in-tests = true
 # including prelude. Setting it now means flipping the lint level to
 # warn later is a one-line change with no tuning afterthought.
 warn-on-all-wildcard-imports = true
-# <<< ox-check-managed: ox-check-clippy

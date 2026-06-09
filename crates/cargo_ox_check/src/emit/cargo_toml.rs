@@ -17,12 +17,11 @@ use std::path::Path;
 
 use ohno::AppError;
 
+use super::managed_region::plan_managed_region;
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
 use crate::region::CommentSyntax;
 use crate::workspace::Workspace;
-
-use super::managed_region::plan_managed_region;
 
 /// Region id for the workspace-scope lints (multi-crate workspaces).
 pub const WORKSPACE_LINTS_REGION_ID: &str = "ox-check-workspace-lints";
@@ -133,6 +132,71 @@ mod tests {
         }
         assert!(LINTS_BODY.contains("rust.unsafe_op_in_unsafe_fn = \"warn\""));
         assert!(LINTS_BODY.contains("clippy.unwrap_used = \"warn\""));
+    }
+
+    /// Locks in the deliberate decisions to omit these from the catalog:
+    /// `missing_docs` (large-workspace noise), `expect_used` and
+    /// `panic` (over-strict for tools/libraries with legitimate panic
+    /// paths). Adopters who want any of them add them outside the
+    /// managed region with no conflict. If we change our mind, this
+    /// test goes; until then, accidentally re-adding any of them
+    /// fires here instead of in the next adopter's CI.
+    #[test]
+    fn catalog_intentionally_omits_contested_lints() {
+        for needle in ["rust.missing_docs", "clippy.expect_used", "clippy.panic "] {
+            assert!(
+                !LINTS_BODY.contains(needle),
+                "catalog now contains '{needle}'; if intentional, update the catalog-omission test"
+            );
+        }
+    }
+
+    /// Pins the Bucket A folding (restriction-group consensus from
+    /// oxidizer + oxidizer-github). If any of these get dropped from
+    /// the catalog the test fires; if a maintainer intends to drop
+    /// them they update this list too.
+    #[test]
+    fn catalog_includes_consensus_restriction_lints() {
+        for needle in [
+            "clippy.as_pointer_underscore = \"warn\"",
+            "clippy.assertions_on_result_states = \"warn\"",
+            "clippy.deref_by_slicing = \"warn\"",
+            "clippy.empty_drop = \"warn\"",
+            "clippy.empty_enum_variants_with_brackets = \"warn\"",
+            "clippy.fn_to_numeric_cast_any = \"warn\"",
+            "clippy.if_then_some_else_none = \"warn\"",
+            "clippy.multiple_unsafe_ops_per_block = \"warn\"",
+            "clippy.redundant_type_annotations = \"warn\"",
+            "clippy.renamed_function_params = \"warn\"",
+            "clippy.semicolon_outside_block = \"warn\"",
+            "clippy.unnecessary_safety_doc = \"warn\"",
+            "clippy.unneeded_field_pattern = \"warn\"",
+            "clippy.unused_result_ok = \"warn\"",
+            "clippy.redundant_pub_crate = \"allow\"",
+            "clippy.should_panic_without_expect = \"allow\"",
+        ] {
+            assert!(LINTS_BODY.contains(needle), "catalog missing consensus lint '{needle}'");
+        }
+    }
+
+    /// `unexpected_cfgs` is on-by-default at warn since Rust 1.80;
+    /// combined with the catalog's `-D warnings` CI policy, an
+    /// undeclared cfg is a hard build failure. The catalog pre-declares
+    /// the `coverage`/`coverage_nightly` cfgs that ox-check's own
+    /// `llvm-cov` recipe sets so the recommended
+    /// `#[cfg_attr(coverage_nightly, coverage(off))]` pattern works
+    /// out of the box. If this line moves out of the catalog,
+    /// adopters using that pattern silently break.
+    #[test]
+    fn catalog_declares_llvm_cov_cfgs_for_unexpected_cfgs_lint() {
+        assert!(
+            LINTS_BODY.contains("rust.unexpected_cfgs"),
+            "catalog must declare rust.unexpected_cfgs to pre-allow llvm-cov's coverage cfgs"
+        );
+        assert!(
+            LINTS_BODY.contains("'cfg(coverage,coverage_nightly)'"),
+            "catalog's unexpected_cfgs check-cfg list must include coverage,coverage_nightly"
+        );
     }
 
     #[test]

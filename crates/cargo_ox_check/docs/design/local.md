@@ -21,7 +21,7 @@ repo/
 │   …user content…
 │
 └── justfiles/ox-check/                               owned (one checksum per file)
-    ├── mod.just            entry point: imports the four sibling files and defines
+    ├── mod.just            entry point: imports the sibling files and defines
     │                       `alias ox-check := ox-check-pr`. The user's Justfile
     │                       region pulls in this single file; everything else is
     │                       reached transitively.
@@ -30,7 +30,11 @@ repo/
     │                       attribute on `ox-check-pr-title`).
     ├── groups.just         group recipes (ox-check-pr-fast, ox-check-pr-test, ox-check-nightly-test, …).
     ├── tiers.just          tier aggregators (ox-check-pr, ox-check-nightly, ox-check-full).
-    └── tools.just          ox-check-tools-check + ox-check-tools-install + helpers.
+    ├── tools.just          ox-check-tools-check + ox-check-tools-install + helpers.
+    ├── tool-minimums.txt   data file: <cargo-subcommand>=<minimum-version> per line.
+    └── versions.just       pinned nightly toolchains (rust_nightly, rust_nightly_external_types).
+                            Read by recipes via `{{ var }}` interpolation and by the
+                            setup composites via `just --evaluate`. See §3.6.
 ```
 
 The Justfile region is the only file ox-check adds to that the user co-owns, and it's
@@ -189,10 +193,10 @@ tier invocations additionally print a one-line tools summary at the top.
 
 ### 3.5 The Rust toolchain
 
-`rust-toolchain.toml` is read but never written, and ox-check never installs a Rust toolchain
-itself. Per-backend rationale lives in [github.md](./github.md#rust-toolchain) and
-[ado.md](./ado.md#rust-toolchain); short version: msrustup owns it on ADO/1ESPT, the runner
-image owns it on GH, the user owns it locally.
+`rust-toolchain.toml` is read but never written, and ox-check never installs the *project's*
+Rust toolchain itself. Per-backend rationale lives in [github.md](./github.md#rust-toolchain)
+and [ado.md](./ado.md#rust-toolchain); short version: msrustup owns it on ADO/1ESPT, the
+runner image owns it on GH, the user owns it locally.
 
 `_ox-check-require` validates the installed `rustc` against the catalog's minimum at recipe
 time; missing or below-minimum `rustc` produces a clean failure message naming the version
@@ -200,6 +204,55 @@ mismatch. Per-check toolchain requirements (e.g. miri, careful, udeps need night
 also enforced by `_ox-check-require`, which suggests the user-environment-appropriate install
 command in the failure message (`rustup install nightly` or "ask your team's pipeline
 owner to add `nightly` to msrustup").
+
+### 3.6 Nightly pinning
+
+A handful of catalog checks need nightly Rust: `fmt`, `udeps`, `miri`, `careful`, and
+`check-external-types`. We **pin** the nightly snapshots used by these checks rather than
+floating bare `+nightly`. Pinning eliminates "rustup update on Tuesday broke main on
+Wednesday" — every CI run uses the same nightly until we deliberately bump the pin.
+
+`fmt` is on nightly because the catalog's `rustfmt.toml` opts into `unstable_features`
+to get import grouping (`imports_granularity = "Module"`, `group_imports =
+"StdExternalCrate"`) and `format_code_in_doc_comments`. Those are the high-value
+opinions every surveyed Microsoft Rust repo reaches for; the stable rustfmt option set
+doesn't include them. Pinning is what makes nightly fmt sustainable — formatting
+churn happens on a pin bump, not on every `rustup update`.
+
+The pins live in `justfiles/ox-check/versions.just` as plain just variables:
+
+```just
+rust_nightly := "nightly-YYYY-MM-DD"
+rust_nightly_external_types := "nightly-YYYY-MM-DD"
+```
+
+**One source of truth, two consumers.** Recipes read the pins by `{{ }}` interpolation
+(`cargo +{{ rust_nightly }} udeps ...`). The setup composites (`setup-action.yml`,
+`steps/setup.yml`) read the pins via `just --evaluate <var>` and pre-install both
+toolchains with `rustup toolchain install`. There is no env-file duplicate.
+
+**Two pins, not one.** `rust_nightly` is the general-purpose nightly used by udeps, miri,
+careful. `rust_nightly_external_types` is intentionally narrower: it's tied to the rustdoc
+JSON schema version that the currently-selected `cargo-check-external-types` release
+accepts. Bump it alongside `cargo-check-external-types` upgrades, not on the general
+cadence. When the two pins resolve to the same date the setup composite installs only one
+toolchain.
+
+**Bump policy.** The general `rust_nightly` is intended to move on a regular cadence
+(monthly is a reasonable default) so adopters absorb nightly drift in predictable chunks.
+`rust_nightly_external_types` moves only when `cargo-check-external-types` releases a new
+version that targets a newer rustdoc JSON schema. Both bumps are normal `cargo ox-check
+update` operations: edit `versions.just`, regenerate, validate, commit. Adopters are free
+to override either pin in their `versions.just` (it's an owned file) — the next run sees
+the dirt and emits a `.ox-check-proposed` sibling instead of overwriting.
+
+**Why pin, not float?** We tried floating nightly once and immediately needed
+regex-based tolerance code in the `check-external-types` recipe to absorb rustdoc JSON
+schema bumps. That was a tell: any tool that depends on nightly internals will routinely
+break on schema/lint/intrinsic drift, and the alternative to pinning is per-tool
+tolerance shims accumulating in the recipes. Pinning is one mechanism that handles all
+present and future cases; tolerance shims are bespoke and silently degrade what the
+check actually validates.
 
 ## 4. Impact-scoping pass-through env vars
 

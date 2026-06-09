@@ -461,9 +461,9 @@ runs:
         # the save — leaving the cache empty forever. The restore-keys
         # fall back across jobs so the install work is still shared
         # across sibling legs on subsequent runs.
-        key: ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt') }}-${{ github.job }}
+        key: ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt', 'justfiles/ox-check/versions.just') }}-${{ github.job }}
         restore-keys: |
-          ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt') }}-
+          ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt', 'justfiles/ox-check/versions.just') }}-
           ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-
           ox-check-v1-${{ runner.os }}-${{ runner.arch }}-
         # `.crates.toml` and `.crates2.json` track which cargo-installed
@@ -505,20 +505,36 @@ runs:
       run: rustup component add rustfmt clippy
 
     # cargo-check-external-types and a few other catalog tools require
-    # a nightly toolchain (use unstable rustdoc -Z flags). `cargo
-    # +nightly` triggers rustup to auto-install on demand, but the
-    # auto-install can hang on some runners and isn't visible in the
-    # job log. Pre-install nightly explicitly so the +nightly
-    # invocations later in the recipe sequence are no-ops.
-    - name: Install nightly toolchain
-      shell: bash
-      run: rustup toolchain install nightly --profile minimal --no-self-update
-
+    # nightly Rust. Pins live in justfiles/ox-check/versions.just so
+    # recipe interpolation (`{{ rust_nightly }}`) and setup composites
+    # share one source of truth — we extract them via `just --evaluate`
+    # below. Install just first so the extract works.
     - name: Install just
       shell: bash
       run: |
         if ! command -v just >/dev/null 2>&1 ; then
           cargo install --locked just
+        fi
+    - name: Resolve pinned nightly toolchains
+      id: nightly
+      shell: bash
+      run: |
+        set -euo pipefail
+        rust_nightly=$(just --evaluate rust_nightly)
+        rust_nightly_external_types=$(just --evaluate rust_nightly_external_types)
+        echo "rust_nightly=$rust_nightly" >> "$GITHUB_OUTPUT"
+        echo "rust_nightly_external_types=$rust_nightly_external_types" >> "$GITHUB_OUTPUT"
+        echo "ox-check: pinned nightly toolchains: $rust_nightly, $rust_nightly_external_types"
+    - name: Install pinned nightly toolchains
+      shell: bash
+      # `--component rustfmt` because ox-check-fmt now uses nightly
+      # rustfmt for unstable_features (imports_granularity etc.).
+      # External-types only needs core nightly + rustdoc.
+      run: |
+        set -euo pipefail
+        rustup toolchain install '${{ steps.nightly.outputs.rust_nightly }}' --profile minimal --component rustfmt --no-self-update
+        if [ '${{ steps.nightly.outputs.rust_nightly }}' != '${{ steps.nightly.outputs.rust_nightly_external_types }}' ]; then
+          rustup toolchain install '${{ steps.nightly.outputs.rust_nightly_external_types }}' --profile minimal --no-self-update
         fi
     # Bootstrap cargo-binstall so the catalog install can use it. We
     # pay the cost of compiling binstall itself once (~1 min), then
@@ -876,12 +892,23 @@ members = ["crates/*"]
 # --- rust ------------------------------------------------------------------
 rust.ambiguous_negative_literals = "warn"
 rust.missing_debug_implementations = "warn"
-rust.missing_docs = "warn"
 rust.redundant_imports = "warn"
 rust.redundant_lifetimes = "warn"
 rust.trivial_numeric_casts = "warn"
 rust.unsafe_op_in_unsafe_fn = "warn"
 rust.unused_lifetimes = "warn"
+# `unexpected_cfgs` is on-by-default at warn since Rust 1.80; combined
+# with the catalog's `-D warnings` CI policy, any custom cfg name
+# becomes a hard build failure. Pre-declare the cfgs that
+# `cargo llvm-cov` sets so the recommended coverage-exclusion pattern
+# `#[cfg_attr(coverage_nightly, coverage(off))]` works out of the box.
+# Adopters who need additional cfg names take ownership of this one
+# line (edit the check-cfg array); ox-check's drift detector will
+# emit a `.ox-check-proposed` sibling on future catalog bumps so the
+# customization is preserved.
+rust.unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(coverage,coverage_nightly)',
+] }
 
 # --- rustdoc ---------------------------------------------------------------
 rustdoc.broken_intra_doc_links = "warn"
@@ -899,29 +926,85 @@ clippy.style = { level = "warn", priority = -1 }
 clippy.suspicious = { level = "warn", priority = -1 }
 
 # --- clippy: opinionated additions -----------------------------------------
+# Two-repo consensus (oxidizer + oxidizer-github). Restriction-group
+# lints that catch real code-smell cases. Adding a workspace-wide lint
+# means adopters can only opt out per-crate or by taking ownership of
+# this region; only enable when the consensus is strong enough to
+# justify that cost.
 clippy.allow_attributes = "warn"
 clippy.allow_attributes_without_reason = "warn"
+clippy.as_pointer_underscore = "warn"
+clippy.assertions_on_result_states = "warn"
 clippy.clone_on_ref_ptr = "warn"
+clippy.deref_by_slicing = "warn"
 clippy.disallowed_script_idents = "warn"
-clippy.expect_used = "warn"
+clippy.empty_drop = "warn"
+clippy.empty_enum_variants_with_brackets = "warn"
+clippy.fn_to_numeric_cast_any = "warn"
+clippy.if_then_some_else_none = "warn"
 clippy.map_err_ignore = "warn"
-clippy.panic = "warn"
+clippy.multiple_unsafe_ops_per_block = "warn"
+clippy.redundant_type_annotations = "warn"
+clippy.renamed_function_params = "warn"
+clippy.semicolon_outside_block = "warn"
 clippy.undocumented_unsafe_blocks = "warn"
 clippy.unnecessary_safety_comment = "warn"
+clippy.unnecessary_safety_doc = "warn"
+clippy.unneeded_field_pattern = "warn"
+clippy.unused_result_ok = "warn"
 clippy.unwrap_used = "warn"
 
 # --- clippy: opinionated suppressions of category-enabled lints ------------
-clippy.option_if_let_else = "allow"
 clippy.missing_const_for_fn = "allow"
 clippy.multiple_crate_versions = "allow"
+clippy.option_if_let_else = "allow"
+clippy.redundant_pub_crate = "allow"
+clippy.should_panic_without_expect = "allow"
 clippy.significant_drop_tightening = "allow"
+# Blocked by Clippy bug: https://github.com/rust-lang/rust-clippy/issues/15036
 clippy.wildcard_imports = "allow"
+
 # <<< ox-check-managed: ox-check-workspace-lints
 
 === Justfile ===
 # >>> ox-check-managed: ox-check-imports
 import 'justfiles/ox-check/mod.just'
 # <<< ox-check-managed: ox-check-imports
+
+=== clippy.toml ===
+# >>> ox-check-managed: ox-check-clippy
+# Fine-tuning settings for clippy lints. These cannot be expressed in
+# Cargo.toml's [lints] table (which only carries level: warn/allow/deny);
+# they configure lint *behavior* and live in clippy.toml only.
+
+# Absolute paths up to 3 segments are clarifying — e.g. `std::sync::Mutex`
+# vs `tokio::sync::Mutex` disambiguates the source. Beyond 3 segments
+# we prefer imports or aliases for readability.
+absolute-paths-max-segments = 3
+
+# Workspace code is internal. Clippy should suggest the most correct
+# fix without worrying about non-breaking-change rules, which only
+# matter for published library APIs.
+avoid-breaking-exported-api = false
+
+# Required companion for the clippy.semicolon_outside_block lint we
+# ship in the catalog. Without this, the lint fires on multiline-block
+# forms that are common Rust style.
+semicolon-outside-block-ignore-multiline = true
+
+# Required companions for the clippy.unwrap_used lint we ship.
+# Test code asserts via unwrap()/panic!() — that's how #[test] reports
+# failure. Without these, every test triggers the lint.
+allow-panic-in-tests = true
+allow-unwrap-in-tests = true
+
+# Aspirational: when clippy.wildcard_imports is re-enabled (currently
+# allowed in cargo-lints-body.toml due to upstream bug rust-clippy#15036),
+# we want the stricter variant that warns on ALL wildcard imports
+# including prelude. Setting it now means flipping the lint level to
+# warn later is a one-line change with no tuning afterthought.
+warn-on-all-wildcard-imports = true
+# <<< ox-check-managed: ox-check-clippy
 
 === crates/alpha/Cargo.toml ===
 [package]
@@ -1027,8 +1110,12 @@ unknown-git = "deny"
 
 # === pr-fast members ====================================================
 
-# Modified tier. cargo-fmt is a rustup component; if cargo is on PATH,
-# fmt is too, so no require is needed.
+# Modified tier. cargo-fmt is a rustup component. We invoke it via the
+# pinned nightly (see versions.just) because rustfmt.toml uses
+# unstable_features = true (imports_granularity, group_imports,
+# format_code_in_doc_comments). Floating nightly would mean
+# format-drift breaking CI on rustup updates — the same trap we
+# explicitly avoid for udeps/miri/careful/external-types.
 [script("pwsh")]
 ox-check-fmt:
     $ErrorActionPreference = 'Stop'
@@ -1036,7 +1123,7 @@ ox-check-fmt:
         Write-Host 'ox-check-fmt: no modified packages; skipping'
         exit 0
     }
-    cargo fmt --all --check
+    cargo '+{{ rust_nightly }}' fmt --all --check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier. Per project policy, clippy runs on the affected set
@@ -1185,8 +1272,8 @@ ox-check-audit: (_ox-check-require "cargo-audit")
 
 # Required tier. cargo-udeps detects unused dependencies by resolving
 # the full crate graph and seeing which deps are referenced; that's
-# precisely what the required tier is for. Depends on the floating
-# nightly toolchain.
+# precisely what the required tier is for. Pinned to the general
+# nightly defined in versions.just.
 [script("pwsh")]
 ox-check-udeps: (_ox-check-require "cargo-udeps")
     $ErrorActionPreference = 'Stop'
@@ -1195,7 +1282,7 @@ ox-check-udeps: (_ox-check-require "cargo-udeps")
         exit 0
     }
     $pkg = @(if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { '--workspace' })
-    & cargo '+nightly' udeps @pkg --all-targets --all-features
+    & cargo '+{{ rust_nightly }}' udeps @pkg --all-targets --all-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier (compares published API of changed crates against the
@@ -1301,26 +1388,15 @@ ox-check-external-types: (_ox-check-require "cargo-check-external-types")
     $failed = $false
     foreach ($p in $packages) {
         Write-Host "ox-check-external-types: $p"
-        # cargo-check-external-types requires a nightly Rust toolchain
-        # (uses unstable rustdoc -Z flags). Invoke via +nightly so
-        # rustup auto-installs nightly on demand. Adopters using
-        # msrustup without a nightly channel override this recipe.
-        #
-        # The tool pins a specific rustdoc-types schema version that
-        # tracks a narrow window of nightly rustdoc JSON output. Newer
-        # nightlies routinely drift past it, producing a "produces JSON
-        # format version X, but this tool requires format version Y"
-        # error that's a tooling-incompat issue, not a real API violation.
-        # We swallow that specific error as a warning and continue.
-        $output = (& cargo +nightly check-external-types --manifest-path $libPkgs[$p] 2>&1) | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            if ($output -match 'JSON format version \d+, but this tool requires format version \d+') {
-                Write-Host "  rustdoc/cargo-check-external-types JSON schema mismatch; skipping (nightly drift)" -ForegroundColor Yellow
-            } else {
-                Write-Host $output
-                $failed = $true
-            }
-        }
+        # cargo-check-external-types requires nightly rustdoc (uses
+        # unstable -Z flags) AND pins a specific rustdoc-types schema
+        # version. We pin nightly narrowly to the schema this tool
+        # version expects via `rust_nightly_external_types` in
+        # versions.just — bump that pin alongside any cargo-check-
+        # external-types upgrade. No tolerance for schema mismatches:
+        # if it fails, the pin or the tool needs to move.
+        & cargo '+{{ rust_nightly_external_types }}' check-external-types --manifest-path $libPkgs[$p]
+        if ($LASTEXITCODE -ne 0) { $failed = $true }
     }
     if ($failed) { exit 1 }
 
@@ -1452,7 +1528,7 @@ ox-check-miri:
         exit 0
     }
     $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
-    & cargo '+nightly' miri nextest run @pkg
+    & cargo '+{{ rust_nightly }}' miri nextest run @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 [script("pwsh")]
@@ -1463,7 +1539,7 @@ ox-check-careful: (_ox-check-require "cargo-careful")
         exit 0
     }
     $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
-    & cargo '+nightly' careful test @pkg --all-features --locked
+    & cargo '+{{ rust_nightly }}' careful test @pkg --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # === nightly-exhaustive members =========================================
@@ -1603,6 +1679,7 @@ import 'checks.just'
 import 'groups.just'
 import 'tiers.just'
 import 'tools.just'
+import 'versions.just'
 
 # Friendly default: `just ox-check` runs the PR tier.
 alias ox-check := ox-check-pr
@@ -1882,6 +1959,37 @@ _ox-check-require name:
         exit 1
     }
 
+=== justfiles/ox-check/versions.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+#
+# Pinned toolchain versions used by the ox-check check tree.
+#
+# These are deliberately pinned (not floating). The cost of floating
+# nightly is "rustup update on Tuesday breaks CI on Wednesday" — we'd
+# rather move the pin deliberately than wake up to surprise red builds.
+# See docs/design/local.md#nightly-pinning for the bump policy.
+#
+# Both ox-check recipes (via the `{{ var }}` interpolation below) and
+# the setup-action / setup.yml composites (via `just --evaluate`) read
+# these constants. There is exactly one source of truth.
+
+# General nightly used by udeps, miri, careful, and any future
+# nightly-dependent check. Bumped on a regular cadence (monthly is a
+# reasonable default) when an adopter has time to absorb formatting /
+# lint / API-surface drift. Pin only — do not use bare `nightly` here.
+rust_nightly := "nightly-2026-01-21"
+
+# Pinned narrowly to the rustdoc JSON schema version that the currently
+# selected cargo-check-external-types release accepts. cargo-check-
+# external-types embeds a specific rustdoc-types crate version; if the
+# nightly's emitted JSON format_version drifts past it, every run fails
+# with "produces JSON format version X, but this tool requires
+# format version Y" — which is a tooling-incompat, not a real API
+# violation. Bump this alongside any cargo-check-external-types upgrade.
+rust_nightly_external_types := "nightly-2025-10-18"
+
 === rustfmt.toml ===
 # >>> ox-check-managed: ox-check-rustfmt
 edition = "2024"
@@ -1889,4 +1997,58 @@ max_width = 140
 newline_style = "Unix"
 use_field_init_shorthand = true
 use_try_shorthand = true
+# The following options require nightly rustfmt. ox-check-fmt invokes
+# `cargo +{{ rust_nightly }} fmt`; see justfiles/ox-check/versions.just
+# for the pin and docs/design/local.md#nightly-pinning for the policy.
+unstable_features = true
+# Format Rust code blocks inside `///` doc comments. Catches stale
+# examples that drift from the prose.
+format_code_in_doc_comments = true
+# One use-statement per module (vs collapsed `a::{b, c, d}` form).
+# Diffs touch only the lines that actually changed.
+imports_granularity = "Module"
+# Group imports: std, then external crates, then crate-internal. Matches
+# the convention used across the surveyed Microsoft Rust repos.
+group_imports = "StdExternalCrate"
 # <<< ox-check-managed: ox-check-rustfmt
+
+=== spellcheck.toml ===
+# >>> ox-check-managed: ox-check-spellcheck
+# Check spelling in code comments marked as dev/developer comments
+# (e.g., `// TODO:`, `// FIXME:`). Set to false to skip them.
+dev_comments = false
+
+# Whether to skip spell checking README files. Set to false to include
+# README files in spell checking.
+skip_readme = false
+
+[Hunspell]
+# Language dictionary. "en_US" uses the built-in English (US) dictionary.
+lang = "en_US"
+
+# Directories searched for `extra_dictionaries` paths. The default
+# repo-root entry lets adopters keep their custom dictionary next to
+# the .spelling source.
+search_dirs = ["."]
+
+# Additional dictionary files loaded after the language dictionary.
+# Format: first line is the word count, remaining lines are sorted
+# words (one per line). `target/spelling.dic` is generated by the
+# `ox-check-spellcheck` recipe from the repo's `.spelling` file.
+extra_dictionaries = ["target/spelling.dic"]
+
+# Don't consult OS-provided dictionaries. Keeps results consistent
+# across Linux/macOS/Windows runners.
+skip_os_lookups = true
+
+# Use cargo-spellcheck's built-in language dictionaries (independent of
+# system hunspell installation). Required for the cross-platform
+# reproducibility guarantee above.
+use_builtin = true
+
+[Hunspell.quirks]
+# Treat CamelCase identifiers as concatenations of dictionary words
+# (e.g., `TcpStream` = `Tcp` + `Stream`). Lowers false-positive rate
+# substantially on Rust codebases.
+allow_concatenation = true
+# <<< ox-check-managed: ox-check-spellcheck

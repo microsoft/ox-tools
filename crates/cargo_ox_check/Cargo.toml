@@ -24,6 +24,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 sha2 = { workspace = true, features = ["std"] }
 toml_edit = { workspace = true }

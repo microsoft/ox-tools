@@ -37,6 +37,7 @@ import 'checks.just'
 import 'groups.just'
 import 'tiers.just'
 import 'tools.just'
+import 'versions.just'
 
 # Friendly default: `just ox-check` runs the PR tier.
 alias ox-check := ox-check-pr

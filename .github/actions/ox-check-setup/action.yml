@@ -29,9 +29,9 @@ runs:
         # the save — leaving the cache empty forever. The restore-keys
         # fall back across jobs so the install work is still shared
         # across sibling legs on subsequent runs.
-        key: ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt') }}-${{ github.job }}
+        key: ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt', 'justfiles/ox-check/versions.just') }}-${{ github.job }}
         restore-keys: |
-          ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt') }}-
+          ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/ox-check/tool-minimums.txt', 'justfiles/ox-check/versions.just') }}-
           ox-check-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-
           ox-check-v1-${{ runner.os }}-${{ runner.arch }}-
         # `.crates.toml` and `.crates2.json` track which cargo-installed
@@ -73,20 +73,36 @@ runs:
       run: rustup component add rustfmt clippy
 
     # cargo-check-external-types and a few other catalog tools require
-    # a nightly toolchain (use unstable rustdoc -Z flags). `cargo
-    # +nightly` triggers rustup to auto-install on demand, but the
-    # auto-install can hang on some runners and isn't visible in the
-    # job log. Pre-install nightly explicitly so the +nightly
-    # invocations later in the recipe sequence are no-ops.
-    - name: Install nightly toolchain
-      shell: bash
-      run: rustup toolchain install nightly --profile minimal --no-self-update
-
+    # nightly Rust. Pins live in justfiles/ox-check/versions.just so
+    # recipe interpolation (`{{ rust_nightly }}`) and setup composites
+    # share one source of truth — we extract them via `just --evaluate`
+    # below. Install just first so the extract works.
     - name: Install just
       shell: bash
       run: |
         if ! command -v just >/dev/null 2>&1 ; then
           cargo install --locked just
+        fi
+    - name: Resolve pinned nightly toolchains
+      id: nightly
+      shell: bash
+      run: |
+        set -euo pipefail
+        rust_nightly=$(just --evaluate rust_nightly)
+        rust_nightly_external_types=$(just --evaluate rust_nightly_external_types)
+        echo "rust_nightly=$rust_nightly" >> "$GITHUB_OUTPUT"
+        echo "rust_nightly_external_types=$rust_nightly_external_types" >> "$GITHUB_OUTPUT"
+        echo "ox-check: pinned nightly toolchains: $rust_nightly, $rust_nightly_external_types"
+    - name: Install pinned nightly toolchains
+      shell: bash
+      # `--component rustfmt` because ox-check-fmt now uses nightly
+      # rustfmt for unstable_features (imports_granularity etc.).
+      # External-types only needs core nightly + rustdoc.
+      run: |
+        set -euo pipefail
+        rustup toolchain install '${{ steps.nightly.outputs.rust_nightly }}' --profile minimal --component rustfmt --no-self-update
+        if [ '${{ steps.nightly.outputs.rust_nightly }}' != '${{ steps.nightly.outputs.rust_nightly_external_types }}' ]; then
+          rustup toolchain install '${{ steps.nightly.outputs.rust_nightly_external_types }}' --profile minimal --no-self-update
         fi
     # Bootstrap cargo-binstall so the catalog install can use it. We
     # pay the cost of compiling binstall itself once (~1 min), then

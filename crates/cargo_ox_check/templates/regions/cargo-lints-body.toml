@@ -7,12 +7,23 @@
 # --- rust ------------------------------------------------------------------
 rust.ambiguous_negative_literals = "warn"
 rust.missing_debug_implementations = "warn"
-rust.missing_docs = "warn"
 rust.redundant_imports = "warn"
 rust.redundant_lifetimes = "warn"
 rust.trivial_numeric_casts = "warn"
 rust.unsafe_op_in_unsafe_fn = "warn"
 rust.unused_lifetimes = "warn"
+# `unexpected_cfgs` is on-by-default at warn since Rust 1.80; combined
+# with the catalog's `-D warnings` CI policy, any custom cfg name
+# becomes a hard build failure. Pre-declare the cfgs that
+# `cargo llvm-cov` sets so the recommended coverage-exclusion pattern
+# `#[cfg_attr(coverage_nightly, coverage(off))]` works out of the box.
+# Adopters who need additional cfg names take ownership of this one
+# line (edit the check-cfg array); ox-check's drift detector will
+# emit a `.ox-check-proposed` sibling on future catalog bumps so the
+# customization is preserved.
+rust.unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(coverage,coverage_nightly)',
+] }
 
 # --- rustdoc ---------------------------------------------------------------
 rustdoc.broken_intra_doc_links = "warn"
@@ -30,20 +41,41 @@ clippy.style = { level = "warn", priority = -1 }
 clippy.suspicious = { level = "warn", priority = -1 }
 
 # --- clippy: opinionated additions -----------------------------------------
+# Two-repo consensus (oxidizer + oxidizer-github). Restriction-group
+# lints that catch real code-smell cases. Adding a workspace-wide lint
+# means adopters can only opt out per-crate or by taking ownership of
+# this region; only enable when the consensus is strong enough to
+# justify that cost.
 clippy.allow_attributes = "warn"
 clippy.allow_attributes_without_reason = "warn"
+clippy.as_pointer_underscore = "warn"
+clippy.assertions_on_result_states = "warn"
 clippy.clone_on_ref_ptr = "warn"
+clippy.deref_by_slicing = "warn"
 clippy.disallowed_script_idents = "warn"
-clippy.expect_used = "warn"
+clippy.empty_drop = "warn"
+clippy.empty_enum_variants_with_brackets = "warn"
+clippy.fn_to_numeric_cast_any = "warn"
+clippy.if_then_some_else_none = "warn"
 clippy.map_err_ignore = "warn"
-clippy.panic = "warn"
+clippy.multiple_unsafe_ops_per_block = "warn"
+clippy.redundant_type_annotations = "warn"
+clippy.renamed_function_params = "warn"
+clippy.semicolon_outside_block = "warn"
 clippy.undocumented_unsafe_blocks = "warn"
 clippy.unnecessary_safety_comment = "warn"
+clippy.unnecessary_safety_doc = "warn"
+clippy.unneeded_field_pattern = "warn"
+clippy.unused_result_ok = "warn"
 clippy.unwrap_used = "warn"
 
 # --- clippy: opinionated suppressions of category-enabled lints ------------
-clippy.option_if_let_else = "allow"
 clippy.missing_const_for_fn = "allow"
 clippy.multiple_crate_versions = "allow"
+clippy.option_if_let_else = "allow"
+clippy.redundant_pub_crate = "allow"
+clippy.should_panic_without_expect = "allow"
 clippy.significant_drop_tightening = "allow"
+# Blocked by Clippy bug: https://github.com/rust-lang/rust-clippy/issues/15036
 clippy.wildcard_imports = "allow"
+

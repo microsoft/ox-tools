@@ -78,7 +78,7 @@ that provided the strongest version of the check.
 
 | Check                          | Invocation                                                | Source |
 |--------------------------------|-----------------------------------------------------------|--------|
-| `fmt`                          | `cargo fmt --all --check`                                 | all |
+| `fmt`                          | `cargo +<pinned-nightly> fmt --all --check`               | all |
 | `clippy`                       | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
 | `cargo-sort`                   | `cargo sort --workspace --check`                          | oxidizer-github |
 | `license-headers`              | `cargo heather --workspace`                               | oxidizer (`heather`), oxidizer-github |

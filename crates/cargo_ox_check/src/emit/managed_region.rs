@@ -10,10 +10,11 @@
 
 use std::path::Path;
 
-use ohno::{AppError, IntoAppError as _};
+use ohno::AppError;
 
 use crate::checksum::checksum_str;
 use crate::decision::{Decision, DecisionInputs, decide};
+use crate::io::read_file_if_present;
 use crate::manifest::{Manifest, RegionKey};
 use crate::plan::{PlanItem, Target};
 use crate::region::{CommentSyntax, find_region, upsert_region};
@@ -41,11 +42,7 @@ pub fn plan_managed_region(
     syntax: CommentSyntax,
 ) -> Result<PlanItem, AppError> {
     let abs = repo_root.join(host_relpath);
-    let host_text = match std::fs::read_to_string(&abs) {
-        Ok(s) => Some(s),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e).into_app_err_with(|| format!("failed to read {}", abs.display())),
-    };
+    let host_text = read_file_if_present(&abs)?;
 
     let template_checksum = checksum_str(rendered_body);
     let key = RegionKey {

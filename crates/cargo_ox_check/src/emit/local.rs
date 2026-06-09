@@ -13,10 +13,9 @@ use std::path::Path;
 
 use ohno::AppError;
 
+use super::owned_file::plan_owned_file;
 use crate::manifest::Manifest;
 use crate::plan::PlanItem;
-
-use super::owned_file::plan_owned_file;
 
 /// Contents of `justfiles/ox-check/mod.just` baked into the binary.
 ///
@@ -26,6 +25,17 @@ pub const MOD_JUST: &str = include_str!("../../templates/justfiles/ox-check/mod.
 
 /// Repo-root-relative path of the entry-point recipe file.
 pub const MOD_JUST_PATH: &str = "justfiles/ox-check/mod.just";
+
+/// Contents of `justfiles/ox-check/versions.just` baked into the binary.
+///
+/// Pinned toolchain versions consumed by recipes (via `{{ var }}`
+/// interpolation) and by setup composites (via `just --evaluate`).
+/// See [`local.md`](../../docs/design/local.md#nightly-pinning) for
+/// the bump policy.
+pub const VERSIONS_JUST: &str = include_str!("../../templates/justfiles/ox-check/versions.just");
+
+/// Repo-root-relative path of the pinned-versions recipe file.
+pub const VERSIONS_JUST_PATH: &str = "justfiles/ox-check/versions.just";
 
 /// Contents of `justfiles/ox-check/tools.just` baked into the binary.
 pub const TOOLS_JUST: &str = include_str!("../../templates/justfiles/ox-check/tools.just");
@@ -80,6 +90,15 @@ pub fn plan_mod_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, 
 /// Propagates I/O errors from [`plan_owned_file`].
 pub fn plan_tools_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
     plan_owned_file(repo_root, manifest, TOOLS_JUST_PATH, TOOLS_JUST)
+}
+
+/// Emit a [`PlanItem`] for `justfiles/ox-check/versions.just`.
+///
+/// # Errors
+///
+/// Propagates I/O errors from [`plan_owned_file`].
+pub fn plan_versions_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
+    plan_owned_file(repo_root, manifest, VERSIONS_JUST_PATH, VERSIONS_JUST)
 }
 
 /// Emit a [`PlanItem`] for `justfiles/ox-check/tool-minimums.txt`.
@@ -233,6 +252,7 @@ pub fn plan_local_just_tree(repo_root: &Path, manifest: &Manifest) -> Result<Vec
         plan_mod_just(repo_root, manifest)?,
         plan_tools_just(repo_root, manifest)?,
         plan_tool_minimums(repo_root, manifest)?,
+        plan_versions_just(repo_root, manifest)?,
         plan_checks_just(repo_root, manifest)?,
         plan_groups_just(repo_root, manifest)?,
         plan_tiers_just(repo_root, manifest)?,
@@ -308,10 +328,10 @@ mod tests {
     }
 
     #[test]
-    fn plan_local_just_tree_emits_six_items() {
+    fn plan_local_just_tree_emits_seven_items() {
         let tmp = TempDir::new().unwrap();
         let items = plan_local_just_tree(tmp.path(), &Manifest::default()).unwrap();
-        assert_eq!(items.len(), 6);
+        assert_eq!(items.len(), 7);
         for item in &items {
             assert_eq!(item.decision, Decision::Write);
         }
@@ -324,9 +344,40 @@ mod tests {
             "import 'groups.just'",
             "import 'tiers.just'",
             "import 'tools.just'",
+            "import 'versions.just'",
             "alias ox-check := ox-check-pr",
         ] {
             assert!(MOD_JUST.contains(needle), "mod.just missing '{needle}'");
+        }
+    }
+
+    #[test]
+    fn versions_just_defines_both_nightly_pins() {
+        // Required source of truth for the setup composites' `just --evaluate`
+        // step and recipe `{{ var }}` interpolation. If either name changes,
+        // the templates / docs must change in lockstep.
+        assert!(VERSIONS_JUST.contains("rust_nightly :="), "versions.just missing rust_nightly");
+        assert!(
+            VERSIONS_JUST.contains("rust_nightly_external_types :="),
+            "versions.just missing rust_nightly_external_types"
+        );
+    }
+
+    #[test]
+    fn checks_just_has_no_floating_nightly_invocations() {
+        // Catch a regression where a recipe falls back to bare `+nightly`
+        // instead of using the pinned `{{ rust_nightly }}` /
+        // `{{ rust_nightly_external_types }}` interpolations.
+        for line in CHECKS_JUST.lines() {
+            let stripped = line.split('#').next().unwrap_or("");
+            assert!(
+                !stripped.contains("+nightly "),
+                "checks.just has a floating '+nightly' invocation: {line}"
+            );
+            assert!(
+                !stripped.contains("'+nightly'"),
+                "checks.just has a floating '+nightly' invocation: {line}"
+            );
         }
     }
 

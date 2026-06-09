@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use ohno::{AppError, IntoAppError as _};
+use ohno::AppError;
 use tracing::info;
 
 use crate::backend::{self, Backend};
@@ -17,6 +17,7 @@ use crate::checksum::checksum_str;
 use crate::cli::{Command, UpdateArgs};
 use crate::decision::{Decision, decide_removal};
 use crate::emit::{ado, cargo_toml, github, local, shared_configs};
+use crate::io::read_file_if_present;
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
 use crate::region::{CommentSyntax, find_region, remove_region};
@@ -42,6 +43,7 @@ pub struct RunOutcome {
 /// # Errors
 ///
 /// Returns an error when the underlying subcommand fails.
+#[mutants::skip] // Thin process-boundary glue (cwd lookup, stdout print, `std::process::exit`); behavior covered by `run_update` tests which exercise every dispatch path.
 pub fn run(command: Command) -> Result<(), AppError> {
     match command {
         Command::Update(args) => {
@@ -223,14 +225,6 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan) -> Resu
     Ok(())
 }
 
-fn read_file_if_present(path: &Path) -> Result<Option<String>, AppError> {
-    match std::fs::read_to_string(path) {
-        Ok(s) => Ok(Some(s)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err::<Option<String>, _>(e).into_app_err_with(|| format!("failed to read {}", path.display())),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -282,9 +276,12 @@ mod tests {
             "justfiles/ox-check/tiers.just",
             "justfiles/ox-check/tools.just",
             "justfiles/ox-check/tool-minimums.txt",
+            "justfiles/ox-check/versions.just",
             "deny.toml",
             "rustfmt.toml",
             ".delta.toml",
+            "spellcheck.toml",
+            "clippy.toml",
             ".ox-check.lock",
         ] {
             assert!(tmp.path().join(expected).is_file(), "expected '{expected}' after update");
@@ -559,5 +556,103 @@ mod tests {
         let _ = run_update(&args, tmp.path()).unwrap();
         let second = run_update(&args, tmp.path()).unwrap();
         assert!(!second.plan.has_changes());
+    }
+
+    /// Files that were previously rendered but are no longer in scope
+    /// (e.g., a backend was disabled) must surface as `Remove` plan items
+    /// when the on-disk content still matches what we last wrote. This
+    /// exercises the `plan_removals` path end-to-end.
+    #[test]
+    fn disabling_a_backend_removes_its_orphaned_files() {
+        use crate::decision::Decision;
+
+        let tmp = empty_workspace();
+
+        // First: write everything including the github backend.
+        let with_gh = UpdateArgs {
+            backends: vec!["github".to_owned()],
+            no_backends: false,
+            dry_run: false,
+        };
+        let first = run_update(&with_gh, tmp.path()).unwrap();
+        assert!(first.applied);
+        let github_workflow = tmp.path().join(".github/workflows/ox-check-pr.yml");
+        assert!(github_workflow.is_file());
+
+        // Second: disable backends. The previously rendered github files
+        // should now be queued for removal (file unchanged on disk since
+        // last render → Decision::Remove).
+        let no_be = UpdateArgs {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+        };
+        let second = run_update(&no_be, tmp.path()).unwrap();
+
+        let removed: Vec<&str> = second
+            .plan
+            .items()
+            .iter()
+            .filter(|i| i.decision == Decision::Remove)
+            .filter_map(|i| match &i.target {
+                crate::plan::Target::File { path } => Some(path.as_str()),
+                crate::plan::Target::Region { .. } => None,
+            })
+            .collect();
+        assert!(
+            removed.contains(&".github/workflows/ox-check-pr.yml"),
+            "expected ox-check-pr.yml to be queued for removal; got: {removed:?}"
+        );
+        assert!(
+            !github_workflow.exists(),
+            "expected the orphaned github workflow file to actually be removed from disk"
+        );
+    }
+
+    /// User-customized orphans (file no longer in scope, but the on-disk
+    /// contents diverge from what we last wrote) must be left alone via
+    /// `OrphanedKept`, not deleted.
+    #[test]
+    fn customized_orphans_are_kept_not_removed() {
+        use crate::decision::Decision;
+
+        let tmp = empty_workspace();
+        let with_gh = UpdateArgs {
+            backends: vec!["github".to_owned()],
+            no_backends: false,
+            dry_run: false,
+        };
+        let _ = run_update(&with_gh, tmp.path()).unwrap();
+
+        let github_workflow = tmp.path().join(".github/workflows/ox-check-pr.yml");
+        fs::write(&github_workflow, "# user edited this\n").unwrap();
+
+        let no_be = UpdateArgs {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+        };
+        let second = run_update(&no_be, tmp.path()).unwrap();
+
+        let kept: Vec<&str> = second
+            .plan
+            .items()
+            .iter()
+            .filter(|i| i.decision == Decision::OrphanedKept)
+            .filter_map(|i| match &i.target {
+                crate::plan::Target::File { path } => Some(path.as_str()),
+                crate::plan::Target::Region { .. } => None,
+            })
+            .collect();
+        assert!(
+            kept.contains(&".github/workflows/ox-check-pr.yml"),
+            "expected customized orphan to surface as OrphanedKept; got: {kept:?}"
+        );
+        assert!(github_workflow.is_file(), "customized orphan must not be deleted from disk");
+        assert_eq!(
+            fs::read_to_string(&github_workflow).unwrap(),
+            "# user edited this\n",
+            "customized orphan contents must be preserved"
+        );
     }
 }

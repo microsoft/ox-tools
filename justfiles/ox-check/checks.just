@@ -55,8 +55,12 @@
 
 # === pr-fast members ====================================================
 
-# Modified tier. cargo-fmt is a rustup component; if cargo is on PATH,
-# fmt is too, so no require is needed.
+# Modified tier. cargo-fmt is a rustup component. We invoke it via the
+# pinned nightly (see versions.just) because rustfmt.toml uses
+# unstable_features = true (imports_granularity, group_imports,
+# format_code_in_doc_comments). Floating nightly would mean
+# format-drift breaking CI on rustup updates — the same trap we
+# explicitly avoid for udeps/miri/careful/external-types.
 [script("pwsh")]
 ox-check-fmt:
     $ErrorActionPreference = 'Stop'
@@ -64,7 +68,7 @@ ox-check-fmt:
         Write-Host 'ox-check-fmt: no modified packages; skipping'
         exit 0
     }
-    cargo fmt --all --check
+    cargo '+{{ rust_nightly }}' fmt --all --check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier. Per project policy, clippy runs on the affected set
@@ -213,8 +217,8 @@ ox-check-audit: (_ox-check-require "cargo-audit")
 
 # Required tier. cargo-udeps detects unused dependencies by resolving
 # the full crate graph and seeing which deps are referenced; that's
-# precisely what the required tier is for. Depends on the floating
-# nightly toolchain.
+# precisely what the required tier is for. Pinned to the general
+# nightly defined in versions.just.
 [script("pwsh")]
 ox-check-udeps: (_ox-check-require "cargo-udeps")
     $ErrorActionPreference = 'Stop'
@@ -223,7 +227,7 @@ ox-check-udeps: (_ox-check-require "cargo-udeps")
         exit 0
     }
     $pkg = @(if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { '--workspace' })
-    & cargo '+nightly' udeps @pkg --all-targets --all-features
+    & cargo '+{{ rust_nightly }}' udeps @pkg --all-targets --all-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier (compares published API of changed crates against the
@@ -329,26 +333,15 @@ ox-check-external-types: (_ox-check-require "cargo-check-external-types")
     $failed = $false
     foreach ($p in $packages) {
         Write-Host "ox-check-external-types: $p"
-        # cargo-check-external-types requires a nightly Rust toolchain
-        # (uses unstable rustdoc -Z flags). Invoke via +nightly so
-        # rustup auto-installs nightly on demand. Adopters using
-        # msrustup without a nightly channel override this recipe.
-        #
-        # The tool pins a specific rustdoc-types schema version that
-        # tracks a narrow window of nightly rustdoc JSON output. Newer
-        # nightlies routinely drift past it, producing a "produces JSON
-        # format version X, but this tool requires format version Y"
-        # error that's a tooling-incompat issue, not a real API violation.
-        # We swallow that specific error as a warning and continue.
-        $output = (& cargo +nightly check-external-types --manifest-path $libPkgs[$p] 2>&1) | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            if ($output -match 'JSON format version \d+, but this tool requires format version \d+') {
-                Write-Host "  rustdoc/cargo-check-external-types JSON schema mismatch; skipping (nightly drift)" -ForegroundColor Yellow
-            } else {
-                Write-Host $output
-                $failed = $true
-            }
-        }
+        # cargo-check-external-types requires nightly rustdoc (uses
+        # unstable -Z flags) AND pins a specific rustdoc-types schema
+        # version. We pin nightly narrowly to the schema this tool
+        # version expects via `rust_nightly_external_types` in
+        # versions.just — bump that pin alongside any cargo-check-
+        # external-types upgrade. No tolerance for schema mismatches:
+        # if it fails, the pin or the tool needs to move.
+        & cargo '+{{ rust_nightly_external_types }}' check-external-types --manifest-path $libPkgs[$p]
+        if ($LASTEXITCODE -ne 0) { $failed = $true }
     }
     if ($failed) { exit 1 }
 
@@ -480,7 +473,7 @@ ox-check-miri:
         exit 0
     }
     $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
-    & cargo '+nightly' miri nextest run @pkg
+    & cargo '+{{ rust_nightly }}' miri nextest run @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 [script("pwsh")]
@@ -491,7 +484,7 @@ ox-check-careful: (_ox-check-require "cargo-careful")
         exit 0
     }
     $pkg = @(if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { '--workspace' })
-    & cargo '+nightly' careful test @pkg --all-features --locked
+    & cargo '+{{ rust_nightly }}' careful test @pkg --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # === nightly-exhaustive members =========================================

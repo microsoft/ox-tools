@@ -35,7 +35,7 @@ checksum = "sha256:4fe2251d5ca54cdf5bcb31444ac4af380c834c910736d4a8b38f80c03ac57
 
 [[file]]
 path = ".github/actions/ox-check-setup/action.yml"
-checksum = "sha256:f773aaeb8401dda5adce94e1bec5c151703b88023431ceb726d357ba0b0d76ee"
+checksum = "sha256:5d0420b3ce92a7602da3832140b5fb2f04df9405a73fa002d097d7e4557aed6c"
 
 [[file]]
 path = ".github/workflows/ox-check-nightly-impl.yml"
@@ -55,7 +55,7 @@ checksum = "sha256:5ea0bea66f0223df032382056e12c88afb0481138c56898b95837fc767e30
 
 [[file]]
 path = "justfiles/ox-check/checks.just"
-checksum = "sha256:8cd4d63d0a6acb6a5bc48f820f25fb35d74058136286dfc66877bf0976932a93"
+checksum = "sha256:1187918a9e9f6f7f58efd50b346b9398b0b49e2e698d5a1c56db4ad3099c446f"
 
 [[file]]
 path = "justfiles/ox-check/groups.just"
@@ -63,7 +63,7 @@ checksum = "sha256:6039f2514da4b061832cbb5ccbf9f435be1cffce16e5e85c40aa573b84c1a
 
 [[file]]
 path = "justfiles/ox-check/mod.just"
-checksum = "sha256:dc94ff109f5a406f47f72380cc562fb4bc29368d8ccad78f0ec6173ada4a8b20"
+checksum = "sha256:2733bad873a59e91db558e38b48f9b01a1a23f0830333afa33c0790495bcaa5b"
 
 [[file]]
 path = "justfiles/ox-check/tiers.just"
@@ -77,6 +77,10 @@ checksum = "sha256:8b841b8ad787927621e2591af3c376c7e205e3014f86fd486436ec6ec3cab
 path = "justfiles/ox-check/tools.just"
 checksum = "sha256:2cb6c8ea9e668fd87fd5f90a7e3c0db3261ec53d525f61addf04dc684985533b"
 
+[[file]]
+path = "justfiles/ox-check/versions.just"
+checksum = "sha256:1beb4b77334726d3f4d369922f104a0db93f911cdc46a97cf93a3c963f20d6c6"
+
 [[region]]
 host = ".delta.toml"
 id = "ox-check-delta"
@@ -85,12 +89,17 @@ checksum = "sha256:ef049abc4bba5e6dac7dfc07a4852d821de4682fe6ad46aace7ddfb2455cb
 [[region]]
 host = "Cargo.toml"
 id = "ox-check-workspace-lints"
-checksum = "sha256:555535ebbddc1399a8488fce724969357e37cdf370827b89cdeff45623d3713c"
+checksum = "sha256:10bc3350181bb208a33a9ad0848b35db5fe076b276dc093e2070da2d052f91a9"
 
 [[region]]
 host = "Justfile"
 id = "ox-check-imports"
 checksum = "sha256:6ced9b1d085f58e73abcc28ba838b14414c4c338f8474322de05014639b367aa"
+
+[[region]]
+host = "clippy.toml"
+id = "ox-check-clippy"
+checksum = "sha256:aba0733632eac4cb54c4768db578fe1f7b7cfe730aa0d7dc13e2828c9062d67d"
 
 [[region]]
 host = "crates/automation/Cargo.toml"
@@ -120,4 +129,9 @@ checksum = "sha256:3d38154ac70567b4b6b39699e244040a1ed869471d3501f7147b5c3c9a748
 [[region]]
 host = "rustfmt.toml"
 id = "ox-check-rustfmt"
-checksum = "sha256:4052419861d11d4f113db0b13252871781c5edd4e3a2ca8596cb54450244be6d"
+checksum = "sha256:d67fe13388a69380fdf7e53b80d309fd69a2c1cb39d92bb0d79a4a0a5dbf5433"
+
+[[region]]
+host = "spellcheck.toml"
+id = "ox-check-spellcheck"
+checksum = "sha256:fabd920064a418d15e56783ffd1b364448b3a96f5645da7448663c89569185d3"
