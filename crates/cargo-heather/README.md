@@ -15,7 +15,9 @@
 
 ## cargo-heather
 
-A cargo sub-command to validate license headers in Rust (`.rs`) and TOML (`.toml`) source files.
+A cargo sub-command to validate license headers in Rust (`.rs`), TOML (`.toml`),
+PowerShell (`.ps1`, `.psd1`, `.psm1`), Just (`justfile`, `*.just`), and env
+(`constants.env`) source files.
 
 ### Setup
 
@@ -57,7 +59,7 @@ exist on disk produce a warning and are ignored.
 ### Usage
 
 ```bash
-# Check all .rs and .toml files for correct license headers
+# Check all supported source files for correct license headers
 cargo heather
 
 # Automatically fix files by adding/replacing headers
@@ -116,9 +118,21 @@ Fixed 2 file(s).
 ### How it works
 
 1. **Config loading** — Reads `.cargo-heather.toml` from the project root and resolves the expected header text (from SPDX identifier or custom text).
-1. **File scanning** — Walks the project directory to find all `.rs` and `.toml` files, skipping `target/`, hidden directories, and the config file itself.
-1. **Header validation** — Extracts the first comment block from each file (`//` for Rust, `#` for TOML) and compares it to the expected header. Reports missing or mismatched headers.
+1. **File scanning** — Walks the project directory for supported source files (see [Supported file kinds](#supported-file-kinds) below), skipping `target/`, hidden directories, and the config file itself.
+1. **Header validation** — Extracts the header comment block from each file (placement depends on the file kind) and compares it to the expected header. Reports missing or mismatched headers.
 1. **Fix mode** — When `--fix` is passed, automatically prepends the correct header to files that are missing it, or replaces incorrect headers.
+
+### Supported file kinds
+
+| File                          | Comment style | Header placement                                   |
+| ----------------------------- | ------------- | -------------------------------------------------- |
+| `.rs` (regular)               | `//`          | Top of file                                        |
+| `.rs` (cargo-script)          | `#`           | Inside the `---` frontmatter                       |
+| `.toml`                       | `#`           | Top of file                                        |
+| `.ps1`, `.psd1`, `.psm1`      | `#`           | Top of file, or after a leading `#!` shebang       |
+| `*.just`, `justfile`          | `#`           | Top of file                                        |
+| `constants.env`               | `#`           | Top of file                                        |
+
 
 
 <hr/>

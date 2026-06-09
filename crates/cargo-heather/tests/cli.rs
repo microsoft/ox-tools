@@ -392,6 +392,12 @@ fn scanner_includes_legacy_hash_comment_file_types() {
         &p.join("build.ps1"),
         &format!("#!/usr/bin/env pwsh\n{HEADER_TEXT_HASH}\nWrite-Host 'ok'\n"),
     );
+    // `.psd1` is plain PowerShell data syntax (used for module manifests
+    // and config-style hashtables) and `.psm1` is a PowerShell module file;
+    // both use the same `#` line-comment syntax as `.ps1` and must be
+    // scanned alongside it.
+    write(&p.join("Settings.psd1"), &format!("{HEADER_TEXT_HASH}\n@{{ Name = 'Settings' }}\n"));
+    write(&p.join("Module.psm1"), &format!("{HEADER_TEXT_HASH}\nfunction Get-Foo {{ }}\n"));
     write(&p.join("recipes.just"), &format!("{HEADER_TEXT_HASH}\nbuild:\n    cargo build\n"));
     write(&p.join("justfile"), &format!("{HEADER_TEXT_HASH}\ntest:\n    cargo test\n"));
     write(&p.join("constants.env"), &format!("{HEADER_TEXT_HASH}\nRUST_LATEST=1.88.0\n"));
@@ -402,9 +408,9 @@ fn scanner_includes_legacy_hash_comment_file_types() {
         out.status.success(),
         "legacy hash-comment files should be checked and pass: {stderr}"
     );
-    assert!(stderr.contains("Checking 4 file(s)"), "{stderr}");
+    assert!(stderr.contains("Checking 6 file(s)"), "{stderr}");
     assert!(
-        stderr.contains("All 4 file(s) have correct license headers."),
+        stderr.contains("All 6 file(s) have correct license headers."),
         "summary missing for legacy hash-comment files: {stderr}"
     );
 }
@@ -420,6 +426,35 @@ fn scanner_reports_missing_header_in_legacy_hash_comment_file_type() {
     let stderr = stderr_of(&out);
     assert!(!out.status.success(), "missing PowerShell header should fail: {stderr}");
     assert!(stderr.contains("MISSING header: build.ps1"), "missing log absent: {stderr}");
+}
+
+#[test]
+fn scanner_reports_missing_header_in_powershell_data_file() {
+    // Regression guard: `.psd1` must be classified as PowerShell so a
+    // missing header is reported (rather than the file being silently
+    // skipped, which was the pre-fix behaviour).
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    write(&p.join(".cargo-heather.toml"), CONFIG_MIT);
+    write(&p.join("Settings.psd1"), "@{ Name = 'Settings' }\n");
+
+    let out = run_heather(p, &[]);
+    let stderr = stderr_of(&out);
+    assert!(!out.status.success(), "missing .psd1 header should fail: {stderr}");
+    assert!(stderr.contains("MISSING header: Settings.psd1"), "missing log absent: {stderr}");
+}
+
+#[test]
+fn scanner_reports_missing_header_in_powershell_module_file() {
+    let dir = TempDir::new().unwrap();
+    let p = dir.path();
+    write(&p.join(".cargo-heather.toml"), CONFIG_MIT);
+    write(&p.join("Module.psm1"), "function Get-Foo { }\n");
+
+    let out = run_heather(p, &[]);
+    let stderr = stderr_of(&out);
+    assert!(!out.status.success(), "missing .psm1 header should fail: {stderr}");
+    assert!(stderr.contains("MISSING header: Module.psm1"), "missing log absent: {stderr}");
 }
 
 #[test]
