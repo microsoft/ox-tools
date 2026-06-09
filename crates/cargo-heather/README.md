@@ -171,7 +171,8 @@ assert!(output.starts_with(b"// Licensed under the MIT License.\n"));
 
 * [`FileKind::Rust`][__link4] — regular Rust source (`//` comments).
 * [`FileKind::Toml`][__link5] — TOML files (`#` comments).
-* [`FileKind::PowerShell`][__link6] — `PowerShell` scripts (`#` comments).
+* [`FileKind::PowerShell`][__link6] — `PowerShell` scripts (`.ps1`), data
+  files (`.psd1`), and module files (`.psm1`) (all use `#` comments).
 * [`FileKind::Just`][__link7] — Just recipes (`#` comments).
 * [`FileKind::Env`][__link8] — `constants.env` files (`#` comments).
 * [`FileKind::CargoScript`][__link9] — Rust script with shebang + `---`
@@ -192,7 +193,7 @@ is supplied.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-heather">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbbnoq_88MiXUbxzT9hRe2HqEbqOK1RXPKs1gblg15FIYbTkZhZIGDbWNhcmdvLWhlYXRoZXJlMC4yLjFtY2FyZ29faGVhdGhlcg
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG7aSTFqFBwxtGyRr4P7G4gh_G-uvsHgUSHrXG3xe3w-XHAcrYWSBg21jYXJnby1oZWF0aGVyZTAuMi4xbWNhcmdvX2hlYXRoZXI
  [__link0]: https://doc.rust-lang.org/stable/std/?search=io::Read
  [__link1]: https://doc.rust-lang.org/stable/std/?search=io::Write
  [__link10]: https://docs.rs/cargo-heather/0.2.1/cargo_heather/?search=FileKind::detect

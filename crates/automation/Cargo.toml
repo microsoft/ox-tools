@@ -37,6 +37,4 @@ serde_json = { workspace = true, features = ["std"] }
 # >>> ox-check-managed: ox-check-lints
 [lints]
 workspace = true
-
-
 # <<< ox-check-managed: ox-check-lints

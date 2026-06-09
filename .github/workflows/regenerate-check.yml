@@ -1,17 +1,17 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 #
-# Verifies that the in-tree state of cargo-ox-check's emitted artifacts
+# Verifies that the in-tree state of cargo-ox-check-update's emitted artifacts
 # matches what the binary built from this PR would render. The job:
 #
-# 1. Builds cargo-ox-check from the PR branch.
-# 2. Runs `cargo ox-check update --dry-run` against the repo root.
+# 1. Builds cargo-ox-check-update from the PR branch.
+# 2. Runs `cargo ox-check-update --dry-run` against the repo root.
 # 3. Fails iff the binary would write or propose anything.
 #
 # This is the primary dogfooding mechanism described in
-# crates/cargo_ox_check/docs/verification.md.
+# crates/cargo-ox-check-update/docs/verification.md.
 #
-# Adopters (the maintainers running `cargo ox-check update` after a
+# Adopters (the maintainers running `cargo ox-check-update` after a
 # catalog change) are responsible for landing the regenerated files
 # alongside the catalog change in the same PR.
 name: regenerate-check
@@ -19,7 +19,7 @@ name: regenerate-check
 on:
   pull_request:
     paths:
-      - "crates/cargo_ox_check/**"
+      - "crates/cargo-ox-check-update/**"
       - ".github/workflows/regenerate-check.yml"
   merge_group: {}
   workflow_dispatch: {}
@@ -36,16 +36,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build cargo-ox-check
-        run: cargo build --locked -p cargo-ox-check
+      - name: Build cargo-ox-check-update
+        run: cargo build --locked -p cargo-ox-check-update
       - name: Verify in-tree state matches templates
         run: |
           # Add target/debug to PATH so cargo finds the freshly built binary
           # as a cargo subcommand.
           export PATH="$PWD/target/debug:$PATH"
-          if ! cargo ox-check update --dry-run ; then
+          if ! cargo ox-check-update --dry-run ; then
             echo "::error::Repository ox-check state is out of date." \
-                 "Run 'cargo run -p cargo-ox-check -- ox-check update'" \
+                 "Run 'cargo run -p cargo-ox-check-update -- ox-check-update'" \
                  "and commit the diff."
             exit 1
           fi

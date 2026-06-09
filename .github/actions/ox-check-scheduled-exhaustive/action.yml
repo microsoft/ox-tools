@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-ox-check; edit via `cargo ox-check update`.
-# The token scheduled-exhaustive is substituted by cargo-ox-check at emit time with
+# Owned by cargo-ox-check-update; edit via `cargo ox-check-update`.
+# The token scheduled-exhaustive is substituted by cargo-ox-check-update at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
 name: ox-check-scheduled-exhaustive
 description: Run the scheduled-exhaustive check group.

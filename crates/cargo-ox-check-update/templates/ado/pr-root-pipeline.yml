@@ -1,0 +1,10 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check-update; edit via `cargo ox-check-update`.
+trigger: none
+
+stages:
+  - template: ox-check/pr.yml
+    parameters:
+      linuxPool: { vmImage: ubuntu-latest }
+      windowsPool: { vmImage: windows-latest }
