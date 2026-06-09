@@ -107,7 +107,12 @@ mod tests {
     #[test]
     fn rustfmt_body_sets_edition_and_width() {
         assert!(RUSTFMT_BODY.contains("edition = \"2024\""));
-        assert!(RUSTFMT_BODY.contains("max_width = 110"));
+        // Catalog default is 140, matching the explicit choice in
+        // oxidizer-github and ox-tools (the two surveyed repos that
+        // opted to set a width). oxidizer/assistants-oxide/ox-docs
+        // didn't set one, defaulting to rustfmt's 100; they can
+        // override outside the managed region if they prefer that.
+        assert!(RUSTFMT_BODY.contains("max_width = 140"));
     }
 
     #[test]

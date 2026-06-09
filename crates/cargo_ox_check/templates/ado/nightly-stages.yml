@@ -1,6 +1,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
+#
+# Every job is rendered through `steps/job.yml` (user-customizable wrapper);
+# see pr-stages.yml for the rationale and template-path note.
 parameters:
   - name: linuxPool
     type: object
@@ -13,20 +16,24 @@ stages:
   - stage: nightly_test
     displayName: ox-check nightly-test
     jobs:
-      - job: linux
-        pool: ${{ parameters.linuxPool }}
-        steps:
-          - template: steps/nightly-test.yml
-          - task: PublishCodeCoverageResults@2
-            condition: succeededOrFailed()
-            displayName: Publish coverage
-            inputs:
-              summaryFileLocation: target/coverage/cobertura.xml
-              failIfCoverageEmpty: false
-      - job: windows
-        pool: ${{ parameters.windowsPool }}
-        steps:
-          - template: steps/nightly-test.yml
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/nightly-test.yml
+            - task: PublishCodeCoverageResults@2
+              condition: succeededOrFailed()
+              displayName: Publish coverage
+              inputs:
+                summaryFileLocation: target/coverage/cobertura.xml
+                failIfCoverageEmpty: false
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/nightly-test.yml
 
   - stage: nightly_advisories
     displayName: ox-check nightly-advisories
@@ -34,14 +41,18 @@ stages:
     jobs:
       # Cross-OS because clippy and udeps in this group compile per host,
       # so cfg-gated code must be linted/scanned on both OSes.
-      - job: linux
-        pool: ${{ parameters.linuxPool }}
-        steps:
-          - template: steps/nightly-advisories.yml
-      - job: windows
-        pool: ${{ parameters.windowsPool }}
-        steps:
-          - template: steps/nightly-advisories.yml
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/nightly-advisories.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/nightly-advisories.yml
 
   - stage: nightly_runtime
     displayName: ox-check nightly-runtime
@@ -56,14 +67,18 @@ stages:
       # default ARM coverage that the GitHub backend ships is not
       # available here. Adopters with self-hosted ARM pools extend
       # this stage in their root pipeline.
-      - job: linux
-        pool: ${{ parameters.linuxPool }}
-        steps:
-          - template: steps/nightly-runtime.yml
-      - job: windows
-        pool: ${{ parameters.windowsPool }}
-        steps:
-          - template: steps/nightly-runtime.yml
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/nightly-runtime.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/nightly-runtime.yml
 
   - stage: nightly_exhaustive
     displayName: ox-check nightly-exhaustive
@@ -74,11 +89,15 @@ stages:
       # from running on both OSes for cfg(target_os) coverage. Adopters
       # who can't afford the Windows leg override the matrix in their
       # root pipeline.
-      - job: linux
-        pool: ${{ parameters.linuxPool }}
-        steps:
-          - template: steps/nightly-exhaustive.yml
-      - job: windows
-        pool: ${{ parameters.windowsPool }}
-        steps:
-          - template: steps/nightly-exhaustive.yml
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/nightly-exhaustive.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/nightly-exhaustive.yml

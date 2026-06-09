@@ -18,6 +18,9 @@ root-files = [
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
+#
+# Every job is rendered through `steps/job.yml` (user-customizable wrapper);
+# see pr-stages.yml for the rationale and template-path note.
 parameters:
   - name: linuxPool
     type: object
@@ -30,20 +33,24 @@ stages:
   - stage: nightly_test
     displayName: ox-check nightly-test
     jobs:
-      - job: linux
-        pool: ${{ parameters.linuxPool }}
-        steps:
-          - template: steps/nightly-test.yml
-          - task: PublishCodeCoverageResults@2
-            condition: succeededOrFailed()
-            displayName: Publish coverage
-            inputs:
-              summaryFileLocation: target/coverage/cobertura.xml
-              failIfCoverageEmpty: false
-      - job: windows
-        pool: ${{ parameters.windowsPool }}
-        steps:
-          - template: steps/nightly-test.yml
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/nightly-test.yml
+            - task: PublishCodeCoverageResults@2
+              condition: succeededOrFailed()
+              displayName: Publish coverage
+              inputs:
+                summaryFileLocation: target/coverage/cobertura.xml
+                failIfCoverageEmpty: false
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/nightly-test.yml
 
   - stage: nightly_advisories
     displayName: ox-check nightly-advisories
@@ -51,14 +58,18 @@ stages:
     jobs:
       # Cross-OS because clippy and udeps in this group compile per host,
       # so cfg-gated code must be linted/scanned on both OSes.
-      - job: linux
-        pool: ${{ parameters.linuxPool }}
-        steps:
-          - template: steps/nightly-advisories.yml
-      - job: windows
-        pool: ${{ parameters.windowsPool }}
-        steps:
-          - template: steps/nightly-advisories.yml
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/nightly-advisories.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/nightly-advisories.yml
 
   - stage: nightly_runtime
     displayName: ox-check nightly-runtime
@@ -73,14 +84,18 @@ stages:
       # default ARM coverage that the GitHub backend ships is not
       # available here. Adopters with self-hosted ARM pools extend
       # this stage in their root pipeline.
-      - job: linux
-        pool: ${{ parameters.linuxPool }}
-        steps:
-          - template: steps/nightly-runtime.yml
-      - job: windows
-        pool: ${{ parameters.windowsPool }}
-        steps:
-          - template: steps/nightly-runtime.yml
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/nightly-runtime.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/nightly-runtime.yml
 
   - stage: nightly_exhaustive
     displayName: ox-check nightly-exhaustive
@@ -91,19 +106,35 @@ stages:
       # from running on both OSes for cfg(target_os) coverage. Adopters
       # who can't afford the Windows leg override the matrix in their
       # root pipeline.
-      - job: linux
-        pool: ${{ parameters.linuxPool }}
-        steps:
-          - template: steps/nightly-exhaustive.yml
-      - job: windows
-        pool: ${{ parameters.windowsPool }}
-        steps:
-          - template: steps/nightly-exhaustive.yml
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/nightly-exhaustive.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/nightly-exhaustive.yml
 
 === .pipelines/ox-check/pr.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check; edit via `cargo ox-check update`.
+#
+# Every job in this stages template is rendered through `steps/job.yml`.
+# That wrapper is *user-customizable*: adopters who need to inject 1ESPT
+# `templateContext:` blocks, custom SDL knobs, build-provenance attrs, etc.
+# edit `steps/job.yml` once and ox-check stops overwriting it. This stages
+# template stays owned and continues to track new groups, dependsOn rewires,
+# impact-output threading changes, etc.
+#
+# Template-path note: each entry in the `steps:` parameter below contains a
+# `template:` reference. ADO resolves template paths relative to the file
+# containing the `template:` keyword, which (for parameters defined at the
+# call site) is *this* file. So paths like `steps/pr-fast.yml` are correct.
 parameters:
   - name: linuxPool
     type: object
@@ -115,11 +146,13 @@ parameters:
 stages:
   - stage: impact
     displayName: ox-check impact
-    pool: ${{ parameters.linuxPool }}
     jobs:
-      - job: compute
-        steps:
-          - template: steps/impact.yml
+      - template: steps/job.yml
+        parameters:
+          name: compute
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/impact.yml
 
   - stage: pr_fast
     displayName: ox-check pr-fast
@@ -134,22 +167,26 @@ stages:
       # (clippy, doc-build, udeps, semver-check, external-types) whose
       # results can differ across host OS for crates that use
       # #[cfg(target_os = ...)] gating.
-      - job: linux
-        pool: ${{ parameters.linuxPool }}
-        steps:
-          - template: steps/pr-fast.yml
-            parameters:
-              include_modified: $(include_modified)
-              include_affected: $(include_affected)
-              include_required: $(include_required)
-      - job: windows
-        pool: ${{ parameters.windowsPool }}
-        steps:
-          - template: steps/pr-fast.yml
-            parameters:
-              include_modified: $(include_modified)
-              include_affected: $(include_affected)
-              include_required: $(include_required)
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/pr-fast.yml
+              parameters:
+                include_modified: $(include_modified)
+                include_affected: $(include_affected)
+                include_required: $(include_required)
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/pr-fast.yml
+              parameters:
+                include_modified: $(include_modified)
+                include_affected: $(include_affected)
+                include_required: $(include_required)
 
   - stage: pr_test
     displayName: ox-check pr-test
@@ -160,28 +197,35 @@ stages:
       include_affected: $[ stageDependencies.impact.compute.outputs['compute.include_affected'] ]
       include_required: $[ stageDependencies.impact.compute.outputs['compute.include_required'] ]
     jobs:
-      - job: linux
-        pool: ${{ parameters.linuxPool }}
-        steps:
-          - template: steps/pr-test.yml
-            parameters:
-              include_modified: $(include_modified)
-              include_affected: $(include_affected)
-              include_required: $(include_required)
-          - task: PublishCodeCoverageResults@2
-            condition: and(succeededOrFailed(), ne(variables.include_affected, '--skip'))
-            displayName: Publish coverage
-            inputs:
-              summaryFileLocation: target/coverage/cobertura.xml
-              failIfCoverageEmpty: false
-      - job: windows
-        pool: ${{ parameters.windowsPool }}
-        steps:
-          - template: steps/pr-test.yml
-            parameters:
-              include_modified: $(include_modified)
-              include_affected: $(include_affected)
-              include_required: $(include_required)
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/pr-test.yml
+              parameters:
+                include_modified: $(include_modified)
+                include_affected: $(include_affected)
+                include_required: $(include_required)
+            # Coverage publish stays as a sibling task — it's a results
+            # publish (not a pipeline artifact), so 1ESPT permits it at
+            # step level and we don't need to route it through `artifacts:`.
+            - task: PublishCodeCoverageResults@2
+              condition: and(succeededOrFailed(), ne(variables.include_affected, '--skip'))
+              displayName: Publish coverage
+              inputs:
+                summaryFileLocation: target/coverage/cobertura.xml
+                failIfCoverageEmpty: false
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/pr-test.yml
+              parameters:
+                include_modified: $(include_modified)
+                include_affected: $(include_affected)
+                include_required: $(include_required)
 
   - stage: pr_mutants
     displayName: ox-check pr-mutants
@@ -195,22 +239,26 @@ stages:
       # Cross-OS to match oxidizer's policy: mutation testing on
       # cfg(target_os) gated code matters. Diff-scoped (--in-diff) keeps
       # each leg's runtime bounded.
-      - job: linux
-        pool: ${{ parameters.linuxPool }}
-        steps:
-          - template: steps/pr-mutants.yml
-            parameters:
-              include_modified: $(include_modified)
-              include_affected: $(include_affected)
-              include_required: $(include_required)
-      - job: windows
-        pool: ${{ parameters.windowsPool }}
-        steps:
-          - template: steps/pr-mutants.yml
-            parameters:
-              include_modified: $(include_modified)
-              include_affected: $(include_affected)
-              include_required: $(include_required)
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/pr-mutants.yml
+              parameters:
+                include_modified: $(include_modified)
+                include_affected: $(include_affected)
+                include_required: $(include_required)
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/pr-mutants.yml
+              parameters:
+                include_modified: $(include_modified)
+                include_affected: $(include_affected)
+                include_required: $(include_required)
 
 === .pipelines/ox-check/steps/impact.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -231,8 +279,25 @@ steps:
   - bash: |
       set -euo pipefail
       cargo install --locked cargo-delta
-      base="${BASE_REF:-$(System.PullRequest.TargetBranch)}"
-      result="$(cargo delta impact --base "$base" --format json 2>/dev/null || echo '{}')"
+      # System.PullRequest.TargetBranch is the unqualified target branch
+      # name (e.g. "main") on PR build-validation runs. Adopters can
+      # override via BASE_REF.
+      base="${BASE_REF:-origin/$(System.PullRequest.TargetBranch)}"
+      # Two snapshots + impact compare (cargo-delta has no --base
+      # shortcut). The baseline runs in a worktree at the merge target
+      # so the checked-out tree is untouched.
+      cargo delta snapshot > "$AGENT_TEMPDIRECTORY/ox-check-current.json"
+      git worktree add --detach "$AGENT_TEMPDIRECTORY/ox-check-baseline" "$base"
+      ( cd "$AGENT_TEMPDIRECTORY/ox-check-baseline" && cargo delta snapshot ) \
+          > "$AGENT_TEMPDIRECTORY/ox-check-baseline.json"
+      git worktree remove --force "$AGENT_TEMPDIRECTORY/ox-check-baseline"
+      result="$(cargo delta impact \
+          --baseline "$AGENT_TEMPDIRECTORY/ox-check-baseline.json" \
+          --current  "$AGENT_TEMPDIRECTORY/ox-check-current.json" \
+          --format json)"
+      # cargo-delta emits TitleCase keys (Modified / Affected /
+      # Required). Format each tier into the --package args shape
+      # recipes expect, with --skip as the empty-set sentinel.
       format_set() {
           local field="$1"
           local pkgs
@@ -250,14 +315,68 @@ steps:
               printf '%s' "${out# }"
           fi
       }
-      include_modified="$(format_set modified)"
-      include_affected="$(format_set affected)"
-      include_required="$(format_set required)"
+      include_modified="$(format_set Modified)"
+      include_affected="$(format_set Affected)"
+      include_required="$(format_set Required)"
       echo "##vso[task.setvariable variable=include_modified;isOutput=true]$include_modified"
       echo "##vso[task.setvariable variable=include_affected;isOutput=true]$include_affected"
       echo "##vso[task.setvariable variable=include_required;isOutput=true]$include_required"
     name: compute
     displayName: ox-check impact (cargo-delta)
+
+=== .pipelines/ox-check/steps/job.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# Default job wrapper emitted by cargo-ox-check.
+#
+# Owns the per-job *shape*: how `pool`, `steps`, and `artifacts` map onto the
+# concrete `job:` block. Pipelines that use extension templates (1ES PT,
+# SubstratePT, M365PT, etc.) take ownership of THIS file once and add their
+# required `templateContext:` block — the owned stages templates
+# (pr-stages.yml / nightly-stages.yml) then continue to update normally
+# because they only know about this wrapper's parameter contract.
+#
+# Once you edit this file, cargo-ox-check treats it as user-owned: subsequent
+# updates Propose into a `.proposed` sibling rather than overwriting.
+#
+# Contract (intentionally small and stable):
+#   - name      (string)   Job name; ADO derives the display name from it.
+#   - pool      (object)   Pool block, passed verbatim to ADO's `pool:` key.
+#   - steps     (stepList) Body of the job. Templated step lists are fine.
+#   - artifacts (object)   Optional list of pipeline artifacts to publish.
+#                          Each item: { name: string, path: string }.
+#                          The default wrapper appends one
+#                          PublishPipelineArtifact@1 task per entry; 1ESPT
+#                          wrappers translate these into
+#                          templateContext.outputs.pipelineArtifact blocks
+#                          at job level. The contract is the same either way,
+#                          so the stages templates don't need to know which
+#                          backend they're targeting.
+parameters:
+  - name: name
+    type: string
+  - name: pool
+    type: object
+  - name: steps
+    type: stepList
+  - name: artifacts
+    type: object
+    default: []
+
+jobs:
+  - job: ${{ parameters.name }}
+    pool: ${{ parameters.pool }}
+    steps:
+      - ${{ each step in parameters.steps }}:
+          - ${{ step }}
+      - ${{ each artifact in parameters.artifacts }}:
+          - task: PublishPipelineArtifact@1
+            displayName: Publish ${{ artifact.name }}
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: ${{ artifact.path }}
+              artifact: ${{ artifact.name }}
 
 === .pipelines/ox-check/steps/nightly-advisories.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -443,24 +562,41 @@ steps:
     displayName: ox-check setup (capture rustc version)
   - task: Cache@2
     inputs:
-      # Same key shape as the GitHub side: OS + rustc version + lockfile
-      # hashes + catalog hash. Cache invalidates cleanly on toolchain
-      # bumps, dependency churn, or tool-minimums.txt updates.
-      key: 'ox-check-v1 | "$(Agent.OS)" | rust$(ox_check_rustc_version) | Cargo.lock | .cargo/config.toml | rust-toolchain.toml | justfiles/ox-check/tool-minimums.txt'
+      # Same key shape as the GitHub side: OS + arch + rustc version +
+      # lockfile hashes + catalog hash. Including arch keeps any
+      # future ARM pool an adopter adds from colliding with x86_64 on
+      # the same OS namespace.
+      key: 'ox-check-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(ox_check_rustc_version) | Cargo.lock | .cargo/config.toml | rust-toolchain.toml | justfiles/ox-check/tool-minimums.txt'
       restoreKeys: |
-        ox-check-v1 | "$(Agent.OS)" | rust$(ox_check_rustc_version)
-        ox-check-v1 | "$(Agent.OS)"
+        ox-check-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(ox_check_rustc_version)
+        ox-check-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)"
       path: |
         $(HOME)/.cargo/registry/cache/
         $(HOME)/.cargo/registry/index/
         $(HOME)/.cargo/bin/
         target/
     displayName: ox-check setup (cache cargo home and target)
+
+  # System dependencies for catalog source builds. See the GitHub
+  # composite setup-action.yml for the rationale — same pattern.
+  - bash: sudo apt-get update && sudo apt-get install -y libclang-dev
+    condition: eq(variables['Agent.OS'], 'Linux')
+    displayName: ox-check setup (install libclang on Linux)
+
+  - bash: rustup component add rustfmt clippy
+    displayName: ox-check setup (ensure rustfmt + clippy components)
+
   - bash: |
       if ! command -v just >/dev/null 2>&1 ; then
         cargo install --locked just
       fi
       just ox-check-tools-install
+    # ox-check-tools-install exits non-zero if any per-tool install
+    # failed (e.g. cargo-mutants doesn't build on aarch64-pc-windows-
+    # msvc due to an upstream winapi incompatibility). We don't fail
+    # the whole job here — recipes that actually USE a missing tool
+    # will fail cleanly via _ox-check-require at recipe-run time.
+    continueOnError: true
     displayName: ox-check setup (install just + catalog tools)
 
 === .pipelines/ox-check-nightly.yml ===
@@ -553,11 +689,6 @@ clippy.significant_drop_tightening = "allow"
 clippy.wildcard_imports = "allow"
 # <<< ox-check-managed: ox-check-workspace-lints
 
-=== Justfile ===
-# >>> ox-check-managed: ox-check-imports
-import 'justfiles/ox-check/mod.just'
-# <<< ox-check-managed: ox-check-imports
-
 === crates/alpha/Cargo.toml ===
 [package]
 name = "alpha"
@@ -602,6 +733,11 @@ unknown-registry = "deny"
 unknown-git = "deny"
 # <<< ox-check-managed: ox-check-deny
 
+=== justfile ===
+# >>> ox-check-managed: ox-check-imports
+import 'justfiles/ox-check/mod.just'
+# <<< ox-check-managed: ox-check-imports
+
 === justfiles/ox-check/checks.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
@@ -638,16 +774,39 @@ unknown-git = "deny"
 # Local invocation (no impact wiring): all three env vars are unset;
 # modified recipes run unconditionally and affected/required recipes
 # default to --workspace.
+#
+# Every recipe whose body uses multi-line conditionals or env-var
+# splicing is annotated with [script("pwsh")]. pwsh is preinstalled on
+# Windows (since Windows 10), on GH/ADO hosted Linux + Windows
+# runners, and installable on macOS via Homebrew or the upstream
+# installer. We chose pwsh over bash because just's shebang dispatch
+# requires `cygpath` on Windows (only on PATH from inside Git Bash),
+# while [script("pwsh")] works from plain PowerShell with no PATH
+# augmentation. The existing _ox-check-require pwsh precedent already
+# established pwsh as a tools-floor requirement.
+#
+# Single-command recipes (cargo deny check, cargo audit) are plain
+# just recipes that inherit the adopter's default shell — they're
+# shell-agnostic.
+#
+# Note: [script(...)] requires `set unstable`. The adopter's root
+# justfile must declare it (typically as a top-level line). ox-check's
+# mod.just does NOT redeclare it, to avoid conflicting with adopters
+# who already have it.
 
 # === pr-fast members ====================================================
 
 # Modified tier. cargo-fmt is a rustup component; if cargo is on PATH,
 # fmt is too, so no require is needed.
+[script("pwsh")]
 ox-check-fmt:
-    @if [ "$OX_CHECK_INCLUDE_MODIFIED" = "--skip" ]; then \
-        echo "ox-check-fmt: no modified packages; skipping"; exit 0; \
-    fi; \
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
+        Write-Host 'ox-check-fmt: no modified packages; skipping'
+        exit 0
+    }
     cargo fmt --all --check
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier. Per project policy, clippy runs on the affected set
 # rather than the modified set: a change in a crate can introduce a
@@ -655,62 +814,97 @@ ox-check-fmt:
 # obviously-truthy-condition lints that key off the changed type), so
 # we want downstream rev-deps to lint as well. cargo-clippy is a
 # rustup component; same reasoning as fmt for the require.
+[script("pwsh")]
 ox-check-clippy:
-    @if [ "$OX_CHECK_INCLUDE_AFFECTED" = "--skip" ]; then \
-        echo "ox-check-clippy: no affected packages; skipping"; exit 0; \
-    fi; \
-    cargo clippy ${OX_CHECK_INCLUDE_AFFECTED:---workspace} --all-targets --all-features --locked -- -D warnings
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'ox-check-clippy: no affected packages; skipping'
+        exit 0
+    }
+    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    & cargo clippy @pkg --all-targets --all-features --locked -- '-D' 'warnings'
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
+[script("pwsh")]
 ox-check-cargo-sort: (_ox-check-require "cargo-sort")
-    @if [ "$OX_CHECK_INCLUDE_MODIFIED" = "--skip" ]; then \
-        echo "ox-check-cargo-sort: no modified packages; skipping"; exit 0; \
-    fi; \
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
+        Write-Host 'ox-check-cargo-sort: no modified packages; skipping'
+        exit 0
+    }
     cargo sort --workspace --check
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
+[script("pwsh")]
 ox-check-license-headers: (_ox-check-require "cargo-heather")
-    @if [ "$OX_CHECK_INCLUDE_MODIFIED" = "--skip" ]; then \
-        echo "ox-check-license-headers: no modified packages; skipping"; exit 0; \
-    fi; \
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
+        Write-Host 'ox-check-license-headers: no modified packages; skipping'
+        exit 0
+    }
     cargo heather --workspace
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
+[script("pwsh")]
 ox-check-ensure-no-cyclic-deps: (_ox-check-require "cargo-ensure-no-cyclic-deps")
-    @if [ "$OX_CHECK_INCLUDE_MODIFIED" = "--skip" ]; then \
-        echo "ox-check-ensure-no-cyclic-deps: no modified packages; skipping"; exit 0; \
-    fi; \
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
+        Write-Host 'ox-check-ensure-no-cyclic-deps: no modified packages; skipping'
+        exit 0
+    }
     cargo ensure-no-cyclic-deps --workspace
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
+[script("pwsh")]
 ox-check-ensure-no-default-features: (_ox-check-require "cargo-ensure-no-default-features")
-    @if [ "$OX_CHECK_INCLUDE_MODIFIED" = "--skip" ]; then \
-        echo "ox-check-ensure-no-default-features: no modified packages; skipping"; exit 0; \
-    fi; \
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
+        Write-Host 'ox-check-ensure-no-default-features: no modified packages; skipping'
+        exit 0
+    }
     cargo ensure-no-default-features --workspace
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Required tier. cargo doc resolves intra-doc links through the dep
 # graph, so a dep changing its public API can break doc-build in a
 # crate that wasn't itself modified.
+[script("pwsh")]
 ox-check-doc-build:
-    @if [ "$OX_CHECK_INCLUDE_REQUIRED" = "--skip" ]; then \
-        echo "ox-check-doc-build: no required packages; skipping"; exit 0; \
-    fi; \
-    RUSTDOCFLAGS='-D warnings' cargo doc ${OX_CHECK_INCLUDE_REQUIRED:---workspace} --all-features --no-deps
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') {
+        Write-Host 'ox-check-doc-build: no required packages; skipping'
+        exit 0
+    }
+    $pkg = if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { @('--workspace') }
+    $env:RUSTDOCFLAGS = '-D warnings'
+    & cargo doc @pkg --all-features --no-deps
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
+[script("pwsh")]
 ox-check-readme-check: (_ox-check-require "cargo-doc2readme")
-    @if [ "$OX_CHECK_INCLUDE_MODIFIED" = "--skip" ]; then \
-        echo "ox-check-readme-check: no modified packages; skipping"; exit 0; \
-    fi; \
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
+        Write-Host 'ox-check-readme-check: no modified packages; skipping'
+        exit 0
+    }
     cargo doc2readme --check
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
+[script("pwsh")]
 ox-check-spellcheck: (_ox-check-require "cargo-spellcheck")
-    @if [ "$OX_CHECK_INCLUDE_MODIFIED" = "--skip" ]; then \
-        echo "ox-check-spellcheck: no modified packages; skipping"; exit 0; \
-    fi; \
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
+        Write-Host 'ox-check-spellcheck: no modified packages; skipping'
+        exit 0
+    }
     cargo spellcheck check --code 1
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Unscoped (PR title is not source-related).
 [script("pwsh")]
@@ -723,7 +917,7 @@ ox-check-pr-title: (_ox-check-require "pwsh")
     }
 
 # Unscoped (consults external advisory DB; reads Cargo.lock, not
-# workspace members).
+# workspace members). Single command — inherits adopter's default shell.
 ox-check-deny: (_ox-check-require "cargo-deny")
     cargo deny check
 
@@ -735,26 +929,41 @@ ox-check-audit: (_ox-check-require "cargo-audit")
 # the full crate graph and seeing which deps are referenced; that's
 # precisely what the required tier is for. Depends on the floating
 # nightly toolchain.
+[script("pwsh")]
 ox-check-udeps: (_ox-check-require "cargo-udeps")
-    @if [ "$OX_CHECK_INCLUDE_REQUIRED" = "--skip" ]; then \
-        echo "ox-check-udeps: no required packages; skipping"; exit 0; \
-    fi; \
-    cargo +nightly udeps ${OX_CHECK_INCLUDE_REQUIRED:---workspace} --all-targets --all-features
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') {
+        Write-Host 'ox-check-udeps: no required packages; skipping'
+        exit 0
+    }
+    $pkg = if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { @('--workspace') }
+    & cargo '+nightly' udeps @pkg --all-targets --all-features
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier (compares published API of changed crates against the
 # baseline; only changed crates' surface is at risk).
+[script("pwsh")]
 ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
-    @if [ "$OX_CHECK_INCLUDE_AFFECTED" = "--skip" ]; then \
-        echo "ox-check-semver-check: no affected packages; skipping"; exit 0; \
-    fi; \
-    cargo semver-checks ${OX_CHECK_INCLUDE_AFFECTED:---workspace}
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'ox-check-semver-check: no affected packages; skipping'
+        exit 0
+    }
+    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    & cargo semver-checks @pkg
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier (lints public API of changed crates and rev-deps).
+[script("pwsh")]
 ox-check-external-types: (_ox-check-require "cargo-check-external-types")
-    @if [ "$OX_CHECK_INCLUDE_AFFECTED" = "--skip" ]; then \
-        echo "ox-check-external-types: no affected packages; skipping"; exit 0; \
-    fi; \
-    cargo check-external-types ${OX_CHECK_INCLUDE_AFFECTED:---workspace}
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'ox-check-external-types: no affected packages; skipping'
+        exit 0
+    }
+    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    & cargo check-external-types @pkg
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Unscoped (consults external risk DB).
 ox-check-aprz: (_ox-check-require "cargo-aprz")
@@ -763,61 +972,96 @@ ox-check-aprz: (_ox-check-require "cargo-aprz")
 # === pr-test members ====================================================
 
 # Affected tier.
+[script("pwsh")]
 ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "cargo-nextest")
-    @if [ "$OX_CHECK_INCLUDE_AFFECTED" = "--skip" ]; then \
-        echo "ox-check-llvm-cov: no affected packages; skipping"; exit 0; \
-    fi
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'ox-check-llvm-cov: no affected packages; skipping'
+        exit 0
+    }
+    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
     # Wipe stale .profraw data so the report reflects only this run.
     cargo llvm-cov clean --workspace --profraw-only
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # Instrument and run tests; defer report generation so we can emit
     # multiple formats from the same profraw set without re-running.
-    cargo llvm-cov nextest ${OX_CHECK_INCLUDE_AFFECTED:---workspace} --all-features --locked --no-report
+    & cargo llvm-cov nextest @pkg --all-features --locked --no-report
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # lcov.info feeds Codecov on GitHub; cobertura.xml feeds
     # PublishCodeCoverageResults@2 on Azure DevOps.
     cargo llvm-cov report --lcov      --output-path target/coverage/lcov.info
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     cargo llvm-cov report --cobertura --output-path target/coverage/cobertura.xml
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # Local-only HTML viewer (no CI consumer); cheap once the data exists.
     cargo llvm-cov report --html      --output-dir target/coverage/html
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier.
+[script("pwsh")]
 ox-check-doc-test:
-    @if [ "$OX_CHECK_INCLUDE_AFFECTED" = "--skip" ]; then \
-        echo "ox-check-doc-test: no affected packages; skipping"; exit 0; \
-    fi; \
-    cargo test --doc ${OX_CHECK_INCLUDE_AFFECTED:---workspace} --all-features --locked
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'ox-check-doc-test: no affected packages; skipping'
+        exit 0
+    }
+    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    & cargo test --doc @pkg --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier.
+[script("pwsh")]
 ox-check-examples:
-    @if [ "$OX_CHECK_INCLUDE_AFFECTED" = "--skip" ]; then \
-        echo "ox-check-examples: no affected packages; skipping"; exit 0; \
-    fi; \
-    cargo build ${OX_CHECK_INCLUDE_AFFECTED:---workspace} --examples --all-features --locked
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'ox-check-examples: no affected packages; skipping'
+        exit 0
+    }
+    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    & cargo build @pkg --examples --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # === pr-mutants members =================================================
 
 # Affected tier. cargo-mutants does its own diff-scoping via --in-diff;
 # the affected-tier guard is the wiring-layer's coarse filter (if no
 # affected packages exist, the entire mutants run is pointless).
+[script("pwsh")]
 ox-check-mutants: (_ox-check-require "cargo-mutants")
-    #!/usr/bin/env sh
-    set -eu
-    if [ "${OX_CHECK_INCLUDE_AFFECTED:-}" = "--skip" ]; then
-        echo "ox-check-mutants: no affected packages; skipping"
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'ox-check-mutants: no affected packages; skipping'
         exit 0
-    fi
+    }
     # Resolve BASE_REF: env override > origin/main > origin/master.
-    if [ -n "${BASE_REF:-}" ]; then
-        base="$BASE_REF"
-    elif git rev-parse --verify origin/main >/dev/null 2>&1; then
-        base="origin/main"
-    elif git rev-parse --verify origin/master >/dev/null 2>&1; then
-        base="origin/master"
-    else
-        echo "ox-check-mutants: no BASE_REF set and neither origin/main nor origin/master is available." >&2
-        echo "Set BASE_REF to the branch to diff against." >&2
+    $base = $null
+    if ($env:BASE_REF) {
+        $base = $env:BASE_REF
+    } else {
+        foreach ($candidate in @('origin/main', 'origin/master')) {
+            git rev-parse --verify $candidate 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                $base = $candidate
+                break
+            }
+        }
+    }
+    if (-not $base) {
+        Write-Error 'ox-check-mutants: no BASE_REF set and neither origin/main nor origin/master is available. Set BASE_REF to the branch to diff against.'
         exit 1
-    fi
-    cargo mutants --in-diff "$base"..HEAD --no-shuffle --jobs 0
+    }
+    # cargo-mutants --in-diff takes a FILE path containing a unified
+    # diff, not a git revision range. Write the diff to a temp file
+    # first. RUNNER_TEMP (GH) and AGENT_TEMPDIRECTORY (ADO) point at
+    # the job's scratch dir; fall back to the system temp dir locally.
+    $tmp_dir = $env:RUNNER_TEMP
+    if (-not $tmp_dir) { $tmp_dir = $env:AGENT_TEMPDIRECTORY }
+    if (-not $tmp_dir) { $tmp_dir = [System.IO.Path]::GetTempPath() }
+    $diff_path = Join-Path $tmp_dir 'ox-check-mutants.diff'
+    git diff "$base..HEAD" --output=$diff_path
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    cargo mutants --in-diff $diff_path --no-shuffle --jobs 0
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # === nightly-runtime members ============================================
 
@@ -825,17 +1069,27 @@ ox-check-mutants: (_ox-check-require "cargo-mutants")
 # by the nightly workflow, so the affected-tier default (--workspace)
 # applies. Skip guards are still included for local diff-scoped runs.
 
+[script("pwsh")]
 ox-check-miri:
-    @if [ "$OX_CHECK_INCLUDE_AFFECTED" = "--skip" ]; then \
-        echo "ox-check-miri: no affected packages; skipping"; exit 0; \
-    fi; \
-    cargo +nightly miri nextest run ${OX_CHECK_INCLUDE_AFFECTED:---workspace}
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'ox-check-miri: no affected packages; skipping'
+        exit 0
+    }
+    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    & cargo '+nightly' miri nextest run @pkg
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+[script("pwsh")]
 ox-check-careful: (_ox-check-require "cargo-careful")
-    @if [ "$OX_CHECK_INCLUDE_AFFECTED" = "--skip" ]; then \
-        echo "ox-check-careful: no affected packages; skipping"; exit 0; \
-    fi; \
-    cargo +nightly careful test ${OX_CHECK_INCLUDE_AFFECTED:---workspace} --all-features --locked
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'ox-check-careful: no affected packages; skipping'
+        exit 0
+    }
+    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    & cargo '+nightly' careful test @pkg --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # === nightly-exhaustive members =========================================
 
@@ -847,18 +1101,28 @@ ox-check-mutants-full: (_ox-check-require "cargo-mutants")
 # Required tier. cargo-hack's feature powerset cascades through dep
 # features, so the required set (workspace-internal transitive deps)
 # is the right scope.
+[script("pwsh")]
 ox-check-cargo-hack: (_ox-check-require "cargo-hack")
-    @if [ "$OX_CHECK_INCLUDE_REQUIRED" = "--skip" ]; then \
-        echo "ox-check-cargo-hack: no required packages; skipping"; exit 0; \
-    fi; \
-    cargo hack ${OX_CHECK_INCLUDE_REQUIRED:---workspace} --feature-powerset --depth 2 check
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') {
+        Write-Host 'ox-check-cargo-hack: no required packages; skipping'
+        exit 0
+    }
+    $pkg = if ($env:OX_CHECK_INCLUDE_REQUIRED) { -split $env:OX_CHECK_INCLUDE_REQUIRED } else { @('--workspace') }
+    & cargo hack @pkg --feature-powerset --depth 2 check
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier.
+[script("pwsh")]
 ox-check-bench:
-    @if [ "$OX_CHECK_INCLUDE_AFFECTED" = "--skip" ]; then \
-        echo "ox-check-bench: no affected packages; skipping"; exit 0; \
-    fi; \
-    cargo bench ${OX_CHECK_INCLUDE_AFFECTED:---workspace} --all-features --no-run
+    $ErrorActionPreference = 'Stop'
+    if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'ox-check-bench: no affected packages; skipping'
+        exit 0
+    }
+    $pkg = if ($env:OX_CHECK_INCLUDE_AFFECTED) { -split $env:OX_CHECK_INCLUDE_AFFECTED } else { @('--workspace') }
+    & cargo bench @pkg --all-features --no-run
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 === justfiles/ox-check/groups.just ===
 # Copyright (c) Microsoft Corporation.
@@ -933,10 +1197,33 @@ ox-check-nightly-exhaustive: \
 # imports this single file; everything else lives in sibling .just files
 # pulled in here.
 
-# Some sibling files use the `[script("bash")]` and `[script("pwsh")]`
-# attributes, which require unstable features. `set unstable` here is
-# inherited by every imported file (justfile imports share scope).
-set unstable
+# All multi-statement recipes in this tree use [script("pwsh")]. pwsh
+# is preinstalled on Windows (10+), GH/ADO hosted Linux + Windows
+# runners, and is installable on macOS/Linux via Homebrew / upstream
+# installer. We chose pwsh over bash because:
+#
+#   - just's shebang dispatch (#!/usr/bin/env bash) requires `cygpath`
+#     on Windows, which is only on PATH inside Git Bash. Plain
+#     PowerShell can't run shebang recipes.
+#   - just's [script("bash")] attribute passes Windows tempfile paths
+#     to bash unescaped, and bash interprets the backslashes as escape
+#     characters — every recipe fails with a mangled path.
+#   - [script("pwsh")] works from plain PowerShell with no PATH
+#     augmentation and no path translation. pwsh handles Windows
+#     paths natively.
+#
+# The existing `_ox-check-require pwsh` recipe already established
+# pwsh as a tools-floor requirement, so requiring it as the recipe
+# interpreter is consistent.
+#
+# Single-command recipes (e.g. `cargo deny check`) are plain just
+# recipes that inherit the adopter's default shell — they're
+# shell-agnostic.
+#
+# IMPORTANT: [script(...)] requires `set unstable`. The adopter's
+# root justfile must declare it (typically as a top-level line).
+# ox-check's mod.just does NOT redeclare it, to avoid conflicting
+# with adopters who already have it.
 
 import 'checks.just'
 import 'groups.just'
@@ -995,23 +1282,24 @@ ox-check-full: \
 # directly in tools.just rather than through this file — their
 # install/upgrade paths are not cargo-managed.
 
-cargo-aprz=0.6.0
+cargo-aprz=1.0.0
 cargo-audit=0.21.0
-cargo-careful=0.4.7
-cargo-check-external-types=0.2.0
-cargo-deny=0.16.0
-cargo-doc2readme=0.6.0
-cargo-ensure-no-cyclic-deps=0.1.0
-cargo-ensure-no-default-features=0.1.0
-cargo-hack=0.6.36
+cargo-careful=0.4.9
+cargo-check-external-types=0.4.0
+cargo-delta=0.3.1
+cargo-deny=0.19.0
+cargo-doc2readme=0.6.4
+cargo-ensure-no-cyclic-deps=0.2.0
+cargo-ensure-no-default-features=1.0.0
+cargo-hack=0.6.41
 cargo-heather=0.1.0
-cargo-llvm-cov=0.6.13
-cargo-mutants=24.5.0
+cargo-llvm-cov=0.8.4
+cargo-mutants=26.1.2
 cargo-nextest=0.9.122
-cargo-semver-checks=0.43.0
-cargo-sort=2.0.1
-cargo-spellcheck=0.15.5
-cargo-udeps=0.1.55
+cargo-semver-checks=0.46.0
+cargo-sort=2.0.2
+cargo-spellcheck=0.15.1
+cargo-udeps=0.1.60
 
 === justfiles/ox-check/tools.just ===
 # Copyright (c) Microsoft Corporation.
@@ -1023,32 +1311,63 @@ cargo-udeps=0.1.55
 # minimum version. Called by `ox-check-tools-check` and as a dependency
 # of every check group via individual `_ox-check-require` invocations.
 [group("ox-check")]
-[script("bash")]
+[script("pwsh")]
 ox-check-tools-check:
-    set -euo pipefail
-    catalog="justfiles/ox-check/tool-minimums.txt"
-    fail=0
-    while IFS='=' read -r tool min; do
-        case "$tool" in '' | '#'*) continue ;; esac
-        if ! just _ox-check-require "$tool" ; then
-            fail=1
-        fi
-    done < "$catalog"
-    just _ox-check-require rustc || fail=1
+    $ErrorActionPreference = 'Stop'
+    $catalog = 'justfiles/ox-check/tool-minimums.txt'
+    $fail = 0
+    foreach ($line in Get-Content $catalog) {
+        $trimmed = $line.Trim()
+        if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
+        if ($trimmed -match '^([^=]+)=') {
+            $tool = $Matches[1]
+            & just _ox-check-require $tool
+            if ($LASTEXITCODE -ne 0) { $fail = 1 }
+        }
+    }
+    & just _ox-check-require rustc
+    if ($LASTEXITCODE -ne 0) { $fail = 1 }
     exit $fail
 
 # Public: install (or upgrade) every catalog tool to its minimum
-# version. Idempotent — `cargo install --locked` is a no-op when the
-# installed version already satisfies the requirement.
+# version. Idempotent — ``cargo install --locked`` is a no-op when
+# the installed version already satisfies the requirement.
+#
+# Per-tool failures don't abort the whole install — a tool that
+# doesn't build on the current host (e.g. cargo-mutants on
+# aarch64-pc-windows-msvc, where the upstream winapi dep doesn't
+# compile) shouldn't block other tools. Each failure is reported
+# at the end; recipes that use the missing tool will get a clean
+# error from ``_ox-check-require`` at recipe-run time. The recipe
+# itself exits non-zero only if at least one install failed, so
+# CI surfaces the problem.
 [group("ox-check")]
-[script("bash")]
+[script("pwsh")]
 ox-check-tools-install:
-    set -euo pipefail
-    catalog="justfiles/ox-check/tool-minimums.txt"
-    while IFS='=' read -r tool min; do
-        case "$tool" in '' | '#'*) continue ;; esac
-        cargo install --locked "$tool" --version ">=$min"
-    done < "$catalog"
+    $ErrorActionPreference = 'Continue'
+    $catalog = 'justfiles/ox-check/tool-minimums.txt'
+    $failed = [System.Collections.Generic.List[string]]::new()
+    foreach ($line in Get-Content $catalog) {
+        $trimmed = $line.Trim()
+        if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
+        if ($trimmed -match '^([^=]+)=(.+)$') {
+            $tool = $Matches[1]
+            $min = $Matches[2]
+            Write-Host "ox-check-tools-install: $tool >= $min"
+            cargo install --locked $tool --version ">=$min"
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "ox-check-tools-install: $tool install FAILED (continuing)" -ForegroundColor Yellow
+                $failed.Add($tool)
+            }
+        }
+    }
+    if ($failed.Count -gt 0) {
+        Write-Host ""
+        Write-Host "ox-check-tools-install: $($failed.Count) tool(s) failed to install:" -ForegroundColor Yellow
+        foreach ($t in $failed) { Write-Host "  - $t" -ForegroundColor Yellow }
+        Write-Host "Recipes that depend on these tools will fail at run time via _ox-check-require." -ForegroundColor Yellow
+        exit 1
+    }
 
 # Internal: assert that `name` meets its catalog minimum (or, for tools
 # not in the catalog, that it's at least present). Three lookup paths:
@@ -1058,70 +1377,98 @@ ox-check-tools-install:
 #   - "pwsh": presence-only with a per-OS install hint.
 #   - Anything else: looked up in tool-minimums.txt; if present, the
 #     installed version is parsed from `cargo install --list` and
-#     compared via `sort -V`. If not in the catalog, presence-only
-#     fallback (covers system binaries like `just` itself, `git`).
-[script("bash")]
+#     compared via the [version] type. If not in the catalog,
+#     presence-only fallback (covers system binaries like `just`
+#     itself, `git`).
+[script("pwsh")]
 _ox-check-require name:
-    set -euo pipefail
-    catalog="justfiles/ox-check/tool-minimums.txt"
-    case "{{name}}" in
-        rustc)
-            if ! command -v rustc >/dev/null 2>&1 ; then
-                echo "ox-check: rustc not found. Install via rustup: https://rustup.rs" >&2
-                exit 1
-            fi
-            exit 0
-            ;;
-        pwsh)
-            if ! command -v pwsh >/dev/null 2>&1 ; then
-                echo "ox-check: pwsh (PowerShell Core) not found." >&2
-                case "$(uname -s 2>/dev/null)" in
-                    Darwin*) echo "Install: brew install --cask powershell" >&2 ;;
-                    *)       echo "Install: see https://github.com/PowerShell/PowerShell" >&2 ;;
-                esac
-                exit 1
-            fi
-            exit 0
-            ;;
-    esac
+    $ErrorActionPreference = 'Stop'
+    $name = '{{name}}'
+    $catalog = 'justfiles/ox-check/tool-minimums.txt'
 
-    # Catalog lookup: trim CRLF on Windows checkouts and skip
+    switch ($name) {
+        'rustc' {
+            if (-not (Get-Command rustc -ErrorAction SilentlyContinue)) {
+                Write-Error 'ox-check: rustc not found. Install via rustup: https://rustup.rs'
+                exit 1
+            }
+            exit 0
+        }
+        'pwsh' {
+            if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
+                $hint = if ($IsMacOS) {
+                    'brew install --cask powershell'
+                } elseif ($IsLinux) {
+                    'see https://github.com/PowerShell/PowerShell'
+                } else {
+                    'winget install --id Microsoft.PowerShell'
+                }
+                Write-Error "ox-check: pwsh (PowerShell Core) not found. Install: $hint"
+                exit 1
+            }
+            exit 0
+        }
+    }
+
+    # Catalog lookup. Trim CRLF (Windows checkouts) and skip
     # comments / blank lines while we're at it.
-    spec=$(grep -E "^{{name}}=" "$catalog" 2>/dev/null | tr -d '\r' || true)
-    if [ -z "$spec" ] ; then
+    $spec = $null
+    if (Test-Path $catalog) {
+        foreach ($line in Get-Content $catalog) {
+            $trimmed = $line.Trim()
+            if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
+            $pattern = '^' + [regex]::Escape($name) + '=(.+)$'
+            if ($trimmed -match $pattern) {
+                $spec = $Matches[1]
+                break
+            }
+        }
+    }
+
+    if (-not $spec) {
         # Not in catalog: presence-only fallback for tools we don't
         # version-gate (`just` itself, `git`, system binaries).
-        if ! command -v "{{name}}" >/dev/null 2>&1 ; then
-            echo "ox-check: required tool '{{name}}' not found." >&2
-            echo "Install hint: cargo install --locked {{name}}" >&2
+        if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
+            Write-Error "ox-check: required tool '$name' not found. Install hint: cargo install --locked $name"
             exit 1
-        fi
+        }
         exit 0
-    fi
+    }
 
-    min="${spec#*=}"
-    installed=$(cargo install --list 2>/dev/null \
-        | grep -E "^{{name}} v" \
-        | head -n1 \
-        | sed -E 's/^[^ ]+ v([0-9][^ :]*).*/\1/' || true)
-    if [ -z "$installed" ] ; then
-        echo "ox-check: '{{name}}' not installed (need >=v$min)." >&2
-        echo "Install: cargo install --locked {{name}} --version '>=$min'" >&2
+    $min = $spec
+    # Parse `cargo install --list` for installed version. Lines look like:
+    #   cargo-deny v0.18.5:
+    #       cargo-deny
+    $installed = $null
+    $listPattern = '^' + [regex]::Escape($name) + ' v(\S+):'
+    foreach ($line in (cargo install --list 2>$null)) {
+        if ($line -match $listPattern) {
+            $installed = $Matches[1]
+            break
+        }
+    }
+
+    if (-not $installed) {
+        Write-Error "ox-check: '$name' not installed (need >=v$min). Install: cargo install --locked $name --version '>=$min'"
         exit 1
-    fi
-    # `sort -V` orders by SemVer; if the minimum is the lowest of the
-    # two, the installed version is >= the minimum.
-    lowest=$(printf '%s\n%s\n' "$installed" "$min" | sort -V | head -n1)
-    if [ "$lowest" != "$min" ] && [ "$installed" != "$min" ] ; then
-        echo "ox-check: '{{name}}' is at v$installed; need >=v$min." >&2
-        echo "Upgrade: cargo install --locked {{name}} --version '>=$min'" >&2
+    }
+
+    # SemVer comparison via the [version] type. Strip any pre-release
+    # / build-metadata suffix (e.g. "1.2.3-alpha.4") for parsing —
+    # [version] only handles dotted numeric components.
+    $minClean = ($min -split '[-+]', 2)[0]
+    $instClean = ($installed -split '[-+]', 2)[0]
+    $minV = [version]$minClean
+    $instV = [version]$instClean
+    if ($instV -lt $minV) {
+        Write-Error "ox-check: '$name' is at v$installed; need >=v$min. Upgrade: cargo install --locked $name --version '>=$min'"
         exit 1
-    fi
+    }
 
 === rustfmt.toml ===
 # >>> ox-check-managed: ox-check-rustfmt
 edition = "2024"
-max_width = 110
+max_width = 140
 newline_style = "Unix"
 use_field_init_shorthand = true
 use_try_shorthand = true

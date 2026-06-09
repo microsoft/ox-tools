@@ -51,6 +51,16 @@ pub enum Decision {
     /// unchanged. Also the steady-state outcome for opt-out (empty file
     /// or empty region body) when the template hasn't moved.
     LeaveAlone,
+    /// Item was in the previous manifest but is no longer in the
+    /// catalog. The on-disk content still matches `last_rendered`, so
+    /// the user has not customized it — safe to delete (file) or
+    /// splice out (region). Manifest entry is dropped.
+    Remove,
+    /// Item was in the previous manifest, is no longer in the catalog,
+    /// and the user has customized it since the last render. Leave the
+    /// file/region in place but drop the manifest entry so ownership
+    /// transfers to the user (no more ox-check tracking).
+    OrphanedKept,
 }
 
 impl Decision {
@@ -64,7 +74,7 @@ impl Decision {
     /// Whether this decision causes writes (the file or the manifest).
     #[must_use]
     pub const fn writes(self) -> bool {
-        matches!(self, Self::Write | Self::Propose)
+        matches!(self, Self::Write | Self::Propose | Self::Remove | Self::OrphanedKept)
     }
 }
 
@@ -101,6 +111,25 @@ pub fn decide(inputs: &DecisionInputs<'_>) -> Decision {
             // adoption-with-divergence: propose.
             Decision::Propose
         }
+    }
+}
+
+/// Compute the decision for one previously-tracked item that is no
+/// longer in the catalog.
+///
+/// - If the on-disk content is missing, the item is already gone;
+///   treat the residual manifest entry as in-sync (no plan item needed,
+///   just purge the manifest).
+/// - If the on-disk content matches `last_rendered`, the user hasn't
+///   touched it since ox-check wrote it. Safe to remove.
+/// - Otherwise the user has customized; transfer ownership and leave
+///   the content in place.
+#[must_use]
+pub fn decide_removal(last_rendered: &str, disk: Option<&str>) -> Decision {
+    match disk {
+        None => Decision::InSync,
+        Some(d) if d == last_rendered => Decision::Remove,
+        Some(_) => Decision::OrphanedKept,
     }
 }
 
@@ -188,6 +217,8 @@ mod tests {
         assert!(Decision::LeaveAlone.is_in_sync());
         assert!(!Decision::Write.is_in_sync());
         assert!(!Decision::Propose.is_in_sync());
+        assert!(!Decision::Remove.is_in_sync());
+        assert!(!Decision::OrphanedKept.is_in_sync());
     }
 
     #[test]
@@ -196,5 +227,31 @@ mod tests {
         assert!(!Decision::LeaveAlone.writes());
         assert!(Decision::Write.writes());
         assert!(Decision::Propose.writes());
+        assert!(Decision::Remove.writes());
+        assert!(Decision::OrphanedKept.writes());
+    }
+
+    #[test]
+    fn removal_missing_disk_is_in_sync() {
+        // Already gone — no action needed beyond manifest purge.
+        assert_eq!(decide_removal("sha256:abc", None), Decision::InSync);
+    }
+
+    #[test]
+    fn removal_untouched_disk_removes() {
+        // Disk matches what we wrote last; safe to delete.
+        assert_eq!(
+            decide_removal("sha256:abc", Some("sha256:abc")),
+            Decision::Remove
+        );
+    }
+
+    #[test]
+    fn removal_customized_disk_orphans() {
+        // User edited since last render — keep, transfer ownership.
+        assert_eq!(
+            decide_removal("sha256:abc", Some("sha256:xyz")),
+            Decision::OrphanedKept
+        );
     }
 }

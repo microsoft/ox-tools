@@ -16,8 +16,25 @@ steps:
   - bash: |
       set -euo pipefail
       cargo install --locked cargo-delta
-      base="${BASE_REF:-$(System.PullRequest.TargetBranch)}"
-      result="$(cargo delta impact --base "$base" --format json 2>/dev/null || echo '{}')"
+      # System.PullRequest.TargetBranch is the unqualified target branch
+      # name (e.g. "main") on PR build-validation runs. Adopters can
+      # override via BASE_REF.
+      base="${BASE_REF:-origin/$(System.PullRequest.TargetBranch)}"
+      # Two snapshots + impact compare (cargo-delta has no --base
+      # shortcut). The baseline runs in a worktree at the merge target
+      # so the checked-out tree is untouched.
+      cargo delta snapshot > "$AGENT_TEMPDIRECTORY/ox-check-current.json"
+      git worktree add --detach "$AGENT_TEMPDIRECTORY/ox-check-baseline" "$base"
+      ( cd "$AGENT_TEMPDIRECTORY/ox-check-baseline" && cargo delta snapshot ) \
+          > "$AGENT_TEMPDIRECTORY/ox-check-baseline.json"
+      git worktree remove --force "$AGENT_TEMPDIRECTORY/ox-check-baseline"
+      result="$(cargo delta impact \
+          --baseline "$AGENT_TEMPDIRECTORY/ox-check-baseline.json" \
+          --current  "$AGENT_TEMPDIRECTORY/ox-check-current.json" \
+          --format json)"
+      # cargo-delta emits TitleCase keys (Modified / Affected /
+      # Required). Format each tier into the --package args shape
+      # recipes expect, with --skip as the empty-set sentinel.
       format_set() {
           local field="$1"
           local pkgs
@@ -35,9 +52,9 @@ steps:
               printf '%s' "${out# }"
           fi
       }
-      include_modified="$(format_set modified)"
-      include_affected="$(format_set affected)"
-      include_required="$(format_set required)"
+      include_modified="$(format_set Modified)"
+      include_affected="$(format_set Affected)"
+      include_required="$(format_set Required)"
       echo "##vso[task.setvariable variable=include_modified;isOutput=true]$include_modified"
       echo "##vso[task.setvariable variable=include_affected;isOutput=true]$include_affected"
       echo "##vso[task.setvariable variable=include_required;isOutput=true]$include_required"

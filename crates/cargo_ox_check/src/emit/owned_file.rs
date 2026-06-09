@@ -47,11 +47,15 @@ pub fn plan_owned_file(
         path: relpath.to_owned(),
     };
     let item = match decision {
-        Decision::InSync | Decision::LeaveAlone => PlanItem::noop(target, decision),
+        Decision::InSync => PlanItem::insync(target, template_checksum),
+        Decision::LeaveAlone => PlanItem::noop(target, decision),
         Decision::Write => {
             PlanItem::write_file(relpath, rendered.to_owned(), template_checksum)
         }
         Decision::Propose => PlanItem::propose_file(relpath, rendered.to_owned(), template_checksum),
+        Decision::Remove | Decision::OrphanedKept => {
+            unreachable!("decide() never returns removal decisions; those come from plan_removals")
+        }
     };
 
     Ok(item)

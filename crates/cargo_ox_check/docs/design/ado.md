@@ -51,6 +51,11 @@ See also:
     └── steps/
         ├── setup.yml               owned   (install just + catalog tools)
         ├── impact.yml              owned   (cargo-delta impact step; omitted if .delta.toml disabled)
+        ├── job.yml                 owned-but-user-customizable
+        │                                   (per-job wrapper; takes `name`,
+        │                                    `pool`, `steps`, `artifacts`;
+        │                                    users edit to inject 1ESPT
+        │                                    `templateContext:` etc.)
         ├── pr-fast.yml             owned   (one step template per group)
         ├── pr-test.yml             owned
         ├── pr-mutants.yml          owned
@@ -61,9 +66,15 @@ See also:
 ```
 
 All files are regular owned files tracked by the sidecar `.ox-check.lock` manifest
-(no in-file checksum line; see [updates.md §1](./updates.md#1-the-manifest)). Users
-who customize the root pipeline take ownership through the standard dirty-file
-flow.
+(no in-file checksum line; see [updates.md §1](./updates.md#1-the-manifest)).
+`steps/job.yml` deserves special mention: it is emitted as owned (so first-time
+adoption gets a working file with no extra steps), but is *expected* to be
+customized by adopters whose ADO instance requires extension templates
+(1ES PT, SubstratePT, M365PT). Once a user edits it, the standard dirty-file
+flow kicks in — subsequent ox-check updates Propose into a `.proposed` sibling
+rather than overwriting. The stages templates address the wrapper only via its
+parameter contract (`name`, `pool`, `steps`, `artifacts`), so the wrapper can
+diverge arbitrarily without blocking stage-shape updates. See §4.1.
 
 ## 3. Root pipelines
 
@@ -160,55 +171,149 @@ checks actually consume is the catalog's concern, not the wiring layer's. This m
 moving a check between groups (e.g. `clippy` from `pr-fast` to `nightly-advisories`)
 never changes the stages template.
 
-Approximate shape (ox-check writes this verbatim; users never edit it):
+### 4.1 Per-job wrapper (`steps/job.yml`) — the 1ESPT extensibility point
+
+Every job in `pr.yml` and `nightly.yml` is rendered through a wrapper template at
+`.pipelines/ox-check/steps/job.yml` rather than declared inline. The wrapper exists
+to give adopters whose ADO instance requires extension templates (1ES PT,
+SubstratePT, M365PT, custom corporate templates) a single, narrow place to inject
+the per-job boilerplate those templates require — `templateContext:` blocks,
+build-provenance attributes, SDL hooks, custom checkout depths, etc. — without
+forking the much larger owned stages templates.
+
+The contract is intentionally small and stable:
+
+| Parameter   | Type       | Required | Meaning                                                                                                                                                                                |
+|-------------|------------|----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `name`      | `string`   | yes      | Job name; ADO derives the display name from it.                                                                                                                                        |
+| `pool`      | `object`   | yes      | Pool block, passed verbatim to ADO's `pool:` key. `linuxPool` and `windowsPool` at the stage level are object parameters, so users can override their shape (e.g. `{ name, os, image }` for 1ESPT). |
+| `steps`     | `stepList` | yes      | Body of the job. Templated step lists are fine — the wrapper splices them in via `${{ each step in parameters.steps }}: - ${{ step }}`.                                                |
+| `artifacts` | `object`   | no       | List of pipeline artifacts to publish. Each item: `{ name: string, path: string }`. Default wrapper appends one `PublishPipelineArtifact@1` per entry; 1ESPT wrappers translate the same list into `templateContext.outputs.pipelineArtifact` blocks. The stages templates don't need to know which backend they're targeting. |
+
+The default wrapper ox-check ships is six lines of logic:
+
+```yaml
+parameters:
+  - { name: name, type: string }
+  - { name: pool, type: object }
+  - { name: steps, type: stepList }
+  - { name: artifacts, type: object, default: [] }
+jobs:
+  - job: ${{ parameters.name }}
+    pool: ${{ parameters.pool }}
+    steps:
+      - ${{ each step in parameters.steps }}:
+          - ${{ step }}
+      - ${{ each artifact in parameters.artifacts }}:
+          - task: PublishPipelineArtifact@1
+            displayName: Publish ${{ artifact.name }}
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: ${{ artifact.path }}
+              artifact: ${{ artifact.name }}
+```
+
+A 1ESPT user replaces the wrapper body with something like:
+
+```yaml
+jobs:
+  - job: ${{ parameters.name }}
+    pool: ${{ parameters.pool }}
+    templateContext:
+      inputs:
+        - input: checkout
+          repository: self
+          fetchDepth: 0
+      outputs:
+        - ${{ each artifact in parameters.artifacts }}:
+            - output: pipelineArtifact
+              targetPath: ${{ artifact.path }}
+              artifactName: ${{ artifact.name }}
+              condition: succeededOrFailed()
+    steps:
+      - ${{ each step in parameters.steps }}:
+          - ${{ step }}
+```
+
+`pool` shape is *also* an extensibility point — `linuxPool` / `windowsPool` are
+`type: object` at the stage level, so the same root-pipeline that swaps in a
+1ESPT-shaped pool (`{ name, os, image }` instead of `{ vmImage }`) doesn't need
+any other changes.
+
+**Why a dedicated wrapper file rather than parameterizing the stages template?**
+Because the wrapper is short and stable, but the stages template is long and
+changes often (new groups, new dependsOn rules, new impact-output wiring). Putting
+the user's customization in a separate file means stages updates flow through
+without merging, and the user's wrapper changes survive every ox-check upgrade.
+
+**Why is the wrapper "owned" rather than "proposed-once"?** So that first-time
+adoption needs zero extra steps — a fresh `cargo ox-check update` writes a
+working wrapper and the pipeline runs. The dirty-file behavior kicks in only
+after the user actually edits the file: from then on, ox-check Proposes into
+`.proposed` siblings on conflict. This is the same mechanism every other owned
+file uses; the wrapper isn't special — it just happens to be the one file most
+internal adopters will customize.
+
+**Template-path note.** Each entry in the `steps:` parameter at the call site
+contains a `template:` reference (e.g. `template: steps/pr-fast.yml`). ADO
+resolves template paths relative to the file containing the `template:`
+keyword, which for parameters defined at the call site is the stages template
+itself — so the path is written relative to `pr.yml` / `nightly.yml`, *not*
+relative to `steps/job.yml`.
+
+### 4.2 Stages template shape
+
+Approximate shape (ox-check writes this verbatim; users normally don't edit it):
 
 ```yaml
 # .pipelines/ox-check/pr.yml   (owned by cargo-ox-check)
 parameters:
-- name: linuxPool
-  type: object
-  default: { vmImage: ubuntu-latest }
-- name: windowsPool
-  type: object
-  default: { vmImage: windows-latest }
+  - name: linuxPool
+    type: object
+    default: { vmImage: ubuntu-latest }
+  - name: windowsPool
+    type: object
+    default: { vmImage: windows-latest }
 
 stages:
-- stage: OX_CHECK_pr
-  jobs:
-  - job: impact
-    pool: ${{ parameters.linuxPool }}
-    steps:
-    - template: steps/impact.yml
-      parameters:
-        baseRef: $(System.PullRequest.TargetBranch)
-  - ${{ each group in ['pr_fast', 'pr_test_linux', 'pr_mutants'] }}:
-    - job: ${{ group }}
-      dependsOn: impact
-      pool: ${{ parameters.linuxPool }}
-      variables:
-        includeModified: $[ dependencies.impact.outputs['delta.include_modified'] ]
-        includeAffected: $[ dependencies.impact.outputs['delta.include_affected'] ]
-        includeRequired: $[ dependencies.impact.outputs['delta.include_required'] ]
-      steps:
-      - template: steps/${{ replace(group, '_', '-') }}.yml   # pseudo-syntax; real emitter unrolls
+  - stage: impact
+    displayName: ox-check impact
+    jobs:
+      - template: steps/job.yml
         parameters:
-          includeModified: $(includeModified)
-          includeAffected: $(includeAffected)
-          includeRequired: $(includeRequired)
-  - ${{ if ne(length(parameters.windowsPool), 0) }}:
-    - job: pr_test_windows
-      dependsOn: impact
-      pool: ${{ parameters.windowsPool }}
-      variables:
-        includeModified: $[ dependencies.impact.outputs['delta.include_modified'] ]
-        includeAffected: $[ dependencies.impact.outputs['delta.include_affected'] ]
-        includeRequired: $[ dependencies.impact.outputs['delta.include_required'] ]
-      steps:
-      - template: steps/pr-test.yml
+          name: compute
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/impact.yml
+
+  - stage: pr_fast
+    displayName: ox-check pr-fast
+    dependsOn: impact
+    condition: succeededOrFailed()
+    variables:
+      include_modified: $[ stageDependencies.impact.compute.outputs['compute.include_modified'] ]
+      include_affected: $[ stageDependencies.impact.compute.outputs['compute.include_affected'] ]
+      include_required: $[ stageDependencies.impact.compute.outputs['compute.include_required'] ]
+    jobs:
+      - template: steps/job.yml
         parameters:
-          includeModified: $(includeModified)
-          includeAffected: $(includeAffected)
-          includeRequired: $(includeRequired)
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/pr-fast.yml
+              parameters:
+                include_modified: $(include_modified)
+                include_affected: $(include_affected)
+                include_required: $(include_required)
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/pr-fast.yml
+              parameters: { ...same... }
+
+  # pr_test, pr_mutants follow the same shape.
 ```
 
 The wiring never gates jobs on impact output. Each group always runs; recipes inside
@@ -218,51 +323,17 @@ the group decide whether a given check no-ops by testing for the literal sentine
 [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars) for the recipe-side
 contract.
 
-The real emitter unrolls the `${{ each group }}` block at template-compile time into
-explicit jobs (ADO's `each` is compile-time so this works, but the syntax is fiddly —
-the snippet above shows the intent, not the verbatim YAML).
+ADO's `strategy.matrix` doesn't compose with stage-output expressions cleanly (the
+expansion happens at compile time but the values aren't available until impact has
+run), so ox-check unrolls the OS axis into two explicit jobs (`linux` and `windows`)
+at template-compile time. Setting `windowsPool: {}` in the user's root pipeline can
+elide the Windows job entirely if their root pipeline is shaped to support that.
 
-ADO's `strategy.matrix` doesn't compose with output-variable expressions cleanly (the
-expansion happens at compile time but the values aren't available until impact has run),
-so ox-check unrolls the OS axis into two explicit jobs (`pr_test_linux` and
-`pr_test_windows`) at template-compile time using the `${{ if … }}` conditional. Setting
-`windowsPool: {}` in the user's root pipeline elides `pr_test_windows` entirely.
-
-The nightly stages template is simpler — it omits the `impact` job and runs each group
-full-workspace, with the same `linuxPool` / `windowsPool` parameter shape. Nightly step
-templates don't receive any `include*` parameters; they default to empty strings and
-recipes fall through to `--workspace`:
-
-```yaml
-# .pipelines/ox-check/nightly.yml  (owned by cargo-ox-check)
-parameters:
-- name: linuxPool
-  type: object
-  default: { vmImage: ubuntu-latest }
-- name: windowsPool
-  type: object
-  default: { vmImage: windows-latest }
-
-stages:
-- stage: OX_CHECK_nightly
-  jobs:
-  - job: nightly_test_linux
-    pool: ${{ parameters.linuxPool }}
-    steps: [ { template: steps/nightly-test.yml } ]
-  - ${{ if ne(length(parameters.windowsPool), 0) }}:
-    - job: nightly_test_windows
-      pool: ${{ parameters.windowsPool }}
-      steps: [ { template: steps/nightly-test.yml } ]
-  - job: advisories
-    pool: ${{ parameters.linuxPool }}
-    steps: [ { template: steps/nightly-advisories.yml } ]
-  - job: runtime
-    pool: ${{ parameters.linuxPool }}
-    steps: [ { template: steps/nightly-runtime.yml } ]
-  - job: exhaustive
-    pool: ${{ parameters.linuxPool }}
-    steps: [ { template: steps/nightly-exhaustive.yml } ]
-```
+The nightly stages template is simpler — it omits the `impact` stage and runs each
+group full-workspace, with the same `linuxPool` / `windowsPool` parameter shape and
+the same `steps/job.yml` delegation. Nightly step templates don't receive any
+`include*` parameters; they default to empty strings and recipes fall through to
+`--workspace`.
 
 If `.delta.toml`'s managed region is disabled
 ([updates.md §opt-out](./updates.md#6-opting-out-in-file-stubs)), the impact step is

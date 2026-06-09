@@ -1,4 +1,10 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+# >>> ox-check-managed: ox-check-rustfmt
+edition = "2024"
 max_width = 140
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_try_shorthand = true
+# <<< ox-check-managed: ox-check-rustfmt

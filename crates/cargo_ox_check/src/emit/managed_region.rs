@@ -72,7 +72,8 @@ pub fn plan_managed_region(
         id: region_id.to_owned(),
     };
     let item = match decision {
-        Decision::InSync | Decision::LeaveAlone => PlanItem::noop(target, decision),
+        Decision::InSync => PlanItem::insync(target, template_checksum),
+        Decision::LeaveAlone => PlanItem::noop(target, decision),
         Decision::Write => {
             let spliced = splice(host_text.as_deref(), region_id, rendered_body, syntax)?;
             PlanItem::write_region(
@@ -86,6 +87,9 @@ pub fn plan_managed_region(
         Decision::Propose => {
             let spliced = splice(host_text.as_deref(), region_id, rendered_body, syntax)?;
             PlanItem::propose_region(host_relpath, region_id, spliced, template_checksum)
+        }
+        Decision::Remove | Decision::OrphanedKept => {
+            unreachable!("decide() never returns removal decisions; those come from plan_removals")
         }
     };
 

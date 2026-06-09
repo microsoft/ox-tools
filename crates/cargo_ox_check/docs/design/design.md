@@ -346,13 +346,14 @@ pipeline.
 |-------------------------------------------------------------|----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
 | `pr-fast`, `nightly-advisories`                             | All legs above                         | Contain compile-sensitive checks (clippy, doc-build, udeps, semver-check, external-types) that only see the host's compiled crate graph — cfg-gated code is invisible to a single-leg run. Text/metadata checks running redundantly is cheaper than splitting jobs. |
 | `pr-test`, `nightly-test`                                   | All legs above                         | Where compile-time and runtime OS / arch bugs actually surface.                                                                                    |
-| `pr-mutants`, `nightly-exhaustive`                          | All legs above                         | Match `oxidizer`'s policy: mutation testing and full-workspace feature/bench compile checks on cfg-gated code matter. Adopters who can't afford `mutants-full` on every leg (hours-long) override the matrix in their root workflow / pipeline. |
+| `pr-mutants`, `nightly-exhaustive`                          | Linux x86_64 + Windows x86_64 | `cargo-mutants` currently doesn't build on `aarch64-pc-windows-msvc` (upstream `winapi` crate incompat), and mutation testing's value-per-leg is highest on the x86_64 targets that match production runtimes. Adopters with ARM-specific concerns extend the matrix in their root workflow.   |
 | `nightly-runtime`                                           | All legs above                         | Both surveyed repos run `miri` and `careful` cross-OS. Both tools work on every Tier 1 Rust target; the earlier "Linux-primary" framing was incorrect.                                  |
 
-macOS is not in the default matrix — adopters who need it add it via the root workflow's
-`test_os` input (GH) or root pipeline's `testPools` parameter (ADO). Both knobs are
-documented in [github.md §4](./github.md#4-owned-reusable-workflows) for `test_os` and
-[ado.md §4](./ado.md#4-owned-stages-templates) for `linuxPool`/`windowsPool`.
+macOS is not in the default matrix — adopters who need it fork the owned reusable
+workflow (GH) or override `testPools` (ADO). The GH-side knob set is intentionally
+limited to per-leg runner labels; the OS axis shape itself is part of the workflow's
+identity. See [github.md §4](./github.md#4-owned-reusable-workflows) and
+[ado.md §4](./ado.md#4-owned-stages-templates) for full details.
 
 Locally there is no matrix — `just ox-check-pr-test` runs against whatever OS the developer
 is on. CI fan-out lives entirely in the owned wiring layer (the reusable workflow / stages

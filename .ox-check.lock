@@ -1,0 +1,123 @@
+version = 1
+rendered_by = "cargo-ox-check 0.1.0"
+
+[[file]]
+path = ".github/actions/ox-check-impact/action.yml"
+checksum = "sha256:20bea9e6fa732a9fc6180afb65e7c068f7caad5e4df8295318b220068cda85be"
+
+[[file]]
+path = ".github/actions/ox-check-nightly-advisories/action.yml"
+checksum = "sha256:08ada497f3780165a162963374edfa10b6b07d0ec1fba310442563b99d030345"
+
+[[file]]
+path = ".github/actions/ox-check-nightly-exhaustive/action.yml"
+checksum = "sha256:985243d1ba8e8e651f9b6f5f36b9898d13f7fd56a36c510439fe84d757eef721"
+
+[[file]]
+path = ".github/actions/ox-check-nightly-runtime/action.yml"
+checksum = "sha256:5fc46ca7ef0ffa9e28af65a5f5ed71e674ae6e505b7ee6d786e2dad58be7b0b8"
+
+[[file]]
+path = ".github/actions/ox-check-nightly-test/action.yml"
+checksum = "sha256:de16e9a72f34b25906c7ee62d5c7be993b3de5ca5d740568e2ed36bce48d8f48"
+
+[[file]]
+path = ".github/actions/ox-check-pr-fast/action.yml"
+checksum = "sha256:b7c7573cdf9413e648d64c45112cd1a93fc34fee80d63ca98029c486a634a394"
+
+[[file]]
+path = ".github/actions/ox-check-pr-mutants/action.yml"
+checksum = "sha256:7ee32441e8ee8956c12fd1ba614ce2c100946a937bb6182937632e8128ebaf2d"
+
+[[file]]
+path = ".github/actions/ox-check-pr-test/action.yml"
+checksum = "sha256:3da3e27b0876eccf54dbf7b2cf9050ccd08ec174d7e9c8edaa8fcd29a0c0c476"
+
+[[file]]
+path = ".github/actions/ox-check-setup/action.yml"
+checksum = "sha256:7eb680204721a35c3ace9d6ef7076c37ae1d568c951e9ac972a5d85de89bc396"
+
+[[file]]
+path = ".github/workflows/ox-check-nightly-impl.yml"
+checksum = "sha256:28b80216ae1ce124d8f11a3879983079cf9491ca4dc83b98ab429b4164607696"
+
+[[file]]
+path = ".github/workflows/ox-check-nightly.yml"
+checksum = "sha256:88086ff455f4471351e9cf94c4d8c501fc5a827de955afe9e97364c1fba0e86e"
+
+[[file]]
+path = ".github/workflows/ox-check-pr-impl.yml"
+checksum = "sha256:a62ef58b9ad2885dbb56cff94f40f9cc3a82a5c1d8f6ab85e533b85bfdaa6476"
+
+[[file]]
+path = ".github/workflows/ox-check-pr.yml"
+checksum = "sha256:5ea0bea66f0223df032382056e12c88afb0481138c56898b95837fc767e30cd3"
+
+[[file]]
+path = "justfiles/ox-check/checks.just"
+checksum = "sha256:8454fc678028fea746ccf7e59efbe0d085ea9d112883965aa01357a735d3d9d9"
+
+[[file]]
+path = "justfiles/ox-check/groups.just"
+checksum = "sha256:64350da45fdf0cdfbd651efd18e0546be7e71cbf15920f370afd50be1a81abc2"
+
+[[file]]
+path = "justfiles/ox-check/mod.just"
+checksum = "sha256:dc94ff109f5a406f47f72380cc562fb4bc29368d8ccad78f0ec6173ada4a8b20"
+
+[[file]]
+path = "justfiles/ox-check/tiers.just"
+checksum = "sha256:46518b2d3fd367c300b44d2b4699437b40c81134b608aa792466641567cfaf0b"
+
+[[file]]
+path = "justfiles/ox-check/tool-minimums.txt"
+checksum = "sha256:8b841b8ad787927621e2591af3c376c7e205e3014f86fd486436ec6ec3cab544"
+
+[[file]]
+path = "justfiles/ox-check/tools.just"
+checksum = "sha256:24aac28855a330f60799cd0a23986a531117edb23eb56aacb087f44bb4d79abb"
+
+[[region]]
+host = ".delta.toml"
+id = "ox-check-delta"
+checksum = "sha256:ef049abc4bba5e6dac7dfc07a4852d821de4682fe6ad46aace7ddfb2455cb597"
+
+[[region]]
+host = "Cargo.toml"
+id = "ox-check-workspace-lints"
+checksum = "sha256:555535ebbddc1399a8488fce724969357e37cdf370827b89cdeff45623d3713c"
+
+[[region]]
+host = "crates/automation/Cargo.toml"
+id = "ox-check-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo_ensure_no_cyclic_deps/Cargo.toml"
+id = "ox-check-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo_heather/Cargo.toml"
+id = "ox-check-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo_ox_check/Cargo.toml"
+id = "ox-check-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "deny.toml"
+id = "ox-check-deny"
+checksum = "sha256:16d9db629d1c110442d1fe0c2462d83fd1cda94f20fcabcc15cbd41d8ae63e42"
+
+[[region]]
+host = "justfile"
+id = "ox-check-imports"
+checksum = "sha256:6ced9b1d085f58e73abcc28ba838b14414c4c338f8474322de05014639b367aa"
+
+[[region]]
+host = "rustfmt.toml"
+id = "ox-check-rustfmt"
+checksum = "sha256:4052419861d11d4f113db0b13252871781c5edd4e3a2ca8596cb54450244be6d"

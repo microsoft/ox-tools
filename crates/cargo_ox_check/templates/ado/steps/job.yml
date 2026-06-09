@@ -1,0 +1,52 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# Default job wrapper emitted by cargo-ox-check.
+#
+# Owns the per-job *shape*: how `pool`, `steps`, and `artifacts` map onto the
+# concrete `job:` block. Pipelines that use extension templates (1ES PT,
+# SubstratePT, M365PT, etc.) take ownership of THIS file once and add their
+# required `templateContext:` block — the owned stages templates
+# (pr-stages.yml / nightly-stages.yml) then continue to update normally
+# because they only know about this wrapper's parameter contract.
+#
+# Once you edit this file, cargo-ox-check treats it as user-owned: subsequent
+# updates Propose into a `.proposed` sibling rather than overwriting.
+#
+# Contract (intentionally small and stable):
+#   - name      (string)   Job name; ADO derives the display name from it.
+#   - pool      (object)   Pool block, passed verbatim to ADO's `pool:` key.
+#   - steps     (stepList) Body of the job. Templated step lists are fine.
+#   - artifacts (object)   Optional list of pipeline artifacts to publish.
+#                          Each item: { name: string, path: string }.
+#                          The default wrapper appends one
+#                          PublishPipelineArtifact@1 task per entry; 1ESPT
+#                          wrappers translate these into
+#                          templateContext.outputs.pipelineArtifact blocks
+#                          at job level. The contract is the same either way,
+#                          so the stages templates don't need to know which
+#                          backend they're targeting.
+parameters:
+  - name: name
+    type: string
+  - name: pool
+    type: object
+  - name: steps
+    type: stepList
+  - name: artifacts
+    type: object
+    default: []
+
+jobs:
+  - job: ${{ parameters.name }}
+    pool: ${{ parameters.pool }}
+    steps:
+      - ${{ each step in parameters.steps }}:
+          - ${{ step }}
+      - ${{ each artifact in parameters.artifacts }}:
+          - task: PublishPipelineArtifact@1
+            displayName: Publish ${{ artifact.name }}
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: ${{ artifact.path }}
+              artifact: ${{ artifact.name }}

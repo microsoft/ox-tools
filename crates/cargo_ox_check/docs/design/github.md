@@ -104,11 +104,18 @@ a `.ox-check-proposed` sibling on the next `update` — see
 [updates.md §5](./updates.md#5-the-decision-algorithm)):
 
 - **Self-hosted runners**: pass `with: { linux_runner: 'self-hosted-rust', windows_runner: 'self-hosted-rust-win', linux_arm_runner: 'self-hosted-rust-arm', windows_arm_runner: 'self-hosted-rust-win-arm' }`
+- **Different OS matrix scope**: not a workflow input. The matrices are part of the
+  workflow's identity — adopters who want to add macOS, drop ARM, or otherwise change
+  the OS axis fork the emitted `ox-check-pr-impl.yml` / `ox-check-nightly-impl.yml`
+  in their own repo and dirty-file-flow takes over from there. Surveyed-repo precedent
+  (`oxidizer-github`, `oxidizer`) does the same.
   to the reusable workflow. The runner inputs are CSV-keyed by OS (see §4 for the
   exact contract).
-- **Trim or expand the test matrix**: pass `with: { test_os: 'linux,windows' }` to drop
-  the ARM legs, or `'linux,windows,linux-arm,windows-arm,macos'` to add macOS. The CSV
-  uses logical names
+- **Different OS matrix scope**: not a workflow input. The matrices are part of the
+  workflow's identity — adopters who want to add macOS, drop ARM, or otherwise change
+  the OS axis fork the emitted `ox-check-pr-impl.yml` / `ox-check-nightly-impl.yml`
+  in their own repo and dirty-file-flow takes over from there. Surveyed-repo precedent
+  (`oxidizer-github`, `oxidizer`) does the same.
   (`linux`/`windows`/`macos`), not runner labels — runner labels come from the separate
   `*_runner` inputs.
 - **Different schedule** for nightly.
@@ -142,49 +149,54 @@ Approximate shape (ox-check writes this verbatim; users never edit it):
 on:
   workflow_call:
     inputs:
-      runs_on:
-        type: string
-        default: ubuntu-latest
-        description: Runner for single-OS jobs (impact, pr-fast, pr-mutants).
-      test_os:
-        type: string
-        default: '["ubuntu-latest","windows-latest"]'
-        description: JSON array of runners for the cross-OS pr-test matrix.
+      linux_runner:       { type: string, default: ubuntu-latest }
+      windows_runner:     { type: string, default: windows-latest }
+      linux_arm_runner:   { type: string, default: ubuntu-24.04-arm }
+      windows_arm_runner: { type: string, default: windows-11-arm }
 
 jobs:
   impact:
-    runs-on: ${{ inputs.runs_on }}
+    runs-on: ${{ inputs.linux_runner }}
     outputs:
-      include_modified: ${{ steps.impact.outputs.include_modified }}
-      include_affected: ${{ steps.impact.outputs.include_affected }}
-      include_required: ${{ steps.impact.outputs.include_required }}
+      include_modified: ${{ steps.delta.outputs.include_modified }}
+      include_affected: ${{ steps.delta.outputs.include_affected }}
+      include_required: ${{ steps.delta.outputs.include_required }}
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
-      - id: impact
+      - id: delta
         uses: ./.github/actions/ox-check-impact
-        with:
-          base_ref: ${{ github.event.pull_request.base.sha }}
 
   pr-fast:
     needs: impact
-    runs-on: ${{ inputs.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-check-pr-fast
         with:
-          pr_title:         ${{ github.event.pull_request.title }}
           include_modified: ${{ needs.impact.outputs.include_modified }}
           include_affected: ${{ needs.impact.outputs.include_affected }}
           include_required: ${{ needs.impact.outputs.include_required }}
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
 
   pr-test:
     needs: impact
     strategy:
       fail-fast: false
       matrix:
-        os: ${{ fromJSON(inputs.test_os) }}
-    runs-on: ${{ matrix.os }}
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/ox-check-pr-test
@@ -194,17 +206,34 @@ jobs:
           include_required: ${{ needs.impact.outputs.include_required }}
 
   pr-mutants:
+    # x86_64 only — cargo-mutants doesn't build on aarch64-pc-windows-msvc.
     needs: impact
-    runs-on: ${{ inputs.runs_on }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
       - uses: ./.github/actions/ox-check-pr-mutants
         with:
-          base_ref:         origin/${{ github.event.pull_request.base.ref }}
           include_modified: ${{ needs.impact.outputs.include_modified }}
           include_affected: ${{ needs.impact.outputs.include_affected }}
           include_required: ${{ needs.impact.outputs.include_required }}
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha }}
 ```
+
+Every multi-OS job hardcodes its OS axis as an inline YAML array. Per-leg runner
+*labels* are inputs (so adopters can swap in self-hosted runners), but the OS axis
+itself is part of the workflow's identity. Adopters who need a different shape (add
+macOS, drop ARM, mix in exotic targets) fork the reusable workflow and let
+dirty-file-flow take over. The previously-considered `fromJSON(inputs.X)` pattern
+was rejected because it added a silent failure mode (mis-formatted inputs produced
+empty matrices that GitHub Actions silently treats as "no legs to run") without
+meaningfully expanding what adopters could customize — anyone who wants to change
+the OS axis is almost certainly making other changes too.
 
 The wiring never gates whole jobs on impact output. Each group always runs; recipes
 inside the group decide whether a given check no-ops, by testing for the literal sentinel
@@ -223,22 +252,49 @@ their local-default behavior (`--workspace`):
 on:
   workflow_call:
     inputs:
-      runs_on:
-        type: string
-        default: ubuntu-latest
-      test_os:
-        type: string
-        default: '["ubuntu-latest","windows-latest"]'
+      linux_runner:       { type: string, default: ubuntu-latest }
+      windows_runner:     { type: string, default: windows-latest }
+      linux_arm_runner:   { type: string, default: ubuntu-24.04-arm }
+      windows_arm_runner: { type: string, default: windows-11-arm }
 jobs:
-  test:
+  nightly-test:
     strategy:
       fail-fast: false
-      matrix: { os: ${{ fromJSON(inputs.test_os) }} }
-    runs-on: ${{ matrix.os }}
+      matrix:
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
     steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-nightly-test } ]
-  advisories:  { runs-on: ${{ inputs.runs_on }}, steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-nightly-advisories } ] }
-  runtime:     { runs-on: ${{ inputs.runs_on }}, steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-nightly-runtime } ] }
-  exhaustive:  { runs-on: ${{ inputs.runs_on }}, steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-nightly-exhaustive } ] }
+  nightly-advisories:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
+    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-nightly-advisories } ]
+  nightly-runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
+    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-nightly-runtime } ]
+  nightly-exhaustive:
+    # x86_64 only — cargo-mutants constraint.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}
+    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/ox-check-nightly-exhaustive } ]
 ```
 
 Nightly composite actions don't receive any `include_*` inputs at all — their inputs
@@ -255,25 +311,17 @@ impact scoping itself.
 
 The reusable workflow declares a small input set so the root workflow can pass overrides:
 
-| Input                | Type   | Default                              | Meaning                                                |
-|----------------------|--------|--------------------------------------|--------------------------------------------------------|
-| `test_os`            | string | `linux,windows,linux-arm,windows-arm` | CSV of logical OS names for the `pr-test` / `nightly-test` matrix. Recognized: `linux`, `windows`, `linux-arm`, `windows-arm`, `macos`. Override to trim or extend the matrix. |
-| `linux_runner`       | string | `ubuntu-latest`                      | Runner label for x86_64 Linux jobs and the single-OS impact job. |
-| `windows_runner`     | string | `windows-latest`                     | Runner label for x86_64 Windows jobs.                  |
-| `linux_arm_runner`   | string | `ubuntu-24.04-arm`                   | Runner label for aarch64 Linux jobs.                   |
-| `windows_arm_runner` | string | `windows-11-arm`                     | Runner label for aarch64 Windows jobs.                 |
-| `macos_runner`       | string | `macos-latest`                       | Runner label for macOS jobs (only consulted when `test_os` includes `macos`). |
+| Input                | Type   | Default              | Meaning                                                |
+|----------------------|--------|----------------------|--------------------------------------------------------|
+| `linux_runner`       | string | `ubuntu-latest`      | Runner label for x86_64 Linux jobs and the single-leg `impact` job. |
+| `windows_runner`     | string | `windows-latest`     | Runner label for x86_64 Windows jobs.                  |
+| `linux_arm_runner`   | string | `ubuntu-24.04-arm`   | Runner label for aarch64 Linux jobs.                   |
+| `windows_arm_runner` | string | `windows-11-arm`     | Runner label for aarch64 Windows jobs.                 |
 
-The non-test groups (`pr-fast`, `pr-mutants`, `nightly-advisories`, `nightly-runtime`,
-`nightly-exhaustive`) all matrix over the same four-leg default
-(`linux,windows,linux-arm,windows-arm`). The single-leg `impact` job uses `linux_runner`.
-Adopters who want a narrower default matrix override `test_os` (which controls the test
-groups) and edit their root workflow to constrain the other groups; per-group matrix
-overrides are intentionally not supported as inputs since they would expand the wiring
-surface beyond what most adopters need.
-
-The nightly reusable workflow has the same four inputs; its `nightly-test` job uses the
-same matrix mechanism as `pr-test`, and every other job uses `linux_runner`.
+The input surface is intentionally narrow: only per-leg *runner labels* are exposed,
+because swapping in self-hosted runners is the one common need that doesn't require
+otherwise touching the workflow. The OS matrix shape (which legs run) is fixed in the
+workflow source — see the discussion under the PR snippet above.
 
 The reusable workflows also declare an optional `workflow_call` secret
 `CODECOV_TOKEN`. See §10 (Coverage upload) for how it's used.

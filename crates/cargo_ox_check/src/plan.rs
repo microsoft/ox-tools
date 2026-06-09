@@ -90,6 +90,26 @@ impl PlanItem {
         }
     }
 
+    /// Construct a plan item for an `InSync` decision that *also*
+    /// carries the current template checksum. The apply step uses it
+    /// to opportunistically refresh the manifest's `L` value — so any
+    /// stale `L` from older binary versions (e.g. before line-ending
+    /// normalization landed) gets self-healed once the file is observed
+    /// in sync with the current template. Without this, a subsequent
+    /// template change would mis-classify as `Propose` instead of
+    /// `Write` because the algorithm would see `F ≠ L` and assume user
+    /// customization.
+    #[must_use]
+    pub fn insync(target: Target, template_checksum: String) -> Self {
+        Self {
+            target,
+            decision: Decision::InSync,
+            rendered: None,
+            spliced_host: None,
+            rendered_checksum: Some(template_checksum),
+        }
+    }
+
     /// Construct a plan item for a `Write` decision on an owned file.
     #[must_use]
     pub fn write_file(path: impl Into<String>, rendered: String, checksum: String) -> Self {
@@ -171,6 +191,56 @@ impl PlanItem {
             rendered_checksum: Some(body_checksum),
         }
     }
+
+    /// Construct a plan item for a `Remove` decision on an owned file —
+    /// the file is no longer in the catalog and the user hasn't
+    /// customized it.
+    #[must_use]
+    pub fn remove_file(path: impl Into<String>) -> Self {
+        Self {
+            target: Target::File { path: path.into() },
+            decision: Decision::Remove,
+            rendered: None,
+            spliced_host: None,
+            rendered_checksum: None,
+        }
+    }
+
+    /// Construct a plan item for a `Remove` decision on a managed region.
+    /// `spliced_host` is the host-file content with the region (markers
+    /// + body) excised.
+    #[must_use]
+    pub fn remove_region(
+        host: impl Into<String>,
+        id: impl Into<String>,
+        spliced_host: String,
+    ) -> Self {
+        Self {
+            target: Target::Region {
+                host: host.into(),
+                id: id.into(),
+            },
+            decision: Decision::Remove,
+            rendered: None,
+            spliced_host: Some(spliced_host),
+            rendered_checksum: None,
+        }
+    }
+
+    /// Construct a plan item for an `OrphanedKept` decision. The
+    /// file/region is no longer in the catalog, but the user has
+    /// customized it — leave the disk state alone and drop the
+    /// manifest entry to transfer ownership.
+    #[must_use]
+    pub fn orphaned_kept(target: Target) -> Self {
+        Self {
+            target,
+            decision: Decision::OrphanedKept,
+            rendered: None,
+            spliced_host: None,
+            rendered_checksum: None,
+        }
+    }
 }
 
 /// A collection of plan items ready to be applied or summarized.
@@ -219,6 +289,8 @@ impl Plan {
         let mut leave_alones: Vec<&PlanItem> = Vec::new();
         let mut proposes: Vec<&PlanItem> = Vec::new();
         let mut in_syncs: Vec<&PlanItem> = Vec::new();
+        let mut removes: Vec<&PlanItem> = Vec::new();
+        let mut orphans_kept: Vec<&PlanItem> = Vec::new();
 
         for item in &self.items {
             match item.decision {
@@ -239,42 +311,8 @@ impl Plan {
                 Decision::LeaveAlone => leave_alones.push(item),
                 Decision::Propose => proposes.push(item),
                 Decision::InSync => in_syncs.push(item),
-            }
-        }
-
-        // Stale entries: in the prior manifest but no longer covered by
-        // any plan item. These are purged on application.
-        let mut stale_files: Vec<&str> = Vec::new();
-        let mut stale_regions: Vec<RegionKey> = Vec::new();
-        if let Some(prev) = previous_manifest {
-            let live_files: std::collections::BTreeSet<&str> = self
-                .items
-                .iter()
-                .filter_map(|i| match &i.target {
-                    Target::File { path } => Some(path.as_str()),
-                    Target::Region { .. } => None,
-                })
-                .collect();
-            let live_regions: std::collections::BTreeSet<RegionKey> = self
-                .items
-                .iter()
-                .filter_map(|i| match &i.target {
-                    Target::Region { host, id } => Some(RegionKey {
-                        host: host.clone(),
-                        id: id.clone(),
-                    }),
-                    Target::File { .. } => None,
-                })
-                .collect();
-            for path in prev.files.keys() {
-                if !live_files.contains(path.as_str()) {
-                    stale_files.push(path.as_str());
-                }
-            }
-            for key in prev.regions.keys() {
-                if !live_regions.contains(key) {
-                    stale_regions.push(key.clone());
-                }
+                Decision::Remove => removes.push(item),
+                Decision::OrphanedKept => orphans_kept.push(item),
             }
         }
 
@@ -284,23 +322,16 @@ impl Plan {
         write_section(&mut out, "Will create", &creates);
         write_section(&mut out, "Will update", &updates);
         write_section(&mut out, "Will propose", &proposes);
+        write_section(&mut out, "Will remove", &removes);
+        write_section(
+            &mut out,
+            "Orphaned (customized; transferring ownership)",
+            &orphans_kept,
+        );
         write_section(&mut out, "Will leave alone (silent)", &leave_alones);
 
         if !in_syncs.is_empty() {
             let _ = writeln!(out, "Unchanged: {} item(s)", in_syncs.len());
-        }
-        if !stale_files.is_empty() || !stale_regions.is_empty() {
-            let _ = writeln!(
-                out,
-                "Stale manifest entries (will be purged): {}",
-                stale_files.len() + stale_regions.len()
-            );
-            for path in &stale_files {
-                let _ = writeln!(out, "  - {path}");
-            }
-            for key in &stale_regions {
-                let _ = writeln!(out, "  - {} [{}]", key.host, key.id);
-            }
         }
 
         out
@@ -410,37 +441,78 @@ impl Plan {
                         );
                     }
                 }
-                (_, Decision::InSync | Decision::LeaveAlone) => {
+                (Target::File { path }, Decision::Remove) => {
+                    // Untouched orphan file: delete and drop the
+                    // manifest entry. If the file is already missing
+                    // (race / external delete), absorb the error so
+                    // the result is idempotent.
+                    let abs = repo_root.join(path);
+                    if let Err(e) = std::fs::remove_file(&abs)
+                        && e.kind() != std::io::ErrorKind::NotFound
+                    {
+                        return Err::<Manifest, _>(e)
+                            .into_app_err_with(|| format!("failed to remove {}", abs.display()));
+                    }
+                    next.files.remove(path);
+                }
+                (Target::Region { host, id }, Decision::Remove) => {
+                    // Untouched orphan region: splice the markers + body
+                    // out of the host file and drop the manifest entry.
+                    let spliced = item
+                        .spliced_host
+                        .as_ref()
+                        .expect("region Remove must carry spliced host");
+                    let abs = repo_root.join(host);
+                    write_file(&abs, spliced)?;
+                    next.regions.remove(&RegionKey {
+                        host: host.clone(),
+                        id: id.clone(),
+                    });
+                }
+                (Target::File { path }, Decision::OrphanedKept) => {
+                    // Customized orphan: leave the file in place,
+                    // transfer ownership by dropping the manifest entry.
+                    next.files.remove(path);
+                }
+                (Target::Region { host, id }, Decision::OrphanedKept) => {
+                    // Customized orphan region: leave the host file
+                    // and the in-region content in place, transfer
+                    // ownership by dropping the manifest entry.
+                    next.regions.remove(&RegionKey {
+                        host: host.clone(),
+                        id: id.clone(),
+                    });
+                }
+                (_, Decision::InSync) => {
+                    // Disk content matches the current template. No
+                    // file write needed. We DO refresh the manifest L
+                    // to the current template checksum if the plan
+                    // item carries one — this self-heals stale-L
+                    // values left over from older binary versions
+                    // whose hash function differed (e.g. before
+                    // line-ending normalization).
+                    if let Some(checksum) = &item.rendered_checksum {
+                        match &item.target {
+                            Target::File { path } => {
+                                next.files.insert(path.clone(), checksum.clone());
+                            }
+                            Target::Region { host, id } => {
+                                next.regions.insert(
+                                    RegionKey {
+                                        host: host.clone(),
+                                        id: id.clone(),
+                                    },
+                                    checksum.clone(),
+                                );
+                            }
+                        }
+                    }
+                }
+                (_, Decision::LeaveAlone) => {
                     // No-op; manifest entry already preserved.
                 }
             }
         }
-
-        // Purge stale entries: anything in the previous manifest that the
-        // current run didn't touch (e.g. a removed workspace member, a
-        // disabled backend) is dropped. We use the items the plan covers
-        // as the active-key set; entries outside that set fall away.
-        let live_files: std::collections::BTreeSet<&str> = self
-            .items
-            .iter()
-            .filter_map(|i| match &i.target {
-                Target::File { path } => Some(path.as_str()),
-                Target::Region { .. } => None,
-            })
-            .collect();
-        let live_regions: std::collections::BTreeSet<RegionKey> = self
-            .items
-            .iter()
-            .filter_map(|i| match &i.target {
-                Target::Region { host, id } => Some(RegionKey {
-                    host: host.clone(),
-                    id: id.clone(),
-                }),
-                Target::File { .. } => None,
-            })
-            .collect();
-        next.files.retain(|path, _| live_files.contains(path.as_str()));
-        next.regions.retain(|key, _| live_regions.contains(key));
 
         Ok(next)
     }
@@ -552,15 +624,23 @@ mod tests {
     }
 
     #[test]
-    fn summary_lists_stale_entries() {
-        let plan = Plan::default();
-        let mut prev = Manifest::default();
-        prev.set_file("stale.txt", "sha256:old");
-        prev.set_region("stale-host.toml", "stale-region", "sha256:r");
-        let s = plan.summary(Some(&prev));
-        assert!(s.contains("Stale manifest entries (will be purged): 2"));
-        assert!(s.contains("- stale.txt"));
-        assert!(s.contains("- stale-host.toml [stale-region]"));
+    fn summary_lists_removal_and_orphan_sections() {
+        // Plan items with the new Remove / OrphanedKept decisions surface
+        // in dedicated summary sections — they replaced the older
+        // implicit "Stale manifest entries" footer because removal is
+        // now an explicit plan action rather than a side effect of
+        // apply().
+        let mut plan = Plan::default();
+        plan.push(PlanItem::remove_file("dropped.txt"));
+        plan.push(PlanItem::orphaned_kept(Target::Region {
+            host: "Justfile".into(),
+            id: "ox-check-old".into(),
+        }));
+        let s = plan.summary(None);
+        assert!(s.contains("Will remove: 1 item(s)"));
+        assert!(s.contains("- dropped.txt"));
+        assert!(s.contains("Orphaned (customized; transferring ownership): 1 item(s)"));
+        assert!(s.contains("- Justfile [ox-check-old]"));
     }
 
     #[test]
@@ -640,26 +720,135 @@ mod tests {
     }
 
     #[test]
-    fn apply_purges_stale_manifest_entries() {
-        // Items present in the previous manifest but not in the current
-        // plan (e.g. a removed workspace member, a disabled backend) are
-        // dropped from the returned manifest.
+    fn apply_insync_refreshes_stale_manifest_l() {
+        // Regression test: when an older binary recorded an L using
+        // a different hash function (e.g. pre-line-ending-normalization),
+        // and the current binary observes F == T (InSync), the manifest
+        // L gets self-healed to the current T. Without this refresh,
+        // the next template change would mis-classify as Propose
+        // because the algorithm would see F ≠ L and assume user
+        // customization.
         let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "current content\n").unwrap();
         let mut prev = Manifest::default();
-        prev.set_file("stale-owned.txt", "sha256:old");
-        prev.set_region("stale-host.toml", "stale-region", "sha256:r");
-        let plan = Plan::default();
+        prev.set_file("a.txt", "sha256:stale-from-older-binary");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::insync(
+            Target::File { path: "a.txt".into() },
+            "sha256:current-template".into(),
+        ));
+        let next = plan.apply(tmp.path(), &prev).unwrap();
+        assert_eq!(
+            next.files.get("a.txt").map(String::as_str),
+            Some("sha256:current-template"),
+            "InSync must refresh the manifest L to the current template checksum",
+        );
+    }
+
+    #[test]
+    fn apply_leave_alone_does_not_refresh_manifest_l() {
+        // Dual of the above: LeaveAlone explicitly preserves L. The
+        // user has diverged from the template; bumping L = T would
+        // make the next run see F ≠ L (true), L == T (true) → Write,
+        // which would silently overwrite the user's customization.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "user edited\n").unwrap();
+        let mut prev = Manifest::default();
+        prev.set_file("a.txt", "sha256:original");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::noop(
+            Target::File { path: "a.txt".into() },
+            Decision::LeaveAlone,
+        ));
+        let next = plan.apply(tmp.path(), &prev).unwrap();
+        assert_eq!(
+            next.files.get("a.txt").map(String::as_str),
+            Some("sha256:original"),
+            "LeaveAlone must preserve the manifest L unchanged",
+        );
+    }
+
+    #[test]
+    fn apply_remove_deletes_file_and_purges_manifest() {
+        // A Remove plan item deletes the file from disk and drops
+        // the manifest entry. This is the path the new plan_removals
+        // hook takes for an untouched orphan (replacing the old
+        // safety-net purge that only touched the manifest).
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("dropped.txt"), "old content\n").unwrap();
+        let mut prev = Manifest::default();
+        prev.set_file("dropped.txt", "sha256:old");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::remove_file("dropped.txt"));
         let next = plan.apply(tmp.path(), &prev).unwrap();
         assert!(
-            next.files.is_empty(),
-            "stale file entry should be purged when not in plan: {:?}",
-            next.files
+            !tmp.path().join("dropped.txt").exists(),
+            "Remove must delete the file from disk"
         );
         assert!(
-            next.regions.is_empty(),
-            "stale region entry should be purged when not in plan: {:?}",
-            next.regions
+            next.files.is_empty(),
+            "Remove must drop the manifest entry: {:?}",
+            next.files
         );
+    }
+
+    #[test]
+    fn apply_remove_region_splices_out_markers_and_body() {
+        // A Region Remove plan item replaces the host file with
+        // its spliced-out content (markers + body excised), and
+        // drops the manifest entry. The spliced_host payload is
+        // computed by the plan builder via region::remove_region.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("Justfile"),
+            "before\n\n# >>> ox-check-managed: r\nbody\n# <<< ox-check-managed: r\nafter\n",
+        )
+        .unwrap();
+        let mut prev = Manifest::default();
+        prev.set_region("Justfile", "r", "sha256:body");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::remove_region(
+            "Justfile",
+            "r",
+            "before\nafter\n".to_string(),
+        ));
+        let next = plan.apply(tmp.path(), &prev).unwrap();
+        let host = std::fs::read_to_string(tmp.path().join("Justfile")).unwrap();
+        assert_eq!(host, "before\nafter\n");
+        assert!(next.regions.is_empty());
+    }
+
+    #[test]
+    fn apply_orphaned_kept_preserves_disk_and_drops_manifest() {
+        // An OrphanedKept plan item leaves the file/region alone and
+        // drops the manifest entry — transferring ownership to the
+        // user.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("custom.txt"), "user edited\n").unwrap();
+        let mut prev = Manifest::default();
+        prev.set_file("custom.txt", "sha256:original");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::orphaned_kept(Target::File {
+            path: "custom.txt".into(),
+        }));
+        let next = plan.apply(tmp.path(), &prev).unwrap();
+        let live = std::fs::read_to_string(tmp.path().join("custom.txt")).unwrap();
+        assert_eq!(live, "user edited\n");
+        assert!(next.files.is_empty());
+    }
+
+    #[test]
+    fn apply_remove_missing_file_is_idempotent() {
+        // Race: the file is already gone (someone deleted it
+        // externally between the plan build and apply). Remove must
+        // still complete cleanly and purge the manifest.
+        let tmp = TempDir::new().unwrap();
+        let mut prev = Manifest::default();
+        prev.set_file("absent.txt", "sha256:old");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::remove_file("absent.txt"));
+        let next = plan.apply(tmp.path(), &prev).unwrap();
+        assert!(next.files.is_empty());
     }
 
     #[test]

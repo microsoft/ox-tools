@@ -24,6 +24,14 @@ pub const SETUP_STEP: &str = include_str!("../../templates/ado/steps/setup.yml")
 /// Embedded body of the cargo-delta impact step template.
 pub const IMPACT_STEP: &str = include_str!("../../templates/ado/steps/impact.yml");
 
+/// Embedded body of the dirty-file job wrapper.
+///
+/// Every job in `pr.yml` / `nightly.yml` is rendered through this
+/// wrapper; 1ESPT (and similar extension-template) users take ownership
+/// of it to inject `templateContext:` blocks without forking the owned
+/// stages templates. See [ado.md §4](../../../docs/design/ado.md#4-owned-stages-templates).
+pub const JOB_WRAPPER: &str = include_str!("../../templates/ado/steps/job.yml");
+
 /// Embedded body of the PR-tier stages template.
 pub const PR_STAGES: &str = include_str!("../../templates/ado/pr-stages.yml");
 
@@ -153,7 +161,7 @@ pub fn plan_step_templates(
     repo_root: &Path,
     manifest: &Manifest,
 ) -> Result<Vec<PlanItem>, AppError> {
-    let mut items = Vec::with_capacity(GROUPS.len() + 2);
+    let mut items = Vec::with_capacity(GROUPS.len() + 3);
     items.push(plan_owned_file(
         repo_root,
         manifest,
@@ -165,6 +173,12 @@ pub fn plan_step_templates(
         manifest,
         ".pipelines/ox-check/steps/impact.yml",
         IMPACT_STEP,
+    )?);
+    items.push(plan_owned_file(
+        repo_root,
+        manifest,
+        ".pipelines/ox-check/steps/job.yml",
+        JOB_WRAPPER,
     )?);
     for group in GROUPS {
         let body = render_group_step(group);
@@ -190,6 +204,23 @@ mod tests {
         assert!(SETUP_STEP.contains("just ox-check-tools-install"));
         assert!(IMPACT_STEP.contains("cargo-delta"));
         assert!(IMPACT_STEP.contains("##vso[task.setvariable"));
+    }
+
+    #[test]
+    fn job_wrapper_declares_expected_contract() {
+        // Contract is intentionally small and stable: name, pool, steps,
+        // artifacts. Anything more elaborate is the user's responsibility
+        // once they take ownership of the wrapper.
+        for needle in [
+            "name: name",
+            "name: pool",
+            "name: steps",
+            "type: stepList",
+            "name: artifacts",
+            "PublishPipelineArtifact@1",
+        ] {
+            assert!(JOB_WRAPPER.contains(needle), "wrapper missing '{needle}'");
+        }
     }
 
     #[test]
@@ -219,6 +250,10 @@ mod tests {
             assert!(PR_STAGES.contains(needle), "PR stages missing '{needle}'");
         }
         assert!(PR_STAGES.contains("stageDependencies.impact.compute.outputs"));
+        // Every job is rendered through the dirty-file wrapper.
+        assert!(PR_STAGES.contains("- template: steps/job.yml"));
+        // No bare `- job:` keys — they must all go through the wrapper.
+        assert!(!PR_STAGES.contains("\n      - job: "), "PR stages defines a bare `- job:` instead of going through steps/job.yml");
     }
 
     #[test]
@@ -233,6 +268,9 @@ mod tests {
         }
         // Nightly publishes coverage via PublishCodeCoverageResults@2.
         assert!(NIGHTLY_STAGES.contains("PublishCodeCoverageResults@2"));
+        // Every job is rendered through the dirty-file wrapper.
+        assert!(NIGHTLY_STAGES.contains("- template: steps/job.yml"));
+        assert!(!NIGHTLY_STAGES.contains("\n      - job: "), "Nightly stages defines a bare `- job:` instead of going through steps/job.yml");
     }
 
     #[test]
@@ -243,10 +281,10 @@ mod tests {
     }
 
     #[test]
-    fn plan_step_templates_emits_setup_impact_plus_seven_groups() {
+    fn plan_step_templates_emits_setup_impact_job_wrapper_plus_seven_groups() {
         let tmp = TempDir::new().unwrap();
         let items = plan_step_templates(tmp.path(), &Manifest::default()).unwrap();
-        assert_eq!(items.len(), GROUPS.len() + 2);
+        assert_eq!(items.len(), GROUPS.len() + 3);
         for item in &items {
             assert_eq!(item.decision, Decision::Write);
         }

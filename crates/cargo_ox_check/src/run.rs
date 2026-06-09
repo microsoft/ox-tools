@@ -6,16 +6,20 @@
 //! Orchestrates: workspace discovery, manifest load, backend resolution,
 //! emitter invocation, plan accumulation, and final apply/summarize.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 
-use ohno::AppError;
+use ohno::{AppError, IntoAppError as _};
 use tracing::info;
 
 use crate::backend::{self, Backend};
+use crate::checksum::checksum_str;
 use crate::cli::{Command, UpdateArgs};
+use crate::decision::{Decision, decide_removal};
 use crate::emit::{ado, cargo_toml, github, local, shared_configs};
 use crate::manifest::Manifest;
-use crate::plan::Plan;
+use crate::plan::{Plan, PlanItem, Target};
+use crate::region::{CommentSyntax, find_region, remove_region};
 use crate::workspace::{self, Workspace};
 
 /// Outcome of an `update` invocation.
@@ -127,7 +131,116 @@ fn build_plan(
         }
     }
 
+    plan_removals(repo_root, manifest, &mut plan)?;
+
     Ok(plan)
+}
+
+/// Scan the previous manifest for entries that the active plan items
+/// don't cover. For each, classify as Remove (user untouched since the
+/// last render) or OrphanedKept (user customized — preserve and
+/// transfer ownership).
+///
+/// This is what removes orphaned CI artifacts, dropped catalog entries,
+/// disabled-backend files, and any other previously-tracked item that
+/// is no longer in scope.
+fn plan_removals(
+    repo_root: &Path,
+    previous: &Manifest,
+    plan: &mut Plan,
+) -> Result<(), AppError> {
+    let live_files: BTreeSet<String> = plan
+        .items()
+        .iter()
+        .filter_map(|i| match &i.target {
+            Target::File { path } => Some(path.clone()),
+            Target::Region { .. } => None,
+        })
+        .collect();
+    let live_regions: BTreeSet<(String, String)> = plan
+        .items()
+        .iter()
+        .filter_map(|i| match &i.target {
+            Target::Region { host, id } => Some((host.clone(), id.clone())),
+            Target::File { .. } => None,
+        })
+        .collect();
+
+    for (path, last) in &previous.files {
+        if live_files.contains(path) {
+            continue;
+        }
+        let disk = read_file_if_present(&repo_root.join(path))?;
+        let disk_checksum = disk.as_deref().map(checksum_str);
+        match decide_removal(last, disk_checksum.as_deref()) {
+            Decision::Remove => plan.push(PlanItem::remove_file(path.clone())),
+            Decision::OrphanedKept => plan.push(PlanItem::orphaned_kept(
+                Target::File { path: path.clone() },
+            )),
+            // `InSync` means the file is already gone; we still want to
+            // purge the manifest entry, so emit a no-op plan item that
+            // the apply step will drop the entry for.
+            Decision::InSync => plan.push(PlanItem::orphaned_kept(
+                Target::File { path: path.clone() },
+            )),
+            other => unreachable!("decide_removal returned {other:?} for a file orphan"),
+        }
+    }
+
+    for (key, last) in &previous.regions {
+        if live_regions.contains(&(key.host.clone(), key.id.clone())) {
+            continue;
+        }
+        let host_path = repo_root.join(&key.host);
+        let host_text = match read_file_if_present(&host_path)? {
+            Some(t) => t,
+            None => {
+                // Host file is gone entirely; just drop the manifest
+                // entry. Emit OrphanedKept (no-op apply) so the plan
+                // can record the transfer of ownership consistently.
+                plan.push(PlanItem::orphaned_kept(Target::Region {
+                    host: key.host.clone(),
+                    id: key.id.clone(),
+                }));
+                continue;
+            }
+        };
+
+        // CommentSyntax is currently always Hash for managed regions.
+        // When that assumption changes, the manifest will need to
+        // record the syntax used.
+        let syntax = CommentSyntax::Hash;
+        let region = find_region(&host_text, &key.id, syntax)?;
+        let body_checksum = region.as_ref().map(|r| checksum_str(r.body_str()));
+        match decide_removal(last, body_checksum.as_deref()) {
+            Decision::Remove => {
+                let spliced = remove_region(&host_text, &key.id, syntax)?;
+                plan.push(PlanItem::remove_region(
+                    key.host.clone(),
+                    key.id.clone(),
+                    spliced,
+                ));
+            }
+            Decision::OrphanedKept | Decision::InSync => {
+                plan.push(PlanItem::orphaned_kept(Target::Region {
+                    host: key.host.clone(),
+                    id: key.id.clone(),
+                }));
+            }
+            other => unreachable!("decide_removal returned {other:?} for a region orphan"),
+        }
+    }
+
+    Ok(())
+}
+
+fn read_file_if_present(path: &Path) -> Result<Option<String>, AppError> {
+    match std::fs::read_to_string(path) {
+        Ok(s) => Ok(Some(s)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err::<Option<String>, _>(e)
+            .into_app_err_with(|| format!("failed to read {}", path.display())),
+    }
 }
 
 #[cfg(test)]

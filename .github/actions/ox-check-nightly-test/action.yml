@@ -1,0 +1,39 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+# The token nightly-test is substituted by cargo-ox-check at emit time with
+# the concrete check-group name (pr-fast, pr-test, nightly-runtime, ...).
+name: ox-check-nightly-test
+description: Run the nightly-test check group.
+inputs:
+  include_modified:
+    description: |
+      Pre-formatted --package args (e.g. "--package alpha --package beta")
+      for the modified tier, or the sentinel "--skip" when nothing
+      modified. Local invocations leave it unset; recipes default to
+      --workspace.
+    default: ""
+    required: false
+  include_affected:
+    description: |
+      Same shape as include_modified, but for the affected tier
+      (modified ∪ rev-deps).
+    default: ""
+    required: false
+  include_required:
+    description: |
+      Same shape as include_modified, but for the required tier
+      (affected ∪ workspace-internal transitive deps).
+    default: ""
+    required: false
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/ox-check-setup
+    - name: Run just ox-check-nightly-test
+      shell: bash
+      env:
+        OX_CHECK_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
+        OX_CHECK_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
+        OX_CHECK_INCLUDE_REQUIRED: ${{ inputs.include_required }}
+      run: just ox-check-nightly-test

@@ -215,6 +215,53 @@ pub fn render_region(id: &str, body: &str, syntax: CommentSyntax) -> String {
     out
 }
 
+/// Splice the named region out of `text`, returning the host content
+/// with the markers + body excised entirely. To avoid leaving an
+/// asymmetric blank-line gap, one adjacent blank line is consumed:
+/// the trailing blank if present, else the leading blank if the
+/// region sits at end-of-file.
+///
+/// If the region is not present the input is returned unchanged.
+///
+/// # Errors
+///
+/// Returns an error if the host file contains a malformed region with
+/// the requested id (mismatched/missing sentinels).
+pub fn remove_region(
+    text: &str,
+    id: &str,
+    syntax: CommentSyntax,
+) -> Result<String, AppError> {
+    let Some(region) = find_region(text, id, syntax)? else {
+        return Ok(text.to_owned());
+    };
+
+    let mut cut_start = region.start_line.start;
+    let mut cut_end = region.end_line.end;
+
+    // Prefer to eat the trailing blank line — that mirrors upsert's
+    // "add one blank line of separation" when the region was first
+    // inserted, and it preserves a single blank between user content
+    // when the region sits in the middle of the file.
+    let trailing_blank = text[cut_end..].starts_with('\n');
+    if trailing_blank {
+        cut_end += 1;
+    } else {
+        // Region sits at end-of-file: there's no trailing blank to
+        // eat. Pull back the leading blank instead so the file doesn't
+        // end with an orphan blank line where the region used to be.
+        let prefix = &text[..cut_start];
+        if prefix.ends_with("\n\n") {
+            cut_start -= 1;
+        }
+    }
+
+    let mut out = String::with_capacity(text.len() - (cut_end - cut_start));
+    out.push_str(&text[..cut_start]);
+    out.push_str(&text[cut_end..]);
+    Ok(out)
+}
+
 fn iterate_lines(text: &str) -> LineIter<'_> {
     LineIter { text, pos: 0 }
 }
@@ -364,6 +411,38 @@ mod tests {
             s,
             "# >>> ox-check-managed: x\nbody\n# <<< ox-check-managed: x\n"
         );
+    }
+
+    #[test]
+    fn remove_region_excises_markers_and_body() {
+        // The dual of upsert_region: takes a host with a region and
+        // returns the host without it. Adjacent blank lines on both
+        // sides of the region are consumed so the spliced result
+        // doesn't leave a visible gap where the region used to be.
+        let text = "before\n\
+                    \n\
+                    # >>> ox-check-managed: x\n\
+                    body line 1\n\
+                    body line 2\n\
+                    # <<< ox-check-managed: x\n\
+                    \n\
+                    after\n";
+        let out = remove_region(text, "x", SYN).unwrap();
+        assert_eq!(out, "before\n\nafter\n");
+    }
+
+    #[test]
+    fn remove_region_absent_region_is_a_noop() {
+        let text = "no region in sight\n";
+        let out = remove_region(text, "x", SYN).unwrap();
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn remove_region_at_eof_drops_trailing_blank() {
+        let text = "before\n\n# >>> ox-check-managed: x\nbody\n# <<< ox-check-managed: x\n";
+        let out = remove_region(text, "x", SYN).unwrap();
+        assert_eq!(out, "before\n");
     }
 
     #[test]

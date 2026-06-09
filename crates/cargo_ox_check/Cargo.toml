@@ -39,5 +39,7 @@ predicates = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
 
+# >>> ox-check-managed: ox-check-lints
 [lints]
 workspace = true
+# <<< ox-check-managed: ox-check-lints

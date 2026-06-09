@@ -1,0 +1,23 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-ox-check; edit via `cargo ox-check update`.
+name: ox-check-pr
+
+on:
+  pull_request: {}
+  merge_group: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ox-check-pr-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ox-check-pr:
+    uses: ./.github/workflows/ox-check-pr-impl.yml
+    permissions:
+      contents: read
+      pull-requests: read
+    secrets: inherit

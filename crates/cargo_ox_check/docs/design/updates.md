@@ -277,6 +277,29 @@ the default behavior of doing nothing.
 `.ox-check-proposed` files are **not** added to `.gitignore`. Showing up in `git status`
 and diffs is the point — a proposal you can't see is a proposal you'll forget about.
 
+### 5.1 Orphan handling: catalog removals and backend changes
+
+When an entry exists in the manifest (`L` present) but the current catalog *does not*
+produce a corresponding plan item — because the file was dropped from the catalog by
+an ox-check version bump, or the user deselected a backend, or a workspace member
+moved — the tool runs a parallel decision against the previously-tracked item:
+
+| `D`        | Action                                                                                                                  |
+|------------|-------------------------------------------------------------------------------------------------------------------------|
+| absent     | Already gone. Just drop the manifest entry; no disk change.                                                              |
+| `D == L`   | **`Remove`** — the user hasn't touched it. Delete the file from disk (or splice the markers + body out of the host file for a managed region). Drop the manifest entry. |
+| `D != L`   | **`OrphanedKept`** — the user has customized it. Leave the file/region on disk untouched; drop the manifest entry. Ownership transfers to the user. |
+
+The `OrphanedKept` path is deliberately silent past the dry-run summary: the user
+hasn't asked ox-check to track this item anymore, and they invested effort customizing
+it. Nagging them would be antagonistic. They can delete the orphan themselves at any
+time, or rename it, or keep editing it — ox-check no longer has an opinion about it.
+
+The `Remove` path is what makes catalog churn safe to ship. When ox-check 0.5 drops
+`nightly-builds.yml` (collapsed into `nightly-exhaustive`), every adopter on 0.4 who
+runs `cargo ox-check update` gets the file cleanly deleted, without manual janitorial
+work — provided they hadn't customized it.
+
 ### Exit codes
 
 - `--dry-run` exit code 0: this run would write no proposal (clean, or dirty but
@@ -379,10 +402,10 @@ omitted, the tool autodetects from the `origin` git remote URL:
 `--no-backends` is valid and useful for repos that want only the local `just` setup
 with no CI files; it is mutually exclusive with `--backend`. Autodetection runs every
 time `--backend` and `--no-backends` are both absent; there is no "first run" special
-case. `update` never deletes files. To stop using a backend, the user removes the
-corresponding directory by hand and trims the stale entries from `.ox-check.lock` (or
-just deletes them and reruns without that backend; the tool purges manifest entries
-whose catalog item is no longer enabled by the current backend set).
+case. When the backend set changes (or an item is dropped from the catalog), the tool
+detects orphaned files / regions per §5.1 and removes them on the next non-dry-run
+unless the user has customized them (in which case ownership transfers to the user
+silently).
 
 ## 9. Dry-run UX
 
@@ -396,11 +419,15 @@ the manifest nor any file). Output is grouped by category:
 - **Will propose**: dirty items whose template *has* changed; a `.ox-check-proposed`
   sibling will be written. Includes both user-edited and emptied/opted-out items —
   emptiness has no special status in the algorithm.
+- **Will remove**: items that were tracked by the previous manifest but are no longer
+  in the catalog *and* the user has not customized them. Owned files get deleted;
+  managed regions get spliced out of their host file.
+- **Orphaned (customized; transferring ownership)**: items that were tracked but are
+  no longer in the catalog *and* the user has customized them. Files / regions are
+  left on disk unchanged; the manifest entry is dropped so ox-check stops tracking
+  them. The user can keep, edit, or delete them at their own discretion.
 - **Unchanged**: clean items whose template is identical to last render.
-- **Stale manifest entries**: paths or `(host, id)` pairs in `.ox-check.lock` that the
-  current catalog no longer manages (e.g. removed by ox-check version bump, or by
-  changing the enabled backend set). These are purged on the next non-dry-run.
 
-Exit code 0 if nothing is dirty-and-template-changed; exit code 1 otherwise. The same
-output format is printed at the end of a non-dry-run `update`, summarizing what
-actually happened.
+Exit code 0 if everything is clean (only `InSync` and `LeaveAlone`); exit code 1 if
+the tool would change anything on disk. The same output format is printed at the end
+of a non-dry-run `update`, summarizing what actually happened.

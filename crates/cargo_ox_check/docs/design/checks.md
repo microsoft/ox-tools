@@ -36,7 +36,7 @@ in different tiers and makes the tier of any failing job obvious from its name a
 |--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis. Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks (fmt, license-headers, …) run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
 | `pr-test`          | Same default as `pr-fast`             | Code execution: tests (instrumented for coverage), doctests, examples. Coverage reporting is folded in via `cargo llvm-cov nextest`. |
-| `pr-mutants`       | Same default as `pr-fast`             | Diff-scoped mutation testing on the change in this PR. Cross-OS to match `oxidizer`'s policy — mutations on cfg-gated code matter. Diff-scoping keeps each leg's runtime bounded. |
+| `pr-mutants`       | Linux x86_64 + Windows x86_64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | Diff-scoped mutation testing on the change in this PR. Cross-OS to match `oxidizer`'s policy — mutations on cfg-gated code matter. **x86_64-only**: cargo-mutants currently doesn't build on `aarch64-pc-windows-msvc` (upstream `winapi` crate incompat), and the value of mutation testing on the ARM legs doesn't justify the extra wall-clock. |
 
 ### Nightly tier (4 groups)
 
@@ -45,7 +45,7 @@ in different tiers and makes the tier of any failing job obvious from its name a
 | `nightly-test`       | Same default as `pr-test` | Re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
 | `nightly-advisories` | Same default as `pr-fast` | Re-runs every check whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain), `udeps` (uses `cargo +nightly`, which evolves). Cross-OS because clippy and udeps compile per host. |
 | `nightly-runtime`    | Same default as `pr-fast` | Tests under stricter runtimes that catch UB and timing/threading bugs: `miri`, `careful`. Both tools work on every Tier 1 Rust target; the surveyed repos (`oxidizer`, `oxidizer-github`) both run them cross-OS, so ox-check does too. |
-| `nightly-exhaustive` | Same default as `pr-fast` | The expensive whole-workspace permutations that don't fit the PR budget: full `cargo mutants`, `cargo-hack --feature-powerset`, and `cargo bench --no-run` plus a single-iteration smoke run per bench target. Cross-OS to match `oxidizer`'s policy and to give cargo-hack / bench compile coverage for cfg-gated code. Adopters who can't afford the full matrix (mutants-full can run for hours per leg) override the matrix in their root workflow / pipeline. |
+| `nightly-exhaustive` | Linux x86_64 + Windows x86_64 | The expensive whole-workspace permutations that don't fit the PR budget: full `cargo mutants`, `cargo-hack --feature-powerset`, and `cargo bench --no-run` plus a single-iteration smoke run per bench target. Cross-OS to match `oxidizer`'s policy and to give cargo-hack / bench compile coverage for cfg-gated code. **x86_64-only**: same `cargo-mutants` / `winapi` constraint as `pr-mutants`. Adopters who can't afford the full matrix (mutants-full can run for hours per leg) override the matrix in their root workflow / pipeline. |
 
 **Backend asymmetry on ARM coverage.** The GitHub backend ships a four-leg default matrix
 (Linux/Windows × x86_64/aarch64) because GH has Microsoft-hosted ARM runners
@@ -56,7 +56,8 @@ backends — the asymmetry is purely in the wiring layer's default OS matrix.
 
 OS-scope is an opinion ox-check ships and the user overrides per-repo through the
 backend-specific knobs ([github.md §4](./github.md#4-owned-reusable-workflows) for
-`test_os` and the runner-label inputs, [ado.md §4](./ado.md#4-owned-stages-templates) for
+the per-leg runner-label inputs and forking the workflow when the matrix shape itself
+needs to change, [ado.md §4](./ado.md#4-owned-stages-templates) for
 `linuxPool`/`windowsPool`).
 Locally there is no OS matrix; `just ox-check-pr-test` runs against whatever OS the
 developer is on. See [design.md §8.3](./design.md#83-cross-os-test-matrices) for the

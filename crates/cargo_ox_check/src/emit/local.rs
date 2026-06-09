@@ -128,7 +128,7 @@ pub fn plan_tiers_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem
 pub const JUSTFILE_REGION_ID: &str = "ox-check-imports";
 
 /// Repo-root-relative path of the user's `Justfile`.
-pub const JUSTFILE_PATH: &str = "Justfile";
+pub const JUSTFILE_PATH: &str = "justfile";
 
 /// Emit a [`PlanItem`] for the `Justfile` imports region.
 ///

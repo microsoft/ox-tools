@@ -6,13 +6,24 @@
 //! All checksums in `cargo-ox-check` are stored as the string
 //! `sha256:<lowercase hex>`. This module centralizes hashing so the prefix
 //! and encoding are guaranteed consistent across the codebase.
+//!
+//! **Line endings are normalized to LF before hashing** so that a file
+//! committed once produces the same checksum regardless of host OS or
+//! Git's `core.autocrlf` setting. Without normalization, a region
+//! authored on Windows (CRLF source under autocrlf=true) and validated
+//! on Linux (LF after git normalizes the commit) would always diverge
+//! and confuse the three-checksum decision algorithm.
 
 use sha2::{Digest as _, Sha256};
 
 /// Compute the canonical checksum string for a byte slice.
+///
+/// CRLF byte pairs are replaced with LF before hashing so the result
+/// is invariant under line-ending conversion (see module docs).
 #[must_use]
 pub fn checksum_bytes(data: &[u8]) -> String {
-    let digest = Sha256::digest(data);
+    let normalized = normalize_line_endings(data);
+    let digest = Sha256::digest(&normalized);
     let mut s = String::with_capacity(7 + digest.len() * 2);
     s.push_str("sha256:");
     for byte in digest {
@@ -24,12 +35,37 @@ pub fn checksum_bytes(data: &[u8]) -> String {
 }
 
 /// Compute the canonical checksum string for a UTF-8 string.
+///
+/// CRLF sequences are replaced with LF before hashing so the result
+/// is invariant under line-ending conversion (see module docs).
 #[must_use]
 pub fn checksum_str(data: &str) -> String {
     checksum_bytes(data.as_bytes())
 }
 
 const HEX: &[u8; 16] = b"0123456789abcdef";
+
+/// Replace every CRLF (`\r\n`) byte pair with a single LF (`\n`).
+///
+/// Bare CR bytes are left alone — they're vanishingly rare in
+/// modern source trees, and treating them specially would risk
+/// false-equating distinct content.
+fn normalize_line_endings(data: &[u8]) -> Vec<u8> {
+    // Pre-allocate optimistically; the output is the same length as
+    // the input minus one byte per CRLF.
+    let mut out = Vec::with_capacity(data.len());
+    let mut i = 0;
+    while i < data.len() {
+        if data[i] == b'\r' && data.get(i + 1) == Some(&b'\n') {
+            out.push(b'\n');
+            i += 2;
+        } else {
+            out.push(data[i]);
+            i += 1;
+        }
+    }
+    out
+}
 
 #[cfg(test)]
 mod tests {
@@ -67,5 +103,52 @@ mod tests {
     #[test]
     fn prefix_is_always_sha256() {
         assert!(checksum_str("anything").starts_with("sha256:"));
+    }
+
+    #[test]
+    fn crlf_and_lf_yield_same_checksum() {
+        // The core portability invariant: the same logical content
+        // hashes identically regardless of line-ending convention.
+        let lf = "line one\nline two\nline three\n";
+        let crlf = "line one\r\nline two\r\nline three\r\n";
+        assert_eq!(checksum_str(lf), checksum_str(crlf));
+    }
+
+    #[test]
+    fn mixed_line_endings_normalize_consistently() {
+        let mixed = "line one\r\nline two\nline three\r\n";
+        let lf_only = "line one\nline two\nline three\n";
+        assert_eq!(checksum_str(mixed), checksum_str(lf_only));
+    }
+
+    #[test]
+    fn bare_cr_is_preserved() {
+        // A lone CR (not followed by LF) is real content, not a line
+        // ending convention. Leave it alone so distinct strings stay
+        // distinct.
+        let with_cr = "old\rmac\rstyle";
+        let with_n = "old\nmac\nstyle";
+        assert_ne!(checksum_str(with_cr), checksum_str(with_n));
+    }
+
+    #[test]
+    fn normalize_keeps_lf_unchanged() {
+        assert_eq!(normalize_line_endings(b"a\nb\nc"), b"a\nb\nc");
+    }
+
+    #[test]
+    fn normalize_collapses_crlf() {
+        assert_eq!(normalize_line_endings(b"a\r\nb\r\nc"), b"a\nb\nc");
+    }
+
+    #[test]
+    fn normalize_preserves_bare_cr() {
+        assert_eq!(normalize_line_endings(b"a\rb\rc"), b"a\rb\rc");
+    }
+
+    #[test]
+    fn normalize_handles_trailing_cr() {
+        // A CR at the very end has no LF to pair with, so it stays.
+        assert_eq!(normalize_line_endings(b"abc\r"), b"abc\r");
     }
 }

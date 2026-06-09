@@ -253,8 +253,14 @@ mod tests {
                 "PR impl workflow missing job '{needle}'"
             );
         }
-        // PR-test fans out across the OS matrix from `test_os`.
-        assert!(PR_IMPL_WORKFLOW.contains("test_os"));
+        // Every multi-OS group hardcodes its matrix as an inline
+        // YAML array — we deliberately do NOT support input-driven
+        // matrices (the fromJSON(inputs.X) pattern adds silent
+        // failure modes and the surveyed repos use hardcoded
+        // matrices too).
+        assert!(PR_IMPL_WORKFLOW.contains("os: [linux, windows, linux-arm, windows-arm]"));
+        assert!(PR_IMPL_WORKFLOW.contains("os: [linux, windows]"));
+        assert!(!PR_IMPL_WORKFLOW.contains("fromJSON"));
         // pr-fast carries the PR title for the ox-check-pr-title check.
         assert!(PR_IMPL_WORKFLOW.contains("PR_TITLE"));
         // pr-mutants needs the base SHA for diff scoping.
