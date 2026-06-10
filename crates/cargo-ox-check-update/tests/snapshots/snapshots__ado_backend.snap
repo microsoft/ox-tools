@@ -2866,7 +2866,7 @@ rust_nightly_external_types := "nightly-2025-10-18"
 # ============================================================================
 
 cargo_aprz_version := "1.0.0"
-cargo_audit_version := "0.21.0"
+cargo_audit_version := "0.22.2"
 cargo_careful_version := "0.4.9"
 cargo_check_external_types_version := "0.4.0"
 cargo_delta_version := "0.3.1"

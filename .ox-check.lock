@@ -75,7 +75,7 @@ checksum = "sha256:20bc3323fc897e5e970b347b5ccae1411c1d629cca4da62e612d995b94e3d
 
 [[file]]
 path = "justfiles/ox-check/versions.just"
-checksum = "sha256:7242f84538c108948a049cc14e01b6c15422d0af2d22aa5e3c35020f9d991e3a"
+checksum = "sha256:942a3230e71473497c1dd1f672cdc1d42af37494f73d58d745f5b5d5e4a3c893"
 
 [[region]]
 host = ".delta.toml"
