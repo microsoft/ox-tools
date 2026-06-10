@@ -30,6 +30,8 @@ runs:
   using: composite
   steps:
     - uses: ./.github/actions/ox-check-setup
+      with:
+        group: pr-fast
     - name: Run just ox-check-pr-fast
       shell: bash
       env:

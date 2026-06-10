@@ -272,8 +272,6 @@ mod tests {
             "justfiles/ox-check/groups.just",
             "justfiles/ox-check/tiers.just",
             "justfiles/ox-check/tools.just",
-            "justfiles/ox-check/tool-minimums.txt",
-            "justfiles/ox-check/rustup-components.txt",
             "justfiles/ox-check/versions.just",
             "deny.toml",
             "rustfmt.toml",

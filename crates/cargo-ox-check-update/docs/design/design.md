@@ -141,7 +141,7 @@ The local UX is plain `just`:
 
 ```text
 $ just ox-check
-[just] running ox-check-tools-check
+[just] running ox-check-validate-prereqs
 [just] running ox-check-pr-fast
 [just] running ox-check-pr-slow
 ox-check OK
@@ -256,8 +256,9 @@ Detail on each host:
   scoping entirely. See [checks.md](./checks.md#impact-scoping) and the per-backend wiring in
   [github.md](./github.md) / [ado.md](./ado.md).
 - **`rust-toolchain.toml`** and **`.cargo/config.toml`** — never touched. Read-only inputs
-  used by `_ox-check-require` to validate the user's `rustc` version against the catalog
-  minimum. The CI building blocks do not install Rust; that is the user's pipeline's job
+  used by `ox-check-tool-rustc-validate-prereqs` to validate the user's `rustc` version
+  against the catalog minimum. The CI building blocks do not install Rust; that is the
+  user's pipeline's job
   (msrustup in 1ESPT, rustup on GH runners).
 
 The tool's persistent state lives in `.ox-check.lock` at the repo root — the sidecar
@@ -377,7 +378,7 @@ boolean-regex primitive). That check is written as a `[script("pwsh")]` block. `
 is preinstalled on GH-hosted runners (`ubuntu-latest` included) and Microsoft-hosted
 ADO Linux agents; Linux/macOS developers install it from
 <https://github.com/PowerShell/PowerShell> as a one-time prerequisite. The
-`_ox-check-require pwsh` recipe enforces this with a clean failure message and a per-OS
+`ox-check-tool-pwsh-validate-prereqs` recipe enforces this with a clean failure message and a per-OS
 install hint. The dependency is kept (rather than dropped to remove the one script)
 so future additions that don't fit cleanly as cargo subcommands have an established
 escape hatch.

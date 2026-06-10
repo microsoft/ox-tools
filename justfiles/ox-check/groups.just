@@ -82,3 +82,125 @@ ox-check-scheduled-exhaustive: \
     ox-check-mutants-full \
     ox-check-cargo-hack \
     ox-check-bench
+# Group-level setup + validate-prereqs
+# ===========================================================================
+#
+# Per-group recipes that fan out to the per-check setup/validate-prereqs
+# from checks.just. Setup recipes accept `installer="install"|"binstall"`;
+# validate-prereqs recipes take no parameters.
+
+[group("ox-check-setup")]
+ox-check-pr-fast-setup installer="install": \
+    (ox-check-fmt-setup installer) \
+    (ox-check-clippy-setup installer) \
+    (ox-check-cargo-sort-setup installer) \
+    (ox-check-license-headers-setup installer) \
+    (ox-check-ensure-no-cyclic-deps-setup installer) \
+    (ox-check-ensure-no-default-features-setup installer) \
+    (ox-check-doc-build-setup installer) \
+    (ox-check-readme-check-setup installer) \
+    (ox-check-spellcheck-setup installer) \
+    (ox-check-pr-title-setup installer) \
+    (ox-check-deny-setup installer) \
+    (ox-check-audit-setup installer) \
+    (ox-check-udeps-setup installer) \
+    (ox-check-semver-check-setup installer) \
+    (ox-check-external-types-setup installer) \
+    (ox-check-aprz-setup installer)
+
+[group("ox-check-setup")]
+ox-check-pr-fast-validate-prereqs: \
+    ox-check-fmt-validate-prereqs \
+    ox-check-clippy-validate-prereqs \
+    ox-check-cargo-sort-validate-prereqs \
+    ox-check-license-headers-validate-prereqs \
+    ox-check-ensure-no-cyclic-deps-validate-prereqs \
+    ox-check-ensure-no-default-features-validate-prereqs \
+    ox-check-doc-build-validate-prereqs \
+    ox-check-readme-check-validate-prereqs \
+    ox-check-spellcheck-validate-prereqs \
+    ox-check-pr-title-validate-prereqs \
+    ox-check-deny-validate-prereqs \
+    ox-check-audit-validate-prereqs \
+    ox-check-udeps-validate-prereqs \
+    ox-check-semver-check-validate-prereqs \
+    ox-check-external-types-validate-prereqs \
+    ox-check-aprz-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-pr-slow-setup installer="install": \
+    (ox-check-pr-test-setup installer) \
+    (ox-check-pr-runtime-analysis-setup installer) \
+    (ox-check-pr-mutants-setup installer)
+
+[group("ox-check-setup")]
+ox-check-pr-slow-validate-prereqs: \
+    ox-check-pr-test-validate-prereqs \
+    ox-check-pr-runtime-analysis-validate-prereqs \
+    ox-check-pr-mutants-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-pr-test-setup installer="install": \
+    (ox-check-llvm-cov-setup installer) \
+    (ox-check-doc-test-setup installer) \
+    (ox-check-examples-setup installer)
+
+[group("ox-check-setup")]
+ox-check-pr-test-validate-prereqs: \
+    ox-check-llvm-cov-validate-prereqs \
+    ox-check-doc-test-validate-prereqs \
+    ox-check-examples-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-pr-runtime-analysis-setup installer="install": \
+    (ox-check-miri-setup installer) \
+    (ox-check-careful-setup installer)
+
+[group("ox-check-setup")]
+ox-check-pr-runtime-analysis-validate-prereqs: \
+    ox-check-miri-validate-prereqs \
+    ox-check-careful-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-pr-mutants-setup installer="install": (ox-check-mutants-diff-setup installer)
+
+[group("ox-check-setup")]
+ox-check-pr-mutants-validate-prereqs: ox-check-mutants-diff-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-scheduled-test-setup installer="install": \
+    (ox-check-llvm-cov-setup installer) \
+    (ox-check-doc-test-setup installer) \
+    (ox-check-examples-setup installer)
+
+[group("ox-check-setup")]
+ox-check-scheduled-test-validate-prereqs: \
+    ox-check-llvm-cov-validate-prereqs \
+    ox-check-doc-test-validate-prereqs \
+    ox-check-examples-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-scheduled-advisories-setup installer="install": \
+    (ox-check-deny-setup installer) \
+    (ox-check-audit-setup installer) \
+    (ox-check-aprz-setup installer) \
+    (ox-check-clippy-setup installer)
+
+[group("ox-check-setup")]
+ox-check-scheduled-advisories-validate-prereqs: \
+    ox-check-deny-validate-prereqs \
+    ox-check-audit-validate-prereqs \
+    ox-check-aprz-validate-prereqs \
+    ox-check-clippy-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-scheduled-exhaustive-setup installer="install": \
+    (ox-check-mutants-full-setup installer) \
+    (ox-check-cargo-hack-setup installer) \
+    (ox-check-bench-setup installer)
+
+[group("ox-check-setup")]
+ox-check-scheduled-exhaustive-validate-prereqs: \
+    ox-check-mutants-full-validate-prereqs \
+    ox-check-cargo-hack-validate-prereqs \
+    ox-check-bench-validate-prereqs

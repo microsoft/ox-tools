@@ -30,6 +30,8 @@ runs:
   using: composite
   steps:
     - uses: ./.github/actions/ox-check-setup
+      with:
+        group: scheduled-advisories
     - name: Run just ox-check-scheduled-advisories
       shell: bash
       env:

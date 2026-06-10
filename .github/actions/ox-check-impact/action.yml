@@ -37,13 +37,17 @@ outputs:
 runs:
   using: composite
   steps:
-    # Use the shared ox-check-setup composite for tool installation so
-    # cargo-delta picks up the version pinned in the catalog
-    # (tool-minimums.txt) rather than whatever happens to be latest on
-    # crates.io. This installs the full catalog -- somewhat heavier
-    # than just installing cargo-delta on its own, but the host runner
-    # cache (see §8 of github.md) amortises the cost across PR runs.
+    # ox-check-setup with group=none bootstraps the rust toolchain +
+    # just + binstall + cache, but skips the full catalog install.
+    # We follow it with just the cargo-delta install (the only tool
+    # this composite needs). This keeps the impact stage lean -- it's
+    # the critical-path gating dep for every PR-tier group job.
     - uses: ./.github/actions/ox-check-setup
+      with:
+        group: none
+    - name: Install cargo-delta
+      shell: bash
+      run: just ox-check-tool-cargo-delta-install binstall
     - id: compute
       name: Compute impact
       shell: bash

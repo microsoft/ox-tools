@@ -13,14 +13,17 @@
 #
 # Unscoped recipes (deny, audit, aprz, pr-title) ignore all three.
 steps:
-  # Reuse the per-job setup (toolchain, cargo cache, just install, tool
-  # install) so cargo + cargo-delta are on PATH and ~/.cargo/bin is
-  # restored from cache. Without this, a clean 1ESPT agent has no cargo
-  # on PATH and `cargo install --locked cargo-delta` exits 127.
+  # Reuse the per-job setup (toolchain, cargo cache, just install) so
+  # cargo + just are on PATH and ~/.cargo/bin is restored from cache.
+  # group=none skips the full catalog install -- impact only needs
+  # cargo-delta, which we install on the next step.
   - template: setup.yml
+    parameters:
+      group: none
+  - bash: just ox-check-tool-cargo-delta-install install
+    displayName: ox-check impact (install cargo-delta)
   - bash: |
       set -euo pipefail
-      cargo install --locked cargo-delta
       # Determine the baseline ref:
       #   * Adopters can override via BASE_REF (full ref name, e.g.
       #     `origin/release`).

@@ -30,6 +30,8 @@ runs:
   using: composite
   steps:
     - uses: ./.github/actions/ox-check-setup
+      with:
+        group: scheduled-test
     - name: Run just ox-check-scheduled-test
       shell: bash
       env:

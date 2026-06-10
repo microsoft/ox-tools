@@ -30,6 +30,8 @@ runs:
   using: composite
   steps:
     - uses: ./.github/actions/ox-check-setup
+      with:
+        group: pr-runtime-analysis
     - name: Run just ox-check-pr-runtime-analysis
       shell: bash
       env:

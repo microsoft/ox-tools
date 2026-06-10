@@ -443,14 +443,17 @@ steps:
 #
 # Unscoped recipes (deny, audit, aprz, pr-title) ignore all three.
 steps:
-  # Reuse the per-job setup (toolchain, cargo cache, just install, tool
-  # install) so cargo + cargo-delta are on PATH and ~/.cargo/bin is
-  # restored from cache. Without this, a clean 1ESPT agent has no cargo
-  # on PATH and `cargo install --locked cargo-delta` exits 127.
+  # Reuse the per-job setup (toolchain, cargo cache, just install) so
+  # cargo + just are on PATH and ~/.cargo/bin is restored from cache.
+  # group=none skips the full catalog install -- impact only needs
+  # cargo-delta, which we install on the next step.
   - template: setup.yml
+    parameters:
+      group: none
+  - bash: just ox-check-tool-cargo-delta-install install
+    displayName: ox-check impact (install cargo-delta)
   - bash: |
       set -euo pipefail
-      cargo install --locked cargo-delta
       # Determine the baseline ref:
       #   * Adopters can override via BASE_REF (full ref name, e.g.
       #     `origin/release`).
@@ -615,6 +618,8 @@ parameters:
     default: ''
 steps:
   - template: setup.yml
+    parameters:
+      group: pr-fast
   - bash: just ox-check-pr-fast
     displayName: ox-check-pr-fast
     env:
@@ -646,6 +651,8 @@ parameters:
     default: ''
 steps:
   - template: setup.yml
+    parameters:
+      group: pr-mutants
   - bash: just ox-check-pr-mutants
     displayName: ox-check-pr-mutants
     env:
@@ -677,6 +684,8 @@ parameters:
     default: ''
 steps:
   - template: setup.yml
+    parameters:
+      group: pr-runtime-analysis
   - bash: just ox-check-pr-runtime-analysis
     displayName: ox-check-pr-runtime-analysis
     env:
@@ -708,6 +717,8 @@ parameters:
     default: ''
 steps:
   - template: setup.yml
+    parameters:
+      group: pr-test
   - bash: just ox-check-pr-test
     displayName: ox-check-pr-test
     env:
@@ -739,6 +750,8 @@ parameters:
     default: ''
 steps:
   - template: setup.yml
+    parameters:
+      group: scheduled-advisories
   - bash: just ox-check-scheduled-advisories
     displayName: ox-check-scheduled-advisories
     env:
@@ -770,6 +783,8 @@ parameters:
     default: ''
 steps:
   - template: setup.yml
+    parameters:
+      group: scheduled-exhaustive
   - bash: just ox-check-scheduled-exhaustive
     displayName: ox-check-scheduled-exhaustive
     env:
@@ -801,6 +816,8 @@ parameters:
     default: ''
 steps:
   - template: setup.yml
+    parameters:
+      group: scheduled-test
   - bash: just ox-check-scheduled-test
     displayName: ox-check-scheduled-test
     env:
@@ -818,6 +835,20 @@ steps:
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check-update; edit via `cargo ox-check-update`.
+#
+# Parameters:
+#   group: which ox-check group to install setup for. Special values:
+#     - "" (default): install the full catalog via
+#       `just ox-check-setup` -- use for "give me everything" flows.
+#     - "none": skip tool installation entirely; just bootstrap the
+#       rust cache + libclang + just. Used by impact.yml, which installs
+#       only cargo-delta afterwards.
+#     - anything else (e.g. "pr-fast"): install only that group's
+#       prerequisites via `just ox-check-<group>-setup`.
+parameters:
+  - name: group
+    type: string
+    default: ''
 steps:
   - bash: echo "##vso[task.setvariable variable=ox_check_rustc_version]$(rustc --version | awk '{print $2}')"
     displayName: ox-check setup (capture rustc version)
@@ -827,7 +858,7 @@ steps:
       # lockfile hashes + catalog hash. Including arch keeps any
       # future ARM pool an adopter adds from colliding with x86_64 on
       # the same OS namespace.
-      key: 'ox-check-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(ox_check_rustc_version) | Cargo.lock | .cargo/config.toml | rust-toolchain.toml | justfiles/ox-check/tool-minimums.txt | justfiles/ox-check/rustup-components.txt | justfiles/ox-check/versions.just'
+      key: 'ox-check-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(ox_check_rustc_version) | Cargo.lock | .cargo/config.toml | rust-toolchain.toml | justfiles/ox-check/versions.just'
       restoreKeys: |
         ox-check-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(ox_check_rustc_version)
         ox-check-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)"
@@ -863,23 +894,25 @@ steps:
       fi
     displayName: ox-check setup (install just)
 
-  # Hand everything else off to the catalog recipe. Idempotent.
-  # See setup-action.yml (GitHub composite) for the same handoff
-  # rationale -- both backends bootstrap `just` here so the recipe
-  # can run, then delegate toolchain + component + cargo-subcommand
-  # install to a single source of truth in tools.just.
+  # Hand everything else off to the catalog recipe. Idempotent. ADO
+  # uses the default `install` backend (source builds) because
+  # cargo-binstall has unresolved compliance issues for internal ADO
+  # pipelines (GH uses `binstall`).
   #
-  # ADO uses the default `install` backend (source builds) because
-  # cargo-binstall has unresolved compliance issues for internal
-  # ADO pipelines. GH uses `binstall` (downloads prebuilt binaries).
-  - bash: just ox-check-setup
-    # ox-check-setup exits non-zero if any per-tool install failed
-    # (e.g. cargo-mutants doesn't build on aarch64-pc-windows-msvc
-    # due to an upstream winapi incompatibility). We don't fail the
-    # whole job here -- recipes that actually USE a missing tool
-    # will fail cleanly via _ox-check-require at recipe-run time.
-    continueOnError: true
-    displayName: ox-check setup (install toolchains + catalog tools)
+  # Selection mirrors setup-action.yml (GH composite):
+  #   group=""     -> full catalog (ox-check-setup)
+  #   group="none" -> skip; caller installs what it needs
+  #   group=<x>    -> only that group's prerequisites
+  - ${{ if eq(parameters.group, 'none') }}:
+      - bash: echo "ox-check-setup: group=none, skipping tool install"
+        displayName: ox-check setup (group=none -- skip tool install)
+  - ${{ elseif eq(parameters.group, '') }}:
+      - bash: just ox-check-setup
+        displayName: ox-check setup (install full catalog)
+  - ${{ else }}:
+      - bash: just ox-check-${{ parameters.group }}-setup
+        displayName: ox-check setup (install ${{ parameters.group }} prerequisites)
+
 
 === .pipelines/ox-check-pr.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -1175,7 +1208,7 @@ unknown-git = "deny"
 # format-drift breaking CI on rustup updates — the same trap we
 # explicitly avoid for udeps/miri/careful/external-types.
 [script("pwsh")]
-ox-check-fmt:
+ox-check-fmt: ox-check-fmt-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo '+{{ rust_nightly }}' fmt --all --check
@@ -1188,7 +1221,7 @@ ox-check-fmt:
 # we want downstream rev-deps to lint as well. cargo-clippy is a
 # rustup component; same reasoning as fmt for the require.
 [script("pwsh")]
-ox-check-clippy:
+ox-check-clippy: ox-check-clippy-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     & cargo clippy @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --all-targets --all-features --locked "--" '-D' 'warnings'
@@ -1196,7 +1229,7 @@ ox-check-clippy:
 
 # Modified tier.
 [script("pwsh")]
-ox-check-cargo-sort: (_ox-check-require "cargo-sort")
+ox-check-cargo-sort: ox-check-cargo-sort-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo sort --workspace --check
@@ -1204,7 +1237,7 @@ ox-check-cargo-sort: (_ox-check-require "cargo-sort")
 
 # Modified tier.
 [script("pwsh")]
-ox-check-license-headers: (_ox-check-require "cargo-heather")
+ox-check-license-headers: ox-check-license-headers-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo heather
@@ -1212,7 +1245,7 @@ ox-check-license-headers: (_ox-check-require "cargo-heather")
 
 # Modified tier.
 [script("pwsh")]
-ox-check-ensure-no-cyclic-deps: (_ox-check-require "cargo-ensure-no-cyclic-deps")
+ox-check-ensure-no-cyclic-deps: ox-check-ensure-no-cyclic-deps-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo ensure-no-cyclic-deps
@@ -1220,7 +1253,7 @@ ox-check-ensure-no-cyclic-deps: (_ox-check-require "cargo-ensure-no-cyclic-deps"
 
 # Modified tier.
 [script("pwsh")]
-ox-check-ensure-no-default-features: (_ox-check-require "cargo-ensure-no-default-features")
+ox-check-ensure-no-default-features: ox-check-ensure-no-default-features-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo ensure-no-default-features
@@ -1230,7 +1263,7 @@ ox-check-ensure-no-default-features: (_ox-check-require "cargo-ensure-no-default
 # graph, so a dep changing its public API can break doc-build in a
 # crate that wasn't itself modified.
 [script("pwsh")]
-ox-check-doc-build:
+ox-check-doc-build: ox-check-doc-build-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
     $env:RUSTDOCFLAGS = '-D warnings'
@@ -1260,7 +1293,7 @@ ox-check-doc-build:
 # resolution. The OX_CHECK_INCLUDE_MODIFIED value would still need to
 # be intersected with the lib-crate set rather than splatted into cargo.
 [script("pwsh")]
-ox-check-readme-check: (_ox-check-require "cargo-doc2readme")
+ox-check-readme-check: ox-check-readme-check-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
         Write-Host 'ox-check-readme-check: no modified packages; skipping'
@@ -1348,7 +1381,7 @@ ox-check-readme-check: (_ox-check-require "cargo-doc2readme")
 # automatically; otherwise we run cargo-spellcheck against whatever
 # the repo has already set up.
 [script("pwsh")]
-ox-check-spellcheck: (_ox-check-require "cargo-spellcheck")
+ox-check-spellcheck: ox-check-spellcheck-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
         Write-Host 'ox-check-spellcheck: no modified packages; skipping'
@@ -1383,7 +1416,7 @@ ox-check-spellcheck: (_ox-check-require "cargo-spellcheck")
 # (no equivalent of `gh pr view`), so the recipe stays simple and
 # defers the check to CI.
 [script("pwsh")]
-ox-check-pr-title: (_ox-check-require "pwsh")
+ox-check-pr-title: ox-check-pr-title-validate-prereqs
     $title = $env:PR_TITLE
     if (-not $title) {
         Write-Host 'ox-check-pr-title: PR_TITLE env var not set; skipping (check runs on CI)'
@@ -1396,11 +1429,11 @@ ox-check-pr-title: (_ox-check-require "pwsh")
 
 # Unscoped (consults external advisory DB; reads Cargo.lock, not
 # workspace members). Single command — inherits adopter's default shell.
-ox-check-deny: (_ox-check-require "cargo-deny")
+ox-check-deny: ox-check-deny-validate-prereqs
     cargo deny check
 
 # Unscoped (consults external advisory DB; reads Cargo.lock).
-ox-check-audit: (_ox-check-require "cargo-audit")
+ox-check-audit: ox-check-audit-validate-prereqs
     cargo audit
 
 # Required tier. cargo-udeps detects unused dependencies by resolving
@@ -1415,7 +1448,7 @@ ox-check-audit: (_ox-check-require "cargo-audit")
 # `[dependencies]`. Restricting to the default targets (lib + bins)
 # matches main repo CI's check and surfaces the real bug.
 [script("pwsh")]
-ox-check-udeps: (_ox-check-require "cargo-udeps")
+ox-check-udeps: ox-check-udeps-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
     & cargo '+{{ rust_nightly }}' udeps @(-split ($env:OX_CHECK_INCLUDE_REQUIRED ?? "--workspace")) --all-features
@@ -1453,7 +1486,7 @@ ox-check-udeps: (_ox-check-require "cargo-udeps")
 # unpublished crates ("not found in registry") and bin->bin+lib
 # transitions ("no library targets found").
 [script("pwsh")]
-ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
+ox-check-semver-check: ox-check-semver-check-validate-prereqs
     $ErrorActionPreference = 'Stop'
     $commentFile = 'target/ox-check/comments/semver.md'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
@@ -1553,7 +1586,7 @@ ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
 # intersect with OX_CHECK_INCLUDE_AFFECTED, and call the tool once per
 # crate. Hard-fails on errors (no tolerance, unlike semver-check).
 [script("pwsh")]
-ox-check-external-types: (_ox-check-require "cargo-check-external-types")
+ox-check-external-types: ox-check-external-types-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
         Write-Host 'ox-check-external-types: no affected packages; skipping'
@@ -1600,14 +1633,14 @@ ox-check-external-types: (_ox-check-require "cargo-check-external-types")
     if ($failed) { exit 1 }
 
 # Unscoped (consults external risk DB).
-ox-check-aprz: (_ox-check-require "cargo-aprz")
+ox-check-aprz: ox-check-aprz-validate-prereqs
     cargo aprz deps --error-if-high-risk --console appraisal
 
 # === pr-test members ====================================================
 
 # Affected tier.
 [script("pwsh")]
-ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "cargo-nextest")
+ox-check-llvm-cov: ox-check-llvm-cov-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
         Write-Host 'ox-check-llvm-cov: no affected packages; skipping'
@@ -1655,7 +1688,7 @@ ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "carg
 
 # Affected tier.
 [script("pwsh")]
-ox-check-doc-test:
+ox-check-doc-test: ox-check-doc-test-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     & cargo test --doc @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --all-features --locked
@@ -1663,7 +1696,7 @@ ox-check-doc-test:
 
 # Affected tier.
 [script("pwsh")]
-ox-check-examples:
+ox-check-examples: ox-check-examples-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     & cargo build @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --examples --all-features --locked
@@ -1681,16 +1714,15 @@ ox-check-examples:
 # is the only sub-recipe that can't follow, so it bails out early on the
 # affected leg. Coverage on the other three legs is unchanged.
 [script("pwsh")]
-ox-check-mutants-diff:
+ox-check-mutants-diff: ox-check-mutants-diff-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
-        Write-Host 'ox-check-mutants-diff: aarch64-pc-windows-msvc -- cargo-mutants does not build here (winapi); skipping'
+        Write-Host 'ox-check-mutants-diff: ox-check-mutants-diff-validate-prereqs aarch64-pc-windows-msvc -- cargo-mutants does not build here (winapi); skipping'
         exit 0
     }
-    & just _ox-check-require cargo-mutants
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
-        Write-Host 'ox-check-mutants-diff: no affected packages; skipping'
+        Write-Host 'ox-check-mutants-diff: ox-check-mutants-diff-validate-prereqs no affected packages; skipping'
         exit 0
     }
     # Resolve BASE_REF: env override > origin/main > origin/master.
@@ -1707,7 +1739,7 @@ ox-check-mutants-diff:
         }
     }
     if (-not $base) {
-        Write-Error 'ox-check-mutants-diff: no BASE_REF set and neither origin/main nor origin/master is available. Set BASE_REF to the branch to diff against.'
+        Write-Error 'ox-check-mutants-diff: ox-check-mutants-diff-validate-prereqs no BASE_REF set and neither origin/main nor origin/master is available. Set BASE_REF to the branch to diff against.'
         exit 1
     }
     # cargo-mutants --in-diff takes a FILE path containing a unified
@@ -1730,7 +1762,7 @@ ox-check-mutants-diff:
 # applies. Skip guards are still included for local diff-scoped runs.
 
 [script("pwsh")]
-ox-check-miri:
+ox-check-miri: ox-check-miri-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     # `--no-tests=pass`: miri-only exception. Tests that touch the
@@ -1747,7 +1779,7 @@ ox-check-miri:
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 [script("pwsh")]
-ox-check-careful: (_ox-check-require "cargo-careful")
+ox-check-careful: ox-check-careful-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     & cargo '+{{ rust_nightly }}' careful test @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --all-features --locked
@@ -1757,14 +1789,14 @@ ox-check-careful: (_ox-check-require "cargo-careful")
 
 # Unscoped. Scheduled-exhaustive deliberately runs over the whole
 # workspace regardless of diff.
-ox-check-mutants-full: (_ox-check-require "cargo-mutants")
+ox-check-mutants-full: ox-check-mutants-full-validate-prereqs
     cargo mutants --workspace --no-shuffle --jobs 0
 
 # Required tier. cargo-hack's feature powerset cascades through dep
 # features, so the required set (workspace-internal transitive deps)
 # is the right scope.
 [script("pwsh")]
-ox-check-cargo-hack: (_ox-check-require "cargo-hack")
+ox-check-cargo-hack: ox-check-cargo-hack-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
     & cargo hack @(-split ($env:OX_CHECK_INCLUDE_REQUIRED ?? "--workspace")) --feature-powerset --depth 2 check
@@ -1772,12 +1804,197 @@ ox-check-cargo-hack: (_ox-check-require "cargo-hack")
 
 # Affected tier.
 [script("pwsh")]
-ox-check-bench:
+ox-check-bench: ox-check-bench-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     & cargo bench @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --all-features --no-run
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# ============================================================================
+# Per-check setup + validate-prereqs
+# ============================================================================
+#
+# Each check has matching `*-setup` and `*-validate-prereqs` recipes
+# that install / verify the tools and components it needs. The setup
+# recipes accept an `installer=install|install` parameter that
+# forwards to the underlying tool-install recipes; the validate-prereqs
+# recipes take no parameters.
+#
+# These are the building blocks for `ox-check-<group>-setup`
+# (groups.just) and `ox-check-<tier>-setup` (tiers.just) ΓÇö each
+# group/tier-level recipe is just a fan-out over the per-check
+# setup/validate-prereqs of its members.
+
+# --- pr-fast members ---
+
+[group("ox-check-setup")]
+ox-check-fmt-setup installer="install": ox-check-component-nightly-rustfmt-install
+
+[group("ox-check-setup")]
+ox-check-fmt-validate-prereqs: ox-check-component-nightly-rustfmt-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-clippy-setup installer="install": ox-check-component-default-clippy-install
+
+[group("ox-check-setup")]
+ox-check-clippy-validate-prereqs: ox-check-component-default-clippy-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-cargo-sort-setup installer="install": (ox-check-tool-cargo-sort-install installer)
+
+[group("ox-check-setup")]
+ox-check-cargo-sort-validate-prereqs: ox-check-tool-cargo-sort-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-license-headers-setup installer="install": (ox-check-tool-cargo-heather-install installer)
+
+[group("ox-check-setup")]
+ox-check-license-headers-validate-prereqs: ox-check-tool-cargo-heather-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-ensure-no-cyclic-deps-setup installer="install": (ox-check-tool-cargo-ensure-no-cyclic-deps-install installer)
+
+[group("ox-check-setup")]
+ox-check-ensure-no-cyclic-deps-validate-prereqs: ox-check-tool-cargo-ensure-no-cyclic-deps-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-ensure-no-default-features-setup installer="install": (ox-check-tool-cargo-ensure-no-default-features-install installer)
+
+[group("ox-check-setup")]
+ox-check-ensure-no-default-features-validate-prereqs: ox-check-tool-cargo-ensure-no-default-features-validate-prereqs
+
+# doc-build, examples and doc-test are pure cargo built-ins; the rust
+# toolchain (rustc + cargo) is the only prerequisite, and we already
+# rely on it being present everywhere ox-check runs.
+[group("ox-check-setup")]
+ox-check-doc-build-setup installer="install": ox-check-tool-rustc-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-doc-build-validate-prereqs: ox-check-tool-rustc-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-readme-check-setup installer="install": (ox-check-tool-cargo-doc2readme-install installer)
+
+[group("ox-check-setup")]
+ox-check-readme-check-validate-prereqs: ox-check-tool-cargo-doc2readme-validate-prereqs
+
+# cargo-spellcheck has a build-time libclang dependency; the system
+# deps check runs first so adopters get a clear hint instead of a
+# cryptic clang-sys build error mid-install.
+[group("ox-check-setup")]
+ox-check-spellcheck-setup installer="install": ox-check-system-deps-check (ox-check-tool-cargo-spellcheck-install installer)
+
+[group("ox-check-setup")]
+ox-check-spellcheck-validate-prereqs: ox-check-tool-cargo-spellcheck-validate-prereqs
+
+# pr-title is a pwsh script; no cargo tool to install.
+[group("ox-check-setup")]
+ox-check-pr-title-setup installer="install": ox-check-tool-pwsh-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-pr-title-validate-prereqs: ox-check-tool-pwsh-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-deny-setup installer="install": (ox-check-tool-cargo-deny-install installer)
+
+[group("ox-check-setup")]
+ox-check-deny-validate-prereqs: ox-check-tool-cargo-deny-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-audit-setup installer="install": (ox-check-tool-cargo-audit-install installer)
+
+[group("ox-check-setup")]
+ox-check-audit-validate-prereqs: ox-check-tool-cargo-audit-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-udeps-setup installer="install": ox-check-toolchain-nightly-install (ox-check-tool-cargo-udeps-install installer)
+
+[group("ox-check-setup")]
+ox-check-udeps-validate-prereqs: ox-check-toolchain-nightly-validate-prereqs ox-check-tool-cargo-udeps-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-semver-check-setup installer="install": (ox-check-tool-cargo-semver-checks-install installer)
+
+[group("ox-check-setup")]
+ox-check-semver-check-validate-prereqs: ox-check-tool-cargo-semver-checks-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-external-types-setup installer="install": ox-check-toolchain-nightly-external-types-install (ox-check-tool-cargo-check-external-types-install installer)
+
+[group("ox-check-setup")]
+ox-check-external-types-validate-prereqs: ox-check-toolchain-nightly-external-types-validate-prereqs ox-check-tool-cargo-check-external-types-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-aprz-setup installer="install": (ox-check-tool-cargo-aprz-install installer)
+
+[group("ox-check-setup")]
+ox-check-aprz-validate-prereqs: ox-check-tool-cargo-aprz-validate-prereqs
+
+# --- pr-test members (shared with scheduled-test) ---
+
+[group("ox-check-setup")]
+ox-check-llvm-cov-setup installer="install": (ox-check-tool-cargo-llvm-cov-install installer) (ox-check-tool-cargo-nextest-install installer)
+
+[group("ox-check-setup")]
+ox-check-llvm-cov-validate-prereqs: ox-check-tool-cargo-llvm-cov-validate-prereqs ox-check-tool-cargo-nextest-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-doc-test-setup installer="install": ox-check-tool-rustc-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-doc-test-validate-prereqs: ox-check-tool-rustc-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-examples-setup installer="install": ox-check-tool-rustc-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-examples-validate-prereqs: ox-check-tool-rustc-validate-prereqs
+
+# --- pr-runtime-analysis members ---
+
+[group("ox-check-setup")]
+ox-check-miri-setup installer="install": ox-check-component-nightly-miri-install ox-check-component-nightly-rust-src-install (ox-check-tool-cargo-nextest-install installer)
+
+[group("ox-check-setup")]
+ox-check-miri-validate-prereqs: ox-check-component-nightly-miri-validate-prereqs ox-check-component-nightly-rust-src-validate-prereqs ox-check-tool-cargo-nextest-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-careful-setup installer="install": ox-check-component-nightly-rust-src-install (ox-check-tool-cargo-careful-install installer)
+
+[group("ox-check-setup")]
+ox-check-careful-validate-prereqs: ox-check-component-nightly-rust-src-validate-prereqs ox-check-tool-cargo-careful-validate-prereqs
+
+# --- pr-mutants members ---
+
+[group("ox-check-setup")]
+ox-check-mutants-diff-setup installer="install": (ox-check-tool-cargo-mutants-install installer)
+
+[group("ox-check-setup")]
+ox-check-mutants-diff-validate-prereqs: ox-check-tool-cargo-mutants-validate-prereqs
+
+# --- scheduled-exhaustive members (mutants-full reuses cargo-mutants;
+#     cargo-hack and bench are dedicated tools) ---
+
+[group("ox-check-setup")]
+ox-check-mutants-full-setup installer="install": (ox-check-tool-cargo-mutants-install installer)
+
+[group("ox-check-setup")]
+ox-check-mutants-full-validate-prereqs: ox-check-tool-cargo-mutants-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-cargo-hack-setup installer="install": (ox-check-tool-cargo-hack-install installer)
+
+[group("ox-check-setup")]
+ox-check-cargo-hack-validate-prereqs: ox-check-tool-cargo-hack-validate-prereqs
+
+# bench uses cargo-built-ins (cargo bench --no-run + plain bench runs);
+# no extra tool install needed beyond the rust toolchain.
+[group("ox-check-setup")]
+ox-check-bench-setup installer="install": ox-check-tool-rustc-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-bench-validate-prereqs: ox-check-tool-rustc-validate-prereqs
 
 === justfiles/ox-check/groups.just ===
 # Copyright (c) Microsoft Corporation.
@@ -1864,6 +2081,128 @@ ox-check-scheduled-exhaustive: \
     ox-check-mutants-full \
     ox-check-cargo-hack \
     ox-check-bench
+# Group-level setup + validate-prereqs
+# ===========================================================================
+#
+# Per-group recipes that fan out to the per-check setup/validate-prereqs
+# from checks.just. Setup recipes accept `installer="install"|"binstall"`;
+# validate-prereqs recipes take no parameters.
+
+[group("ox-check-setup")]
+ox-check-pr-fast-setup installer="install": \
+    (ox-check-fmt-setup installer) \
+    (ox-check-clippy-setup installer) \
+    (ox-check-cargo-sort-setup installer) \
+    (ox-check-license-headers-setup installer) \
+    (ox-check-ensure-no-cyclic-deps-setup installer) \
+    (ox-check-ensure-no-default-features-setup installer) \
+    (ox-check-doc-build-setup installer) \
+    (ox-check-readme-check-setup installer) \
+    (ox-check-spellcheck-setup installer) \
+    (ox-check-pr-title-setup installer) \
+    (ox-check-deny-setup installer) \
+    (ox-check-audit-setup installer) \
+    (ox-check-udeps-setup installer) \
+    (ox-check-semver-check-setup installer) \
+    (ox-check-external-types-setup installer) \
+    (ox-check-aprz-setup installer)
+
+[group("ox-check-setup")]
+ox-check-pr-fast-validate-prereqs: \
+    ox-check-fmt-validate-prereqs \
+    ox-check-clippy-validate-prereqs \
+    ox-check-cargo-sort-validate-prereqs \
+    ox-check-license-headers-validate-prereqs \
+    ox-check-ensure-no-cyclic-deps-validate-prereqs \
+    ox-check-ensure-no-default-features-validate-prereqs \
+    ox-check-doc-build-validate-prereqs \
+    ox-check-readme-check-validate-prereqs \
+    ox-check-spellcheck-validate-prereqs \
+    ox-check-pr-title-validate-prereqs \
+    ox-check-deny-validate-prereqs \
+    ox-check-audit-validate-prereqs \
+    ox-check-udeps-validate-prereqs \
+    ox-check-semver-check-validate-prereqs \
+    ox-check-external-types-validate-prereqs \
+    ox-check-aprz-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-pr-slow-setup installer="install": \
+    (ox-check-pr-test-setup installer) \
+    (ox-check-pr-runtime-analysis-setup installer) \
+    (ox-check-pr-mutants-setup installer)
+
+[group("ox-check-setup")]
+ox-check-pr-slow-validate-prereqs: \
+    ox-check-pr-test-validate-prereqs \
+    ox-check-pr-runtime-analysis-validate-prereqs \
+    ox-check-pr-mutants-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-pr-test-setup installer="install": \
+    (ox-check-llvm-cov-setup installer) \
+    (ox-check-doc-test-setup installer) \
+    (ox-check-examples-setup installer)
+
+[group("ox-check-setup")]
+ox-check-pr-test-validate-prereqs: \
+    ox-check-llvm-cov-validate-prereqs \
+    ox-check-doc-test-validate-prereqs \
+    ox-check-examples-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-pr-runtime-analysis-setup installer="install": \
+    (ox-check-miri-setup installer) \
+    (ox-check-careful-setup installer)
+
+[group("ox-check-setup")]
+ox-check-pr-runtime-analysis-validate-prereqs: \
+    ox-check-miri-validate-prereqs \
+    ox-check-careful-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-pr-mutants-setup installer="install": (ox-check-mutants-diff-setup installer)
+
+[group("ox-check-setup")]
+ox-check-pr-mutants-validate-prereqs: ox-check-mutants-diff-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-scheduled-test-setup installer="install": \
+    (ox-check-llvm-cov-setup installer) \
+    (ox-check-doc-test-setup installer) \
+    (ox-check-examples-setup installer)
+
+[group("ox-check-setup")]
+ox-check-scheduled-test-validate-prereqs: \
+    ox-check-llvm-cov-validate-prereqs \
+    ox-check-doc-test-validate-prereqs \
+    ox-check-examples-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-scheduled-advisories-setup installer="install": \
+    (ox-check-deny-setup installer) \
+    (ox-check-audit-setup installer) \
+    (ox-check-aprz-setup installer) \
+    (ox-check-clippy-setup installer)
+
+[group("ox-check-setup")]
+ox-check-scheduled-advisories-validate-prereqs: \
+    ox-check-deny-validate-prereqs \
+    ox-check-audit-validate-prereqs \
+    ox-check-aprz-validate-prereqs \
+    ox-check-clippy-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-scheduled-exhaustive-setup installer="install": \
+    (ox-check-mutants-full-setup installer) \
+    (ox-check-cargo-hack-setup installer) \
+    (ox-check-bench-setup installer)
+
+[group("ox-check-setup")]
+ox-check-scheduled-exhaustive-validate-prereqs: \
+    ox-check-mutants-full-validate-prereqs \
+    ox-check-cargo-hack-validate-prereqs \
+    ox-check-bench-validate-prereqs
 
 === justfiles/ox-check/mod.just ===
 # Copyright (c) Microsoft Corporation.
@@ -1910,58 +2249,6 @@ import 'versions.just'
 # Friendly default: `just ox-check` runs the PR tier.
 alias ox-check := ox-check-pr
 
-=== justfiles/ox-check/rustup-components.txt ===
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-# Owned by cargo-ox-check-update; edit via `cargo ox-check-update`.
-#
-# Rustup toolchains + components needed by the ox-check check tree.
-# Consumed by the `ox-check-setup` recipe (tools.just), which runs
-#   rustup toolchain install <pin> --profile minimal --component <c>...
-# per pinned nightly, and
-#   rustup component add <c>...
-# on the workspace's default toolchain.
-#
-# Format: <toolchain-key>:<component> -- one entry per line. Lines
-# starting with `#` and blank lines are ignored.
-#
-# Toolchain keys:
-#   default                  - the workspace's default toolchain (rustup
-#                              resolves this from `rust-toolchain.toml`
-#                              if present, otherwise from `rustup default`).
-#   nightly                  - the value of `rust_nightly` in versions.just.
-#                              Used by ox-check-fmt, ox-check-udeps,
-#                              ox-check-miri, ox-check-careful.
-#   nightly_external_types   - the value of `rust_nightly_external_types`
-#                              in versions.just. Used by
-#                              ox-check-external-types. Often the same
-#                              as `nightly`; pinned separately to track
-#                              the rustdoc JSON schema cargo-check-
-#                              external-types expects.
-#
-# Per-toolchain notes:
-#   - `default:clippy`       - needed by ox-check-clippy.
-#   - `default:rustfmt`      - convenience; ox-check-fmt uses the pinned
-#                              nightly's rustfmt for unstable_features,
-#                              but adopters often invoke `cargo fmt` ad
-#                              hoc and expect the stable rustfmt to be
-#                              present too.
-#   - `nightly:rustfmt`      - ox-check-fmt uses unstable rustfmt
-#                              features (imports_granularity etc.) only
-#                              available on nightly.
-#   - `nightly:miri`         - ox-check-miri.
-#   - `nightly:rust-src`     - ox-check-careful recompiles std with
-#                              debug instrumentation; needs the std
-#                              source. Also needed by miri's xargo-style
-#                              libstd build.
-
-default:clippy
-default:rustfmt
-
-nightly:rustfmt
-nightly:miri
-nightly:rust-src
-
 === justfiles/ox-check/tiers.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
@@ -1992,61 +2279,68 @@ ox-check-full: \
     ox-check-pr \
     ox-check-scheduled
 
-=== justfiles/ox-check/tool-minimums.txt ===
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-# Owned by cargo-ox-check-update; edit via `cargo ox-check-update`.
+# Tier-level + global setup + validate-prereqs
+# ===========================================================================
 #
-# Tool-version catalog consumed by `tools.just` recipes
-# (_ox-check-require, ox-check-setup, ox-check-tools-check).
+# Per-tier recipes that fan out to per-group setup/validate-prereqs from
+# groups.just. The global `ox-check-setup` / `ox-check-validate-prereqs`
+# recipes are the catch-all entry points that install / verify everything.
 #
-# Format: <cargo-subcommand-binary>=<pinned-version>
-# One per line. Lines starting with `#` and blank lines are ignored.
-# Versions are SemVer; comparison uses `[version]` (so "1.2.10" > "1.2.9").
-#
-# Version semantics:
-#   - On install (`ox-check-setup`): exactly this version (`=<pin>`).
-#     Pinning the install avoids the CI reproducibility risk of
-#     "upstream release between yesterday's green build and today's
-#     PR breaks things" (cargo-spellcheck 0.15.7's em-dash regression
-#     is the canonical example of why >= is the wrong policy here).
-#   - On runtime check (`_ox-check-require`): the installed version
-#     must be `>= <pin>`. A user who has manually upgraded a tool
-#     for their own reasons is not downgraded by setup.
-#
-# To bump a pin, edit the version in place and re-run `cargo ox-check-update
-# update`. The dirty-file flow preserves the edit on subsequent runs.
-# To add a new tool, append a line. To remove a tool, delete its line
-# (and any recipe in checks.just that depends on it).
-#
-# Non-catalog dependencies (rustc, pwsh, just itself) are handled
-# directly in tools.just rather than through this file -- their
-# install/upgrade paths are not cargo-managed.
+# CI typically invokes only the per-group setup it needs (e.g. the
+# `ox-check-pr-fast` composite action / step template runs
+# `ox-check-pr-fast-setup` rather than the global `ox-check-setup`).
+# Local users who want "install everything" run `just ox-check-setup`.
 
-cargo-aprz=1.0.0
-cargo-audit=0.21.0
-cargo-careful=0.4.9
-cargo-check-external-types=0.4.0
-cargo-delta=0.3.1
-cargo-deny=0.19.0
-cargo-doc2readme=0.6.4
-cargo-ensure-no-cyclic-deps=0.2.0
-cargo-ensure-no-default-features=1.0.0
-cargo-hack=0.6.41
-cargo-heather=0.2.1
-cargo-llvm-cov=0.8.4
-cargo-mutants=26.1.2
-cargo-nextest=0.9.122
-cargo-semver-checks=0.46.0
-cargo-sort=2.0.2
-cargo-spellcheck=0.15.1
-cargo-udeps=0.1.60
+[group("ox-check-setup")]
+ox-check-pr-setup installer="install": \
+    (ox-check-pr-fast-setup installer) \
+    (ox-check-pr-slow-setup installer)
+
+[group("ox-check-setup")]
+ox-check-pr-validate-prereqs: \
+    ox-check-pr-fast-validate-prereqs \
+    ox-check-pr-slow-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-scheduled-setup installer="install": \
+    (ox-check-scheduled-test-setup installer) \
+    (ox-check-scheduled-advisories-setup installer) \
+    (ox-check-scheduled-exhaustive-setup installer)
+
+[group("ox-check-setup")]
+ox-check-scheduled-validate-prereqs: \
+    ox-check-scheduled-test-validate-prereqs \
+    ox-check-scheduled-advisories-validate-prereqs \
+    ox-check-scheduled-exhaustive-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-full-setup installer="install": \
+    (ox-check-pr-setup installer) \
+    (ox-check-scheduled-setup installer)
+
+[group("ox-check-setup")]
+ox-check-full-validate-prereqs: \
+    ox-check-pr-validate-prereqs \
+    ox-check-scheduled-validate-prereqs
+
+# Global aliases. `ox-check-setup` (no suffix) installs everything the
+# catalog knows about; `ox-check-validate-prereqs` verifies every tool
+# and component is present at or above its pinned version.
+[group("ox-check-setup")]
+ox-check-setup installer="install": (ox-check-full-setup installer)
+
+[group("ox-check-setup")]
+ox-check-validate-prereqs: ox-check-full-validate-prereqs
 
 === justfiles/ox-check/tools.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check-update; edit via `cargo ox-check-update`.
 # See ../../docs/design/local.md for the policy.
+
+# ============================================================================
+# System-level prerequisites (libclang, etc.)
+# ============================================================================
 
 # Public: probe for system-level prerequisites that catalog tools need
 # to BUILD from source. The `binstall` install path downloads pre-built
@@ -2067,7 +2361,7 @@ cargo-udeps=0.1.60
 # On missing deps the recipe prints copy-paste install hints per OS /
 # package manager and exits non-zero. No auto-install: admin / sudo and
 # package-manager choice stay with the user.
-[group("ox-check")]
+[group("ox-check-setup")]
 [script("pwsh")]
 ox-check-system-deps-check:
     $ErrorActionPreference = 'Stop'
@@ -2135,378 +2429,427 @@ ox-check-system-deps-check:
         exit 1
     }
 
-# Public: assert that every catalog tool is present at or above its
-# minimum version. Called by `ox-check-tools-check` and as a dependency
-# of every check group via individual `_ox-check-require` invocations.
-[group("ox-check")]
-[script("pwsh")]
-ox-check-tools-check:
-    $ErrorActionPreference = 'Stop'
-    $catalog = 'justfiles/ox-check/tool-minimums.txt'
-    $fail = 0
-    foreach ($line in Get-Content $catalog) {
-        $trimmed = $line.Trim()
-        if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -match '^([^=]+)=') {
-            $tool = $Matches[1]
-            & just _ox-check-require $tool
-            if ($LASTEXITCODE -ne 0) { $fail = 1 }
-        }
-    }
-    & just _ox-check-require rustc
-    if ($LASTEXITCODE -ne 0) { $fail = 1 }
-    exit $fail
+# ============================================================================
+# rustc + pwsh validate-prereqs (no install -- system prereqs)
+# ============================================================================
+#
+# rustc is installed via rustup (https://rustup.rs); pwsh is installed
+# via the platform's package manager. Both are presumed present on any
+# machine running ox-check; the validate recipes just surface a friendly
+# error if not.
 
-# Public: install everything ox-check needs in one shot. Idempotent --
-# every sub-step is a no-op when the artifact (rustup toolchain /
-# component / cargo subcommand) is already present at or above the
-# pinned version. Safe to re-run.
-#
-# Order:
-#   1. System library dependencies (libclang for cargo-spellcheck's
-#      build script). Source-install path only.
-#   2. Rustup toolchains and components: the pinned nightlies from
-#      versions.just plus the components listed in
-#      `rustup-components.txt` (clippy on default, miri / rust-src /
-#      rustfmt on the pinned nightly, etc.). This step is what makes
-#      `ox-check-miri` and `ox-check-careful` work locally without a
-#      separate one-time setup.
-#   3. cargo-binstall bootstrap (binstall path only).
-#   4. Cargo subcommands from `tool-minimums.txt`.
-#
-# Version policy for step 4:
-#   - The catalog file is named tool-minimums.txt for historical
-#     reasons, but each entry is treated as a *pin* on the install
-#     side and a *minimum* on the runtime side. Concretely:
-#       * If the tool is missing or older than the pin: install
-#         exactly `=<pin>` (NOT `>=<pin>`). This makes CI runs
-#         reproducible -- the version that ships is what the
-#         catalog was validated against, not whatever upstream
-#         released since.
-#       * If the tool is already installed at the pin or NEWER:
-#         leave it alone. Local devs who upgrade a tool for their
-#         own reasons (e.g. needing a bugfix not yet pinned in the
-#         catalog) are not downgraded. The `_ox-check-require`
-#         gate uses `installed >= pin`, so newer is fine.
-#   - Why the asymmetry: pulling "latest matching >=pin" from
-#     upstream is a CI reproducibility risk -- a tool released between
-#     yesterday's green build and today's PR can break things
-#     (cargo-spellcheck 0.15.7's em-dash regression was exactly
-#     this failure mode). Pinning the install removes that risk
-#     without forcing adopters to downgrade their existing setups.
-#
-# `installer` selects the backend for step 4 (and dictates whether
-# steps 1 and 3 run):
-#   - "install"  (default): ``cargo install --locked`` -- pure-source
-#     builds; works in any cargo environment, no extra runtime
-#     dependencies. Slow (~30 minutes for the full catalog on a cold
-#     runner). Used by ADO, where ``cargo-binstall`` has known
-#     compliance issues for internal pipelines.
-#   - "binstall": ``cargo binstall --no-confirm --locked`` -- downloads
-#     a prebuilt binary from each tool's GitHub Releases when
-#     available, falling back to ``cargo install`` per-tool when
-#     not. Cuts catalog install time from ~30 min to ~1 min on a
-#     cold runner. Bootstraps cargo-binstall itself in step 3 if
-#     it isn't already on PATH. Used by the GitHub Actions setup
-#     action.
-#
-# Per-tool failures don't abort the whole install -- a tool that
-# doesn't build on the current host (e.g. cargo-mutants on
-# aarch64-pc-windows-msvc, where the upstream winapi dep doesn't
-# compile) shouldn't block other tools. Each failure is reported
-# at the end; recipes that use the missing tool will get a clean
-# error from ``_ox-check-require`` at recipe-run time. The recipe
-# itself exits non-zero only if at least one install failed, so
-# CI surfaces the problem.
-[group("ox-check")]
+[group("ox-check-setup")]
 [script("pwsh")]
-ox-check-setup installer="install":
-    $ErrorActionPreference = 'Continue'
+ox-check-tool-rustc-validate-prereqs:
+    if (-not (Get-Command rustc -ErrorAction SilentlyContinue)) {
+        Write-Error 'ox-check: rustc not found. Install via rustup: https://rustup.rs'
+        exit 1
+    }
+
+[group("ox-check-setup")]
+[script("pwsh")]
+ox-check-tool-pwsh-validate-prereqs:
+    if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
+        $hint = if ($IsMacOS) {
+            'brew install --cask powershell'
+        } elseif ($IsLinux) {
+            'see https://github.com/PowerShell/PowerShell'
+        } else {
+            'winget install --id Microsoft.PowerShell'
+        }
+        Write-Error "ox-check: pwsh (PowerShell Core) not found. Install: $hint"
+        exit 1
+    }
+
+# ============================================================================
+# Private helpers (install/check primitives)
+# ============================================================================
+
+# _install-tool: install a cargo subcommand at exactly the pinned version,
+# or no-op if it is already installed at or above that version. The
+# `installer` parameter selects between:
+#   - "install"  (cargo install --locked, pure-source). Default.
+#   - "binstall" (cargo binstall --no-confirm --locked, with cargo install
+#                 fallback if binstall fails). Bootstraps cargo-binstall
+#                 itself if not on PATH.
+[script("pwsh")]
+_install-tool name version installer:
+    $ErrorActionPreference = 'Stop'
+    $name = '{{name}}'
+    $version = '{{version}}'
     $installer = '{{installer}}'
+
     if ($installer -ne 'install' -and $installer -ne 'binstall') {
-        Write-Error "ox-check-setup: unknown installer '$installer' (expected 'install' or 'binstall')"
+        Write-Error "_install-tool: unknown installer '$installer' (expected 'install' or 'binstall')"
         exit 2
     }
 
-    # === Step 1: system library dependencies ===========================
-    # Only relevant for the source-install path -- binstall downloads
-    # prebuilt binaries that don't need libclang at build time. Fail
-    # fast with a clear hint instead of a cryptic clang-sys build error
-    # 10 minutes into the install.
-    if ($installer -eq 'install') {
-        & just ox-check-system-deps-check
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "ox-check-setup: system dependency check failed; install the missing libs and re-run."
-            exit $LASTEXITCODE
+    # Already at or above the pin: skip. We don't downgrade tools the
+    # user upgraded for their own reasons; the validate side uses
+    # `installed >= pin`, so newer is fine. The early-exit is also what
+    # makes the actions/cache restore actually useful -- without it,
+    # every post-restore run would try to re-install on top of the
+    # cached binaries and fail with "binary already exists in destination".
+    $installed = $null
+    $pattern = '^' + [regex]::Escape($name) + ' v(\S+):'
+    foreach ($line in (cargo install --list 2>$null)) {
+        if ($line -match $pattern) { $installed = $Matches[1]; break }
+    }
+    if ($installed) {
+        try {
+            if (([version]$installed) -ge ([version]$version)) {
+                Write-Host "$name >= $version (already satisfied; installed=$installed)"
+                exit 0
+            }
+        } catch {
+            # Fall through to reinstall when versions don't parse as [version].
         }
     }
 
-    # === Step 2: rustup toolchains + components ========================
-    # Group components by toolchain key (see rustup-components.txt).
-    # Each pinned nightly is installed with all of its required
-    # components in a single `rustup toolchain install` invocation, so
-    # the toolchain download happens once and components are added
-    # atomically. Default-toolchain components are added separately
-    # with `rustup component add` -- the default toolchain is whatever
-    # rustup resolves at the moment (rust-toolchain.toml override or
-    # `rustup default`).
-    $componentCatalog = 'justfiles/ox-check/rustup-components.txt'
-    $byToolchain = @{}
-    foreach ($line in Get-Content $componentCatalog) {
-        $trimmed = $line.Trim()
-        if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -match '^([^:]+):(.+)$') {
-            $key = $Matches[1]
-            $comp = $Matches[2]
-            if (-not $byToolchain.ContainsKey($key)) {
-                $byToolchain[$key] = [System.Collections.Generic.List[string]]::new()
-            }
-            $byToolchain[$key].Add($comp) | Out-Null
-        }
-    }
-    # Resolve pinned nightlies from versions.just. Local invocation
-    # path matches what setup-action.yml / setup.yml do in CI; recipe
-    # interpolation `{{ rust_nightly }}` (used by ox-check-miri etc.)
-    # reads from the same place.
-    $nightly = (& just --evaluate rust_nightly) | Select-Object -Last 1
-    $nightlyExt = (& just --evaluate rust_nightly_external_types) | Select-Object -Last 1
-    $toolchainPins = @{ nightly = $nightly; nightly_external_types = $nightlyExt }
-    foreach ($key in $byToolchain.Keys) {
-        $components = $byToolchain[$key]
-        if ($key -eq 'default') {
-            Write-Host "ox-check-setup: rustup component add $($components -join ' ') (default toolchain)"
-            & rustup component add @components
-            if ($LASTEXITCODE -ne 0) {
-                Write-Error "ox-check-setup: 'rustup component add' failed for default toolchain"
-                exit $LASTEXITCODE
-            }
-        } else {
-            if (-not $toolchainPins.ContainsKey($key)) {
-                Write-Error "ox-check-setup: unknown toolchain key '$key' in $componentCatalog (expected 'default' / 'nightly' / 'nightly_external_types')"
-                exit 1
-            }
-            $pin = $toolchainPins[$key]
-            $componentArgs = @()
-            foreach ($c in $components) { $componentArgs += @('--component', $c) }
-            Write-Host "ox-check-setup: rustup toolchain install $pin --profile minimal $($componentArgs -join ' ') --no-self-update"
-            & rustup toolchain install $pin --profile minimal @componentArgs --no-self-update
-            if ($LASTEXITCODE -ne 0) {
-                Write-Error "ox-check-setup: 'rustup toolchain install' failed for $pin"
-                exit $LASTEXITCODE
-            }
-        }
-    }
-    # If a pinned toolchain has no entries in rustup-components.txt,
-    # ensure it's still installed (cargo-check-external-types needs
-    # `nightly_external_types` even though it requires no components
-    # beyond what `--profile minimal` provides).
-    foreach ($key in $toolchainPins.Keys) {
-        if ($byToolchain.ContainsKey($key)) { continue }
-        $pin = $toolchainPins[$key]
-        if ($pin -eq $nightly -and $byToolchain.ContainsKey('nightly')) { continue }
-        Write-Host "ox-check-setup: rustup toolchain install $pin --profile minimal --no-self-update"
-        & rustup toolchain install $pin --profile minimal --no-self-update
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "ox-check-setup: 'rustup toolchain install' failed for $pin"
-            exit $LASTEXITCODE
-        }
-    }
-
-    # === Step 3: cargo-binstall bootstrap (binstall path only) =========
+    Write-Host "Installing $name =$version (installer: $installer)"
     if ($installer -eq 'binstall') {
         if (-not (Get-Command cargo-binstall -ErrorAction SilentlyContinue)) {
-            Write-Host "ox-check-setup: bootstrapping cargo-binstall"
-            & cargo install --locked cargo-binstall
+            Write-Host '  Bootstrapping cargo-binstall'
+            cargo install --locked cargo-binstall
             if ($LASTEXITCODE -ne 0) {
-                Write-Error "ox-check-setup: cargo-binstall bootstrap failed"
+                Write-Error 'cargo-binstall bootstrap failed'
                 exit $LASTEXITCODE
             }
         }
+        cargo binstall --no-confirm --locked $name --version "=$version"
+        if ($LASTEXITCODE -eq 0) { exit 0 }
+        Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
+    }
+    cargo install --locked $name --version "=$version"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "$name install FAILED"
+        exit $LASTEXITCODE
     }
 
-    # === Step 4: cargo subcommands =====================================
-    $catalog = 'justfiles/ox-check/tool-minimums.txt'
-    $failed = [System.Collections.Generic.List[string]]::new()
-    foreach ($line in Get-Content $catalog) {
-        $trimmed = $line.Trim()
-        if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -match '^([^=]+)=(.+)$') {
-            $tool = $Matches[1]
-            $pin = $Matches[2]
-            # Skip if the tool is already installed at or above the
-            # pinned version. _ox-check-require uses `installed >= pin`,
-            # so a user who has manually upgraded a tool for their own
-            # reasons (e.g. needing a bugfix the catalog hasn't pinned
-            # yet) is not downgraded by setup. The early-exit is also
-            # what makes the actions/cache restore actually useful --
-            # without it, every post-restore run would try to re-install
-            # on top of the cached binaries and fail with "binary
-            # already exists in destination". The `2>$null` swallows
-            # the help-text noise _ox-check-require emits when the tool
-            # is missing.
-            & just _ox-check-require $tool 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "ox-check-setup ($installer): $tool >= $pin (already satisfied)"
-                continue
-            }
-            # Install exactly the pinned version (NOT >=). Pulling
-            # latest-matching at install time is a CI reproducibility
-            # risk: an upstream release between yesterday's green
-            # build and today's PR can break things, even though the
-            # catalog hasn't moved. The `=` constraint locks the
-            # install to the version we validated.
-            Write-Host "ox-check-setup ($installer): $tool =$pin"
-            $installed = $false
-            if ($installer -eq 'binstall') {
-                cargo binstall --no-confirm --locked $tool --version "=$pin"
-                if ($LASTEXITCODE -eq 0) {
-                    $installed = $true
-                } else {
-                    Write-Host "  binstall failed for $tool; falling back to cargo install" -ForegroundColor Yellow
-                    cargo install --locked $tool --version "=$pin"
-                    if ($LASTEXITCODE -eq 0) { $installed = $true }
-                }
-            } else {
-                cargo install --locked $tool --version "=$pin"
-                if ($LASTEXITCODE -eq 0) { $installed = $true }
-            }
-            if (-not $installed) {
-                Write-Host "ox-check-setup: $tool install FAILED (continuing)" -ForegroundColor Yellow
-                $failed.Add($tool)
-            }
-        }
-    }
-    if ($failed.Count -gt 0) {
-        Write-Host ""
-        Write-Host "ox-check-setup: $($failed.Count) tool(s) failed to install:" -ForegroundColor Yellow
-        foreach ($t in $failed) { Write-Host "  - $t" -ForegroundColor Yellow }
-        Write-Host "Recipes that depend on these tools will fail at run time via _ox-check-require." -ForegroundColor Yellow
-        exit 1
-    }
-
-# Internal: assert that `name` meets its catalog minimum (or, for tools
-# not in the catalog, that it's at least present). Three lookup paths:
-#
-#   - "rustc": presence-only; the workspace's rust-toolchain.toml drives
-#     the actual version requirement (rustup auto-installs).
-#   - "pwsh": presence-only with a per-OS install hint.
-#   - Anything else: looked up in tool-minimums.txt; if present, the
-#     installed version is parsed from `cargo install --list` and
-#     compared via the [version] type. If not in the catalog,
-#     presence-only fallback (covers system binaries like `just`
-#     itself, `git`).
+# _check-tool: verify a cargo subcommand is installed at or above the
+# pinned version. Errors with an install hint on missing or too-old.
 [script("pwsh")]
-_ox-check-require name:
+_check-tool name version:
     $ErrorActionPreference = 'Stop'
     $name = '{{name}}'
-    $catalog = 'justfiles/ox-check/tool-minimums.txt'
+    $version = '{{version}}'
 
-    switch ($name) {
-        'rustc' {
-            if (-not (Get-Command rustc -ErrorAction SilentlyContinue)) {
-                Write-Error 'ox-check: rustc not found. Install via rustup: https://rustup.rs'
-                exit 1
-            }
-            exit 0
-        }
-        'pwsh' {
-            if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
-                $hint = if ($IsMacOS) {
-                    'brew install --cask powershell'
-                } elseif ($IsLinux) {
-                    'see https://github.com/PowerShell/PowerShell'
-                } else {
-                    'winget install --id Microsoft.PowerShell'
-                }
-                Write-Error "ox-check: pwsh (PowerShell Core) not found. Install: $hint"
-                exit 1
-            }
-            exit 0
-        }
+    $installed = $null
+    $pattern = '^' + [regex]::Escape($name) + ' v(\S+):'
+    foreach ($line in (cargo install --list 2>$null)) {
+        if ($line -match $pattern) { $installed = $Matches[1]; break }
+    }
+    if (-not $installed) {
+        Write-Error "ox-check: required tool '$name' not found. Install: cargo install --locked --version =$version $name"
+        exit 1
+    }
+    try {
+        $installedV = [version]$installed
+        $pinV = [version]$version
+    } catch {
+        Write-Error "ox-check: cannot compare versions for '$name' (installed=$installed pin=$version). Reinstall: cargo install --locked --version =$version $name"
+        exit 1
+    }
+    if ($installedV -lt $pinV) {
+        Write-Error "ox-check: '$name' v$installed is older than the required minimum v$version. Upgrade: cargo install --locked --version =$version $name"
+        exit 1
     }
 
-    # Catalog lookup. Trim CRLF (Windows checkouts) and skip
-    # comments / blank lines while we're at it.
-    $spec = $null
-    if (Test-Path $catalog) {
-        foreach ($line in Get-Content $catalog) {
-            $trimmed = $line.Trim()
-            if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
-            $pattern = '^' + [regex]::Escape($name) + '=(.+)$'
-            if ($trimmed -match $pattern) {
-                $spec = $Matches[1]
-                break
-            }
-        }
+# _install-toolchain: install a specific rustup toolchain (no components).
+[script("pwsh")]
+_install-toolchain toolchain:
+    $ErrorActionPreference = 'Stop'
+    $toolchain = '{{toolchain}}'
+    Write-Host "rustup toolchain install $toolchain --profile minimal --no-self-update"
+    rustup toolchain install $toolchain --profile minimal --no-self-update
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to install toolchain '$toolchain'"
+        exit $LASTEXITCODE
     }
 
-    if (-not $spec) {
-        # Not in catalog: presence-only fallback for tools we don't
-        # version-gate (`just` itself, `git`, system binaries).
-        if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
-            Write-Error "ox-check: required tool '$name' not found. Install hint: cargo install --locked $name"
-            exit 1
-        }
+# _check-toolchain: verify a rustup toolchain is installed.
+[script("pwsh")]
+_check-toolchain toolchain:
+    $ErrorActionPreference = 'Stop'
+    $toolchain = '{{toolchain}}'
+    rustup which --toolchain $toolchain rustc 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "ox-check: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain --profile minimal"
+        exit 1
+    }
+
+# _install-component: add a component to a toolchain. The toolchain is
+# either the literal "default" (current rustup default) or a specific
+# pinned toolchain string (which must already be installed -- the
+# per-component setup recipes ensure this via a dependency on
+# ox-check-<toolchain>-install).
+[script("pwsh")]
+_install-component toolchain component:
+    $ErrorActionPreference = 'Stop'
+    $toolchain = '{{toolchain}}'
+    $component = '{{component}}'
+    if ($toolchain -eq 'default') {
+        Write-Host "rustup component add $component (default toolchain)"
+        rustup component add $component
+    } else {
+        Write-Host "rustup component add --toolchain $toolchain $component"
+        rustup component add --toolchain $toolchain $component
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to install component '$component' on toolchain '$toolchain'"
+        exit $LASTEXITCODE
+    }
+
+# _check-component: verify a component is installed on a toolchain.
+[script("pwsh")]
+_check-component toolchain component:
+    $ErrorActionPreference = 'Stop'
+    $toolchain = '{{toolchain}}'
+    $component = '{{component}}'
+    $output = if ($toolchain -eq 'default') {
+        rustup component list --installed 2>$null
+    } else {
+        rustup component list --installed --toolchain $toolchain 2>$null
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "ox-check: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain --profile minimal"
+        exit 1
+    }
+    $found = $output | Where-Object { $_ -like "$component*" }
+    if (-not $found) {
+        $cmd = if ($toolchain -eq 'default') { "rustup component add $component" } else { "rustup component add --toolchain $toolchain $component" }
+        Write-Error "ox-check: component '$component' not installed on toolchain '$toolchain'. Run: $cmd"
+        exit 1
+    }
+
+# ============================================================================
+# Rustup toolchains
+# ============================================================================
+
+[group("ox-check-setup")]
+ox-check-toolchain-nightly-install: (_install-toolchain rust_nightly)
+
+[group("ox-check-setup")]
+ox-check-toolchain-nightly-validate-prereqs: (_check-toolchain rust_nightly)
+
+[group("ox-check-setup")]
+ox-check-toolchain-nightly-external-types-install: (_install-toolchain rust_nightly_external_types)
+
+[group("ox-check-setup")]
+ox-check-toolchain-nightly-external-types-validate-prereqs: (_check-toolchain rust_nightly_external_types)
+
+# ============================================================================
+# Rustup components
+# ============================================================================
+#
+# Default-toolchain components are installed via `rustup component add`
+# (no toolchain spec). Nightly components depend on the toolchain
+# being installed first (via the relevant ox-check-<toolchain>-install
+# recipe) and then add the component.
+
+[group("ox-check-setup")]
+ox-check-component-default-clippy-install: (_install-component "default" "clippy")
+
+[group("ox-check-setup")]
+ox-check-component-default-clippy-validate-prereqs: (_check-component "default" "clippy")
+
+[group("ox-check-setup")]
+ox-check-component-default-rustfmt-install: (_install-component "default" "rustfmt")
+
+[group("ox-check-setup")]
+ox-check-component-default-rustfmt-validate-prereqs: (_check-component "default" "rustfmt")
+
+[group("ox-check-setup")]
+ox-check-component-nightly-rustfmt-install: ox-check-toolchain-nightly-install (_install-component rust_nightly "rustfmt")
+
+[group("ox-check-setup")]
+ox-check-component-nightly-rustfmt-validate-prereqs: ox-check-toolchain-nightly-validate-prereqs (_check-component rust_nightly "rustfmt")
+
+[group("ox-check-setup")]
+ox-check-component-nightly-miri-install: ox-check-toolchain-nightly-install (_install-component rust_nightly "miri")
+
+[group("ox-check-setup")]
+ox-check-component-nightly-miri-validate-prereqs: ox-check-toolchain-nightly-validate-prereqs (_check-component rust_nightly "miri")
+
+[group("ox-check-setup")]
+ox-check-component-nightly-rust-src-install: ox-check-toolchain-nightly-install (_install-component rust_nightly "rust-src")
+
+[group("ox-check-setup")]
+ox-check-component-nightly-rust-src-validate-prereqs: ox-check-toolchain-nightly-validate-prereqs (_check-component rust_nightly "rust-src")
+
+# ============================================================================
+# Cargo subcommands
+# ============================================================================
+#
+# One pair (install + validate-prereqs) per tool, alphabetical.
+# Version pins live in versions.just (one cargo_<name>_version variable
+# per tool). The install recipes accept an `installer="install"|"binstall"`
+# parameter; the validate-prereqs recipes do not (they only read state).
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-aprz-install installer="install": (_install-tool "cargo-aprz" cargo_aprz_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-aprz-validate-prereqs: (_check-tool "cargo-aprz" cargo_aprz_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-audit-install installer="install": (_install-tool "cargo-audit" cargo_audit_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-careful-install installer="install": (_install-tool "cargo-careful" cargo_careful_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-careful-validate-prereqs: (_check-tool "cargo-careful" cargo_careful_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-check-external-types-install installer="install": (_install-tool "cargo-check-external-types" cargo_check_external_types_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-check-external-types-validate-prereqs: (_check-tool "cargo-check-external-types" cargo_check_external_types_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-delta-install installer="install": (_install-tool "cargo-delta" cargo_delta_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-delta-validate-prereqs: (_check-tool "cargo-delta" cargo_delta_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-deny-install installer="install": (_install-tool "cargo-deny" cargo_deny_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-deny-validate-prereqs: (_check-tool "cargo-deny" cargo_deny_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-doc2readme-install installer="install": (_install-tool "cargo-doc2readme" cargo_doc2readme_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-doc2readme-validate-prereqs: (_check-tool "cargo-doc2readme" cargo_doc2readme_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-ensure-no-cyclic-deps-install installer="install": (_install-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-ensure-no-cyclic-deps-validate-prereqs: (_check-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-ensure-no-default-features-install installer="install": (_install-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-ensure-no-default-features-validate-prereqs: (_check-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-hack-install installer="install": (_install-tool "cargo-hack" cargo_hack_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-hack-validate-prereqs: (_check-tool "cargo-hack" cargo_hack_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-heather-install installer="install": (_install-tool "cargo-heather" cargo_heather_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-heather-validate-prereqs: (_check-tool "cargo-heather" cargo_heather_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-llvm-cov-install installer="install": (_install-tool "cargo-llvm-cov" cargo_llvm_cov_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_llvm_cov_version)
+
+# cargo-mutants doesn't build on aarch64-pc-windows-msvc (upstream
+# winapi crate incompat). The install recipe self-skips on that target
+# so per-group setup recipes that depend on it (pr-mutants-setup,
+# scheduled-exhaustive-setup) don't fail on that platform. The
+# mutants-diff / mutants-full check recipes also self-skip on the same
+# target, so the check is effectively a no-op end-to-end there.
+[group("ox-check-setup")]
+[script("pwsh")]
+ox-check-tool-cargo-mutants-install installer="install":
+    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
+        Write-Host 'ox-check-tool-cargo-mutants-install: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
         exit 0
     }
+    & just _install-tool cargo-mutants {{cargo_mutants_version}} {{installer}}
+    exit $LASTEXITCODE
 
-    $pin = $spec
-    # Parse `cargo install --list` for installed version. Lines look like:
-    #   cargo-deny v0.18.5:
-    #       cargo-deny
-    $installed = $null
-    $listPattern = '^' + [regex]::Escape($name) + ' v(\S+):'
-    foreach ($line in (cargo install --list 2>$null)) {
-        if ($line -match $listPattern) {
-            $installed = $Matches[1]
-            break
-        }
+[group("ox-check-setup")]
+[script("pwsh")]
+ox-check-tool-cargo-mutants-validate-prereqs:
+    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
+        Write-Host 'ox-check-tool-cargo-mutants-validate-prereqs: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
+        exit 0
     }
+    & just _check-tool cargo-mutants {{cargo_mutants_version}}
+    exit $LASTEXITCODE
 
-    if (-not $installed) {
-        # Install hint pins the exact catalog version (`=$pin`),
-        # matching what ox-check-setup does. Users who want a newer
-        # version of the tool for their own reasons can upgrade
-        # manually; the gate below (installed >= pin) will still pass.
-        Write-Error "ox-check: '$name' not installed (need >=v$pin). Install: cargo install --locked $name --version '=$pin'  (or run: just ox-check-setup)"
-        exit 1
-    }
+[group("ox-check-setup")]
+ox-check-tool-cargo-nextest-install installer="install": (_install-tool "cargo-nextest" cargo_nextest_version installer)
 
-    # SemVer comparison via the [version] type. Strip any pre-release
-    # / build-metadata suffix (e.g. "1.2.3-alpha.4") for parsing --
-    # [version] only handles dotted numeric components.
-    $pinClean = ($pin -split '[-+]', 2)[0]
-    $instClean = ($installed -split '[-+]', 2)[0]
-    $pinV = [version]$pinClean
-    $instV = [version]$instClean
-    if ($instV -lt $pinV) {
-        # Upgrade hint pins the exact catalog version, not `>=$pin`,
-        # for the same CI-reproducibility reason as setup. Adopters
-        # who need newer can take it via plain `cargo install --locked`.
-        Write-Error "ox-check: '$name' is at v$installed; need >=v$pin. Upgrade: cargo install --locked $name --version '=$pin'  (or run: just ox-check-setup)"
-        exit 1
-    }
+[group("ox-check-setup")]
+ox-check-tool-cargo-nextest-validate-prereqs: (_check-tool "cargo-nextest" cargo_nextest_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-semver-checks-install installer="install": (_install-tool "cargo-semver-checks" cargo_semver_checks_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-semver-checks-validate-prereqs: (_check-tool "cargo-semver-checks" cargo_semver_checks_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-sort-install installer="install": (_install-tool "cargo-sort" cargo_sort_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-spellcheck-validate-prereqs: (_check-tool "cargo-spellcheck" cargo_spellcheck_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-udeps-install installer="install": (_install-tool "cargo-udeps" cargo_udeps_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_version)
 
 === justfiles/ox-check/versions.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check-update; edit via `cargo ox-check-update`.
 #
-# Pinned toolchain versions used by the ox-check check tree.
+# Pinned versions used by the ox-check check tree.
 #
-# These are deliberately pinned (not floating). The cost of floating
-# nightly is "rustup update on Tuesday breaks CI on Wednesday" — we'd
-# rather move the pin deliberately than wake up to surprise red builds.
-# See docs/design/local.md#nightly-pinning for the bump policy.
+# Everything ox-check installs (cargo subcommands + rustup toolchains)
+# is pinned here. The pinning policy:
+#   - On install (`-install` recipes): exactly this version (`=<pin>` for
+#     cargo subcommands, exact ref for rustup toolchains). Pulling
+#     "latest-matching" at install time is a CI reproducibility risk --
+#     an upstream release between yesterday's green build and today's
+#     PR can break things (cargo-spellcheck 0.15.7's em-dash regression
+#     is the canonical case). The `=` constraint locks the install to
+#     the version the catalog was validated against.
+#   - On validate-prereqs (`-validate-prereqs` recipes): the installed
+#     version must be `>= <pin>`. A user who has manually upgraded a
+#     tool for their own reasons (e.g. needing an unreleased bugfix)
+#     is not downgraded by setup. The validate gate uses
+#     `installed >= pin`, so newer is fine.
 #
-# Both ox-check recipes (via the `{{ var }}` interpolation below) and
-# the setup-action / setup.yml composites (via `just --evaluate`) read
-# these constants. There is exactly one source of truth.
+# To bump a pin, edit the version in place and re-run
+# `cargo ox-check-update`. The dirty-file flow preserves the edit on
+# subsequent runs. To add a new tool, append a variable and the matching
+# `-install`/`-validate-prereqs` pair in `tools.just`. To remove a tool,
+# delete its variable and recipes (and any check that depends on them).
+
+# ============================================================================
+# Rustup toolchains
+# ============================================================================
 
 # General nightly used by udeps, miri, careful, and any future
 # nightly-dependent check. Bumped on a regular cadence (monthly is a
 # reasonable default) when an adopter has time to absorb formatting /
-# lint / API-surface drift. Pin only — do not use bare `nightly` here.
+# lint / API-surface drift. Pin only -- do not use bare `nightly` here.
 rust_nightly := "nightly-2026-02-10"
 
 # Pinned narrowly to the rustdoc JSON schema version that the currently
@@ -2514,9 +2857,32 @@ rust_nightly := "nightly-2026-02-10"
 # external-types embeds a specific rustdoc-types crate version; if the
 # nightly's emitted JSON format_version drifts past it, every run fails
 # with "produces JSON format version X, but this tool requires
-# format version Y" — which is a tooling-incompat, not a real API
+# format version Y" -- which is a tooling-incompat, not a real API
 # violation. Bump this alongside any cargo-check-external-types upgrade.
 rust_nightly_external_types := "nightly-2025-10-18"
+
+# ============================================================================
+# Cargo subcommands
+# ============================================================================
+
+cargo_aprz_version := "1.0.0"
+cargo_audit_version := "0.21.0"
+cargo_careful_version := "0.4.9"
+cargo_check_external_types_version := "0.4.0"
+cargo_delta_version := "0.3.1"
+cargo_deny_version := "0.19.0"
+cargo_doc2readme_version := "0.6.4"
+cargo_ensure_no_cyclic_deps_version := "0.2.0"
+cargo_ensure_no_default_features_version := "1.0.0"
+cargo_hack_version := "0.6.41"
+cargo_heather_version := "0.2.1"
+cargo_llvm_cov_version := "0.8.4"
+cargo_mutants_version := "26.1.2"
+cargo_nextest_version := "0.9.122"
+cargo_semver_checks_version := "0.46.0"
+cargo_sort_version := "2.0.2"
+cargo_spellcheck_version := "0.15.1"
+cargo_udeps_version := "0.1.60"
 
 === rustfmt.toml ===
 # >>> ox-check-managed: ox-check-rustfmt

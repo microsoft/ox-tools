@@ -83,7 +83,7 @@
 # format-drift breaking CI on rustup updates — the same trap we
 # explicitly avoid for udeps/miri/careful/external-types.
 [script("pwsh")]
-ox-check-fmt:
+ox-check-fmt: ox-check-fmt-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo '+{{ rust_nightly }}' fmt --all --check
@@ -96,7 +96,7 @@ ox-check-fmt:
 # we want downstream rev-deps to lint as well. cargo-clippy is a
 # rustup component; same reasoning as fmt for the require.
 [script("pwsh")]
-ox-check-clippy:
+ox-check-clippy: ox-check-clippy-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     & cargo clippy @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --all-targets --all-features --locked "--" '-D' 'warnings'
@@ -104,7 +104,7 @@ ox-check-clippy:
 
 # Modified tier.
 [script("pwsh")]
-ox-check-cargo-sort: (_ox-check-require "cargo-sort")
+ox-check-cargo-sort: ox-check-cargo-sort-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo sort --workspace --check
@@ -112,7 +112,7 @@ ox-check-cargo-sort: (_ox-check-require "cargo-sort")
 
 # Modified tier.
 [script("pwsh")]
-ox-check-license-headers: (_ox-check-require "cargo-heather")
+ox-check-license-headers: ox-check-license-headers-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo heather
@@ -120,7 +120,7 @@ ox-check-license-headers: (_ox-check-require "cargo-heather")
 
 # Modified tier.
 [script("pwsh")]
-ox-check-ensure-no-cyclic-deps: (_ox-check-require "cargo-ensure-no-cyclic-deps")
+ox-check-ensure-no-cyclic-deps: ox-check-ensure-no-cyclic-deps-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo ensure-no-cyclic-deps
@@ -128,7 +128,7 @@ ox-check-ensure-no-cyclic-deps: (_ox-check-require "cargo-ensure-no-cyclic-deps"
 
 # Modified tier.
 [script("pwsh")]
-ox-check-ensure-no-default-features: (_ox-check-require "cargo-ensure-no-default-features")
+ox-check-ensure-no-default-features: ox-check-ensure-no-default-features-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo ensure-no-default-features
@@ -138,7 +138,7 @@ ox-check-ensure-no-default-features: (_ox-check-require "cargo-ensure-no-default
 # graph, so a dep changing its public API can break doc-build in a
 # crate that wasn't itself modified.
 [script("pwsh")]
-ox-check-doc-build:
+ox-check-doc-build: ox-check-doc-build-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
     $env:RUSTDOCFLAGS = '-D warnings'
@@ -168,7 +168,7 @@ ox-check-doc-build:
 # resolution. The OX_CHECK_INCLUDE_MODIFIED value would still need to
 # be intersected with the lib-crate set rather than splatted into cargo.
 [script("pwsh")]
-ox-check-readme-check: (_ox-check-require "cargo-doc2readme")
+ox-check-readme-check: ox-check-readme-check-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
         Write-Host 'ox-check-readme-check: no modified packages; skipping'
@@ -256,7 +256,7 @@ ox-check-readme-check: (_ox-check-require "cargo-doc2readme")
 # automatically; otherwise we run cargo-spellcheck against whatever
 # the repo has already set up.
 [script("pwsh")]
-ox-check-spellcheck: (_ox-check-require "cargo-spellcheck")
+ox-check-spellcheck: ox-check-spellcheck-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_MODIFIED -eq '--skip') {
         Write-Host 'ox-check-spellcheck: no modified packages; skipping'
@@ -291,7 +291,7 @@ ox-check-spellcheck: (_ox-check-require "cargo-spellcheck")
 # (no equivalent of `gh pr view`), so the recipe stays simple and
 # defers the check to CI.
 [script("pwsh")]
-ox-check-pr-title: (_ox-check-require "pwsh")
+ox-check-pr-title: ox-check-pr-title-validate-prereqs
     $title = $env:PR_TITLE
     if (-not $title) {
         Write-Host 'ox-check-pr-title: PR_TITLE env var not set; skipping (check runs on CI)'
@@ -304,11 +304,11 @@ ox-check-pr-title: (_ox-check-require "pwsh")
 
 # Unscoped (consults external advisory DB; reads Cargo.lock, not
 # workspace members). Single command — inherits adopter's default shell.
-ox-check-deny: (_ox-check-require "cargo-deny")
+ox-check-deny: ox-check-deny-validate-prereqs
     cargo deny check
 
 # Unscoped (consults external advisory DB; reads Cargo.lock).
-ox-check-audit: (_ox-check-require "cargo-audit")
+ox-check-audit: ox-check-audit-validate-prereqs
     cargo audit
 
 # Required tier. cargo-udeps detects unused dependencies by resolving
@@ -323,7 +323,7 @@ ox-check-audit: (_ox-check-require "cargo-audit")
 # `[dependencies]`. Restricting to the default targets (lib + bins)
 # matches main repo CI's check and surfaces the real bug.
 [script("pwsh")]
-ox-check-udeps: (_ox-check-require "cargo-udeps")
+ox-check-udeps: ox-check-udeps-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
     & cargo '+{{ rust_nightly }}' udeps @(-split ($env:OX_CHECK_INCLUDE_REQUIRED ?? "--workspace")) --all-features
@@ -361,7 +361,7 @@ ox-check-udeps: (_ox-check-require "cargo-udeps")
 # unpublished crates ("not found in registry") and bin->bin+lib
 # transitions ("no library targets found").
 [script("pwsh")]
-ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
+ox-check-semver-check: ox-check-semver-check-validate-prereqs
     $ErrorActionPreference = 'Stop'
     $commentFile = 'target/ox-check/comments/semver.md'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
@@ -461,7 +461,7 @@ ox-check-semver-check: (_ox-check-require "cargo-semver-checks")
 # intersect with OX_CHECK_INCLUDE_AFFECTED, and call the tool once per
 # crate. Hard-fails on errors (no tolerance, unlike semver-check).
 [script("pwsh")]
-ox-check-external-types: (_ox-check-require "cargo-check-external-types")
+ox-check-external-types: ox-check-external-types-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
         Write-Host 'ox-check-external-types: no affected packages; skipping'
@@ -508,14 +508,14 @@ ox-check-external-types: (_ox-check-require "cargo-check-external-types")
     if ($failed) { exit 1 }
 
 # Unscoped (consults external risk DB).
-ox-check-aprz: (_ox-check-require "cargo-aprz")
+ox-check-aprz: ox-check-aprz-validate-prereqs
     cargo aprz deps --error-if-high-risk --console appraisal
 
 # === pr-test members ====================================================
 
 # Affected tier.
 [script("pwsh")]
-ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "cargo-nextest")
+ox-check-llvm-cov: ox-check-llvm-cov-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
         Write-Host 'ox-check-llvm-cov: no affected packages; skipping'
@@ -563,7 +563,7 @@ ox-check-llvm-cov: (_ox-check-require "cargo-llvm-cov") (_ox-check-require "carg
 
 # Affected tier.
 [script("pwsh")]
-ox-check-doc-test:
+ox-check-doc-test: ox-check-doc-test-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     & cargo test --doc @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --all-features --locked
@@ -571,7 +571,7 @@ ox-check-doc-test:
 
 # Affected tier.
 [script("pwsh")]
-ox-check-examples:
+ox-check-examples: ox-check-examples-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     & cargo build @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --examples --all-features --locked
@@ -589,16 +589,15 @@ ox-check-examples:
 # is the only sub-recipe that can't follow, so it bails out early on the
 # affected leg. Coverage on the other three legs is unchanged.
 [script("pwsh")]
-ox-check-mutants-diff:
+ox-check-mutants-diff: ox-check-mutants-diff-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
-        Write-Host 'ox-check-mutants-diff: aarch64-pc-windows-msvc -- cargo-mutants does not build here (winapi); skipping'
+        Write-Host 'ox-check-mutants-diff: ox-check-mutants-diff-validate-prereqs aarch64-pc-windows-msvc -- cargo-mutants does not build here (winapi); skipping'
         exit 0
     }
-    & just _ox-check-require cargo-mutants
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') {
-        Write-Host 'ox-check-mutants-diff: no affected packages; skipping'
+        Write-Host 'ox-check-mutants-diff: ox-check-mutants-diff-validate-prereqs no affected packages; skipping'
         exit 0
     }
     # Resolve BASE_REF: env override > origin/main > origin/master.
@@ -615,7 +614,7 @@ ox-check-mutants-diff:
         }
     }
     if (-not $base) {
-        Write-Error 'ox-check-mutants-diff: no BASE_REF set and neither origin/main nor origin/master is available. Set BASE_REF to the branch to diff against.'
+        Write-Error 'ox-check-mutants-diff: ox-check-mutants-diff-validate-prereqs no BASE_REF set and neither origin/main nor origin/master is available. Set BASE_REF to the branch to diff against.'
         exit 1
     }
     # cargo-mutants --in-diff takes a FILE path containing a unified
@@ -638,7 +637,7 @@ ox-check-mutants-diff:
 # applies. Skip guards are still included for local diff-scoped runs.
 
 [script("pwsh")]
-ox-check-miri:
+ox-check-miri: ox-check-miri-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     # `--no-tests=pass`: miri-only exception. Tests that touch the
@@ -655,7 +654,7 @@ ox-check-miri:
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 [script("pwsh")]
-ox-check-careful: (_ox-check-require "cargo-careful")
+ox-check-careful: ox-check-careful-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     & cargo '+{{ rust_nightly }}' careful test @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --all-features --locked
@@ -665,14 +664,14 @@ ox-check-careful: (_ox-check-require "cargo-careful")
 
 # Unscoped. Scheduled-exhaustive deliberately runs over the whole
 # workspace regardless of diff.
-ox-check-mutants-full: (_ox-check-require "cargo-mutants")
+ox-check-mutants-full: ox-check-mutants-full-validate-prereqs
     cargo mutants --workspace --no-shuffle --jobs 0
 
 # Required tier. cargo-hack's feature powerset cascades through dep
 # features, so the required set (workspace-internal transitive deps)
 # is the right scope.
 [script("pwsh")]
-ox-check-cargo-hack: (_ox-check-require "cargo-hack")
+ox-check-cargo-hack: ox-check-cargo-hack-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
     & cargo hack @(-split ($env:OX_CHECK_INCLUDE_REQUIRED ?? "--workspace")) --feature-powerset --depth 2 check
@@ -680,9 +679,194 @@ ox-check-cargo-hack: (_ox-check-require "cargo-hack")
 
 # Affected tier.
 [script("pwsh")]
-ox-check-bench:
+ox-check-bench: ox-check-bench-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:OX_CHECK_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     & cargo bench @(-split ($env:OX_CHECK_INCLUDE_AFFECTED ?? "--workspace")) --all-features --no-run
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# ============================================================================
+# Per-check setup + validate-prereqs
+# ============================================================================
+#
+# Each check has matching `*-setup` and `*-validate-prereqs` recipes
+# that install / verify the tools and components it needs. The setup
+# recipes accept an `installer=install|install` parameter that
+# forwards to the underlying tool-install recipes; the validate-prereqs
+# recipes take no parameters.
+#
+# These are the building blocks for `ox-check-<group>-setup`
+# (groups.just) and `ox-check-<tier>-setup` (tiers.just) ΓÇö each
+# group/tier-level recipe is just a fan-out over the per-check
+# setup/validate-prereqs of its members.
+
+# --- pr-fast members ---
+
+[group("ox-check-setup")]
+ox-check-fmt-setup installer="install": ox-check-component-nightly-rustfmt-install
+
+[group("ox-check-setup")]
+ox-check-fmt-validate-prereqs: ox-check-component-nightly-rustfmt-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-clippy-setup installer="install": ox-check-component-default-clippy-install
+
+[group("ox-check-setup")]
+ox-check-clippy-validate-prereqs: ox-check-component-default-clippy-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-cargo-sort-setup installer="install": (ox-check-tool-cargo-sort-install installer)
+
+[group("ox-check-setup")]
+ox-check-cargo-sort-validate-prereqs: ox-check-tool-cargo-sort-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-license-headers-setup installer="install": (ox-check-tool-cargo-heather-install installer)
+
+[group("ox-check-setup")]
+ox-check-license-headers-validate-prereqs: ox-check-tool-cargo-heather-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-ensure-no-cyclic-deps-setup installer="install": (ox-check-tool-cargo-ensure-no-cyclic-deps-install installer)
+
+[group("ox-check-setup")]
+ox-check-ensure-no-cyclic-deps-validate-prereqs: ox-check-tool-cargo-ensure-no-cyclic-deps-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-ensure-no-default-features-setup installer="install": (ox-check-tool-cargo-ensure-no-default-features-install installer)
+
+[group("ox-check-setup")]
+ox-check-ensure-no-default-features-validate-prereqs: ox-check-tool-cargo-ensure-no-default-features-validate-prereqs
+
+# doc-build, examples and doc-test are pure cargo built-ins; the rust
+# toolchain (rustc + cargo) is the only prerequisite, and we already
+# rely on it being present everywhere ox-check runs.
+[group("ox-check-setup")]
+ox-check-doc-build-setup installer="install": ox-check-tool-rustc-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-doc-build-validate-prereqs: ox-check-tool-rustc-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-readme-check-setup installer="install": (ox-check-tool-cargo-doc2readme-install installer)
+
+[group("ox-check-setup")]
+ox-check-readme-check-validate-prereqs: ox-check-tool-cargo-doc2readme-validate-prereqs
+
+# cargo-spellcheck has a build-time libclang dependency; the system
+# deps check runs first so adopters get a clear hint instead of a
+# cryptic clang-sys build error mid-install.
+[group("ox-check-setup")]
+ox-check-spellcheck-setup installer="install": ox-check-system-deps-check (ox-check-tool-cargo-spellcheck-install installer)
+
+[group("ox-check-setup")]
+ox-check-spellcheck-validate-prereqs: ox-check-tool-cargo-spellcheck-validate-prereqs
+
+# pr-title is a pwsh script; no cargo tool to install.
+[group("ox-check-setup")]
+ox-check-pr-title-setup installer="install": ox-check-tool-pwsh-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-pr-title-validate-prereqs: ox-check-tool-pwsh-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-deny-setup installer="install": (ox-check-tool-cargo-deny-install installer)
+
+[group("ox-check-setup")]
+ox-check-deny-validate-prereqs: ox-check-tool-cargo-deny-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-audit-setup installer="install": (ox-check-tool-cargo-audit-install installer)
+
+[group("ox-check-setup")]
+ox-check-audit-validate-prereqs: ox-check-tool-cargo-audit-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-udeps-setup installer="install": ox-check-toolchain-nightly-install (ox-check-tool-cargo-udeps-install installer)
+
+[group("ox-check-setup")]
+ox-check-udeps-validate-prereqs: ox-check-toolchain-nightly-validate-prereqs ox-check-tool-cargo-udeps-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-semver-check-setup installer="install": (ox-check-tool-cargo-semver-checks-install installer)
+
+[group("ox-check-setup")]
+ox-check-semver-check-validate-prereqs: ox-check-tool-cargo-semver-checks-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-external-types-setup installer="install": ox-check-toolchain-nightly-external-types-install (ox-check-tool-cargo-check-external-types-install installer)
+
+[group("ox-check-setup")]
+ox-check-external-types-validate-prereqs: ox-check-toolchain-nightly-external-types-validate-prereqs ox-check-tool-cargo-check-external-types-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-aprz-setup installer="install": (ox-check-tool-cargo-aprz-install installer)
+
+[group("ox-check-setup")]
+ox-check-aprz-validate-prereqs: ox-check-tool-cargo-aprz-validate-prereqs
+
+# --- pr-test members (shared with scheduled-test) ---
+
+[group("ox-check-setup")]
+ox-check-llvm-cov-setup installer="install": (ox-check-tool-cargo-llvm-cov-install installer) (ox-check-tool-cargo-nextest-install installer)
+
+[group("ox-check-setup")]
+ox-check-llvm-cov-validate-prereqs: ox-check-tool-cargo-llvm-cov-validate-prereqs ox-check-tool-cargo-nextest-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-doc-test-setup installer="install": ox-check-tool-rustc-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-doc-test-validate-prereqs: ox-check-tool-rustc-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-examples-setup installer="install": ox-check-tool-rustc-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-examples-validate-prereqs: ox-check-tool-rustc-validate-prereqs
+
+# --- pr-runtime-analysis members ---
+
+[group("ox-check-setup")]
+ox-check-miri-setup installer="install": ox-check-component-nightly-miri-install ox-check-component-nightly-rust-src-install (ox-check-tool-cargo-nextest-install installer)
+
+[group("ox-check-setup")]
+ox-check-miri-validate-prereqs: ox-check-component-nightly-miri-validate-prereqs ox-check-component-nightly-rust-src-validate-prereqs ox-check-tool-cargo-nextest-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-careful-setup installer="install": ox-check-component-nightly-rust-src-install (ox-check-tool-cargo-careful-install installer)
+
+[group("ox-check-setup")]
+ox-check-careful-validate-prereqs: ox-check-component-nightly-rust-src-validate-prereqs ox-check-tool-cargo-careful-validate-prereqs
+
+# --- pr-mutants members ---
+
+[group("ox-check-setup")]
+ox-check-mutants-diff-setup installer="install": (ox-check-tool-cargo-mutants-install installer)
+
+[group("ox-check-setup")]
+ox-check-mutants-diff-validate-prereqs: ox-check-tool-cargo-mutants-validate-prereqs
+
+# --- scheduled-exhaustive members (mutants-full reuses cargo-mutants;
+#     cargo-hack and bench are dedicated tools) ---
+
+[group("ox-check-setup")]
+ox-check-mutants-full-setup installer="install": (ox-check-tool-cargo-mutants-install installer)
+
+[group("ox-check-setup")]
+ox-check-mutants-full-validate-prereqs: ox-check-tool-cargo-mutants-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-cargo-hack-setup installer="install": (ox-check-tool-cargo-hack-install installer)
+
+[group("ox-check-setup")]
+ox-check-cargo-hack-validate-prereqs: ox-check-tool-cargo-hack-validate-prereqs
+
+# bench uses cargo-built-ins (cargo bench --no-run + plain bench runs);
+# no extra tool install needed beyond the rust toolchain.
+[group("ox-check-setup")]
+ox-check-bench-setup installer="install": ox-check-tool-rustc-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-bench-validate-prereqs: ox-check-tool-rustc-validate-prereqs

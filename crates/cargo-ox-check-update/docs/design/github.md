@@ -179,7 +179,7 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 ```text
 .github/
 ├── actions/
-│   ├── ox-check-setup/action.yml         owned   (install just + catalog tools)
+│   ├── ox-check-setup/action.yml         owned   (install just + group-scoped catalog tools)
 │   ├── ox-check-impact/action.yml        owned   (cargo-delta; omitted if .delta.toml disabled)
 │   ├── ox-check-pr-fast/action.yml       owned   (one composite action per group)
 │   ├── ox-check-pr-test/action.yml      owned
@@ -514,19 +514,35 @@ plug individual groups into an unrelated workflow can `uses:` them directly.
 
 ### `ox-check-setup`
 
-`ox-check-setup` installs `just` (`cargo install just --locked`) and runs
-`just ox-check-setup`. Does not install Rust; expects `cargo` on PATH (see
-§7). `ox-check-impact` is described in §6 below.
+`ox-check-setup` is a composite action that installs `just`
+(`cargo install just --locked`) and then invokes the catalog setup recipes. It
+takes a single `group` input that controls which recipes run:
+
+- empty (default): runs `just ox-check-setup binstall` -- the full catalog. Use
+  for local "give me everything" flows.
+- `none`: skips the catalog setup entirely. Used by `ox-check-impact`, which only
+  needs `cargo-delta` and installs it itself afterwards.
+- any other value (e.g. `pr-fast`, `scheduled-advisories`): runs
+  `just ox-check-<group>-setup binstall` -- only the tools, components, and
+  toolchains that group actually needs. Every per-group composite action
+  (`.github/actions/ox-check-<group>`) passes its own group name here, so a
+  `pr-fast` matrix leg never installs cargo-mutants.
+
+The action does not install Rust; it expects `cargo` on PATH (see §7).
+`ox-check-impact` is described in §6 below.
 
 ## 6. Impact scoping
 
 `.github/actions/ox-check-impact/action.yml` is a composite action with input `base_ref`. It
 runs:
 
-1. `cargo install --locked cargo-delta`.
-2. `cargo delta impact --base $base_ref --format json` once, capturing the JSON tier
+1. `./.github/actions/ox-check-setup` with `group: none` (bootstrap rust + just +
+   cache; no catalog tools).
+2. `just ox-check-tool-cargo-delta-install binstall` -- only tool this composite
+   needs.
+3. `cargo delta impact --base $base_ref --format json` once, capturing the JSON tier
    sets in a single invocation.
-3. For each of the three tiers (`modified`, `affected`, `required`), format the crate
+4. For each of the three tiers (`modified`, `affected`, `required`), format the crate
    list into a pre-built `--package X --package Y …` string, or emit the sentinel
    `--skip` when the tier is empty.
 
@@ -574,20 +590,21 @@ Since reusable workflows can't accept "previous step" handoff, self-hosted users
 forgo the reusable-workflow shape and write a single workflow that calls the composite
 actions directly. ox-check's composite actions are exposed for that use case.
 
-`_ox-check-require` (invoked by every check recipe) validates the installed `rustc` against
-the catalog minimum at recipe time; missing or below-minimum `rustc` produces a clean
-failure message.
+`ox-check-tool-rustc-validate-prereqs` (depended on by every check that needs rustc)
+validates the installed `rustc` against the catalog minimum at recipe time; a
+below-minimum `rustc` produces a clean failure message.
 
 ## 8. Caching
 
 The `ox-check-setup` composite action computes a cache key from: OS, rustc version (read
-from `rust-toolchain.toml`), `Cargo.lock`, `.cargo/config.toml`, and the binary's
-embedded catalog hash. Uses `actions/cache` natively. `CARGO_HOME` is pinned to a
-workspace-scratch location to keep cache scoping predictable.
+from `rust-toolchain.toml`), `Cargo.lock`, `.cargo/config.toml`, and `versions.just`
+(the single source of truth for catalog tool/toolchain pins). Uses `actions/cache`
+natively. `CARGO_HOME` is pinned to a workspace-scratch location to keep cache
+scoping predictable.
 
 The cache covers:
 
-- The `cargo install`-ed tools from `ox-check-setup` (step 4 of the recipe).
+- The `cargo install`-ed tools installed by the catalog setup recipes.
 - The `target/` directory (per ox-check recipe; a per-recipe cache scope means a `pr-test`
   cache hit doesn't have to wait on a `pr-fast` cache miss).
 
@@ -604,7 +621,8 @@ Recommended root workflow shape:
 - No `pull-requests: write` (the PR-title check only needs the title from the event
   payload, which is already in `${{ github.event.pull_request.title }}`).
 - Scheduled-tier secrets, if any, live on `ox-check-scheduled.yml` only — never on `ox-check-pr.yml`.
-- All cargo-tool installs done by `ox-check-setup` use `--locked`. No `cargo-binstall`.
+- All cargo-tool installs done by the catalog setup recipes use `--locked` (with
+  `cargo install` or `cargo binstall` depending on `installer`).
 
 ## 10. Coverage upload
 

@@ -3,6 +3,10 @@
 # Owned by cargo-ox-check-update; edit via `cargo ox-check-update`.
 # See ../../docs/design/local.md for the policy.
 
+# ============================================================================
+# System-level prerequisites (libclang, etc.)
+# ============================================================================
+
 # Public: probe for system-level prerequisites that catalog tools need
 # to BUILD from source. The `binstall` install path downloads pre-built
 # binaries and does not need these, so this check is primarily relevant
@@ -22,7 +26,7 @@
 # On missing deps the recipe prints copy-paste install hints per OS /
 # package manager and exits non-zero. No auto-install: admin / sudo and
 # package-manager choice stay with the user.
-[group("ox-check")]
+[group("ox-check-setup")]
 [script("pwsh")]
 ox-check-system-deps-check:
     $ErrorActionPreference = 'Stop'
@@ -90,354 +94,387 @@ ox-check-system-deps-check:
         exit 1
     }
 
-# Public: assert that every catalog tool is present at or above its
-# minimum version. Called by `ox-check-tools-check` and as a dependency
-# of every check group via individual `_ox-check-require` invocations.
-[group("ox-check")]
-[script("pwsh")]
-ox-check-tools-check:
-    $ErrorActionPreference = 'Stop'
-    $catalog = 'justfiles/ox-check/tool-minimums.txt'
-    $fail = 0
-    foreach ($line in Get-Content $catalog) {
-        $trimmed = $line.Trim()
-        if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -match '^([^=]+)=') {
-            $tool = $Matches[1]
-            & just _ox-check-require $tool
-            if ($LASTEXITCODE -ne 0) { $fail = 1 }
-        }
-    }
-    & just _ox-check-require rustc
-    if ($LASTEXITCODE -ne 0) { $fail = 1 }
-    exit $fail
+# ============================================================================
+# rustc + pwsh validate-prereqs (no install -- system prereqs)
+# ============================================================================
+#
+# rustc is installed via rustup (https://rustup.rs); pwsh is installed
+# via the platform's package manager. Both are presumed present on any
+# machine running ox-check; the validate recipes just surface a friendly
+# error if not.
 
-# Public: install everything ox-check needs in one shot. Idempotent --
-# every sub-step is a no-op when the artifact (rustup toolchain /
-# component / cargo subcommand) is already present at or above the
-# pinned version. Safe to re-run.
-#
-# Order:
-#   1. System library dependencies (libclang for cargo-spellcheck's
-#      build script). Source-install path only.
-#   2. Rustup toolchains and components: the pinned nightlies from
-#      versions.just plus the components listed in
-#      `rustup-components.txt` (clippy on default, miri / rust-src /
-#      rustfmt on the pinned nightly, etc.). This step is what makes
-#      `ox-check-miri` and `ox-check-careful` work locally without a
-#      separate one-time setup.
-#   3. cargo-binstall bootstrap (binstall path only).
-#   4. Cargo subcommands from `tool-minimums.txt`.
-#
-# Version policy for step 4:
-#   - The catalog file is named tool-minimums.txt for historical
-#     reasons, but each entry is treated as a *pin* on the install
-#     side and a *minimum* on the runtime side. Concretely:
-#       * If the tool is missing or older than the pin: install
-#         exactly `=<pin>` (NOT `>=<pin>`). This makes CI runs
-#         reproducible -- the version that ships is what the
-#         catalog was validated against, not whatever upstream
-#         released since.
-#       * If the tool is already installed at the pin or NEWER:
-#         leave it alone. Local devs who upgrade a tool for their
-#         own reasons (e.g. needing a bugfix not yet pinned in the
-#         catalog) are not downgraded. The `_ox-check-require`
-#         gate uses `installed >= pin`, so newer is fine.
-#   - Why the asymmetry: pulling "latest matching >=pin" from
-#     upstream is a CI reproducibility risk -- a tool released between
-#     yesterday's green build and today's PR can break things
-#     (cargo-spellcheck 0.15.7's em-dash regression was exactly
-#     this failure mode). Pinning the install removes that risk
-#     without forcing adopters to downgrade their existing setups.
-#
-# `installer` selects the backend for step 4 (and dictates whether
-# steps 1 and 3 run):
-#   - "install"  (default): ``cargo install --locked`` -- pure-source
-#     builds; works in any cargo environment, no extra runtime
-#     dependencies. Slow (~30 minutes for the full catalog on a cold
-#     runner). Used by ADO, where ``cargo-binstall`` has known
-#     compliance issues for internal pipelines.
-#   - "binstall": ``cargo binstall --no-confirm --locked`` -- downloads
-#     a prebuilt binary from each tool's GitHub Releases when
-#     available, falling back to ``cargo install`` per-tool when
-#     not. Cuts catalog install time from ~30 min to ~1 min on a
-#     cold runner. Bootstraps cargo-binstall itself in step 3 if
-#     it isn't already on PATH. Used by the GitHub Actions setup
-#     action.
-#
-# Per-tool failures don't abort the whole install -- a tool that
-# doesn't build on the current host (e.g. cargo-mutants on
-# aarch64-pc-windows-msvc, where the upstream winapi dep doesn't
-# compile) shouldn't block other tools. Each failure is reported
-# at the end; recipes that use the missing tool will get a clean
-# error from ``_ox-check-require`` at recipe-run time. The recipe
-# itself exits non-zero only if at least one install failed, so
-# CI surfaces the problem.
-[group("ox-check")]
+[group("ox-check-setup")]
 [script("pwsh")]
-ox-check-setup installer="install":
-    $ErrorActionPreference = 'Continue'
+ox-check-tool-rustc-validate-prereqs:
+    if (-not (Get-Command rustc -ErrorAction SilentlyContinue)) {
+        Write-Error 'ox-check: rustc not found. Install via rustup: https://rustup.rs'
+        exit 1
+    }
+
+[group("ox-check-setup")]
+[script("pwsh")]
+ox-check-tool-pwsh-validate-prereqs:
+    if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
+        $hint = if ($IsMacOS) {
+            'brew install --cask powershell'
+        } elseif ($IsLinux) {
+            'see https://github.com/PowerShell/PowerShell'
+        } else {
+            'winget install --id Microsoft.PowerShell'
+        }
+        Write-Error "ox-check: pwsh (PowerShell Core) not found. Install: $hint"
+        exit 1
+    }
+
+# ============================================================================
+# Private helpers (install/check primitives)
+# ============================================================================
+
+# _install-tool: install a cargo subcommand at exactly the pinned version,
+# or no-op if it is already installed at or above that version. The
+# `installer` parameter selects between:
+#   - "install"  (cargo install --locked, pure-source). Default.
+#   - "binstall" (cargo binstall --no-confirm --locked, with cargo install
+#                 fallback if binstall fails). Bootstraps cargo-binstall
+#                 itself if not on PATH.
+[script("pwsh")]
+_install-tool name version installer:
+    $ErrorActionPreference = 'Stop'
+    $name = '{{name}}'
+    $version = '{{version}}'
     $installer = '{{installer}}'
+
     if ($installer -ne 'install' -and $installer -ne 'binstall') {
-        Write-Error "ox-check-setup: unknown installer '$installer' (expected 'install' or 'binstall')"
+        Write-Error "_install-tool: unknown installer '$installer' (expected 'install' or 'binstall')"
         exit 2
     }
 
-    # === Step 1: system library dependencies ===========================
-    # Only relevant for the source-install path -- binstall downloads
-    # prebuilt binaries that don't need libclang at build time. Fail
-    # fast with a clear hint instead of a cryptic clang-sys build error
-    # 10 minutes into the install.
-    if ($installer -eq 'install') {
-        & just ox-check-system-deps-check
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "ox-check-setup: system dependency check failed; install the missing libs and re-run."
-            exit $LASTEXITCODE
+    # Already at or above the pin: skip. We don't downgrade tools the
+    # user upgraded for their own reasons; the validate side uses
+    # `installed >= pin`, so newer is fine. The early-exit is also what
+    # makes the actions/cache restore actually useful -- without it,
+    # every post-restore run would try to re-install on top of the
+    # cached binaries and fail with "binary already exists in destination".
+    $installed = $null
+    $pattern = '^' + [regex]::Escape($name) + ' v(\S+):'
+    foreach ($line in (cargo install --list 2>$null)) {
+        if ($line -match $pattern) { $installed = $Matches[1]; break }
+    }
+    if ($installed) {
+        try {
+            if (([version]$installed) -ge ([version]$version)) {
+                Write-Host "$name >= $version (already satisfied; installed=$installed)"
+                exit 0
+            }
+        } catch {
+            # Fall through to reinstall when versions don't parse as [version].
         }
     }
 
-    # === Step 2: rustup toolchains + components ========================
-    # Group components by toolchain key (see rustup-components.txt).
-    # Each pinned nightly is installed with all of its required
-    # components in a single `rustup toolchain install` invocation, so
-    # the toolchain download happens once and components are added
-    # atomically. Default-toolchain components are added separately
-    # with `rustup component add` -- the default toolchain is whatever
-    # rustup resolves at the moment (rust-toolchain.toml override or
-    # `rustup default`).
-    $componentCatalog = 'justfiles/ox-check/rustup-components.txt'
-    $byToolchain = @{}
-    foreach ($line in Get-Content $componentCatalog) {
-        $trimmed = $line.Trim()
-        if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -match '^([^:]+):(.+)$') {
-            $key = $Matches[1]
-            $comp = $Matches[2]
-            if (-not $byToolchain.ContainsKey($key)) {
-                $byToolchain[$key] = [System.Collections.Generic.List[string]]::new()
-            }
-            $byToolchain[$key].Add($comp) | Out-Null
-        }
-    }
-    # Resolve pinned nightlies from versions.just. Local invocation
-    # path matches what setup-action.yml / setup.yml do in CI; recipe
-    # interpolation `{{ rust_nightly }}` (used by ox-check-miri etc.)
-    # reads from the same place.
-    $nightly = (& just --evaluate rust_nightly) | Select-Object -Last 1
-    $nightlyExt = (& just --evaluate rust_nightly_external_types) | Select-Object -Last 1
-    $toolchainPins = @{ nightly = $nightly; nightly_external_types = $nightlyExt }
-    foreach ($key in $byToolchain.Keys) {
-        $components = $byToolchain[$key]
-        if ($key -eq 'default') {
-            Write-Host "ox-check-setup: rustup component add $($components -join ' ') (default toolchain)"
-            & rustup component add @components
-            if ($LASTEXITCODE -ne 0) {
-                Write-Error "ox-check-setup: 'rustup component add' failed for default toolchain"
-                exit $LASTEXITCODE
-            }
-        } else {
-            if (-not $toolchainPins.ContainsKey($key)) {
-                Write-Error "ox-check-setup: unknown toolchain key '$key' in $componentCatalog (expected 'default' / 'nightly' / 'nightly_external_types')"
-                exit 1
-            }
-            $pin = $toolchainPins[$key]
-            $componentArgs = @()
-            foreach ($c in $components) { $componentArgs += @('--component', $c) }
-            Write-Host "ox-check-setup: rustup toolchain install $pin --profile minimal $($componentArgs -join ' ') --no-self-update"
-            & rustup toolchain install $pin --profile minimal @componentArgs --no-self-update
-            if ($LASTEXITCODE -ne 0) {
-                Write-Error "ox-check-setup: 'rustup toolchain install' failed for $pin"
-                exit $LASTEXITCODE
-            }
-        }
-    }
-    # If a pinned toolchain has no entries in rustup-components.txt,
-    # ensure it's still installed (cargo-check-external-types needs
-    # `nightly_external_types` even though it requires no components
-    # beyond what `--profile minimal` provides).
-    foreach ($key in $toolchainPins.Keys) {
-        if ($byToolchain.ContainsKey($key)) { continue }
-        $pin = $toolchainPins[$key]
-        if ($pin -eq $nightly -and $byToolchain.ContainsKey('nightly')) { continue }
-        Write-Host "ox-check-setup: rustup toolchain install $pin --profile minimal --no-self-update"
-        & rustup toolchain install $pin --profile minimal --no-self-update
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "ox-check-setup: 'rustup toolchain install' failed for $pin"
-            exit $LASTEXITCODE
-        }
-    }
-
-    # === Step 3: cargo-binstall bootstrap (binstall path only) =========
+    Write-Host "Installing $name =$version (installer: $installer)"
     if ($installer -eq 'binstall') {
         if (-not (Get-Command cargo-binstall -ErrorAction SilentlyContinue)) {
-            Write-Host "ox-check-setup: bootstrapping cargo-binstall"
-            & cargo install --locked cargo-binstall
+            Write-Host '  Bootstrapping cargo-binstall'
+            cargo install --locked cargo-binstall
             if ($LASTEXITCODE -ne 0) {
-                Write-Error "ox-check-setup: cargo-binstall bootstrap failed"
+                Write-Error 'cargo-binstall bootstrap failed'
                 exit $LASTEXITCODE
             }
         }
+        cargo binstall --no-confirm --locked $name --version "=$version"
+        if ($LASTEXITCODE -eq 0) { exit 0 }
+        Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
+    }
+    cargo install --locked $name --version "=$version"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "$name install FAILED"
+        exit $LASTEXITCODE
     }
 
-    # === Step 4: cargo subcommands =====================================
-    $catalog = 'justfiles/ox-check/tool-minimums.txt'
-    $failed = [System.Collections.Generic.List[string]]::new()
-    foreach ($line in Get-Content $catalog) {
-        $trimmed = $line.Trim()
-        if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
-        if ($trimmed -match '^([^=]+)=(.+)$') {
-            $tool = $Matches[1]
-            $pin = $Matches[2]
-            # Skip if the tool is already installed at or above the
-            # pinned version. _ox-check-require uses `installed >= pin`,
-            # so a user who has manually upgraded a tool for their own
-            # reasons (e.g. needing a bugfix the catalog hasn't pinned
-            # yet) is not downgraded by setup. The early-exit is also
-            # what makes the actions/cache restore actually useful --
-            # without it, every post-restore run would try to re-install
-            # on top of the cached binaries and fail with "binary
-            # already exists in destination". The `2>$null` swallows
-            # the help-text noise _ox-check-require emits when the tool
-            # is missing.
-            & just _ox-check-require $tool 2>$null
-            if ($LASTEXITCODE -eq 0) {
-                Write-Host "ox-check-setup ($installer): $tool >= $pin (already satisfied)"
-                continue
-            }
-            # Install exactly the pinned version (NOT >=). Pulling
-            # latest-matching at install time is a CI reproducibility
-            # risk: an upstream release between yesterday's green
-            # build and today's PR can break things, even though the
-            # catalog hasn't moved. The `=` constraint locks the
-            # install to the version we validated.
-            Write-Host "ox-check-setup ($installer): $tool =$pin"
-            $installed = $false
-            if ($installer -eq 'binstall') {
-                cargo binstall --no-confirm --locked $tool --version "=$pin"
-                if ($LASTEXITCODE -eq 0) {
-                    $installed = $true
-                } else {
-                    Write-Host "  binstall failed for $tool; falling back to cargo install" -ForegroundColor Yellow
-                    cargo install --locked $tool --version "=$pin"
-                    if ($LASTEXITCODE -eq 0) { $installed = $true }
-                }
-            } else {
-                cargo install --locked $tool --version "=$pin"
-                if ($LASTEXITCODE -eq 0) { $installed = $true }
-            }
-            if (-not $installed) {
-                Write-Host "ox-check-setup: $tool install FAILED (continuing)" -ForegroundColor Yellow
-                $failed.Add($tool)
-            }
-        }
-    }
-    if ($failed.Count -gt 0) {
-        Write-Host ""
-        Write-Host "ox-check-setup: $($failed.Count) tool(s) failed to install:" -ForegroundColor Yellow
-        foreach ($t in $failed) { Write-Host "  - $t" -ForegroundColor Yellow }
-        Write-Host "Recipes that depend on these tools will fail at run time via _ox-check-require." -ForegroundColor Yellow
-        exit 1
-    }
-
-# Internal: assert that `name` meets its catalog minimum (or, for tools
-# not in the catalog, that it's at least present). Three lookup paths:
-#
-#   - "rustc": presence-only; the workspace's rust-toolchain.toml drives
-#     the actual version requirement (rustup auto-installs).
-#   - "pwsh": presence-only with a per-OS install hint.
-#   - Anything else: looked up in tool-minimums.txt; if present, the
-#     installed version is parsed from `cargo install --list` and
-#     compared via the [version] type. If not in the catalog,
-#     presence-only fallback (covers system binaries like `just`
-#     itself, `git`).
+# _check-tool: verify a cargo subcommand is installed at or above the
+# pinned version. Errors with an install hint on missing or too-old.
 [script("pwsh")]
-_ox-check-require name:
+_check-tool name version:
     $ErrorActionPreference = 'Stop'
     $name = '{{name}}'
-    $catalog = 'justfiles/ox-check/tool-minimums.txt'
+    $version = '{{version}}'
 
-    switch ($name) {
-        'rustc' {
-            if (-not (Get-Command rustc -ErrorAction SilentlyContinue)) {
-                Write-Error 'ox-check: rustc not found. Install via rustup: https://rustup.rs'
-                exit 1
-            }
-            exit 0
-        }
-        'pwsh' {
-            if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
-                $hint = if ($IsMacOS) {
-                    'brew install --cask powershell'
-                } elseif ($IsLinux) {
-                    'see https://github.com/PowerShell/PowerShell'
-                } else {
-                    'winget install --id Microsoft.PowerShell'
-                }
-                Write-Error "ox-check: pwsh (PowerShell Core) not found. Install: $hint"
-                exit 1
-            }
-            exit 0
-        }
+    $installed = $null
+    $pattern = '^' + [regex]::Escape($name) + ' v(\S+):'
+    foreach ($line in (cargo install --list 2>$null)) {
+        if ($line -match $pattern) { $installed = $Matches[1]; break }
+    }
+    if (-not $installed) {
+        Write-Error "ox-check: required tool '$name' not found. Install: cargo install --locked --version =$version $name"
+        exit 1
+    }
+    try {
+        $installedV = [version]$installed
+        $pinV = [version]$version
+    } catch {
+        Write-Error "ox-check: cannot compare versions for '$name' (installed=$installed pin=$version). Reinstall: cargo install --locked --version =$version $name"
+        exit 1
+    }
+    if ($installedV -lt $pinV) {
+        Write-Error "ox-check: '$name' v$installed is older than the required minimum v$version. Upgrade: cargo install --locked --version =$version $name"
+        exit 1
     }
 
-    # Catalog lookup. Trim CRLF (Windows checkouts) and skip
-    # comments / blank lines while we're at it.
-    $spec = $null
-    if (Test-Path $catalog) {
-        foreach ($line in Get-Content $catalog) {
-            $trimmed = $line.Trim()
-            if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
-            $pattern = '^' + [regex]::Escape($name) + '=(.+)$'
-            if ($trimmed -match $pattern) {
-                $spec = $Matches[1]
-                break
-            }
-        }
+# _install-toolchain: install a specific rustup toolchain (no components).
+[script("pwsh")]
+_install-toolchain toolchain:
+    $ErrorActionPreference = 'Stop'
+    $toolchain = '{{toolchain}}'
+    Write-Host "rustup toolchain install $toolchain --profile minimal --no-self-update"
+    rustup toolchain install $toolchain --profile minimal --no-self-update
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to install toolchain '$toolchain'"
+        exit $LASTEXITCODE
     }
 
-    if (-not $spec) {
-        # Not in catalog: presence-only fallback for tools we don't
-        # version-gate (`just` itself, `git`, system binaries).
-        if (-not (Get-Command $name -ErrorAction SilentlyContinue)) {
-            Write-Error "ox-check: required tool '$name' not found. Install hint: cargo install --locked $name"
-            exit 1
-        }
+# _check-toolchain: verify a rustup toolchain is installed.
+[script("pwsh")]
+_check-toolchain toolchain:
+    $ErrorActionPreference = 'Stop'
+    $toolchain = '{{toolchain}}'
+    rustup which --toolchain $toolchain rustc 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "ox-check: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain --profile minimal"
+        exit 1
+    }
+
+# _install-component: add a component to a toolchain. The toolchain is
+# either the literal "default" (current rustup default) or a specific
+# pinned toolchain string (which must already be installed -- the
+# per-component setup recipes ensure this via a dependency on
+# ox-check-<toolchain>-install).
+[script("pwsh")]
+_install-component toolchain component:
+    $ErrorActionPreference = 'Stop'
+    $toolchain = '{{toolchain}}'
+    $component = '{{component}}'
+    if ($toolchain -eq 'default') {
+        Write-Host "rustup component add $component (default toolchain)"
+        rustup component add $component
+    } else {
+        Write-Host "rustup component add --toolchain $toolchain $component"
+        rustup component add --toolchain $toolchain $component
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to install component '$component' on toolchain '$toolchain'"
+        exit $LASTEXITCODE
+    }
+
+# _check-component: verify a component is installed on a toolchain.
+[script("pwsh")]
+_check-component toolchain component:
+    $ErrorActionPreference = 'Stop'
+    $toolchain = '{{toolchain}}'
+    $component = '{{component}}'
+    $output = if ($toolchain -eq 'default') {
+        rustup component list --installed 2>$null
+    } else {
+        rustup component list --installed --toolchain $toolchain 2>$null
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "ox-check: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain --profile minimal"
+        exit 1
+    }
+    $found = $output | Where-Object { $_ -like "$component*" }
+    if (-not $found) {
+        $cmd = if ($toolchain -eq 'default') { "rustup component add $component" } else { "rustup component add --toolchain $toolchain $component" }
+        Write-Error "ox-check: component '$component' not installed on toolchain '$toolchain'. Run: $cmd"
+        exit 1
+    }
+
+# ============================================================================
+# Rustup toolchains
+# ============================================================================
+
+[group("ox-check-setup")]
+ox-check-toolchain-nightly-install: (_install-toolchain rust_nightly)
+
+[group("ox-check-setup")]
+ox-check-toolchain-nightly-validate-prereqs: (_check-toolchain rust_nightly)
+
+[group("ox-check-setup")]
+ox-check-toolchain-nightly-external-types-install: (_install-toolchain rust_nightly_external_types)
+
+[group("ox-check-setup")]
+ox-check-toolchain-nightly-external-types-validate-prereqs: (_check-toolchain rust_nightly_external_types)
+
+# ============================================================================
+# Rustup components
+# ============================================================================
+#
+# Default-toolchain components are installed via `rustup component add`
+# (no toolchain spec). Nightly components depend on the toolchain
+# being installed first (via the relevant ox-check-<toolchain>-install
+# recipe) and then add the component.
+
+[group("ox-check-setup")]
+ox-check-component-default-clippy-install: (_install-component "default" "clippy")
+
+[group("ox-check-setup")]
+ox-check-component-default-clippy-validate-prereqs: (_check-component "default" "clippy")
+
+[group("ox-check-setup")]
+ox-check-component-default-rustfmt-install: (_install-component "default" "rustfmt")
+
+[group("ox-check-setup")]
+ox-check-component-default-rustfmt-validate-prereqs: (_check-component "default" "rustfmt")
+
+[group("ox-check-setup")]
+ox-check-component-nightly-rustfmt-install: ox-check-toolchain-nightly-install (_install-component rust_nightly "rustfmt")
+
+[group("ox-check-setup")]
+ox-check-component-nightly-rustfmt-validate-prereqs: ox-check-toolchain-nightly-validate-prereqs (_check-component rust_nightly "rustfmt")
+
+[group("ox-check-setup")]
+ox-check-component-nightly-miri-install: ox-check-toolchain-nightly-install (_install-component rust_nightly "miri")
+
+[group("ox-check-setup")]
+ox-check-component-nightly-miri-validate-prereqs: ox-check-toolchain-nightly-validate-prereqs (_check-component rust_nightly "miri")
+
+[group("ox-check-setup")]
+ox-check-component-nightly-rust-src-install: ox-check-toolchain-nightly-install (_install-component rust_nightly "rust-src")
+
+[group("ox-check-setup")]
+ox-check-component-nightly-rust-src-validate-prereqs: ox-check-toolchain-nightly-validate-prereqs (_check-component rust_nightly "rust-src")
+
+# ============================================================================
+# Cargo subcommands
+# ============================================================================
+#
+# One pair (install + validate-prereqs) per tool, alphabetical.
+# Version pins live in versions.just (one cargo_<name>_version variable
+# per tool). The install recipes accept an `installer="install"|"binstall"`
+# parameter; the validate-prereqs recipes do not (they only read state).
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-aprz-install installer="install": (_install-tool "cargo-aprz" cargo_aprz_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-aprz-validate-prereqs: (_check-tool "cargo-aprz" cargo_aprz_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-audit-install installer="install": (_install-tool "cargo-audit" cargo_audit_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-careful-install installer="install": (_install-tool "cargo-careful" cargo_careful_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-careful-validate-prereqs: (_check-tool "cargo-careful" cargo_careful_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-check-external-types-install installer="install": (_install-tool "cargo-check-external-types" cargo_check_external_types_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-check-external-types-validate-prereqs: (_check-tool "cargo-check-external-types" cargo_check_external_types_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-delta-install installer="install": (_install-tool "cargo-delta" cargo_delta_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-delta-validate-prereqs: (_check-tool "cargo-delta" cargo_delta_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-deny-install installer="install": (_install-tool "cargo-deny" cargo_deny_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-deny-validate-prereqs: (_check-tool "cargo-deny" cargo_deny_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-doc2readme-install installer="install": (_install-tool "cargo-doc2readme" cargo_doc2readme_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-doc2readme-validate-prereqs: (_check-tool "cargo-doc2readme" cargo_doc2readme_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-ensure-no-cyclic-deps-install installer="install": (_install-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-ensure-no-cyclic-deps-validate-prereqs: (_check-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-ensure-no-default-features-install installer="install": (_install-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-ensure-no-default-features-validate-prereqs: (_check-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-hack-install installer="install": (_install-tool "cargo-hack" cargo_hack_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-hack-validate-prereqs: (_check-tool "cargo-hack" cargo_hack_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-heather-install installer="install": (_install-tool "cargo-heather" cargo_heather_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-heather-validate-prereqs: (_check-tool "cargo-heather" cargo_heather_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-llvm-cov-install installer="install": (_install-tool "cargo-llvm-cov" cargo_llvm_cov_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_llvm_cov_version)
+
+# cargo-mutants doesn't build on aarch64-pc-windows-msvc (upstream
+# winapi crate incompat). The install recipe self-skips on that target
+# so per-group setup recipes that depend on it (pr-mutants-setup,
+# scheduled-exhaustive-setup) don't fail on that platform. The
+# mutants-diff / mutants-full check recipes also self-skip on the same
+# target, so the check is effectively a no-op end-to-end there.
+[group("ox-check-setup")]
+[script("pwsh")]
+ox-check-tool-cargo-mutants-install installer="install":
+    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
+        Write-Host 'ox-check-tool-cargo-mutants-install: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
         exit 0
     }
+    & just _install-tool cargo-mutants {{cargo_mutants_version}} {{installer}}
+    exit $LASTEXITCODE
 
-    $pin = $spec
-    # Parse `cargo install --list` for installed version. Lines look like:
-    #   cargo-deny v0.18.5:
-    #       cargo-deny
-    $installed = $null
-    $listPattern = '^' + [regex]::Escape($name) + ' v(\S+):'
-    foreach ($line in (cargo install --list 2>$null)) {
-        if ($line -match $listPattern) {
-            $installed = $Matches[1]
-            break
-        }
+[group("ox-check-setup")]
+[script("pwsh")]
+ox-check-tool-cargo-mutants-validate-prereqs:
+    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
+        Write-Host 'ox-check-tool-cargo-mutants-validate-prereqs: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
+        exit 0
     }
+    & just _check-tool cargo-mutants {{cargo_mutants_version}}
+    exit $LASTEXITCODE
 
-    if (-not $installed) {
-        # Install hint pins the exact catalog version (`=$pin`),
-        # matching what ox-check-setup does. Users who want a newer
-        # version of the tool for their own reasons can upgrade
-        # manually; the gate below (installed >= pin) will still pass.
-        Write-Error "ox-check: '$name' not installed (need >=v$pin). Install: cargo install --locked $name --version '=$pin'  (or run: just ox-check-setup)"
-        exit 1
-    }
+[group("ox-check-setup")]
+ox-check-tool-cargo-nextest-install installer="install": (_install-tool "cargo-nextest" cargo_nextest_version installer)
 
-    # SemVer comparison via the [version] type. Strip any pre-release
-    # / build-metadata suffix (e.g. "1.2.3-alpha.4") for parsing --
-    # [version] only handles dotted numeric components.
-    $pinClean = ($pin -split '[-+]', 2)[0]
-    $instClean = ($installed -split '[-+]', 2)[0]
-    $pinV = [version]$pinClean
-    $instV = [version]$instClean
-    if ($instV -lt $pinV) {
-        # Upgrade hint pins the exact catalog version, not `>=$pin`,
-        # for the same CI-reproducibility reason as setup. Adopters
-        # who need newer can take it via plain `cargo install --locked`.
-        Write-Error "ox-check: '$name' is at v$installed; need >=v$pin. Upgrade: cargo install --locked $name --version '=$pin'  (or run: just ox-check-setup)"
-        exit 1
-    }
+[group("ox-check-setup")]
+ox-check-tool-cargo-nextest-validate-prereqs: (_check-tool "cargo-nextest" cargo_nextest_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-semver-checks-install installer="install": (_install-tool "cargo-semver-checks" cargo_semver_checks_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-semver-checks-validate-prereqs: (_check-tool "cargo-semver-checks" cargo_semver_checks_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-sort-install installer="install": (_install-tool "cargo-sort" cargo_sort_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-spellcheck-validate-prereqs: (_check-tool "cargo-spellcheck" cargo_spellcheck_version)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-udeps-install installer="install": (_install-tool "cargo-udeps" cargo_udeps_version installer)
+
+[group("ox-check-setup")]
+ox-check-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_version)

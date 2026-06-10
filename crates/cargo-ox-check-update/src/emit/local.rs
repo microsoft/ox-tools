@@ -43,26 +43,6 @@ pub const TOOLS_JUST: &str = include_str!("../../templates/justfiles/ox-check/to
 /// Repo-root-relative path of the tools recipe file.
 pub const TOOLS_JUST_PATH: &str = "justfiles/ox-check/tools.just";
 
-/// Contents of `justfiles/ox-check/tool-minimums.txt` baked into the binary.
-///
-/// Data file consumed by the `tools.just` recipes; one line per cargo
-/// subcommand, format `<tool>=<minimum-version>`. See
-/// [`local.md §3`](../../docs/design/local.md) for the policy.
-pub const TOOL_MINIMUMS: &str = include_str!("../../templates/justfiles/ox-check/tool-minimums.txt");
-
-/// Repo-root-relative path of the tool minimums catalog.
-pub const TOOL_MINIMUMS_PATH: &str = "justfiles/ox-check/tool-minimums.txt";
-
-/// Contents of `justfiles/ox-check/rustup-components.txt` baked into the binary.
-///
-/// Data file consumed by the `ox-check-setup` recipe; one line per
-/// rustup component, format `<toolchain-key>:<component>`. See
-/// [`local.md §3`](../../docs/design/local.md) for the policy.
-pub const RUSTUP_COMPONENTS: &str = include_str!("../../templates/justfiles/ox-check/rustup-components.txt");
-
-/// Repo-root-relative path of the rustup components catalog.
-pub const RUSTUP_COMPONENTS_PATH: &str = "justfiles/ox-check/rustup-components.txt";
-
 /// Contents of `justfiles/ox-check/checks.just` baked into the binary.
 pub const CHECKS_JUST: &str = include_str!("../../templates/justfiles/ox-check/checks.just");
 
@@ -109,24 +89,6 @@ pub fn plan_tools_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem
 /// Propagates I/O errors from [`plan_owned_file`].
 pub fn plan_versions_just(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
     plan_owned_file(repo_root, manifest, VERSIONS_JUST_PATH, VERSIONS_JUST)
-}
-
-/// Emit a [`PlanItem`] for `justfiles/ox-check/tool-minimums.txt`.
-///
-/// # Errors
-///
-/// Propagates I/O errors from [`plan_owned_file`].
-pub fn plan_tool_minimums(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
-    plan_owned_file(repo_root, manifest, TOOL_MINIMUMS_PATH, TOOL_MINIMUMS)
-}
-
-/// Emit a [`PlanItem`] for `justfiles/ox-check/rustup-components.txt`.
-///
-/// # Errors
-///
-/// Propagates I/O errors from [`plan_owned_file`].
-pub fn plan_rustup_components(repo_root: &Path, manifest: &Manifest) -> Result<PlanItem, AppError> {
-    plan_owned_file(repo_root, manifest, RUSTUP_COMPONENTS_PATH, RUSTUP_COMPONENTS)
 }
 
 /// Emit a [`PlanItem`] for `justfiles/ox-check/checks.just`.
@@ -270,8 +232,6 @@ pub fn plan_local_just_tree(repo_root: &Path, manifest: &Manifest) -> Result<Vec
     Ok(vec![
         plan_mod_just(repo_root, manifest)?,
         plan_tools_just(repo_root, manifest)?,
-        plan_tool_minimums(repo_root, manifest)?,
-        plan_rustup_components(repo_root, manifest)?,
         plan_versions_just(repo_root, manifest)?,
         plan_checks_just(repo_root, manifest)?,
         plan_groups_just(repo_root, manifest)?,
@@ -288,8 +248,13 @@ mod tests {
 
     #[test]
     fn tools_just_template_is_not_empty() {
-        assert!(TOOLS_JUST.contains("ox-check-tools-check"));
-        assert!(TOOLS_JUST.contains("_ox-check-require"));
+        // Sample a handful of the per-tool/component/toolchain recipes that
+        // tools.just must define.
+        assert!(TOOLS_JUST.contains("ox-check-system-deps-check"));
+        assert!(TOOLS_JUST.contains("ox-check-tool-cargo-deny-install"));
+        assert!(TOOLS_JUST.contains("ox-check-tool-cargo-deny-validate-prereqs"));
+        assert!(TOOLS_JUST.contains("ox-check-component-default-clippy-install"));
+        assert!(TOOLS_JUST.contains("ox-check-toolchain-nightly-install"));
     }
 
     #[test]
@@ -354,19 +319,24 @@ mod tests {
     }
 
     #[test]
-    fn tool_minimums_template_has_known_tools() {
-        for needle in ["cargo-nextest=", "cargo-llvm-cov=", "cargo-deny=", "cargo-mutants="] {
-            assert!(TOOL_MINIMUMS.contains(needle), "tool-minimums.txt missing entry '{needle}'");
+    fn versions_just_has_known_tools() {
+        for needle in [
+            "cargo_nextest_version",
+            "cargo_llvm_cov_version",
+            "cargo_deny_version",
+            "cargo_mutants_version",
+        ] {
+            assert!(VERSIONS_JUST.contains(needle), "versions.just missing variable '{needle}'");
         }
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
-    fn plan_local_just_tree_emits_eight_items() {
+    fn plan_local_just_tree_emits_six_items() {
         let tmp = TempDir::new().unwrap();
         let items = plan_local_just_tree(tmp.path(), &Manifest::default()).unwrap();
-        // mod, tools, tool-minimums, rustup-components, versions, checks, groups, tiers
-        assert_eq!(items.len(), 8);
+        // mod, tools, versions, checks, groups, tiers
+        assert_eq!(items.len(), 6);
         for item in &items {
             assert_eq!(item.decision, Decision::Write);
         }

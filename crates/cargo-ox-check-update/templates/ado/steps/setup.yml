@@ -1,6 +1,20 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-ox-check-update; edit via `cargo ox-check-update`.
+#
+# Parameters:
+#   group: which ox-check group to install setup for. Special values:
+#     - "" (default): install the full catalog via
+#       `just ox-check-setup` -- use for "give me everything" flows.
+#     - "none": skip tool installation entirely; just bootstrap the
+#       rust cache + libclang + just. Used by impact.yml, which installs
+#       only cargo-delta afterwards.
+#     - anything else (e.g. "pr-fast"): install only that group's
+#       prerequisites via `just ox-check-<group>-setup`.
+parameters:
+  - name: group
+    type: string
+    default: ''
 steps:
   - bash: echo "##vso[task.setvariable variable=ox_check_rustc_version]$(rustc --version | awk '{print $2}')"
     displayName: ox-check setup (capture rustc version)
@@ -10,7 +24,7 @@ steps:
       # lockfile hashes + catalog hash. Including arch keeps any
       # future ARM pool an adopter adds from colliding with x86_64 on
       # the same OS namespace.
-      key: 'ox-check-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(ox_check_rustc_version) | Cargo.lock | .cargo/config.toml | rust-toolchain.toml | justfiles/ox-check/tool-minimums.txt | justfiles/ox-check/rustup-components.txt | justfiles/ox-check/versions.just'
+      key: 'ox-check-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(ox_check_rustc_version) | Cargo.lock | .cargo/config.toml | rust-toolchain.toml | justfiles/ox-check/versions.just'
       restoreKeys: |
         ox-check-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(ox_check_rustc_version)
         ox-check-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)"
@@ -46,20 +60,22 @@ steps:
       fi
     displayName: ox-check setup (install just)
 
-  # Hand everything else off to the catalog recipe. Idempotent.
-  # See setup-action.yml (GitHub composite) for the same handoff
-  # rationale -- both backends bootstrap `just` here so the recipe
-  # can run, then delegate toolchain + component + cargo-subcommand
-  # install to a single source of truth in tools.just.
+  # Hand everything else off to the catalog recipe. Idempotent. ADO
+  # uses the default `install` backend (source builds) because
+  # cargo-binstall has unresolved compliance issues for internal ADO
+  # pipelines (GH uses `binstall`).
   #
-  # ADO uses the default `install` backend (source builds) because
-  # cargo-binstall has unresolved compliance issues for internal
-  # ADO pipelines. GH uses `binstall` (downloads prebuilt binaries).
-  - bash: just ox-check-setup
-    # ox-check-setup exits non-zero if any per-tool install failed
-    # (e.g. cargo-mutants doesn't build on aarch64-pc-windows-msvc
-    # due to an upstream winapi incompatibility). We don't fail the
-    # whole job here -- recipes that actually USE a missing tool
-    # will fail cleanly via _ox-check-require at recipe-run time.
-    continueOnError: true
-    displayName: ox-check setup (install toolchains + catalog tools)
+  # Selection mirrors setup-action.yml (GH composite):
+  #   group=""     -> full catalog (ox-check-setup)
+  #   group="none" -> skip; caller installs what it needs
+  #   group=<x>    -> only that group's prerequisites
+  - ${{ if eq(parameters.group, 'none') }}:
+      - bash: echo "ox-check-setup: group=none, skipping tool install"
+        displayName: ox-check setup (group=none -- skip tool install)
+  - ${{ elseif eq(parameters.group, '') }}:
+      - bash: just ox-check-setup
+        displayName: ox-check setup (install full catalog)
+  - ${{ else }}:
+      - bash: just ox-check-${{ parameters.group }}-setup
+        displayName: ox-check setup (install ${{ parameters.group }} prerequisites)
+

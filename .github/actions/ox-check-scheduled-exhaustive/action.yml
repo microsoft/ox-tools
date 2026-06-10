@@ -30,6 +30,8 @@ runs:
   using: composite
   steps:
     - uses: ./.github/actions/ox-check-setup
+      with:
+        group: scheduled-exhaustive
     - name: Run just ox-check-scheduled-exhaustive
       shell: bash
       env:

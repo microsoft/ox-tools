@@ -30,6 +30,8 @@ runs:
   using: composite
   steps:
     - uses: ./.github/actions/ox-check-setup
+      with:
+        group: pr-mutants
     - name: Run just ox-check-pr-mutants
       shell: bash
       env:

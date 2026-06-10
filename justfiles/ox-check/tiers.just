@@ -26,3 +26,56 @@ ox-check-scheduled: \
 ox-check-full: \
     ox-check-pr \
     ox-check-scheduled
+
+# Tier-level + global setup + validate-prereqs
+# ===========================================================================
+#
+# Per-tier recipes that fan out to per-group setup/validate-prereqs from
+# groups.just. The global `ox-check-setup` / `ox-check-validate-prereqs`
+# recipes are the catch-all entry points that install / verify everything.
+#
+# CI typically invokes only the per-group setup it needs (e.g. the
+# `ox-check-pr-fast` composite action / step template runs
+# `ox-check-pr-fast-setup` rather than the global `ox-check-setup`).
+# Local users who want "install everything" run `just ox-check-setup`.
+
+[group("ox-check-setup")]
+ox-check-pr-setup installer="install": \
+    (ox-check-pr-fast-setup installer) \
+    (ox-check-pr-slow-setup installer)
+
+[group("ox-check-setup")]
+ox-check-pr-validate-prereqs: \
+    ox-check-pr-fast-validate-prereqs \
+    ox-check-pr-slow-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-scheduled-setup installer="install": \
+    (ox-check-scheduled-test-setup installer) \
+    (ox-check-scheduled-advisories-setup installer) \
+    (ox-check-scheduled-exhaustive-setup installer)
+
+[group("ox-check-setup")]
+ox-check-scheduled-validate-prereqs: \
+    ox-check-scheduled-test-validate-prereqs \
+    ox-check-scheduled-advisories-validate-prereqs \
+    ox-check-scheduled-exhaustive-validate-prereqs
+
+[group("ox-check-setup")]
+ox-check-full-setup installer="install": \
+    (ox-check-pr-setup installer) \
+    (ox-check-scheduled-setup installer)
+
+[group("ox-check-setup")]
+ox-check-full-validate-prereqs: \
+    ox-check-pr-validate-prereqs \
+    ox-check-scheduled-validate-prereqs
+
+# Global aliases. `ox-check-setup` (no suffix) installs everything the
+# catalog knows about; `ox-check-validate-prereqs` verifies every tool
+# and component is present at or above its pinned version.
+[group("ox-check-setup")]
+ox-check-setup installer="install": (ox-check-full-setup installer)
+
+[group("ox-check-setup")]
+ox-check-validate-prereqs: ox-check-full-validate-prereqs

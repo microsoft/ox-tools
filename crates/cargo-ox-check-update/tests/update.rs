@@ -113,8 +113,7 @@ fn single_crate_emits_crate_lints_and_justfiles() {
         "justfiles/ox-check/checks.just",
         "justfiles/ox-check/groups.just",
         "justfiles/ox-check/tiers.just",
-        "justfiles/ox-check/tool-minimums.txt",
-        "justfiles/ox-check/rustup-components.txt",
+        "justfiles/ox-check/versions.just",
     ] {
         assert!(tmp.path().join(rel).is_file(), "expected {rel} to be written");
     }

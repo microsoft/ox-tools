@@ -547,15 +547,31 @@ passing any include parameters — they default to empty (recipes fall back to
 
 ### `setup.yml` and `impact.yml`
 
-`setup.yml` installs `just` (`cargo install just --locked`) and runs
-`just ox-check-setup`. Does not install Rust; expects `cargo` on PATH --
-provided by the user's msrustup step in 1ESPT pipelines or by a previous step in OSS
-pipelines (see §6).
+`setup.yml` is a step template that installs `just`
+(`cargo install just --locked`) and then invokes the catalog setup recipes. It
+takes a single `group` parameter that controls which recipes run:
 
-`impact.yml` runs `cargo delta impact --format json` against
-`$(System.PullRequest.TargetBranch)` (or `$BASE_REF` if set) and formats each tier into
-a pre-built `--package …` string or the sentinel `--skip`. The three results are
-exported as ADO output variables via `##vso[task.setvariable variable=…;isOutput=true]`:
+- empty (default): runs `just ox-check-setup` -- the full catalog. Use for "give
+  me everything" flows.
+- `none`: skips the catalog setup entirely. Used by `impact.yml`, which only
+  needs `cargo-delta` and installs it itself afterwards.
+- any other value (e.g. `pr-fast`, `scheduled-advisories`): runs
+  `just ox-check-<group>-setup` -- only the tools, components, and toolchains
+  that group actually needs. Every per-group step template
+  (`.pipelines/ox-check/steps/<group>.yml`) passes its own group name here, so a
+  `pr-fast` matrix leg never installs cargo-mutants.
+
+The template does not install Rust; it expects `cargo` on PATH -- provided by the
+user's msrustup step in 1ESPT pipelines or by a previous step in OSS pipelines
+(see §6). ADO uses the default `install` backend (source builds) because
+`cargo-binstall` has unresolved compliance issues for internal ADO pipelines.
+
+`impact.yml` invokes `setup.yml` with `group: none`, then installs `cargo-delta`
+via `ox-check-tool-cargo-delta-install` and runs
+`cargo delta impact --format json` against `$(System.PullRequest.TargetBranch)`
+(or `$BASE_REF` if set), formatting each tier into a pre-built `--package …`
+string or the sentinel `--skip`. The three results are exported as ADO output
+variables via `##vso[task.setvariable variable=…;isOutput=true]`:
 
 - `compute.include_modified`
 - `compute.include_affected`
@@ -588,21 +604,24 @@ shell script) to their root pipeline before the ox-check stages template runs. A
 placement: a setup stage that `dependsOn`s nothing and runs first, followed by the ox-check
 stages.
 
-`_ox-check-require` (invoked by every check recipe) validates the installed `rustc` against
-the catalog minimum at recipe time; missing or below-minimum `rustc` produces a clean
-failure message. For nightly-requiring checks (miri, careful, udeps), the failure message
-suggests asking the team's pipeline owner to add `nightly` to msrustup.
+`ox-check-tool-rustc-validate-prereqs` (depended on by every check that needs rustc)
+validates the installed `rustc` against the catalog minimum at recipe time; a
+below-minimum `rustc` produces a clean failure message. For nightly-requiring
+checks (miri, careful, udeps), the matching toolchain-validate-prereqs recipe
+fails with a suggestion to ask the team's pipeline owner to add `nightly` to
+msrustup.
 
 ## 7. Caching
 
 `setup.yml` computes a cache key from: OS, rustc version (read from
-`rust-toolchain.toml`), `Cargo.lock`, `.cargo/config.toml`, and the binary's embedded
-catalog hash. Uses the ADO pipeline workspace cache (`Cache@2` task). `CARGO_HOME` is
-pinned to a workspace-scratch location to keep cache scoping predictable.
+`rust-toolchain.toml`), `Cargo.lock`, `.cargo/config.toml`, and `versions.just`
+(the single source of truth for catalog tool/toolchain pins). Uses the ADO
+pipeline workspace cache (`Cache@2` task). `CARGO_HOME` is pinned to a
+workspace-scratch location to keep cache scoping predictable.
 
 The cache covers:
 
-- The `cargo install`-ed tools from `ox-check-setup` (step 4 of the recipe).
+- The `cargo install`-ed tools installed by the catalog setup recipes.
 - The `target/` directory (per ox-check recipe; a per-recipe cache scope means a `pr-test`
   cache hit doesn't have to wait on a `pr-fast` cache miss).
 

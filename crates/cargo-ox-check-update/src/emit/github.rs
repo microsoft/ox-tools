@@ -173,6 +173,32 @@ mod tests {
     }
 
     #[test]
+    fn setup_action_takes_group_input_and_dispatches() {
+        // The group input drives whether we install the full catalog,
+        // skip tool install entirely (group=none, used by impact), or
+        // scope install to one group.
+        assert!(SETUP_ACTION.contains("group:"));
+        assert!(SETUP_ACTION.contains("just ox-check-setup binstall"));
+        assert!(SETUP_ACTION.contains("just \"ox-check-${{ inputs.group }}-setup\" binstall"));
+        assert!(SETUP_ACTION.contains("none)"));
+    }
+
+    #[test]
+    fn group_action_passes_group_to_setup() {
+        let body = render_group_action("pr-fast");
+        // The per-group composite invokes ox-check-setup with its own
+        // group name so only that group's prerequisites get installed.
+        assert!(body.contains("uses: ./.github/actions/ox-check-setup"));
+        assert!(body.contains("group: pr-fast"));
+    }
+
+    #[test]
+    fn impact_action_uses_group_none_and_installs_only_cargo_delta() {
+        assert!(IMPACT_ACTION.contains("group: none"));
+        assert!(IMPACT_ACTION.contains("ox-check-tool-cargo-delta-install"));
+    }
+
+    #[test]
     fn render_group_action_uses_correct_name() {
         let body = render_group_action("pr-fast");
         assert!(body.contains("name: ox-check-pr-fast"));

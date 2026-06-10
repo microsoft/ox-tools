@@ -187,6 +187,30 @@ mod tests {
     }
 
     #[test]
+    fn setup_step_takes_group_parameter_and_dispatches() {
+        // group="" -> full catalog; group="none" -> skip; else -> per-group.
+        assert!(SETUP_STEP.contains("name: group"));
+        assert!(SETUP_STEP.contains("just ox-check-setup"));
+        assert!(SETUP_STEP.contains("just ox-check-${{ parameters.group }}-setup"));
+        assert!(SETUP_STEP.contains("eq(parameters.group, 'none')"));
+    }
+
+    #[test]
+    fn group_step_passes_group_to_setup() {
+        let body = render_group_step("pr-fast");
+        assert!(body.contains("template: setup.yml"));
+        assert!(body.contains("group: pr-fast"));
+    }
+
+    #[test]
+    fn impact_step_uses_group_none_and_installs_only_cargo_delta() {
+        assert!(IMPACT_STEP.contains("group: none"));
+        assert!(IMPACT_STEP.contains("ox-check-tool-cargo-delta-install"));
+        // The old inline install line is gone.
+        assert!(!IMPACT_STEP.contains("cargo install --locked cargo-delta"));
+    }
+
+    #[test]
     fn job_wrapper_declares_expected_contract() {
         // Contract is intentionally small and stable: name, pool, steps,
         // artifacts. Anything more elaborate is the user's responsibility

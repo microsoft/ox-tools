@@ -30,6 +30,8 @@ runs:
   using: composite
   steps:
     - uses: ./.github/actions/ox-check-setup
+      with:
+        group: __GROUP__
     - name: Run just ox-check-__GROUP__
       shell: bash
       env:
