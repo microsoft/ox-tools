@@ -1457,6 +1457,7 @@ ox-check-system-deps-check:
         } else {
             @(
                 '/usr/lib/x86_64-linux-gnu/libclang.so.1',
+                '/usr/lib/aarch64-linux-gnu/libclang.so.1',
                 '/usr/lib64/libclang.so',
                 '/usr/lib64/libclang.so.1'
             )
@@ -1466,7 +1467,7 @@ ox-check-system-deps-check:
         }
         # Linux distros often add a version suffix (libclang-19.so etc.); glob fallback.
         if (-not $haveLibclang -and -not $IsWindows -and -not $IsMacOS) {
-            $glob = Get-ChildItem -Path '/usr/lib','/usr/lib64','/usr/lib/x86_64-linux-gnu' -Filter 'libclang*.so*' -ErrorAction SilentlyContinue
+            $glob = Get-ChildItem -Path '/usr/lib','/usr/lib64','/usr/lib/x86_64-linux-gnu','/usr/lib/aarch64-linux-gnu' -Filter 'libclang*.so*' -ErrorAction SilentlyContinue
             if ($glob) { $haveLibclang = $true }
         }
     }
