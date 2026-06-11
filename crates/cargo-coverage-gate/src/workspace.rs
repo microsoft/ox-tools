@@ -155,9 +155,8 @@ edition = "2021"
         )
     }
 
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
     #[test]
-    #[cfg_attr(miri, ignore = "spawns cargo metadata subprocess")]
     fn loads_workspace_with_no_metadata_anywhere() {
         let tmp = tempfile::tempdir().expect("tempdir");
         write_workspace(
@@ -180,9 +179,8 @@ edition = "2021"
         }
     }
 
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
     #[test]
-    #[cfg_attr(miri, ignore = "spawns cargo metadata subprocess")]
     fn picks_up_workspace_level_default() {
         let tmp = tempfile::tempdir().expect("tempdir");
         write_workspace(
@@ -194,9 +192,8 @@ edition = "2021"
         assert_eq!(ws.default_min_lines_percent, Some(80.0));
     }
 
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
     #[test]
-    #[cfg_attr(miri, ignore = "spawns cargo metadata subprocess")]
     fn picks_up_per_crate_override() {
         let tmp = tempfile::tempdir().expect("tempdir");
         write_workspace(
@@ -212,9 +209,8 @@ edition = "2021"
         assert_eq!(ws.default_min_lines_percent, Some(80.0));
     }
 
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
     #[test]
-    #[cfg_attr(miri, ignore = "spawns cargo metadata subprocess")]
     fn rejects_out_of_range_per_crate_threshold() {
         let tmp = tempfile::tempdir().expect("tempdir");
         write_workspace(
@@ -232,9 +228,8 @@ edition = "2021"
         assert!(rendered.contains("120"), "rendered: {rendered}");
     }
 
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
     #[test]
-    #[cfg_attr(miri, ignore = "spawns cargo metadata subprocess")]
     fn rejects_negative_workspace_threshold() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = r#"
@@ -252,9 +247,8 @@ min-lines-percent = -1
         assert!(rendered.contains("-1"), "rendered: {rendered}");
     }
 
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
     #[test]
-    #[cfg_attr(miri, ignore = "spawns cargo metadata subprocess")]
     fn rejects_non_numeric_threshold() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = r#"

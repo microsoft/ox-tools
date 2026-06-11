@@ -1950,7 +1950,7 @@ cargo_mutants_version := "26.1.2"
 cargo_nextest_version := "0.9.122"
 cargo_semver_checks_version := "0.46.0"
 cargo_sort_version := "2.0.2"
-cargo_spellcheck_version := "0.15.1"
+cargo_spellcheck_version := "0.15.7"
 cargo_udeps_version := "0.1.60"
 
 === rustfmt.toml ===
