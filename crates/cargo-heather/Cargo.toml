@@ -4,7 +4,7 @@
 [package]
 name = "cargo-heather"
 description = " A cargo subcommand to validate license headers in Rust, TOML, PowerShell, Just, and env source files"
-version = "0.2.1"
+version = "0.3.0"
 readme = "README.md"
 keywords = ["oxidizer", "cargo", "subcommand", "license", "cli"]
 categories = ["command-line-utilities", "development-tools::cargo-plugins"]
