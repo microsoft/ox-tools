@@ -1,5 +1,9 @@
 # cargo-anvil — Design
 
+> **Why "anvil"?** Borrowing the smithing metaphor: an anvil is a stable, opinionated
+> surface against which build tooling is forged into the shape each repo needs.
+> The metaphor stays out of the user-facing docs; this is the only place it's named.
+
 This is the top-level design document. It captures the why, the principles, and the
 user-visible shape of the tool. Detail lives in companion documents:
 
