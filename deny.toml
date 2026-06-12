@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# >>> ox-check-managed: ox-check-deny
+# >>> anvil-managed: anvil-deny
 [advisories]
 yanked = "deny"
 # Scope of unmaintained-crate checks: "all" surfaces transitive
@@ -30,4 +30,4 @@ wildcards = "deny"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# <<< ox-check-managed: ox-check-deny
+# <<< anvil-managed: anvil-deny

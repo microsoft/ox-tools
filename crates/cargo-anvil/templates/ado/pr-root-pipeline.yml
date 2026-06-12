@@ -1,0 +1,10 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+trigger: none
+
+stages:
+  - template: anvil/pr.yml
+    parameters:
+      linuxPool: { vmImage: ubuntu-latest }
+      windowsPool: { vmImage: windows-latest }

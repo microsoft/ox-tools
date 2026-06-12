@@ -1,0 +1,2973 @@
+---
+source: crates/cargo-anvil/tests/snapshots.rs
+expression: render_tree(tmp.path())
+---
+=== .delta.toml ===
+# >>> anvil-managed: anvil-delta
+[delta]
+# Include the workspace root files that should invalidate every member's
+# impact analysis when changed (lockfile, root manifest, toolchain).
+root-files = [
+    "Cargo.lock",
+    "Cargo.toml",
+    "rust-toolchain.toml",
+]
+# <<< anvil-managed: anvil-delta
+
+=== .pipelines/anvil/pr.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+#
+# Every job in this stages template is rendered through `steps/job.yml`.
+# That wrapper is *user-customizable*: adopters who need to inject 1ESPT
+# `templateContext:` blocks, custom SDL knobs, build-provenance attrs, etc.
+# edit `steps/job.yml` once and anvil stops overwriting it. This stages
+# template stays owned and continues to track new groups, dependsOn rewires,
+# impact-output threading changes, etc.
+#
+# Template-path note: each entry in the `steps:` parameter below contains a
+# `template:` reference. ADO resolves template paths relative to the file
+# containing the `template:` keyword, which (for parameters defined at the
+# call site) is *this* file. So paths like `steps/pr-fast.yml` are correct.
+parameters:
+  - name: linuxPool
+    type: object
+    default: { vmImage: ubuntu-latest }
+  - name: windowsPool
+    type: object
+    default: { vmImage: windows-latest }
+
+stages:
+  # cargo-delta impact runs per OS so that downstream legs consume an
+  # impact set computed against THEIR host's cargo-metadata depgraph.
+  # Without this, an OS-conditional dep change (under
+  # `[target.'cfg(target_os = ...)'.dependencies]`) computed on Linux
+  # wouldn't include the cross-OS reverse-deps that only show up in
+  # the Windows depgraph, so the Windows leg could skip tests that
+  # ought to run. We pay for one impact stage per OS family; downstream
+  # stages select the right one per leg.
+  - stage: impact_linux
+    displayName: anvil impact (linux)
+    jobs:
+      - template: steps/job.yml
+        parameters:
+          name: compute
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/impact.yml
+
+  - stage: impact_windows
+    displayName: anvil impact (windows)
+    jobs:
+      - template: steps/job.yml
+        parameters:
+          name: compute
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/impact.yml
+
+  - stage: pr_fast
+    displayName: anvil pr-fast
+    dependsOn: [impact_linux, impact_windows]
+    condition: succeededOrFailed()
+    variables:
+      include_modified_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_modified'] ]
+      include_affected_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_affected'] ]
+      include_required_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_required'] ]
+      include_modified_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_modified'] ]
+      include_affected_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_affected'] ]
+      include_required_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_required'] ]
+    jobs:
+      # Cross-OS because pr-fast contains compile-sensitive checks
+      # (clippy, doc-build, udeps, semver-check, external-types) whose
+      # results can differ across host OS for crates that use
+      # #[cfg(target_os = ...)] gating.
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/pr-fast.yml
+              parameters:
+                include_modified: $(include_modified_linux)
+                include_affected: $(include_affected_linux)
+                include_required: $(include_required_linux)
+            # Advisory PR comments. Recipes that surface non-blocking findings
+            # (e.g. cargo-semver-checks) write a markdown body to
+            # `target/anvil/comments/<name>.md` and exit 0; this step turns
+            # presence/absence of those files into upserts/closures of a
+            # sticky PR comment via the ADO REST API. Runs on the canonical
+            # Linux leg only so the Linux/Windows matrix doesn't race on the
+            # same thread. Skipped (silently) when the build identity lacks
+            # "Contribute to pull requests" so adopters who haven't opted in
+            # to write permissions aren't broken.
+            - template: steps/advisory-comments.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/pr-fast.yml
+              parameters:
+                include_modified: $(include_modified_windows)
+                include_affected: $(include_affected_windows)
+                include_required: $(include_required_windows)
+
+  # The PR-tier slow checks are split into three independent stages
+  # (pr_test, pr_runtime_analysis, pr_mutants) so they run in parallel rather
+  # than sequentially in one job. Each stage owns its own dependsOn
+  # link to the impact stages and its own variable hookup. ADO has
+  # no hosted ARM agents, so the matrix stays Linux + Windows x86_64
+  # across all three stages.
+
+  - stage: pr_test
+    displayName: anvil pr-test (tests + coverage)
+    dependsOn: [impact_linux, impact_windows]
+    condition: succeededOrFailed()
+    variables:
+      include_modified_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_modified'] ]
+      include_affected_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_affected'] ]
+      include_required_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_required'] ]
+      include_modified_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_modified'] ]
+      include_affected_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_affected'] ]
+      include_required_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_required'] ]
+    jobs:
+      # pr-test runs llvm-cov / doc-test / examples. Coverage publish
+      # stays as a sibling task on each OS job -- it's a results
+      # publish (not a pipeline artifact), so 1ESPT permits it at step
+      # level and we don't need to route it through `artifacts:`.
+      # cobertura.xml is produced by the anvil-llvm-cov recipe.
+      # Publishing from every OS leg matters because OS-gated code is
+      # only exercised on its native target; a single-leg upload would
+      # systematically under-report coverage of cfg(target_os = ...)
+      # branches. ADO's PublishCodeCoverageResults@2 coalesces multiple
+      # publishes against the same build into one coverage report.
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/pr-test.yml
+              parameters:
+                include_modified: $(include_modified_linux)
+                include_affected: $(include_affected_linux)
+                include_required: $(include_required_linux)
+            - task: PublishCodeCoverageResults@2
+              condition: and(succeededOrFailed(), ne(variables.include_affected_linux, '--skip'))
+              displayName: Publish coverage (linux)
+              inputs:
+                summaryFileLocation: target/coverage/cobertura.xml
+                failIfCoverageEmpty: false
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/pr-test.yml
+              parameters:
+                include_modified: $(include_modified_windows)
+                include_affected: $(include_affected_windows)
+                include_required: $(include_required_windows)
+            - task: PublishCodeCoverageResults@2
+              condition: and(succeededOrFailed(), ne(variables.include_affected_windows, '--skip'))
+              displayName: Publish coverage (windows)
+              inputs:
+                summaryFileLocation: target/coverage/cobertura.xml
+                failIfCoverageEmpty: false
+
+  - stage: pr_runtime_analysis
+    displayName: anvil pr-runtime-analysis (miri + careful)
+    dependsOn: [impact_linux, impact_windows]
+    condition: succeededOrFailed()
+    variables:
+      include_modified_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_modified'] ]
+      include_affected_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_affected'] ]
+      include_required_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_required'] ]
+      include_modified_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_modified'] ]
+      include_affected_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_affected'] ]
+      include_required_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_required'] ]
+    jobs:
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/pr-runtime-analysis.yml
+              parameters:
+                include_modified: $(include_modified_linux)
+                include_affected: $(include_affected_linux)
+                include_required: $(include_required_linux)
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/pr-runtime-analysis.yml
+              parameters:
+                include_modified: $(include_modified_windows)
+                include_affected: $(include_affected_windows)
+                include_required: $(include_required_windows)
+
+  - stage: pr_mutants
+    displayName: anvil pr-mutants (mutants)
+    dependsOn: [impact_linux, impact_windows]
+    condition: succeededOrFailed()
+    variables:
+      include_modified_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_modified'] ]
+      include_affected_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_affected'] ]
+      include_required_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_required'] ]
+      include_modified_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_modified'] ]
+      include_affected_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_affected'] ]
+      include_required_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_required'] ]
+    jobs:
+      # anvil-mutants-diff self-skips on aarch64-pc-windows-msvc as a
+      # defence-in-depth measure for adopters with self-hosted ARM pools.
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/pr-mutants.yml
+              parameters:
+                include_modified: $(include_modified_linux)
+                include_affected: $(include_affected_linux)
+                include_required: $(include_required_linux)
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/pr-mutants.yml
+              parameters:
+                include_modified: $(include_modified_windows)
+                include_affected: $(include_affected_windows)
+                include_required: $(include_required_windows)
+
+=== .pipelines/anvil/scheduled.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+#
+# Every job is rendered through `steps/job.yml` (user-customizable wrapper);
+# see pr-stages.yml for the rationale and template-path note.
+parameters:
+  - name: linuxPool
+    type: object
+    default: { vmImage: ubuntu-latest }
+  - name: windowsPool
+    type: object
+    default: { vmImage: windows-latest }
+
+stages:
+  - stage: scheduled_test
+    displayName: anvil scheduled-test
+    jobs:
+      # Publish coverage from both legs so OS-gated code is fully
+      # represented (see the pr-stages.yml comment for the rationale).
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/scheduled-test.yml
+            - task: PublishCodeCoverageResults@2
+              condition: succeededOrFailed()
+              displayName: Publish coverage (linux)
+              inputs:
+                summaryFileLocation: target/coverage/cobertura.xml
+                failIfCoverageEmpty: false
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/scheduled-test.yml
+            - task: PublishCodeCoverageResults@2
+              condition: succeededOrFailed()
+              displayName: Publish coverage (windows)
+              inputs:
+                summaryFileLocation: target/coverage/cobertura.xml
+                failIfCoverageEmpty: false
+
+  - stage: scheduled_advisories
+    displayName: anvil scheduled-advisories
+    dependsOn: []
+    jobs:
+      # Cross-OS because clippy and udeps in this group compile per host,
+      # so cfg-gated code must be linted/scanned on both OSes.
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/scheduled-advisories.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/scheduled-advisories.yml
+
+  - stage: scheduled_exhaustive
+    displayName: anvil scheduled-exhaustive
+    dependsOn: []
+    jobs:
+      # Cross-OS to match oxidizer's policy: full-workspace mutation
+      # testing + cargo-hack powerset + bench compile checks all benefit
+      # from running on both OSes for cfg(target_os) coverage. Adopters
+      # who can't afford the Windows leg override the matrix in their
+      # root pipeline.
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/scheduled-exhaustive.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/scheduled-exhaustive.yml
+
+=== .pipelines/anvil/steps/advisory-comments.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+#
+# Upsert/clear sticky PR comments for advisory checks.
+#
+# Convention (see docs/design/checks.md §6): a recipe writes a complete
+# markdown body to `target/anvil/comments/<NAME>.md` when it has
+# findings, and removes the file when it does not. The first line of
+# the body is an HTML comment marker (`<!-- anvil-<NAME> -->`) used
+# here to find the existing PR thread to update or close.
+#
+# This step inspects each known convention file and:
+#   - if the file exists and no thread matches the marker, POSTs a new
+#     active thread carrying the file body;
+#   - if the file exists and a thread matches, PATCHes that thread's
+#     first comment with the new body;
+#   - if the file does not exist and a thread matches, sets the
+#     thread's status to "closed" (ADO has no thread-delete API; closed
+#     threads collapse in the PR UI).
+#
+# The step is a no-op when:
+#   - the build is not a PR build (Build.Reason != PullRequest);
+#   - the build identity lacks "Contribute to pull requests" on the
+#     repo (we catch the 401/403 and exit 0 so adopters who haven't
+#     opted in to write permissions aren't broken).
+#
+# Adding a new advisory check: extend the `$checks` array below with a
+# `@{ name = '<NEW>'; file = 'target/anvil/comments/<NEW>.md' }`
+# entry. The marker / header convention follows automatically.
+
+steps:
+  - task: PowerShell@2
+    displayName: anvil advisory PR comments
+    condition: and(succeededOrFailed(), eq(variables['Build.Reason'], 'PullRequest'))
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+    inputs:
+      targetType: inline
+      pwsh: true
+      script: |
+        $ErrorActionPreference = 'Stop'
+        $checks = @(
+            @{ name = 'semver'; file = 'target/anvil/comments/semver.md' }
+        )
+        $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
+        if (-not $prId) {
+            Write-Host 'advisory-comments: not a PR build; skipping'
+            exit 0
+        }
+        if (-not $env:SYSTEM_ACCESSTOKEN) {
+            Write-Host 'advisory-comments: SYSTEM_ACCESSTOKEN not exposed; skipping'
+            exit 0
+        }
+        $base = "$env:SYSTEM_COLLECTIONURI$env:SYSTEM_TEAMPROJECT/_apis/git/repositories/$env:BUILD_REPOSITORY_ID/pullRequests/$prId"
+        $headers = @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" }
+        try {
+            $threads = (Invoke-RestMethod "$base/threads?api-version=7.1" -Headers $headers).value
+        } catch {
+            $status = $_.Exception.Response.StatusCode.value__
+            if ($status -in 401, 403) {
+                Write-Host "advisory-comments: build identity lacks 'Contribute to pull requests' (HTTP $status); skipping"
+                exit 0
+            }
+            throw
+        }
+        foreach ($c in $checks) {
+            $marker = "<!-- anvil-$($c.name) -->"
+            $existing = $threads | Where-Object {
+                $_.comments -and $_.comments[0].content -like "*$marker*" -and $_.status -ne 'closed'
+            } | Select-Object -First 1
+            if (Test-Path -LiteralPath $c.file) {
+                $body = Get-Content -LiteralPath $c.file -Raw
+                if ($existing) {
+                    Write-Host "advisory-comments: updating anvil-$($c.name) (thread $($existing.id))"
+                    $payload = @{ content = $body } | ConvertTo-Json -Depth 5
+                    Invoke-RestMethod "$base/threads/$($existing.id)/comments/1?api-version=7.1" `
+                        -Method PATCH -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $payload | Out-Null
+                } else {
+                    Write-Host "advisory-comments: posting anvil-$($c.name)"
+                    $payload = @{
+                        comments = @(@{ parentCommentId = 0; content = $body; commentType = 1 })
+                        status   = 'active'
+                    } | ConvertTo-Json -Depth 5
+                    Invoke-RestMethod "$base/threads?api-version=7.1" `
+                        -Method POST -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $payload | Out-Null
+                }
+            } elseif ($existing) {
+                Write-Host "advisory-comments: closing anvil-$($c.name) (thread $($existing.id))"
+                $payload = @{ status = 'closed' } | ConvertTo-Json
+                Invoke-RestMethod "$base/threads/$($existing.id)?api-version=7.1" `
+                    -Method PATCH -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $payload | Out-Null
+            }
+        }
+
+=== .pipelines/anvil/steps/impact.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# Computes per-tier include lists from cargo-delta and publishes them
+# as stage outputs for downstream group stages to consume.
+#
+# Output variables (consumed in pr-stages.yml via
+# stageDependencies.impact.compute.outputs['compute.<name>']):
+#   include_modified - "--package X --package Y" or "--skip" sentinel.
+#   include_affected - same shape, for the affected set (modified ∪ rev-deps).
+#   include_required - same shape, for the required set
+#                      (affected ∪ workspace-internal transitive deps).
+#
+# Unscoped recipes (deny, audit, aprz, pr-title) ignore all three.
+steps:
+  # Reuse the per-job setup (toolchain, cargo cache, just install) so
+  # cargo + just are on PATH and ~/.cargo/bin is restored from cache.
+  # group=none skips the full catalog install -- impact only needs
+  # cargo-delta, which we install on the next step.
+  - template: setup.yml
+    parameters:
+      group: none
+  - bash: just anvil-tool-cargo-delta-install install
+    displayName: anvil impact (install cargo-delta)
+  - bash: |
+      set -euo pipefail
+      # Determine the baseline ref:
+      #   * Adopters can override via BASE_REF (full ref name, e.g.
+      #     `origin/release`).
+      #   * On PR build-validation runs, SYSTEM_PULLREQUEST_TARGETBRANCH
+      #     is set to the unqualified target branch (e.g. `main`).
+      #   * Otherwise fall back to `master` so manual / branch CI runs
+      #     produce a sensible diff against the default branch.
+      # The ADO macro form `$(System.PullRequest.TargetBranch)` is unsafe
+      # here: when the variable is unset (non-PR builds), ADO leaves the
+      # `$(...)` literal in the script, which bash then interprets as
+      # command substitution and fails with exit 127.
+      base="${BASE_REF:-origin/${SYSTEM_PULLREQUEST_TARGETBRANCH:-master}}"
+      # Two snapshots + impact compare (cargo-delta has no --base
+      # shortcut). The baseline runs in a worktree at the merge target
+      # so the checked-out tree is untouched.
+      #
+      # GIT_LFS_SKIP_SMUDGE=1 prevents the worktree checkout from trying
+      # to fetch LFS objects -- the worktree inherits the parent repo's
+      # git config but NOT the credential helper that authenticated the
+      # initial checkout, so any LFS-tracked file would otherwise fail
+      # with "Git credentials ... not found". cargo-delta only needs
+      # file presence + content hashes; LFS pointer files hash
+      # consistently across baseline and current, so the impact analysis
+      # is unaffected.
+      cargo delta snapshot > "$AGENT_TEMPDIRECTORY/anvil-current.json"
+      GIT_LFS_SKIP_SMUDGE=1 git worktree add --detach "$AGENT_TEMPDIRECTORY/anvil-baseline" "$base"
+      ( cd "$AGENT_TEMPDIRECTORY/anvil-baseline" && cargo delta snapshot ) \
+          > "$AGENT_TEMPDIRECTORY/anvil-baseline.json"
+      git worktree remove --force "$AGENT_TEMPDIRECTORY/anvil-baseline"
+      result="$(cargo delta impact \
+          --baseline "$AGENT_TEMPDIRECTORY/anvil-baseline.json" \
+          --current  "$AGENT_TEMPDIRECTORY/anvil-current.json" \
+          --format json)"
+      # cargo-delta emits TitleCase keys (Modified / Affected /
+      # Required). Format each tier into the --package args shape
+      # recipes expect, with --skip as the empty-set sentinel.
+      #
+      # cargo-delta's impact output uses *library names* (snake_case)
+      # rather than cargo *package names* (which may use hyphens). For
+      # hyphenated packages — e.g. `cargo-anvil` — that means it
+      # emits `cargo_anvil`, which cargo rejects as a --package
+      # specification. We build:
+      #   * `pkg_map`: lib-name -> package-name (and identity for
+      #     package-name -> package-name), for translation;
+      #   * `valid_pkgs`: set of all known package names, for
+      #     validation. Names cargo-delta emits that aren't valid
+      #     packages (e.g. directory-leaf ambiguities like `ffi` /
+      #     `ffi_build` in deeply nested workspaces) are dropped with a
+      #     warning rather than failing the whole build.
+      declare -A pkg_map
+      declare -A valid_pkgs
+      while IFS=$'\t' read -r pkg_name lib_name; do
+          valid_pkgs["$pkg_name"]=1
+          pkg_map["$pkg_name"]="$pkg_name"
+          [ -n "$lib_name" ] && pkg_map["$lib_name"]="$pkg_name"
+      done < <(cargo metadata --no-deps --format-version 1 \
+          | jq -r '.packages[] as $p | ($p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)"), "\($p.name)\t"')
+      format_set() {
+          local field="$1"
+          local pkgs
+          pkgs=$(printf '%s' "$result" | jq -r --arg f "$field" '(.[$f] // []) | .[]' 2>/dev/null || true)
+          if [ -z "$pkgs" ] ; then
+              printf '%s' "--skip"
+          else
+              local out=""
+              while IFS= read -r pkg ; do
+                  [ -z "$pkg" ] && continue
+                  local mapped="${pkg_map[$pkg]:-$pkg}"
+                  if [ -z "${valid_pkgs[$mapped]:-}" ] ; then
+                      echo "anvil impact: dropping unknown package '$pkg' (-> '$mapped') from $field set; see https://github.com/microsoft/ox-tools/issues for tracking" >&2
+                      continue
+                  fi
+                  out="$out --package $mapped"
+              done <<EOF
+      $pkgs
+      EOF
+              if [ -z "$out" ] ; then
+                  printf '%s' "--skip"
+              else
+                  printf '%s' "${out# }"
+              fi
+          fi
+      }
+      include_modified="$(format_set Modified)"
+      include_affected="$(format_set Affected)"
+      include_required="$(format_set Required)"
+      echo "##vso[task.setvariable variable=include_modified;isOutput=true]$include_modified"
+      echo "##vso[task.setvariable variable=include_affected;isOutput=true]$include_affected"
+      echo "##vso[task.setvariable variable=include_required;isOutput=true]$include_required"
+    name: compute
+    displayName: anvil impact (cargo-delta)
+
+=== .pipelines/anvil/steps/job.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# Default job wrapper emitted by cargo-anvil.
+#
+# Owns the per-job *shape*: how `pool`, `steps`, and `artifacts` map onto the
+# concrete `job:` block. Pipelines that use extension templates (1ES PT,
+# SubstratePT, M365PT, etc.) take ownership of THIS file once and add their
+# required `templateContext:` block — the owned stages templates
+# (pr-stages.yml / scheduled-stages.yml) then continue to update normally
+# because they only know about this wrapper's parameter contract.
+#
+# Once you edit this file, cargo-anvil treats it as user-owned: subsequent
+# updates Propose into a `.proposed` sibling rather than overwriting.
+#
+# Contract (intentionally small and stable):
+#   - name      (string)   Job name; ADO derives the display name from it.
+#   - pool      (object)   Pool block, passed verbatim to ADO's `pool:` key.
+#   - steps     (stepList) Body of the job. Templated step lists are fine.
+#   - artifacts (object)   Optional list of pipeline artifacts to publish.
+#                          Each item: { name: string, path: string }.
+#                          The default wrapper appends one
+#                          PublishPipelineArtifact@1 task per entry; 1ESPT
+#                          wrappers translate these into
+#                          templateContext.outputs.pipelineArtifact blocks
+#                          at job level. The contract is the same either way,
+#                          so the stages templates don't need to know which
+#                          backend they're targeting.
+parameters:
+  - name: name
+    type: string
+  - name: pool
+    type: object
+  - name: steps
+    type: stepList
+  - name: artifacts
+    type: object
+    default: []
+
+jobs:
+  - job: ${{ parameters.name }}
+    pool: ${{ parameters.pool }}
+    steps:
+      - ${{ each step in parameters.steps }}:
+          - ${{ step }}
+      - ${{ each artifact in parameters.artifacts }}:
+          - task: PublishPipelineArtifact@1
+            displayName: Publish ${{ artifact.name }}
+            condition: succeededOrFailed()
+            inputs:
+              targetPath: ${{ artifact.path }}
+              artifact: ${{ artifact.name }}
+
+=== .pipelines/anvil/steps/pr-fast.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# The token pr-fast is substituted by cargo-anvil at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+parameters:
+  - name: include_modified
+    type: string
+    default: ''
+  - name: include_affected
+    type: string
+    default: ''
+  - name: include_required
+    type: string
+    default: ''
+steps:
+  - template: setup.yml
+    parameters:
+      group: pr-fast
+  - bash: just anvil-pr-fast
+    displayName: anvil-pr-fast
+    env:
+      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
+      # but injecting it on every group keeps group.yml uniform across
+      # groups. ADO sets $(System.PullRequest.Title) to an empty string
+      # on non-PR builds; anvil-pr-title treats empty as "no title set"
+      # and skips.
+      PR_TITLE: $(System.PullRequest.Title)
+      ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
+      ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
+      ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+
+=== .pipelines/anvil/steps/pr-mutants.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# The token pr-mutants is substituted by cargo-anvil at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+parameters:
+  - name: include_modified
+    type: string
+    default: ''
+  - name: include_affected
+    type: string
+    default: ''
+  - name: include_required
+    type: string
+    default: ''
+steps:
+  - template: setup.yml
+    parameters:
+      group: pr-mutants
+  - bash: just anvil-pr-mutants
+    displayName: anvil-pr-mutants
+    env:
+      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
+      # but injecting it on every group keeps group.yml uniform across
+      # groups. ADO sets $(System.PullRequest.Title) to an empty string
+      # on non-PR builds; anvil-pr-title treats empty as "no title set"
+      # and skips.
+      PR_TITLE: $(System.PullRequest.Title)
+      ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
+      ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
+      ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+
+=== .pipelines/anvil/steps/pr-runtime-analysis.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# The token pr-runtime-analysis is substituted by cargo-anvil at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+parameters:
+  - name: include_modified
+    type: string
+    default: ''
+  - name: include_affected
+    type: string
+    default: ''
+  - name: include_required
+    type: string
+    default: ''
+steps:
+  - template: setup.yml
+    parameters:
+      group: pr-runtime-analysis
+  - bash: just anvil-pr-runtime-analysis
+    displayName: anvil-pr-runtime-analysis
+    env:
+      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
+      # but injecting it on every group keeps group.yml uniform across
+      # groups. ADO sets $(System.PullRequest.Title) to an empty string
+      # on non-PR builds; anvil-pr-title treats empty as "no title set"
+      # and skips.
+      PR_TITLE: $(System.PullRequest.Title)
+      ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
+      ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
+      ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+
+=== .pipelines/anvil/steps/pr-test.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# The token pr-test is substituted by cargo-anvil at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+parameters:
+  - name: include_modified
+    type: string
+    default: ''
+  - name: include_affected
+    type: string
+    default: ''
+  - name: include_required
+    type: string
+    default: ''
+steps:
+  - template: setup.yml
+    parameters:
+      group: pr-test
+  - bash: just anvil-pr-test
+    displayName: anvil-pr-test
+    env:
+      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
+      # but injecting it on every group keeps group.yml uniform across
+      # groups. ADO sets $(System.PullRequest.Title) to an empty string
+      # on non-PR builds; anvil-pr-title treats empty as "no title set"
+      # and skips.
+      PR_TITLE: $(System.PullRequest.Title)
+      ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
+      ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
+      ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+
+=== .pipelines/anvil/steps/scheduled-advisories.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# The token scheduled-advisories is substituted by cargo-anvil at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+parameters:
+  - name: include_modified
+    type: string
+    default: ''
+  - name: include_affected
+    type: string
+    default: ''
+  - name: include_required
+    type: string
+    default: ''
+steps:
+  - template: setup.yml
+    parameters:
+      group: scheduled-advisories
+  - bash: just anvil-scheduled-advisories
+    displayName: anvil-scheduled-advisories
+    env:
+      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
+      # but injecting it on every group keeps group.yml uniform across
+      # groups. ADO sets $(System.PullRequest.Title) to an empty string
+      # on non-PR builds; anvil-pr-title treats empty as "no title set"
+      # and skips.
+      PR_TITLE: $(System.PullRequest.Title)
+      ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
+      ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
+      ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+
+=== .pipelines/anvil/steps/scheduled-exhaustive.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# The token scheduled-exhaustive is substituted by cargo-anvil at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+parameters:
+  - name: include_modified
+    type: string
+    default: ''
+  - name: include_affected
+    type: string
+    default: ''
+  - name: include_required
+    type: string
+    default: ''
+steps:
+  - template: setup.yml
+    parameters:
+      group: scheduled-exhaustive
+  - bash: just anvil-scheduled-exhaustive
+    displayName: anvil-scheduled-exhaustive
+    env:
+      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
+      # but injecting it on every group keeps group.yml uniform across
+      # groups. ADO sets $(System.PullRequest.Title) to an empty string
+      # on non-PR builds; anvil-pr-title treats empty as "no title set"
+      # and skips.
+      PR_TITLE: $(System.PullRequest.Title)
+      ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
+      ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
+      ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+
+=== .pipelines/anvil/steps/scheduled-test.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# The token scheduled-test is substituted by cargo-anvil at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+parameters:
+  - name: include_modified
+    type: string
+    default: ''
+  - name: include_affected
+    type: string
+    default: ''
+  - name: include_required
+    type: string
+    default: ''
+steps:
+  - template: setup.yml
+    parameters:
+      group: scheduled-test
+  - bash: just anvil-scheduled-test
+    displayName: anvil-scheduled-test
+    env:
+      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
+      # but injecting it on every group keeps group.yml uniform across
+      # groups. ADO sets $(System.PullRequest.Title) to an empty string
+      # on non-PR builds; anvil-pr-title treats empty as "no title set"
+      # and skips.
+      PR_TITLE: $(System.PullRequest.Title)
+      ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
+      ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
+      ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+
+=== .pipelines/anvil/steps/setup.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+#
+# Parameters:
+#   group: which anvil group to install setup for. Special values:
+#     - "" (default): install the full catalog via
+#       `just anvil-setup` -- use for "give me everything" flows.
+#     - "none": skip tool installation entirely; just bootstrap the
+#       rust cache + libclang + just. Used by impact.yml, which installs
+#       only cargo-delta afterwards.
+#     - anything else (e.g. "pr-fast"): install only that group's
+#       prerequisites via `just anvil-<group>-setup`.
+parameters:
+  - name: group
+    type: string
+    default: ''
+steps:
+  - bash: echo "##vso[task.setvariable variable=anvil_rustc_version]$(rustc --version | awk '{print $2}')"
+    displayName: anvil setup (capture rustc version)
+  - task: Cache@2
+    inputs:
+      # Same key shape as the GitHub side: OS + arch + rustc version +
+      # lockfile hashes + catalog hash. Including arch keeps any
+      # future ARM pool an adopter adds from colliding with x86_64 on
+      # the same OS namespace.
+      key: 'anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(anvil_rustc_version) | Cargo.lock | .cargo/config.toml | rust-toolchain.toml | justfiles/anvil/versions.just'
+      restoreKeys: |
+        anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(anvil_rustc_version)
+        anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)"
+      path: |
+        $(HOME)/.cargo/registry/cache/
+        $(HOME)/.cargo/registry/index/
+        $(HOME)/.cargo/bin/
+        target/
+    displayName: anvil setup (cache cargo home and target)
+
+  # System dependencies for catalog source builds. See the GitHub
+  # composite setup-action.yml for the rationale — same pattern.
+  # Detect the distro's package manager so this works on Ubuntu agents
+  # (apt-get) and Azure Linux 3 agents (tdnf, common on 1ESPT) alike.
+  - bash: |
+      set -euo pipefail
+      if command -v tdnf >/dev/null 2>&1; then
+        sudo tdnf install -y clang-devel
+      elif command -v dnf >/dev/null 2>&1; then
+        sudo dnf install -y clang-devel
+      elif command -v apt-get >/dev/null 2>&1; then
+        sudo apt-get update && sudo apt-get install -y libclang-dev
+      else
+        echo "No supported package manager found (tdnf/dnf/apt-get)" >&2
+        exit 1
+      fi
+    condition: eq(variables['Agent.OS'], 'Linux')
+    displayName: anvil setup (install libclang on Linux)
+
+  - bash: |
+      if ! command -v just >/dev/null 2>&1 ; then
+        cargo install --locked just
+      fi
+    displayName: anvil setup (install just)
+
+  # Hand everything else off to the catalog recipe. Idempotent. ADO
+  # uses the default `install` backend (source builds) because
+  # cargo-binstall has unresolved compliance issues for internal ADO
+  # pipelines (GH uses `binstall`).
+  #
+  # Selection mirrors setup-action.yml (GH composite):
+  #   group=""     -> full catalog (anvil-setup)
+  #   group="none" -> skip; caller installs what it needs
+  #   group=<x>    -> only that group's prerequisites
+  - ${{ if eq(parameters.group, 'none') }}:
+      - bash: echo "anvil-setup: group=none, skipping tool install"
+        displayName: anvil setup (group=none -- skip tool install)
+  - ${{ elseif eq(parameters.group, '') }}:
+      - bash: just anvil-setup
+        displayName: anvil setup (install full catalog)
+  - ${{ else }}:
+      - bash: just anvil-${{ parameters.group }}-setup
+        displayName: anvil setup (install ${{ parameters.group }} prerequisites)
+
+
+=== .pipelines/anvil-pr.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+trigger: none
+
+stages:
+  - template: anvil/pr.yml
+    parameters:
+      linuxPool: { vmImage: ubuntu-latest }
+      windowsPool: { vmImage: windows-latest }
+
+=== .pipelines/anvil-scheduled.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+trigger: none
+pr: none
+
+schedules:
+  - cron: "0 6 * * *"
+    displayName: anvil scheduled
+    branches:
+      include: [main, master]
+    always: true
+
+stages:
+  - template: anvil/scheduled.yml
+    parameters:
+      linuxPool: { vmImage: ubuntu-latest }
+      windowsPool: { vmImage: windows-latest }
+
+=== Cargo.toml ===
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+# >>> anvil-managed: anvil-workspace-lints
+[workspace.lints]
+# Catalog of opinionated lints, in dotted-key form so users can extend the
+# same scope (`[workspace.lints]` or `[lints]`) outside the sentinels.
+# The host-specific table header (`[workspace.lints]` or `[lints]`) is
+# prepended by cargo-anvil based on whether the manifest is a workspace
+# root or a single-crate Cargo.toml.
+
+# --- rust ------------------------------------------------------------------
+rust.ambiguous_negative_literals = "warn"
+rust.missing_debug_implementations = "warn"
+rust.redundant_imports = "warn"
+rust.redundant_lifetimes = "warn"
+rust.trivial_numeric_casts = "warn"
+rust.unsafe_op_in_unsafe_fn = "warn"
+rust.unused_lifetimes = "warn"
+# `unexpected_cfgs` is on-by-default at warn since Rust 1.80; combined
+# with the catalog's `-D warnings` CI policy, any custom cfg name
+# becomes a hard build failure. Pre-declare the cfgs that
+# `cargo llvm-cov` sets so the recommended coverage-exclusion pattern
+# `#[cfg_attr(coverage_nightly, coverage(off))]` works out of the box.
+# Adopters who need additional cfg names take ownership of this one
+# line (edit the check-cfg array); anvil's drift detector will
+# emit a `.anvil-proposed` sibling on future catalog bumps so the
+# customization is preserved.
+rust.unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(coverage,coverage_nightly)',
+] }
+
+# --- rustdoc ---------------------------------------------------------------
+rustdoc.broken_intra_doc_links = "warn"
+rustdoc.missing_crate_level_docs = "warn"
+rustdoc.unescaped_backticks = "warn"
+
+# --- clippy: category gates (priority -1 so per-lint allows can override) --
+clippy.cargo = { level = "warn", priority = -1 }
+clippy.complexity = { level = "warn", priority = -1 }
+clippy.correctness = { level = "warn", priority = -1 }
+clippy.nursery = { level = "warn", priority = -1 }
+clippy.pedantic = { level = "warn", priority = -1 }
+clippy.perf = { level = "warn", priority = -1 }
+clippy.style = { level = "warn", priority = -1 }
+clippy.suspicious = { level = "warn", priority = -1 }
+
+# --- clippy: opinionated additions -----------------------------------------
+# Two-repo consensus (oxidizer + oxidizer-github). Restriction-group
+# lints that catch real code-smell cases. Adding a workspace-wide lint
+# means adopters can only opt out per-crate or by taking ownership of
+# this region; only enable when the consensus is strong enough to
+# justify that cost.
+clippy.allow_attributes = "warn"
+clippy.allow_attributes_without_reason = "warn"
+clippy.as_pointer_underscore = "warn"
+clippy.assertions_on_result_states = "warn"
+clippy.clone_on_ref_ptr = "warn"
+clippy.deref_by_slicing = "warn"
+clippy.disallowed_script_idents = "warn"
+clippy.empty_drop = "warn"
+clippy.empty_enum_variants_with_brackets = "warn"
+clippy.fn_to_numeric_cast_any = "warn"
+clippy.if_then_some_else_none = "warn"
+clippy.map_err_ignore = "warn"
+clippy.multiple_unsafe_ops_per_block = "warn"
+clippy.redundant_type_annotations = "warn"
+clippy.renamed_function_params = "warn"
+clippy.semicolon_outside_block = "warn"
+clippy.undocumented_unsafe_blocks = "warn"
+clippy.unnecessary_safety_comment = "warn"
+clippy.unnecessary_safety_doc = "warn"
+clippy.unneeded_field_pattern = "warn"
+clippy.unused_result_ok = "warn"
+clippy.unwrap_used = "warn"
+
+# --- clippy: opinionated suppressions of category-enabled lints ------------
+clippy.missing_const_for_fn = "allow"
+clippy.multiple_crate_versions = "allow"
+clippy.option_if_let_else = "allow"
+clippy.redundant_pub_crate = "allow"
+clippy.should_panic_without_expect = "allow"
+clippy.significant_drop_tightening = "allow"
+# Blocked by Clippy bug: https://github.com/rust-lang/rust-clippy/issues/15036
+clippy.wildcard_imports = "allow"
+
+# <<< anvil-managed: anvil-workspace-lints
+
+=== Justfile ===
+# >>> anvil-managed: anvil-imports
+import 'justfiles/anvil/mod.just'
+# <<< anvil-managed: anvil-imports
+
+=== clippy.toml ===
+# >>> anvil-managed: anvil-clippy
+# Fine-tuning settings for clippy lints. These cannot be expressed in
+# Cargo.toml's [lints] table (which only carries level: warn/allow/deny);
+# they configure lint *behavior* and live in clippy.toml only.
+
+# Absolute paths up to 3 segments are clarifying — e.g. `std::sync::Mutex`
+# vs `tokio::sync::Mutex` disambiguates the source. Beyond 3 segments
+# we prefer imports or aliases for readability.
+absolute-paths-max-segments = 3
+
+# Workspace code is internal. Clippy should suggest the most correct
+# fix without worrying about non-breaking-change rules, which only
+# matter for published library APIs.
+avoid-breaking-exported-api = false
+
+# Required companion for the clippy.semicolon_outside_block lint we
+# ship in the catalog. Without this, the lint fires on multiline-block
+# forms that are common Rust style.
+semicolon-outside-block-ignore-multiline = true
+
+# Required companions for the clippy.unwrap_used lint we ship.
+# Test code asserts via unwrap()/panic!() — that's how #[test] reports
+# failure. Without these, every test triggers the lint.
+allow-panic-in-tests = true
+allow-unwrap-in-tests = true
+
+# Aspirational: when clippy.wildcard_imports is re-enabled (currently
+# allowed in cargo-lints-body.toml due to upstream bug rust-clippy#15036),
+# we want the stricter variant that warns on ALL wildcard imports
+# including prelude. Setting it now means flipping the lint level to
+# warn later is a one-line change with no tuning afterthought.
+warn-on-all-wildcard-imports = true
+# <<< anvil-managed: anvil-clippy
+
+=== crates/alpha/Cargo.toml ===
+[package]
+name = "alpha"
+version = "0.1.0"
+edition = "2024"
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints
+
+=== crates/alpha/src/lib.rs ===
+
+
+=== deny.toml ===
+# >>> anvil-managed: anvil-deny
+[advisories]
+yanked = "deny"
+# Scope of unmaintained-crate checks: "all" surfaces transitive
+# dependencies too; tighten to "workspace" if the noise is high.
+unmaintained = "all"
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MPL-2.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+# <<< anvil-managed: anvil-deny
+
+=== justfiles/anvil/checks.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# See ../../docs/design/checks.md for the catalog and rationale.
+#
+# Each check belongs to one of four buckets, which determines how it
+# interprets the impact env vars emitted by the cargo-delta impact step
+# in CI:
+#
+#   - "modified": only run when at least one package's source files
+#     changed in the diff. The check's underlying tool is workspace-wide
+#     or directory-scoped (cargo fmt --all, cargo heather, cargo
+#     spellcheck), so it doesn't take --package; we short-circuit on
+#     the ANVIL_INCLUDE_MODIFIED == "--skip" sentinel.
+#
+#   - "affected": run on the affected set (modified ∪ reverse-deps
+#     within the workspace). The check's underlying tool takes
+#     --package; we splice ANVIL_INCLUDE_AFFECTED into the cargo
+#     invocation, defaulting to --workspace for local invocations where
+#     no env var is set.
+#
+#   - "required": run on the required set (affected ∪ workspace-internal
+#     transitive deps). Same splice/default pattern as affected, but
+#     keyed on ANVIL_INCLUDE_REQUIRED. Used for checks whose tool
+#     resolves through the dep graph (cargo doc → intra-doc links;
+#     cargo hack → feature powerset; cargo udeps → unused-deps).
+#
+#   - "unscoped": always run, no env var reference. External-input
+#     checks (deny, audit, aprz) and PR-context checks (pr-title) live
+#     here. Scheduled-exhaustive recipes (mutants-full) are also unscoped
+#     by design.
+#
+# Local invocation (no impact wiring): all three env vars are unset
+# (recipes use the `?? "--workspace"` null-coalescing fallback below);
+# modified-tier recipes simply skip the splice and run their
+# workspace-wide tool; affected/required-tier recipes splat
+# "--workspace" when the env var is unset.
+#
+# Preparation contract: when a recipe reaches the cargo call, the
+# env var is one of:
+#
+#   * unset                       - local run; the recipe substitutes
+#                                    "--workspace" via `?? "--workspace"`
+#   * "--package A --package B"   - emitted by the CI impact step when
+#                                    the tier has members
+#   * "--skip"                    - emitted by the CI impact step when
+#                                    the tier is empty (recipe exits 0)
+#
+# This lets the simple recipes splat the var directly with
+#   & cargo X @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace")) ...
+# and reduces the per-recipe boilerplate to a single one-line skip
+# guard plus the cargo invocation.
+#
+# Modified-tier recipes never splice the env var into cargo (their
+# tools are workspace-wide); they only check the skip sentinel.
+#
+# Every recipe whose body uses multi-line conditionals or env-var
+# splicing is annotated with [script("pwsh")]. pwsh is preinstalled on
+# Windows (since Windows 10), on GH/ADO hosted Linux + Windows
+# runners, and installable on macOS via Homebrew or the upstream
+# installer. We chose pwsh over bash because just's shebang dispatch
+# requires `cygpath` on Windows (only on PATH from inside Git Bash),
+# while [script("pwsh")] works from plain PowerShell with no PATH
+# augmentation. The `??` null-coalescing operator used in the splat
+# requires pwsh 7+, which is the floor we already require via
+# _anvil-require pwsh.
+#
+# Single-command recipes (cargo deny check, cargo audit) are plain
+# just recipes that inherit the adopter's default shell — they're
+# shell-agnostic.
+#
+# Note: [script(...)] requires `set unstable`. The adopter's root
+# justfile must declare it (typically as a top-level line). anvil's
+# mod.just does NOT redeclare it, to avoid conflicting with adopters
+# who already have it.
+
+# === pr-fast members ====================================================
+
+# Modified tier. cargo-fmt is a rustup component. We invoke it via the
+# pinned nightly (see versions.just) because rustfmt.toml uses
+# unstable_features = true (imports_granularity, group_imports,
+# format_code_in_doc_comments). Floating nightly would mean
+# format-drift breaking CI on rustup updates — the same trap we
+# explicitly avoid for udeps/miri/careful/external-types.
+[script("pwsh")]
+anvil-fmt: anvil-fmt-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    cargo '+{{ rust_nightly }}' fmt --all --check
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Affected tier. Per project policy, clippy runs on the affected set
+# rather than the modified set: a change in a crate can introduce a
+# clippy issue in a dependent crate (e.g., trait-bound or
+# obviously-truthy-condition lints that key off the changed type), so
+# we want downstream rev-deps to lint as well. cargo-clippy is a
+# rustup component; same reasoning as fmt for the require.
+[script("pwsh")]
+anvil-clippy: anvil-clippy-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    & cargo clippy @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace")) --all-targets --all-features --locked "--" '-D' 'warnings'
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Modified tier.
+[script("pwsh")]
+anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    cargo sort --workspace --check
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Modified tier.
+[script("pwsh")]
+anvil-license-headers: anvil-license-headers-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    cargo heather
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Modified tier.
+[script("pwsh")]
+anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    cargo ensure-no-cyclic-deps
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Modified tier.
+[script("pwsh")]
+anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    cargo ensure-no-default-features
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Required tier. cargo doc resolves intra-doc links through the dep
+# graph, so a dep changing its public API can break doc-build in a
+# crate that wasn't itself modified.
+[script("pwsh")]
+anvil-doc-build: anvil-doc-build-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
+    $env:RUSTDOCFLAGS = '-D warnings'
+    & cargo doc @(-split ($env:ANVIL_INCLUDE_REQUIRED ?? "--workspace")) --all-features --no-deps
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Modified tier.
+#
+# cargo-doc2readme regenerates a crate's README.md from its rustdoc.
+# Two extension points users frequently need:
+#   * Workspace-level template (`crates/README.j2` or `README.j2` at repo
+#     root): a Tera template applied to every crate's README. anvil
+#     auto-detects it and passes `--template` to the per-crate runs.
+#   * Per-crate opt-out: hand-crafted READMEs (e.g. a tool crate whose
+#     README is more freeform than the lib docs) opt out by adding
+#     `[package.metadata.ox-gen-readme]\ndisable = true` to their
+#     Cargo.toml. anvil skips those crates.
+#
+# Bin-only crates have no library rustdoc to base a README on, so they
+# are skipped as well (cargo doc2readme requires a library target).
+# TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
+# skip/splat preamble, this recipe stays multi-step: per-crate
+# iteration over library targets, cargo-metadata-driven opt-outs
+# (publish=false, [package.metadata.ox-gen-readme] disable), per-crate
+# Push-Location into the crate dir (cargo-doc2readme is CWD-sensitive
+# rather than --manifest-path-driven), and per-crate template-path
+# resolution. The ANVIL_INCLUDE_MODIFIED value would still need to
+# be intersected with the lib-crate set rather than splatted into cargo.
+[script("pwsh")]
+anvil-readme-check: anvil-readme-check-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {
+        Write-Host 'anvil-readme-check: no modified packages; skipping'
+        exit 0
+    }
+    # Detect a workspace-level README template. Two conventional
+    # locations: crates/README.j2 (cargo-workspaces idiom) or
+    # README.j2 at repo root.
+    $template = $null
+    foreach ($candidate in 'crates/README.j2', 'README.j2') {
+        if (Test-Path $candidate) { $template = (Resolve-Path $candidate).Path; break }
+    }
+    # Iterate library crates. Filter by impact set when set, then drop
+    # bin-only crates and opt-outs.
+    $pkg = @(if ($env:ANVIL_INCLUDE_MODIFIED) { -split $env:ANVIL_INCLUDE_MODIFIED } else { '--workspace' })
+    $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+    $byName = @{}
+    foreach ($p in $meta.packages) { $byName[$p.name] = $p }
+    $candidates = if ($pkg -contains '--workspace') {
+        @($meta.packages | ForEach-Object { $_.name })
+    } else {
+        $names = @()
+        for ($i = 0; $i -lt $pkg.Count; $i++) {
+            if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
+                $names += $pkg[$i + 1]; $i++
+            }
+        }
+        $names
+    }
+    $hadFailure = $false
+    foreach ($name in $candidates) {
+        $p = $byName[$name]
+        if (-not $p) { continue }
+        if (-not ($p.targets | Where-Object { $_.kind -contains 'lib' })) { continue }
+        # Skip private crates (publish = false). They aren't released
+        # and rarely have a polished README. Mirrors the
+        # `cargo workspaces exec --ignore-private` idiom adopters
+        # commonly use.
+        if ($p.publish -is [array] -and $p.publish.Count -eq 0) {
+            Write-Host "anvil-readme-check: $name (skipped: publish = false)"
+            continue
+        }
+        $disabled = $false
+        if ($p.metadata -and $p.metadata.'ox-gen-readme' -and $p.metadata.'ox-gen-readme'.disable) {
+            $disabled = $true
+        }
+        if ($disabled) {
+            Write-Host "anvil-readme-check: $name (opted out via [package.metadata.ox-gen-readme])"
+            continue
+        }
+        Write-Host "anvil-readme-check: $name"
+        # cargo doc2readme writes / compares relative to its CWD (not
+        # --manifest-path), so chdir into the crate before invoking
+        # --check. We also compute a per-crate relative path to the
+        # workspace-level template so the same template file works for
+        # every crate (parallels the cargo-workspaces idiom).
+        $crateDir = Split-Path -Parent $p.manifest_path
+        Push-Location $crateDir
+        try {
+            $relTemplate = if ($template) {
+                Resolve-Path -Relative -LiteralPath $template
+            } else {
+                $null
+            }
+            $args = @('doc2readme', '--check')
+            if ($relTemplate) { $args += @('--template', $relTemplate) }
+            & cargo @args
+            if ($LASTEXITCODE -ne 0) { $hadFailure = $true }
+        } finally {
+            Pop-Location
+        }
+    }
+    if ($hadFailure) { exit 1 }
+
+# Modified tier.
+#
+# cargo-spellcheck reads a Hunspell-compatible dictionary file at the
+# path configured in spellcheck.toml (typically `extra_dictionaries =
+# ["target/spelling.dic"]`). The convention used by the surveyed
+# Microsoft Rust repos is to keep the *source* word list in a
+# human-edited `.spelling` file at the repo root and preprocess it
+# into the .dic format at check time (Hunspell .dic requires:
+# alphabetical sort, blank/numeric lines removed, line-count header).
+# If `.spelling` is present, we generate `target/spelling.dic` from it
+# automatically; otherwise we run cargo-spellcheck against whatever
+# the repo has already set up.
+[script("pwsh")]
+anvil-spellcheck: anvil-spellcheck-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {
+        Write-Host 'anvil-spellcheck: no modified packages; skipping'
+        exit 0
+    }
+    if (Test-Path '.spelling') {
+        $output_file = 'target/spelling.dic'
+        $lines = Get-Content '.spelling' | Sort-Object
+        $filtered_lines = $lines | Where-Object { $_ -notmatch '^\d+$' -and $_ -ne '' }
+        $line_count = $filtered_lines.Count
+        [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($output_file)) | Out-Null
+        @($line_count) + $filtered_lines | Set-Content $output_file
+    }
+    # Pass --cfg explicitly when a spellcheck.toml exists at repo root,
+    # otherwise cargo-spellcheck falls back to its built-in defaults and
+    # ignores user-curated dictionaries (`extra_dictionaries`, custom
+    # hunspell langs, etc.).
+    if (Test-Path 'spellcheck.toml') {
+        cargo spellcheck --cfg spellcheck.toml check --code 1
+    } else {
+        cargo spellcheck check --code 1
+    }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Unscoped (PR title is not source-related).
+#
+# Validates that $env:PR_TITLE matches Conventional Commits when set;
+# no-op when unset. CI injects PR_TITLE explicitly (GH Actions:
+# ${{ github.event.pull_request.title }}; ADO: $(System.PullRequest.Title))
+# so the check has authoritative input there. Locally it skips silently --
+# there is no reliable way to recover the PR title for the ADO backend
+# (no equivalent of `gh pr view`), so the recipe stays simple and
+# defers the check to CI.
+[script("pwsh")]
+anvil-pr-title: anvil-pr-title-validate-prereqs
+    $title = $env:PR_TITLE
+    if (-not $title) {
+        Write-Host 'anvil-pr-title: PR_TITLE env var not set; skipping (check runs on CI)'
+        exit 0
+    }
+    if ($title -notmatch '^(feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(\([^)]+\))?!?: .+') {
+        Write-Error "PR title '$title' does not match Conventional Commits"
+        exit 1
+    }
+
+# Unscoped (consults external advisory DB; reads Cargo.lock, not
+# workspace members). Single command — inherits adopter's default shell.
+anvil-deny: anvil-deny-validate-prereqs
+    cargo deny check
+
+# Unscoped (consults external advisory DB; reads Cargo.lock).
+anvil-audit: anvil-audit-validate-prereqs
+    cargo audit
+
+# Required tier. cargo-udeps detects unused dependencies by resolving
+# the full crate graph and seeing which deps are referenced; that's
+# precisely what the required tier is for. Pinned to the general
+# nightly defined in versions.just.
+#
+# Deliberately omits `--all-targets`: with `--all-targets`, a dep
+# that's listed in BOTH `[dependencies]` and `[dev-dependencies]` and
+# used only by tests is reported as "all used" because the dev-deps
+# target satisfies the lookup, masking the unused entry in main
+# `[dependencies]`. Restricting to the default targets (lib + bins)
+# matches main repo CI's check and surfaces the real bug.
+[script("pwsh")]
+anvil-udeps: anvil-udeps-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
+    & cargo '+{{ rust_nightly }}' udeps @(-split ($env:ANVIL_INCLUDE_REQUIRED ?? "--workspace")) --all-features
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Affected tier (compares published API of changed crates against the
+# baseline; only changed crates' surface is at risk).
+#
+# Several real-world conditions produce errors that aren't actually
+# SemVer violations:
+#   - bin-only crates have no API to compare ("no library targets found").
+#   - crates not yet published to crates.io ("not found in registry").
+#   - crates where the published baseline lacks a lib target the
+#     current source has (bin -> bin+lib transition).
+# We pre-filter to library-bearing crates from cargo metadata, then
+# run cargo-semver-checks per-package and tolerate the
+# "no-comparable-baseline" failure modes.
+#
+# Findings policy: this recipe is *advisory*. Real SemVer findings do
+# NOT fail the recipe -- breaking changes between unreleased commits
+# are normal (the major-version bump happens at release time, not on
+# every PR). Instead, when there are findings we write a markdown
+# advisory body to `target/anvil/comments/semver.md`; when the
+# tree is clean we remove that file. CI wiring (GH:
+# marocchino/sticky-pull-request-comment; ADO: pwsh + REST API)
+# inspects the file after the recipe and upserts / clears a sticky
+# PR comment accordingly. Local invocation gets the same file
+# written under target/ for inspection.
+#
+# TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
+# skip/splat preamble, this recipe stays multi-step: cargo-metadata
+# filter to library crates (cargo-semver-checks --workspace fails on
+# bin-only workspaces), intersect ANVIL_INCLUDE_AFFECTED with that
+# set, then per-crate invocation with selective error tolerance for
+# unpublished crates ("not found in registry") and bin->bin+lib
+# transitions ("no library targets found").
+[script("pwsh")]
+anvil-semver-check: anvil-semver-check-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    $commentFile = 'target/anvil/comments/semver.md'
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'anvil-semver-check: no affected packages; skipping'
+        Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
+        exit 0
+    }
+    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    # Build the candidate package list. Always iterate per-package over
+    # library crates only -- cargo-semver-checks --workspace would fail
+    # on workspaces that contain bin-only crates ("no library targets
+    # found"), and we want the same tolerance for unpublished / bin->lib-
+    # transition crates regardless of whether we got here via impact-
+    # scoping (CI) or full-workspace fallback (local).
+    $libPkgs = @{}
+    $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+    foreach ($p in $meta.packages) {
+        if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
+            $libPkgs[$p.name] = $true
+        }
+    }
+    if ($pkg -contains '--workspace') {
+        $packages = @($libPkgs.Keys)
+    } else {
+        $packages = @()
+        for ($i = 0; $i -lt $pkg.Count; $i++) {
+            if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
+                if ($libPkgs[$pkg[$i + 1]]) { $packages += $pkg[$i + 1] }
+                $i++
+            }
+        }
+    }
+    if ($packages.Count -eq 0) {
+        Write-Host 'anvil-semver-check: no affected library crates; skipping'
+        Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
+        exit 0
+    }
+    $findings = New-Object System.Collections.Generic.List[string]
+    foreach ($p in $packages) {
+        Write-Host "anvil-semver-check: $p"
+        $output = (& cargo semver-checks --package $p 2>&1) | Out-String
+        if ($LASTEXITCODE -ne 0) {
+            if ($output -match 'not found in registry|no library targets found') {
+                Write-Host "  $p has no comparable baseline; skipping (likely unpublished or bin->lib transition)" -ForegroundColor Yellow
+            } else {
+                Write-Host $output
+                # Append a per-crate findings block. Using one-line-at-a-time
+                # appends keeps the markdown free of pwsh backtick-escape
+                # gymnastics (single-quoted literals + the natural `n join
+                # produce clean LF newlines and unambiguous triple-backticks).
+                $findings.Add('### `' + $p + '`') | Out-Null
+                $findings.Add('') | Out-Null
+                $findings.Add('```') | Out-Null
+                foreach ($line in ($output.TrimEnd() -split "`r?`n")) {
+                    $findings.Add($line.TrimEnd()) | Out-Null
+                }
+                $findings.Add('```') | Out-Null
+                $findings.Add('') | Out-Null
+            }
+        }
+    }
+    [System.IO.Directory]::CreateDirectory((Split-Path -Parent $commentFile)) | Out-Null
+    if ($findings.Count -gt 0) {
+        # Body starts with an HTML-comment marker so the ADO wiring can
+        # locate the existing thread on subsequent runs (ADO has no
+        # native "sticky comment header"; the marker is invisible to
+        # human readers). Marocchino on GH uses its own `header:` input
+        # and ignores the marker, but having it in the body keeps a
+        # single source of truth across backends.
+        $lines = New-Object System.Collections.Generic.List[string]
+        $lines.Add('<!-- anvil-semver -->') | Out-Null
+        $lines.Add('## :warning: Potential breaking changes detected') | Out-Null
+        $lines.Add('') | Out-Null
+        $lines.Add('`cargo semver-checks` flagged the following on this PR. This is **informational** -- breaking changes between commits are expected; the major-version bump happens at release time, not on every PR.') | Out-Null
+        $lines.Add('') | Out-Null
+        foreach ($f in $findings) { $lines.Add($f) | Out-Null }
+        $body = ($lines -join "`n") + "`n"
+        Set-Content -LiteralPath $commentFile -Value $body -Encoding UTF8 -NoNewline
+        Write-Host ''
+        Write-Host "anvil-semver-check: wrote advisory comment to $commentFile (recipe exits 0; CI will upsert a PR comment)" -ForegroundColor Yellow
+    } else {
+        Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
+    }
+    # Advisory: always exit 0. CI wiring posts/clears the PR comment.
+    exit 0
+
+# Affected tier (lints public API of changed crates and rev-deps).
+#
+# cargo-check-external-types is per-manifest: no --package/--workspace,
+# only --manifest-path. Iterate the affected library crates and run
+# the tool once each, pointing at the crate's Cargo.toml. Bin-only
+# crates have no public API surface and are skipped.
+# TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
+# skip/splat preamble, this recipe stays multi-step: cargo-check-
+# external-types is per-manifest (no --package/--workspace), so we
+# build a name->manifest map from cargo metadata, filter to lib crates,
+# intersect with ANVIL_INCLUDE_AFFECTED, and call the tool once per
+# crate. Hard-fails on errors (no tolerance, unlike semver-check).
+[script("pwsh")]
+anvil-external-types: anvil-external-types-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'anvil-external-types: no affected packages; skipping'
+        exit 0
+    }
+    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    # Build pkg-name -> manifest-path map, restricted to library crates.
+    $libPkgs = @{}
+    $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+    foreach ($p in $meta.packages) {
+        if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
+            $libPkgs[$p.name] = $p.manifest_path
+        }
+    }
+    # Decide which packages to check.
+    $packages = @()
+    if ($pkg -contains '--workspace') {
+        $packages = $libPkgs.Keys
+    } else {
+        for ($i = 0; $i -lt $pkg.Count; $i++) {
+            if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
+                if ($libPkgs.ContainsKey($pkg[$i + 1])) { $packages += $pkg[$i + 1] }
+                $i++
+            }
+        }
+    }
+    if ($packages.Count -eq 0) {
+        Write-Host 'anvil-external-types: no affected library crates; skipping'
+        exit 0
+    }
+    $failed = $false
+    foreach ($p in $packages) {
+        Write-Host "anvil-external-types: $p"
+        # cargo-check-external-types requires nightly rustdoc (uses
+        # unstable -Z flags) AND pins a specific rustdoc-types schema
+        # version. We pin nightly narrowly to the schema this tool
+        # version expects via `rust_nightly_external_types` in
+        # versions.just — bump that pin alongside any cargo-check-
+        # external-types upgrade. No tolerance for schema mismatches:
+        # if it fails, the pin or the tool needs to move.
+        & cargo '+{{ rust_nightly_external_types }}' check-external-types --manifest-path $libPkgs[$p]
+        if ($LASTEXITCODE -ne 0) { $failed = $true }
+    }
+    if ($failed) { exit 1 }
+
+# Unscoped (consults external risk DB).
+anvil-aprz: anvil-aprz-validate-prereqs
+    cargo aprz deps --error-if-high-risk --console appraisal
+
+# === pr-test members ====================================================
+
+# Affected tier.
+[script("pwsh")]
+anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'anvil-llvm-cov: no affected packages; skipping'
+        exit 0
+    }
+    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    # cargo-llvm-cov doesn't work on aarch64-pc-windows-msvc: the
+    # llvm-profdata that ships with the rust toolchain there fails
+    # to merge the .profraw set ("no profile can be merged"). Fall
+    # back to plain `cargo nextest run` on that target so we still
+    # get test execution; coverage data from this leg wouldn't have
+    # been used anyway (coverage upload is gated on Linux only).
+    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
+        Write-Host 'anvil-llvm-cov: aarch64-pc-windows-msvc -- skipping coverage; running plain nextest'
+        & cargo nextest run @pkg --all-features --locked
+        exit $LASTEXITCODE
+    }
+    # cargo llvm-cov writes the .profraw set into target/llvm-cov-target/
+    # but the *report* output directory (target/coverage/) is something
+    # we choose and must exist before --output-path runs.
+    [System.IO.Directory]::CreateDirectory('target/coverage') | Out-Null
+    [System.IO.Directory]::CreateDirectory('target/coverage/html') | Out-Null
+    # Wipe stale .profraw data so the report reflects only this run.
+    cargo llvm-cov clean --workspace --profraw-only
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # Instrument and run tests; defer report generation so we can emit
+    # multiple formats from the same profraw set without re-running.
+    # Note: nextest's exit-4 ("no tests to run") IS treated as a
+    # failure here -- a llvm-cov run that finds no tests almost
+    # always means a config mistake (wrong package filter, missing
+    # test target, etc.), not a legitimate empty set. anvil-miri
+    # is the exception (see its comment): miri-skipped tests are an
+    # expected design point for FS-heavy crates.
+    & cargo llvm-cov nextest @pkg --all-features --locked --no-report
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # lcov.info feeds Codecov on GitHub; cobertura.xml feeds
+    # PublishCodeCoverageResults@2 on Azure DevOps.
+    cargo llvm-cov report --lcov      --output-path target/coverage/lcov.info
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    cargo llvm-cov report --cobertura --output-path target/coverage/cobertura.xml
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # Local-only HTML viewer (no CI consumer); cheap once the data exists.
+    cargo llvm-cov report --html      --output-dir target/coverage/html
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Affected tier.
+[script("pwsh")]
+anvil-doc-test: anvil-doc-test-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    & cargo test --doc @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace")) --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Affected tier.
+[script("pwsh")]
+anvil-examples: anvil-examples-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    & cargo build @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace")) --examples --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# === pr-mutants member ====================================================
+
+# Affected tier. cargo-mutants does its own diff-scoping via --in-diff;
+# the affected-tier guard is the wiring-layer's coarse filter (if no
+# affected packages exist, the entire mutants run is pointless).
+#
+# Skip on aarch64-pc-windows-msvc: cargo-mutants doesn't build there
+# (upstream winapi incompatibility), so `_anvil-require cargo-mutants`
+# would fail. The merged pr-slow group runs on all four OS legs; mutants
+# is the only sub-recipe that can't follow, so it bails out early on the
+# affected leg. Coverage on the other three legs is unchanged.
+[script("pwsh")]
+anvil-mutants-diff: anvil-mutants-diff-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
+        Write-Host 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs aarch64-pc-windows-msvc -- cargo-mutants does not build here (winapi); skipping'
+        exit 0
+    }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs no affected packages; skipping'
+        exit 0
+    }
+    # Resolve BASE_REF: env override > origin/main > origin/master.
+    $base = $null
+    if ($env:BASE_REF) {
+        $base = $env:BASE_REF
+    } else {
+        foreach ($candidate in @('origin/main', 'origin/master')) {
+            git rev-parse --verify $candidate 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                $base = $candidate
+                break
+            }
+        }
+    }
+    if (-not $base) {
+        Write-Error 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs no BASE_REF set and neither origin/main nor origin/master is available. Set BASE_REF to the branch to diff against.'
+        exit 1
+    }
+    # cargo-mutants --in-diff takes a FILE path containing a unified
+    # diff, not a git revision range. Write the diff to a temp file
+    # first. RUNNER_TEMP (GH) and AGENT_TEMPDIRECTORY (ADO) point at
+    # the job's scratch dir; fall back to the system temp dir locally.
+    $tmp_dir = $env:RUNNER_TEMP
+    if (-not $tmp_dir) { $tmp_dir = $env:AGENT_TEMPDIRECTORY }
+    if (-not $tmp_dir) { $tmp_dir = [System.IO.Path]::GetTempPath() }
+    $diff_path = Join-Path $tmp_dir 'anvil-mutants-diff.diff'
+    git diff "$base..HEAD" --output=$diff_path
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    cargo mutants --in-diff $diff_path --no-shuffle --jobs 0
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# === nightly-runtime members ============================================
+
+# Nightly checks always run full-workspace; impact env vars aren't set
+# by the scheduled workflow, so the affected-tier default (--workspace)
+# applies. Skip guards are still included for local diff-scoped runs.
+
+[script("pwsh")]
+anvil-miri: anvil-miri-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    # `--no-tests=pass`: miri-only exception. Tests that touch the
+    # filesystem, spawn subprocesses, or use other miri-incompatible
+    # APIs commonly carry `#[cfg_attr(miri, ignore)]` (this is the
+    # canonical opt-out for build-tooling / CLI crates). A crate
+    # whose test set ends up entirely-skipped under miri legitimately
+    # produces zero runnable tests; nextest's default exit-4 ("no
+    # tests to run") would fail the recipe in that case. We treat
+    # empty test runs as success for miri only. Other nextest-using
+    # recipes (llvm-cov) keep exit-4 as a failure because zero tests
+    # there almost always indicates a config mistake.
+    & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace"))
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+[script("pwsh")]
+anvil-careful: anvil-careful-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    & cargo '+{{ rust_nightly }}' careful test @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace")) --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# === nightly-exhaustive members =========================================
+
+# Unscoped. Scheduled-exhaustive deliberately runs over the whole
+# workspace regardless of diff.
+anvil-mutants-full: anvil-mutants-full-validate-prereqs
+    cargo mutants --workspace --no-shuffle --jobs 0
+
+# Required tier. cargo-hack's feature powerset cascades through dep
+# features, so the required set (workspace-internal transitive deps)
+# is the right scope.
+[script("pwsh")]
+anvil-cargo-hack: anvil-cargo-hack-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
+    & cargo hack @(-split ($env:ANVIL_INCLUDE_REQUIRED ?? "--workspace")) --feature-powerset --depth 2 check
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Affected tier.
+[script("pwsh")]
+anvil-bench: anvil-bench-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    & cargo bench @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace")) --all-features --no-run
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# ============================================================================
+# Per-check setup + validate-prereqs
+# ============================================================================
+#
+# Each check has matching `*-setup` and `*-validate-prereqs` recipes
+# that install / verify the tools and components it needs. The setup
+# recipes accept an `installer=install|install` parameter that
+# forwards to the underlying tool-install recipes; the validate-prereqs
+# recipes take no parameters.
+#
+# These are the building blocks for `anvil-<group>-setup`
+# (groups.just) and `anvil-<tier>-setup` (tiers.just) ΓÇö each
+# group/tier-level recipe is just a fan-out over the per-check
+# setup/validate-prereqs of its members.
+
+# --- pr-fast members ---
+
+[group("anvil-setup")]
+anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install
+
+[group("anvil-setup")]
+anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs
+
+[group("anvil-setup")]
+anvil-clippy-setup installer="install": anvil-component-default-clippy-install
+
+[group("anvil-setup")]
+anvil-clippy-validate-prereqs: anvil-component-default-clippy-validate-prereqs
+
+[group("anvil-setup")]
+anvil-cargo-sort-setup installer="install": (anvil-tool-cargo-sort-install installer)
+
+[group("anvil-setup")]
+anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs
+
+[group("anvil-setup")]
+anvil-license-headers-setup installer="install": (anvil-tool-cargo-heather-install installer)
+
+[group("anvil-setup")]
+anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereqs
+
+[group("anvil-setup")]
+anvil-ensure-no-cyclic-deps-setup installer="install": (anvil-tool-cargo-ensure-no-cyclic-deps-install installer)
+
+[group("anvil-setup")]
+anvil-ensure-no-cyclic-deps-validate-prereqs: anvil-tool-cargo-ensure-no-cyclic-deps-validate-prereqs
+
+[group("anvil-setup")]
+anvil-ensure-no-default-features-setup installer="install": (anvil-tool-cargo-ensure-no-default-features-install installer)
+
+[group("anvil-setup")]
+anvil-ensure-no-default-features-validate-prereqs: anvil-tool-cargo-ensure-no-default-features-validate-prereqs
+
+# doc-build, examples and doc-test are pure cargo built-ins; the rust
+# toolchain (rustc + cargo) is the only prerequisite, and we already
+# rely on it being present everywhere anvil runs.
+[group("anvil-setup")]
+anvil-doc-build-setup installer="install": anvil-tool-rustc-validate-prereqs
+
+[group("anvil-setup")]
+anvil-doc-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
+
+[group("anvil-setup")]
+anvil-readme-check-setup installer="install": (anvil-tool-cargo-doc2readme-install installer)
+
+[group("anvil-setup")]
+anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereqs
+
+# cargo-spellcheck has a build-time libclang dependency; the system
+# deps check runs first so adopters get a clear hint instead of a
+# cryptic clang-sys build error mid-install.
+[group("anvil-setup")]
+anvil-spellcheck-setup installer="install": anvil-system-deps-check (anvil-tool-cargo-spellcheck-install installer)
+
+[group("anvil-setup")]
+anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs
+
+# pr-title is a pwsh script; no cargo tool to install.
+[group("anvil-setup")]
+anvil-pr-title-setup installer="install": anvil-tool-pwsh-validate-prereqs
+
+[group("anvil-setup")]
+anvil-pr-title-validate-prereqs: anvil-tool-pwsh-validate-prereqs
+
+[group("anvil-setup")]
+anvil-deny-setup installer="install": (anvil-tool-cargo-deny-install installer)
+
+[group("anvil-setup")]
+anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs
+
+[group("anvil-setup")]
+anvil-audit-setup installer="install": (anvil-tool-cargo-audit-install installer)
+
+[group("anvil-setup")]
+anvil-audit-validate-prereqs: anvil-tool-cargo-audit-validate-prereqs
+
+[group("anvil-setup")]
+anvil-udeps-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-udeps-install installer)
+
+[group("anvil-setup")]
+anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-udeps-validate-prereqs
+
+[group("anvil-setup")]
+anvil-semver-check-setup installer="install": (anvil-tool-cargo-semver-checks-install installer)
+
+[group("anvil-setup")]
+anvil-semver-check-validate-prereqs: anvil-tool-cargo-semver-checks-validate-prereqs
+
+[group("anvil-setup")]
+anvil-external-types-setup installer="install": anvil-toolchain-nightly-external-types-install (anvil-tool-cargo-check-external-types-install installer)
+
+[group("anvil-setup")]
+anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-validate-prereqs anvil-tool-cargo-check-external-types-validate-prereqs
+
+[group("anvil-setup")]
+anvil-aprz-setup installer="install": (anvil-tool-cargo-aprz-install installer)
+
+[group("anvil-setup")]
+anvil-aprz-validate-prereqs: anvil-tool-cargo-aprz-validate-prereqs
+
+# --- pr-test members (shared with scheduled-test) ---
+
+[group("anvil-setup")]
+anvil-llvm-cov-setup installer="install": (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer)
+
+[group("anvil-setup")]
+anvil-llvm-cov-validate-prereqs: anvil-tool-cargo-llvm-cov-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs
+
+[group("anvil-setup")]
+anvil-doc-test-setup installer="install": anvil-tool-rustc-validate-prereqs
+
+[group("anvil-setup")]
+anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs
+
+[group("anvil-setup")]
+anvil-examples-setup installer="install": anvil-tool-rustc-validate-prereqs
+
+[group("anvil-setup")]
+anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs
+
+# --- pr-runtime-analysis members ---
+
+[group("anvil-setup")]
+anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-nextest-install installer)
+
+[group("anvil-setup")]
+anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs
+
+[group("anvil-setup")]
+anvil-careful-setup installer="install": anvil-component-nightly-rust-src-install (anvil-tool-cargo-careful-install installer)
+
+[group("anvil-setup")]
+anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-careful-validate-prereqs
+
+# --- pr-mutants members ---
+
+[group("anvil-setup")]
+anvil-mutants-diff-setup installer="install": (anvil-tool-cargo-mutants-install installer)
+
+[group("anvil-setup")]
+anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
+
+# --- scheduled-exhaustive members (mutants-full reuses cargo-mutants;
+#     cargo-hack and bench are dedicated tools) ---
+
+[group("anvil-setup")]
+anvil-mutants-full-setup installer="install": (anvil-tool-cargo-mutants-install installer)
+
+[group("anvil-setup")]
+anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
+
+[group("anvil-setup")]
+anvil-cargo-hack-setup installer="install": (anvil-tool-cargo-hack-install installer)
+
+[group("anvil-setup")]
+anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
+
+# bench uses cargo-built-ins (cargo bench --no-run + plain bench runs);
+# no extra tool install needed beyond the rust toolchain.
+[group("anvil-setup")]
+anvil-bench-setup installer="install": anvil-tool-rustc-validate-prereqs
+
+[group("anvil-setup")]
+anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
+
+=== justfiles/anvil/groups.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# See ../../docs/design/checks.md for the catalog and rationale.
+
+# Each group is one CI job. Within a group, checks run sequentially.
+
+# PR groups
+# ===========================================================================
+
+[group("anvil")]
+anvil-pr-fast: \
+    anvil-fmt \
+    anvil-clippy \
+    anvil-cargo-sort \
+    anvil-license-headers \
+    anvil-ensure-no-cyclic-deps \
+    anvil-ensure-no-default-features \
+    anvil-doc-build \
+    anvil-readme-check \
+    anvil-spellcheck \
+    anvil-pr-title \
+    anvil-deny \
+    anvil-audit \
+    anvil-udeps \
+    anvil-semver-check \
+    anvil-external-types \
+    anvil-aprz
+
+# pr-slow is the single PR-tier group for everything that takes more
+# than ~30s per crate (tests, stricter runtimes, mutation testing).
+# It's internally split into three sub-recipes so individual concerns
+# can be invoked locally without dragging the others along:
+#
+#   slow1: tests + coverage (replaces the former pr-test group)
+#   slow2: stricter-runtime correctness (miri, careful)
+#   slow3: mutation testing
+#
+# CI runs pr-slow as ONE job per OS leg -- the sub-recipes run
+# sequentially within. This trades per-leg wall-clock for fewer
+# orchestration jobs and a flatter PR check graph. Individual sub-
+# recipes are runnable on their own locally:
+#
+#   $ just anvil-pr-test   # tests + coverage only
+#   $ just anvil-pr-runtime-analysis   # miri + careful only
+#   $ just anvil-pr-mutants   # mutants only
+[group("anvil")]
+anvil-pr-slow: anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants
+
+[group("anvil")]
+anvil-pr-test: \
+    anvil-llvm-cov \
+    anvil-doc-test \
+    anvil-examples
+
+[group("anvil")]
+anvil-pr-runtime-analysis: \
+    anvil-miri \
+    anvil-careful
+
+[group("anvil")]
+anvil-pr-mutants: anvil-mutants-diff
+
+# Scheduled groups
+# ===========================================================================
+
+[group("anvil")]
+anvil-scheduled-test: \
+    anvil-llvm-cov \
+    anvil-doc-test \
+    anvil-examples
+
+[group("anvil")]
+anvil-scheduled-advisories: \
+    anvil-deny \
+    anvil-audit \
+    anvil-aprz \
+    anvil-clippy
+
+[group("anvil")]
+anvil-scheduled-exhaustive: \
+    anvil-mutants-full \
+    anvil-cargo-hack \
+    anvil-bench
+# Group-level setup + validate-prereqs
+# ===========================================================================
+#
+# Per-group recipes that fan out to the per-check setup/validate-prereqs
+# from checks.just. Setup recipes accept `installer="install"|"binstall"`;
+# validate-prereqs recipes take no parameters.
+
+[group("anvil-setup")]
+anvil-pr-fast-setup installer="install": \
+    (anvil-fmt-setup installer) \
+    (anvil-clippy-setup installer) \
+    (anvil-cargo-sort-setup installer) \
+    (anvil-license-headers-setup installer) \
+    (anvil-ensure-no-cyclic-deps-setup installer) \
+    (anvil-ensure-no-default-features-setup installer) \
+    (anvil-doc-build-setup installer) \
+    (anvil-readme-check-setup installer) \
+    (anvil-spellcheck-setup installer) \
+    (anvil-pr-title-setup installer) \
+    (anvil-deny-setup installer) \
+    (anvil-audit-setup installer) \
+    (anvil-udeps-setup installer) \
+    (anvil-semver-check-setup installer) \
+    (anvil-external-types-setup installer) \
+    (anvil-aprz-setup installer)
+
+[group("anvil-setup")]
+anvil-pr-fast-validate-prereqs: \
+    anvil-fmt-validate-prereqs \
+    anvil-clippy-validate-prereqs \
+    anvil-cargo-sort-validate-prereqs \
+    anvil-license-headers-validate-prereqs \
+    anvil-ensure-no-cyclic-deps-validate-prereqs \
+    anvil-ensure-no-default-features-validate-prereqs \
+    anvil-doc-build-validate-prereqs \
+    anvil-readme-check-validate-prereqs \
+    anvil-spellcheck-validate-prereqs \
+    anvil-pr-title-validate-prereqs \
+    anvil-deny-validate-prereqs \
+    anvil-audit-validate-prereqs \
+    anvil-udeps-validate-prereqs \
+    anvil-semver-check-validate-prereqs \
+    anvil-external-types-validate-prereqs \
+    anvil-aprz-validate-prereqs
+
+[group("anvil-setup")]
+anvil-pr-slow-setup installer="install": \
+    (anvil-pr-test-setup installer) \
+    (anvil-pr-runtime-analysis-setup installer) \
+    (anvil-pr-mutants-setup installer)
+
+[group("anvil-setup")]
+anvil-pr-slow-validate-prereqs: \
+    anvil-pr-test-validate-prereqs \
+    anvil-pr-runtime-analysis-validate-prereqs \
+    anvil-pr-mutants-validate-prereqs
+
+[group("anvil-setup")]
+anvil-pr-test-setup installer="install": \
+    (anvil-llvm-cov-setup installer) \
+    (anvil-doc-test-setup installer) \
+    (anvil-examples-setup installer)
+
+[group("anvil-setup")]
+anvil-pr-test-validate-prereqs: \
+    anvil-llvm-cov-validate-prereqs \
+    anvil-doc-test-validate-prereqs \
+    anvil-examples-validate-prereqs
+
+[group("anvil-setup")]
+anvil-pr-runtime-analysis-setup installer="install": \
+    (anvil-miri-setup installer) \
+    (anvil-careful-setup installer)
+
+[group("anvil-setup")]
+anvil-pr-runtime-analysis-validate-prereqs: \
+    anvil-miri-validate-prereqs \
+    anvil-careful-validate-prereqs
+
+[group("anvil-setup")]
+anvil-pr-mutants-setup installer="install": (anvil-mutants-diff-setup installer)
+
+[group("anvil-setup")]
+anvil-pr-mutants-validate-prereqs: anvil-mutants-diff-validate-prereqs
+
+[group("anvil-setup")]
+anvil-scheduled-test-setup installer="install": \
+    (anvil-llvm-cov-setup installer) \
+    (anvil-doc-test-setup installer) \
+    (anvil-examples-setup installer)
+
+[group("anvil-setup")]
+anvil-scheduled-test-validate-prereqs: \
+    anvil-llvm-cov-validate-prereqs \
+    anvil-doc-test-validate-prereqs \
+    anvil-examples-validate-prereqs
+
+[group("anvil-setup")]
+anvil-scheduled-advisories-setup installer="install": \
+    (anvil-deny-setup installer) \
+    (anvil-audit-setup installer) \
+    (anvil-aprz-setup installer) \
+    (anvil-clippy-setup installer)
+
+[group("anvil-setup")]
+anvil-scheduled-advisories-validate-prereqs: \
+    anvil-deny-validate-prereqs \
+    anvil-audit-validate-prereqs \
+    anvil-aprz-validate-prereqs \
+    anvil-clippy-validate-prereqs
+
+[group("anvil-setup")]
+anvil-scheduled-exhaustive-setup installer="install": \
+    (anvil-mutants-full-setup installer) \
+    (anvil-cargo-hack-setup installer) \
+    (anvil-bench-setup installer)
+
+[group("anvil-setup")]
+anvil-scheduled-exhaustive-validate-prereqs: \
+    anvil-mutants-full-validate-prereqs \
+    anvil-cargo-hack-validate-prereqs \
+    anvil-bench-validate-prereqs
+
+=== justfiles/anvil/mod.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# Entry point for the anvil just recipe tree. The user's root Justfile
+# imports this single file; everything else lives in sibling .just files
+# pulled in here.
+
+# All multi-statement recipes in this tree use [script("pwsh")]. pwsh
+# is preinstalled on Windows (10+), GH/ADO hosted Linux + Windows
+# runners, and is installable on macOS/Linux via Homebrew / upstream
+# installer. We chose pwsh over bash because:
+#
+#   - just's shebang dispatch (#!/usr/bin/env bash) requires `cygpath`
+#     on Windows, which is only on PATH inside Git Bash. Plain
+#     PowerShell can't run shebang recipes.
+#   - just's [script("bash")] attribute passes Windows tempfile paths
+#     to bash unescaped, and bash interprets the backslashes as escape
+#     characters — every recipe fails with a mangled path.
+#   - [script("pwsh")] works from plain PowerShell with no PATH
+#     augmentation and no path translation. pwsh handles Windows
+#     paths natively.
+#
+# The existing `_anvil-require pwsh` recipe already established
+# pwsh as a tools-floor requirement, so requiring it as the recipe
+# interpreter is consistent.
+#
+# Single-command recipes (e.g. `cargo deny check`) are plain just
+# recipes that inherit the adopter's default shell — they're
+# shell-agnostic.
+#
+# IMPORTANT: [script(...)] requires `set unstable`. The adopter's
+# root justfile must declare it (typically as a top-level line).
+# anvil's mod.just does NOT redeclare it, to avoid conflicting
+# with adopters who already have it.
+
+import 'checks.just'
+import 'groups.just'
+import 'tiers.just'
+import 'tools.just'
+import 'versions.just'
+
+# Friendly default: `just anvil` runs the PR tier.
+alias anvil := anvil-pr
+
+=== justfiles/anvil/tiers.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# See ../../docs/design/checks.md for the tier structure.
+
+# PR tier: every check that should run on every pull request, split
+# into two groups so the fast checks aren't blocked behind the slow
+# ones in CI.
+[group("anvil")]
+anvil-pr: \
+    anvil-pr-fast \
+    anvil-pr-slow
+
+# scheduled tier: full-workspace re-runs of things that can change
+# without a commit (advisories, flakes) + the truly expensive
+# exhaustive checks that don't fit in a PR budget. Runs on a schedule
+# against `main`, not on PRs.
+[group("anvil")]
+anvil-scheduled: \
+    anvil-scheduled-test \
+    anvil-scheduled-advisories \
+    anvil-scheduled-exhaustive
+
+# Full tier: PR + scheduled, end-to-end. Useful before tagging a release.
+[group("anvil")]
+anvil-full: \
+    anvil-pr \
+    anvil-scheduled
+
+# Tier-level + global setup + validate-prereqs
+# ===========================================================================
+#
+# Per-tier recipes that fan out to per-group setup/validate-prereqs from
+# groups.just. The global `anvil-setup` / `anvil-validate-prereqs`
+# recipes are the catch-all entry points that install / verify everything.
+#
+# CI typically invokes only the per-group setup it needs (e.g. the
+# `anvil-pr-fast` composite action / step template runs
+# `anvil-pr-fast-setup` rather than the global `anvil-setup`).
+# Local users who want "install everything" run `just anvil-setup`.
+
+[group("anvil-setup")]
+anvil-pr-setup installer="install": \
+    (anvil-pr-fast-setup installer) \
+    (anvil-pr-slow-setup installer)
+
+[group("anvil-setup")]
+anvil-pr-validate-prereqs: \
+    anvil-pr-fast-validate-prereqs \
+    anvil-pr-slow-validate-prereqs
+
+[group("anvil-setup")]
+anvil-scheduled-setup installer="install": \
+    (anvil-scheduled-test-setup installer) \
+    (anvil-scheduled-advisories-setup installer) \
+    (anvil-scheduled-exhaustive-setup installer)
+
+[group("anvil-setup")]
+anvil-scheduled-validate-prereqs: \
+    anvil-scheduled-test-validate-prereqs \
+    anvil-scheduled-advisories-validate-prereqs \
+    anvil-scheduled-exhaustive-validate-prereqs
+
+[group("anvil-setup")]
+anvil-full-setup installer="install": \
+    (anvil-pr-setup installer) \
+    (anvil-scheduled-setup installer)
+
+[group("anvil-setup")]
+anvil-full-validate-prereqs: \
+    anvil-pr-validate-prereqs \
+    anvil-scheduled-validate-prereqs
+
+# Global aliases. `anvil-setup` (no suffix) installs everything the
+# catalog knows about; `anvil-validate-prereqs` verifies every tool
+# and component is present at or above its pinned version.
+[group("anvil-setup")]
+anvil-setup installer="install": (anvil-full-setup installer)
+
+[group("anvil-setup")]
+anvil-validate-prereqs: anvil-full-validate-prereqs
+
+=== justfiles/anvil/tools.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# See ../../docs/design/local.md for the policy.
+
+# ============================================================================
+# System-level prerequisites (libclang, etc.)
+# ============================================================================
+
+# Public: probe for system-level prerequisites that catalog tools need
+# to BUILD from source. The `binstall` install path downloads pre-built
+# binaries and does not need these, so this check is primarily relevant
+# for the source-build `install` path (used by local devs and the ADO
+# backend) and is best-effort (skipped silently) for `binstall`.
+#
+# Scope policy: only system libs that an anvil catalog tool DIRECTLY
+# requires. We do not try to be a general-purpose dev-env doctor.
+# Current entries:
+#   - libclang: required by cargo-spellcheck (clang-sys / hunspell-rs)
+#     at build time.
+#
+# Detection uses presence-only probes (file existence in standard install
+# dirs + `LIBCLANG_PATH` env var). No version checks -- system libs upgrade
+# independently and any reasonably modern libclang works for clang-sys.
+#
+# On missing deps the recipe prints copy-paste install hints per OS /
+# package manager and exits non-zero. No auto-install: admin / sudo and
+# package-manager choice stay with the user.
+[group("anvil-setup")]
+[script("pwsh")]
+anvil-system-deps-check:
+    $ErrorActionPreference = 'Stop'
+    $missing = @()
+
+    # libclang: required to BUILD cargo-spellcheck from source.
+    $haveLibclang = $false
+    $libclangFiles = @('libclang.dll', 'libclang.so', 'libclang.so.1', 'libclang.dylib')
+    if ($env:LIBCLANG_PATH) {
+        foreach ($f in $libclangFiles) {
+            if (Test-Path (Join-Path $env:LIBCLANG_PATH $f)) { $haveLibclang = $true; break }
+        }
+    }
+    if (-not $haveLibclang) {
+        $probes = if ($IsWindows) {
+            @(
+                'C:\Program Files\LLVM\bin\libclang.dll',
+                "$env:USERPROFILE\scoop\apps\llvm\current\bin\libclang.dll"
+            )
+        } elseif ($IsMacOS) {
+            @(
+                '/usr/local/opt/llvm/lib/libclang.dylib',
+                '/opt/homebrew/opt/llvm/lib/libclang.dylib'
+            )
+        } else {
+            @(
+                '/usr/lib/x86_64-linux-gnu/libclang.so.1',
+                '/usr/lib/aarch64-linux-gnu/libclang.so.1',
+                '/usr/lib64/libclang.so',
+                '/usr/lib64/libclang.so.1'
+            )
+        }
+        foreach ($p in $probes) {
+            if (Get-Item -LiteralPath $p -ErrorAction SilentlyContinue) { $haveLibclang = $true; break }
+        }
+        # Linux distros often add a version suffix (libclang-19.so etc.); glob fallback.
+        if (-not $haveLibclang -and -not $IsWindows -and -not $IsMacOS) {
+            $glob = Get-ChildItem -Path '/usr/lib','/usr/lib64','/usr/lib/x86_64-linux-gnu','/usr/lib/aarch64-linux-gnu' -Filter 'libclang*.so*' -ErrorAction SilentlyContinue
+            if ($glob) { $haveLibclang = $true }
+        }
+    }
+    if (-not $haveLibclang) {
+        $missing += [pscustomobject]@{
+            name = 'libclang'
+            why = 'cargo-spellcheck (clang-sys/hunspell-rs) needs libclang at build time'
+            hints = @(
+                'Linux (Ubuntu/Debian):    sudo apt-get install -y libclang-dev'
+                'Linux (Azure Linux/RHEL): sudo tdnf install -y clang-devel'
+                'macOS (homebrew):         brew install llvm'
+                'Windows (scoop):          scoop install llvm     # no admin'
+                'Windows (winget, admin):  winget install LLVM.LLVM'
+            )
+        }
+    }
+
+    if ($missing.Count -gt 0) {
+        Write-Host ''
+        foreach ($m in $missing) {
+            Write-Host "anvil: missing system dependency '$($m.name)'" -ForegroundColor Yellow
+            Write-Host "  why: $($m.why)"
+            Write-Host '  install:'
+            foreach ($h in $m.hints) { Write-Host "    $h" }
+            Write-Host ''
+        }
+        Write-Host "If the dep is installed but not on the standard search path, set LIBCLANG_PATH and re-run." -ForegroundColor Yellow
+        exit 1
+    }
+
+# ============================================================================
+# rustc + pwsh validate-prereqs (no install -- system prereqs)
+# ============================================================================
+#
+# rustc is installed via rustup (https://rustup.rs); pwsh is installed
+# via the platform's package manager. Both are presumed present on any
+# machine running anvil; the validate recipes just surface a friendly
+# error if not.
+
+[group("anvil-setup")]
+[script("pwsh")]
+anvil-tool-rustc-validate-prereqs:
+    if (-not (Get-Command rustc -ErrorAction SilentlyContinue)) {
+        Write-Error 'anvil: rustc not found. Install via rustup: https://rustup.rs'
+        exit 1
+    }
+
+[group("anvil-setup")]
+[script("pwsh")]
+anvil-tool-pwsh-validate-prereqs:
+    if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
+        $hint = if ($IsMacOS) {
+            'brew install --cask powershell'
+        } elseif ($IsLinux) {
+            'see https://github.com/PowerShell/PowerShell'
+        } else {
+            'winget install --id Microsoft.PowerShell'
+        }
+        Write-Error "anvil: pwsh (PowerShell Core) not found. Install: $hint"
+        exit 1
+    }
+
+# ============================================================================
+# Private helpers (install/check primitives)
+# ============================================================================
+
+# _install-tool: install a cargo subcommand at exactly the pinned version,
+# or no-op if it is already installed at or above that version. The
+# `installer` parameter selects between:
+#   - "install"  (cargo install --locked, pure-source). Default.
+#   - "binstall" (cargo binstall --no-confirm --locked, with cargo install
+#                 fallback if binstall fails). Bootstraps cargo-binstall
+#                 itself if not on PATH.
+[script("pwsh")]
+_install-tool name version installer:
+    $ErrorActionPreference = 'Stop'
+    $name = '{{name}}'
+    $version = '{{version}}'
+    $installer = '{{installer}}'
+
+    if ($installer -ne 'install' -and $installer -ne 'binstall') {
+        Write-Error "_install-tool: unknown installer '$installer' (expected 'install' or 'binstall')"
+        exit 2
+    }
+
+    # Already at or above the pin: skip. We don't downgrade tools the
+    # user upgraded for their own reasons; the validate side uses
+    # `installed >= pin`, so newer is fine. The early-exit is also what
+    # makes the actions/cache restore actually useful -- without it,
+    # every post-restore run would try to re-install on top of the
+    # cached binaries and fail with "binary already exists in destination".
+    $installed = $null
+    $pattern = '^' + [regex]::Escape($name) + ' v(\S+):'
+    foreach ($line in (cargo install --list 2>$null)) {
+        if ($line -match $pattern) { $installed = $Matches[1]; break }
+    }
+    if ($installed) {
+        try {
+            if (([version]$installed) -ge ([version]$version)) {
+                Write-Host "$name >= $version (already satisfied; installed=$installed)"
+                exit 0
+            }
+        } catch {
+            # Fall through to reinstall when versions don't parse as [version].
+        }
+    }
+
+    Write-Host "Installing $name =$version (installer: $installer)"
+    if ($installer -eq 'binstall') {
+        if (-not (Get-Command cargo-binstall -ErrorAction SilentlyContinue)) {
+            Write-Host '  Bootstrapping cargo-binstall'
+            cargo install --locked cargo-binstall
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error 'cargo-binstall bootstrap failed'
+                exit $LASTEXITCODE
+            }
+        }
+        cargo binstall --no-confirm --locked $name --version "=$version"
+        if ($LASTEXITCODE -eq 0) { exit 0 }
+        Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
+    }
+    cargo install --locked $name --version "=$version"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "$name install FAILED"
+        exit $LASTEXITCODE
+    }
+
+# _check-tool: verify a cargo subcommand is installed at or above the
+# pinned version. Errors with an install hint on missing or too-old.
+[script("pwsh")]
+_check-tool name version:
+    $ErrorActionPreference = 'Stop'
+    $name = '{{name}}'
+    $version = '{{version}}'
+
+    $installed = $null
+    $pattern = '^' + [regex]::Escape($name) + ' v(\S+):'
+    foreach ($line in (cargo install --list 2>$null)) {
+        if ($line -match $pattern) { $installed = $Matches[1]; break }
+    }
+    if (-not $installed) {
+        Write-Error "anvil: required tool '$name' not found. Install: cargo install --locked --version =$version $name"
+        exit 1
+    }
+    try {
+        $installedV = [version]$installed
+        $pinV = [version]$version
+    } catch {
+        Write-Error "anvil: cannot compare versions for '$name' (installed=$installed pin=$version). Reinstall: cargo install --locked --version =$version $name"
+        exit 1
+    }
+    if ($installedV -lt $pinV) {
+        Write-Error "anvil: '$name' v$installed is older than the required minimum v$version. Upgrade: cargo install --locked --version =$version $name"
+        exit 1
+    }
+
+# _install-toolchain: install a specific rustup toolchain (no components).
+[script("pwsh")]
+_install-toolchain toolchain:
+    $ErrorActionPreference = 'Stop'
+    $toolchain = '{{toolchain}}'
+    Write-Host "rustup toolchain install $toolchain --profile minimal --no-self-update"
+    rustup toolchain install $toolchain --profile minimal --no-self-update
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to install toolchain '$toolchain'"
+        exit $LASTEXITCODE
+    }
+
+# _check-toolchain: verify a rustup toolchain is installed.
+[script("pwsh")]
+_check-toolchain toolchain:
+    $ErrorActionPreference = 'Stop'
+    $toolchain = '{{toolchain}}'
+    rustup which --toolchain $toolchain rustc 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "anvil: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain --profile minimal"
+        exit 1
+    }
+
+# _install-component: add a component to a toolchain. The toolchain is
+# either the literal "default" (current rustup default) or a specific
+# pinned toolchain string (which must already be installed -- the
+# per-component setup recipes ensure this via a dependency on
+# anvil-<toolchain>-install).
+[script("pwsh")]
+_install-component toolchain component:
+    $ErrorActionPreference = 'Stop'
+    $toolchain = '{{toolchain}}'
+    $component = '{{component}}'
+    if ($toolchain -eq 'default') {
+        Write-Host "rustup component add $component (default toolchain)"
+        rustup component add $component
+    } else {
+        Write-Host "rustup component add --toolchain $toolchain $component"
+        rustup component add --toolchain $toolchain $component
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to install component '$component' on toolchain '$toolchain'"
+        exit $LASTEXITCODE
+    }
+
+# _check-component: verify a component is installed on a toolchain.
+[script("pwsh")]
+_check-component toolchain component:
+    $ErrorActionPreference = 'Stop'
+    $toolchain = '{{toolchain}}'
+    $component = '{{component}}'
+    $output = if ($toolchain -eq 'default') {
+        rustup component list --installed 2>$null
+    } else {
+        rustup component list --installed --toolchain $toolchain 2>$null
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "anvil: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain --profile minimal"
+        exit 1
+    }
+    $found = $output | Where-Object { $_ -like "$component*" }
+    if (-not $found) {
+        $cmd = if ($toolchain -eq 'default') { "rustup component add $component" } else { "rustup component add --toolchain $toolchain $component" }
+        Write-Error "anvil: component '$component' not installed on toolchain '$toolchain'. Run: $cmd"
+        exit 1
+    }
+
+# ============================================================================
+# Rustup toolchains
+# ============================================================================
+
+[group("anvil-setup")]
+anvil-toolchain-nightly-install: (_install-toolchain rust_nightly)
+
+[group("anvil-setup")]
+anvil-toolchain-nightly-validate-prereqs: (_check-toolchain rust_nightly)
+
+[group("anvil-setup")]
+anvil-toolchain-nightly-external-types-install: (_install-toolchain rust_nightly_external_types)
+
+[group("anvil-setup")]
+anvil-toolchain-nightly-external-types-validate-prereqs: (_check-toolchain rust_nightly_external_types)
+
+# ============================================================================
+# Rustup components
+# ============================================================================
+#
+# Default-toolchain components are installed via `rustup component add`
+# (no toolchain spec). Nightly components depend on the toolchain
+# being installed first (via the relevant anvil-<toolchain>-install
+# recipe) and then add the component.
+
+[group("anvil-setup")]
+anvil-component-default-clippy-install: (_install-component "default" "clippy")
+
+[group("anvil-setup")]
+anvil-component-default-clippy-validate-prereqs: (_check-component "default" "clippy")
+
+[group("anvil-setup")]
+anvil-component-default-rustfmt-install: (_install-component "default" "rustfmt")
+
+[group("anvil-setup")]
+anvil-component-default-rustfmt-validate-prereqs: (_check-component "default" "rustfmt")
+
+[group("anvil-setup")]
+anvil-component-nightly-rustfmt-install: anvil-toolchain-nightly-install (_install-component rust_nightly "rustfmt")
+
+[group("anvil-setup")]
+anvil-component-nightly-rustfmt-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "rustfmt")
+
+[group("anvil-setup")]
+anvil-component-nightly-miri-install: anvil-toolchain-nightly-install (_install-component rust_nightly "miri")
+
+[group("anvil-setup")]
+anvil-component-nightly-miri-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "miri")
+
+[group("anvil-setup")]
+anvil-component-nightly-rust-src-install: anvil-toolchain-nightly-install (_install-component rust_nightly "rust-src")
+
+[group("anvil-setup")]
+anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "rust-src")
+
+# ============================================================================
+# Cargo subcommands
+# ============================================================================
+#
+# One pair (install + validate-prereqs) per tool, alphabetical.
+# Version pins live in versions.just (one cargo_<name>_version variable
+# per tool). The install recipes accept an `installer="install"|"binstall"`
+# parameter; the validate-prereqs recipes do not (they only read state).
+
+[group("anvil-setup")]
+anvil-tool-cargo-aprz-install installer="install": (_install-tool "cargo-aprz" cargo_aprz_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-aprz-validate-prereqs: (_check-tool "cargo-aprz" cargo_aprz_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-audit-install installer="install": (_install-tool "cargo-audit" cargo_audit_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-careful-install installer="install": (_install-tool "cargo-careful" cargo_careful_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-careful-validate-prereqs: (_check-tool "cargo-careful" cargo_careful_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-check-external-types-install installer="install": (_install-tool "cargo-check-external-types" cargo_check_external_types_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-check-external-types-validate-prereqs: (_check-tool "cargo-check-external-types" cargo_check_external_types_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-delta-install installer="install": (_install-tool "cargo-delta" cargo_delta_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-delta-validate-prereqs: (_check-tool "cargo-delta" cargo_delta_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-deny-install installer="install": (_install-tool "cargo-deny" cargo_deny_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-deny-validate-prereqs: (_check-tool "cargo-deny" cargo_deny_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-doc2readme-install installer="install": (_install-tool "cargo-doc2readme" cargo_doc2readme_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-doc2readme-validate-prereqs: (_check-tool "cargo-doc2readme" cargo_doc2readme_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-ensure-no-cyclic-deps-install installer="install": (_install-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-ensure-no-cyclic-deps-validate-prereqs: (_check-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-ensure-no-default-features-install installer="install": (_install-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-ensure-no-default-features-validate-prereqs: (_check-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-hack-install installer="install": (_install-tool "cargo-hack" cargo_hack_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-hack-validate-prereqs: (_check-tool "cargo-hack" cargo_hack_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-heather-install installer="install": (_install-tool "cargo-heather" cargo_heather_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-heather-validate-prereqs: (_check-tool "cargo-heather" cargo_heather_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-llvm-cov-install installer="install": (_install-tool "cargo-llvm-cov" cargo_llvm_cov_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_llvm_cov_version)
+
+# cargo-mutants doesn't build on aarch64-pc-windows-msvc (upstream
+# winapi crate incompat). The install recipe self-skips on that target
+# so per-group setup recipes that depend on it (pr-mutants-setup,
+# scheduled-exhaustive-setup) don't fail on that platform. The
+# mutants-diff / mutants-full check recipes also self-skip on the same
+# target, so the check is effectively a no-op end-to-end there.
+[group("anvil-setup")]
+[script("pwsh")]
+anvil-tool-cargo-mutants-install installer="install":
+    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
+        Write-Host 'anvil-tool-cargo-mutants-install: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
+        exit 0
+    }
+    & just _install-tool cargo-mutants {{cargo_mutants_version}} {{installer}}
+    exit $LASTEXITCODE
+
+[group("anvil-setup")]
+[script("pwsh")]
+anvil-tool-cargo-mutants-validate-prereqs:
+    if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
+        Write-Host 'anvil-tool-cargo-mutants-validate-prereqs: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
+        exit 0
+    }
+    & just _check-tool cargo-mutants {{cargo_mutants_version}}
+    exit $LASTEXITCODE
+
+[group("anvil-setup")]
+anvil-tool-cargo-nextest-install installer="install": (_install-tool "cargo-nextest" cargo_nextest_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-nextest-validate-prereqs: (_check-tool "cargo-nextest" cargo_nextest_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-semver-checks-install installer="install": (_install-tool "cargo-semver-checks" cargo_semver_checks_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-semver-checks-validate-prereqs: (_check-tool "cargo-semver-checks" cargo_semver_checks_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-sort-install installer="install": (_install-tool "cargo-sort" cargo_sort_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-spellcheck-validate-prereqs: (_check-tool "cargo-spellcheck" cargo_spellcheck_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-udeps-install installer="install": (_install-tool "cargo-udeps" cargo_udeps_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_version)
+
+=== justfiles/anvil/versions.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+#
+# Pinned versions used by the anvil check tree.
+#
+# Everything anvil installs (cargo subcommands + rustup toolchains)
+# is pinned here. The pinning policy:
+#   - On install (`-install` recipes): exactly this version (`=<pin>` for
+#     cargo subcommands, exact ref for rustup toolchains). Pulling
+#     "latest-matching" at install time is a CI reproducibility risk --
+#     an upstream release between yesterday's green build and today's
+#     PR can break things (cargo-spellcheck 0.15.7's em-dash regression
+#     is the canonical case). The `=` constraint locks the install to
+#     the version the catalog was validated against.
+#   - On validate-prereqs (`-validate-prereqs` recipes): the installed
+#     version must be `>= <pin>`. A user who has manually upgraded a
+#     tool for their own reasons (e.g. needing an unreleased bugfix)
+#     is not downgraded by setup. The validate gate uses
+#     `installed >= pin`, so newer is fine.
+#
+# To bump a pin, edit the version in place and re-run
+# `cargo anvil`. The dirty-file flow preserves the edit on
+# subsequent runs. To add a new tool, append a variable and the matching
+# `-install`/`-validate-prereqs` pair in `tools.just`. To remove a tool,
+# delete its variable and recipes (and any check that depends on them).
+
+# ============================================================================
+# Rustup toolchains
+# ============================================================================
+
+# General nightly used by udeps, miri, careful, and any future
+# nightly-dependent check. Bumped on a regular cadence (monthly is a
+# reasonable default) when an adopter has time to absorb formatting /
+# lint / API-surface drift. Pin only -- do not use bare `nightly` here.
+rust_nightly := "nightly-2026-02-10"
+
+# Pinned narrowly to the rustdoc JSON schema version that the currently
+# selected cargo-check-external-types release accepts. cargo-check-
+# external-types embeds a specific rustdoc-types crate version; if the
+# nightly's emitted JSON format_version drifts past it, every run fails
+# with "produces JSON format version X, but this tool requires
+# format version Y" -- which is a tooling-incompat, not a real API
+# violation. Bump this alongside any cargo-check-external-types upgrade.
+rust_nightly_external_types := "nightly-2025-10-18"
+
+# ============================================================================
+# Cargo subcommands
+# ============================================================================
+
+cargo_aprz_version := "1.0.0"
+cargo_audit_version := "0.22.2"
+cargo_careful_version := "0.4.9"
+cargo_check_external_types_version := "0.4.0"
+cargo_delta_version := "0.3.1"
+cargo_deny_version := "0.19.0"
+cargo_doc2readme_version := "0.6.4"
+cargo_ensure_no_cyclic_deps_version := "0.2.0"
+cargo_ensure_no_default_features_version := "1.0.0"
+cargo_hack_version := "0.6.41"
+cargo_heather_version := "0.2.1"
+cargo_llvm_cov_version := "0.8.4"
+cargo_mutants_version := "26.1.2"
+cargo_nextest_version := "0.9.122"
+cargo_semver_checks_version := "0.46.0"
+cargo_sort_version := "2.0.2"
+cargo_spellcheck_version := "0.15.7"
+cargo_udeps_version := "0.1.60"
+
+=== rustfmt.toml ===
+# >>> anvil-managed: anvil-rustfmt
+edition = "2024"
+max_width = 140
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_try_shorthand = true
+# The following options require nightly rustfmt. anvil-fmt invokes
+# `cargo +{{ rust_nightly }} fmt`; see justfiles/anvil/versions.just
+# for the pin and docs/design/local.md#nightly-pinning for the policy.
+unstable_features = true
+# Format Rust code blocks inside `///` doc comments. Catches stale
+# examples that drift from the prose.
+format_code_in_doc_comments = true
+# One use-statement per module (vs collapsed `a::{b, c, d}` form).
+# Diffs touch only the lines that actually changed.
+imports_granularity = "Module"
+# Group imports: std, then external crates, then crate-internal. Matches
+# the convention used across the surveyed Microsoft Rust repos.
+group_imports = "StdExternalCrate"
+# <<< anvil-managed: anvil-rustfmt
+
+=== spellcheck.toml ===
+# >>> anvil-managed: anvil-spellcheck
+# Check spelling in code comments marked as dev/developer comments
+# (e.g., `// TODO:`, `// FIXME:`). Set to false to skip them.
+dev_comments = false
+
+# Whether to skip spell checking README files. Set to false to include
+# README files in spell checking.
+skip_readme = false
+
+[Hunspell]
+# Language dictionary. "en_US" uses the built-in English (US) dictionary.
+lang = "en_US"
+
+# Directories searched for `extra_dictionaries` paths. The default
+# repo-root entry lets adopters keep their custom dictionary next to
+# the .spelling source.
+search_dirs = ["."]
+
+# Additional dictionary files loaded after the language dictionary.
+# Format: first line is the word count, remaining lines are sorted
+# words (one per line). `target/spelling.dic` is generated by the
+# `anvil-spellcheck` recipe from the repo's `.spelling` file.
+extra_dictionaries = ["target/spelling.dic"]
+
+# Don't consult OS-provided dictionaries. Keeps results consistent
+# across Linux/macOS/Windows runners.
+skip_os_lookups = true
+
+# Use cargo-spellcheck's built-in language dictionaries (independent of
+# system hunspell installation). Required for the cross-platform
+# reproducibility guarantee above.
+use_builtin = true
+
+# Token-boundary characters. Override the upstream default to add
+# typographic punctuation we use in prose (em-dash, en-dash, arrows,
+# minus sign). Without these, cargo-spellcheck 0.15.7 tokenises text
+# like `runtime — it` as three tokens including the em-dash itself,
+# then fails its dictionary lookup and flags the em-dash as a
+# "possible spelling mistake". Upstream default keeps figure-dash
+# (U+2012) and the ASCII hyphen but omits the rest; this list is a
+# superset, so the only behavioural change is that the added chars
+# now act as token boundaries.
+#
+# Encoded as \uXXXX escapes for grep-ability and to keep the file
+# 7-bit ASCII:
+#   ASCII punctuation (default): ",;:.!?#(){}[]|/_-
+#   Dashes & minus  : \u2012 figure-dash       (default)
+#                     \u2013 en-dash           (added)
+#                     \u2014 em-dash           (added)
+#                     \u2015 horizontal-bar    (added)
+#                     \u2212 minus-sign        (added)
+#   Arrows          : \u2190 leftwards-arrow   (added)
+#                     \u2192 rightwards-arrow  (added)
+#   ASCII punctuation (default): ' ` & @
+#   Misc (default)              : \u00A7 section, \u00B6 pilcrow, \u2026 ellipsis
+tokenization_splitchars = "\",;:.!?#(){}[]|/_-\u2012\u2013\u2014\u2015\u2190\u2192\u2212'`&@\u00A7\u00B6\u2026"
+
+[Hunspell.quirks]
+# Treat CamelCase identifiers as concatenations of dictionary words
+# (e.g., `TcpStream` = `Tcp` + `Stream`). Lowers false-positive rate
+# substantially on Rust codebases.
+allow_concatenation = true
+# <<< anvil-managed: anvil-spellcheck

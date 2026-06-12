@@ -99,12 +99,12 @@ windows-sys = { version = "0.61.2", default-features = false }
 xutex = { version = "0.2.0", default-features = false }
 xxhash-rust = { version = "0.8.15", default-features = false }
 
-# >>> ox-check-managed: ox-check-workspace-lints
+# >>> anvil-managed: anvil-workspace-lints
 [workspace.lints]
 # Catalog of opinionated lints, in dotted-key form so users can extend the
 # same scope (`[workspace.lints]` or `[lints]`) outside the sentinels.
 # The host-specific table header (`[workspace.lints]` or `[lints]`) is
-# prepended by cargo-ox-check-update based on whether the manifest is a workspace
+# prepended by cargo-anvil based on whether the manifest is a workspace
 # root or a single-crate Cargo.toml.
 
 # --- rust ------------------------------------------------------------------
@@ -121,8 +121,8 @@ rust.unused_lifetimes = "warn"
 # `cargo llvm-cov` sets so the recommended coverage-exclusion pattern
 # `#[cfg_attr(coverage_nightly, coverage(off))]` works out of the box.
 # Adopters who need additional cfg names take ownership of this one
-# line (edit the check-cfg array); ox-check's drift detector will
-# emit a `.ox-check-proposed` sibling on future catalog bumps so the
+# line (edit the check-cfg array); anvil's drift detector will
+# emit a `.anvil-proposed` sibling on future catalog bumps so the
 # customization is preserved.
 rust.unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(coverage,coverage_nightly)',
@@ -182,7 +182,7 @@ clippy.significant_drop_tightening = "allow"
 # Blocked by Clippy bug: https://github.com/rust-lang/rust-clippy/issues/15036
 clippy.wildcard_imports = "allow"
 
-# <<< ox-check-managed: ox-check-workspace-lints
+# <<< anvil-managed: anvil-workspace-lints
 
 # A bit of debugging support for release builds.
 [profile.release]

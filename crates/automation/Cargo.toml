@@ -13,13 +13,13 @@ publish = false
 rust-version.workspace = true
 
 # Public-API discipline. `automation` is `publish = false` and lives
-# solely to be used by `scripts/`, but ox-check-external-types still
+# solely to be used by `scripts/`, but anvil-external-types still
 # runs against it (publish=false isn't a free pass for unbounded API
 # surface -- in-workspace callers in `scripts/` rely on type
 # stability too). All three allowed types are intentional:
 # - `ohno::app::error::AppError`: project-wide app error type, used
 #   by every fallible function in the workspace. Same allowlist
-#   entry as cargo-coverage-gate and cargo_ox_check.
+#   entry as cargo-coverage-gate and cargo_anvil.
 # - `serde::*` (which surfaces in nightly rustdoc as
 #   `serde_core::de::Deserialize`): `PackageMetadata` and `Target`
 #   are derived-Deserialize so `serde_json::from_str` can parse
@@ -34,7 +34,7 @@ ohno = { workspace = true, features = ["app-err"] }
 serde = { workspace = true, features = ["derive", "alloc"] }
 serde_json = { workspace = true, features = ["std"] }
 
-# >>> ox-check-managed: ox-check-lints
+# >>> anvil-managed: anvil-lints
 [lints]
 workspace = true
-# <<< ox-check-managed: ox-check-lints
+# <<< anvil-managed: anvil-lints

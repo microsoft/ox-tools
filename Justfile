@@ -23,6 +23,6 @@ import 'justfiles/format.just'
 import 'justfiles/setup.just'
 import 'justfiles/spelling.just'
 
-# >>> ox-check-managed: ox-check-imports
-import 'justfiles/ox-check/mod.just'
-# <<< ox-check-managed: ox-check-imports
+# >>> anvil-managed: anvil-imports
+import 'justfiles/anvil/mod.just'
+# <<< anvil-managed: anvil-imports

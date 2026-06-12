@@ -1,0 +1,138 @@
+version = 1
+rendered_by = "cargo-anvil 0.1.0"
+
+[[file]]
+path = ".github/actions/anvil-impact/action.yml"
+checksum = "sha256:7d2f0dcafd024407c8e73370c19afdb882e4cb807f6113258561d665bd2b8a0a"
+
+[[file]]
+path = ".github/actions/anvil-pr-fast/action.yml"
+checksum = "sha256:6d93a456cdeb9668d713c623cb649732e731ec31a3761b4ad971acb3b9827ea5"
+
+[[file]]
+path = ".github/actions/anvil-pr-mutants/action.yml"
+checksum = "sha256:4053a6023ddcd01eee22911e0080031e1bcd8c502ffc75acfb20d4c02a038685"
+
+[[file]]
+path = ".github/actions/anvil-pr-runtime-analysis/action.yml"
+checksum = "sha256:326cc30bfb67bc1d23be50d37c57e542466bce813a56b38a0c2a015e8d13a540"
+
+[[file]]
+path = ".github/actions/anvil-pr-test/action.yml"
+checksum = "sha256:ba33cd6a826d2a6e63e88fd6e4795496717b697d64bf93f133333d916952cdb5"
+
+[[file]]
+path = ".github/actions/anvil-scheduled-advisories/action.yml"
+checksum = "sha256:c05a587116e84f5da346f8faf994503c6b0ab578fb2534d5e586fa4bbb261cd6"
+
+[[file]]
+path = ".github/actions/anvil-scheduled-exhaustive/action.yml"
+checksum = "sha256:6a56421f666b92239a952e0ef351c803c59f5d24bd22b34f8695581fa175bdea"
+
+[[file]]
+path = ".github/actions/anvil-scheduled-test/action.yml"
+checksum = "sha256:a42cf49d0e203db5545a797888c8c62e1564f5914a2588e2a40cb3b2cf8b0ad3"
+
+[[file]]
+path = ".github/actions/anvil-setup/action.yml"
+checksum = "sha256:1861acca1a7d81bf68cd36eaf041133b96cbdd7b46560d4f07caa2427b67f2bb"
+
+[[file]]
+path = ".github/workflows/anvil-pr-impl.yml"
+checksum = "sha256:70b2f188d3cc0fee5c9502534611121db9ff8b2c27cd6dfa176bf9a9ba9d2d2e"
+
+[[file]]
+path = ".github/workflows/anvil-pr.yml"
+checksum = "sha256:14c3541e39a7918497cb400ea20232340bc056da6d862a951568c09e32f4f2f7"
+
+[[file]]
+path = ".github/workflows/anvil-scheduled-impl.yml"
+checksum = "sha256:bee7c741ee336c43b75754a0a902d6a64f8df971a95121acc7c6d66bbf2bacc8"
+
+[[file]]
+path = ".github/workflows/anvil-scheduled.yml"
+checksum = "sha256:a45359b92a6d851fc39bfa1c03aeb489b544ae37a1cea390dbbf860b2def8205"
+
+[[file]]
+path = "justfiles/anvil/checks.just"
+checksum = "sha256:6ae18f19a51866b48cc1c8f1b921360d49a4a4b8d791db0ff6a6026a7b5c2084"
+
+[[file]]
+path = "justfiles/anvil/groups.just"
+checksum = "sha256:af34bee277492080cb9facda9a576184175fe978506a32f9e7b2b0aaa4378826"
+
+[[file]]
+path = "justfiles/anvil/mod.just"
+checksum = "sha256:06b486f1d154b36cf1c1a43333addd2e3ade8c69646600f7409a0c6a1c08cedb"
+
+[[file]]
+path = "justfiles/anvil/tiers.just"
+checksum = "sha256:740bc881b9642e73200de2532078dd5bf39a1cb3bf68df9d8e33b491a54b9084"
+
+[[file]]
+path = "justfiles/anvil/tools.just"
+checksum = "sha256:7c92f6cadca16c4e2d6897b1c9304e7a541fb7c7e380e27165304d4071a6d27c"
+
+[[file]]
+path = "justfiles/anvil/versions.just"
+checksum = "sha256:fd35d5e310a8a284527a887b258f1fc0dbd1492a0f93adbdcefe2bc4f20c50a7"
+
+[[region]]
+host = ".delta.toml"
+id = "anvil-delta"
+checksum = "sha256:ef049abc4bba5e6dac7dfc07a4852d821de4682fe6ad46aace7ddfb2455cb597"
+
+[[region]]
+host = "Cargo.toml"
+id = "anvil-workspace-lints"
+checksum = "sha256:c473bb001944ce784b6001ed1facf4a7b22d631ac809fd0efc183b829a1810cd"
+
+[[region]]
+host = "Justfile"
+id = "anvil-imports"
+checksum = "sha256:f8affd59b69c7083c2f3b6f593c63672116dda974c1e661dcb66a4412eb3eada"
+
+[[region]]
+host = "clippy.toml"
+id = "anvil-clippy"
+checksum = "sha256:aba0733632eac4cb54c4768db578fe1f7b7cfe730aa0d7dc13e2828c9062d67d"
+
+[[region]]
+host = "crates/automation/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo-anvil/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo-coverage-gate/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo-heather/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo_ensure_no_cyclic_deps/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "deny.toml"
+id = "anvil-deny"
+checksum = "sha256:3d38154ac70567b4b6b39699e244040a1ed869471d3501f7147b5c3c9a748ade"
+
+[[region]]
+host = "rustfmt.toml"
+id = "anvil-rustfmt"
+checksum = "sha256:c21c68f3f9e46e8a958513e80ebce393d2e2ec8b90e2ded5416bca4215ffa8b7"
+
+[[region]]
+host = "spellcheck.toml"
+id = "anvil-spellcheck"
+checksum = "sha256:3d85d17a4e9a9a6770738b67d93a801375ffadd159e506eef81e5a9ffe1da0d7"

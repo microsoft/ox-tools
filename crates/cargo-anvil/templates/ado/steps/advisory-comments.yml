@@ -1,0 +1,94 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+#
+# Upsert/clear sticky PR comments for advisory checks.
+#
+# Convention (see docs/design/checks.md §6): a recipe writes a complete
+# markdown body to `target/anvil/comments/<NAME>.md` when it has
+# findings, and removes the file when it does not. The first line of
+# the body is an HTML comment marker (`<!-- anvil-<NAME> -->`) used
+# here to find the existing PR thread to update or close.
+#
+# This step inspects each known convention file and:
+#   - if the file exists and no thread matches the marker, POSTs a new
+#     active thread carrying the file body;
+#   - if the file exists and a thread matches, PATCHes that thread's
+#     first comment with the new body;
+#   - if the file does not exist and a thread matches, sets the
+#     thread's status to "closed" (ADO has no thread-delete API; closed
+#     threads collapse in the PR UI).
+#
+# The step is a no-op when:
+#   - the build is not a PR build (Build.Reason != PullRequest);
+#   - the build identity lacks "Contribute to pull requests" on the
+#     repo (we catch the 401/403 and exit 0 so adopters who haven't
+#     opted in to write permissions aren't broken).
+#
+# Adding a new advisory check: extend the `$checks` array below with a
+# `@{ name = '<NEW>'; file = 'target/anvil/comments/<NEW>.md' }`
+# entry. The marker / header convention follows automatically.
+
+steps:
+  - task: PowerShell@2
+    displayName: anvil advisory PR comments
+    condition: and(succeededOrFailed(), eq(variables['Build.Reason'], 'PullRequest'))
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+    inputs:
+      targetType: inline
+      pwsh: true
+      script: |
+        $ErrorActionPreference = 'Stop'
+        $checks = @(
+            @{ name = 'semver'; file = 'target/anvil/comments/semver.md' }
+        )
+        $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
+        if (-not $prId) {
+            Write-Host 'advisory-comments: not a PR build; skipping'
+            exit 0
+        }
+        if (-not $env:SYSTEM_ACCESSTOKEN) {
+            Write-Host 'advisory-comments: SYSTEM_ACCESSTOKEN not exposed; skipping'
+            exit 0
+        }
+        $base = "$env:SYSTEM_COLLECTIONURI$env:SYSTEM_TEAMPROJECT/_apis/git/repositories/$env:BUILD_REPOSITORY_ID/pullRequests/$prId"
+        $headers = @{ Authorization = "Bearer $env:SYSTEM_ACCESSTOKEN" }
+        try {
+            $threads = (Invoke-RestMethod "$base/threads?api-version=7.1" -Headers $headers).value
+        } catch {
+            $status = $_.Exception.Response.StatusCode.value__
+            if ($status -in 401, 403) {
+                Write-Host "advisory-comments: build identity lacks 'Contribute to pull requests' (HTTP $status); skipping"
+                exit 0
+            }
+            throw
+        }
+        foreach ($c in $checks) {
+            $marker = "<!-- anvil-$($c.name) -->"
+            $existing = $threads | Where-Object {
+                $_.comments -and $_.comments[0].content -like "*$marker*" -and $_.status -ne 'closed'
+            } | Select-Object -First 1
+            if (Test-Path -LiteralPath $c.file) {
+                $body = Get-Content -LiteralPath $c.file -Raw
+                if ($existing) {
+                    Write-Host "advisory-comments: updating anvil-$($c.name) (thread $($existing.id))"
+                    $payload = @{ content = $body } | ConvertTo-Json -Depth 5
+                    Invoke-RestMethod "$base/threads/$($existing.id)/comments/1?api-version=7.1" `
+                        -Method PATCH -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $payload | Out-Null
+                } else {
+                    Write-Host "advisory-comments: posting anvil-$($c.name)"
+                    $payload = @{
+                        comments = @(@{ parentCommentId = 0; content = $body; commentType = 1 })
+                        status   = 'active'
+                    } | ConvertTo-Json -Depth 5
+                    Invoke-RestMethod "$base/threads?api-version=7.1" `
+                        -Method POST -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $payload | Out-Null
+                }
+            } elseif ($existing) {
+                Write-Host "advisory-comments: closing anvil-$($c.name) (thread $($existing.id))"
+                $payload = @{ status = 'closed' } | ConvertTo-Json
+                Invoke-RestMethod "$base/threads/$($existing.id)?api-version=7.1" `
+                    -Method PATCH -Headers $headers -ContentType 'application/json; charset=utf-8' -Body $payload | Out-Null
+            }
+        }

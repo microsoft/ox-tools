@@ -82,7 +82,7 @@ assume_patterns = [
 # If not specified, uses the default branch detection
 remote_branch = "origin/main"
 
-# >>> ox-check-managed: ox-check-delta
+# >>> anvil-managed: anvil-delta
 [delta]
 # Include the workspace root files that should invalidate every member's
 # impact analysis when changed (lockfile, root manifest, toolchain).
@@ -91,4 +91,4 @@ root-files = [
     "Cargo.toml",
     "rust-toolchain.toml",
 ]
-# <<< ox-check-managed: ox-check-delta
+# <<< anvil-managed: anvil-delta
