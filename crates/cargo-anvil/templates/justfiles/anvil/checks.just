@@ -5,7 +5,7 @@
 #
 # Each check belongs to one of four buckets, which determines how it
 # interprets the impact env vars emitted by the cargo-delta impact step
-# in CI:
+# in cloud workflows:
 #
 #   - "modified": only run when at least one package's source files
 #     changed in the diff. The check's underlying tool is workspace-wide
@@ -41,9 +41,9 @@
 #
 #   * unset                       - local run; the recipe substitutes
 #                                    "--workspace" via `?? "--workspace"`
-#   * "--package A --package B"   - emitted by the CI impact step when
+#   * "--package A --package B"   - emitted by the cloud-workflow impact step when
 #                                    the tier has members
-#   * "--skip"                    - emitted by the CI impact step when
+#   * "--skip"                    - emitted by the cloud-workflow impact step when
 #                                    the tier is empty (recipe exits 0)
 #
 # This lets the simple recipes splat the var directly with
@@ -80,7 +80,7 @@
 # pinned nightly (see versions.just) because rustfmt.toml uses
 # unstable_features = true (imports_granularity, group_imports,
 # format_code_in_doc_comments). Floating nightly would mean
-# format-drift breaking CI on rustup updates — the same trap we
+# format-drift breaking cloud workflows on rustup updates — the same trap we
 # explicitly avoid for udeps/miri/careful/external-types.
 [script("pwsh")]
 anvil-fmt: anvil-fmt-validate-prereqs
@@ -284,20 +284,20 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
 # Unscoped (PR title is not source-related).
 #
 # Validates that $env:PR_TITLE matches Conventional Commits when set;
-# no-op when unset. CI injects PR_TITLE explicitly (GH Actions:
+# no-op when unset. Cloud workflows inject PR_TITLE explicitly (GH Actions:
 # ${{ github.event.pull_request.title }}; ADO: $(System.PullRequest.Title))
 # so the check has authoritative input there. Locally it skips silently --
 # there is no reliable way to recover the PR title for the ADO backend
 # (no equivalent of `gh pr view`), so the recipe stays simple and
-# defers the check to CI.
+# defers the check to cloud workflows.
 [script("pwsh")]
 anvil-pr-title: anvil-pr-title-validate-prereqs
     $title = $env:PR_TITLE
     if (-not $title) {
-        Write-Host 'anvil-pr-title: PR_TITLE env var not set; skipping (check runs on CI)'
+        Write-Host 'anvil-pr-title: PR_TITLE env var not set; skipping (check runs in cloud workflows)'
         exit 0
     }
-    if ($title -notmatch '^(feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(\([^)]+\))?!?: .+') {
+    if ($title -notmatch '^(feat|fix|chore|docs|refactor|test|build|cloud workflows|perf|revert)(\([^)]+\))?!?: .+') {
         Write-Error "PR title '$title' does not match Conventional Commits"
         exit 1
     }
@@ -321,7 +321,7 @@ anvil-audit: anvil-audit-validate-prereqs
 # used only by tests is reported as "all used" because the dev-deps
 # target satisfies the lookup, masking the unused entry in main
 # `[dependencies]`. Restricting to the default targets (lib + bins)
-# matches main repo CI's check and surfaces the real bug.
+# matches main repo cloud workflows' check and surfaces the real bug.
 [script("pwsh")]
 anvil-udeps: anvil-udeps-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -347,7 +347,7 @@ anvil-udeps: anvil-udeps-validate-prereqs
 # are normal (the major-version bump happens at release time, not on
 # every PR). Instead, when there are findings we write a markdown
 # advisory body to `target/anvil/comments/semver.md`; when the
-# tree is clean we remove that file. CI wiring (GH:
+# tree is clean we remove that file. cloud-workflow wiring (GH:
 # marocchino/sticky-pull-request-comment; ADO: pwsh + REST API)
 # inspects the file after the recipe and upserts / clears a sticky
 # PR comment accordingly. Local invocation gets the same file
@@ -375,7 +375,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
     # on workspaces that contain bin-only crates ("no library targets
     # found"), and we want the same tolerance for unpublished / bin->lib-
     # transition crates regardless of whether we got here via impact-
-    # scoping (CI) or full-workspace fallback (local).
+    # scoping (cloud workflows) or full-workspace fallback (local).
     $libPkgs = @{}
     $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
     foreach ($p in $meta.packages) {
@@ -441,11 +441,11 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
         $body = ($lines -join "`n") + "`n"
         Set-Content -LiteralPath $commentFile -Value $body -Encoding UTF8 -NoNewline
         Write-Host ''
-        Write-Host "anvil-semver-check: wrote advisory comment to $commentFile (recipe exits 0; CI will upsert a PR comment)" -ForegroundColor Yellow
+        Write-Host "anvil-semver-check: wrote advisory comment to $commentFile (recipe exits 0; cloud workflows will upsert a PR comment)" -ForegroundColor Yellow
     } else {
         Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
     }
-    # Advisory: always exit 0. CI wiring posts/clears the PR comment.
+    # Advisory: always exit 0. cloud-workflow wiring posts/clears the PR comment.
     exit 0
 
 # Affected tier (lints public API of changed crates and rev-deps).
@@ -557,7 +557,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     cargo llvm-cov report --cobertura --output-path target/coverage/cobertura.xml
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    # Local-only HTML viewer (no CI consumer); cheap once the data exists.
+    # Local-only HTML viewer (no cloud-workflow consumer); cheap once the data exists.
     cargo llvm-cov report --html      --output-dir target/coverage/html
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

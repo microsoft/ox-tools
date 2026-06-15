@@ -55,11 +55,11 @@ pub const SCHEDULED_ROOT_PIPELINE: &str = include_str!("../../templates/ado/sche
 /// All check groups that get a per-group step template.
 ///
 /// See [`emit::github::GROUPS`](super::github::GROUPS) for the
-/// rationale around splitting `pr-slow` into three CI-visible
+/// rationale around splitting `pr-slow` into three cloud-workflow-visible
 /// sub-stages (`pr-test`, `pr-runtime-analysis`, `pr-mutants`) that run in
 /// parallel. The `anvil-pr-slow` umbrella recipe is preserved in
 /// `groups.just` for local convenience but does not appear as a
-/// discrete CI stage here.
+/// discrete cloud-workflow stage here.
 pub const GROUPS: &[&str] = &[
     "pr-fast",
     "pr-test",

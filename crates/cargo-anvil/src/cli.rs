@@ -15,26 +15,26 @@ use clap::Parser;
 /// `anvil` token that Cargo injects when the binary is invoked as a
 /// subcommand.
 ///
-/// The tool intentionally has a single action (update local recipes, CI
-/// building blocks, and managed regions), so the flags live at the top
+/// The tool intentionally has a single action (update local recipes,
+/// cloud-workflow building blocks, and managed regions), so the flags live at the top
 /// level rather than under a subcommand.
 #[derive(Debug, Parser, Clone, Default)]
 #[command(
     name = "cargo-anvil",
     bin_name = "cargo anvil",
-    about = "Update local recipes, CI building blocks, and managed regions for the anvil unified build setup",
+    about = "Update local recipes, cloud-workflow building blocks, and managed regions for the anvil unified build setup",
     version,
     disable_help_subcommand = true
 )]
 pub struct Cli {
-    /// CI backend(s) to emit. Repeatable. Valid values: `github`, `ado`.
+    /// cloud-workflow backend(s) to emit. Repeatable. Valid values: `github`, `ado`.
     ///
     /// If omitted and `--no-backends` is not set, the backend is autodetected
     /// from the `origin` git remote.
     #[arg(long = "backend", value_name = "NAME")]
     pub backends: Vec<String>,
 
-    /// Emit only local files; skip every CI backend.
+    /// Emit only local files; skip every cloud-workflow backend.
     ///
     /// Mutually exclusive with `--backend`.
     #[arg(long, conflicts_with = "backends")]

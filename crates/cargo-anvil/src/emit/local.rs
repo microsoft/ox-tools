@@ -286,9 +286,9 @@ mod tests {
 
     #[test]
     fn groups_just_template_includes_all_groups_and_pr_slow_sub_recipes() {
-        // pr-slow has three CI-visible sub-groups (pr-test, pr-runtime-analysis,
+        // pr-slow has three cloud-workflow-visible sub-groups (pr-test, pr-runtime-analysis,
         // pr-mutants) that each get their own composite action / step
-        // template / CI job. The umbrella `anvil-pr-slow` recipe is
+        // template / cloud-workflow job. The umbrella `anvil-pr-slow` recipe is
         // preserved for local convenience (it runs the three sub-
         // recipes sequentially) but is not in GROUPS.
         for needle in [

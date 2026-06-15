@@ -44,11 +44,11 @@ pub const SCHEDULED_ROOT_WORKFLOW: &str = include_str!("../../templates/github/s
 ///
 /// Mirrors [`checks.md`](../../../docs/design/checks.md) `§1`.
 ///
-/// The PR-tier "pr-slow" umbrella is split into three CI-visible
+/// The PR-tier "pr-slow" umbrella is split into three cloud-workflow-visible
 /// sub-groups (`pr-test`, `pr-runtime-analysis`, `pr-mutants`) so each runs as
 /// its own job and they execute in parallel across the matrix. The
 /// umbrella `anvil-pr-slow` recipe is preserved in `groups.just`
-/// for local convenience but does not appear in CI as a discrete
+/// for local convenience but does not appear in cloud workflows as a discrete
 /// job. `pr-mutants` (mutants) self-skips on aarch64-pc-windows-msvc
 /// where cargo-mutants doesn't build.
 pub const GROUPS: &[&str] = &[
@@ -246,10 +246,10 @@ mod tests {
     #[test]
     fn pr_impl_workflow_has_expected_jobs() {
         assert!(PR_IMPL_WORKFLOW.contains("workflow_call:"));
-        // pr-slow is split into three CI-visible jobs (pr-test,
+        // pr-slow is split into three cloud-workflow-visible jobs (pr-test,
         // pr-runtime-analysis, pr-mutants) that run in parallel. The
         // umbrella `anvil-pr-slow` recipe exists in groups.just for
-        // local convenience but does NOT appear as a CI job here.
+        // local convenience but does NOT appear as a cloud-workflow job here.
         for needle in [
             "impact-linux:",
             "impact-windows:",

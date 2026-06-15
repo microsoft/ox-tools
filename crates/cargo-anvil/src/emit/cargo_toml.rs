@@ -140,7 +140,7 @@ mod tests {
     /// paths). Adopters who want any of them add them outside the
     /// managed region with no conflict. If we change our mind, this
     /// test goes; until then, accidentally re-adding any of them
-    /// fires here instead of in the next adopter's CI.
+    /// fires here instead of in the next adopter's cloud workflows.
     #[test]
     fn catalog_intentionally_omits_contested_lints() {
         for needle in ["rust.missing_docs", "clippy.expect_used", "clippy.panic "] {
@@ -180,7 +180,7 @@ mod tests {
     }
 
     /// `unexpected_cfgs` is on-by-default at warn since Rust 1.80;
-    /// combined with the catalog's `-D warnings` CI policy, an
+    /// combined with the catalog's `-D warnings` cloud-workflow policy, an
     /// undeclared cfg is a hard build failure. The catalog pre-declares
     /// the `coverage`/`coverage_nightly` cfgs that anvil's own
     /// `llvm-cov` recipe sets so the recommended

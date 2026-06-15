@@ -103,7 +103,7 @@ pub fn run_update(args: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError> 
     })
 }
 
-/// Build the full plan: local files + selected CI backends.
+/// Build the full plan: local files + selected cloud-workflow backends.
 fn build_plan(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, backends: &[Backend]) -> Result<Plan, AppError> {
     let mut plan = Plan::default();
 
@@ -144,7 +144,7 @@ fn build_plan(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, back
 /// last render) or `OrphanedKept` (user customized — preserve and
 /// transfer ownership).
 ///
-/// This is what removes orphaned CI artifacts, dropped catalog entries,
+/// This is what removes orphaned cloud-workflow artifacts, dropped catalog entries,
 /// disabled-backend files, and any other previously-tracked item that
 /// is no longer in scope.
 fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan) -> Result<(), AppError> {

@@ -1,9 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! CI backend identification and autodetection.
+//! cloud-workflow backend identification and autodetection.
 //!
-//! `cargo-anvil` emits files for one or more CI backends (`github`, `ado`).
+//! `cargo-anvil` emits files for one or more cloud-workflow backends (`github`, `ado`).
 //! The set of backends is chosen by, in order:
 //!
 //! 1. Explicit `--backend <name>` flag(s).
@@ -17,7 +17,7 @@ use std::process::Command;
 
 use ohno::{AppError, IntoAppError as _, app_err};
 
-/// Supported CI backends.
+/// Supported cloud-workflow backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Backend {
     /// GitHub Actions.
@@ -169,7 +169,7 @@ pub fn resolve(flag_backends: &[String], no_backends: bool, repo_root: &Path) ->
     let detected = detect_from_url(&url);
     if detected.is_empty() {
         return Err(app_err!(
-            "could not autodetect a CI backend from origin URL '{url}'. \
+            "could not autodetect a cloud-workflow backend from origin URL '{url}'. \
              Pass --backend github|ado explicitly, or --no-backends."
         ));
     }

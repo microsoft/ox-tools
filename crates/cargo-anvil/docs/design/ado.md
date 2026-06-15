@@ -1,7 +1,7 @@
 # Azure DevOps Pipelines Integration
 
 This document describes what `cargo anvil --backend ado` emits for Azure DevOps
-Pipelines, and how a repo wires those files into its own CI.
+Pipelines, and how a repo wires those files into its own cloud workflows.
 
 anvil emits three layers, all owned by anvil with the standard owned-file flow (edit →
 dirty → `.anvil-proposed` sibling on next update). The split is by what users actually

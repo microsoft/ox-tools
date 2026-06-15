@@ -9,7 +9,7 @@ See also:
 
 - [design.md](./design.md) for the overall principles and the CLI shape.
 - [local.md](./local.md) for the just-recipe files this algorithm manages.
-- [github.md](./github.md) / [ado.md](./ado.md) for the CI building-block files.
+- [github.md](./github.md) / [ado.md](./ado.md) for the cloud workflow building-block files.
 
 ## 1. The manifest
 
@@ -154,7 +154,7 @@ anvil's baseline severity is `"warn"`, not `"deny"`. Promotion to deny happens a
 the lint-run boundary via `cargo clippy -- -D warnings`, which is what the `anvil-clippy`
 recipe invokes. This keeps the baseline friendly to incremental adoption (a new repo
 running anvil for the first time sees warnings rather than a wall of build failures)
-while still failing CI on anything the catalog covers. Users who want stricter local
+while still failing cloud workflows on anything the catalog covers. Users who want stricter local
 behavior set per-lint `"deny"` values inside the region — the dirty-file flow then
 preserves their edit.
 
@@ -403,7 +403,7 @@ omitted, the tool autodetects from the `origin` git remote URL:
   `--backend` flag.
 
 `--no-backends` is valid and useful for repos that want only the local `just` setup
-with no CI files; it is mutually exclusive with `--backend`. Autodetection runs every
+with no cloud workflows files; it is mutually exclusive with `--backend`. Autodetection runs every
 time `--backend` and `--no-backends` are both absent; there is no "first run" special
 case. When the backend set changes (or an item is dropped from the catalog), the tool
 detects orphaned files / regions per §5.1 and removes them on the next non-dry-run

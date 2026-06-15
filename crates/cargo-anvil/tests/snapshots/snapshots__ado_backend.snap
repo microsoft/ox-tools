@@ -459,7 +459,7 @@ steps:
       #     `origin/release`).
       #   * On PR build-validation runs, SYSTEM_PULLREQUEST_TARGETBRANCH
       #     is set to the unqualified target branch (e.g. `main`).
-      #   * Otherwise fall back to `master` so manual / branch CI runs
+      #   * Otherwise fall back to `master` so manual / branch cloud-workflow runs
       #     produce a sensible diff against the default branch.
       # The ADO macro form `$(System.PullRequest.TargetBranch)` is unsafe
       # here: when the variable is unset (non-PR builds), ADO leaves the
@@ -968,7 +968,7 @@ rust.trivial_numeric_casts = "warn"
 rust.unsafe_op_in_unsafe_fn = "warn"
 rust.unused_lifetimes = "warn"
 # `unexpected_cfgs` is on-by-default at warn since Rust 1.80; combined
-# with the catalog's `-D warnings` CI policy, any custom cfg name
+# with the catalog's `-D warnings` cloud-workflow policy, any custom cfg name
 # becomes a hard build failure. Pre-declare the cfgs that
 # `cargo llvm-cov` sets so the recommended coverage-exclusion pattern
 # `#[cfg_attr(coverage_nightly, coverage(off))]` works out of the box.
@@ -1130,7 +1130,7 @@ unknown-git = "deny"
 #
 # Each check belongs to one of four buckets, which determines how it
 # interprets the impact env vars emitted by the cargo-delta impact step
-# in CI:
+# in cloud workflows:
 #
 #   - "modified": only run when at least one package's source files
 #     changed in the diff. The check's underlying tool is workspace-wide
@@ -1166,9 +1166,9 @@ unknown-git = "deny"
 #
 #   * unset                       - local run; the recipe substitutes
 #                                    "--workspace" via `?? "--workspace"`
-#   * "--package A --package B"   - emitted by the CI impact step when
+#   * "--package A --package B"   - emitted by the cloud-workflow impact step when
 #                                    the tier has members
-#   * "--skip"                    - emitted by the CI impact step when
+#   * "--skip"                    - emitted by the cloud-workflow impact step when
 #                                    the tier is empty (recipe exits 0)
 #
 # This lets the simple recipes splat the var directly with
@@ -1205,7 +1205,7 @@ unknown-git = "deny"
 # pinned nightly (see versions.just) because rustfmt.toml uses
 # unstable_features = true (imports_granularity, group_imports,
 # format_code_in_doc_comments). Floating nightly would mean
-# format-drift breaking CI on rustup updates — the same trap we
+# format-drift breaking cloud workflows on rustup updates — the same trap we
 # explicitly avoid for udeps/miri/careful/external-types.
 [script("pwsh")]
 anvil-fmt: anvil-fmt-validate-prereqs
@@ -1409,20 +1409,20 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
 # Unscoped (PR title is not source-related).
 #
 # Validates that $env:PR_TITLE matches Conventional Commits when set;
-# no-op when unset. CI injects PR_TITLE explicitly (GH Actions:
+# no-op when unset. Cloud workflows inject PR_TITLE explicitly (GH Actions:
 # ${{ github.event.pull_request.title }}; ADO: $(System.PullRequest.Title))
 # so the check has authoritative input there. Locally it skips silently --
 # there is no reliable way to recover the PR title for the ADO backend
 # (no equivalent of `gh pr view`), so the recipe stays simple and
-# defers the check to CI.
+# defers the check to cloud workflows.
 [script("pwsh")]
 anvil-pr-title: anvil-pr-title-validate-prereqs
     $title = $env:PR_TITLE
     if (-not $title) {
-        Write-Host 'anvil-pr-title: PR_TITLE env var not set; skipping (check runs on CI)'
+        Write-Host 'anvil-pr-title: PR_TITLE env var not set; skipping (check runs in cloud workflows)'
         exit 0
     }
-    if ($title -notmatch '^(feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(\([^)]+\))?!?: .+') {
+    if ($title -notmatch '^(feat|fix|chore|docs|refactor|test|build|cloud workflows|perf|revert)(\([^)]+\))?!?: .+') {
         Write-Error "PR title '$title' does not match Conventional Commits"
         exit 1
     }
@@ -1446,7 +1446,7 @@ anvil-audit: anvil-audit-validate-prereqs
 # used only by tests is reported as "all used" because the dev-deps
 # target satisfies the lookup, masking the unused entry in main
 # `[dependencies]`. Restricting to the default targets (lib + bins)
-# matches main repo CI's check and surfaces the real bug.
+# matches main repo cloud workflows' check and surfaces the real bug.
 [script("pwsh")]
 anvil-udeps: anvil-udeps-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1472,7 +1472,7 @@ anvil-udeps: anvil-udeps-validate-prereqs
 # are normal (the major-version bump happens at release time, not on
 # every PR). Instead, when there are findings we write a markdown
 # advisory body to `target/anvil/comments/semver.md`; when the
-# tree is clean we remove that file. CI wiring (GH:
+# tree is clean we remove that file. cloud-workflow wiring (GH:
 # marocchino/sticky-pull-request-comment; ADO: pwsh + REST API)
 # inspects the file after the recipe and upserts / clears a sticky
 # PR comment accordingly. Local invocation gets the same file
@@ -1500,7 +1500,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
     # on workspaces that contain bin-only crates ("no library targets
     # found"), and we want the same tolerance for unpublished / bin->lib-
     # transition crates regardless of whether we got here via impact-
-    # scoping (CI) or full-workspace fallback (local).
+    # scoping (cloud workflows) or full-workspace fallback (local).
     $libPkgs = @{}
     $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
     foreach ($p in $meta.packages) {
@@ -1566,11 +1566,11 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
         $body = ($lines -join "`n") + "`n"
         Set-Content -LiteralPath $commentFile -Value $body -Encoding UTF8 -NoNewline
         Write-Host ''
-        Write-Host "anvil-semver-check: wrote advisory comment to $commentFile (recipe exits 0; CI will upsert a PR comment)" -ForegroundColor Yellow
+        Write-Host "anvil-semver-check: wrote advisory comment to $commentFile (recipe exits 0; cloud workflows will upsert a PR comment)" -ForegroundColor Yellow
     } else {
         Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
     }
-    # Advisory: always exit 0. CI wiring posts/clears the PR comment.
+    # Advisory: always exit 0. cloud-workflow wiring posts/clears the PR comment.
     exit 0
 
 # Affected tier (lints public API of changed crates and rev-deps).
@@ -1682,7 +1682,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     cargo llvm-cov report --cobertura --output-path target/coverage/cobertura.xml
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    # Local-only HTML viewer (no CI consumer); cheap once the data exists.
+    # Local-only HTML viewer (no cloud-workflow consumer); cheap once the data exists.
     cargo llvm-cov report --html      --output-dir target/coverage/html
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -2002,7 +2002,7 @@ anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # See ../../docs/design/checks.md for the catalog and rationale.
 
-# Each group is one CI job. Within a group, checks run sequentially.
+# Each group is one cloud-workflow job. Within a group, checks run sequentially.
 
 # PR groups
 # ===========================================================================
@@ -2035,7 +2035,7 @@ anvil-pr-fast: \
 #   slow2: stricter-runtime correctness (miri, careful)
 #   slow3: mutation testing
 #
-# CI runs pr-slow as ONE job per OS leg -- the sub-recipes run
+# Cloud workflows run pr-slow as ONE job per OS leg -- the sub-recipes run
 # sequentially within. This trades per-leg wall-clock for fewer
 # orchestration jobs and a flatter PR check graph. Individual sub-
 # recipes are runnable on their own locally:
@@ -2257,7 +2257,7 @@ alias anvil := anvil-pr
 
 # PR tier: every check that should run on every pull request, split
 # into two groups so the fast checks aren't blocked behind the slow
-# ones in CI.
+# ones in cloud workflows.
 [group("anvil")]
 anvil-pr: \
     anvil-pr-fast \
@@ -2286,7 +2286,7 @@ anvil-full: \
 # groups.just. The global `anvil-setup` / `anvil-validate-prereqs`
 # recipes are the catch-all entry points that install / verify everything.
 #
-# CI typically invokes only the per-group setup it needs (e.g. the
+# Cloud workflows typically invoke only the per-group setup it needs (e.g. the
 # `anvil-pr-fast` composite action / step template runs
 # `anvil-pr-fast-setup` rather than the global `anvil-setup`).
 # Local users who want "install everything" run `just anvil-setup`.
@@ -2826,7 +2826,7 @@ anvil-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_
 # is pinned here. The pinning policy:
 #   - On install (`-install` recipes): exactly this version (`=<pin>` for
 #     cargo subcommands, exact ref for rustup toolchains). Pulling
-#     "latest-matching" at install time is a CI reproducibility risk --
+#     "latest-matching" at install time is a cloud-workflow reproducibility risk --
 #     an upstream release between yesterday's green build and today's
 #     PR can break things (cargo-spellcheck 0.15.7's em-dash regression
 #     is the canonical case). The `=` constraint locks the install to

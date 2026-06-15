@@ -5,7 +5,7 @@
 
 # PR tier: every check that should run on every pull request, split
 # into two groups so the fast checks aren't blocked behind the slow
-# ones in CI.
+# ones in cloud workflows.
 [group("anvil")]
 anvil-pr: \
     anvil-pr-fast \
@@ -34,7 +34,7 @@ anvil-full: \
 # groups.just. The global `anvil-setup` / `anvil-validate-prereqs`
 # recipes are the catch-all entry points that install / verify everything.
 #
-# CI typically invokes only the per-group setup it needs (e.g. the
+# Cloud workflows typically invoke only the per-group setup it needs (e.g. the
 # `anvil-pr-fast` composite action / step template runs
 # `anvil-pr-fast-setup` rather than the global `anvil-setup`).
 # Local users who want "install everything" run `just anvil-setup`.

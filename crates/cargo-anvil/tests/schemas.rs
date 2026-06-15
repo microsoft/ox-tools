@@ -15,7 +15,7 @@
 //! validator (`actionlint`, `taplo`, `just`) over the relevant files.
 //!
 //! If the validator isn't installed, the test is skipped — never failed.
-//! In CI we enforce installation via the `anvil-tools-install` recipe;
+//! in cloud workflows we enforce installation via the `anvil-tools-install` recipe;
 //! locally the test suite degrades gracefully.
 //!
 //! See `crates/cargo-anvil/docs/verification.md` for the

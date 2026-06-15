@@ -3,7 +3,7 @@
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # See ../../docs/design/checks.md for the catalog and rationale.
 
-# Each group is one CI job. Within a group, checks run sequentially.
+# Each group is one cloud-workflow job. Within a group, checks run sequentially.
 
 # PR groups
 # ===========================================================================
@@ -36,7 +36,7 @@ anvil-pr-fast: \
 #   slow2: stricter-runtime correctness (miri, careful)
 #   slow3: mutation testing
 #
-# CI runs pr-slow as ONE job per OS leg -- the sub-recipes run
+# Cloud workflows run pr-slow as ONE job per OS leg -- the sub-recipes run
 # sequentially within. This trades per-leg wall-clock for fewer
 # orchestration jobs and a flatter PR check graph. Individual sub-
 # recipes are runnable on their own locally:

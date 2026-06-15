@@ -2,9 +2,9 @@
 
 This document defines how `cargo-anvil` is kept correct over time. The headline mechanism
 is dogfooding — the `microsoft/ox-tools` repo, where cargo-anvil itself lives, uses
-`cargo anvil` to manage its own CI. Every PR that touches the catalog or the
+`cargo anvil` to manage its own cloud workflows. Every PR that touches the catalog or the
 emitters produces a visible diff in `.github/` and `justfiles/anvil/`, then runs through
-the regenerated CI on the same commit. A broken emitter or catalog fails the PR's own
+the regenerated cloud workflows on the same commit. A broken emitter or catalog fails the PR's own
 checks immediately.
 
 See also:
@@ -18,7 +18,7 @@ See also:
 - **Detect regressions on the PR that introduces them.** No "this broke a downstream repo"
   surprises after a release.
 - **Validate the whole pipeline**, not just unit-level behavior: catalog → templates →
-  manifest → emitted CI → CI actually running.
+  manifest → emitted cloud workflows → cloud workflows actually running.
 - **Cover the state machine in [updates.md §5](./design/updates.md#5-the-decision-algorithm)
   exhaustively** — every row of the decision table is exercised by some test.
 - **Keep validation cheap** — most of it runs in the PR pipeline; nothing requires a
@@ -47,7 +47,7 @@ What this validates end-to-end:
 - The catalog renders to valid YAML / TOML / `just`.
 - The manifest's three-checksum state machine produces idempotent output (rerunning
   `update` with no changes is a no-op).
-- Every emitted CI building block actually runs — broken composite actions, broken
+- Every emitted cloud-workflow building block actually runs — broken composite actions, broken
   reusable workflows, broken step templates surface immediately.
 - The full default check catalog is exercised on every PR. ox-tools deliberately enables
   every catalog check (no opt-out stubs) and the default cross-OS matrix (Linux +
@@ -170,7 +170,7 @@ that, the standard `anvil-pr-impl.yml` reusable workflow runs every group, exact
 in any consumer repo.
 
 The wrapper workflow above is the **one** hand-written workflow in ox-tools — it
-bootstraps the dogfood loop. Every other CI artifact is regenerated.
+bootstraps the dogfood loop. Every other cloud workflows artifact is regenerated.
 
 ## 4. Bootstrap and breaking changes
 
@@ -180,7 +180,7 @@ The very first cargo-anvil PR cannot dogfood itself — the binary doesn't exist
 Bootstrap plan:
 
 1. PR #1: lands the binary's skeleton (current state, no `update` logic yet) plus
-   hand-written workflows for the unit and integration tests. ox-tools's CI is still
+   hand-written workflows for the unit and integration tests. ox-tools's cloud workflows is still
    hand-written.
 2. PR #N (first usable `update`): lands the emitter implementation. Run
    `cargo anvil` locally, commit the diff, push. From this point forward
@@ -194,7 +194,7 @@ Two flavors require care:
 - **Manifest-schema bumps.** Migration logic must be in place before any release that
   needs it. The `migration/` fixture exercises old-schema-to-new-schema upgrades.
   Release notes call out the bump.
-- **Renames in the emitted CI surface** (e.g., `anvil-pr-fast` → `anvil-pr-static`).
+- **Renames in the emitted cloud workflows surface** (e.g., `anvil-pr-fast` → `anvil-pr-static`).
   Treated as major-version bumps. The PR introducing the rename is split into two
   commits: (a) implement, (b) `cargo anvil` to regenerate. Downstream repos do
   the same two-step on adoption.
@@ -207,7 +207,7 @@ rename that doesn't round-trip will produce drift on the second run, failing the
 If a PR lands that breaks the regenerate-check (because reviewers missed it), the
 breakage is **not stuck** — every PR builds cargo-anvil from source on its own branch,
 so the fix PR is free to either revert the offending change or land the missing
-regenerated output, and its own CI will pass cleanly.
+regenerated output, and its own cloud workflows will pass cleanly.
 
 What is affected: unrelated PRs that branched off the broken commit will fail their
 regenerate-check, because they inherit the drift through the merge base. They recover
@@ -217,14 +217,14 @@ Procedure:
 
 1. Open a fix PR. Either: (a) revert the offending commit, or (b) commit the missing
    `cargo anvil` output. Either flavor builds the binary from the fix branch
-   and produces a clean `git diff` against its own tree, so CI passes.
+   and produces a clean `git diff` against its own tree, so cloud workflows passes.
 2. Merge.
 3. In-flight PRs rebase to pick up the fix; their regenerate-check passes once their
    merge base is past the fix commit.
 
 ox-tools never depends on the published crates.io version of cargo-anvil for its own
 checks — it always builds from source. So a broken release on crates.io doesn't
-cascade into ox-tools's CI; only a broken `main` does, and only for unrelated
+cascade into ox-tools's cloud workflows; only a broken `main` does, and only for unrelated
 in-flight PRs.
 
 ## 5. Coverage gaps
@@ -267,5 +267,5 @@ Acknowledged limits of this strategy:
 - A small set of "downstream canary" repos in `microsoft/` org that pin cargo-anvil
   to `main` (not to a release) and report failures via issues. Catches regressions
   earlier than the manual release checklist.
-- Pre-release smoke runs of every adopter's CI against a release candidate, gated by
+- Pre-release smoke runs of every adopter's cloud workflows against a release candidate, gated by
   a draft pre-release tag.

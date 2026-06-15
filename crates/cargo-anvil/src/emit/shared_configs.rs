@@ -56,7 +56,7 @@ pub const RUSTFMT_BODY: &str = include_str!("../../templates/regions/rustfmt.tom
 /// Embedded body of the .delta.toml managed region.
 ///
 /// Minimum cargo-delta config covering the impact-scoping inputs used
-/// by the CI emitter.
+/// by the cloud-workflow emitter.
 pub const DELTA_BODY: &str = include_str!("../../templates/regions/delta.toml");
 
 /// Embedded body of the spellcheck.toml managed region.

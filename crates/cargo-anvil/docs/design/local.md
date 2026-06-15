@@ -1,7 +1,7 @@
 # Local Recipe Surface
 
 This document describes the `justfiles/anvil/` tree that anvil writes into a repo, how the
-recipes are organized, and how local invocations differ from CI invocations (spoiler: they
+recipes are organized, and how local invocations differ from cloud workflows invocations (spoiler: they
 don't — that's the design).
 
 See also:
@@ -83,13 +83,13 @@ The cost is a handful of cheap lookups per check, well under a second on a warm 
 
 ### groups.just
 
-One recipe per CI-visible group, named `anvil-<tier>-<group>`. The check-recipe and group-recipe
+One recipe per cloud-workflow-visible group, named `anvil-<tier>-<group>`. The check-recipe and group-recipe
 namespaces are kept disjoint by naming choice: no check is named `<tier>-<group>` for
 any tier × group combination (e.g. the coverage-instrumented test check is named
 `llvm-cov`, not `test`, so that group names like `anvil-pr-test` unambiguously refer to a group recipe).
 
-The `pr-slow` work is split into three independent CI-visible sub-groups
-(`pr-test`, `pr-runtime-analysis`, `pr-mutants`) so they run as parallel CI jobs/stages.
+The `pr-slow` work is split into three independent cloud-workflow-visible sub-groups
+(`pr-test`, `pr-runtime-analysis`, `pr-mutants`) so they run as parallel cloud-workflow jobs/stages.
 A convenience umbrella `anvil-pr-slow` recipe is also provided for local
 use; it invokes the three sub-recipes sequentially. `pr-mutants` (mutants) is
 diff-scoped against the PR base; `scheduled-exhaustive` runs the
@@ -150,7 +150,7 @@ anvil-full: anvil-pr anvil-scheduled
 
 All atomic install recipes are idempotent: they early-skip when the tool is already
 present at or above the pinned version (`_install-tool` uses `cargo install --list`
-plus a `[version]` comparison in pwsh). So calling any composition layer on every CI
+plus a `[version]` comparison in pwsh). So calling any composition layer on every cloud workflows
 run costs nothing on a cache hit.
 
 The full tool-version policy these recipes implement is detailed in §3 below.
@@ -164,7 +164,7 @@ The catalog records, for each cargo subcommand, a **pinned version** (e.g.
 
 - **On install** (`anvil-tool-<bin>-install` writing into `~/.cargo/bin`): the recipe
   installs *exactly* that version (`--version '={{ pin }}'`), never `>=`. Pulling
-  latest-matching at install time is a CI reproducibility risk -- an upstream release
+  latest-matching at install time is a cloud-workflow reproducibility risk -- an upstream release
   between yesterday's green build and today's PR can break things, even though the
   catalog hasn't moved. `cargo-spellcheck 0.15.7`'s em-dash word-boundary regression is
   the canonical example: with `>=0.15.1` the catalog would have silently picked it up,
@@ -175,7 +175,7 @@ The catalog records, for each cargo subcommand, a **pinned version** (e.g.
   reasons (e.g. needing a bugfix the catalog hasn't pinned yet) is not downgraded by
   setup. Their newer version still satisfies the gate; recipes run against it.
 
-This asymmetry -- "install exact, accept newer if already present" -- gives CI
+This asymmetry -- "install exact, accept newer if already present" -- gives cloud workflows
 reproducibility *and* leaves the user in control. Bumping a pin is a deliberate
 catalog edit (changing a variable in `versions.just`), not an upstream-release-triggered
 surprise.
@@ -215,7 +215,7 @@ already present at or above its pin and fails with a one-line install hint other
   install recipe that this check needs. So `anvil-clippy-setup` brings up
   `cargo-clippy` (a default-toolchain component) and `rustc`, and nothing else.
 - `anvil-<group>-setup installer="install"` — depends on every per-check setup
-  in the group. CI matrix jobs call this so a `pr-fast` leg never installs
+  in the group. cloud workflows matrix jobs call this so a `pr-fast` leg never installs
   cargo-mutants.
 - `anvil-<tier>-setup installer="install"` — depends on every per-group setup
   in the tier. Local "I want to run the whole PR tier" convenience.
@@ -231,7 +231,7 @@ Mirror `*-validate-prereqs` recipes exist at every composition layer
 prerequisites without installing them.
 
 The atomic installs are fully idempotent (early-skip on installed >= pin), so calling
-any composition layer on every CI run is cheap on a cache hit. There is intentionally
+any composition layer on every cloud-workflow run is cheap on a cache hit. There is intentionally
 no separate "install-missing" variant: every install recipe IS the install-missing
 recipe.
 
@@ -268,7 +268,7 @@ install recipe can run:
   system package. Every backend's setup composite/template installs it via cargo as
   a one-shot before calling any catalog recipe.
 - **`pwsh`** (PowerShell Core) -- used by every `[script("pwsh")]` recipe in the
-  catalog. Preinstalled on every relevant CI runner (GH-hosted
+  catalog. Preinstalled on every relevant cloud-workflow runner (GH-hosted
   Linux/Windows/macOS, Microsoft-hosted ADO agents). On a developer machine
   without pwsh, `anvil-tool-pwsh-validate-prereqs` fails with a per-OS install
   hint pointing at <https://github.com/PowerShell/PowerShell>.
@@ -335,7 +335,7 @@ nightly to msrustup").
 A handful of catalog checks need nightly Rust: `fmt`, `udeps`, `miri`, `careful`, and
 `check-external-types`. We **pin** the nightly snapshots used by these checks rather than
 floating bare `+nightly`. Pinning eliminates "rustup update on Tuesday broke main on
-Wednesday" — every CI run uses the same nightly until we deliberately bump the pin.
+Wednesday" — every cloud-workflow run uses the same nightly until we deliberately bump the pin.
 
 `fmt` is on nightly because the catalog's `rustfmt.toml` opts into `unstable_features`
 to get import grouping (`imports_granularity = "Module"`, `group_imports =
@@ -383,7 +383,7 @@ check actually validates.
 ## 4. Impact-scoping pass-through env vars
 
 Every check recipe whose work is per-crate accepts an optional pass-through env var
-that the CI wiring populates from the `anvil-impact` building block. There are three
+that the cloud-workflow wiring populates from the `anvil-impact` building block. There are three
 such env vars, one per cargo-delta tier:
 
 | Env var                      | Bucket    | What recipes do with it                                                                       |
@@ -393,7 +393,7 @@ such env vars, one per cargo-delta tier:
 | `ANVIL_INCLUDE_REQUIRED`  | required  | Same semantics as `ANVIL_INCLUDE_AFFECTED`, but consumed by recipes that need transitive dep graph in scope (doc-build, cargo-hack, udeps). |
 
 Each var holds either the literal sentinel `--skip` (the tier is empty for this PR), or
-a pre-built argument string like `--package alpha --package beta`. The CI wiring sets
+a pre-built argument string like `--package alpha --package beta`. The cloud-workflow wiring sets
 exactly one form; local invocations leave the vars unset, and recipes fall back to
 `--workspace`.
 
@@ -431,18 +431,18 @@ changes when scoping is disabled.
 (typically a docs-only PR or a PR touching only files cargo-delta's
 `file_exclude_patterns` ignore). It is not a valid cargo argument, so there is no risk
 of collision with a real package name. Recipes test for it with `[ "$VAR" = "--skip" ]`
-and exit 0 cleanly, keeping the CI job green while signalling that nothing in that tier
+and exit 0 cleanly, keeping the cloud-workflow job green while signalling that nothing in that tier
 needed to run.
 
 This separation is what makes the wiring layer durably structural: "which checks can
 no-op when nothing in the relevant tier is affected" is a per-check property living in
 the catalog/recipe, not in the wiring layer. Moving a check between buckets is a pure
-catalog change; the CI templates always thread all three vars and never gate jobs on
+catalog change; the cloud workflow templates always thread all three vars and never gate jobs on
 their values.
 
 ### 4.2 Local impact-scoped runs
 
-Not the default. To preview what CI would skip, run cargo-delta manually and export the
+Not the default. To preview what cloud workflows would skip, run cargo-delta manually and export the
 env vars:
 
 ```sh
@@ -453,7 +453,7 @@ just anvil-pr-test
 
 A wrapper recipe to compute and export all three vars in one shot is left to v2: it has
 subtle git-state interactions and the manual flow is good enough for the rare case a
-developer actually wants to reproduce CI scoping locally.
+developer actually wants to reproduce cloud workflows scoping locally.
 
 ## 5. Daily driver
 
@@ -467,7 +467,7 @@ anvil OK
 
 `anvil` is an alias for `anvil-pr` (set in the managed `Justfile` region). All three tiers
 (`anvil-pr`, `anvil-scheduled`, `anvil-full`) are first-class -- locally reproducible with
-exactly the same arguments CI uses, because CI invokes the same `just` recipes.
+exactly the same arguments cloud workflows uses, because cloud workflows invokes the same `just` recipes.
 
 ## 6. No-tooling fallback
 

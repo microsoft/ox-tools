@@ -18,10 +18,10 @@ user-visible shape of the tool. Detail lives in companion documents:
 ## 1. Problem
 
 Across the surveyed Rust repos (`oxidizer`, `oxidizer-github`, `ox-tools`, `ox-tools-gh`,
-`assistants-oxide`, `ox-docs`) the build/test/CI infrastructure is conceptually similar but
+`assistants-oxide`, `ox-docs`) the build/test/cloud workflows infrastructure is conceptually similar but
 implemented six different ways:
 
-| Repo | CI | Justfile shape | Toolchain | Notable specifics |
+| Repo | cloud workflows | Justfile shape | Toolchain | Notable specifics |
 |------|----|----------------|-----------|-------------------|
 | `oxidizer`         | ADO 1ESPT (`SubstratePT`) | 500-line monolith + `just_mutants.just` | `ms-prod-1.93` | Stage flags (`enableStages`), `cargo-aprz`, stable-API checks |
 | `oxidizer-github`  | GitHub Actions            | Modular `justfiles/{basic,coverage,format,setup,spelling}.just` + `constants.env` | `1.93` | `cargo-delta` impact-scoped builds, sticky semver comments, composite `setup` action |
@@ -45,14 +45,14 @@ missed, and onboarding new Rust repos requires copying-and-praying.
 1. **One opinionated build profile** for Rust repos, with sane defaults distilled from the
    strongest patterns observed across the existing repos.
 2. **Two tiers**: `pr` (blocking on every pull request) and `scheduled` (slow, runs on a schedule).
-3. **Both CI backends** — GitHub Actions and Azure DevOps Pipelines — generated from the same
+3. **Both cloud-workflow backends** — GitHub Actions and Azure DevOps Pipelines — generated from the same
    source of truth. The user picks one or both per repo via a CLI flag.
 4. **Compliance preservation**: ADO pipelines that must `extends:` 1ESPT/SubstratePT continue to
    do so. The tool's emitted templates contain no references to those harnesses; the user's
    root pipeline does the wrapping. See [ado.md](./ado.md).
-5. **Local/CI parity at every level**: every individual check, every group of checks, and the
+5. **Local/cloud workflows parity at every level**: every individual check, every group of checks, and the
    full tier are all reproducible locally with a single `just` invocation, using the exact same
-   arguments CI uses. The three commands `just anvil-pr`, `just anvil-scheduled`, and
+   arguments cloud workflows uses. The three commands `just anvil-pr`, `just anvil-scheduled`, and
    `just anvil-full` (= pr + scheduled) are first-class local entry points.
 6. **Plain-cargo fallback**: a developer with only `cargo` installed (no `just`, no
    `cargo-anvil`) can still build and run tests.
@@ -67,22 +67,22 @@ missed, and onboarding new Rust repos requires copying-and-praying.
 - Replacing 1ESPT, SubstratePT, CloudBuild, or any other compliance/release pipeline. anvil's
   emitted templates contain no references to those harnesses; users wrap anvil's stages
   template in their compliance-extending pipeline themselves. See [ado.md](./ado.md).
-- Building a general-purpose CI compiler/IR. We share **check semantics**, not CI features.
+- Building a general-purpose cloud workflows compiler/IR. We share **check semantics**, not cloud workflows features.
 - Owning `.cargo/config.toml`, `rust-toolchain.toml`, or workspace layout in `Cargo.toml`.
 - Installing the Rust toolchain. msrustup owns it on 1ESPT; the runner image owns it on
   GitHub-hosted runners; the user owns it locally. The tool validates `rustc` version at
   recipe time and produces a clean failure when it doesn't meet the catalog minimum.
   Future work: warn (not fail) when the locally-installed toolchain drifts materially
-  from the version the catalog targets, so local results stay predictive of CI.
+  from the version the catalog targets, so local results stay predictive of cloud workflows.
 - Managing exact tool versions on the user's behalf — we enforce minimums only. See
   [local.md §3](./local.md#3-tool-versions-and-installation).
 - Hosting a service. The tool is a CLI binary; updates ship via crates.io.
-- Acting as a runtime: the tool emits `just` recipes and CI building blocks, then exits.
-  It is **not** invoked at build/test/CI time. `just` is the runtime. (A narrow exception
-  may be made in the future for runtime subcommands tightly coupled to CI execution —
+- Acting as a runtime: the tool emits `just` recipes and cloud-workflow building blocks, then exits.
+  It is **not** invoked at build/test/cloud workflows time. `just` is the runtime. (A narrow exception
+  may be made in the future for runtime subcommands tightly coupled to cloud workflows execution —
   e.g. coverage gating — but the generator stance remains the default.)
 - Destructive operations: `cargo anvil` never deletes files. Removing a previously
-  configured CI backend is a manual `rm -rf` by the user.
+  configured cloud-workflow backend is a manual `rm -rf` by the user.
 
 ## 4. Guiding Principle
 
@@ -91,9 +91,9 @@ missed, and onboarding new Rust repos requires copying-and-praying.
 Corollaries that drive every section below:
 
 - The tool's only job is to author and update files. It is not on the local-build hot path or in
-  the CI graph at runtime.
-- The local daily-driver is `just anvil` (and friends). Those recipes call `cargo …` directly. CI
-  jobs invoke the same `just` recipes. Local and CI are bit-identical because they share one
+  the cloud-workflow graph at runtime.
+- The local daily-driver is `just anvil` (and friends). Those recipes call `cargo …` directly. cloud workflows
+  jobs invoke the same `just` recipes. Local and cloud-workflow runs are bit-identical because they share one
   implementation in the imported `.just` files.
 - Drift detection lives inside the files themselves (per-file checksums and per-managed-region
   checksums). There is no parallel metadata file. See [updates.md](./updates.md).
@@ -101,7 +101,7 @@ Corollaries that drive every section below:
   config files (`deny.toml`, `[workspace.lints]` in the workspace `Cargo.toml`, and `[lints]`
   in each crate's `Cargo.toml`, plus `.delta.toml` and `rustfmt.toml`). Outside those sections,
   the user's content is preserved verbatim. Everything else is in tool-owned files under
-  `justfiles/anvil/` and the backend-specific CI directories.
+  `justfiles/anvil/` and the backend-specific cloud workflows directories.
 
 ## 5. User Experience
 
@@ -130,12 +130,12 @@ The full per-item decision table lives in [updates.md](./updates.md).
 sync with the binary's current templates and all managed content matched, ignoring disabled
 items"; exit code 1 means "something is out of date or user-modified."
 
-`--backend <name>` is a repeatable flag controlling which CI backend(s) get emitted. Valid
+`--backend <name>` is a repeatable flag controlling which cloud-workflow backend(s) get emitted. Valid
 backend names today are `github` and `ado`; the flag is repeatable (`--backend github
 --backend ado`) so that adding a third backend in the future doesn't require new CLI
 syntax. If `--backend` is omitted, the tool autodetects from the `origin` git remote URL
 (`github.com` → `github`; `dev.azure.com` / `*.visualstudio.com` → `ado`). `--no-backends`
-is valid and useful for repos that want only the local `just` setup with no CI files.
+is valid and useful for repos that want only the local `just` setup with no cloud workflows files.
 `update` never deletes files; to stop using a backend the user removes its directory by
 hand and reruns without that backend.
 
@@ -154,7 +154,7 @@ anvil OK
 `anvil` is an alias for `anvil-pr`. Both are plain `just` recipes (not wrappers around
 `cargo anvil`). The PR tier is made up of a small set of *check groups* — each group is a
 `just` recipe that runs the individual checks belonging to it. Groups are the level at which
-CI parallelizes. See [checks.md](./checks.md) for the group → check mapping and
+cloud workflows parallelizes. See [checks.md](./checks.md) for the group → check mapping and
 [local.md](./local.md) for the recipe tree.
 
 Other tier entry points:
@@ -165,7 +165,7 @@ Other tier entry points:
 
 A user with only `just` installed (no `cargo-anvil`) can run any check, any group, or any tier
 without ever invoking the tool. `cargo-anvil` is only required by the maintainer who wants to
-update the recipes or CI building blocks.
+update the recipes or cloud-workflow building blocks.
 
 ### 5.4 No-tooling fallback
 
@@ -255,13 +255,13 @@ Detail on each host:
 - **`rustfmt.toml`** — created with the opinionated baseline if absent; managed region at the
   end of the file. The most contested opinion in the catalog; users who want to keep their own
   formatting opt the file out via the empty-stub mechanism in [updates.md](./updates.md).
-- **`.delta.toml`** — cargo-delta configuration that drives impact-scoped CI runs. Created if
+- **`.delta.toml`** — cargo-delta configuration that drives impact-scoped cloud-workflow runs. Created if
   absent. Region at the end of the file. Disabling the region opts the repo out of impact
   scoping entirely. See [checks.md](./checks.md#impact-scoping) and the per-backend wiring in
   [github.md](./github.md) / [ado.md](./ado.md).
 - **`rust-toolchain.toml`** and **`.cargo/config.toml`** — never touched. Read-only inputs
   used by `anvil-tool-rustc-validate-prereqs` to validate the user's `rustc` version
-  against the catalog minimum. The CI building blocks do not install Rust; that is the
+  against the catalog minimum. the cloud workflow building blocks do not install Rust; that is the
   user's pipeline's job
   (msrustup in 1ESPT, rustup on GH runners).
 
@@ -332,7 +332,7 @@ adopters report friction.
 
 ### 8.3 Cross-OS test matrices
 
-CI fans out the catalog across operating systems and architectures. The default matrix
+cloud workflows fans out the catalog across operating systems and architectures. The default matrix
 differs by backend:
 
 **GitHub backend (default: four legs).** GH ships Microsoft-hosted ARM runners
@@ -348,7 +348,7 @@ pipeline.
 | Group                                                       | OS / arch scope (default)              | Rationale                                                                                                                                          |
 |-------------------------------------------------------------|----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
 | `pr-fast`, `scheduled-advisories`                             | All legs above                         | Contain compile-sensitive checks (clippy, doc-build, udeps, semver-check, external-types) that only see the host's compiled crate graph -- cfg-gated code is invisible to a single-leg run. Text/metadata checks running redundantly is cheaper than splitting jobs. |
-| `pr-test`, `pr-runtime-analysis`, `scheduled-test`                     | All legs above                         | Where compile-time and runtime OS / arch bugs actually surface. The three `pr-slow*` groups run as parallel CI jobs (split out from a former single `pr-slow`) for shorter wall-clock per leg. |
+| `pr-test`, `pr-runtime-analysis`, `scheduled-test`                     | All legs above                         | Where compile-time and runtime OS / arch bugs actually surface. The three `pr-slow*` groups run as parallel cloud-workflow jobs (split out from a former single `pr-slow`) for shorter wall-clock per leg. |
 | `pr-mutants`                                                    | GH: Linux x86_64 + Windows x86_64 + Linux aarch64 (windows-arm self-skips). ADO: Linux x86_64 + Windows x86_64 | Diff-scoped mutation testing. cargo-mutants doesn't build on `aarch64-pc-windows-msvc`; the recipe self-skips so the windows-arm leg is a no-op. |
 | `scheduled-exhaustive`                                       | Linux x86_64 + Windows x86_64 | Full `cargo-mutants` / `cargo-hack` / `bench`. cargo-mutants doesn't build on `aarch64-pc-windows-msvc`; rather than splitting the matrix to add an ARM-Linux leg for cargo-hack and bench, the whole group is x86-only. Adopters with ARM-specific concerns extend the matrix in their root workflow. |
 
@@ -359,7 +359,7 @@ identity. See [github.md §4](./github.md#4-owned-reusable-workflows) and
 [ado.md §4](./ado.md#4-owned-stages-templates) for full details.
 
 Locally there is no matrix — `just anvil-pr-slow` runs against whatever OS the developer
-is on. CI fan-out lives entirely in the owned wiring layer (the reusable workflow / stages
+is on. cloud workflows fan-out lives entirely in the owned wiring layer (the reusable workflow / stages
 template), so users don't write per-OS jobs.
 
 cargo-delta impact runs **per OS family** (one stage on Linux, one on Windows) and

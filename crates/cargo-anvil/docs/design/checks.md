@@ -8,16 +8,16 @@ See also:
 
 - [design.md](./design.md) for the overall principles and CLI shape.
 - [local.md](./local.md) for how the catalog is exposed as `just` recipes.
-- [github.md](./github.md) / [ado.md](./ado.md) for how groups map to CI building blocks.
+- [github.md](./github.md) / [ado.md](./ado.md) for how groups map to cloud-workflow building blocks.
 
 ## 1. Groups and tiers
 
 The check catalog is hardcoded in the binary. Each check belongs to one or more *groups*, and
-each group belongs to exactly one *tier*. Groups are the unit of CI parallelization (one CI
+each group belongs to exactly one *tier*. Groups are the unit of cloud workflows parallelization (one cloud workflows
 job per group) and the unit of local invocation through `just` (one `just` recipe per group).
-A user (or CI) never has to enumerate individual checks — they operate at the group level.
+A user (or cloud workflows) never has to enumerate individual checks — they operate at the group level.
 
-The **single-tier-per-group** rule is deliberate: if you see `just anvil-pr-fast` in CI logs,
+The **single-tier-per-group** rule is deliberate: if you see `just anvil-pr-fast` in cloud workflows logs,
 you know it is a PR-tier check; if you see `just anvil-scheduled-exhaustive`, you know it is
 scheduled-only. This makes "what gets executed" trivially answerable from the group name.
 
@@ -96,7 +96,7 @@ flowchart LR
     classDef check fill:#f3e8ff,stroke:#6f42c1,stroke-width:1px,font-size:10px;
 ```
 
-(Tier nodes are the user-facing entry points; group nodes are the unit of CI parallelization; check nodes are the individual `anvil-<check>` recipes. `pr-test`, `pr-runtime-analysis`, and `pr-mutants` were split out from a single `pr-slow` group so the three workloads run as parallel CI jobs per OS leg rather than sequentially in one job. Locally, `just anvil-pr-slow` is an umbrella recipe that invokes the three sub-recipes in order, and `just anvil` is an alias for `just anvil-pr`.)
+(Tier nodes are the user-facing entry points; group nodes are the unit of cloud workflows parallelization; check nodes are the individual `anvil-<check>` recipes. `pr-test`, `pr-runtime-analysis`, and `pr-mutants` were split out from a single `pr-slow` group so the three workloads run as parallel cloud-workflow jobs per OS leg rather than sequentially in one job. Locally, `just anvil-pr-slow` is an umbrella recipe that invokes the three sub-recipes in order, and `just anvil` is an alias for `just anvil-pr`.)
 
 ### PR tier (4 groups)
 
@@ -157,21 +157,21 @@ that provided the strongest version of the check.
 | `doc-build`                    | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps` | oxidizer-github |
 | `readme-check`                 | `cargo doc2readme --check` for each crate that opts in (presence of a `[package.metadata.doc2readme]` table) | oxidizer-github |
 | `spellcheck`                   | `cargo spellcheck check --code 1`                         | oxidizer-github |
-| `pr-title`                     | Conventional-Commits regex applied to the title in the `PR_TITLE` env var. Skipped silently when the env var is unset (intermediate local runs, scheduled-tier builds). Written as a `[script("pwsh")]` recipe (the one check that needs scripting; see [design.md §8.3](./design.md#83-cross-os-test-matrices)). CI wiring: GitHub's per-group composite action reads `${{ inputs.pr_title }}` populated from `${{ github.event.pull_request.title }}` in the reusable PR workflow; ADO's `group.yml` step template injects `PR_TITLE: $(System.PullRequest.Title)` on every group (empty on non-PR builds, where the recipe no-ops). | oxidizer-github |
+| `pr-title`                     | Conventional-Commits regex applied to the title in the `PR_TITLE` env var. Skipped silently when the env var is unset (intermediate local runs, scheduled-tier builds). Written as a `[script("pwsh")]` recipe (the one check that needs scripting; see [design.md §8.3](./design.md#83-cross-os-test-matrices)). cloud-workflow wiring: GitHub's per-group composite action reads `${{ inputs.pr_title }}` populated from `${{ github.event.pull_request.title }}` in the reusable PR workflow; ADO's `group.yml` step template injects `PR_TITLE: $(System.PullRequest.Title)` on every group (empty on non-PR builds, where the recipe no-ops). | oxidizer-github |
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
-| `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` (deliberately NOT `--all-targets`: with it, a dep listed in both `[dependencies]` and `[dev-dependencies]` and used only by tests is reported as "all used" because the dev-deps target satisfies the lookup, masking the unused entry in main `[dependencies]`. Restricting to the default targets matches main repo CI's check and surfaces the real bug.) | oxidizer, oxidizer-github |
-| `semver-check`                 | `cargo semver-checks` per library crate (per-package because `--workspace` fails on bin-only members, and we tolerate "not found in registry" / "no library targets found" for unpublished or bin→lib-transition crates). **Advisory only**: findings do not fail the recipe (breaking changes between unreleased commits are normal — the major-version bump happens at release time, not on every PR). Instead the recipe writes a markdown body to `target/anvil/comments/semver.md` when there are findings and removes the file when the tree is clean; CI wiring turns presence/absence into a sticky PR comment (see §6 below). | oxidizer-github |
+| `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` (deliberately NOT `--all-targets`: with it, a dep listed in both `[dependencies]` and `[dev-dependencies]` and used only by tests is reported as "all used" because the dev-deps target satisfies the lookup, masking the unused entry in main `[dependencies]`. Restricting to the default targets matches main repo cloud workflows' check and surfaces the real bug.) | oxidizer, oxidizer-github |
+| `semver-check`                 | `cargo semver-checks` per library crate (per-package because `--workspace` fails on bin-only members, and we tolerate "not found in registry" / "no library targets found" for unpublished or bin→lib-transition crates). **Advisory only**: findings do not fail the recipe (breaking changes between unreleased commits are normal — the major-version bump happens at release time, not on every PR). Instead the recipe writes a markdown body to `target/anvil/comments/semver.md` when there are findings and removes the file when the tree is clean; cloud-workflow wiring turns presence/absence into a sticky PR comment (see §6 below). | oxidizer-github |
 | `external-types`               | `cargo +<pinned-nightly-rustdoc-schema> check-external-types --manifest-path` per library crate (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are skipped). Nightly is pinned narrowly to the rustdoc JSON schema version the tool expects (`rust_nightly_external_types` in `versions.just`); the pin is bumped alongside any cargo-check-external-types upgrade. With the pin in place, the check is deterministic and PR-suitable. | oxidizer-github |
 | `aprz`                         | `cargo aprz check` — third-party risk analysis published on crates.io | oxidizer |
 
 ### `pr-slow`
 
-The PR-tier slow checks are split into three independent CI-visible groups —
+The PR-tier slow checks are split into three independent cloud-workflow-visible groups —
 `pr-test`, `pr-runtime-analysis`, `pr-mutants` — that each run as their own job (GitHub) or
 stage (ADO) in parallel. An umbrella `anvil-pr-slow` recipe is also provided in
 `groups.just` for local use; it invokes the three sub-recipes sequentially so
-adopters can type one command to run "everything slow" without needing the CI
+adopters can type one command to run "everything slow" without needing the cloud workflow
 matrix overhead.
 
 #### `pr-test` (tests + coverage)
@@ -182,7 +182,7 @@ matrix overhead.
 | `doc-test`   | `cargo test --doc --workspace --all-features --locked` (nextest does not run doctests, so this is a separate cargo-test invocation) | oxidizer, oxidizer-github |
 | `examples`   | `cargo build --workspace --examples --all-features --locked` -- verifies that example targets compile. Running each example is intentionally not part of the check (examples are not test scaffolding; their runtime behavior isn't part of what we gate on). | oxidizer, oxidizer-github |
 
-This is the same set of checks that used to live in the standalone `pr-test` group; merging into `pr-test` removes one CI job from the matrix without changing what runs.
+This is the same set of checks that used to live in the standalone `pr-test` group; merging into `pr-test` removes one cloud-workflow job from the matrix without changing what runs.
 
 #### `pr-runtime-analysis` (stricter-runtime correctness)
 
@@ -203,7 +203,7 @@ The mutants check requires a base ref: locally the recipe resolves `BASE_REF` (i
 
 Same three checks as `pr-test` -- `llvm-cov`, `doc-test`, `examples` -- and the same
 recipe invocations, with the same output paths (`target/coverage/lcov.info` and
-`target/coverage/cobertura.xml`). The recipe is shared between tiers; only the CI
+`target/coverage/cobertura.xml`). The recipe is shared between tiers; only the cloud workflow
 wiring around it changes (PR uploads lcov to Codecov / cobertura to ADO from each
 PR run; scheduled does the same against `main` plus flags the upload as `scheduled` in
 Codecov so the two streams stay distinguishable in the UI). Two purposes for re-running
@@ -240,15 +240,15 @@ commit can't surface anything new.)
 | `cargo-hack` powerset | `cargo hack --workspace --feature-powerset --depth 2 check`                                                  | oxidizer, oxidizer-github |
 | `bench`               | `cargo bench --workspace --all-features --no-run` ＋ a single-iteration smoke benchmark for each bench target | oxidizer |
 
-## 3. Per-check vs grouped CI execution
+## 3. Per-check vs grouped cloud workflows execution
 
-Each *group* is one CI job. Within a job, the checks belonging to the group run sequentially
+Each *group* is one cloud-workflow job. Within a job, the checks belonging to the group run sequentially
 as the `just` recipe defines them. A failure in any check fails the group; the per-check log
-lines are visible in the job log but the CI surface (the green/red pill in the PR view) is
+lines are visible in the job log but the cloud workflow surface (the green/red pill in the PR view) is
 per-group.
 
-This is the deliberate middle ground between "one giant CI step running `just anvil-pr`"
-(loses all per-check structure, one red X for any failure) and "twenty-five individual CI
+This is the deliberate middle ground between "one giant cloud workflows step running `just anvil-pr`"
+(loses all per-check structure, one red X for any failure) and "twenty-five individual cloud workflows
 steps" (unmaintainable YAML, fragile, and the tool would have to re-emit the workflow file
 every time the catalog changes). Groups are stable units of meaning the user can talk about;
 checks are implementation details that can churn.
@@ -256,7 +256,7 @@ checks are implementation details that can churn.
 ## 4. What scheduled does and does not re-run
 
 The rule is simple: **a check belongs in scheduled iff its outcome can change without a
-commit to this repo.** Re-running everything else on the scheduled tier would just burn CI time
+commit to this repo.** Re-running everything else on the scheduled tier would just burn cloud workflows time
 duplicating PR signal.
 
 What that means concretely:
@@ -290,7 +290,7 @@ env vars, and the recipes in `checks.just` consume them.
 
 Each catalog check is tagged with one of four buckets:
 
-| Bucket    | Env var consumed              | Behavior in CI                                                              | Behavior locally (env unset)        |
+| Bucket    | Env var consumed              | Behavior in cloud workflows                                                              | Behavior locally (env unset)        |
 |-----------|-------------------------------|-----------------------------------------------------------------------------|--------------------------------------|
 | modified  | `ANVIL_INCLUDE_MODIFIED`   | If `--skip`: exit 0. Otherwise run unconditionally (tool is workspace-wide). | Run unconditionally.                 |
 | affected  | `ANVIL_INCLUDE_AFFECTED`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
@@ -324,11 +324,11 @@ external risk DB. These ignore the env vars and always run.
 
 The sentinel `--skip` is a magic string that cannot be a valid cargo argument, so there
 is no collision with real package names. Recipes test for it with
-`[ "$VAR" = "--skip" ]` and exit 0 to keep the CI job green while signalling that
+`[ "$VAR" = "--skip" ]` and exit 0 to keep the cloud-workflow job green while signalling that
 nothing in that tier needed to run.
 
 The recipe-side mechanics are in
-[local.md §4](./local.md#4-impact-scoping-pass-through-env-vars). The CI-side wiring (the
+[local.md §4](./local.md#4-impact-scoping-pass-through-env-vars). the cloud workflow-side wiring (the
 `anvil-impact` building block, how downstream jobs consume the include vars) is in
 [github.md](./github.md#impact-scoping) and [ado.md](./ado.md#impact-scoping).
 
@@ -358,16 +358,16 @@ convention:
    removes that file. The body's first line is an invisible HTML marker
    (`<!-- anvil-<NAME> -->`) so a backend without a native "sticky comment header"
    concept (ADO) can find an existing thread to update.
-2. **CI wiring upserts a sticky PR comment**. After each PR job that runs an
-   advisory-emitting recipe, anvil's CI templates inspect the convention directory
+2. **cloud-workflow wiring upserts a sticky PR comment**. After each PR job that runs an
+   advisory-emitting recipe, anvil's cloud workflows templates inspect the convention directory
    and:
    - if `<NAME>.md` exists, upsert a sticky PR comment headed `anvil-<NAME>` with the
      file's contents;
    - if `<NAME>.md` does not exist (the recipe removed it because the tree is now
      clean), clear any prior sticky comment with that header.
-3. **One canonical leg per matrix**. CI runs the same recipe on multiple OS legs; the
+3. **One canonical leg per matrix**. cloud-workflow runs the same recipe on multiple OS legs; the
    upsert/clear steps run only on the x86_64 Linux leg so the matrix doesn't race on the
-   same PR thread. The recipe still writes the file on every leg (local-vs-CI parity).
+   same PR thread. The recipe still writes the file on every leg (local-vs-cloud workflows parity).
 
 Backend wiring:
 
@@ -385,7 +385,7 @@ Backend wiring:
 
 Local runs (no PR context) just write/remove the file; nothing posts it. This keeps the
 file useful as a self-service diagnostic and makes the behaviour bit-identical between
-local and CI.
+local and cloud workflows.
 
 Currently `semver-check` is the only advisory-emitting recipe. The convention extends
 to any future check that surfaces non-blocking findings (e.g. coverage deltas, security

@@ -1,7 +1,7 @@
 # GitHub Actions Integration
 
 This document describes what `cargo anvil --backend github` emits for GitHub
-Actions, and how a repo wires those files into its own CI.
+Actions, and how a repo wires those files into its own cloud workflows.
 
 anvil emits three layers, all owned by anvil with the standard owned-file flow (edit →
 dirty → `.anvil-proposed` sibling on next update). The split is by what users actually
@@ -262,7 +262,7 @@ remove if they have specific reasons:
 
 - `concurrency: { group: anvil-pr-${{ github.head_ref || github.ref }}, cancel-in-progress: true }`
   on `anvil-pr.yml`. Prevents two anvil runs from racing on the same PR
-  branch — the newer push cancels the older. Removing it costs CI minutes but
+  branch — the newer push cancels the older. Removing it costs cloud workflows minutes but
   is otherwise harmless.
 - `secrets: inherit` on the `anvil:` job. Forwards the calling repo's
   secrets (notably `CODECOV_TOKEN`) into the reusable workflow without each

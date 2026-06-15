@@ -116,7 +116,7 @@ rust.trivial_numeric_casts = "warn"
 rust.unsafe_op_in_unsafe_fn = "warn"
 rust.unused_lifetimes = "warn"
 # `unexpected_cfgs` is on-by-default at warn since Rust 1.80; combined
-# with the catalog's `-D warnings` CI policy, any custom cfg name
+# with the catalog's `-D warnings` cloud-workflow policy, any custom cfg name
 # becomes a hard build failure. Pre-declare the cfgs that
 # `cargo llvm-cov` sets so the recommended coverage-exclusion pattern
 # `#[cfg_attr(coverage_nightly, coverage(off))]` works out of the box.

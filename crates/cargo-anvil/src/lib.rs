@@ -12,15 +12,15 @@
 
 //! # cargo-anvil
 //!
-//! Opinionated, unified Rust build/CI scaffolding for GitHub Actions and
-//! Azure DevOps Pipelines. One opinionated check catalog, two CI
+//! Opinionated, unified Rust build and cloud-workflow scaffolding for GitHub Actions and
+//! Azure DevOps Pipelines. One opinionated check catalog, two cloud workflows
 //! backends, generated from the same source of truth.
 //!
 //! ## What it does
 //!
 //! `cargo-anvil` writes files. `just` runs them. The repo composes
 //! everything. The tool itself is not on the local-build hot path or in
-//! the CI graph at runtime — it is a code generator that you re-run when
+//! the cloud-workflow graph at runtime — it is a code generator that you re-run when
 //! you want to upgrade the opinionated baseline.
 //!
 //! Each run of `cargo anvil` writes:
@@ -32,7 +32,7 @@
 //!   `[workspace.lints]` in dotted-key form, plus a `[lints] workspace =
 //!   true` region in each workspace member.
 //! - Managed regions in `deny.toml`, `rustfmt.toml`, and `.delta.toml`.
-//! - For each selected CI backend (`github`, `ado`), the full set of
+//! - For each selected cloud-workflow backend (`github`, `ado`), the full set of
 //!   composite actions / step templates, reusable workflows / stages
 //!   templates, and root workflows / pipelines.
 //!
@@ -61,7 +61,7 @@
 //!
 //! - `--backend <name>` — repeatable. Valid values: `github`, `ado`. If
 //!   omitted, the backend is autodetected from the `origin` git remote.
-//! - `--no-backends` — emit only local files; skip every CI backend.
+//! - `--no-backends` — emit only local files; skip every cloud-workflow backend.
 //!   Mutually exclusive with `--backend`.
 //! - `--dry-run` — analyze without writing. Exits 1 if anything would be
 //!   written or proposed.
@@ -77,7 +77,7 @@
 //! $ just anvil-full     # both, sequentially
 //! ```
 //!
-//! CI invokes the same recipes. Local and CI are bit-identical because
+//! cloud workflows invokes the same recipes. Local and cloud-workflow runs are bit-identical because
 //! they share one implementation in the imported `.just` files.
 //!
 //! ## Customization

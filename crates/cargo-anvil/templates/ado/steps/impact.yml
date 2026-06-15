@@ -29,7 +29,7 @@ steps:
       #     `origin/release`).
       #   * On PR build-validation runs, SYSTEM_PULLREQUEST_TARGETBRANCH
       #     is set to the unqualified target branch (e.g. `main`).
-      #   * Otherwise fall back to `master` so manual / branch CI runs
+      #   * Otherwise fall back to `master` so manual / branch cloud-workflow runs
       #     produce a sensible diff against the default branch.
       # The ADO macro form `$(System.PullRequest.TargetBranch)` is unsafe
       # here: when the variable is unset (non-PR builds), ADO leaves the

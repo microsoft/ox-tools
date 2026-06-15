@@ -8,11 +8,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors = ["The Oxidizer Project Authors"]
-description = "Opinionated, unified Rust build/CI scaffolding for GitHub Actions and Azure DevOps"
+description = "Opinionated, unified Rust build and cloud-workflow scaffolding for GitHub Actions and Azure DevOps"
 readme = "README.md"
 repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil"
 homepage = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil"
-keywords = ["cargo", "subcommand", "ci", "just", "github-actions"]
+keywords = ["cargo", "subcommand", "workflows", "just", "github-actions"]
 categories = ["development-tools::cargo-plugins"]
 
 [package.metadata.cargo_check_external_types]

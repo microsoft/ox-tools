@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! `cargo-anvil`: opinionated, unified Rust build/CI scaffolding.
+//! `cargo-anvil`: opinionated, unified Rust build and cloud-workflow scaffolding.
 
 use std::process::ExitCode;
 
