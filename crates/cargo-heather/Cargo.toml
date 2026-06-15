@@ -22,12 +22,6 @@ all-features = true
 [package.metadata.cargo_check_external_types]
 allowed_external_types = []
 
-# cargo-heather ships a hand-curated README with its own logo and layout
-# (not generated from lib doc-comments via the shared template). Opt out
-# of the catalog-wide doc2readme check so anvil-readme-check skips it.
-[package.metadata.ox-gen-readme]
-disable = true
-
 [[bin]]
 name = "cargo-heather"
 path = "src/bin/cargo-heather/main.rs"

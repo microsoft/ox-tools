@@ -193,19 +193,19 @@ is supplied.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-heather">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG7aSTFqFBwxtGyRr4P7G4gh_G-uvsHgUSHrXG3xe3w-XHAcrYWSBg21jYXJnby1oZWF0aGVyZTAuMi4xbWNhcmdvX2hlYXRoZXI
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbtpJMWoUHDG0bJGvg_sbiCH8b66-weBRIetcbfF7fD5ccBythZIGDbWNhcmdvLWhlYXRoZXJlMC4zLjBtY2FyZ29faGVhdGhlcg
  [__link0]: https://doc.rust-lang.org/stable/std/?search=io::Read
  [__link1]: https://doc.rust-lang.org/stable/std/?search=io::Write
- [__link10]: https://docs.rs/cargo-heather/0.2.1/cargo_heather/?search=FileKind::detect
- [__link11]: https://docs.rs/cargo-heather/0.2.1/cargo_heather/?search=is_cargo_script
- [__link12]: https://docs.rs/cargo-heather/0.2.1/cargo_heather/?search=check
- [__link13]: https://docs.rs/cargo-heather/0.2.1/cargo_heather/?search=fix
- [__link14]: https://docs.rs/cargo-heather/0.2.1/cargo_heather/license/index.html
- [__link2]: https://docs.rs/cargo-heather/0.2.1/cargo_heather/?search=check
- [__link3]: https://docs.rs/cargo-heather/0.2.1/cargo_heather/?search=fix
- [__link4]: https://docs.rs/cargo-heather/0.2.1/cargo_heather/?search=FileKind::Rust
- [__link5]: https://docs.rs/cargo-heather/0.2.1/cargo_heather/?search=FileKind::Toml
- [__link6]: https://docs.rs/cargo-heather/0.2.1/cargo_heather/?search=FileKind::PowerShell
- [__link7]: https://docs.rs/cargo-heather/0.2.1/cargo_heather/?search=FileKind::Just
- [__link8]: https://docs.rs/cargo-heather/0.2.1/cargo_heather/?search=FileKind::Env
- [__link9]: https://docs.rs/cargo-heather/0.2.1/cargo_heather/?search=FileKind::CargoScript
+ [__link10]: https://docs.rs/cargo-heather/0.3.0/cargo_heather/?search=FileKind::detect
+ [__link11]: https://docs.rs/cargo-heather/0.3.0/cargo_heather/?search=is_cargo_script
+ [__link12]: https://docs.rs/cargo-heather/0.3.0/cargo_heather/?search=check
+ [__link13]: https://docs.rs/cargo-heather/0.3.0/cargo_heather/?search=fix
+ [__link14]: https://docs.rs/cargo-heather/0.3.0/cargo_heather/license/index.html
+ [__link2]: https://docs.rs/cargo-heather/0.3.0/cargo_heather/?search=check
+ [__link3]: https://docs.rs/cargo-heather/0.3.0/cargo_heather/?search=fix
+ [__link4]: https://docs.rs/cargo-heather/0.3.0/cargo_heather/?search=FileKind::Rust
+ [__link5]: https://docs.rs/cargo-heather/0.3.0/cargo_heather/?search=FileKind::Toml
+ [__link6]: https://docs.rs/cargo-heather/0.3.0/cargo_heather/?search=FileKind::PowerShell
+ [__link7]: https://docs.rs/cargo-heather/0.3.0/cargo_heather/?search=FileKind::Just
+ [__link8]: https://docs.rs/cargo-heather/0.3.0/cargo_heather/?search=FileKind::Env
+ [__link9]: https://docs.rs/cargo-heather/0.3.0/cargo_heather/?search=FileKind::CargoScript
