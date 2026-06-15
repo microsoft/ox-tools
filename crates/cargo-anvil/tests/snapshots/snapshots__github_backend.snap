@@ -565,11 +565,20 @@ runs:
     # everything else to it. The setup recipes are idempotent and
     # short-circuit on tools already installed at or above the pinned
     # version, so re-running on cache-hit runs is cheap.
+    # Install a prebuilt cargo-binstall binary in seconds. Without this,
+    # the first `_install-tool` recipe that needs binstall bootstraps it
+    # via `cargo install --locked cargo-binstall`, which takes ~4 min of
+    # source compilation on every cold-cache job. The official action
+    # downloads the release binary from cargo-bins/cargo-binstall, so
+    # the bootstrap branch in `tools.just` becomes a no-op on GH.
+    - name: Install cargo-binstall
+      uses: cargo-bins/cargo-binstall@main
+
     - name: Install just
       shell: bash
       run: |
         if ! command -v just >/dev/null 2>&1 ; then
-          cargo install --locked just
+          cargo binstall --no-confirm --locked just || cargo install --locked just
         fi
 
     - name: Install anvil toolchains + tools

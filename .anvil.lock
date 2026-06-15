@@ -35,7 +35,7 @@ checksum = "sha256:a42cf49d0e203db5545a797888c8c62e1564f5914a2588e2a40cb3b2cf8b0
 
 [[file]]
 path = ".github/actions/anvil-setup/action.yml"
-checksum = "sha256:1861acca1a7d81bf68cd36eaf041133b96cbdd7b46560d4f07caa2427b67f2bb"
+checksum = "sha256:065181e093ed68c83d5f974ebde2980f26cc70f954d965b2c0ca1b63042d3a1e"
 
 [[file]]
 path = ".github/workflows/anvil-pr-impl.yml"
