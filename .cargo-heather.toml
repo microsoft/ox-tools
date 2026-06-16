@@ -2,3 +2,18 @@ header = """
 Copyright (c) Microsoft Corporation.
 Licensed under the MIT License.
 """
+
+# Excluded directories. These hold content that legitimately should NOT
+# carry the Microsoft copyright header:
+#
+# - `crates/cargo-anvil/templates/regions/`: managed-region body
+#   snippets embedded into adopters' config files via include_str!.
+#   A header here would inject it into every adopter's deny.toml /
+#   rustfmt.toml / etc.
+# - `crates/cargo-anvil/tests/fixtures/`: simulated adopter repos
+#   used as test inputs. They model arbitrary user content and
+#   should not inherit our header policy.
+exclude = [
+    "crates/cargo-anvil/templates/regions",
+    "crates/cargo-anvil/tests/fixtures",
+]

@@ -1,0 +1,18 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+trigger: none
+pr: none
+
+schedules:
+  - cron: "0 6 * * *"
+    displayName: anvil scheduled
+    branches:
+      include: [main, master]
+    always: true
+
+stages:
+  - template: anvil/scheduled.yml
+    parameters:
+      linuxPool: { vmImage: ubuntu-latest }
+      windowsPool: { vmImage: windows-latest }

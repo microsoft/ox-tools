@@ -1,0 +1,85 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+#
+# Every job is rendered through `steps/job.yml` (user-customizable wrapper);
+# see pr-stages.yml for the rationale and template-path note.
+parameters:
+  - name: linuxPool
+    type: object
+    default: { vmImage: ubuntu-latest }
+  - name: windowsPool
+    type: object
+    default: { vmImage: windows-latest }
+
+stages:
+  - stage: scheduled_test
+    displayName: anvil scheduled-test
+    jobs:
+      # Publish coverage from both legs so OS-gated code is fully
+      # represented (see the pr-stages.yml comment for the rationale).
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/scheduled-test.yml
+            - task: PublishCodeCoverageResults@2
+              condition: succeededOrFailed()
+              displayName: Publish coverage (linux)
+              inputs:
+                summaryFileLocation: target/coverage/cobertura.xml
+                failIfCoverageEmpty: false
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/scheduled-test.yml
+            - task: PublishCodeCoverageResults@2
+              condition: succeededOrFailed()
+              displayName: Publish coverage (windows)
+              inputs:
+                summaryFileLocation: target/coverage/cobertura.xml
+                failIfCoverageEmpty: false
+
+  - stage: scheduled_advisories
+    displayName: anvil scheduled-advisories
+    dependsOn: []
+    jobs:
+      # Cross-OS because clippy and udeps in this group compile per host,
+      # so cfg-gated code must be linted/scanned on both OSes.
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/scheduled-advisories.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/scheduled-advisories.yml
+
+  - stage: scheduled_exhaustive
+    displayName: anvil scheduled-exhaustive
+    dependsOn: []
+    jobs:
+      # Cross-OS to match oxidizer's policy: full-workspace mutation
+      # testing + cargo-hack powerset + bench compile checks all benefit
+      # from running on both OSes for cfg(target_os) coverage. Adopters
+      # who can't afford the Windows leg override the matrix in their
+      # root pipeline.
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/scheduled-exhaustive.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/scheduled-exhaustive.yml

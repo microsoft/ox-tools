@@ -10,6 +10,7 @@
 //! `coverage-gate` token is prepended to the argv because that's what
 //! cargo's subcommand convention does.
 
+#![cfg(not(miri))] // miri can't sandbox FS ops these tests do (TempDir, assert_cmd, etc.)
 use std::fs;
 use std::path::Path;
 

@@ -1,0 +1,31 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# The token __GROUP__ is substituted by cargo-anvil at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+parameters:
+  - name: include_modified
+    type: string
+    default: ''
+  - name: include_affected
+    type: string
+    default: ''
+  - name: include_required
+    type: string
+    default: ''
+steps:
+  - template: setup.yml
+    parameters:
+      group: __GROUP__
+  - bash: just anvil-__GROUP__
+    displayName: anvil-__GROUP__
+    env:
+      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
+      # but injecting it on every group keeps group.yml uniform across
+      # groups. ADO sets $(System.PullRequest.Title) to an empty string
+      # on non-PR builds; anvil-pr-title treats empty as "no title set"
+      # and skips.
+      PR_TITLE: $(System.PullRequest.Title)
+      ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
+      ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
+      ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}

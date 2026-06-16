@@ -36,4 +36,5 @@ ARROW
 
 # Agent files
 .claude
-CLAUDE.md
+CLAUDE.md.cm.txt
+*.snap.new

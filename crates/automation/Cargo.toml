@@ -5,19 +5,36 @@
 name = "automation"
 description = "Shared code for writing Rust scripts"
 version = "0.1.0"
-edition.workspace = true
-rust-version.workspace = true
 authors.workspace = true
-license.workspace = true
+edition.workspace = true
 homepage.workspace = true
+license.workspace = true
 publish = false
+rust-version.workspace = true
+
+# Public-API discipline. `automation` is `publish = false` and lives
+# solely to be used by `scripts/`, but anvil-external-types still
+# runs against it (publish=false isn't a free pass for unbounded API
+# surface -- in-workspace callers in `scripts/` rely on type
+# stability too). All three allowed types are intentional:
+# - `ohno::app::error::AppError`: project-wide app error type, used
+#   by every fallible function in the workspace. Same allowlist
+#   entry as cargo-coverage-gate and cargo_anvil.
+# - `serde::*` (which surfaces in nightly rustdoc as
+#   `serde_core::de::Deserialize`): `PackageMetadata` and `Target`
+#   are derived-Deserialize so `serde_json::from_str` can parse
+#   `cargo metadata` output. Removing the derive would force every
+#   caller to write a manual deserializer for trivial shapes.
+[package.metadata.cargo_check_external_types]
+allowed_external_types = ["ohno::app::error::AppError", "serde::*", "serde_core::*"]
 
 [dependencies]
-ohno = { workspace = true, features = ["app-err"] }
-
 duct = { workspace = true }
+ohno = { workspace = true, features = ["app-err"] }
 serde = { workspace = true, features = ["derive", "alloc"] }
 serde_json = { workspace = true, features = ["std"] }
 
+# >>> anvil-managed: anvil-lints
 [lints]
 workspace = true
+# <<< anvil-managed: anvil-lints

@@ -6,6 +6,14 @@
 #![allow(clippy::missing_errors_doc, reason = "this is an internal crate for scripts")]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg_attr(coverage_nightly, coverage(off))]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::unwrap_used,
+        reason = "panic-on-failure idioms are appropriate in tests"
+    )
+)]
 
 use std::path::Path;
 use std::process::Command;

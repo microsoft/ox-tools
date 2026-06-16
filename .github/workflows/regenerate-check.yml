@@ -1,0 +1,51 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# Verifies that the in-tree state of cargo-anvil's emitted artifacts
+# matches what the binary built from this PR would render. The job:
+#
+# 1. Builds cargo-anvil from the PR branch.
+# 2. Runs `cargo anvil --dry-run` against the repo root.
+# 3. Fails iff the binary would write or propose anything.
+#
+# This is the primary dogfooding mechanism described in
+# crates/cargo-anvil/docs/verification.md.
+#
+# Adopters (the maintainers running `cargo anvil` after a
+# catalog change) are responsible for landing the regenerated files
+# alongside the catalog change in the same PR.
+name: regenerate-check
+
+on:
+  pull_request:
+    paths:
+      - "crates/cargo-anvil/**"
+      - ".github/workflows/regenerate-check.yml"
+  merge_group: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: regenerate-check-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regenerate-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build cargo-anvil
+        run: cargo build --locked -p cargo-anvil
+      - name: Verify in-tree state matches templates
+        run: |
+          # Add target/debug to PATH so cargo finds the freshly built binary
+          # as a cargo subcommand.
+          export PATH="$PWD/target/debug:$PATH"
+          if ! cargo anvil --dry-run ; then
+            echo "::error::Repository anvil state is out of date." \
+                 "Run 'cargo run -p cargo-anvil -- anvil'" \
+                 "and commit the diff."
+            exit 1
+          fi

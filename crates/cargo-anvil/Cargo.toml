@@ -1,0 +1,60 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-anvil"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors = ["The Oxidizer Project Authors"]
+description = "Opinionated, unified Rust build and cloud-workflow scaffolding for GitHub Actions and Azure DevOps"
+readme = "README.md"
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil"
+homepage = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil"
+keywords = ["cargo", "subcommand", "workflows", "just", "github-actions"]
+categories = ["development-tools::cargo-plugins"]
+
+[package.metadata.cargo_check_external_types]
+# - `clap_builder::derive::*`: types reachable through clap's derive
+#   macros (Args, Subcommand, ValueEnum, ...). The macro-generated impls
+#   appear in `cargo_anvil::cli::Cli`'s public surface as
+#   `<Cli as Args>::augment_args(...)`. Expected; not a real API leak.
+# - `clap_builder::Error`: returned by `Cli::parse_from_cargo_args` so
+#   callers can decide how to render parse failures (clap's pretty
+#   help text vs. a custom rendering). clap::Error has documented
+#   stable formatting; re-wrapping it in our own type would lose
+#   information without adding value.
+# - `ohno::app::error::AppError`: project-wide app error type from
+#   the `ohno` crate. Every fallible anvil entry point
+#   returns it so that callers can use ohno's `?` and `AppErr`
+#   conversions uniformly. Intentional; mirrors the same allowlist
+#   entry in cargo-coverage-gate and automation.
+allowed_external_types = [
+    "clap_builder::derive::*",
+    "clap_builder::Error",
+    "ohno::app::error::AppError",
+]
+
+[[bin]]
+name = "cargo-anvil"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+mutants = { workspace = true }
+ohno = { workspace = true, features = ["app-err"] }
+sha2 = { workspace = true, features = ["std"] }
+toml_edit = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["fmt"] }
+
+[dev-dependencies]
+insta = { workspace = true, features = ["filters"] }
+tempfile = { workspace = true }
+walkdir = { workspace = true }
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints
