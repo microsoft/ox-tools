@@ -347,4 +347,55 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn every_registry_entry_is_in_the_anvil_catalog() {
+        use crate::catalog::Catalog;
+
+        let catalog = Catalog::anvil();
+        let present = |artifact: &Artifact| catalog.artifacts().iter().any(|a| a.key() == artifact.key());
+
+        let singletons = [
+            justfile::entry(),
+            justfile::versions(),
+            justfile::tools(),
+            justfile::checks(),
+            justfile::groups(),
+            justfile::tiers(),
+            region::justfile_imports(),
+            region::workspace_lints(),
+            region::member_lints(),
+            region::deny(),
+            region::rustfmt(),
+            region::delta(),
+            region::spellcheck(),
+            region::clippy(),
+            github::setup_action(),
+            github::impact_action(),
+            github::pr_impl_workflow(),
+            github::scheduled_impl_workflow(),
+            github::pr_root_workflow(),
+            github::scheduled_root_workflow(),
+            ado::setup_step(),
+            ado::impact_step(),
+            ado::advisory_comments(),
+            ado::job_wrapper(),
+            ado::pr_stages(),
+            ado::scheduled_stages(),
+            ado::pr_root_pipeline(),
+            ado::scheduled_root_pipeline(),
+        ];
+        for artifact in &singletons {
+            assert!(present(artifact), "registry entry {:?} is not in Catalog::anvil()", artifact.key());
+        }
+
+        // Per-group backend files (exposed via the all() helpers).
+        for artifact in github::all().iter().chain(ado::all().iter()) {
+            assert!(
+                present(artifact),
+                "backend artifact {:?} is not in Catalog::anvil()",
+                artifact.key()
+            );
+        }
+    }
 }

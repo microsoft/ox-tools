@@ -126,6 +126,7 @@ pub mod run;
 pub mod workspace;
 
 pub use backend::Backend;
+pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec, artifacts};
 pub use checksum::{checksum_bytes, checksum_str};
 pub use cli::Cli;
 pub use decision::{Decision, DecisionInputs, decide};
