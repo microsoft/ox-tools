@@ -12,13 +12,14 @@ use std::path::Path;
 use ohno::{AppError, bail};
 use tracing::info;
 
+use crate::anvil::reconcile;
 use crate::backend::{self, Backend};
 use crate::catalog::Catalog;
 use crate::catalog::artifact::{Artifact, HostSelector, RegionSpec};
 use crate::checksum::checksum_str;
 use crate::cli::Cli;
 use crate::decision::{Decision, decide_removal};
-use crate::emit::{cargo_toml, local, plan_managed_region, plan_owned_file};
+use crate::emit::{plan_managed_region, plan_owned_file};
 use crate::io::read_file_if_present;
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
@@ -85,7 +86,7 @@ pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<Run
     // the lowercase entry, transfer it to the canonical case so the
     // orphan-detection pass doesn't spuriously try to splice the
     // region back out.
-    local::migrate_legacy_justfile_case(&mut manifest);
+    reconcile::migrate_legacy_justfile_case(&mut manifest);
 
     let backends = backend::resolve(&args.backends, args.no_backends, &repo_root)?;
     info!(
@@ -191,17 +192,17 @@ fn push_region(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, pla
     let id = spec.id.as_str();
     match &spec.host {
         HostSelector::Path(path) => {
-            if id == cargo_toml::WORKSPACE_LINTS_REGION_ID && !workspace.has_workspace_table {
+            if id == reconcile::WORKSPACE_LINTS_REGION_ID && !workspace.has_workspace_table {
                 return Ok(());
             }
             let host = resolve_host_path(repo_root, path);
             plan.push(plan_managed_region(repo_root, manifest, &host, id, &spec.body, spec.syntax)?);
         }
         HostSelector::EachMemberManifest => {
-            let single_crate_lints = id == cargo_toml::CRATE_LINTS_REGION_ID && !workspace.has_workspace_table;
+            let single_crate_lints = id == reconcile::CRATE_LINTS_REGION_ID && !workspace.has_workspace_table;
             for member in &workspace.members {
                 let body = if single_crate_lints {
-                    cargo_toml::render_single_crate_lints_body()
+                    reconcile::render_single_crate_lints_body()
                 } else {
                     spec.body.clone()
                 };
@@ -223,8 +224,8 @@ fn push_region(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, pla
 /// `Justfile` host, whose on-disk capitalization is resolved against the repo
 /// (an adopter may carry a lowercase `justfile`).
 fn resolve_host_path(repo_root: &Path, path: &str) -> String {
-    if path == local::JUSTFILE_PATH {
-        local::resolve_justfile_path(repo_root).to_owned()
+    if path == reconcile::JUSTFILE_PATH {
+        reconcile::resolve_justfile_path(repo_root).to_owned()
     } else {
         path.to_owned()
     }
@@ -319,7 +320,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::emit::shared_configs;
+    use crate::anvil::artifacts::region;
 
     fn write(path: &Path, contents: &str) {
         if let Some(parent) = path.parent() {
@@ -527,8 +528,7 @@ mod tests {
 
         let path = tmp.path().join("rustfmt.toml");
         let host = fs::read_to_string(&path).unwrap();
-        let updated =
-            crate::region::upsert_region(&host, shared_configs::RUSTFMT_REGION_ID, "", crate::region::CommentSyntax::Hash).unwrap();
+        let updated = crate::region::upsert_region(&host, region::RUSTFMT_REGION_ID, "", crate::region::CommentSyntax::Hash).unwrap();
         fs::write(&path, updated).unwrap();
 
         let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
@@ -538,7 +538,7 @@ mod tests {
             .iter()
             .find(|i| {
                 matches!(&i.target, crate::plan::Target::Region { host, id }
-                    if host == "rustfmt.toml" && id == shared_configs::RUSTFMT_REGION_ID)
+                    if host == "rustfmt.toml" && id == region::RUSTFMT_REGION_ID)
             })
             .expect("rustfmt region item missing from plan");
         assert_eq!(rustfmt_item.decision, crate::decision::Decision::LeaveAlone);
@@ -560,7 +560,7 @@ mod tests {
         let host = fs::read_to_string(&path).unwrap();
         let updated = crate::region::upsert_region(
             &host,
-            shared_configs::RUSTFMT_REGION_ID,
+            region::RUSTFMT_REGION_ID,
             "edition = \"2021\"\n",
             crate::region::CommentSyntax::Hash,
         )
@@ -574,7 +574,7 @@ mod tests {
             .iter()
             .find(|i| {
                 matches!(&i.target, crate::plan::Target::Region { host, id }
-                    if host == "rustfmt.toml" && id == shared_configs::RUSTFMT_REGION_ID)
+                    if host == "rustfmt.toml" && id == region::RUSTFMT_REGION_ID)
             })
             .unwrap();
         assert_eq!(rustfmt_item.decision, crate::decision::Decision::LeaveAlone);
@@ -607,7 +607,7 @@ mod tests {
         let host = fs::read_to_string(&path).unwrap();
         let edited = crate::region::upsert_region(
             &host,
-            shared_configs::RUSTFMT_REGION_ID,
+            region::RUSTFMT_REGION_ID,
             "edition = \"2021\"\n",
             crate::region::CommentSyntax::Hash,
         )
@@ -622,7 +622,7 @@ mod tests {
         let mut manifest = Manifest::load(tmp.path()).unwrap();
         let key = RegionKey {
             host: "rustfmt.toml".to_owned(),
-            id: shared_configs::RUSTFMT_REGION_ID.to_owned(),
+            id: region::RUSTFMT_REGION_ID.to_owned(),
         };
         manifest.regions.insert(key, checksum_str("synthetic old template"));
         manifest.save(tmp.path()).unwrap();
@@ -636,7 +636,7 @@ mod tests {
             .iter()
             .find(|i| {
                 matches!(&i.target, crate::plan::Target::Region { host, id }
-                    if host == "rustfmt.toml" && id == shared_configs::RUSTFMT_REGION_ID)
+                    if host == "rustfmt.toml" && id == region::RUSTFMT_REGION_ID)
             })
             .unwrap();
         assert_eq!(item.decision, crate::decision::Decision::Propose);
@@ -655,7 +655,7 @@ mod tests {
             .iter()
             .find(|i| {
                 matches!(&i.target, crate::plan::Target::Region { host, id }
-                    if host == "rustfmt.toml" && id == shared_configs::RUSTFMT_REGION_ID)
+                    if host == "rustfmt.toml" && id == region::RUSTFMT_REGION_ID)
             })
             .unwrap();
         assert_eq!(

@@ -1,21 +1,21 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! The catalog: the set of artifacts a tool emits, plus its CLI identity.
+//! The reusable catalog engine API.
 //!
-//! [`crate::run::build_plan`] iterates a catalog's artifacts and dispatches
-//! each to the generic owned-file / managed-region drivers, instead of
-//! calling a fixed list of hand-named emitters. This is what lets a
-//! downstream tool ship its own catalog while reusing the entire engine.
+//! A [`Catalog`] pairs a [`CliMeta`] identity with an ordered set of
+//! [`Artifact`]s; [`CatalogBuilder`] customizes one. This module is
+//! catalog-engine only — it knows nothing about the `anvil` base catalog,
+//! which lives in [`crate::anvil`]. [`crate::run::build_plan`] iterates any
+//! catalog's artifacts and dispatches each to the generic owned-file /
+//! managed-region drivers, so a downstream tool ships its own catalog while
+//! reusing the entire engine.
 //!
 //! See [`extensibility.md`](../../docs/design/extensibility.md).
 
 pub mod artifact;
-pub mod artifacts;
 pub mod builder;
 pub mod meta;
-
-mod anvil;
 
 pub use artifact::{Artifact, HostSelector, OwnedFileSpec, RegionId, RegionSpec};
 pub use builder::{Catalog, CatalogBuilder};

@@ -1,19 +1,17 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Owned-file and managed-region emitters.
+//! Generic plan drivers.
 //!
-//! Each emitter produces a [`crate::plan::PlanItem`] given the workspace
-//! and the previous manifest. The driver in [`mod@crate::run`] collects
-//! them into a [`crate::plan::Plan`] and either applies or summarizes it.
+//! Two reusable engine drivers turn a catalog artifact into a
+//! [`crate::plan::PlanItem`] for a single repository: [`plan_owned_file`] for
+//! a fully tool-owned file and [`plan_managed_region`] for a sentinel-
+//! delimited region spliced into a host file. They are catalog-agnostic —
+//! [`crate::run::build_plan`] feeds them the bodies the catalog supplies. The
+//! anvil base catalog's templates live in [`crate::anvil`].
 
-pub mod ado;
-pub mod cargo_toml;
-pub mod github;
-pub mod local;
 pub mod managed_region;
 pub mod owned_file;
-pub mod shared_configs;
 
 pub use managed_region::plan_managed_region;
 pub use owned_file::plan_owned_file;

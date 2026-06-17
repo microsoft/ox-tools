@@ -132,7 +132,7 @@ fn single_crate_emits_crate_lints_and_justfiles() {
 /// first run keeps that opt-out across re-runs (LeaveAlone decision).
 #[test]
 fn empty_region_is_treated_as_opt_out() {
-    use cargo_anvil::emit::shared_configs::RUSTFMT_REGION_ID;
+    use cargo_anvil::anvil::artifacts::region::RUSTFMT_REGION_ID;
     use cargo_anvil::region::{CommentSyntax, upsert_region};
 
     let tmp = stage_fixture("opt-outs");
@@ -155,7 +155,7 @@ fn empty_region_is_treated_as_opt_out() {
 /// template should be left alone on subsequent runs.
 #[test]
 fn user_edit_inside_region_is_left_alone() {
-    use cargo_anvil::emit::shared_configs::RUSTFMT_REGION_ID;
+    use cargo_anvil::anvil::artifacts::region::RUSTFMT_REGION_ID;
     use cargo_anvil::region::{CommentSyntax, upsert_region};
 
     let tmp = stage_fixture("customized");

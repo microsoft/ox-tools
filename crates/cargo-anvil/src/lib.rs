@@ -165,6 +165,7 @@
 
 #![deny(unsafe_code)]
 
+pub mod anvil;
 pub mod backend;
 pub mod catalog;
 pub mod checksum;
@@ -180,8 +181,9 @@ pub mod workspace;
 
 use std::process::ExitCode;
 
+pub use anvil::artifacts;
 pub use backend::Backend;
-pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec, artifacts};
+pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec};
 pub use checksum::{checksum_bytes, checksum_str};
 pub use cli::Cli;
 pub use decision::{Decision, DecisionInputs, decide};

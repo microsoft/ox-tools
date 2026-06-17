@@ -13,7 +13,6 @@
 
 use ohno::{AppError, bail};
 
-use crate::catalog::anvil::anvil_artifacts;
 use crate::catalog::artifact::Artifact;
 use crate::catalog::meta::CliMeta;
 use crate::checksum::checksum_str;
@@ -26,14 +25,11 @@ pub struct Catalog {
 }
 
 impl Catalog {
-    /// The built-in base catalog: the `anvil` CLI identity and the full
-    /// built-in artifact set.
-    #[must_use]
-    pub fn anvil() -> Self {
-        Self {
-            cli: CliMeta::anvil(),
-            artifacts: anvil_artifacts(),
-        }
+    /// Assemble a catalog from its parts. The base-catalog constructor
+    /// ([`Catalog::anvil`], defined in the `anvil` module) and the builder go
+    /// through this so the fields stay private to the reusable engine.
+    pub(crate) fn from_parts(cli: CliMeta, artifacts: Vec<Artifact>) -> Self {
+        Self { cli, artifacts }
     }
 
     /// Start a new, empty catalog from a CLI identity.
@@ -221,15 +217,7 @@ impl CatalogBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::artifacts;
-
-    #[test]
-    fn anvil_catalog_has_identity_and_artifacts() {
-        let catalog = Catalog::anvil();
-        assert_eq!(catalog.cli().subcommand, "anvil");
-        assert_eq!(catalog.cli().bin_name, "cargo-anvil");
-        assert!(!catalog.artifacts().is_empty());
-    }
+    use crate::anvil::artifacts;
 
     #[test]
     fn subcommand_derives_bin_name() {

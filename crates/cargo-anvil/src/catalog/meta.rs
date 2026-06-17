@@ -40,15 +40,4 @@ impl CliMeta {
             version: "0.0.0".to_owned(),
         }
     }
-
-    /// The CLI identity of the built-in `anvil` tool.
-    #[must_use]
-    pub fn anvil() -> Self {
-        Self {
-            subcommand: "anvil".to_owned(),
-            bin_name: "cargo-anvil".to_owned(),
-            about: "Update local recipes, cloud-workflow building blocks, and managed regions for the anvil unified build setup".to_owned(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
-        }
-    }
 }
