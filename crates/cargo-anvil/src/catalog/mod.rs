@@ -11,5 +11,8 @@
 //! See [`extensibility.md`](../../docs/design/extensibility.md).
 
 pub mod artifact;
+pub mod artifacts;
+
+mod anvil;
 
 pub use artifact::{Artifact, HostSelector, OwnedFileSpec, RegionId, RegionSpec};
