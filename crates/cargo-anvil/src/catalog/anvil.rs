@@ -17,7 +17,6 @@ use crate::catalog::artifacts;
 
 /// The full built-in artifact set, in emission order.
 #[must_use]
-#[allow(dead_code, reason = "wired into build_plan in the next commit of this series")]
 pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
     let mut out = Vec::new();
 

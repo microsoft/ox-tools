@@ -13,10 +13,12 @@ use ohno::AppError;
 use tracing::info;
 
 use crate::backend::{self, Backend};
+use crate::catalog::anvil_artifacts;
+use crate::catalog::artifact::{Artifact, HostSelector, RegionSpec};
 use crate::checksum::checksum_str;
 use crate::cli::Cli;
 use crate::decision::{Decision, decide_removal};
-use crate::emit::{ado, cargo_toml, github, local, shared_configs};
+use crate::emit::{cargo_toml, local, plan_managed_region, plan_owned_file};
 use crate::io::read_file_if_present;
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
@@ -103,33 +105,27 @@ pub fn run_update(args: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError> 
     })
 }
 
-/// Build the full plan: local files + selected cloud-workflow backends.
+/// Build the full plan by iterating the catalog's artifacts.
+///
+/// Each artifact dispatches to the generic owned-file / managed-region
+/// driver. Owned files carrying a backend `gate` are emitted only when that
+/// backend is in the resolved set. Managed regions whose host is
+/// [`HostSelector::EachMemberManifest`] fan out across the discovered
+/// workspace members. The Cargo.toml lint regions reconcile the
+/// single-crate shape (no `[workspace]` table) — see [`push_region`].
 fn build_plan(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, backends: &[Backend]) -> Result<Plan, AppError> {
     let mut plan = Plan::default();
 
-    for item in local::plan_local_just_tree(repo_root, manifest)? {
-        plan.push(item);
-    }
-    plan.push(local::plan_justfile_imports(repo_root, manifest)?);
-
-    for item in cargo_toml::plan_cargo_lints(repo_root, workspace, manifest)? {
-        plan.push(item);
-    }
-    for item in shared_configs::plan_shared_configs(repo_root, manifest)? {
-        plan.push(item);
-    }
-
-    for backend in backends {
-        match backend {
-            Backend::GitHub => {
-                for item in github::plan_github_backend(repo_root, manifest)? {
-                    plan.push(item);
+    for artifact in anvil_artifacts() {
+        match artifact {
+            Artifact::OwnedFile(spec) => {
+                let selected = spec.gate.is_none_or(|gate| backends.contains(&gate));
+                if selected {
+                    plan.push(plan_owned_file(repo_root, manifest, spec.path, &spec.body)?);
                 }
             }
-            Backend::Ado => {
-                for item in ado::plan_ado_backend(repo_root, manifest)? {
-                    plan.push(item);
-                }
+            Artifact::Region(spec) => {
+                push_region(repo_root, workspace, manifest, &mut plan, &spec)?;
             }
         }
     }
@@ -137,6 +133,61 @@ fn build_plan(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, back
     plan_removals(repo_root, manifest, &mut plan)?;
 
     Ok(plan)
+}
+
+/// Dispatch one managed-region artifact into the plan, expanding host
+/// selectors against the discovered workspace.
+///
+/// Two behaviors are specific to anvil's built-in lint regions (and keyed on
+/// their region ids, per [`extensibility.md §4.2`](../../docs/design/extensibility.md)):
+///
+/// - The workspace-scope lints region (`anvil-workspace-lints`) is emitted
+///   only in a multi-crate workspace; a single-crate repo has no
+///   `[workspace.lints]` table.
+/// - In a single-crate repo the per-member region (`anvil-lints`) carries the
+///   full lint catalog under `[lints]` instead of the `workspace = true`
+///   inheritance stub used by members of a real workspace.
+fn push_region(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, plan: &mut Plan, spec: &RegionSpec) -> Result<(), AppError> {
+    let id = spec.id.as_str();
+    match &spec.host {
+        HostSelector::Path(path) => {
+            if id == cargo_toml::WORKSPACE_LINTS_REGION_ID && !workspace.has_workspace_table {
+                return Ok(());
+            }
+            let host = resolve_host_path(repo_root, path);
+            plan.push(plan_managed_region(repo_root, manifest, &host, id, &spec.body, spec.syntax)?);
+        }
+        HostSelector::EachMemberManifest => {
+            let single_crate_lints = id == cargo_toml::CRATE_LINTS_REGION_ID && !workspace.has_workspace_table;
+            for member in &workspace.members {
+                let body = if single_crate_lints {
+                    cargo_toml::render_single_crate_lints_body()
+                } else {
+                    spec.body.clone()
+                };
+                plan.push(plan_managed_region(
+                    repo_root,
+                    manifest,
+                    &member.manifest_relpath,
+                    id,
+                    &body,
+                    spec.syntax,
+                )?);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Resolve a region host path. Literal paths are used as-is, except the
+/// `Justfile` host, whose on-disk capitalization is resolved against the repo
+/// (an adopter may carry a lowercase `justfile`).
+fn resolve_host_path(repo_root: &Path, path: &str) -> String {
+    if path == local::JUSTFILE_PATH {
+        local::resolve_justfile_path(repo_root).to_owned()
+    } else {
+        path.to_owned()
+    }
 }
 
 /// Scan the previous manifest for entries that the active plan items
@@ -228,6 +279,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::emit::shared_configs;
 
     fn write(path: &Path, contents: &str) {
         if let Some(parent) = path.parent() {

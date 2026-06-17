@@ -154,7 +154,7 @@ const JUSTFILE_PATH_LOWERCASE: &str = "justfile";
 /// sibling `Justfile` containing the imports region, and `just` would
 /// load whichever it finds first (lowercase wins by default) — so the
 /// imports never take effect.
-fn resolve_justfile_path(repo_root: &Path) -> &'static str {
+pub(crate) fn resolve_justfile_path(repo_root: &Path) -> &'static str {
     if repo_root.join(JUSTFILE_PATH).exists() {
         JUSTFILE_PATH
     } else if repo_root.join(JUSTFILE_PATH_LOWERCASE).exists() {

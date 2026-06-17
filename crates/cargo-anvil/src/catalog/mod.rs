@@ -15,4 +15,5 @@ pub mod artifacts;
 
 mod anvil;
 
+pub(crate) use anvil::anvil_artifacts;
 pub use artifact::{Artifact, HostSelector, OwnedFileSpec, RegionId, RegionSpec};
