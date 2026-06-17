@@ -113,6 +113,7 @@
 #![deny(unsafe_code)]
 
 pub mod backend;
+pub mod catalog;
 pub mod checksum;
 pub mod cli;
 pub mod decision;
