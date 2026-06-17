@@ -93,13 +93,26 @@ impl Cli {
         let usage_name: &'static str = String::leak(format!("cargo {}", meta.subcommand));
         let about: &'static str = String::leak(meta.about.clone());
         let version: &'static str = String::leak(meta.version.clone());
+        // `--version` prints a second line with the catalog checksum, so two
+        // builds reporting the same version but carrying different catalogs
+        // can be told apart; `-V` keeps the terse single-line version.
+        let long_version: &'static str = String::leak(format!("{}\ncatalog: {}", meta.version, catalog.checksum()));
 
         let command = Self::command()
             .name(bin_name)
             .bin_name(usage_name)
             .about(about)
             .long_about(about)
-            .version(version);
+            .version(version)
+            .long_version(long_version)
+            .disable_version_flag(true)
+            .arg(
+                clap::Arg::new("version")
+                    .short('V')
+                    .long("version")
+                    .action(clap::ArgAction::Version)
+                    .help("Print version; --version also prints the catalog checksum"),
+            );
         let matches = command.try_get_matches_from(argv_iter)?;
         Self::from_arg_matches(&matches)
     }
@@ -149,6 +162,18 @@ mod tests {
         assert!(cli.force);
         let cli = Cli::parse_from(["cargo-anvil"]);
         assert!(!cli.force);
+    }
+
+    #[test]
+    fn version_output_includes_catalog_checksum() {
+        let catalog = crate::catalog::Catalog::anvil();
+        let err = Cli::parse_from_cargo_args(&catalog, ["cargo-anvil", "--version"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains(&catalog.checksum()),
+            "--version must print the catalog checksum; got: {rendered}"
+        );
     }
 
     #[test]
