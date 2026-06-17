@@ -104,6 +104,7 @@
 //! - `checks.md` — the opinionated check catalog.
 //! - `local.md` — the `justfiles/anvil/` tree.
 //! - `updates.md` — the drift-detection algorithm.
+//! - `extensibility.md` — how downstream tools ship their own brand + catalog.
 //! - `github.md` — GitHub Actions emission.
 //! - `ado.md` — Azure DevOps Pipelines emission.
 //!
