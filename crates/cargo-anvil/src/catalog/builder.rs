@@ -16,6 +16,7 @@ use ohno::{AppError, bail};
 use crate::catalog::anvil::anvil_artifacts;
 use crate::catalog::artifact::Artifact;
 use crate::catalog::meta::CliMeta;
+use crate::checksum::checksum_str;
 
 /// The set of artifacts a tool emits, plus its CLI identity.
 #[derive(Debug, Clone)]
@@ -65,6 +66,46 @@ impl Catalog {
     #[must_use]
     pub fn artifacts(&self) -> &[Artifact] {
         &self.artifacts
+    }
+
+    /// A `sha256:…` checksum over the whole catalog — every artifact's
+    /// identity and rendered body, in canonical (sorted) order.
+    ///
+    /// Deterministic and independent of any repository: it depends only on
+    /// the artifact set, not on artifact insertion order and not on the
+    /// [`CliMeta`] identity. Two builds that share a `tool_version` but
+    /// differ in any artifact (an extra file, an overridden body, a swapped
+    /// backend file) produce different checksums. See
+    /// [`updates.md §1`](../../docs/design/updates.md) and
+    /// [`extensibility.md §5.1`](../../docs/design/extensibility.md).
+    #[must_use]
+    pub fn checksum(&self) -> String {
+        let mut entries: Vec<String> = self.artifacts.iter().map(canonical_repr).collect();
+        entries.sort();
+        checksum_str(&entries.join("\n"))
+    }
+}
+
+/// Canonical, collision-resistant string for one artifact: its full identity
+/// (including gate / syntax) followed by its rendered body. The leading
+/// fields make sorting these strings a canonical, order-independent ordering.
+fn canonical_repr(artifact: &Artifact) -> String {
+    // U+001F (unit separator) cannot appear in paths/ids and is vanishingly
+    // unlikely in bodies, so it disambiguates the joined fields.
+    const SEP: char = '\u{1f}';
+    match artifact {
+        Artifact::OwnedFile(spec) => {
+            format!("file{SEP}{}{SEP}gate={:?}{SEP}{}", spec.path, spec.gate, spec.body)
+        }
+        Artifact::Region(spec) => {
+            format!(
+                "region{SEP}{:?}{SEP}{}{SEP}{:?}{SEP}{}",
+                spec.host,
+                spec.id.as_str(),
+                spec.syntax,
+                spec.body
+            )
+        }
     }
 }
 
@@ -283,5 +324,69 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("absent-1"), "got: {msg}");
         assert!(msg.contains("absent-2"), "got: {msg}");
+    }
+
+    #[test]
+    fn checksum_is_independent_of_insertion_order() {
+        let a = Artifact::owned_file("a", "1");
+        let b = Artifact::owned_file("b", "2");
+        let one = Catalog::builder(CliMeta::new("t"))
+            .with_artifact(a.clone())
+            .with_artifact(b.clone())
+            .build()
+            .unwrap();
+        let two = Catalog::builder(CliMeta::new("t"))
+            .with_artifact(b)
+            .with_artifact(a)
+            .build()
+            .unwrap();
+        assert_eq!(one.checksum(), two.checksum());
+        assert!(one.checksum().starts_with("sha256:"));
+    }
+
+    #[test]
+    fn checksum_is_independent_of_cli_meta() {
+        let base = Catalog::anvil().checksum();
+        let renamed = Catalog::anvil()
+            .into_builder()
+            .subcommand("zzz")
+            .version("9.9.9")
+            .about("totally different")
+            .build()
+            .unwrap()
+            .checksum();
+        assert_eq!(base, renamed, "CliMeta must not affect the catalog checksum");
+    }
+
+    #[test]
+    fn checksum_changes_when_a_body_changes() {
+        let base = Catalog::anvil().checksum();
+        let edited = Catalog::anvil()
+            .into_builder()
+            .replace_artifact(artifacts::region::rustfmt().with_body("max_width = 80\n"))
+            .build()
+            .unwrap()
+            .checksum();
+        assert_ne!(base, edited);
+    }
+
+    #[test]
+    fn checksum_changes_when_an_artifact_is_added_or_removed() {
+        let base = Catalog::anvil().checksum();
+        let added = Catalog::anvil()
+            .into_builder()
+            .with_artifact(Artifact::owned_file("justfiles/anvil/extra.just", "x\n"))
+            .build()
+            .unwrap()
+            .checksum();
+        let removed = Catalog::anvil()
+            .into_builder()
+            .without_artifact(artifacts::region::clippy())
+            .build()
+            .unwrap()
+            .checksum();
+        assert_ne!(base, added);
+        assert_ne!(base, removed);
+        assert_ne!(added, removed);
     }
 }

@@ -93,10 +93,10 @@ pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<Run
         false
     } else {
         let mut next = plan.apply(&repo_root, &manifest)?;
-        // Stamp this tool's provenance on every save. The catalog checksum
-        // is filled in a later commit of this series.
+        // Stamp this tool's provenance on every save.
         next.tool = Some(catalog.cli().subcommand.clone());
         next.tool_version = Some(catalog.cli().version.clone());
+        next.catalog_checksum = Some(catalog.checksum());
         next.save(&repo_root)?;
         true
     };
@@ -380,6 +380,24 @@ mod tests {
         assert!(outcome.plan.has_changes());
         assert!(!tmp.path().join("justfiles/anvil/tools.just").exists());
         assert!(!tmp.path().join(".anvil.lock").exists());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn run_stamps_tool_and_catalog_checksum_into_lock() {
+        let tmp = empty_workspace();
+        let args = Cli {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+        };
+        let catalog = Catalog::anvil();
+        let _ = run_update(&catalog, &args, tmp.path()).unwrap();
+
+        let saved = Manifest::load(tmp.path()).unwrap();
+        assert_eq!(saved.tool.as_deref(), Some("anvil"));
+        assert_eq!(saved.tool_version, Some(catalog.cli().version.clone()));
+        assert_eq!(saved.catalog_checksum, Some(catalog.checksum()));
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
