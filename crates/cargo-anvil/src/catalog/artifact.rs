@@ -106,7 +106,6 @@ pub enum Artifact {
 /// it references the built-in artifacts themselves (see the `artifacts::`
 /// registry) and the engine derives the key.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[allow(dead_code, reason = "wired into build_plan dispatch in a later commit of this series")]
 pub(crate) enum ArtifactKey {
     /// An owned file, keyed by its path.
     OwnedFile(String),
@@ -177,7 +176,6 @@ impl Artifact {
     }
 
     /// This artifact's engine-internal identity, used for dedup and override.
-    #[allow(dead_code, reason = "wired into build_plan dispatch in a later commit of this series")]
     pub(crate) fn key(&self) -> ArtifactKey {
         match self {
             Self::OwnedFile(spec) => ArtifactKey::OwnedFile(spec.path.to_owned()),

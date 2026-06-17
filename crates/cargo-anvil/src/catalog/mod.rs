@@ -12,8 +12,12 @@
 
 pub mod artifact;
 pub mod artifacts;
+pub mod builder;
+pub mod meta;
 
 mod anvil;
 
 pub(crate) use anvil::anvil_artifacts;
 pub use artifact::{Artifact, HostSelector, OwnedFileSpec, RegionId, RegionSpec};
+pub use builder::{Catalog, CatalogBuilder};
+pub use meta::CliMeta;
