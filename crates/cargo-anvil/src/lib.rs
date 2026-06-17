@@ -50,7 +50,7 @@
 //! ## Usage
 //!
 //! ```text
-//! cargo anvil [--backend <name>]... [--no-backends] [--dry-run]
+//! cargo anvil [--backend <name>]... [--no-backends] [--dry-run] [--force]
 //! ```
 //!
 //! `update` is the only subcommand. There is no separate `init`,
@@ -65,6 +65,14 @@
 //!   Mutually exclusive with `--backend`.
 //! - `--dry-run` — analyze without writing. Exits 1 if anything would be
 //!   written or proposed.
+//! - `--force` — override the single-tool guard and switch the repository to
+//!   this tool, then run a normal update. A repo is managed by exactly one
+//!   anvil-family tool (recorded as `tool` in `.anvil.lock`); without
+//!   `--force`, a run refuses when that field names a different tool.
+//!
+//! `--version` prints the build version plus, on a second line, the
+//! `catalog:` checksum — a `sha256` over the whole compiled-in catalog — so
+//! two builds at the same version but different catalogs are distinguishable.
 //!
 //! ## Daily driver
 //!
@@ -96,6 +104,51 @@
 //!    region. The next `update` detects the dirt and writes a
 //!    `.anvil-proposed` sibling instead of overwriting.
 //!
+//! ## Extensibility: shipping your own tool
+//!
+//! Another team can ship its own cargo subcommand with its own catalog while
+//! reusing this entire engine. The downstream binary's `main` is one line:
+//!
+//! ```no_run
+//! use std::process::ExitCode;
+//!
+//! fn main() -> ExitCode {
+//!     cargo_anvil::run_app(myforge::catalog())
+//! }
+//! # mod myforge { pub fn catalog() -> cargo_anvil::Catalog { cargo_anvil::Catalog::anvil() } }
+//! ```
+//!
+//! …plus a [`Catalog`] value that starts from [`Catalog::anvil`] and
+//! customizes the CLI identity ([`CliMeta`]) and artifact set:
+//!
+//! ```no_run
+//! use cargo_anvil::{Artifact, Catalog, artifacts};
+//!
+//! pub fn catalog() -> Catalog {
+//!     Catalog::anvil()
+//!         .into_builder()
+//!         .subcommand("myforge")
+//!         .with_artifact(Artifact::owned_file(
+//!             "justfiles/anvil/extra.just",
+//!             "# ...\n",
+//!         ))
+//!         .replace_artifact(artifacts::region::rustfmt().with_body("max_width = 80\n"))
+//!         .without_artifact(artifacts::region::clippy())
+//!         .build()
+//!         .expect("valid catalog")
+//! }
+//! ```
+//!
+//! The on-disk vocabulary (`.anvil.lock`, `anvil-managed` sentinels,
+//! `justfiles/anvil/`, `anvil-` recipes) is the fixed engine format and is
+//! never rebranded. A fork customizes only its CLI identity and which
+//! artifacts it emits, via the three uniform builder verbs
+//! ([`CatalogBuilder::with_artifact`], [`CatalogBuilder::replace_artifact`],
+//! [`CatalogBuilder::without_artifact`]) over the public [`artifacts`]
+//! registry. The `tool` field recorded in `.anvil.lock` keeps two
+//! anvil-family tools from clobbering one another in a shared repo (see `--force`).
+//! See `docs/design/extensibility.md`.
+//!
 //! ## Design docs
 //!
 //! See `docs/design/` for the full architecture:
@@ -104,7 +157,7 @@
 //! - `checks.md` — the opinionated check catalog.
 //! - `local.md` — the `justfiles/anvil/` tree.
 //! - `updates.md` — the drift-detection algorithm.
-//! - `extensibility.md` — how downstream tools ship their own brand + catalog.
+//! - `extensibility.md` — how downstream tools ship their own catalog.
 //! - `github.md` — GitHub Actions emission.
 //! - `ado.md` — Azure DevOps Pipelines emission.
 //!

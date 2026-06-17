@@ -62,7 +62,7 @@ pub enum HostSelector {
 
 /// A fully tool-owned file.
 ///
-/// The justfile tree members live here, and so does every cloud-workflow
+/// The `justfiles/anvil/` tree members live here, and so does every cloud-workflow
 /// backend file. An owned file may be **gated** on a backend so it is
 /// emitted only when that backend is selected. Identity: its
 /// repo-root-relative path.
@@ -72,7 +72,7 @@ pub struct OwnedFileSpec {
     pub path: &'static str,
     /// The byte-exact content the artifact renders.
     pub body: String,
-    /// `None` = emit always; `Some(b)` = emit only when backend `b` is selected.
+    /// `None` emits the file always; `Some(backend)` emits it only when that backend is selected.
     pub gate: Option<Backend>,
 }
 
