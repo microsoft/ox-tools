@@ -21,9 +21,10 @@ use toml_edit::DocumentMut;
 pub struct Workspace {
     /// Absolute path to the workspace root directory.
     pub root: PathBuf,
-    /// Workspace members. Always at least one entry (the root crate, for
-    /// single-crate repos that don't declare `[workspace]`, or each explicit
-    /// member otherwise).
+    /// The `[workspace]` members. A multi-crate workspace has one entry per
+    /// member crate; a single-crate repo (no `[workspace]` table) has **no**
+    /// workspace members — its lint catalog goes into the root `Cargo.toml`
+    /// directly rather than into per-member stubs.
     pub members: Vec<WorkspaceMember>,
     /// Whether the root `Cargo.toml` carries a `[workspace]` table.
     ///
@@ -99,25 +100,26 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, AppError> {
 
     let has_workspace_table = doc.get("workspace").is_some();
     let members = if has_workspace_table {
-        resolve_workspace_members(root, &doc)?
+        let resolved = resolve_workspace_members(root, &doc)?;
+        if resolved.is_empty() {
+            bail!(
+                "workspace at {} resolved to zero members; check `members` in {}",
+                root.display(),
+                manifest_path.display()
+            );
+        }
+        resolved
     } else if doc.get("package").is_some() {
-        vec![WorkspaceMember {
-            manifest_relpath: "Cargo.toml".to_owned(),
-        }]
+        // A single-crate repo has no *workspace* members. Its lint catalog
+        // goes directly into the root `Cargo.toml` via a
+        // `HostSelector::SingleCrateCargoToml` region, not a per-member stub.
+        Vec::new()
     } else {
         bail!(
             "{} has neither [workspace] nor [package] — not a recognizable Cargo manifest",
             manifest_path.display()
         );
     };
-
-    if members.is_empty() {
-        bail!(
-            "workspace at {} resolved to zero members; check `members` in {}",
-            root.display(),
-            manifest_path.display()
-        );
-    }
 
     Ok(Workspace {
         root: root.to_path_buf(),
@@ -246,12 +248,7 @@ version = "0.1.0"
 
         let ws = load_workspace(&found).unwrap();
         assert!(!ws.has_workspace_table);
-        assert_eq!(
-            ws.members,
-            vec![WorkspaceMember {
-                manifest_relpath: "Cargo.toml".into()
-            }]
-        );
+        assert!(ws.members.is_empty(), "a single-crate repo has no workspace members");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

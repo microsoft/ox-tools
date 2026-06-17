@@ -12,7 +12,6 @@ use std::path::Path;
 use ohno::{AppError, bail};
 use tracing::info;
 
-use crate::anvil::reconcile;
 use crate::backend::{self, Backend};
 use crate::catalog::Catalog;
 use crate::catalog::artifact::{Artifact, HostSelector, RegionSpec};
@@ -20,7 +19,7 @@ use crate::checksum::checksum_str;
 use crate::cli::Cli;
 use crate::decision::{Decision, decide_removal};
 use crate::emit::{plan_managed_region, plan_owned_file};
-use crate::io::read_file_if_present;
+use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
 use crate::region::{CommentSyntax, find_region, remove_region};
@@ -68,7 +67,7 @@ pub fn run(catalog: &Catalog, cli: &Cli) -> Result<(), AppError> {
 pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError> {
     let repo_root = workspace::find_workspace_root(start_dir)?;
     let ws = workspace::load_workspace(&repo_root)?;
-    let mut manifest = Manifest::load(&repo_root)?;
+    let manifest = Manifest::load(&repo_root)?;
 
     // The single-tool guard: a repository is managed by exactly one
     // anvil-family tool. If the lock records a *different* tool, refuse
@@ -77,16 +76,6 @@ pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<Run
     // A lock with no `tool` field (first run, or a legacy pre-split lock) is
     // never blocked. See updates.md §1 "The single-tool guard".
     enforce_single_tool_guard(catalog, args, &manifest)?;
-
-    // One-time legacy migration: an earlier version of cargo-anvil
-    // emitted the Justfile imports region under a lowercase `justfile`
-    // host path. The canonical capitalization is `Justfile` (matching
-    // Makefile / Dockerfile / Rakefile convention and the surveyed
-    // Microsoft Rust repos). For repos whose manifest still carries
-    // the lowercase entry, transfer it to the canonical case so the
-    // orphan-detection pass doesn't spuriously try to splice the
-    // region back out.
-    reconcile::migrate_legacy_justfile_case(&mut manifest);
 
     let backends = backend::resolve(&args.backends, args.no_backends, &repo_root)?;
     info!(
@@ -144,10 +133,10 @@ fn enforce_single_tool_guard(catalog: &Catalog, args: &Cli, manifest: &Manifest)
 ///
 /// Each artifact dispatches to the generic owned-file / managed-region
 /// driver. Owned files carrying a backend `gate` are emitted only when that
-/// backend is in the resolved set. Managed regions whose host is
-/// [`HostSelector::EachMemberManifest`] fan out across the discovered
-/// workspace members. The Cargo.toml lint regions reconcile the
-/// single-crate shape (no `[workspace]` table) — see [`push_region`].
+/// backend is in the resolved set. Managed-region host selectors are expanded
+/// against the discovered workspace (see [`push_region`]). Every path is
+/// resolved to its on-disk casing so anvil follows whatever a repo already
+/// uses (e.g. `justfile` vs `Justfile`).
 fn build_plan(
     repo_root: &Path,
     workspace: &Workspace,
@@ -162,7 +151,8 @@ fn build_plan(
             Artifact::OwnedFile(spec) => {
                 let selected = spec.gate.is_none_or(|gate| backends.contains(&gate));
                 if selected {
-                    plan.push(plan_owned_file(repo_root, manifest, spec.path, &spec.body)?);
+                    let path = resolve_existing_case_insensitive(repo_root, spec.path);
+                    plan.push(plan_owned_file(repo_root, manifest, &path, &spec.body)?);
                 }
             }
             Artifact::Region(spec) => {
@@ -176,59 +166,54 @@ fn build_plan(
     Ok(plan)
 }
 
-/// Dispatch one managed-region artifact into the plan, expanding host
-/// selectors against the discovered workspace.
+/// Dispatch one managed-region artifact into the plan, expanding its host
+/// selector against the discovered workspace.
 ///
-/// Two behaviors are specific to anvil's built-in lint regions (and keyed on
-/// their region ids, per [`extensibility.md §4.2`](../../docs/design/extensibility.md)):
-///
-/// - The workspace-scope lints region (`anvil-workspace-lints`) is emitted
-///   only in a multi-crate workspace; a single-crate repo has no
-///   `[workspace.lints]` table.
-/// - In a single-crate repo the per-member region (`anvil-lints`) carries the
-///   full lint catalog under `[lints]` instead of the `workspace = true`
-///   inheritance stub used by members of a real workspace.
+/// - [`HostSelector::Path`] — a single literal host.
+/// - [`HostSelector::EachMemberManifest`] — one host per workspace member (no
+///   hosts in a single-crate repo, which has no workspace members).
+/// - [`HostSelector::WorkspaceCargoToml`] / [`HostSelector::SingleCrateCargoToml`]
+///   — the root `Cargo.toml`, gated on whether it declares a `[workspace]`
+///   table.
 fn push_region(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, plan: &mut Plan, spec: &RegionSpec) -> Result<(), AppError> {
     let id = spec.id.as_str();
     match &spec.host {
         HostSelector::Path(path) => {
-            if id == reconcile::WORKSPACE_LINTS_REGION_ID && !workspace.has_workspace_table {
-                return Ok(());
+            push_region_at(repo_root, manifest, plan, path, id, &spec.body, spec.syntax)?;
+        }
+        HostSelector::WorkspaceCargoToml => {
+            if workspace.has_workspace_table {
+                push_region_at(repo_root, manifest, plan, "Cargo.toml", id, &spec.body, spec.syntax)?;
             }
-            let host = resolve_host_path(repo_root, path);
-            plan.push(plan_managed_region(repo_root, manifest, &host, id, &spec.body, spec.syntax)?);
+        }
+        HostSelector::SingleCrateCargoToml => {
+            if !workspace.has_workspace_table {
+                push_region_at(repo_root, manifest, plan, "Cargo.toml", id, &spec.body, spec.syntax)?;
+            }
         }
         HostSelector::EachMemberManifest => {
-            let single_crate_lints = id == reconcile::CRATE_LINTS_REGION_ID && !workspace.has_workspace_table;
             for member in &workspace.members {
-                let body = if single_crate_lints {
-                    reconcile::render_single_crate_lints_body()
-                } else {
-                    spec.body.clone()
-                };
-                plan.push(plan_managed_region(
-                    repo_root,
-                    manifest,
-                    &member.manifest_relpath,
-                    id,
-                    &body,
-                    spec.syntax,
-                )?);
+                push_region_at(repo_root, manifest, plan, &member.manifest_relpath, id, &spec.body, spec.syntax)?;
             }
         }
     }
     Ok(())
 }
 
-/// Resolve a region host path. Literal paths are used as-is, except the
-/// `Justfile` host, whose on-disk capitalization is resolved against the repo
-/// (an adopter may carry a lowercase `justfile`).
-fn resolve_host_path(repo_root: &Path, path: &str) -> String {
-    if path == reconcile::JUSTFILE_PATH {
-        reconcile::resolve_justfile_path(repo_root).to_owned()
-    } else {
-        path.to_owned()
-    }
+/// Plan one managed region at a single host, resolving the host's on-disk
+/// casing first.
+fn push_region_at(
+    repo_root: &Path,
+    manifest: &Manifest,
+    plan: &mut Plan,
+    host: &str,
+    id: &str,
+    body: &str,
+    syntax: crate::region::CommentSyntax,
+) -> Result<(), AppError> {
+    let host = resolve_existing_case_insensitive(repo_root, host);
+    plan.push(plan_managed_region(repo_root, manifest, &host, id, body, syntax)?);
+    Ok(())
 }
 
 /// Scan the previous manifest for entries that the active plan items
@@ -342,6 +327,32 @@ mod tests {
         );
         write(&root.join("crates/alpha/src/lib.rs"), "");
         tmp
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn existing_lowercase_justfile_is_reused_not_duplicated() {
+        // Proposal: anvil follows whatever casing the repo already uses. A
+        // pre-existing lowercase `justfile` must be spliced into, not shadowed
+        // by a new capital `Justfile`.
+        let tmp = empty_workspace();
+        std::fs::write(tmp.path().join("justfile"), "# user recipes\n").unwrap();
+        let args = local_only();
+
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+        assert!(outcome.applied);
+
+        let lower = std::fs::read_to_string(tmp.path().join("justfile")).unwrap();
+        assert!(lower.contains("# user recipes"), "user content preserved");
+        assert!(
+            lower.contains("anvil-managed: anvil-imports"),
+            "region spliced into the lowercase file"
+        );
+
+        // The manifest tracks the on-disk (lowercase) host, so a second run is
+        // a no-op rather than re-proposing or orphaning the region.
+        let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+        assert!(!second.plan.has_changes(), "second run should be idempotent");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

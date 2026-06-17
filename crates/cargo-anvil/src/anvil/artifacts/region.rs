@@ -108,15 +108,39 @@ pub fn justfile_imports() -> Artifact {
     )
 }
 
-/// Root `Cargo.toml` / `anvil-workspace-lints` — the workspace-scope lint
-/// catalog (multi-crate workspaces only).
+/// Root `Cargo.toml` / `anvil-workspace-lints`.
+///
+/// The workspace-scope lint catalog under `[workspace.lints]`. Emitted only
+/// in a multi-crate workspace; the [`HostSelector::WorkspaceCargoToml`] host
+/// skips it in a single-crate repo.
 #[must_use]
 pub fn workspace_lints() -> Artifact {
-    path_region("Cargo.toml", WORKSPACE_LINTS_REGION_ID, render_workspace_lints_body())
+    Artifact::region(RegionSpec {
+        host: HostSelector::WorkspaceCargoToml,
+        id: RegionId::new(WORKSPACE_LINTS_REGION_ID),
+        body: render_workspace_lints_body(),
+        syntax: CommentSyntax::Hash,
+    })
+}
+
+/// Root `Cargo.toml` / `anvil-lints`.
+///
+/// The full lint catalog under `[lints]`. Emitted only in a single-crate
+/// repo; the [`HostSelector::SingleCrateCargoToml`] host skips it in a
+/// workspace, where the catalog lives under `[workspace.lints]` and members
+/// inherit it.
+#[must_use]
+pub fn single_crate_lints() -> Artifact {
+    Artifact::region(RegionSpec {
+        host: HostSelector::SingleCrateCargoToml,
+        id: RegionId::new(CRATE_LINTS_REGION_ID),
+        body: render_single_crate_lints_body(),
+        syntax: CommentSyntax::Hash,
+    })
 }
 
 /// `<member>/Cargo.toml` / `anvil-lints` — the per-member `workspace = true`
-/// inheritance stub, replicated across every member.
+/// inheritance stub, replicated across every member of a workspace.
 #[must_use]
 pub fn member_lints() -> Artifact {
     Artifact::member_region(RegionId::new(CRATE_LINTS_REGION_ID), MEMBER_LINTS_BODY)

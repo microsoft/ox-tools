@@ -48,16 +48,25 @@ impl std::fmt::Display for RegionId {
 /// Where a managed region's host file lives.
 ///
 /// A region is not always anchored to one literal path: the crate-scope
-/// `[lints]` region is spliced into *every* workspace member's manifest,
-/// with the host set discovered at plan time.
+/// `[lints]` region is spliced into *every* workspace member's manifest, and
+/// the workspace-/single-crate-scope lint regions are conditioned on the
+/// shape of the root `Cargo.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HostSelector {
     /// A single literal repo-root-relative forward-slash path
-    /// (`Justfile`, `deny.toml`, the root `Cargo.toml`).
+    /// (`Justfile`, `deny.toml`).
     Path(String),
     /// Every workspace member's manifest — expands to one
-    /// `<member>/Cargo.toml` host per member discovered at plan time.
+    /// `<member>/Cargo.toml` host per member discovered at plan time. A
+    /// non-workspace single crate has no workspace members, so this expands
+    /// to nothing there.
     EachMemberManifest,
+    /// The root `Cargo.toml`, but only when it declares a `[workspace]`
+    /// table. Skipped in a single-crate repo.
+    WorkspaceCargoToml,
+    /// The root `Cargo.toml`, but only when it does **not** declare a
+    /// `[workspace]` table (a single-crate repo). Skipped in a workspace.
+    SingleCrateCargoToml,
 }
 
 /// A fully tool-owned file.
