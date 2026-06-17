@@ -47,6 +47,16 @@ pub struct Cli {
     /// Exits with code 1 if anything would be written or proposed.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Override the single-tool guard and switch this repository to this tool.
+    ///
+    /// A repository is managed by exactly one anvil-family tool, recorded as
+    /// `tool` in `.anvil.lock`. If that field names a *different* tool, the
+    /// run refuses (writing nothing, even under `--dry-run`). `--force` lifts
+    /// that guard and proceeds as a normal update, rewriting the lock's
+    /// provenance to this tool on save.
+    #[arg(long)]
+    pub force: bool,
 }
 
 impl Cli {
@@ -131,6 +141,14 @@ mod tests {
     fn parse_no_backends() {
         let cli = Cli::parse_from(["cargo-anvil", "--no-backends"]);
         assert!(cli.no_backends);
+    }
+
+    #[test]
+    fn parse_force() {
+        let cli = Cli::parse_from(["cargo-anvil", "--force"]);
+        assert!(cli.force);
+        let cli = Cli::parse_from(["cargo-anvil"]);
+        assert!(!cli.force);
     }
 
     #[test]

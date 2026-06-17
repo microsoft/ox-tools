@@ -70,6 +70,7 @@ fn local_only_args() -> Cli {
         backends: vec![],
         no_backends: true,
         dry_run: false,
+        force: false,
     }
 }
 

@@ -101,6 +101,7 @@ fn local_only_tree() {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         },
         &tmp,
     );
@@ -115,6 +116,7 @@ fn github_backend_tree() {
             backends: vec!["github".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         },
         &tmp,
     );
@@ -129,6 +131,7 @@ fn ado_backend_tree() {
             backends: vec!["ado".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         },
         &tmp,
     );

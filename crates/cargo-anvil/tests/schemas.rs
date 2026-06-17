@@ -62,6 +62,7 @@ fn run_with_backend(backend: &str) -> TempDir {
         backends: vec![backend.to_owned()],
         no_backends: false,
         dry_run: false,
+        force: false,
     };
     run_update(&cargo_anvil::Catalog::anvil(), &args, tmp.path()).unwrap();
     tmp

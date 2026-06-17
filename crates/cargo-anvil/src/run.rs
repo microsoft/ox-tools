@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use ohno::AppError;
+use ohno::{AppError, bail};
 use tracing::info;
 
 use crate::backend::{self, Backend};
@@ -69,6 +69,14 @@ pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<Run
     let ws = workspace::load_workspace(&repo_root)?;
     let mut manifest = Manifest::load(&repo_root)?;
 
+    // The single-tool guard: a repository is managed by exactly one
+    // anvil-family tool. If the lock records a *different* tool, refuse
+    // before doing any planning work — content-free, and honored even under
+    // --dry-run — unless --force is passed to switch ownership to this tool.
+    // A lock with no `tool` field (first run, or a legacy pre-split lock) is
+    // never blocked. See updates.md §1 "The single-tool guard".
+    enforce_single_tool_guard(catalog, args, &manifest)?;
+
     // One-time legacy migration: an earlier version of cargo-anvil
     // emitted the Justfile imports region under a lowercase `justfile`
     // host path. The canonical capitalization is `Justfile` (matching
@@ -107,6 +115,28 @@ pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<Run
         applied,
         backends,
     })
+}
+
+/// Enforce the single-tool guard: refuse if the lock names a different tool
+/// and `--force` was not passed.
+///
+/// # Errors
+///
+/// Returns a refusal error when `manifest.tool` is `Some` and differs from
+/// `catalog.cli().subcommand` and `args.force` is `false`.
+fn enforce_single_tool_guard(catalog: &Catalog, args: &Cli, manifest: &Manifest) -> Result<(), AppError> {
+    let current = &catalog.cli().subcommand;
+    if let Some(owner) = &manifest.tool
+        && owner != current
+        && !args.force
+    {
+        bail!(
+            "this repository is managed by '{owner}' (per .anvil.lock); refusing to run '{current}'. \
+             A repository must be managed by a single anvil-family tool. Run '{owner}' instead, \
+             or re-run with --force to switch this repository to '{current}'."
+        );
+    }
+    Ok(())
 }
 
 /// Build the full plan by iterating the catalog's artifacts.
@@ -321,6 +351,7 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         };
         let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(outcome.applied);
@@ -360,6 +391,7 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         };
         let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
@@ -374,6 +406,7 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: true,
+            force: false,
         };
         let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(!outcome.applied);
@@ -390,6 +423,7 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         };
         let catalog = Catalog::anvil();
         let _ = run_update(&catalog, &args, tmp.path()).unwrap();
@@ -400,6 +434,83 @@ mod tests {
         assert_eq!(saved.catalog_checksum, Some(catalog.checksum()));
     }
 
+    fn local_only() -> Cli {
+        Cli {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+            force: false,
+        }
+    }
+
+    fn seed_lock_owner(root: &Path, tool: &str) {
+        let mut m = Manifest::default();
+        m.tool = Some(tool.to_owned());
+        m.save(root).unwrap();
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn guard_allows_matching_tool() {
+        let tmp = empty_workspace();
+        seed_lock_owner(tmp.path(), "anvil");
+        let outcome = run_update(&Catalog::anvil(), &local_only(), tmp.path()).unwrap();
+        assert!(outcome.applied);
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn guard_refuses_mismatched_tool_and_writes_nothing() {
+        let tmp = empty_workspace();
+        seed_lock_owner(tmp.path(), "forge2");
+        let err = run_update(&Catalog::anvil(), &local_only(), tmp.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("managed by 'forge2'"), "got: {msg}");
+        assert!(msg.contains("--force"), "refusal should suggest --force; got: {msg}");
+        assert!(!tmp.path().join("justfiles/anvil/tools.just").exists(), "guard must write nothing");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn guard_refuses_mismatched_tool_under_dry_run() {
+        let tmp = empty_workspace();
+        seed_lock_owner(tmp.path(), "forge2");
+        let args = Cli {
+            dry_run: true,
+            ..local_only()
+        };
+        let err = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("managed by 'forge2'"));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn force_switches_ownership_and_rewrites_provenance() {
+        let tmp = empty_workspace();
+        seed_lock_owner(tmp.path(), "forge2");
+        let args = Cli {
+            force: true,
+            ..local_only()
+        };
+        let catalog = Catalog::anvil();
+        let outcome = run_update(&catalog, &args, tmp.path()).unwrap();
+        assert!(outcome.applied, "force should proceed as a normal update");
+        assert!(tmp.path().join("justfiles/anvil/tools.just").is_file());
+        let saved = Manifest::load(tmp.path()).unwrap();
+        assert_eq!(saved.tool.as_deref(), Some("anvil"), "force rewrites the lock owner");
+        assert_eq!(saved.catalog_checksum, Some(catalog.checksum()));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn legacy_lock_without_tool_is_not_blocked() {
+        let tmp = empty_workspace();
+        // A pre-split lock: rendered_by present, no `tool` field.
+        std::fs::write(tmp.path().join(".anvil.lock"), "version = 1\nrendered_by = \"cargo-anvil 0.0.1\"\n").unwrap();
+        let outcome = run_update(&Catalog::anvil(), &local_only(), tmp.path()).unwrap();
+        assert!(outcome.applied, "a legacy lock with no tool must not trigger the guard");
+    }
+
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn opted_out_region_is_skipped_on_second_run() {
@@ -408,6 +519,7 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         };
         let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
 
@@ -438,6 +550,7 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         };
         let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
 
@@ -481,6 +594,7 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         };
 
         // First update: write everything.
@@ -557,6 +671,7 @@ mod tests {
             backends: vec!["github".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         };
         let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(outcome.applied);
@@ -588,6 +703,7 @@ mod tests {
             backends: vec!["github".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         };
         let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
@@ -606,6 +722,7 @@ mod tests {
             backends: vec!["ado".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         };
         let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(outcome.applied);
@@ -638,6 +755,7 @@ mod tests {
             backends: vec!["github".to_owned(), "ado".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         };
         let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
@@ -660,6 +778,7 @@ mod tests {
             backends: vec!["github".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         };
         let first = run_update(&Catalog::anvil(), &with_gh, tmp.path()).unwrap();
         assert!(first.applied);
@@ -673,6 +792,7 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         };
         let second = run_update(&Catalog::anvil(), &no_be, tmp.path()).unwrap();
 
@@ -709,6 +829,7 @@ mod tests {
             backends: vec!["github".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         };
         let _ = run_update(&Catalog::anvil(), &with_gh, tmp.path()).unwrap();
 
@@ -719,6 +840,7 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         };
         let second = run_update(&Catalog::anvil(), &no_be, tmp.path()).unwrap();
 
