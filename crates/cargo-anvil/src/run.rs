@@ -444,8 +444,10 @@ mod tests {
     }
 
     fn seed_lock_owner(root: &Path, tool: &str) {
-        let mut m = Manifest::default();
-        m.tool = Some(tool.to_owned());
+        let m = Manifest {
+            tool: Some(tool.to_owned()),
+            ..Manifest::default()
+        };
         m.save(root).unwrap();
     }
 

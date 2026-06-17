@@ -185,6 +185,10 @@ impl CatalogBuilder {
     /// Remove an artifact. Records an error if no artifact with that identity
     /// exists.
     #[must_use]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "uniform artifact-verb signature; only the artifact's identity is read"
+    )]
     pub fn without_artifact(mut self, artifact: Artifact) -> Self {
         match self.position_of(&artifact) {
             Some(index) => {

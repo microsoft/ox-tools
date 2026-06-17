@@ -209,6 +209,10 @@ pub use workspace::{Workspace, WorkspaceMember};
 /// ```
 #[must_use]
 #[mutants::skip] // Entry point: tracing/clap setup + dispatch to run; behavior is integration-tested via run_update.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "public one-call entry point that owns the catalog for the process lifetime by design"
+)]
 pub fn run_app(catalog: Catalog) -> ExitCode {
     use tracing_subscriber::fmt::format::FmtSpan;
 

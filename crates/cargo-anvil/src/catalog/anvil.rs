@@ -18,31 +18,25 @@ use crate::catalog::artifacts;
 /// The full built-in artifact set, in emission order.
 #[must_use]
 pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
-    let mut out = Vec::new();
-
-    // The justfiles/anvil/ owned-file tree (mod, tools, versions, checks,
-    // groups, tiers — matching the historical emitter order).
-    out.push(artifacts::justfile::entry());
-    out.push(artifacts::justfile::tools());
-    out.push(artifacts::justfile::versions());
-    out.push(artifacts::justfile::checks());
-    out.push(artifacts::justfile::groups());
-    out.push(artifacts::justfile::tiers());
-
-    // The Justfile imports region.
-    out.push(artifacts::region::justfile_imports());
-
-    // Cargo.toml lints: a workspace-scope region plus a per-member region.
-    // build_plan reconciles the single-crate shape (no [workspace] table).
-    out.push(artifacts::region::workspace_lints());
-    out.push(artifacts::region::member_lints());
-
-    // Shared-config regions.
-    out.push(artifacts::region::deny());
-    out.push(artifacts::region::rustfmt());
-    out.push(artifacts::region::delta());
-    out.push(artifacts::region::spellcheck());
-    out.push(artifacts::region::clippy());
+    // The justfiles/anvil/ owned-file tree, the Justfile imports region, the
+    // Cargo.toml lint regions (build_plan reconciles the single-crate shape),
+    // and the shared-config regions.
+    let mut out = vec![
+        artifacts::justfile::entry(),
+        artifacts::justfile::tools(),
+        artifacts::justfile::versions(),
+        artifacts::justfile::checks(),
+        artifacts::justfile::groups(),
+        artifacts::justfile::tiers(),
+        artifacts::region::justfile_imports(),
+        artifacts::region::workspace_lints(),
+        artifacts::region::member_lints(),
+        artifacts::region::deny(),
+        artifacts::region::rustfmt(),
+        artifacts::region::delta(),
+        artifacts::region::spellcheck(),
+        artifacts::region::clippy(),
+    ];
 
     // Backend files (gated); both backends present, filtered by gate at plan time.
     out.extend(artifacts::github::all());
