@@ -92,7 +92,11 @@ pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<Run
     let applied = if args.dry_run {
         false
     } else {
-        let next = plan.apply(&repo_root, &manifest)?;
+        let mut next = plan.apply(&repo_root, &manifest)?;
+        // Stamp this tool's provenance on every save. The catalog checksum
+        // is filled in a later commit of this series.
+        next.tool = Some(catalog.cli().subcommand.clone());
+        next.tool_version = Some(catalog.cli().version.clone());
         next.save(&repo_root)?;
         true
     };
