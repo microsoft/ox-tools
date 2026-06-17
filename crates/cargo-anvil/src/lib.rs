@@ -125,6 +125,8 @@ pub mod region;
 pub mod run;
 pub mod workspace;
 
+use std::process::ExitCode;
+
 pub use backend::Backend;
 pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec, artifacts};
 pub use checksum::{checksum_bytes, checksum_str};
@@ -135,3 +137,48 @@ pub use plan::{Plan, PlanItem, Target};
 pub use region::{CommentSyntax, Region, find_region, render_region, upsert_region};
 pub use run::run;
 pub use workspace::{Workspace, WorkspaceMember};
+
+/// One-call entry point for a tool built on the anvil engine.
+///
+/// This is the body of `cargo-anvil`'s own `main`, generalized over a
+/// [`Catalog`]: it initializes tracing, parses argv against the catalog's
+/// CLI identity, runs the update, and maps the result to an [`ExitCode`].
+/// A downstream binary's entire `main` is therefore one line:
+///
+/// ```no_run
+/// use std::process::ExitCode;
+///
+/// use cargo_anvil::Catalog;
+///
+/// fn main() -> ExitCode {
+///     cargo_anvil::run_app(Catalog::anvil())
+/// }
+/// ```
+#[must_use]
+#[mutants::skip] // Entry point: tracing/clap setup + dispatch to run; behavior is integration-tested via run_update.
+pub fn run_app(catalog: Catalog) -> ExitCode {
+    use tracing_subscriber::fmt::format::FmtSpan;
+
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_level(false)
+        .with_span_events(FmtSpan::NONE)
+        .without_time()
+        .init();
+
+    let cli = match Cli::parse_from_cargo_args(&catalog, std::env::args_os()) {
+        Ok(cli) => cli,
+        Err(err) => {
+            // clap formats and prints the help/error itself.
+            err.exit();
+        }
+    };
+
+    match run::run(&catalog, &cli) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("error: {err:#}");
+            ExitCode::FAILURE
+        }
+    }
+}

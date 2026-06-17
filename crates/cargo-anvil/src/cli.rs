@@ -7,7 +7,9 @@
 //! `anvil` as the first argument; we strip it and parse the
 //! remainder.
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
+
+use crate::catalog::Catalog;
 
 /// Parsed top-level CLI.
 ///
@@ -49,29 +51,47 @@ pub struct Cli {
 
 impl Cli {
     /// Parse the CLI from the raw `std::env::args_os` iterator that cargo
-    /// passes to its subcommand binaries.
+    /// passes to its subcommand binaries, rendering the command's name,
+    /// `about`, and version from the catalog's [`crate::CliMeta`].
     ///
-    /// Cargo invokes `cargo-anvil anvil <args…>` when the
-    /// user types `cargo anvil <args…>`. We drop the
-    /// `anvil` token if present so that clap sees a normal argv.
+    /// Cargo invokes `cargo-<sub> <sub> <args…>` when the user types
+    /// `cargo <sub> <args…>`. We drop the leading `<sub>` token (the
+    /// catalog's `subcommand`) if present so that clap sees a normal argv.
     ///
     /// # Errors
     ///
     /// Returns clap's parse error (typically with an exit code already
     /// encoded) on invalid input.
-    pub fn parse_from_cargo_args<I, T>(args: I) -> Result<Self, clap::Error>
+    pub fn parse_from_cargo_args<I, T>(catalog: &Catalog, args: I) -> Result<Self, clap::Error>
     where
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
+        let meta = catalog.cli();
         let mut iter = args.into_iter().map(Into::<std::ffi::OsString>::into);
         let exe = iter.next();
         let mut rest: Vec<std::ffi::OsString> = iter.collect();
-        if rest.first().is_some_and(|a| a == "anvil") {
+        if rest.first().is_some_and(|a| a == meta.subcommand.as_str()) {
             rest.remove(0);
         }
         let argv_iter = exe.into_iter().chain(rest);
-        Self::try_parse_from(argv_iter)
+
+        // clap interns command metadata as `&'static str`. The catalog
+        // outlives the single parse in `run_app`, so leaking these few
+        // small strings is acceptable and keeps the metadata catalog-driven.
+        let bin_name: &'static str = String::leak(meta.bin_name.clone());
+        let usage_name: &'static str = String::leak(format!("cargo {}", meta.subcommand));
+        let about: &'static str = String::leak(meta.about.clone());
+        let version: &'static str = String::leak(meta.version.clone());
+
+        let command = Self::command()
+            .name(bin_name)
+            .bin_name(usage_name)
+            .about(about)
+            .long_about(about)
+            .version(version);
+        let matches = command.try_get_matches_from(argv_iter)?;
+        Self::from_arg_matches(&matches)
     }
 }
 
@@ -121,13 +141,15 @@ mod tests {
 
     #[test]
     fn parse_from_cargo_args_strips_subcommand_token() {
-        let cli = Cli::parse_from_cargo_args(["cargo-anvil", "anvil", "--dry-run"]).unwrap();
+        let catalog = crate::catalog::Catalog::anvil();
+        let cli = Cli::parse_from_cargo_args(&catalog, ["cargo-anvil", "anvil", "--dry-run"]).unwrap();
         assert!(cli.dry_run);
     }
 
     #[test]
     fn parse_from_cargo_args_works_without_subcommand_token() {
-        let cli = Cli::parse_from_cargo_args(["cargo-anvil", "--dry-run"]).unwrap();
+        let catalog = crate::catalog::Catalog::anvil();
+        let cli = Cli::parse_from_cargo_args(&catalog, ["cargo-anvil", "--dry-run"]).unwrap();
         assert!(cli.dry_run);
     }
 

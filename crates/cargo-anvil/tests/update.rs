@@ -74,7 +74,7 @@ fn local_only_args() -> Cli {
 }
 
 fn run(tmp: &TempDir) -> RunOutcome {
-    run_update(&local_only_args(), tmp.path()).unwrap()
+    run_update(&cargo_anvil::Catalog::anvil(), &local_only_args(), tmp.path()).unwrap()
 }
 
 fn region_decision(outcome: &RunOutcome, host: &str, id: &str) -> Decision {

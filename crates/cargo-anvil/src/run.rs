@@ -13,7 +13,7 @@ use ohno::AppError;
 use tracing::info;
 
 use crate::backend::{self, Backend};
-use crate::catalog::anvil_artifacts;
+use crate::catalog::Catalog;
 use crate::catalog::artifact::{Artifact, HostSelector, RegionSpec};
 use crate::checksum::checksum_str;
 use crate::cli::Cli;
@@ -46,8 +46,8 @@ pub struct RunOutcome {
 ///
 /// Returns an error when the underlying update flow fails.
 #[mutants::skip] // Thin process-boundary glue (cwd lookup, stdout print, `std::process::exit`); behavior covered by `run_update` tests which exercise every dispatch path.
-pub fn run(cli: &Cli) -> Result<(), AppError> {
-    let outcome = run_update(cli, &std::env::current_dir()?)?;
+pub fn run(catalog: &Catalog, cli: &Cli) -> Result<(), AppError> {
+    let outcome = run_update(catalog, cli, &std::env::current_dir()?)?;
     print!("{}", outcome.plan.summary(Some(&outcome.previous_manifest)));
     if cli.dry_run && outcome.plan.has_changes() {
         std::process::exit(1);
@@ -64,7 +64,7 @@ pub fn run(cli: &Cli) -> Result<(), AppError> {
 ///
 /// Propagates errors from any subsystem (workspace discovery, manifest
 /// I/O, emitter, plan application).
-pub fn run_update(args: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError> {
+pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError> {
     let repo_root = workspace::find_workspace_root(start_dir)?;
     let ws = workspace::load_workspace(&repo_root)?;
     let mut manifest = Manifest::load(&repo_root)?;
@@ -87,7 +87,7 @@ pub fn run_update(args: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError> 
         "anvil"
     );
 
-    let plan = build_plan(&repo_root, &ws, &manifest, &backends)?;
+    let plan = build_plan(&repo_root, &ws, &manifest, &backends, catalog)?;
 
     let applied = if args.dry_run {
         false
@@ -113,10 +113,16 @@ pub fn run_update(args: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError> 
 /// [`HostSelector::EachMemberManifest`] fan out across the discovered
 /// workspace members. The Cargo.toml lint regions reconcile the
 /// single-crate shape (no `[workspace]` table) — see [`push_region`].
-fn build_plan(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, backends: &[Backend]) -> Result<Plan, AppError> {
+fn build_plan(
+    repo_root: &Path,
+    workspace: &Workspace,
+    manifest: &Manifest,
+    backends: &[Backend],
+    catalog: &Catalog,
+) -> Result<Plan, AppError> {
     let mut plan = Plan::default();
 
-    for artifact in anvil_artifacts() {
+    for artifact in catalog.artifacts() {
         match artifact {
             Artifact::OwnedFile(spec) => {
                 let selected = spec.gate.is_none_or(|gate| backends.contains(&gate));
@@ -125,7 +131,7 @@ fn build_plan(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, back
                 }
             }
             Artifact::Region(spec) => {
-                push_region(repo_root, workspace, manifest, &mut plan, &spec)?;
+                push_region(repo_root, workspace, manifest, &mut plan, spec)?;
             }
         }
     }
@@ -312,7 +318,7 @@ mod tests {
             no_backends: true,
             dry_run: false,
         };
-        let outcome = run_update(&args, tmp.path()).unwrap();
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(outcome.applied);
         assert!(outcome.backends.is_empty());
         assert!(outcome.plan.has_changes());
@@ -351,8 +357,8 @@ mod tests {
             no_backends: true,
             dry_run: false,
         };
-        let _ = run_update(&args, tmp.path()).unwrap();
-        let second = run_update(&args, tmp.path()).unwrap();
+        let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+        let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(!second.plan.has_changes(), "second run should be a no-op");
     }
 
@@ -365,7 +371,7 @@ mod tests {
             no_backends: true,
             dry_run: true,
         };
-        let outcome = run_update(&args, tmp.path()).unwrap();
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(!outcome.applied);
         assert!(outcome.plan.has_changes());
         assert!(!tmp.path().join("justfiles/anvil/tools.just").exists());
@@ -381,7 +387,7 @@ mod tests {
             no_backends: true,
             dry_run: false,
         };
-        let _ = run_update(&args, tmp.path()).unwrap();
+        let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
 
         let path = tmp.path().join("rustfmt.toml");
         let host = fs::read_to_string(&path).unwrap();
@@ -389,7 +395,7 @@ mod tests {
             crate::region::upsert_region(&host, shared_configs::RUSTFMT_REGION_ID, "", crate::region::CommentSyntax::Hash).unwrap();
         fs::write(&path, updated).unwrap();
 
-        let outcome = run_update(&args, tmp.path()).unwrap();
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         let rustfmt_item = outcome
             .plan
             .items()
@@ -411,7 +417,7 @@ mod tests {
             no_backends: true,
             dry_run: false,
         };
-        let _ = run_update(&args, tmp.path()).unwrap();
+        let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
 
         let path = tmp.path().join("rustfmt.toml");
         let host = fs::read_to_string(&path).unwrap();
@@ -424,7 +430,7 @@ mod tests {
         .unwrap();
         fs::write(&path, updated).unwrap();
 
-        let outcome = run_update(&args, tmp.path()).unwrap();
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         let rustfmt_item = outcome
             .plan
             .items()
@@ -456,7 +462,7 @@ mod tests {
         };
 
         // First update: write everything.
-        let _ = run_update(&args, tmp.path()).unwrap();
+        let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
 
         // User edits the rustfmt region.
         let path = tmp.path().join("rustfmt.toml");
@@ -485,7 +491,7 @@ mod tests {
         let _ = manifest_path; // sanity
 
         // Second update: should Propose (user diverged + template moved).
-        let second = run_update(&args, tmp.path()).unwrap();
+        let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         let item = second
             .plan
             .items()
@@ -504,7 +510,7 @@ mod tests {
         // Third update: nothing has changed since the second run; the
         // proposal should have been "burned through" and the next run
         // should see LeaveAlone (D ≠ L, L = T) — not Propose.
-        let third = run_update(&args, tmp.path()).unwrap();
+        let third = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         let item = third
             .plan
             .items()
@@ -530,7 +536,7 @@ mod tests {
             no_backends: false,
             dry_run: false,
         };
-        let outcome = run_update(&args, tmp.path()).unwrap();
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(outcome.applied);
         assert_eq!(outcome.backends, vec![Backend::GitHub]);
         for expected in [
@@ -561,8 +567,8 @@ mod tests {
             no_backends: false,
             dry_run: false,
         };
-        let _ = run_update(&args, tmp.path()).unwrap();
-        let second = run_update(&args, tmp.path()).unwrap();
+        let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+        let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(
             !second.plan.has_changes(),
             "second github run should be a no-op:\n{}",
@@ -579,7 +585,7 @@ mod tests {
             no_backends: false,
             dry_run: false,
         };
-        let outcome = run_update(&args, tmp.path()).unwrap();
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(outcome.applied);
         assert_eq!(outcome.backends, vec![Backend::Ado]);
         for expected in [
@@ -611,8 +617,8 @@ mod tests {
             no_backends: false,
             dry_run: false,
         };
-        let _ = run_update(&args, tmp.path()).unwrap();
-        let second = run_update(&args, tmp.path()).unwrap();
+        let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+        let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(!second.plan.has_changes());
     }
 
@@ -633,7 +639,7 @@ mod tests {
             no_backends: false,
             dry_run: false,
         };
-        let first = run_update(&with_gh, tmp.path()).unwrap();
+        let first = run_update(&Catalog::anvil(), &with_gh, tmp.path()).unwrap();
         assert!(first.applied);
         let github_workflow = tmp.path().join(".github/workflows/anvil-pr.yml");
         assert!(github_workflow.is_file());
@@ -646,7 +652,7 @@ mod tests {
             no_backends: true,
             dry_run: false,
         };
-        let second = run_update(&no_be, tmp.path()).unwrap();
+        let second = run_update(&Catalog::anvil(), &no_be, tmp.path()).unwrap();
 
         let removed: Vec<&str> = second
             .plan
@@ -682,7 +688,7 @@ mod tests {
             no_backends: false,
             dry_run: false,
         };
-        let _ = run_update(&with_gh, tmp.path()).unwrap();
+        let _ = run_update(&Catalog::anvil(), &with_gh, tmp.path()).unwrap();
 
         let github_workflow = tmp.path().join(".github/workflows/anvil-pr.yml");
         fs::write(&github_workflow, "# user edited this\n").unwrap();
@@ -692,7 +698,7 @@ mod tests {
             no_backends: true,
             dry_run: false,
         };
-        let second = run_update(&no_be, tmp.path()).unwrap();
+        let second = run_update(&Catalog::anvil(), &no_be, tmp.path()).unwrap();
 
         let kept: Vec<&str> = second
             .plan

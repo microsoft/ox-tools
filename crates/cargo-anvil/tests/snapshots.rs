@@ -90,7 +90,7 @@ fn render_tree(root: &Path) -> String {
 }
 
 fn run(args: &Cli, tmp: &TempDir) {
-    run_update(args, tmp.path()).unwrap();
+    run_update(&cargo_anvil::Catalog::anvil(), args, tmp.path()).unwrap();
 }
 
 #[test]

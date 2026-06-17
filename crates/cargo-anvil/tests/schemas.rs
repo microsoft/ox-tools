@@ -63,7 +63,7 @@ fn run_with_backend(backend: &str) -> TempDir {
         no_backends: false,
         dry_run: false,
     };
-    run_update(&args, tmp.path()).unwrap();
+    run_update(&cargo_anvil::Catalog::anvil(), &args, tmp.path()).unwrap();
     tmp
 }
 
