@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.1.0"
-catalog_checksum = "sha256:a1ab42662e9b7d69a9ff8d120f832d61dffd4086a14f219c8d4ee26605d5ccbf"
+catalog_checksum = "sha256:a46ed64387bbdf87e4f0334f52b767207f44f7908fd9cb6e23a0ae263bad7a09"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"
@@ -32,6 +32,10 @@ path = ".github/actions/anvil-scheduled-exhaustive/action.yml"
 checksum = "sha256:6a56421f666b92239a952e0ef351c803c59f5d24bd22b34f8695581fa175bdea"
 
 [[file]]
+path = ".github/actions/anvil-scheduled-runtime-analysis/action.yml"
+checksum = "sha256:b943525f6d08b1f2b17bd08979c199a214f17305dad7bc8bea3d723fe2fa3091"
+
+[[file]]
 path = ".github/actions/anvil-scheduled-test/action.yml"
 checksum = "sha256:a42cf49d0e203db5545a797888c8c62e1564f5914a2588e2a40cb3b2cf8b0ad3"
 
@@ -49,7 +53,7 @@ checksum = "sha256:14c3541e39a7918497cb400ea20232340bc056da6d862a951568c09e32f4f
 
 [[file]]
 path = ".github/workflows/anvil-scheduled-impl.yml"
-checksum = "sha256:bee7c741ee336c43b75754a0a902d6a64f8df971a95121acc7c6d66bbf2bacc8"
+checksum = "sha256:48669cdc1c372d47cbbc5b51ffada9236a2f176ea5a4d37829685fb56a60427a"
 
 [[file]]
 path = ".github/workflows/anvil-scheduled.yml"
@@ -57,11 +61,11 @@ checksum = "sha256:a45359b92a6d851fc39bfa1c03aeb489b544ae37a1cea390dbbf860b2def8
 
 [[file]]
 path = "justfiles/anvil/checks.just"
-checksum = "sha256:4fdce5b0806929c9dda59b9e807f6b2ac89a42042f55d721ee345efd928ba0ef"
+checksum = "sha256:fa923cd5c0219462d2ed045ced0796c5a038160d61eb703f23e6aa7a7b84bff2"
 
 [[file]]
 path = "justfiles/anvil/groups.just"
-checksum = "sha256:6fa13e5e760a490c5c466efee538513bc9a73deffd58d8a05f13b71f3b9b4f10"
+checksum = "sha256:90dfd2354cde09544d39e3f69231bec48bb78b9963da6a1daef626977f657364"
 
 [[file]]
 path = "justfiles/anvil/mod.just"
@@ -73,11 +77,11 @@ checksum = "sha256:fd65dc16029c0e347f55f406e005ca1b264db4b482e3f1e8f6ef94aad7c51
 
 [[file]]
 path = "justfiles/anvil/tools.just"
-checksum = "sha256:7c92f6cadca16c4e2d6897b1c9304e7a541fb7c7e380e27165304d4071a6d27c"
+checksum = "sha256:15feedc5f54ff9dc4471e8977bd653be844c11b2683cfc4db93fb1f21064f034"
 
 [[file]]
 path = "justfiles/anvil/versions.just"
-checksum = "sha256:59d77df9871456e53ffe1c1c12104555dfa2d50ae8f9ccb2201d07770c7ae289"
+checksum = "sha256:9da2b99b5ce18785b508dc82c593d41ff972a6f1cdd587add0aa9186a6121b93"
 
 [[region]]
 host = ".delta.toml"
@@ -87,7 +91,7 @@ checksum = "sha256:ef049abc4bba5e6dac7dfc07a4852d821de4682fe6ad46aace7ddfb2455cb
 [[region]]
 host = "Cargo.toml"
 id = "anvil-workspace-lints"
-checksum = "sha256:d66a878609d0bf11e3aa52f3d28ef674de9333c97b3f5d5ffdc7c7b487ac5792"
+checksum = "sha256:8257f8c96103501ef0af020ce686ffcd7333fa5704f701b33758468baa9cdd98"
 
 [[region]]
 host = "Justfile"
