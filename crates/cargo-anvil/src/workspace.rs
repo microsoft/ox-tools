@@ -365,4 +365,38 @@ members = ["cra*tes"]
         assert_eq!(normalize_relpath("a/b/c"), "a/b/c");
         assert_eq!(normalize_relpath("a\\b\\c"), if cfg!(windows) { "a/b/c" } else { "a\\b\\c" });
     }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn workspace_resolving_to_zero_members_errors() {
+        // A `crates/*` glob whose parent dir doesn't exist resolves to zero
+        // members; an empty workspace is rejected.
+        let tmp = TempDir::new().unwrap();
+        write(&tmp.path().join("Cargo.toml"), "[workspace]\nmembers = [\"nonexistent/*\"]\n");
+        let err = load_workspace(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("zero members"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn empty_member_pattern_errors() {
+        let tmp = TempDir::new().unwrap();
+        write(&tmp.path().join("Cargo.toml"), "[workspace]\nmembers = [\"\"]\n");
+        let err = load_workspace(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("pattern is empty"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn glob_with_existing_parent_but_no_member_dirs_resolves_empty() {
+        // `crates/*` where `crates/` exists but contains no member dirs:
+        // the glob expands to nothing (Cargo tolerates this), so the
+        // workspace ends up with zero members and is rejected -- exercising
+        // the is_dir() == true, no-entries path of expand_member_pattern.
+        let tmp = TempDir::new().unwrap();
+        write(&tmp.path().join("Cargo.toml"), "[workspace]\nmembers = [\"crates/*\"]\n");
+        fs::create_dir_all(tmp.path().join("crates")).unwrap();
+        let err = load_workspace(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("zero members"), "{err}");
+    }
 }
