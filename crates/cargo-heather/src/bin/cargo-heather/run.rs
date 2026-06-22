@@ -178,3 +178,80 @@ fn format_mismatch_details(expected: &str, actual: &str) -> String {
 fn make_relative(path: &Path, base: &Path) -> PathBuf {
     path.strip_prefix(base).unwrap_or(path).to_path_buf()
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn config() -> HeatherConfig {
+        HeatherConfig {
+            header_text: "// Copyright".into(),
+            scripts: true,
+            dot_toml: false,
+            exclude: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn format_mismatch_details_handles_empty_expected_and_actual() {
+        let s = format_mismatch_details("", "");
+        assert!(s.contains("+ <empty>"), "{s}");
+        assert!(s.contains("- <empty>"), "{s}");
+    }
+
+    #[test]
+    fn format_mismatch_details_lists_nonempty_lines_with_markers() {
+        let s = format_mismatch_details("E1\nE2", "A1");
+        assert!(s.contains("+ E1") && s.contains("+ E2"), "{s}");
+        assert!(s.contains("- A1"), "{s}");
+    }
+
+    #[test]
+    fn read_and_classify_rejects_unsupported_file_type() {
+        let err = read_and_classify(Path::new("weird.unknownext"), &config()).unwrap_err();
+        assert!(matches!(err, HeatherError::UnsupportedFileType { .. }), "{err}");
+    }
+
+    #[test]
+    fn read_and_classify_returns_kind_and_content_for_supported_file() {
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("a.rs");
+        std::fs::write(&p, "// x\nfn main() {}\n").unwrap();
+        let got = read_and_classify(&p, &config()).unwrap();
+        assert!(got.is_some());
+    }
+
+    #[test]
+    fn make_relative_strips_base_or_falls_back() {
+        assert_eq!(make_relative(Path::new("/a/b/c.rs"), Path::new("/a")), PathBuf::from("b/c.rs"));
+        // Unrelated base: path returned unchanged.
+        assert_eq!(make_relative(Path::new("/x/c.rs"), Path::new("/a")), PathBuf::from("/x/c.rs"));
+    }
+
+    #[test]
+    fn read_and_classify_propagates_read_error() {
+        // A directory named like a Rust file: CommentStyle recognizes the
+        // extension, so the function proceeds past the type check, but
+        // reading the "file" fails -> FileRead error.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("looks_like.rs");
+        std::fs::create_dir(&dir).unwrap();
+        assert!(matches!(read_and_classify(&dir, &config()), Err(HeatherError::FileRead { .. })));
+    }
+
+    #[test]
+    fn run_fix_skips_cargo_scripts_when_scripts_disabled() {
+        // A cargo-script file with `scripts = false` is skipped by
+        // read_and_classify (Ok(None)), exercising the `continue` in run_fix.
+        let tmp = TempDir::new().unwrap();
+        let script = tmp.path().join("s.rs");
+        std::fs::write(&script, "#!/usr/bin/env cargo\n---\n//! doc\nfn main() {}\n").unwrap();
+        let mut cfg = config();
+        cfg.scripts = false;
+        let fixed = run_fix(&[script], &cfg, tmp.path()).unwrap();
+        assert_eq!(fixed, 0);
+    }
+}

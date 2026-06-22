@@ -76,6 +76,7 @@ impl std::error::Error for HeatherError {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::error::Error;
 
@@ -96,5 +97,43 @@ mod tests {
     fn non_io_variants_have_no_source() {
         let err = HeatherError::ConfigInvalid("bad".into());
         assert!(err.source().is_none());
+    }
+
+    #[test]
+    fn display_renders_every_variant() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "gone");
+        assert!(
+            HeatherError::FileRead {
+                path: PathBuf::from("/p"),
+                source: io_err,
+            }
+            .to_string()
+            .contains("failed to read file")
+        );
+        assert!(
+            HeatherError::ConfigParse {
+                path: PathBuf::from("/c"),
+                message: "boom".into(),
+            }
+            .to_string()
+            .contains("failed to parse config")
+        );
+        assert!(
+            HeatherError::ConfigNotFound(PathBuf::from("/n"))
+                .to_string()
+                .contains("config file not found")
+        );
+        assert!(HeatherError::ConfigInvalid("x".into()).to_string().contains("invalid config"));
+        assert!(
+            HeatherError::UnknownLicense("ZZZ".into())
+                .to_string()
+                .contains("unknown SPDX license identifier")
+        );
+        assert!(
+            HeatherError::UnsupportedFileType { path: PathBuf::from("/u") }
+                .to_string()
+                .contains("unsupported file type")
+        );
+        assert!(HeatherError::ValidationFailed(3).to_string().contains("3 file(s)"));
     }
 }
