@@ -17,7 +17,7 @@ use crate::catalog::Catalog;
 use crate::catalog::artifact::{Artifact, HostSelector, RegionSpec};
 use crate::checksum::checksum_str;
 use crate::cli::Cli;
-use crate::decision::{Decision, decide_removal};
+use crate::decision::{RemovalDecision, decide_removal};
 use crate::emit::{plan_managed_region, plan_owned_file};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
 use crate::manifest::Manifest;
@@ -256,12 +256,13 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan) -> Resu
         let disk = read_file_if_present(&repo_root.join(path))?;
         let disk_checksum = disk.as_deref().map(checksum_str);
         match decide_removal(last, disk_checksum.as_deref()) {
-            Decision::Remove => plan.push(PlanItem::remove_file(path.clone())),
-            // `InSync` means the file is already gone but we still want
-            // to purge the manifest entry, same as a customized orphan —
-            // both surface as no-op plan items that drop the entry.
-            Decision::OrphanedKept | Decision::InSync => plan.push(PlanItem::orphaned_kept(Target::File { path: path.clone() })),
-            other => unreachable!("decide_removal returned {other:?} for a file orphan"),
+            RemovalDecision::Remove => plan.push(PlanItem::remove_file(path.clone())),
+            // `AlreadyGone` means the file is already missing but we still
+            // want to purge the manifest entry, same as a customized orphan
+            // — both surface as no-op plan items that drop the entry.
+            RemovalDecision::OrphanedKept | RemovalDecision::AlreadyGone => {
+                plan.push(PlanItem::orphaned_kept(Target::File { path: path.clone() }));
+            }
         }
     }
 
@@ -288,17 +289,16 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan) -> Resu
         let region = find_region(&host_text, &key.id, syntax)?;
         let body_checksum = region.as_ref().map(|r| checksum_str(r.body_str()));
         match decide_removal(last, body_checksum.as_deref()) {
-            Decision::Remove => {
+            RemovalDecision::Remove => {
                 let spliced = remove_region(&host_text, &key.id, syntax)?;
                 plan.push(PlanItem::remove_region(key.host.clone(), key.id.clone(), spliced));
             }
-            Decision::OrphanedKept | Decision::InSync => {
+            RemovalDecision::OrphanedKept | RemovalDecision::AlreadyGone => {
                 plan.push(PlanItem::orphaned_kept(Target::Region {
                     host: key.host.clone(),
                     id: key.id.clone(),
                 }));
             }
-            other => unreachable!("decide_removal returned {other:?} for a region orphan"),
         }
     }
 
@@ -912,6 +912,69 @@ mod tests {
             fs::read_to_string(&github_workflow).unwrap(),
             "# user edited this\n",
             "customized orphan contents must be preserved"
+        );
+    }
+
+    /// Direct unit test of `plan_removals` for a region orphan whose host
+    /// file no longer exists: it must surface as `OrphanedKept` (drop the
+    /// manifest entry, no disk action).
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn plan_removals_region_orphan_with_missing_host() {
+        use crate::decision::Decision;
+
+        let tmp = TempDir::new().unwrap();
+        let mut previous = Manifest::default();
+        previous.set_region("Justfile", "anvil-r", "sha256:body");
+        let mut plan = Plan::default();
+        plan_removals(tmp.path(), &previous, &mut plan).unwrap();
+        let orphans: Vec<(&str, &str)> = plan
+            .items()
+            .iter()
+            .filter(|i| i.decision == Decision::OrphanedKept)
+            .filter_map(|i| match &i.target {
+                Target::Region { host, id } => Some((host.as_str(), id.as_str())),
+                Target::File { .. } => None,
+            })
+            .collect();
+        assert_eq!(orphans, vec![("Justfile", "anvil-r")]);
+    }
+
+    /// Direct unit test of `plan_removals` for a region orphan whose host
+    /// file exists with a customized (checksum-diverged) region body: it
+    /// must surface as `OrphanedKept`, preserving the user's edits.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn plan_removals_region_orphan_customized_is_kept() {
+        use crate::decision::Decision;
+
+        let tmp = TempDir::new().unwrap();
+        write(
+            &tmp.path().join("Justfile"),
+            "# >>> anvil-managed: anvil-r\nuser edited body\n# <<< anvil-managed: anvil-r\n",
+        );
+        let mut previous = Manifest::default();
+        // Stored checksum deliberately differs from the on-disk body, so
+        // decide_removal classifies the region as a customized orphan.
+        previous.set_region("Justfile", "anvil-r", "sha256:stored-different");
+        let mut plan = Plan::default();
+        plan_removals(tmp.path(), &previous, &mut plan).unwrap();
+        let orphans: Vec<(&str, &str)> = plan
+            .items()
+            .iter()
+            .filter(|i| i.decision == Decision::OrphanedKept)
+            .filter_map(|i| match &i.target {
+                Target::Region { host, id } => Some((host.as_str(), id.as_str())),
+                Target::File { .. } => None,
+            })
+            .collect();
+        assert_eq!(orphans, vec![("Justfile", "anvil-r")]);
+        // Host file untouched.
+        assert!(
+            fs::read_to_string(tmp.path().join("Justfile"))
+                .unwrap()
+                .contains("user edited body"),
+            "customized region body must be preserved",
         );
     }
 }

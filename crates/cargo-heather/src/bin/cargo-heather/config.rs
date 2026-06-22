@@ -178,17 +178,7 @@ fn try_load_from_cargo_toml(path: &Path) -> Result<Option<HeatherConfig>, Heathe
 }
 
 fn resolve_workspace_license(package_cargo_toml: &Path) -> Result<Option<HeatherConfig>, HeatherError> {
-    let workspace_root = find_workspace_root(package_cargo_toml)?;
-
-    let content = std::fs::read_to_string(&workspace_root).map_err(|e| HeatherError::FileRead {
-        path: workspace_root.clone(),
-        source: e,
-    })?;
-
-    let manifest: CargoManifest = toml::from_str(&content).map_err(|e| HeatherError::ConfigParse {
-        path: workspace_root,
-        message: e.to_string(),
-    })?;
+    let (_, manifest) = find_workspace_root(package_cargo_toml)?;
 
     let spdx_id = manifest
         .workspace
@@ -205,7 +195,10 @@ fn resolve_workspace_license(package_cargo_toml: &Path) -> Result<Option<Heather
     }
 }
 
-fn find_workspace_root(package_cargo_toml: &Path) -> Result<PathBuf, HeatherError> {
+/// Walk up from `package_cargo_toml` to the nearest ancestor `Cargo.toml`
+/// that declares a `[workspace]` table, returning both its path and its
+/// already-parsed manifest so callers don't have to re-read and re-parse it.
+fn find_workspace_root(package_cargo_toml: &Path) -> Result<(PathBuf, CargoManifest), HeatherError> {
     let start_dir = package_cargo_toml
         .parent()
         .ok_or_else(|| HeatherError::ConfigInvalid(format!("cannot determine parent directory of '{}'", package_cargo_toml.display())))?;
@@ -214,8 +207,11 @@ fn find_workspace_root(package_cargo_toml: &Path) -> Result<PathBuf, HeatherErro
 
     loop {
         let candidate = current.join("Cargo.toml");
-        if candidate.exists() && cargo_toml_has_workspace(&candidate)? {
-            return Ok(candidate);
+        if candidate.exists() {
+            let manifest = parse_cargo_manifest(&candidate)?;
+            if manifest.workspace.is_some() {
+                return Ok((candidate, manifest));
+            }
         }
 
         match current.parent() {
@@ -230,18 +226,16 @@ fn find_workspace_root(package_cargo_toml: &Path) -> Result<PathBuf, HeatherErro
     )))
 }
 
-fn cargo_toml_has_workspace(path: &Path) -> Result<bool, HeatherError> {
+fn parse_cargo_manifest(path: &Path) -> Result<CargoManifest, HeatherError> {
     let content = std::fs::read_to_string(path).map_err(|e| HeatherError::FileRead {
         path: path.to_path_buf(),
         source: e,
     })?;
 
-    let manifest: CargoManifest = toml::from_str(&content).map_err(|e| HeatherError::ConfigParse {
+    toml::from_str(&content).map_err(|e| HeatherError::ConfigParse {
         path: path.to_path_buf(),
         message: e.to_string(),
-    })?;
-
-    Ok(manifest.workspace.is_some())
+    })
 }
 
 /// Return the expected config file path for a project directory.
@@ -425,12 +419,12 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_has_workspace_distinguishes_tables() {
+    fn parse_cargo_manifest_distinguishes_workspace_tables() {
         let tmp = TempDir::new().unwrap();
         let ws = write(tmp.path(), "ws/Cargo.toml", "[workspace]\nmembers = []\n");
         let pkg = write(tmp.path(), "pkg/Cargo.toml", "[package]\nname = \"x\"\n");
-        assert!(cargo_toml_has_workspace(&ws).unwrap());
-        assert!(!cargo_toml_has_workspace(&pkg).unwrap());
+        assert!(parse_cargo_manifest(&ws).unwrap().workspace.is_some());
+        assert!(parse_cargo_manifest(&pkg).unwrap().workspace.is_none());
     }
 
     #[test]
@@ -454,15 +448,15 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_has_workspace_on_directory_is_file_read_error() {
+    fn parse_cargo_manifest_on_directory_is_file_read_error() {
         let tmp = TempDir::new().unwrap();
-        assert!(matches!(cargo_toml_has_workspace(tmp.path()), Err(HeatherError::FileRead { .. })));
+        assert!(matches!(parse_cargo_manifest(tmp.path()), Err(HeatherError::FileRead { .. })));
     }
 
     #[test]
-    fn cargo_toml_has_workspace_on_malformed_is_parse_error() {
+    fn parse_cargo_manifest_on_malformed_is_parse_error() {
         let tmp = TempDir::new().unwrap();
         let p = write(tmp.path(), "Cargo.toml", "x = = bad");
-        assert!(matches!(cargo_toml_has_workspace(&p), Err(HeatherError::ConfigParse { .. })));
+        assert!(matches!(parse_cargo_manifest(&p), Err(HeatherError::ConfigParse { .. })));
     }
 }

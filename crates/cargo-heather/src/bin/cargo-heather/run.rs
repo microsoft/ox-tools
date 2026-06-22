@@ -60,10 +60,8 @@ fn run_check(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> R
             continue;
         };
         checked += 1;
-        let result = cargo_heather::check(content.as_bytes(), &config.header_text, kind).map_err(|e| HeatherError::FileRead {
-            path: path.clone(),
-            source: e,
-        })?;
+        let result = cargo_heather::check(content.as_bytes(), &config.header_text, kind)
+            .expect("check reads from an in-memory slice and never performs fallible IO");
         let relative = make_relative(path, project_dir);
         match &result {
             CheckResult::Ok => {}
@@ -97,27 +95,18 @@ fn run_fix(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> Res
             continue;
         };
         let mut output: Vec<u8> = Vec::with_capacity(content.len() + 128);
-        let result =
-            cargo_heather::fix(content.as_bytes(), &mut output, &config.header_text, kind).map_err(|e| HeatherError::FileRead {
-                path: path.clone(),
-                source: e,
-            })?;
+        let result = cargo_heather::fix(content.as_bytes(), &mut output, &config.header_text, kind)
+            .expect("fix reads from an in-memory slice and writes to a Vec, both infallible");
         let relative = make_relative(path, project_dir);
         match &result {
             CheckResult::Ok => {}
             CheckResult::Missing => {
-                std::fs::write(path, &output).map_err(|e| HeatherError::FileRead {
-                    path: path.clone(),
-                    source: e,
-                })?;
+                write_fixed(path, &output)?;
                 println!("  Fixed (added header): {}", relative.display());
                 fixed_count += 1;
             }
             CheckResult::Mismatch { .. } => {
-                std::fs::write(path, &output).map_err(|e| HeatherError::FileRead {
-                    path: path.clone(),
-                    source: e,
-                })?;
+                write_fixed(path, &output)?;
                 println!("  Fixed (replaced header): {}", relative.display());
                 fixed_count += 1;
             }
@@ -130,6 +119,18 @@ fn run_fix(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> Res
     }
 
     Ok(fixed_count)
+}
+
+/// Persist the rewritten file contents to disk.
+///
+/// This is the single filesystem-write edge of the `--fix` path,
+/// extracted from [`run_fix`] so the two fix arms share one write site.
+fn write_fixed(path: &Path, output: &[u8]) -> Result<(), AppError> {
+    std::fs::write(path, output).map_err(|e| HeatherError::FileRead {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    Ok(())
 }
 
 /// Read the file and classify its [`FileKind`]. Returns `Ok(None)` when the
@@ -253,5 +254,23 @@ mod tests {
         cfg.scripts = false;
         let fixed = run_fix(&[script], &cfg, tmp.path()).unwrap();
         assert_eq!(fixed, 0);
+    }
+
+    #[test]
+    fn write_fixed_writes_bytes_to_disk() {
+        let tmp = TempDir::new().unwrap();
+        let p = tmp.path().join("out.rs");
+        write_fixed(&p, b"hello\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "hello\n");
+    }
+
+    #[test]
+    fn write_fixed_propagates_write_error() {
+        // A directory occupies the target path, so `fs::write` fails and
+        // the error is surfaced as `FileRead`.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("blocked");
+        std::fs::create_dir(&dir).unwrap();
+        assert!(write_fixed(&dir, b"x").is_err());
     }
 }

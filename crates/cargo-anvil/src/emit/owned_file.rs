@@ -12,7 +12,7 @@ use std::path::Path;
 use ohno::AppError;
 
 use crate::checksum::checksum_str;
-use crate::decision::{Decision, DecisionInputs, decide};
+use crate::decision::{Decision, DecisionInputs, UpdateDecision, decide};
 use crate::io::read_file_if_present;
 use crate::manifest::Manifest;
 use crate::plan::{PlanItem, Target};
@@ -37,17 +37,13 @@ pub fn plan_owned_file(repo_root: &Path, manifest: &Manifest, relpath: &str, ren
         disk: disk_checksum.as_deref(),
         template: &template_checksum,
     };
-    let decision = decide(&inputs);
 
     let target = Target::File { path: relpath.to_owned() };
-    let item = match decision {
-        Decision::InSync => PlanItem::insync(target, template_checksum),
-        Decision::LeaveAlone => PlanItem::noop(target, decision),
-        Decision::Write => PlanItem::write_file(relpath, rendered.to_owned(), template_checksum),
-        Decision::Propose => PlanItem::propose_file(relpath, rendered.to_owned(), template_checksum),
-        Decision::Remove | Decision::OrphanedKept => {
-            unreachable!("decide() never returns removal decisions; those come from plan_removals")
-        }
+    let item = match decide(&inputs) {
+        UpdateDecision::InSync => PlanItem::insync(target, template_checksum),
+        UpdateDecision::LeaveAlone => PlanItem::noop(target, Decision::LeaveAlone),
+        UpdateDecision::Write => PlanItem::write_file(relpath, rendered.to_owned(), template_checksum),
+        UpdateDecision::Propose => PlanItem::propose_file(relpath, rendered.to_owned(), template_checksum),
     };
 
     Ok(item)
