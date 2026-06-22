@@ -124,7 +124,7 @@ mod tests {
     /// A minimal catalog (no artifacts) for exercising the parse path. Its
     /// checksum is over an empty artifact set, so `parse_from_cargo_args`
     /// stays cheap under Miri while still interning the CLI metadata — which
-    /// keeps Miri's leak checker watching the metadata path without the
+    /// keeps the Miri leak checker watching the metadata path without the
     /// pathological cost of hashing the full embedded `anvil` catalog.
     fn tiny_catalog() -> crate::catalog::Catalog {
         crate::catalog::Catalog::builder(crate::catalog::CliMeta::new("anvil"))
