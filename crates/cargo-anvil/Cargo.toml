@@ -41,7 +41,7 @@ name = "cargo-anvil"
 path = "src/main.rs"
 
 [dependencies]
-clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context", "string"] }
 mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
 sha2 = { workspace = true, features = ["std"] }

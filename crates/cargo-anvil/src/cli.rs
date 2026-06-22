@@ -86,24 +86,21 @@ impl Cli {
         }
         let argv_iter = exe.into_iter().chain(rest);
 
-        // clap interns command metadata as `&'static str`. The catalog
-        // outlives the single parse in `run_app`, so leaking these few
-        // small strings is acceptable and keeps the metadata catalog-driven.
-        let bin_name: &'static str = String::leak(meta.bin_name.clone());
-        let usage_name: &'static str = String::leak(format!("cargo {}", meta.subcommand));
-        let about: &'static str = String::leak(meta.about.clone());
-        let version: &'static str = String::leak(meta.version.clone());
+        // clap's `string` feature lets `Command` metadata be owned `String`s
+        // (interned into `Str`), so the catalog's identity drives the CLI with
+        // no leak.
+        let usage_name = format!("cargo {}", meta.subcommand);
         // `--version` prints a second line with the catalog checksum, so two
         // builds reporting the same version but carrying different catalogs
         // can be told apart; `-V` keeps the terse single-line version.
-        let long_version: &'static str = String::leak(format!("{}\ncatalog: {}", meta.version, catalog.checksum()));
+        let long_version = format!("{}\ncatalog: {}", meta.version, catalog.checksum());
 
         let command = Self::command()
-            .name(bin_name)
+            .name(meta.bin_name.clone())
             .bin_name(usage_name)
-            .about(about)
-            .long_about(about)
-            .version(version)
+            .about(meta.about.clone())
+            .long_about(meta.about.clone())
+            .version(meta.version.clone())
             .long_version(long_version)
             .disable_version_flag(true)
             .arg(
