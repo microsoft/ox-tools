@@ -92,6 +92,7 @@ fn splice(host_text: Option<&str>, region_id: &str, rendered_body: &str, syntax:
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 

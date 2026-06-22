@@ -74,6 +74,7 @@ fn find_entry_case_insensitive(dir: &Path, name: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 

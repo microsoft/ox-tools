@@ -116,6 +116,7 @@ impl Cli {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use clap::Parser as _;
 
