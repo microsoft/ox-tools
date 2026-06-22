@@ -1007,10 +1007,10 @@ anvil-aprz-validate-prereqs: anvil-tool-cargo-aprz-validate-prereqs
 # --- pr-test members (shared with scheduled-test) ---
 
 [group("anvil-setup")]
-anvil-llvm-cov-setup installer="install": anvil-component-nightly-llvm-tools-preview-install (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer) (anvil-tool-cargo-coverage-gate-install installer)
+anvil-llvm-cov-setup installer="install": anvil-component-nightly-llvm-tools-install (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer) (anvil-tool-cargo-coverage-gate-install installer)
 
 [group("anvil-setup")]
-anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-preview-validate-prereqs anvil-tool-cargo-llvm-cov-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs anvil-tool-cargo-coverage-gate-validate-prereqs
+anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-prereqs anvil-tool-cargo-llvm-cov-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs anvil-tool-cargo-coverage-gate-validate-prereqs
 
 [group("anvil-setup")]
 anvil-doc-test-setup installer="install": anvil-tool-rustc-validate-prereqs

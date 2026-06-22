@@ -343,16 +343,19 @@ anvil-component-nightly-rust-src-install: anvil-toolchain-nightly-install (_inst
 [group("anvil-setup")]
 anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "rust-src")
 
-# llvm-tools-preview ships the llvm-profdata / llvm-cov binaries that
+# llvm-tools ships the llvm-profdata / llvm-cov binaries that
 # cargo-llvm-cov shells out to. Required on the nightly toolchain
 # because anvil runs coverage on nightly (so cargo-llvm-cov sets the
 # `cfg(coverage_nightly)` that the workspace's
 # `#[cfg_attr(coverage_nightly, coverage(off))]` exclusions depend on).
+# Use the canonical `llvm-tools` name (not the legacy `llvm-tools-preview`
+# alias): `rustup component list` reports it as `llvm-tools-<target>`, so
+# the `-preview` alias never prefix-matches in `_check-component`.
 [group("anvil-setup")]
-anvil-component-nightly-llvm-tools-preview-install: anvil-toolchain-nightly-install (_install-component rust_nightly "llvm-tools-preview")
+anvil-component-nightly-llvm-tools-install: anvil-toolchain-nightly-install (_install-component rust_nightly "llvm-tools")
 
 [group("anvil-setup")]
-anvil-component-nightly-llvm-tools-preview-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "llvm-tools-preview")
+anvil-component-nightly-llvm-tools-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "llvm-tools")
 
 # ============================================================================
 # Cargo subcommands
