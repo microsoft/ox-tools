@@ -421,6 +421,11 @@ mod tests {
         // Guards the `pi == p.len()` shortcut in glob_inner from being short-circuited.
         assert!(!super::glob_matches("a*b", "ac"));
         assert!(!super::glob_matches("a*b", "axyz"));
+        // `?` requires exactly one remaining name char: a trailing `?`
+        // with the name exhausted must not match (guards the
+        // `ni >= n.len()` early-return in the `?` arm).
+        assert!(!super::glob_matches("a?", "a"));
+        assert!(!super::glob_matches("alpha?", "alpha"));
     }
 
     #[test]
