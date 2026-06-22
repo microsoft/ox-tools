@@ -121,6 +121,18 @@ mod tests {
 
     use super::*;
 
+    /// A minimal catalog (no artifacts) for exercising the parse path. Its
+    /// checksum is over an empty artifact set, so `parse_from_cargo_args`
+    /// stays cheap under Miri while still interning the CLI metadata — which
+    /// keeps Miri's leak checker watching the metadata path without the
+    /// pathological cost of hashing the full embedded `anvil` catalog.
+    fn tiny_catalog() -> crate::catalog::Catalog {
+        crate::catalog::Catalog::builder(crate::catalog::CliMeta::new("anvil"))
+            .version("9.9.9")
+            .build()
+            .unwrap()
+    }
+
     #[test]
     fn parse_no_args() {
         let cli = Cli::parse_from(["cargo-anvil"]);
@@ -163,7 +175,7 @@ mod tests {
 
     #[test]
     fn version_output_includes_catalog_checksum() {
-        let catalog = crate::catalog::Catalog::anvil();
+        let catalog = tiny_catalog();
         let err = Cli::parse_from_cargo_args(&catalog, ["cargo-anvil", "--version"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
         let rendered = err.to_string();
@@ -181,14 +193,14 @@ mod tests {
 
     #[test]
     fn parse_from_cargo_args_strips_subcommand_token() {
-        let catalog = crate::catalog::Catalog::anvil();
+        let catalog = tiny_catalog();
         let cli = Cli::parse_from_cargo_args(&catalog, ["cargo-anvil", "anvil", "--dry-run"]).unwrap();
         assert!(cli.dry_run);
     }
 
     #[test]
     fn parse_from_cargo_args_works_without_subcommand_token() {
-        let catalog = crate::catalog::Catalog::anvil();
+        let catalog = tiny_catalog();
         let cli = Cli::parse_from_cargo_args(&catalog, ["cargo-anvil", "--dry-run"]).unwrap();
         assert!(cli.dry_run);
     }

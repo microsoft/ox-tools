@@ -336,6 +336,10 @@ mod tests {
         assert!(one.checksum().starts_with("sha256:"));
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "hashes the full embedded anvil catalog; pure safe Rust with no leak/UB to exercise, covered by the native run"
+    )]
     #[test]
     fn checksum_is_independent_of_cli_meta() {
         let base = Catalog::anvil().checksum();
@@ -350,6 +354,10 @@ mod tests {
         assert_eq!(base, renamed, "CliMeta must not affect the catalog checksum");
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "hashes the full embedded anvil catalog; pure safe Rust with no leak/UB to exercise, covered by the native run"
+    )]
     #[test]
     fn checksum_changes_when_a_body_changes() {
         let base = Catalog::anvil().checksum();
@@ -362,6 +370,10 @@ mod tests {
         assert_ne!(base, edited);
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "hashes the full embedded anvil catalog; pure safe Rust with no leak/UB to exercise, covered by the native run"
+    )]
     #[test]
     fn checksum_changes_when_an_artifact_is_added_or_removed() {
         let base = Catalog::anvil().checksum();
