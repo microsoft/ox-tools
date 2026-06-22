@@ -31,3 +31,27 @@ pub(super) fn normalize_to_lines(text: &str) -> Vec<String> {
     }
     lines
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_strips_outer_blank_lines_and_trailing_ws() {
+        // Leading and trailing blank lines are removed; interior content
+        // keeps leading whitespace but loses trailing whitespace.
+        let got = normalize_to_lines("\n\n  a  \nb\n\n\n");
+        assert_eq!(got, vec!["  a".to_owned(), "b".to_owned()]);
+    }
+
+    #[test]
+    fn header_matches_ignores_outer_blank_lines() {
+        assert!(header_matches("\n// A\n// B\n\n", "// A\n// B"));
+    }
+
+    #[test]
+    fn header_matches_false_when_actual_shorter_than_expected() {
+        assert!(!header_matches("// A", "// A\n// B"));
+    }
+}
