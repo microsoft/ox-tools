@@ -57,6 +57,7 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::catalog::Catalog;

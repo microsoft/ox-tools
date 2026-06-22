@@ -54,6 +54,7 @@ pub fn plan_owned_file(repo_root: &Path, manifest: &Manifest, relpath: &str, ren
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 

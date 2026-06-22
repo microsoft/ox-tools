@@ -35,6 +35,7 @@ fn anvil_cli_meta() -> CliMeta {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

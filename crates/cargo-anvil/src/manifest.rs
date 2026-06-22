@@ -251,6 +251,7 @@ impl Manifest {
 // yet (they will once writers gain inline-table support in later commits).
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 

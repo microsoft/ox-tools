@@ -134,6 +134,7 @@ pub fn decide_removal(last_rendered: &str, disk: Option<&str>) -> Decision {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

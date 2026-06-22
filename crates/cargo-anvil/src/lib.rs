@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg_attr(
     test,
     allow(
@@ -235,6 +236,7 @@ pub use region::CommentSyntax;
 /// }
 /// ```
 #[must_use]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[mutants::skip] // Entry point: tracing/clap setup + dispatch to run; behavior is integration-tested via run_update.
 #[expect(
     clippy::needless_pass_by_value,

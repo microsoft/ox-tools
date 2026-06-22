@@ -87,10 +87,12 @@ dependencies = [
 name = "cargo-anvil"
 version = "0.1.0"
 dependencies = [
+ "assert_cmd",
  "clap",
  "insta",
  "mutants",
  "ohno",
+ "predicates",
  "sha2",
  "tempfile",
  "toml_edit",
