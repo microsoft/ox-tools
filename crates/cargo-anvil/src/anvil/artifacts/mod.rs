@@ -14,7 +14,7 @@
 //! ```
 //!
 //! This is the single source of truth for the base catalog: both
-//! [`anvil_artifacts`] and downstream forks build on these functions, so the
+//! `anvil_artifacts` and downstream forks build on these functions, so the
 //! template content and its identity live together with no separate
 //! key/content split. See [`extensibility.md §4.1`](../../../docs/design/extensibility.md).
 

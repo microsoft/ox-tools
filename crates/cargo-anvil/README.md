@@ -129,7 +129,10 @@ pub fn catalog() -> Catalog {
     Catalog::anvil()
         .into_builder()
         .subcommand("myforge")
-        .with_artifact(Artifact::owned_file("justfiles/anvil/extra.just", "# ...\n"))
+        .with_artifact(Artifact::owned_file(
+            "justfiles/anvil/extra.just",
+            "# ...\n",
+        ))
         .replace_artifact(artifacts::region::rustfmt().with_body("max_width = 80\n"))
         .without_artifact(artifacts::region::clippy())
         .build()
@@ -167,11 +170,11 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbIrc1r7gMqv0bcybT5n3R6fUbyQTsRFGohYYb8KTpK1behABhZIGDa2NhcmdvLWFudmlsZTAuMS4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbOKGd9SPBdfobKjOs_WkWgQcbDDxCoIeuo6cbYeurLnzJsrZhZIGDa2NhcmdvLWFudmlsZTAuMS4wa2NhcmdvX2Fudmls
  [__link0]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=catalog::Catalog
  [__link1]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=catalog::Catalog::anvil
  [__link2]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=catalog::CliMeta
  [__link3]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=catalog::CatalogBuilder::with_artifact
  [__link4]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=catalog::CatalogBuilder::replace_artifact
  [__link5]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=catalog::CatalogBuilder::without_artifact
- [__link6]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=catalog::artifacts
+ [__link6]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=anvil::artifacts

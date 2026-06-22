@@ -6,7 +6,7 @@
 //! A [`Catalog`] pairs a [`CliMeta`] identity with an ordered set of
 //! [`Artifact`]s; [`CatalogBuilder`] customizes one. This module is
 //! catalog-engine only — it knows nothing about the `anvil` base catalog,
-//! which lives in [`crate::anvil`]. [`crate::run::build_plan`] iterates any
+//! which lives in [`crate::anvil`]. The engine's plan builder iterates any
 //! catalog's artifacts and dispatches each to the generic owned-file /
 //! managed-region drivers, so a downstream tool ships its own catalog while
 //! reusing the entire engine.
