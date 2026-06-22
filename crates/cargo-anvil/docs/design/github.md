@@ -126,18 +126,23 @@ flowchart LR
     sched_impl[".github/workflows/<br/>anvil-scheduled-impl.yml<br/>(reusable workflow_call)"]:::impl
     stest_job["scheduled-test<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     sadv_job["scheduled-advisories<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
+    srun_job["scheduled-runtime-analysis<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     sexh_job["scheduled-exhaustive<br/>matrix: linux, windows"]:::job
     stest_setup[".github/actions/<br/>anvil-setup"]:::action
     sadv_setup[".github/actions/<br/>anvil-setup"]:::action
+    srun_setup[".github/actions/<br/>anvil-setup"]:::action
     sexh_setup[".github/actions/<br/>anvil-setup"]:::action
     stest_act[".github/actions/<br/>anvil-scheduled-test"]:::action
     sadv_act[".github/actions/<br/>anvil-scheduled-advisories"]:::action
+    srun_act[".github/actions/<br/>anvil-scheduled-runtime-analysis"]:::action
     sexh_act[".github/actions/<br/>anvil-scheduled-exhaustive"]:::action
     codecov_act["codecov/codecov-action@v5"]:::external
     stest_just["just anvil-scheduled-test"]:::recipe
     stest_setup_just["just anvil-setup"]:::recipe
     sadv_just["just anvil-scheduled-advisories"]:::recipe
     sadv_setup_just["just anvil-setup"]:::recipe
+    srun_just["just anvil-scheduled-runtime-analysis"]:::recipe
+    srun_setup_just["just anvil-setup"]:::recipe
     sexh_just["just anvil-scheduled-exhaustive"]:::recipe
     sexh_setup_just["just anvil-setup"]:::recipe
 
@@ -187,6 +192,7 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 │   ├── anvil-pr-mutants/action.yml      owned
 │   ├── anvil-scheduled-test/action.yml  owned
 │   ├── anvil-scheduled-advisories/action.yml  owned
+│   ├── anvil-scheduled-runtime-analysis/action.yml  owned
 │   └── anvil-scheduled-exhaustive/action.yml  owned
 └── workflows/
     ├── anvil-pr-impl.yml              owned   (reusable workflow doing the wiring)

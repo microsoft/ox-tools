@@ -45,6 +45,7 @@ pub struct RunOutcome {
 /// # Errors
 ///
 /// Returns an error when the underlying update flow fails.
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[mutants::skip] // Thin process-boundary glue (cwd lookup, stdout print, `std::process::exit`); behavior covered by `run_update` tests which exercise every dispatch path.
 pub fn run(catalog: &Catalog, cli: &Cli) -> Result<(), AppError> {
     let outcome = run_update(catalog, cli, &std::env::current_dir()?)?;
@@ -299,6 +300,7 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan) -> Resu
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
 
@@ -698,6 +700,7 @@ mod tests {
             ".github/actions/anvil-pr-mutants/action.yml",
             ".github/actions/anvil-scheduled-test/action.yml",
             ".github/actions/anvil-scheduled-advisories/action.yml",
+            ".github/actions/anvil-scheduled-runtime-analysis/action.yml",
             ".github/actions/anvil-scheduled-exhaustive/action.yml",
             ".github/workflows/anvil-pr-impl.yml",
             ".github/workflows/anvil-scheduled-impl.yml",
@@ -750,6 +753,7 @@ mod tests {
             ".pipelines/anvil/steps/pr-mutants.yml",
             ".pipelines/anvil/steps/scheduled-test.yml",
             ".pipelines/anvil/steps/scheduled-advisories.yml",
+            ".pipelines/anvil/steps/scheduled-runtime-analysis.yml",
             ".pipelines/anvil/steps/scheduled-exhaustive.yml",
             ".pipelines/anvil/pr.yml",
             ".pipelines/anvil/scheduled.yml",

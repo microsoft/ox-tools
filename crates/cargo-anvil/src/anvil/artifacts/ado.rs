@@ -46,6 +46,7 @@ const GROUPS: &[&str] = &[
     "pr-mutants",
     "scheduled-test",
     "scheduled-advisories",
+    "scheduled-runtime-analysis",
     "scheduled-exhaustive",
 ];
 
@@ -128,6 +129,10 @@ pub(crate) const GROUP_STEPS: &[(&str, &str)] = &[
     ("pr-mutants", ".pipelines/anvil/steps/pr-mutants.yml"),
     ("scheduled-test", ".pipelines/anvil/steps/scheduled-test.yml"),
     ("scheduled-advisories", ".pipelines/anvil/steps/scheduled-advisories.yml"),
+    (
+        "scheduled-runtime-analysis",
+        ".pipelines/anvil/steps/scheduled-runtime-analysis.yml",
+    ),
     ("scheduled-exhaustive", ".pipelines/anvil/steps/scheduled-exhaustive.yml"),
 ];
 
@@ -146,6 +151,7 @@ pub(crate) fn all() -> Vec<Artifact> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -244,15 +250,15 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_stages_has_three_groups() {
+    fn scheduled_stages_has_four_groups() {
         for needle in [
             "stage: scheduled_test",
             "stage: scheduled_advisories",
+            "stage: scheduled_runtime_analysis",
             "stage: scheduled_exhaustive",
         ] {
             assert!(SCHEDULED_STAGES.contains(needle), "scheduled stages missing '{needle}'");
         }
-        assert!(!SCHEDULED_STAGES.contains("scheduled_runtime"));
         assert!(SCHEDULED_STAGES.contains("PublishCodeCoverageResults@2"));
         assert!(SCHEDULED_STAGES.contains("- template: steps/job.yml"));
         assert!(

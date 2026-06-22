@@ -56,7 +56,9 @@ anvil-pr-test: \
 [group("anvil")]
 anvil-pr-runtime-analysis: \
     anvil-miri \
-    anvil-careful
+    anvil-careful \
+    anvil-loom \
+    anvil-bolero
 
 [group("anvil")]
 anvil-pr-mutants: anvil-mutants-diff
@@ -76,6 +78,18 @@ anvil-scheduled-advisories: \
     anvil-audit \
     anvil-aprz \
     anvil-clippy
+
+# scheduled-runtime-analysis is the full-workspace counterpart of
+# pr-runtime-analysis: it re-runs miri unscoped (PR-tier miri is
+# impact-scoped, so crates untouched by a PR never get miri coverage)
+# and adds the three stricter miri profiles (tree-borrows, strict-
+# provenance, race-coverage) which are too expensive for PR.
+[group("anvil")]
+anvil-scheduled-runtime-analysis: \
+    anvil-miri \
+    anvil-miri-tree-borrows \
+    anvil-miri-strict-provenance \
+    anvil-miri-race-coverage
 
 [group("anvil")]
 anvil-scheduled-exhaustive: \
@@ -154,12 +168,16 @@ anvil-pr-test-validate-prereqs: \
 [group("anvil-setup")]
 anvil-pr-runtime-analysis-setup installer="install": \
     (anvil-miri-setup installer) \
-    (anvil-careful-setup installer)
+    (anvil-careful-setup installer) \
+    (anvil-loom-setup installer) \
+    (anvil-bolero-setup installer)
 
 [group("anvil-setup")]
 anvil-pr-runtime-analysis-validate-prereqs: \
     anvil-miri-validate-prereqs \
-    anvil-careful-validate-prereqs
+    anvil-careful-validate-prereqs \
+    anvil-loom-validate-prereqs \
+    anvil-bolero-validate-prereqs
 
 [group("anvil-setup")]
 anvil-pr-mutants-setup installer="install": (anvil-mutants-diff-setup installer)
@@ -192,6 +210,20 @@ anvil-scheduled-advisories-validate-prereqs: \
     anvil-audit-validate-prereqs \
     anvil-aprz-validate-prereqs \
     anvil-clippy-validate-prereqs
+
+[group("anvil-setup")]
+anvil-scheduled-runtime-analysis-setup installer="install": \
+    (anvil-miri-setup installer) \
+    (anvil-miri-tree-borrows-setup installer) \
+    (anvil-miri-strict-provenance-setup installer) \
+    (anvil-miri-race-coverage-setup installer)
+
+[group("anvil-setup")]
+anvil-scheduled-runtime-analysis-validate-prereqs: \
+    anvil-miri-validate-prereqs \
+    anvil-miri-tree-borrows-validate-prereqs \
+    anvil-miri-strict-provenance-validate-prereqs \
+    anvil-miri-race-coverage-validate-prereqs
 
 [group("anvil-setup")]
 anvil-scheduled-exhaustive-setup installer="install": \
