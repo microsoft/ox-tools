@@ -259,12 +259,14 @@ mod tests {
         p
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn read_config_file_missing_path_is_config_not_found() {
         let err = read_config_file(Path::new("/definitely/missing/.cargo-heather.toml")).unwrap_err();
         assert!(matches!(err, HeatherError::ConfigNotFound(_)), "{err}");
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn read_config_file_on_directory_is_file_read_error() {
         let tmp = TempDir::new().unwrap();
@@ -347,6 +349,7 @@ mod tests {
         assert_eq!(cfg.exclude, vec!["target".to_owned()]);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn load_config_errors_when_neither_config_nor_cargo_toml_present() {
         let tmp = TempDir::new().unwrap();
@@ -354,6 +357,7 @@ mod tests {
         assert!(matches!(err, HeatherError::ConfigNotFound(_)), "{err}");
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn load_config_falls_back_to_cargo_toml_license() {
         let tmp = TempDir::new().unwrap();
@@ -362,6 +366,7 @@ mod tests {
         assert!(!cfg.header_text.is_empty());
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn try_load_from_cargo_toml_rejects_malformed() {
         let tmp = TempDir::new().unwrap();
@@ -369,6 +374,7 @@ mod tests {
         assert!(matches!(try_load_from_cargo_toml(&p), Err(HeatherError::ConfigParse { .. })));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn try_load_from_cargo_toml_without_license_is_none() {
         let tmp = TempDir::new().unwrap();
@@ -376,6 +382,7 @@ mod tests {
         assert!(try_load_from_cargo_toml(&p).unwrap().is_none());
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn try_load_from_cargo_toml_empty_or_false_workspace_license_is_none() {
         let tmp = TempDir::new().unwrap();
@@ -384,6 +391,7 @@ mod tests {
         assert!(try_load_from_cargo_toml(&p).unwrap().is_none());
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn try_load_from_cargo_toml_uses_workspace_package_license() {
         let tmp = TempDir::new().unwrap();
@@ -392,6 +400,7 @@ mod tests {
         assert!(!cfg.header_text.is_empty());
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn try_load_from_cargo_toml_resolves_workspace_inherited_license() {
         // package license = { workspace = true } walks up to the workspace root.
@@ -410,6 +419,7 @@ mod tests {
         assert!(!cfg.header_text.is_empty());
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn find_workspace_root_errors_when_no_workspace_ancestor() {
         let tmp = TempDir::new().unwrap();
@@ -418,6 +428,7 @@ mod tests {
         assert!(matches!(err, HeatherError::ConfigInvalid(_)), "{err}");
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn parse_cargo_manifest_distinguishes_workspace_tables() {
         let tmp = TempDir::new().unwrap();
@@ -427,12 +438,14 @@ mod tests {
         assert!(parse_cargo_manifest(&pkg).unwrap().workspace.is_none());
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn try_load_from_cargo_toml_on_directory_is_file_read_error() {
         let tmp = TempDir::new().unwrap();
         assert!(matches!(try_load_from_cargo_toml(tmp.path()), Err(HeatherError::FileRead { .. })));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn workspace_inherited_license_absent_resolves_to_none() {
         // member inherits license, but the workspace root declares no
@@ -447,12 +460,14 @@ mod tests {
         assert!(try_load_from_cargo_toml(&member).unwrap().is_none());
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn parse_cargo_manifest_on_directory_is_file_read_error() {
         let tmp = TempDir::new().unwrap();
         assert!(matches!(parse_cargo_manifest(tmp.path()), Err(HeatherError::FileRead { .. })));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn parse_cargo_manifest_on_malformed_is_parse_error() {
         let tmp = TempDir::new().unwrap();

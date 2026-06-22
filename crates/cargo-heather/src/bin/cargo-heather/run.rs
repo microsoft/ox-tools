@@ -216,6 +216,7 @@ mod tests {
         assert!(matches!(err, HeatherError::UnsupportedFileType { .. }), "{err}");
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn read_and_classify_returns_kind_and_content_for_supported_file() {
         let tmp = TempDir::new().unwrap();
@@ -232,6 +233,7 @@ mod tests {
         assert_eq!(make_relative(Path::new("/x/c.rs"), Path::new("/a")), PathBuf::from("/x/c.rs"));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn read_and_classify_propagates_read_error() {
         // A directory named like a Rust file: CommentStyle recognizes the
@@ -243,6 +245,7 @@ mod tests {
         assert!(matches!(read_and_classify(&dir, &config()), Err(HeatherError::FileRead { .. })));
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn run_fix_skips_cargo_scripts_when_scripts_disabled() {
         // A cargo-script file with `scripts = false` is skipped by
@@ -256,6 +259,7 @@ mod tests {
         assert_eq!(fixed, 0);
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn write_fixed_writes_bytes_to_disk() {
         let tmp = TempDir::new().unwrap();
@@ -264,6 +268,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&p).unwrap(), "hello\n");
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn write_fixed_propagates_write_error() {
         // A directory occupies the target path, so `fs::write` fails and
