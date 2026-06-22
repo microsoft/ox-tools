@@ -199,14 +199,15 @@ pub mod artifacts {
     }
     // Managed regions spliced into user-composed host files.
     pub mod region {
-        pub fn justfile_imports() -> Artifact;  // Justfile / anvil-imports
-        pub fn workspace_lints() -> Artifact;   // Cargo.toml / anvil-workspace-lints
-        pub fn member_lints() -> Artifact;      // <member>/Cargo.toml / anvil-lints
-        pub fn deny() -> Artifact;              // deny.toml / anvil-deny
-        pub fn rustfmt() -> Artifact;           // rustfmt.toml / anvil-rustfmt
-        pub fn delta() -> Artifact;             // .delta.toml / anvil-delta
-        pub fn spellcheck() -> Artifact;        // spellcheck.toml / anvil-spellcheck
-        pub fn clippy() -> Artifact;            // clippy.toml / anvil-clippy
+        pub fn justfile_imports() -> Artifact;   // Justfile / anvil-imports
+        pub fn workspace_lints() -> Artifact;    // Cargo.toml (workspace) / anvil-workspace-lints
+        pub fn single_crate_lints() -> Artifact; // Cargo.toml (single crate) / anvil-lints
+        pub fn member_lints() -> Artifact;       // <member>/Cargo.toml / anvil-lints
+        pub fn deny() -> Artifact;               // deny.toml / anvil-deny
+        pub fn rustfmt() -> Artifact;            // rustfmt.toml / anvil-rustfmt
+        pub fn delta() -> Artifact;              // .delta.toml / anvil-delta
+        pub fn spellcheck() -> Artifact;         // spellcheck.toml / anvil-spellcheck
+        pub fn clippy() -> Artifact;             // clippy.toml / anvil-clippy
     }
     // Backend files are owned files gated on a backend (§4.3), grouped per backend.
     pub mod github {
@@ -241,33 +242,42 @@ rule needed. The raw `RegionId` sentinel values stay private to the engine; the 
 artifacts are the sanctioned handles. The previous `pub const *_REGION_ID` items collapse into
 this one organized namespace.
 
-### 4.2 Per-member regions (workspace fan-out)
+### 4.2 Host selectors (workspace fan-out and `Cargo.toml` shape)
 
 Some regions are not anchored to one literal file. The crate-scope `[lints]` region is spliced
 into **every** workspace member's `Cargo.toml`, with the host set discovered at runtime from the
-workspace, not known when the catalog is authored. A single `(host, id)` key can't express
-"a region in each member's manifest."
+workspace, not known when the catalog is authored. And the lint catalog's *placement* depends on
+whether the root `Cargo.toml` declares a `[workspace]` table. A single `(host, id)` key can't
+express either condition.
 
 The `host` of a `RegionSpec` is therefore a **selector**, not a literal path:
 
 ```rust
 pub enum HostSelector {
-    /// A single literal repo-root-relative path (Justfile, deny.toml, root Cargo.toml).
+    /// A single literal repo-root-relative path (Justfile, deny.toml).
     Path(String),
     /// Every workspace member's manifest — expands to one `<member>/Cargo.toml`
-    /// host per member discovered at plan time.
+    /// host per member discovered at plan time. A non-workspace single crate has
+    /// no workspace members, so this expands to nothing there.
     EachMemberManifest,
+    /// The root `Cargo.toml`, but only when it declares a `[workspace]` table.
+    WorkspaceCargoToml,
+    /// The root `Cargo.toml`, but only when it does NOT declare a `[workspace]`
+    /// table (a single-crate repo).
+    SingleCrateCargoToml,
 }
 ```
 
-`build_plan` expands selectors against the discovered `Workspace` exactly as `plan_cargo_lints`
-does today: `EachMemberManifest` fans out to one concrete `(member/Cargo.toml, id)` plan item per
-member. Everything downstream of expansion is unchanged — the manifest keys on the concrete
-expanded `(host, id)` pairs, so per-member orphan detection (a member is removed → its region
-entry is dropped) works exactly as it does now.
+`build_plan` expands selectors against the discovered `Workspace`: `EachMemberManifest` fans out to
+one concrete `(member/Cargo.toml, id)` plan item per member, and the two `*CargoToml` selectors
+emit the root `(Cargo.toml, id)` item only when the workspace table is present (resp. absent).
+Everything downstream of expansion is unchanged — the manifest keys on the concrete expanded
+`(host, id)` pairs, so per-member orphan detection (a member is removed → its region entry is
+dropped) works exactly as it does now.
 
-This makes the fan-out a first-class, reusable capability rather than special-cased engine logic.
-A fork that wants its own region in every crate's `Cargo.toml` just adds one artifact:
+This makes the fan-out and the workspace/single-crate conditioning first-class, reusable
+capabilities rather than special-cased engine logic. A fork that wants its own region in every
+crate's `Cargo.toml` just adds one artifact:
 
 ```rust
 .with_artifact(Artifact::region(RegionSpec {
@@ -283,11 +293,18 @@ A fork that wants its own region in every crate's `Cargo.toml` just adds one art
 and the engine replicates it across all members, tracks each in `.anvil.lock`, and reconciles
 drift per member — no per-fork engine changes.
 
-> Note anvil's own lint regions are modeled as two separate artifacts under this scheme: a
-> `HostSelector::Path("Cargo.toml")` workspace-scope region (`anvil-workspace-lints`) plus an
-> `EachMemberManifest` member region (`anvil-lints`). The single-crate case (no `[workspace]`
-> table) is the engine emitting the full-catalog `anvil-lints` region into the root `Cargo.toml`
-> instead — a property of the built-in lints artifacts, transparent to forks.
+> Note anvil's own lint regions are modeled as three separate artifacts under this scheme, with no
+> region-id-specific engine logic: a `WorkspaceCargoToml` region carrying `[workspace.lints]`
+> (`anvil-workspace-lints`), a `SingleCrateCargoToml` region carrying the full `[lints]` catalog
+> (`anvil-lints`), and an `EachMemberManifest` member stub (`anvil-lints`). In a workspace the
+> first and third emit; in a single-crate repo only the second does (it has no workspace members),
+> so the full catalog lands directly in the root `[lints]`. Which set applies is purely a property
+> of the selectors on the built-in artifacts, transparent to forks.
+
+> **On-disk casing.** Host paths and owned-file paths are canonical (`Justfile`, `Cargo.toml`), but
+> the engine resolves each against the repo case-insensitively and reuses whatever casing already
+> exists on disk (e.g. an adopter's lowercase `justfile`). A fork authors canonical paths and never
+> has to think about case variants — this is engine behavior, not per-catalog.
 
 ### 4.3 Backends: a fixed set, overridable in parts
 
