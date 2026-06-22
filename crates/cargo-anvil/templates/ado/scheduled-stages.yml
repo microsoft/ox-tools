@@ -62,6 +62,27 @@ stages:
           steps:
             - template: steps/scheduled-advisories.yml
 
+  - stage: scheduled_runtime_analysis
+    displayName: anvil scheduled-runtime-analysis
+    dependsOn: []
+    jobs:
+      # OS scope mirrors pr-runtime-analysis: any OS already considered
+      # "worth running miri on" gets the stricter profiles too. ADO
+      # hosted pools don't ship hosted ARM runners; adopters with self-
+      # hosted ARM agents override the matrix in their root pipeline.
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/scheduled-runtime-analysis.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/scheduled-runtime-analysis.yml
+
   - stage: scheduled_exhaustive
     displayName: anvil scheduled-exhaustive
     dependsOn: []

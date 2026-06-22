@@ -419,6 +419,52 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-scheduled-exhaustive
 
+=== .github/actions/anvil-scheduled-runtime-analysis/action.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# The token scheduled-runtime-analysis is substituted by cargo-anvil at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+name: anvil-scheduled-runtime-analysis
+description: Run the scheduled-runtime-analysis check group.
+inputs:
+  include_modified:
+    description: |
+      Pre-formatted --package args (e.g. "--package alpha --package beta")
+      for the modified tier, or the sentinel "--skip" when nothing
+      modified. Local invocations leave it unset; recipes default to
+      --workspace.
+    default: ""
+    required: false
+  include_affected:
+    description: |
+      Same shape as include_modified, but for the affected tier
+      (modified ∪ rev-deps).
+    default: ""
+    required: false
+  include_required:
+    description: |
+      Same shape as include_modified, but for the required tier
+      (affected ∪ workspace-internal transitive deps).
+    default: ""
+    required: false
+runs:
+  using: composite
+  steps:
+    - uses: ./.github/actions/anvil-setup
+      with:
+        group: scheduled-runtime-analysis
+    - name: Run just anvil-scheduled-runtime-analysis
+      shell: bash
+      env:
+        ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
+        ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
+        ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
+        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
+        # built-in token so it can use the 1000 req/hr authenticated quota.
+        GITHUB_TOKEN: ${{ github.token }}
+      run: just anvil-scheduled-runtime-analysis
+
 === .github/actions/anvil-scheduled-test/action.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
@@ -954,6 +1000,29 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/anvil-scheduled-advisories
 
+  scheduled-runtime-analysis:
+    # Full-workspace counterpart of pr-runtime-analysis. OS matrix
+    # mirrors pr-runtime-analysis so any OS already considered "worth
+    # running miri on" gets the stricter profiles (tree-borrows,
+    # strict-provenance, race-coverage) too. Each profile runs in
+    # one job: keeping them as members of one composite action would
+    # serialize them (hours per profile, days per run). The matrix
+    # gives parallelism across OS legs; the per-profile fan-out
+    # inside the composite action runs them sequentially within a
+    # leg, which is the right trade -- the profiles share toolchain
+    # setup and target/ cache.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/anvil-scheduled-runtime-analysis
+
   scheduled-exhaustive:
     # x86_64-only by design: this group includes mutants-full (which
     # doesn't build on aarch64-pc-windows-msvc — winapi crate
@@ -1020,6 +1089,10 @@ rust.unused_lifetimes = "warn"
 # customization is preserved.
 rust.unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(coverage,coverage_nightly)',
+    'cfg(loom)',
+    'cfg(miri_race_coverage)',
+    'cfg(miri_strict_provenance)',
+    'cfg(miri_tree_borrows)',
 ] }
 
 # --- rustdoc ---------------------------------------------------------------
@@ -1712,7 +1785,13 @@ anvil-aprz: anvil-aprz-validate-prereqs
 
 # === pr-test members ====================================================
 
-# Affected tier.
+# Affected tier. Runs on the pinned nightly toolchain: cargo-llvm-cov
+# only sets the `cfg(coverage_nightly)` that gates the workspace's
+# `#[cfg_attr(coverage_nightly, coverage(off))]` exclusions when it
+# instruments on nightly. On stable those exclusions are inert and
+# untestable code (process-shelling error paths, script-only crates,
+# etc.) wrongly counts against coverage. This matches the repo's own
+# `coverage-measure` recipe, which also runs on nightly.
 [script("pwsh")]
 anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1729,7 +1808,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
     # been used anyway (coverage upload is gated on Linux only).
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
         Write-Host 'anvil-llvm-cov: aarch64-pc-windows-msvc -- skipping coverage; running plain nextest'
-        & cargo nextest run @pkg --all-features --locked
+        & cargo '+{{ rust_nightly }}' nextest run @pkg --all-features --locked
         exit $LASTEXITCODE
     }
     # cargo llvm-cov writes the .profraw set into target/llvm-cov-target/
@@ -1738,34 +1817,64 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
     [System.IO.Directory]::CreateDirectory('target/coverage') | Out-Null
     [System.IO.Directory]::CreateDirectory('target/coverage/html') | Out-Null
     # Wipe stale .profraw data so the report reflects only this run.
-    cargo llvm-cov clean --workspace --profraw-only
+    # `--profraw-only` may not be combined with `--workspace` (cargo-llvm-cov
+    # warns and ignores the flag), so we scope to profraw without it.
+    cargo '+{{ rust_nightly }}' llvm-cov clean --profraw-only
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    # Instrument and run tests; defer report generation so we can emit
-    # multiple formats from the same profraw set without re-running.
+    # Instrument and run tests twice -- once with --all-features and
+    # once with --no-default-features -- merging both .profraw sets via
+    # the shared target/llvm-cov-target/ before any report runs. Dual
+    # invocation catches lines that only execute under one feature
+    # configuration: feature-gated code that's dead with default
+    # features off, plus code paths that only the default features
+    # exercise. The single merged report still produces one lcov.info
+    # (so Codecov / cobertura / HTML each have a single source of
+    # truth).
+    #
     # Note: nextest's exit-4 ("no tests to run") IS treated as a
     # failure here -- a llvm-cov run that finds no tests almost
     # always means a config mistake (wrong package filter, missing
     # test target, etc.), not a legitimate empty set. anvil-miri
     # is the exception (see its comment): miri-skipped tests are an
     # expected design point for FS-heavy crates.
-    & cargo llvm-cov nextest @pkg --all-features --locked --no-report
+    & cargo '+{{ rust_nightly }}' llvm-cov nextest @pkg --all-features --locked --no-report
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo '+{{ rust_nightly }}' llvm-cov nextest @pkg --no-default-features --locked --no-report
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # lcov.info feeds Codecov on GitHub; cobertura.xml feeds
     # PublishCodeCoverageResults@2 on Azure DevOps.
-    cargo llvm-cov report --lcov      --output-path target/coverage/lcov.info
+    cargo '+{{ rust_nightly }}' llvm-cov report --lcov      --output-path target/coverage/lcov.info
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    cargo llvm-cov report --cobertura --output-path target/coverage/cobertura.xml
+    cargo '+{{ rust_nightly }}' llvm-cov report --cobertura --output-path target/coverage/cobertura.xml
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # Local-only HTML viewer (no cloud-workflow consumer); cheap once the data exists.
-    cargo llvm-cov report --html      --output-dir target/coverage/html
+    cargo '+{{ rust_nightly }}' llvm-cov report --html      --output-dir target/coverage/html
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # Local coverage gate: cargo-coverage-gate compares per-package line
+    # coverage from lcov.info against per-package thresholds carried in
+    # Cargo.toml ([package.metadata.coverage-gate] min-lines-percent,
+    # falling back to [workspace.metadata.coverage-gate], then the
+    # built-in 100.0 default). Exits non-zero when any gated package
+    # falls below its threshold, so coverage regressions fail the PR
+    # locally and in cloud workflows -- the upload to Codecov stays
+    # purely for display and historical trend, no longer the gate.
+    cargo coverage-gate --lcov target/coverage/lcov.info
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# Affected tier.
+# Affected tier. Two cargo-test invocations cover both feature
+# configurations: --all-features catches doctests that only compile
+# with optional features enabled; the default-features run catches
+# doctests that only compile when those features are off. The
+# duplication is cheap because doctests are already a small fraction
+# of total compile/test time.
 [script("pwsh")]
 anvil-doc-test: anvil-doc-test-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    & cargo test --doc @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace")) --all-features --locked
+    $pkg = @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace"))
+    & cargo test --doc @pkg --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo test --doc @pkg --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier.
@@ -1851,12 +1960,143 @@ anvil-miri: anvil-miri-validate-prereqs
     & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace"))
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Stricter miri profiles. Each runs miri over the full workspace
+# with a profile-specific MIRIFLAGS plus a profile-specific
+# `--cfg miri_<profile>` set via RUSTFLAGS. Per-test opt-outs use
+# `#[cfg_attr(miri_<profile>, ignore = "<reason>")]`, keeping the
+# suppression next to the test rather than in a sidecar file.
+# The cfg names are declared in the workspace check-cfg list
+# (regions/cargo-lints-body.toml) so non-miri builds don't warn.
+#
+# These profiles always run full-workspace (scheduled-runtime-analysis
+# does not set ANVIL_INCLUDE_AFFECTED); the --skip / affected guards
+# below only apply if an adopter invokes them locally with the env
+# vars set.
+[script("pwsh")]
+anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $env:MIRIFLAGS = "-Zmiri-tree-borrows $($env:MIRIFLAGS)".Trim()
+    $env:RUSTFLAGS = "--cfg miri_tree_borrows $($env:RUSTFLAGS)".Trim()
+    & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @pkg
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+[script("pwsh")]
+anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $env:MIRIFLAGS = "-Zmiri-strict-provenance $($env:MIRIFLAGS)".Trim()
+    $env:RUSTFLAGS = "--cfg miri_strict_provenance $($env:RUSTFLAGS)".Trim()
+    & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @pkg
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Race coverage rotates the miri-many-seeds window daily by
+# day-of-month: day N -> seeds [2N-1, 2N+1) (2 seeds/day,
+# ~62 seeds/month). Rotating amortizes the seed space across the
+# schedule rather than retesting the same seeds every night; race
+# conditions surface as inter-seed nondeterminism rather than
+# per-seed crashes, so coverage matters more than depth-per-seed.
+[script("pwsh")]
+anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $day = (Get-Date).Day
+    $low = (2 * $day) - 1
+    $high = (2 * $day) + 1
+    $env:MIRIFLAGS = "-Zmiri-many-seeds=$low..$high $($env:MIRIFLAGS)".Trim()
+    $env:RUSTFLAGS = "--cfg miri_race_coverage $($env:RUSTFLAGS)".Trim()
+    Write-Host "anvil-miri-race-coverage: seed window $low..$high (day $day)"
+    & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @pkg
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
 [script("pwsh")]
 anvil-careful: anvil-careful-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     & cargo '+{{ rust_nightly }}' careful test @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace")) --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Affected tier. `loom` is a permutation-based concurrency model
+# checker: tests written behind `#[cfg(loom)]` are only compiled
+# (and only see the loom replacement primitives for std::sync,
+# std::thread, etc.) when the `loom` cfg is set. Crates with no
+# loom harness have no `#[cfg(loom)]` items, so `cargo test` finds
+# zero loom-specific targets and the run is effectively a no-op
+# (the regular tests already ran under anvil-llvm-cov, no need to
+# redo them here). We use --release because loom's permutation
+# exploration is wall-clock dominated by the SUT, and the loom docs
+# explicitly recommend release builds for non-trivial models.
+#
+# RUSTFLAGS goes via $env: rather than --config so it propagates
+# through to nextest/cargo's child rustc invocations cleanly on
+# both pwsh/bash.
+[script("pwsh")]
+anvil-loom: anvil-loom-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'anvil-loom: no affected packages; skipping'
+        exit 0
+    }
+    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $env:RUSTFLAGS = "--cfg loom $($env:RUSTFLAGS)".Trim()
+    & cargo test @pkg --release --all-features --locked --tests
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Affected tier. Smoke-only fuzz pass via [bolero](https://crates.io/crates/bolero):
+# each fuzz target gets a 60-second libfuzzer run, just enough to
+# surface obvious crashes/hangs introduced by a PR without paying for
+# a long fuzzing campaign.
+#
+# Linux-only: cargo-bolero's libfuzzer engine (and its bolero-afl
+# build dependency) only builds on Linux, so the recipe self-skips on
+# non-Linux hosts -- the pr-runtime-analysis Windows/ARM legs treat
+# bolero as a no-op rather than a failure. This matches oxidizer's
+# reference workflow, whose bolero job runs exclusively on ubuntu.
+# Crates that ship bolero harnesses still get them compiled and
+# exercised as ordinary tests by anvil-llvm-cov on every leg; the
+# libfuzzer campaign is the Linux-only extra.
+#
+# Target discovery is `cargo bolero list` over the affected packages.
+# Crates with no bolero harness print zero targets and the recipe
+# no-ops. The libfuzzer engine requires nightly, so the test
+# invocation uses the pinned rust_nightly. Adopters who want longer
+# campaigns wire a separate scheduled job; anvil deliberately does
+# not ship a long-form fuzz tier (the failure surface is too
+# repo-specific to standardize).
+[script("pwsh")]
+anvil-bolero: anvil-bolero-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if (-not $IsLinux) {
+        Write-Host 'anvil-bolero: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only; harnesses still run under anvil-llvm-cov)'
+        exit 0
+    }
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+        Write-Host 'anvil-bolero: no affected packages; skipping'
+        exit 0
+    }
+    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    # `cargo bolero list` emits one JSON object per target on stdout;
+    # we want the set of (package, test) pairs over the affected set.
+    $targetsJson = & cargo bolero list @pkg 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host 'anvil-bolero: bolero list failed; assuming no targets'
+        exit 0
+    }
+    $targets = @($targetsJson | Where-Object { $_ -match '^\{' } | ForEach-Object { ConvertFrom-Json $_ })
+    if ($targets.Count -eq 0) {
+        Write-Host 'anvil-bolero: no fuzz targets in affected packages; skipping'
+        exit 0
+    }
+    $failed = $false
+    foreach ($t in $targets) {
+        Write-Host "anvil-bolero: $($t.package_name)::$($t.test_name)"
+        & cargo '+{{ rust_nightly }}' bolero test --release --engine libfuzzer -T 60s --package $t.package_name $t.test_name
+        if ($LASTEXITCODE -ne 0) { $failed = $true }
+    }
+    if ($failed) { exit 1 }
 
 # === nightly-exhaustive members =========================================
 
@@ -2007,10 +2247,10 @@ anvil-aprz-validate-prereqs: anvil-tool-cargo-aprz-validate-prereqs
 # --- pr-test members (shared with scheduled-test) ---
 
 [group("anvil-setup")]
-anvil-llvm-cov-setup installer="install": (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer)
+anvil-llvm-cov-setup installer="install": anvil-component-nightly-llvm-tools-preview-install (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer) (anvil-tool-cargo-coverage-gate-install installer)
 
 [group("anvil-setup")]
-anvil-llvm-cov-validate-prereqs: anvil-tool-cargo-llvm-cov-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs
+anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-preview-validate-prereqs anvil-tool-cargo-llvm-cov-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs anvil-tool-cargo-coverage-gate-validate-prereqs
 
 [group("anvil-setup")]
 anvil-doc-test-setup installer="install": anvil-tool-rustc-validate-prereqs
@@ -2032,11 +2272,50 @@ anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil
 [group("anvil-setup")]
 anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs
 
+# The three nightly-miri profiles share the same toolchain prereqs
+# as anvil-miri; they only differ in the MIRIFLAGS / RUSTFLAGS the
+# recipe sets. Separate setup recipes keep the per-check fan-out
+# regular (groups.just can iterate without special-casing).
+[group("anvil-setup")]
+anvil-miri-tree-borrows-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-nextest-install installer)
+
+[group("anvil-setup")]
+anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs
+
+[group("anvil-setup")]
+anvil-miri-strict-provenance-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-nextest-install installer)
+
+[group("anvil-setup")]
+anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs
+
+[group("anvil-setup")]
+anvil-miri-race-coverage-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-nextest-install installer)
+
+[group("anvil-setup")]
+anvil-miri-race-coverage-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs
+
 [group("anvil-setup")]
 anvil-careful-setup installer="install": anvil-component-nightly-rust-src-install (anvil-tool-cargo-careful-install installer)
 
 [group("anvil-setup")]
 anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-careful-validate-prereqs
+
+# loom is a regular cargo-test invocation with RUSTFLAGS=--cfg loom;
+# no dedicated tool to install. The rust toolchain (rustc + cargo)
+# is the only prerequisite.
+[group("anvil-setup")]
+anvil-loom-setup installer="install": anvil-tool-rustc-validate-prereqs
+
+[group("anvil-setup")]
+anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs
+
+# bolero needs cargo-bolero plus the pinned nightly toolchain
+# (libfuzzer engine requires nightly rustc features).
+[group("anvil-setup")]
+anvil-bolero-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-bolero-install installer)
+
+[group("anvil-setup")]
+anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-bolero-validate-prereqs
 
 # --- pr-mutants members ---
 
@@ -2128,7 +2407,9 @@ anvil-pr-test: \
 [group("anvil")]
 anvil-pr-runtime-analysis: \
     anvil-miri \
-    anvil-careful
+    anvil-careful \
+    anvil-loom \
+    anvil-bolero
 
 [group("anvil")]
 anvil-pr-mutants: anvil-mutants-diff
@@ -2148,6 +2429,18 @@ anvil-scheduled-advisories: \
     anvil-audit \
     anvil-aprz \
     anvil-clippy
+
+# scheduled-runtime-analysis is the full-workspace counterpart of
+# pr-runtime-analysis: it re-runs miri unscoped (PR-tier miri is
+# impact-scoped, so crates untouched by a PR never get miri coverage)
+# and adds the three stricter miri profiles (tree-borrows, strict-
+# provenance, race-coverage) which are too expensive for PR.
+[group("anvil")]
+anvil-scheduled-runtime-analysis: \
+    anvil-miri \
+    anvil-miri-tree-borrows \
+    anvil-miri-strict-provenance \
+    anvil-miri-race-coverage
 
 [group("anvil")]
 anvil-scheduled-exhaustive: \
@@ -2226,12 +2519,16 @@ anvil-pr-test-validate-prereqs: \
 [group("anvil-setup")]
 anvil-pr-runtime-analysis-setup installer="install": \
     (anvil-miri-setup installer) \
-    (anvil-careful-setup installer)
+    (anvil-careful-setup installer) \
+    (anvil-loom-setup installer) \
+    (anvil-bolero-setup installer)
 
 [group("anvil-setup")]
 anvil-pr-runtime-analysis-validate-prereqs: \
     anvil-miri-validate-prereqs \
-    anvil-careful-validate-prereqs
+    anvil-careful-validate-prereqs \
+    anvil-loom-validate-prereqs \
+    anvil-bolero-validate-prereqs
 
 [group("anvil-setup")]
 anvil-pr-mutants-setup installer="install": (anvil-mutants-diff-setup installer)
@@ -2264,6 +2561,20 @@ anvil-scheduled-advisories-validate-prereqs: \
     anvil-audit-validate-prereqs \
     anvil-aprz-validate-prereqs \
     anvil-clippy-validate-prereqs
+
+[group("anvil-setup")]
+anvil-scheduled-runtime-analysis-setup installer="install": \
+    (anvil-miri-setup installer) \
+    (anvil-miri-tree-borrows-setup installer) \
+    (anvil-miri-strict-provenance-setup installer) \
+    (anvil-miri-race-coverage-setup installer)
+
+[group("anvil-setup")]
+anvil-scheduled-runtime-analysis-validate-prereqs: \
+    anvil-miri-validate-prereqs \
+    anvil-miri-tree-borrows-validate-prereqs \
+    anvil-miri-strict-provenance-validate-prereqs \
+    anvil-miri-race-coverage-validate-prereqs
 
 [group("anvil-setup")]
 anvil-scheduled-exhaustive-setup installer="install": \
@@ -2751,6 +3062,17 @@ anvil-component-nightly-rust-src-install: anvil-toolchain-nightly-install (_inst
 [group("anvil-setup")]
 anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "rust-src")
 
+# llvm-tools-preview ships the llvm-profdata / llvm-cov binaries that
+# cargo-llvm-cov shells out to. Required on the nightly toolchain
+# because anvil runs coverage on nightly (so cargo-llvm-cov sets the
+# `cfg(coverage_nightly)` that the workspace's
+# `#[cfg_attr(coverage_nightly, coverage(off))]` exclusions depend on).
+[group("anvil-setup")]
+anvil-component-nightly-llvm-tools-preview-install: anvil-toolchain-nightly-install (_install-component rust_nightly "llvm-tools-preview")
+
+[group("anvil-setup")]
+anvil-component-nightly-llvm-tools-preview-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "llvm-tools-preview")
+
 # ============================================================================
 # Cargo subcommands
 # ============================================================================
@@ -2772,6 +3094,36 @@ anvil-tool-cargo-audit-install installer="install": (_install-tool "cargo-audit"
 [group("anvil-setup")]
 anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_version)
 
+# cargo-bolero is Linux-only: its `bolero-afl` build dependency
+# compiles AFL's native C (afl-fuzz.c), which needs POSIX headers
+# (`unistd.h`) and uses preprocessor constructs MSVC rejects, so the
+# install fails outright on windows-*-msvc. bolero's libfuzzer engine
+# is likewise Linux-only. oxidizer's reference workflow runs bolero
+# exclusively on ubuntu, so anvil follows suit: the install/validate
+# pair self-skips on non-Linux (analogous to cargo-mutants skipping
+# aarch64-pc-windows-msvc), and the anvil-bolero check self-skips on
+# the same hosts. The pr-runtime-analysis Windows/ARM legs therefore
+# treat bolero as a no-op rather than a setup failure.
+[group("anvil-setup")]
+[script("pwsh")]
+anvil-tool-cargo-bolero-install installer="install":
+    if (-not $IsLinux) {
+        Write-Host 'anvil-tool-cargo-bolero-install: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
+        exit 0
+    }
+    & just _install-tool cargo-bolero {{cargo_bolero_version}} {{installer}}
+    exit $LASTEXITCODE
+
+[group("anvil-setup")]
+[script("pwsh")]
+anvil-tool-cargo-bolero-validate-prereqs:
+    if (-not $IsLinux) {
+        Write-Host 'anvil-tool-cargo-bolero-validate-prereqs: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
+        exit 0
+    }
+    & just _check-tool cargo-bolero {{cargo_bolero_version}}
+    exit $LASTEXITCODE
+
 [group("anvil-setup")]
 anvil-tool-cargo-careful-install installer="install": (_install-tool "cargo-careful" cargo_careful_version installer)
 
@@ -2783,6 +3135,12 @@ anvil-tool-cargo-check-external-types-install installer="install": (_install-too
 
 [group("anvil-setup")]
 anvil-tool-cargo-check-external-types-validate-prereqs: (_check-tool "cargo-check-external-types" cargo_check_external_types_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-coverage-gate-install installer="install": (_install-tool "cargo-coverage-gate" cargo_coverage_gate_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-coverage-gate-validate-prereqs: (_check-tool "cargo-coverage-gate" cargo_coverage_gate_version)
 
 [group("anvil-setup")]
 anvil-tool-cargo-delta-install installer="install": (_install-tool "cargo-delta" cargo_delta_version installer)
@@ -2941,8 +3299,10 @@ rust_nightly_external_types := "nightly-2025-10-18"
 
 cargo_aprz_version := "1.0.0"
 cargo_audit_version := "0.22.2"
+cargo_bolero_version := "0.13.4"
 cargo_careful_version := "0.4.9"
 cargo_check_external_types_version := "0.4.0"
+cargo_coverage_gate_version := "0.1.0"
 cargo_delta_version := "0.3.1"
 cargo_deny_version := "0.19.0"
 cargo_doc2readme_version := "0.6.4"

@@ -43,6 +43,7 @@ const GROUPS: &[&str] = &[
     "pr-mutants",
     "scheduled-test",
     "scheduled-advisories",
+    "scheduled-runtime-analysis",
     "scheduled-exhaustive",
 ];
 
@@ -117,6 +118,10 @@ pub(crate) const GROUP_ACTIONS: &[(&str, &str)] = &[
     ("pr-mutants", ".github/actions/anvil-pr-mutants/action.yml"),
     ("scheduled-test", ".github/actions/anvil-scheduled-test/action.yml"),
     ("scheduled-advisories", ".github/actions/anvil-scheduled-advisories/action.yml"),
+    (
+        "scheduled-runtime-analysis",
+        ".github/actions/anvil-scheduled-runtime-analysis/action.yml",
+    ),
     ("scheduled-exhaustive", ".github/actions/anvil-scheduled-exhaustive/action.yml"),
 ];
 
@@ -135,6 +140,7 @@ pub(crate) fn all() -> Vec<Artifact> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -219,7 +225,12 @@ mod tests {
 
     #[test]
     fn scheduled_impl_workflow_has_expected_jobs() {
-        for needle in ["scheduled-test:", "scheduled-advisories:", "scheduled-exhaustive:"] {
+        for needle in [
+            "scheduled-test:",
+            "scheduled-advisories:",
+            "scheduled-runtime-analysis:",
+            "scheduled-exhaustive:",
+        ] {
             assert!(
                 SCHEDULED_IMPL_WORKFLOW.contains(needle),
                 "scheduled impl workflow missing job '{needle}'"
