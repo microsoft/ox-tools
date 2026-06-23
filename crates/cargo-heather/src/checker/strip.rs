@@ -154,6 +154,7 @@ pub(super) fn fix_script_content(content: &str, header_text: &str, style: Commen
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -222,5 +223,72 @@ fn main() {}
 ";
         let stripped = strip_existing_header(content, CommentStyle::DoubleSlash, "\n");
         assert_eq!(stripped, "fn main() {}\n", "all 5 wrong header lines must be removed");
+    }
+
+    #[test]
+    fn strip_existing_header_returns_content_unchanged_when_no_header() {
+        let s = strip_existing_header("fn main() {}\n", CommentStyle::DoubleSlash, "\n");
+        assert_eq!(s, "fn main() {}\n");
+    }
+
+    #[test]
+    fn strip_existing_header_yields_empty_when_file_is_only_a_header() {
+        let s = strip_existing_header("// H\n", CommentStyle::DoubleSlash, "\n");
+        assert_eq!(s, "");
+    }
+
+    #[test]
+    fn strip_existing_header_preserves_absence_of_trailing_newline() {
+        let s = strip_existing_header("// H\nbody", CommentStyle::DoubleSlash, "\n");
+        assert_eq!(s, "body");
+    }
+
+    #[test]
+    fn fix_shebang_content_handles_empty_content() {
+        let s = fix_shebang_content("", "New", CommentStyle::DoubleSlash, "\n");
+        assert!(s.contains("New"), "{s}");
+    }
+
+    #[test]
+    fn fix_shebang_content_without_shebang_strips_and_prepends() {
+        let s = fix_shebang_content("// Old\nbody\n", "New", CommentStyle::DoubleSlash, "\n");
+        assert!(s.contains("// New"), "{s}");
+        assert!(s.contains("body"), "{s}");
+        assert!(!s.contains("Old"), "{s}");
+    }
+
+    #[test]
+    fn fix_shebang_content_with_shebang_reassembles_header_and_body() {
+        let s = fix_shebang_content("#!/bin/sh\n// Old\nbody\n", "New", CommentStyle::DoubleSlash, "\n");
+        assert!(s.starts_with("#!/bin/sh\n"), "{s}");
+        assert!(s.contains("// New"), "{s}");
+        assert!(s.contains("body"), "{s}");
+    }
+
+    #[test]
+    fn fix_shebang_content_with_shebang_only_emits_header_without_body() {
+        let s = fix_shebang_content("#!/bin/sh\n", "New", CommentStyle::DoubleSlash, "\n");
+        assert!(s.starts_with("#!/bin/sh\n"), "{s}");
+        assert!(s.contains("// New"), "{s}");
+    }
+
+    #[test]
+    fn prepend_after_optional_shebang_handles_empty_content() {
+        let s = prepend_after_optional_shebang("", "New", CommentStyle::DoubleSlash, "\n");
+        assert!(s.contains("New"), "{s}");
+    }
+
+    #[test]
+    fn fix_script_content_with_no_body_emits_frontmatter_and_header() {
+        let s = fix_script_content("#!/usr/bin/env cargo\n---\n// Old\n", "New", CommentStyle::DoubleSlash, "\n");
+        assert!(s.starts_with("#!/usr/bin/env cargo\n---\n"), "{s}");
+        assert!(s.contains("// New"), "{s}");
+    }
+
+    #[test]
+    fn fix_script_content_with_body_preserves_it() {
+        let s = fix_script_content("#!/usr/bin/env cargo\n---\n// Old\nbody\n", "New", CommentStyle::DoubleSlash, "\n");
+        assert!(s.contains("// New"), "{s}");
+        assert!(s.contains("body"), "{s}");
     }
 }

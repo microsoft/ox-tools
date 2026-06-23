@@ -30,8 +30,7 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use cargo_anvil::cli::Cli;
-use cargo_anvil::run::run_update;
+use cargo_anvil::test_support::{Cli, run_update};
 use tempfile::TempDir;
 
 fn write(path: &Path, contents: &str) {
@@ -62,8 +61,9 @@ fn run_with_backend(backend: &str) -> TempDir {
         backends: vec![backend.to_owned()],
         no_backends: false,
         dry_run: false,
+        force: false,
     };
-    run_update(&args, tmp.path()).unwrap();
+    run_update(&cargo_anvil::Catalog::anvil(), &args, tmp.path()).unwrap();
     tmp
 }
 

@@ -87,3 +87,22 @@ fn classify(extracted: Option<String>, expected_header: &str) -> CheckResult {
         },
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fix_returns_input_unchanged_when_already_ok() {
+        // When the input already carries the expected header, fix() must
+        // be a no-op (CheckResult::Ok arm returns the content verbatim).
+        // The expected header is the raw text; the file carries it as a
+        // `//` comment.
+        let header = "Copyright (c) Microsoft Corporation.";
+        let content = "// Copyright (c) Microsoft Corporation.\n\nfn main() {}\n".to_owned();
+        let (result, out) = fix(&content, header, FileKind::Rust, "\n");
+        assert_eq!(result, CheckResult::Ok);
+        assert_eq!(out, content);
+    }
+}

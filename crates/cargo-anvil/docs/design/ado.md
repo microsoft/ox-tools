@@ -128,17 +128,22 @@ flowchart LR
     stest_s["stage: scheduled_test<br/>linux + windows jobs"]:::stage
     sadv_s["stage: scheduled_advisories<br/>linux + windows jobs"]:::stage
     sexh_s["stage: scheduled_exhaustive<br/>linux + windows jobs"]:::stage
+    srun_s["stage: scheduled_runtime_analysis<br/>linux + windows jobs"]:::stage
     stest_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     sadv_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
+    srun_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     sexh_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     stest_step[".pipelines/anvil/<br/>steps/scheduled-test.yml"]:::step
     sadv_step[".pipelines/anvil/<br/>steps/scheduled-advisories.yml"]:::step
+    srun_step[".pipelines/anvil/<br/>steps/scheduled-runtime-analysis.yml"]:::step
     sexh_step[".pipelines/anvil/<br/>steps/scheduled-exhaustive.yml"]:::step
     publish_coverage["PublishCodeCoverageResults@2"]:::external
     stest_just["just anvil-scheduled-test"]:::recipe
     stest_setup_just["just anvil-setup"]:::recipe
     sadv_just["just anvil-scheduled-advisories"]:::recipe
     sadv_setup_just["just anvil-setup"]:::recipe
+    srun_just["just anvil-scheduled-runtime-analysis"]:::recipe
+    srun_setup_just["just anvil-setup"]:::recipe
     sexh_just["just anvil-scheduled-exhaustive"]:::recipe
     sexh_setup_just["just anvil-setup"]:::recipe
 
@@ -146,6 +151,7 @@ flowchart LR
     sched_root -. extends .-> sched_stages
     sched_stages --> stest_s
     sched_stages --> sadv_s
+    sched_stages --> srun_s
     sched_stages --> sexh_s
 
     stest_s ==> stest_step
@@ -202,6 +208,7 @@ Note the ADO topology differs from GitHub Actions in two places:
         ├── pr-mutants.yml            owned
         ├── scheduled-test.yml        owned
         ├── scheduled-advisories.yml  owned
+        ├── scheduled-runtime-analysis.yml  owned
         └── scheduled-exhaustive.yml  owned
 ```
 

@@ -10,6 +10,7 @@ user-visible shape of the tool. Detail lives in companion documents:
 - [checks.md](./checks.md) — the opinionated check catalog, the group/tier structure
 - [local.md](./local.md) — the `justfiles/anvil/` layout, recipe surface, and customization.
 - [updates.md](./updates.md) — the drift-detection and update algorithm; opt-out semantics.
+- [extensibility.md](./extensibility.md) — how downstream tools ship their own brand + catalog.
 - [github.md](./github.md) — GitHub Actions emission, example workflows, impact wiring.
 - [ado.md](./ado.md) — Azure DevOps Pipelines emission, 1ESPT/msrustup composition.
 - [../verification.md](../verification.md) — continuous-validation strategy: dogfooding,
@@ -117,7 +118,7 @@ Only the repo maintainer who runs updates needs the binary installed. Everyone e
 ### 5.2 The single command
 
 ```text
-cargo anvil [--backend <name>]... [--no-backends] [--dry-run]
+cargo anvil [--backend <name>]... [--no-backends] [--dry-run] [--force]
 ```
 
 That is the entire CLI surface. There is intentionally no `init`, `migrate`, `check`, `run`,
@@ -130,6 +131,19 @@ The full per-item decision table lives in [updates.md](./updates.md).
 sync with the binary's current templates and all managed content matched, ignoring disabled
 items"; exit code 1 means "something is out of date or user-modified."
 
+`--version` prints the build's version **and its catalog checksum** — a `sha256` over the entire
+compiled-in catalog — on a second line, e.g.:
+
+```text
+cargo-anvil 0.4.1
+catalog: sha256:5e9d…
+```
+
+The checksum tells apart two builds that report the same version but carry different catalogs (a
+development-time situation); the same value is recorded as `catalog_checksum` in `.anvil.lock`
+(see [updates.md §1](./updates.md#1-the-manifest)). The `--version` help text notes that the
+second line is the catalog checksum.
+
 `--backend <name>` is a repeatable flag controlling which cloud-workflow backend(s) get emitted. Valid
 backend names today are `github` and `ado`; the flag is repeatable (`--backend github
 --backend ado`) so that adding a third backend in the future doesn't require new CLI
@@ -138,6 +152,15 @@ syntax. If `--backend` is omitted, the tool autodetects from the `origin` git re
 is valid and useful for repos that want only the local `just` setup with no cloud workflows files.
 `update` never deletes files; to stop using a backend the user removes its directory by
 hand and reruns without that backend.
+
+**Single-tool guard.** A repository is managed by exactly one anvil-family tool (the base
+`cargo-anvil` or a downstream tool built on the same engine — see
+[extensibility.md](./extensibility.md)). Each run checks the `tool` field recorded in
+`.anvil.lock`; if it names a *different* tool, the run refuses immediately and writes nothing
+(including under `--dry-run`). `--force` overrides the guard for that run and switches ownership:
+the tool proceeds and rewrites the lock's `tool` (and `tool_version` / `catalog_checksum`) to
+itself. Without `--force`, switching tools is otherwise a manual step. See
+[updates.md §1](./updates.md#the-single-tool-guard).
 
 ### 5.3 Daily driver
 

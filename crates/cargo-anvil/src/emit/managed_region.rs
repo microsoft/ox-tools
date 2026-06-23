@@ -13,7 +13,7 @@ use std::path::Path;
 use ohno::AppError;
 
 use crate::checksum::checksum_str;
-use crate::decision::{Decision, DecisionInputs, decide};
+use crate::decision::{Decision, DecisionInputs, UpdateDecision, decide};
 use crate::io::read_file_if_present;
 use crate::manifest::{Manifest, RegionKey};
 use crate::plan::{PlanItem, Target};
@@ -61,25 +61,21 @@ pub fn plan_managed_region(
         disk: disk_checksum.as_deref(),
         template: &template_checksum,
     };
-    let decision = decide(&inputs);
 
     let target = Target::Region {
         host: host_relpath.to_owned(),
         id: region_id.to_owned(),
     };
-    let item = match decision {
-        Decision::InSync => PlanItem::insync(target, template_checksum),
-        Decision::LeaveAlone => PlanItem::noop(target, decision),
-        Decision::Write => {
+    let item = match decide(&inputs) {
+        UpdateDecision::InSync => PlanItem::insync(target, template_checksum),
+        UpdateDecision::LeaveAlone => PlanItem::noop(target, Decision::LeaveAlone),
+        UpdateDecision::Write => {
             let spliced = splice(host_text.as_deref(), region_id, rendered_body, syntax)?;
             PlanItem::write_region(host_relpath, region_id, rendered_body.to_owned(), spliced, template_checksum)
         }
-        Decision::Propose => {
+        UpdateDecision::Propose => {
             let spliced = splice(host_text.as_deref(), region_id, rendered_body, syntax)?;
             PlanItem::propose_region(host_relpath, region_id, spliced, template_checksum)
-        }
-        Decision::Remove | Decision::OrphanedKept => {
-            unreachable!("decide() never returns removal decisions; those come from plan_removals")
         }
     };
 
@@ -92,6 +88,7 @@ fn splice(host_text: Option<&str>, region_id: &str, rendered_body: &str, syntax:
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 

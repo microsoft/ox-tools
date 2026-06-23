@@ -343,6 +343,20 @@ anvil-component-nightly-rust-src-install: anvil-toolchain-nightly-install (_inst
 [group("anvil-setup")]
 anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "rust-src")
 
+# llvm-tools ships the llvm-profdata / llvm-cov binaries that
+# cargo-llvm-cov shells out to. Required on the nightly toolchain
+# because anvil runs coverage on nightly (so cargo-llvm-cov sets the
+# `cfg(coverage_nightly)` that the workspace's
+# `#[cfg_attr(coverage_nightly, coverage(off))]` exclusions depend on).
+# Use the canonical `llvm-tools` name (not the legacy `llvm-tools-preview`
+# alias): `rustup component list` reports it as `llvm-tools-<target>`, so
+# the `-preview` alias never prefix-matches in `_check-component`.
+[group("anvil-setup")]
+anvil-component-nightly-llvm-tools-install: anvil-toolchain-nightly-install (_install-component rust_nightly "llvm-tools")
+
+[group("anvil-setup")]
+anvil-component-nightly-llvm-tools-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "llvm-tools")
+
 # ============================================================================
 # Cargo subcommands
 # ============================================================================
@@ -364,6 +378,36 @@ anvil-tool-cargo-audit-install installer="install": (_install-tool "cargo-audit"
 [group("anvil-setup")]
 anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_version)
 
+# cargo-bolero is Linux-only: its `bolero-afl` build dependency
+# compiles AFL's native C (afl-fuzz.c), which needs POSIX headers
+# (`unistd.h`) and uses preprocessor constructs MSVC rejects, so the
+# install fails outright on windows-*-msvc. bolero's libfuzzer engine
+# is likewise Linux-only. oxidizer's reference workflow runs bolero
+# exclusively on ubuntu, so anvil follows suit: the install/validate
+# pair self-skips on non-Linux (analogous to cargo-mutants skipping
+# aarch64-pc-windows-msvc), and the anvil-bolero check self-skips on
+# the same hosts. The pr-runtime-analysis Windows/ARM legs therefore
+# treat bolero as a no-op rather than a setup failure.
+[group("anvil-setup")]
+[script("pwsh")]
+anvil-tool-cargo-bolero-install installer="install":
+    if (-not $IsLinux) {
+        Write-Host 'anvil-tool-cargo-bolero-install: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
+        exit 0
+    }
+    & just _install-tool cargo-bolero {{cargo_bolero_version}} {{installer}}
+    exit $LASTEXITCODE
+
+[group("anvil-setup")]
+[script("pwsh")]
+anvil-tool-cargo-bolero-validate-prereqs:
+    if (-not $IsLinux) {
+        Write-Host 'anvil-tool-cargo-bolero-validate-prereqs: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
+        exit 0
+    }
+    & just _check-tool cargo-bolero {{cargo_bolero_version}}
+    exit $LASTEXITCODE
+
 [group("anvil-setup")]
 anvil-tool-cargo-careful-install installer="install": (_install-tool "cargo-careful" cargo_careful_version installer)
 
@@ -375,6 +419,12 @@ anvil-tool-cargo-check-external-types-install installer="install": (_install-too
 
 [group("anvil-setup")]
 anvil-tool-cargo-check-external-types-validate-prereqs: (_check-tool "cargo-check-external-types" cargo_check_external_types_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-coverage-gate-install installer="install": (_install-tool "cargo-coverage-gate" cargo_coverage_gate_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-coverage-gate-validate-prereqs: (_check-tool "cargo-coverage-gate" cargo_coverage_gate_version)
 
 [group("anvil-setup")]
 anvil-tool-cargo-delta-install installer="install": (_install-tool "cargo-delta" cargo_delta_version installer)

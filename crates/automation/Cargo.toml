@@ -28,6 +28,15 @@ rust-version.workspace = true
 [package.metadata.cargo_check_external_types]
 allowed_external_types = ["ohno::app::error::AppError", "serde::*", "serde_core::*"]
 
+# Coverage opt-out. `automation` is a script-only crate, entirely
+# annotated `#![cfg_attr(coverage_nightly, coverage(off))]`, so under the
+# nightly anvil-llvm-cov run it produces no instrumented regions. Without
+# this opt-out cargo-coverage-gate would classify it as NO DATA (exit 2).
+# `min-lines-percent = 0.0` is the gate's documented opt-out and resolves
+# to Status::Ok even with no attributed data.
+[package.metadata.coverage-gate]
+min-lines-percent = 0.0
+
 [dependencies]
 duct = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }

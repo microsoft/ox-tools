@@ -348,7 +348,9 @@ impl Plan {
     )]
     pub fn apply(&self, repo_root: &Path, previous_manifest: &Manifest) -> Result<Manifest, AppError> {
         let mut next = Manifest {
-            rendered_by: Some(format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))),
+            tool: previous_manifest.tool.clone(),
+            tool_version: previous_manifest.tool_version.clone(),
+            catalog_checksum: previous_manifest.catalog_checksum.clone(),
             files: previous_manifest.files.clone(),
             regions: previous_manifest.regions.clone(),
         };
@@ -491,9 +493,10 @@ fn write_section(out: &mut String, header: &str, items: &[&PlanItem]) {
 }
 
 fn write_file(path: &Path, content: &str) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).into_app_err_with(|| format!("failed to create parent directory {}", parent.display()))?;
-    }
+    let parent = path
+        .parent()
+        .expect("write_file targets are always repo-root-joined paths, which always have a parent");
+    std::fs::create_dir_all(parent).into_app_err_with(|| format!("failed to create parent directory {}", parent.display()))?;
     let tmp = make_temp_path(path);
     std::fs::write(&tmp, content).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
     std::fs::rename(&tmp, path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
@@ -507,6 +510,7 @@ fn make_temp_path(path: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 
@@ -602,7 +606,25 @@ mod tests {
         let written = std::fs::read_to_string(tmp.path().join("subdir/a.txt")).unwrap();
         assert_eq!(written, "hello\n");
         assert_eq!(m.files.get("subdir/a.txt").map(String::as_str), Some("sha256:abcd"));
-        assert!(m.rendered_by.is_some());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn apply_carries_provenance_forward() {
+        // apply preserves the previous lock's provenance fields; run_update
+        // is what stamps the current tool's identity on save.
+        let tmp = TempDir::new().unwrap();
+        let plan = Plan::default();
+        let prev = Manifest {
+            tool: Some("forge2".into()),
+            tool_version: Some("1.2.3".into()),
+            catalog_checksum: Some("sha256:feed".into()),
+            ..Manifest::default()
+        };
+        let next = plan.apply(tmp.path(), &prev).unwrap();
+        assert_eq!(next.tool.as_deref(), Some("forge2"));
+        assert_eq!(next.tool_version.as_deref(), Some("1.2.3"));
+        assert_eq!(next.catalog_checksum.as_deref(), Some("sha256:feed"));
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -813,5 +835,116 @@ mod tests {
             id: "x".into(),
         };
         assert_eq!(t.label(), "Justfile [x]");
+    }
+
+    #[test]
+    fn summary_lists_propose_and_leave_alone_sections() {
+        // Covers the Propose and LeaveAlone categorization arms of summary().
+        let mut plan = Plan::default();
+        plan.push(PlanItem::propose_file("p.txt", "x".into(), "sha256:1".into()));
+        plan.push(PlanItem::noop(Target::File { path: "l.txt".into() }, Decision::LeaveAlone));
+        let s = plan.summary(None);
+        assert!(s.contains("Will propose: 1 item(s)"), "summary:\n{s}");
+        assert!(s.contains("- p.txt"), "summary:\n{s}");
+        assert!(s.contains("Will leave alone (silent): 1 item(s)"), "summary:\n{s}");
+        assert!(s.contains("- l.txt"), "summary:\n{s}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn apply_orphaned_kept_region_preserves_host_and_drops_manifest() {
+        // OrphanedKept for a Region target: the host file and its in-region
+        // content are left untouched; only the manifest entry is dropped.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("Justfile"),
+            "# >>> anvil-managed: r\nuser edited\n# <<< anvil-managed: r\n",
+        )
+        .unwrap();
+        let mut prev = Manifest::default();
+        prev.set_region("Justfile", "r", "sha256:original");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::orphaned_kept(Target::Region {
+            host: "Justfile".into(),
+            id: "r".into(),
+        }));
+        let next = plan.apply(tmp.path(), &prev).unwrap();
+        // Host file untouched.
+        let host = std::fs::read_to_string(tmp.path().join("Justfile")).unwrap();
+        assert!(host.contains("user edited"));
+        // Manifest region entry dropped.
+        assert!(next.regions.is_empty(), "{:?}", next.regions);
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn apply_insync_region_refreshes_stale_manifest_l() {
+        // InSync for a Region target with a rendered checksum: the manifest
+        // region L is self-healed to the current template checksum (covers
+        // the Region arm of the InSync refresh).
+        let tmp = TempDir::new().unwrap();
+        let key = RegionKey {
+            host: "Justfile".into(),
+            id: "r".into(),
+        };
+        let mut prev = Manifest::default();
+        prev.set_region("Justfile", "r", "sha256:stale");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::insync(
+            Target::Region {
+                host: "Justfile".into(),
+                id: "r".into(),
+            },
+            "sha256:current".into(),
+        ));
+        let next = plan.apply(tmp.path(), &prev).unwrap();
+        assert_eq!(
+            next.regions.get(&key).map(String::as_str),
+            Some("sha256:current"),
+            "InSync must refresh the region L to the current template checksum",
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn apply_insync_without_checksum_preserves_manifest_entry() {
+        // An InSync item built via `noop` carries no rendered checksum, so
+        // the self-heal `if let Some(..)` takes its empty else branch and
+        // the previous manifest entry is preserved verbatim.
+        let tmp = TempDir::new().unwrap();
+        let mut prev = Manifest::default();
+        prev.set_file("a.txt", "sha256:k");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::noop(Target::File { path: "a.txt".into() }, Decision::InSync));
+        let next = plan.apply(tmp.path(), &prev).unwrap();
+        assert_eq!(next.files.get("a.txt").map(String::as_str), Some("sha256:k"));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn apply_remove_file_propagates_non_not_found_error() {
+        // A directory occupies the target path, so `remove_file` fails with
+        // a non-NotFound error that must propagate (not be absorbed like the
+        // idempotent already-gone case).
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("blocked")).unwrap();
+        let mut prev = Manifest::default();
+        prev.set_file("blocked", "sha256:old");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::remove_file("blocked"));
+        let err = plan.apply(tmp.path(), &prev).unwrap_err();
+        assert!(err.to_string().contains("failed to remove"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn write_file_propagates_create_dir_all_error() {
+        // A regular file occupies what would be the parent directory, so
+        // `create_dir_all` fails and the error propagates.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("occupied"), "x").unwrap();
+        let target = tmp.path().join("occupied").join("child.txt");
+        let err = write_file(&target, "data").unwrap_err();
+        assert!(err.to_string().contains("failed to create parent directory"), "{err}");
     }
 }

@@ -29,9 +29,19 @@ pub const SCHEMA_VERSION: i64 = 1;
 /// The full parsed manifest.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Manifest {
-    /// `rendered_by` string (binary name + version) of the last writer.
-    /// `None` for empty/never-written manifests.
-    pub rendered_by: Option<String>,
+    /// The tool that last wrote this lock: its cargo-subcommand token
+    /// (`anvil`, or a downstream tool's subcommand). This is the identity
+    /// the single-tool guard keys on. `None` for empty/never-written
+    /// manifests and for legacy locks written before the field split (which
+    /// is treated as "no recorded tool" so the guard never fires).
+    pub tool: Option<String>,
+
+    /// The version of the binary that last wrote the lock. Informational.
+    pub tool_version: Option<String>,
+
+    /// A `sha256` over the whole catalog the writing build carried.
+    /// Provenance and diagnostics only — never a gate.
+    pub catalog_checksum: Option<String>,
 
     /// Last-rendered checksum per owned file, keyed by repo-root-relative
     /// forward-slash path.
@@ -90,7 +100,18 @@ impl Manifest {
             bail!("manifest schema version {version} is newer than supported ({SCHEMA_VERSION}); upgrade cargo-anvil");
         }
 
-        let rendered_by = doc.get("rendered_by").and_then(Item::as_str).map(str::to_owned);
+        let tool = doc.get("tool").and_then(Item::as_str).map(str::to_owned);
+        // `tool_version` falls back to the version token of a legacy
+        // `rendered_by` string ("cargo-anvil 0.1.0"). The `tool` guard field
+        // deliberately does NOT fall back to `rendered_by`: a pre-split lock
+        // has no recorded tool, so the guard must not fire on it.
+        let tool_version = doc.get("tool_version").and_then(Item::as_str).map(str::to_owned).or_else(|| {
+            doc.get("rendered_by")
+                .and_then(Item::as_str)
+                .and_then(|rb| rb.split_whitespace().last())
+                .map(str::to_owned)
+        });
+        let catalog_checksum = doc.get("catalog_checksum").and_then(Item::as_str).map(str::to_owned);
 
         let mut files = BTreeMap::new();
         if let Some(arr) = doc.get("file").and_then(Item::as_array_of_tables) {
@@ -137,7 +158,9 @@ impl Manifest {
         }
 
         Ok(Self {
-            rendered_by,
+            tool,
+            tool_version,
+            catalog_checksum,
             files,
             regions,
         })
@@ -152,8 +175,14 @@ impl Manifest {
         let mut doc = DocumentMut::new();
 
         doc.insert("version", value(SCHEMA_VERSION));
-        if let Some(rb) = &self.rendered_by {
-            doc.insert("rendered_by", value(rb.as_str()));
+        if let Some(tool) = &self.tool {
+            doc.insert("tool", value(tool.as_str()));
+        }
+        if let Some(tool_version) = &self.tool_version {
+            doc.insert("tool_version", value(tool_version.as_str()));
+        }
+        if let Some(catalog_checksum) = &self.catalog_checksum {
+            doc.insert("catalog_checksum", value(catalog_checksum.as_str()));
         }
 
         if !self.files.is_empty() {
@@ -179,10 +208,15 @@ impl Manifest {
             doc.insert("region", Item::ArrayOfTables(tables));
         }
 
-        let mut out = doc.to_string();
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
+        // Normalize to exactly one trailing newline regardless of how
+        // toml_edit serialized the document — `trim_end_matches` collapses
+        // zero-or-more trailing newlines so there is no conditional branch
+        // to leave uncovered.
+        let body = doc.to_string();
+        let trimmed = body.trim_end_matches('\n');
+        let mut out = String::with_capacity(trimmed.len() + 1);
+        out.push_str(trimmed);
+        out.push('\n');
         out
     }
 
@@ -222,6 +256,7 @@ impl Manifest {
 // yet (they will once writers gain inline-table support in later commits).
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 
@@ -229,7 +264,9 @@ mod tests {
 
     fn sample_manifest() -> Manifest {
         let mut m = Manifest {
-            rendered_by: Some("cargo-anvil 0.1.0".into()),
+            tool: Some("anvil".into()),
+            tool_version: Some("0.1.0".into()),
+            catalog_checksum: Some("sha256:abcd".into()),
             ..Manifest::default()
         };
         m.set_file("Justfile", "sha256:aaaa");
@@ -293,6 +330,39 @@ mod tests {
     }
 
     #[test]
+    fn provenance_fields_round_trip() {
+        let m = sample_manifest();
+        let parsed = Manifest::parse(&m.to_toml()).unwrap();
+        assert_eq!(parsed.tool.as_deref(), Some("anvil"));
+        assert_eq!(parsed.tool_version.as_deref(), Some("0.1.0"));
+        assert_eq!(parsed.catalog_checksum.as_deref(), Some("sha256:abcd"));
+    }
+
+    #[test]
+    fn legacy_rendered_by_parses_without_setting_tool() {
+        // A pre-split lock has only `rendered_by`. `tool` must stay None so
+        // the single-tool guard never fires on it; `tool_version` is
+        // recovered from the version token for display.
+        let text = "version = 1\nrendered_by = \"cargo-anvil 0.3.1\"\n";
+        let m = Manifest::parse(text).unwrap();
+        assert_eq!(m.tool, None, "legacy lock must have no recorded tool");
+        assert_eq!(m.tool_version.as_deref(), Some("0.3.1"));
+        assert_eq!(m.catalog_checksum, None);
+    }
+
+    #[test]
+    fn provenance_keys_serialize_after_version() {
+        let text = sample_manifest().to_toml();
+        let version_pos = text.find("version =").unwrap();
+        let tool_pos = text.find("tool =").unwrap();
+        let file_pos = text.find("[[file]]").unwrap();
+        assert!(
+            version_pos < tool_pos && tool_pos < file_pos,
+            "provenance keys must sit between version and [[file]]:\n{text}"
+        );
+    }
+
+    #[test]
     fn rejects_missing_version() {
         let text = "rendered_by = \"x\"\n";
         let err = Manifest::parse(text).unwrap_err();
@@ -311,6 +381,15 @@ mod tests {
         let text = "version = 1\n[[file]]\npath=\"x\"\nchecksum=\"sha256:1\"\n[[file]]\npath=\"x\"\nchecksum=\"sha256:2\"\n";
         let err = Manifest::parse(text).unwrap_err();
         assert!(err.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn rejects_duplicate_region_entry() {
+        let text = "version = 1\n\
+            [[region]]\nhost=\"Justfile\"\nid=\"anvil-x\"\nchecksum=\"sha256:1\"\n\
+            [[region]]\nhost=\"Justfile\"\nid=\"anvil-x\"\nchecksum=\"sha256:2\"\n";
+        let err = Manifest::parse(text).unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

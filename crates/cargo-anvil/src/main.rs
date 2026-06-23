@@ -1,35 +1,16 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+
 //! `cargo-anvil`: opinionated, unified Rust build and cloud-workflow scaffolding.
 
 use std::process::ExitCode;
 
-use cargo_anvil::cli::Cli;
-use tracing_subscriber::fmt::format::FmtSpan;
+use cargo_anvil::Catalog;
 
-#[mutants::skip] // Entry point: tracing/clap setup + dispatch to lib::run; behavior is integration-tested.
+#[mutants::skip] // Entry point: one-line dispatch to the integration-tested run_app; nothing to unit-test.
+#[cfg_attr(coverage_nightly, coverage(off))]
 fn main() -> ExitCode {
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_level(false)
-        .with_span_events(FmtSpan::NONE)
-        .without_time()
-        .init();
-
-    let cli = match Cli::parse_from_cargo_args(std::env::args_os()) {
-        Ok(cli) => cli,
-        Err(err) => {
-            // clap formats and prints the help/error itself.
-            err.exit();
-        }
-    };
-
-    match cargo_anvil::run(&cli) {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(err) => {
-            eprintln!("error: {err:#}");
-            ExitCode::FAILURE
-        }
-    }
+    cargo_anvil::run_app(Catalog::anvil())
 }

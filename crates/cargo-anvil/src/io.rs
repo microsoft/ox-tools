@@ -22,3 +22,110 @@ pub fn read_file_if_present(path: &Path) -> Result<Option<String>, AppError> {
         Err(e) => Err::<Option<String>, _>(e).into_app_err_with(|| format!("failed to read {}", path.display())),
     }
 }
+
+/// Resolve a repo-root-relative forward-slash path against the on-disk tree,
+/// matching each path segment case-insensitively and returning the **actual**
+/// stored casing.
+///
+/// The catalog declares canonical paths (e.g. `Justfile`), but adopters may
+/// already carry a different casing (`justfile`). Every file anvil touches is
+/// therefore resolved to whatever is already on disk: an exact-case match
+/// wins, otherwise a case-insensitive match returns the real name, and a
+/// segment that doesn't exist (a file anvil is about to create) keeps the
+/// canonical casing. Returning the real on-disk name — rather than just
+/// testing existence of the literal — is what keeps drift tracking correct on
+/// case-insensitive filesystems, where the literal `Justfile` would otherwise
+/// "exist" even when the file is named `justfile`.
+#[must_use]
+pub fn resolve_existing_case_insensitive(repo_root: &Path, relpath: &str) -> String {
+    let segments: Vec<&str> = relpath.split('/').filter(|s| !s.is_empty()).collect();
+    let mut resolved: Vec<String> = Vec::with_capacity(segments.len());
+
+    for (index, segment) in segments.iter().enumerate() {
+        let current_dir = repo_root.join(resolved.join("/"));
+        if let Some(actual) = find_entry_case_insensitive(&current_dir, segment) {
+            resolved.push(actual);
+        } else {
+            // This segment (and everything below it) isn't on disk yet;
+            // keep the canonical casing for the remainder.
+            resolved.extend(segments[index..].iter().map(|s| (*s).to_owned()));
+            break;
+        }
+    }
+
+    resolved.join("/")
+}
+
+/// Find a directory entry of `dir` whose name equals `name`, preferring an
+/// exact-case match and falling back to a case-insensitive one. Returns the
+/// entry's real on-disk name.
+fn find_entry_case_insensitive(dir: &Path, name: &str) -> Option<String> {
+    let mut case_insensitive: Option<String> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let entry_name = entry.file_name().to_string_lossy().into_owned();
+        if entry_name == name {
+            return Some(entry_name);
+        }
+        if case_insensitive.is_none() && entry_name.eq_ignore_ascii_case(name) {
+            case_insensitive = Some(entry_name);
+        }
+    }
+    case_insensitive
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn touch(root: &Path, rel: &str) {
+        let path = root.join(rel);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(path, "").unwrap();
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn nonexistent_path_keeps_canonical_casing() {
+        let tmp = TempDir::new().unwrap();
+        assert_eq!(resolve_existing_case_insensitive(tmp.path(), "Justfile"), "Justfile");
+        assert_eq!(
+            resolve_existing_case_insensitive(tmp.path(), "justfiles/anvil/mod.just"),
+            "justfiles/anvil/mod.just"
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn exact_match_is_returned() {
+        let tmp = TempDir::new().unwrap();
+        touch(tmp.path(), "Justfile");
+        assert_eq!(resolve_existing_case_insensitive(tmp.path(), "Justfile"), "Justfile");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn case_insensitive_match_returns_real_name() {
+        let tmp = TempDir::new().unwrap();
+        touch(tmp.path(), "justfile");
+        // Catalog asks for `Justfile`; the real on-disk name is `justfile`.
+        assert_eq!(resolve_existing_case_insensitive(tmp.path(), "Justfile"), "justfile");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn read_file_if_present_propagates_non_not_found_errors() {
+        // A file containing invalid UTF-8 makes `read_to_string` fail with
+        // `InvalidData` (not `NotFound`), exercising the error passthrough
+        // arm rather than the `Ok(None)` missing-file arm.
+        let tmp = TempDir::new().unwrap();
+        let bad = tmp.path().join("bad.bin");
+        std::fs::write(&bad, [0xFFu8, 0xFE, 0xFF]).unwrap();
+        let err = read_file_if_present(&bad).unwrap_err();
+        assert!(err.to_string().contains("failed to read"), "{err}");
+    }
+}

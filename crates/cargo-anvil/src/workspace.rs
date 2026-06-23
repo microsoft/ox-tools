@@ -19,11 +19,10 @@ use toml_edit::DocumentMut;
 /// A discovered Cargo workspace.
 #[derive(Debug, Clone)]
 pub struct Workspace {
-    /// Absolute path to the workspace root directory.
-    pub root: PathBuf,
-    /// Workspace members. Always at least one entry (the root crate, for
-    /// single-crate repos that don't declare `[workspace]`, or each explicit
-    /// member otherwise).
+    /// The `[workspace]` members. A multi-crate workspace has one entry per
+    /// member crate; a single-crate repo (no `[workspace]` table) has **no**
+    /// workspace members — its lint catalog goes into the root `Cargo.toml`
+    /// directly rather than into per-member stubs.
     pub members: Vec<WorkspaceMember>,
     /// Whether the root `Cargo.toml` carries a `[workspace]` table.
     ///
@@ -99,11 +98,20 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, AppError> {
 
     let has_workspace_table = doc.get("workspace").is_some();
     let members = if has_workspace_table {
-        resolve_workspace_members(root, &doc)?
+        let resolved = resolve_workspace_members(root, &doc)?;
+        if resolved.is_empty() {
+            bail!(
+                "workspace at {} resolved to zero members; check `members` in {}",
+                root.display(),
+                manifest_path.display()
+            );
+        }
+        resolved
     } else if doc.get("package").is_some() {
-        vec![WorkspaceMember {
-            manifest_relpath: "Cargo.toml".to_owned(),
-        }]
+        // A single-crate repo has no *workspace* members. Its lint catalog
+        // goes directly into the root `Cargo.toml` via a
+        // `HostSelector::SingleCrateCargoToml` region, not a per-member stub.
+        Vec::new()
     } else {
         bail!(
             "{} has neither [workspace] nor [package] — not a recognizable Cargo manifest",
@@ -111,16 +119,7 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, AppError> {
         );
     };
 
-    if members.is_empty() {
-        bail!(
-            "workspace at {} resolved to zero members; check `members` in {}",
-            root.display(),
-            manifest_path.display()
-        );
-    }
-
     Ok(Workspace {
-        root: root.to_path_buf(),
         members,
         has_workspace_table,
     })
@@ -213,6 +212,7 @@ fn normalize_relpath(relpath: &str) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
 
@@ -246,12 +246,7 @@ version = "0.1.0"
 
         let ws = load_workspace(&found).unwrap();
         assert!(!ws.has_workspace_table);
-        assert_eq!(
-            ws.members,
-            vec![WorkspaceMember {
-                manifest_relpath: "Cargo.toml".into()
-            }]
-        );
+        assert!(ws.members.is_empty(), "a single-crate repo has no workspace members");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -369,5 +364,39 @@ members = ["cra*tes"]
     fn normalize_relpath_uses_forward_slashes() {
         assert_eq!(normalize_relpath("a/b/c"), "a/b/c");
         assert_eq!(normalize_relpath("a\\b\\c"), if cfg!(windows) { "a/b/c" } else { "a\\b\\c" });
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn workspace_resolving_to_zero_members_errors() {
+        // A `crates/*` glob whose parent dir doesn't exist resolves to zero
+        // members; an empty workspace is rejected.
+        let tmp = TempDir::new().unwrap();
+        write(&tmp.path().join("Cargo.toml"), "[workspace]\nmembers = [\"nonexistent/*\"]\n");
+        let err = load_workspace(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("zero members"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn empty_member_pattern_errors() {
+        let tmp = TempDir::new().unwrap();
+        write(&tmp.path().join("Cargo.toml"), "[workspace]\nmembers = [\"\"]\n");
+        let err = load_workspace(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("pattern is empty"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn glob_with_existing_parent_but_no_member_dirs_resolves_empty() {
+        // `crates/*` where `crates/` exists but contains no member dirs:
+        // the glob expands to nothing (Cargo tolerates this), so the
+        // workspace ends up with zero members and is rejected -- exercising
+        // the is_dir() == true, no-entries path of expand_member_pattern.
+        let tmp = TempDir::new().unwrap();
+        write(&tmp.path().join("Cargo.toml"), "[workspace]\nmembers = [\"crates/*\"]\n");
+        fs::create_dir_all(tmp.path().join("crates")).unwrap();
+        let err = load_workspace(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("zero members"), "{err}");
     }
 }

@@ -138,4 +138,69 @@ mod tests {
         let s = render_to_string(&report);
         assert!(!s.contains("_Note:"));
     }
+
+    #[test]
+    fn renders_combined_fail_and_no_data_summary() {
+        // Exercises the `(f, d)` summary arm: a report with both a
+        // below-threshold package and a no-data package.
+        let report = Report {
+            outcomes: vec![
+                outcome("beta", 100, 50, 80.0, ThresholdSource::Workspace, Status::Fail),
+                outcome("gamma", 0, 0, 100.0, ThresholdSource::Default, Status::NoData),
+            ],
+            unattributed: 0,
+        };
+        let s = render_to_string(&report);
+        assert!(
+            s.contains("below threshold") && s.contains("no attributed data"),
+            "expected combined summary, got:\n{s}"
+        );
+    }
+
+    /// Writer that returns an error the first time a write contains
+    /// `needle`, used to exercise the `?` error-propagation branches on
+    /// the multi-line `writeln!` calls. Earlier writes (which don't
+    /// contain the needle) succeed, so the failure lands on a specific
+    /// statement rather than the first write.
+    struct FailOnNeedle {
+        needle: &'static [u8],
+    }
+
+    impl io::Write for FailOnNeedle {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if buf.windows(self.needle.len()).any(|w| w == self.needle) {
+                return Err(io::Error::other("injected write failure"));
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn propagates_error_from_per_row_write() {
+        // The package name "ROWFAIL" is emitted only by the per-row
+        // `writeln!`, so failing on it covers that statement's `?`.
+        let report = Report {
+            outcomes: vec![outcome("ROWFAIL", 100, 95, 80.0, ThresholdSource::Package, Status::Ok)],
+            unattributed: 0,
+        };
+        let mut w = FailOnNeedle { needle: b"ROWFAIL" };
+        assert!(render(&mut w, &report).is_err());
+    }
+
+    #[test]
+    fn propagates_error_from_unattributed_note_write() {
+        // "had paths" appears only in the unattributed-note `writeln!`,
+        // so failing on it covers that statement's `?` after the rest of
+        // the table has been written successfully.
+        let report = Report {
+            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok)],
+            unattributed: 2,
+        };
+        let mut w = FailOnNeedle { needle: b"had paths" };
+        assert!(render(&mut w, &report).is_err());
+    }
 }

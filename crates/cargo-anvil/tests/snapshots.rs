@@ -26,9 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cargo_anvil::cli::Cli;
-use cargo_anvil::manifest::MANIFEST_FILE_NAME;
-use cargo_anvil::run::run_update;
+use cargo_anvil::test_support::{Cli, MANIFEST_FILE_NAME, run_update};
 use tempfile::TempDir;
 
 fn write(path: &Path, contents: &str) {
@@ -90,7 +88,7 @@ fn render_tree(root: &Path) -> String {
 }
 
 fn run(args: &Cli, tmp: &TempDir) {
-    run_update(args, tmp.path()).unwrap();
+    run_update(&cargo_anvil::Catalog::anvil(), args, tmp.path()).unwrap();
 }
 
 #[test]
@@ -101,6 +99,7 @@ fn local_only_tree() {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         },
         &tmp,
     );
@@ -115,6 +114,7 @@ fn github_backend_tree() {
             backends: vec!["github".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         },
         &tmp,
     );
@@ -129,6 +129,7 @@ fn ado_backend_tree() {
             backends: vec!["ado".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         },
         &tmp,
     );
