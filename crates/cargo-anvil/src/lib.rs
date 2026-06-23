@@ -181,17 +181,17 @@ pub mod workspace;
 
 use std::process::ExitCode;
 
+// Crate-root re-exports are limited to what a downstream tool author needs to
+// describe a catalog and run it (see `docs/design/extensibility.md`):
+// `run_app` (below), the catalog builder surface, the artifact model, the
+// backend enum, and the `artifacts` registry. Everything else — the manifest,
+// plan, decision table, region splicing, workspace discovery, the CLI parser,
+// and the checksum helpers — is engine internals; it stays reachable via its
+// module but is deliberately not surfaced at the crate root.
 pub use anvil::artifacts;
 pub use backend::Backend;
-pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec};
-pub use checksum::{checksum_bytes, checksum_str};
-pub use cli::Cli;
-pub use decision::{Decision, DecisionInputs, decide};
-pub use manifest::{Manifest, RegionKey};
-pub use plan::{Plan, PlanItem, Target};
-pub use region::{CommentSyntax, Region, find_region, render_region, upsert_region};
-pub use run::run;
-pub use workspace::{Workspace, WorkspaceMember};
+pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, RegionId, RegionSpec};
+pub use region::CommentSyntax;
 
 /// One-call entry point for a tool built on the anvil engine.
 ///
@@ -225,7 +225,7 @@ pub fn run_app(catalog: Catalog) -> ExitCode {
         .without_time()
         .init();
 
-    let cli = match Cli::parse_from_cargo_args(&catalog, std::env::args_os()) {
+    let cli = match cli::Cli::parse_from_cargo_args(&catalog, std::env::args_os()) {
         Ok(cli) => cli,
         Err(err) => {
             // clap formats and prints the help/error itself.
