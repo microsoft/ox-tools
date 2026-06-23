@@ -502,12 +502,18 @@ mod tests {
         // `load_workspace`).
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        write(&root.join("Cargo.toml"), "[workspace]\nresolver = \"2\"\nmembers = [\"crates/missing\"]\n");
+        write(
+            &root.join("Cargo.toml"),
+            "[workspace]\nresolver = \"2\"\nmembers = [\"crates/missing\"]\n",
+        );
         seed_lock_owner(root, "forge2");
 
         let err = run_update(&Catalog::anvil(), &local_only(), root).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("managed by 'forge2'"), "guard must refuse before workspace parsing; got: {msg}");
+        assert!(
+            msg.contains("managed by 'forge2'"),
+            "guard must refuse before workspace parsing; got: {msg}"
+        );
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
