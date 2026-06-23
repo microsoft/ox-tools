@@ -163,13 +163,15 @@ workspace = true
 
 
 === deny.toml ===
-# >>> anvil-managed: anvil-deny
+# >>> anvil-managed: anvil-deny-advisories
 [advisories]
 yanked = "deny"
 # Scope of unmaintained-crate checks: "all" surfaces transitive
 # dependencies too; tighten to "workspace" if the noise is high.
 unmaintained = "all"
+# <<< anvil-managed: anvil-deny-advisories
 
+# >>> anvil-managed: anvil-deny-licenses
 [licenses]
 allow = [
     "MIT",
@@ -184,15 +186,19 @@ allow = [
     "Zlib",
 ]
 confidence-threshold = 0.93
+# <<< anvil-managed: anvil-deny-licenses
 
+# >>> anvil-managed: anvil-deny-bans
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# <<< anvil-managed: anvil-deny-bans
 
+# >>> anvil-managed: anvil-deny-sources
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
-# <<< anvil-managed: anvil-deny
+# <<< anvil-managed: anvil-deny-sources
 
 === justfiles/anvil/checks.just ===
 # Copyright (c) Microsoft Corporation.

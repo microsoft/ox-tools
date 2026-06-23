@@ -3,18 +3,22 @@
 
 //! Driver for a single managed region.
 //!
-//! Given a host file path, region id, and the rendered region body, this
-//! module reads the host file (if any), locates the region (if present),
-//! consults the manifest, computes the decision, and returns a
-//! [`PlanItem`] ready to be applied.
-
-use std::path::Path;
+//! Given the host file's current text, a region id, and the rendered
+//! region body, this module locates the region (if present), consults the
+//! manifest, computes the decision, and returns a [`PlanItem`] ready to be
+//! applied.
+//!
+//! The host text is supplied by the caller rather than read here, so that
+//! multiple regions targeting the same host file compose: the caller
+//! threads an accumulating in-memory host text (seeded from disk) through
+//! every region, and each region splices on top of the previous one's
+//! result instead of re-reading the original disk state. See
+//! [`crate::run`]'s `HostTextCache` and `updates.md §4`.
 
 use ohno::AppError;
 
 use crate::checksum::checksum_str;
 use crate::decision::{Decision, DecisionInputs, UpdateDecision, decide};
-use crate::io::read_file_if_present;
 use crate::manifest::{Manifest, RegionKey};
 use crate::plan::{PlanItem, Target};
 use crate::region::{CommentSyntax, find_region, upsert_region};
@@ -22,28 +26,28 @@ use crate::region::{CommentSyntax, find_region, upsert_region};
 /// Compute the [`PlanItem`] for a managed region.
 ///
 /// `host_relpath` is the repo-root-relative forward-slash path of the
-/// host file. `region_id` is the stable region id. `rendered_body` is
-/// the byte-exact content the template would render between the
-/// sentinels. `syntax` is the host's comment flavor.
+/// host file. `host_text` is the host file's current content — `None`
+/// when the host file does not (yet) exist — which for the second and
+/// later regions in one host is the in-memory result of splicing the
+/// earlier regions, not the original disk state. `region_id` is the
+/// stable region id. `rendered_body` is the byte-exact content the
+/// template would render between the sentinels. `syntax` is the host's
+/// comment flavor.
 ///
-/// If the host file is missing, the region is treated as a `Write` and
+/// If the host text is `None`, the region is treated as a `Write` and
 /// the spliced output will be just the rendered region (sentinels + body).
 ///
 /// # Errors
 ///
-/// Returns an error if the host file exists but can't be read, or if the
-/// region in the host is malformed.
+/// Returns an error if the region in the host is malformed.
 pub fn plan_managed_region(
-    repo_root: &Path,
     manifest: &Manifest,
     host_relpath: &str,
+    host_text: Option<&str>,
     region_id: &str,
     rendered_body: &str,
     syntax: CommentSyntax,
 ) -> Result<PlanItem, AppError> {
-    let abs = repo_root.join(host_relpath);
-    let host_text = read_file_if_present(&abs)?;
-
     let template_checksum = checksum_str(rendered_body);
     let key = RegionKey {
         host: host_relpath.to_owned(),
@@ -51,7 +55,7 @@ pub fn plan_managed_region(
     };
     let last_rendered = manifest.regions.get(&key).map(String::as_str);
 
-    let disk_checksum = match host_text.as_deref() {
+    let disk_checksum = match host_text {
         None => None,
         Some(text) => find_region(text, region_id, syntax)?.map(|region| checksum_str(region.body_str())),
     };
@@ -70,11 +74,11 @@ pub fn plan_managed_region(
         UpdateDecision::InSync => PlanItem::insync(target, template_checksum),
         UpdateDecision::LeaveAlone => PlanItem::noop(target, Decision::LeaveAlone),
         UpdateDecision::Write => {
-            let spliced = splice(host_text.as_deref(), region_id, rendered_body, syntax)?;
+            let spliced = splice(host_text, region_id, rendered_body, syntax)?;
             PlanItem::write_region(host_relpath, region_id, rendered_body.to_owned(), spliced, template_checksum)
         }
         UpdateDecision::Propose => {
-            let spliced = splice(host_text.as_deref(), region_id, rendered_body, syntax)?;
+            let spliced = splice(host_text, region_id, rendered_body, syntax)?;
             PlanItem::propose_region(host_relpath, region_id, spliced, template_checksum)
         }
     };
@@ -90,97 +94,91 @@ fn splice(host_text: Option<&str>, region_id: &str, rendered_body: &str, syntax:
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use tempfile::TempDir;
-
     use super::*;
 
     const SYN: CommentSyntax = CommentSyntax::Hash;
 
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn missing_host_writes_new_file() {
-        let tmp = TempDir::new().unwrap();
-        let item = plan_managed_region(tmp.path(), &Manifest::default(), "Justfile", "r", "body line\n", SYN).unwrap();
+        let item = plan_managed_region(&Manifest::default(), "Justfile", None, "r", "body line\n", SYN).unwrap();
         assert_eq!(item.decision, Decision::Write);
         let spliced = item.spliced_host.as_deref().unwrap();
         assert!(spliced.contains("# >>> anvil-managed: r"));
         assert!(spliced.contains("body line"));
     }
 
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn existing_host_without_region_appends_region() {
-        let tmp = TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("Justfile"), "user content\n").unwrap();
-        let item = plan_managed_region(tmp.path(), &Manifest::default(), "Justfile", "r", "body\n", SYN).unwrap();
+        let item = plan_managed_region(&Manifest::default(), "Justfile", Some("user content\n"), "r", "body\n", SYN).unwrap();
         assert_eq!(item.decision, Decision::Write);
         let spliced = item.spliced_host.as_deref().unwrap();
         assert!(spliced.starts_with("user content\n"));
         assert!(spliced.contains("# >>> anvil-managed: r"));
     }
 
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn matching_region_is_in_sync() {
-        let tmp = TempDir::new().unwrap();
         let host = "before\n\
                     # >>> anvil-managed: r\n\
                     body\n\
                     # <<< anvil-managed: r\n\
                     after\n";
-        std::fs::write(tmp.path().join("Justfile"), host).unwrap();
-        let item = plan_managed_region(tmp.path(), &Manifest::default(), "Justfile", "r", "body\n", SYN).unwrap();
+        let item = plan_managed_region(&Manifest::default(), "Justfile", Some(host), "r", "body\n", SYN).unwrap();
         assert_eq!(item.decision, Decision::InSync);
     }
 
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn user_modified_proposes_when_template_changed() {
-        let tmp = TempDir::new().unwrap();
         let host = "# >>> anvil-managed: r\nuser body\n# <<< anvil-managed: r\n";
-        std::fs::write(tmp.path().join("Justfile"), host).unwrap();
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("old body\n"));
-        let item = plan_managed_region(tmp.path(), &manifest, "Justfile", "r", "new body\n", SYN).unwrap();
+        let item = plan_managed_region(&manifest, "Justfile", Some(host), "r", "new body\n", SYN).unwrap();
         assert_eq!(item.decision, Decision::Propose);
         assert!(item.spliced_host.is_some());
     }
 
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn user_modified_template_unchanged_leaves_alone() {
-        let tmp = TempDir::new().unwrap();
         let host = "# >>> anvil-managed: r\nuser body\n# <<< anvil-managed: r\n";
-        std::fs::write(tmp.path().join("Justfile"), host).unwrap();
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("body\n"));
-        let item = plan_managed_region(tmp.path(), &manifest, "Justfile", "r", "body\n", SYN).unwrap();
+        let item = plan_managed_region(&manifest, "Justfile", Some(host), "r", "body\n", SYN).unwrap();
         assert_eq!(item.decision, Decision::LeaveAlone);
     }
 
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn empty_region_opts_out_when_template_unchanged() {
         // Steady-state opt-out: user emptied the region, template hasn't moved.
-        let tmp = TempDir::new().unwrap();
         let host = "# >>> anvil-managed: r\n# <<< anvil-managed: r\n";
-        std::fs::write(tmp.path().join("Justfile"), host).unwrap();
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("body\n"));
-        let item = plan_managed_region(tmp.path(), &manifest, "Justfile", "r", "body\n", SYN).unwrap();
+        let item = plan_managed_region(&manifest, "Justfile", Some(host), "r", "body\n", SYN).unwrap();
         assert_eq!(item.decision, Decision::LeaveAlone);
     }
 
-    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn empty_region_with_new_template_proposes() {
-        let tmp = TempDir::new().unwrap();
         let host = "# >>> anvil-managed: r\n# <<< anvil-managed: r\n";
-        std::fs::write(tmp.path().join("Justfile"), host).unwrap();
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("old\n"));
-        let item = plan_managed_region(tmp.path(), &manifest, "Justfile", "r", "new\n", SYN).unwrap();
+        let item = plan_managed_region(&manifest, "Justfile", Some(host), "r", "new\n", SYN).unwrap();
         // Opt-out remains in place but the user gets a proposed host file.
         assert_eq!(item.decision, Decision::Propose);
+    }
+
+    #[test]
+    fn composes_onto_existing_region_in_host_text() {
+        // A second region planned against host text that already carries a
+        // first region must preserve the first and append the second —
+        // this is the in-memory composition that lets several regions
+        // share one host file (e.g. the sections of deny.toml).
+        let host = "# >>> anvil-managed: a\nbody-a\n# <<< anvil-managed: a\n";
+        let item = plan_managed_region(&Manifest::default(), "deny.toml", Some(host), "b", "body-b\n", SYN).unwrap();
+        assert_eq!(item.decision, Decision::Write);
+        let spliced = item.spliced_host.as_deref().unwrap();
+        assert!(spliced.contains("anvil-managed: a"), "first region preserved");
+        assert!(spliced.contains("body-a"), "first region body preserved");
+        assert!(spliced.contains("anvil-managed: b"), "second region appended");
+        assert!(spliced.contains("body-b"), "second region body appended");
     }
 }

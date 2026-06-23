@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.1.0"
-catalog_checksum = "sha256:1abe6661c04a48acb601d3e52be8dfff3b65540c4ebfa89ce25ed0498b462aa7"
+catalog_checksum = "sha256:277448dc02dea41b10ec8b5cb5482594ba02933a1c4156d97a3014d912453558"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"
@@ -130,8 +130,23 @@ checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103a
 
 [[region]]
 host = "deny.toml"
-id = "anvil-deny"
-checksum = "sha256:3d38154ac70567b4b6b39699e244040a1ed869471d3501f7147b5c3c9a748ade"
+id = "anvil-deny-advisories"
+checksum = "sha256:33c41d1b48567b929fc485915ba8465be2a0fc7186b321fcd55dda2330572b6b"
+
+[[region]]
+host = "deny.toml"
+id = "anvil-deny-bans"
+checksum = "sha256:bd5763f09562715dcdeaf0b5c11c24c8c4e214cc14f6d0ddfe13d30a7ea03880"
+
+[[region]]
+host = "deny.toml"
+id = "anvil-deny-licenses"
+checksum = "sha256:46d7144a403be402bceeabc48e2e0c3b9bd1738339712d4e90b04d6fdab5cabe"
+
+[[region]]
+host = "deny.toml"
+id = "anvil-deny-sources"
+checksum = "sha256:920e1e1fed8cf6ac2173cb489d19153d167e806d26fdb73c8b91b7ddf44d0815"
 
 [[region]]
 host = "rustfmt.toml"

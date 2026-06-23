@@ -203,7 +203,10 @@ pub mod artifacts {
         pub fn workspace_lints() -> Artifact;    // Cargo.toml (workspace) / anvil-workspace-lints
         pub fn single_crate_lints() -> Artifact; // Cargo.toml (single crate) / anvil-lints
         pub fn member_lints() -> Artifact;       // <member>/Cargo.toml / anvil-lints
-        pub fn deny() -> Artifact;               // deny.toml / anvil-deny
+        pub fn deny_advisories() -> Artifact;    // deny.toml / anvil-deny-advisories
+        pub fn deny_licenses() -> Artifact;      // deny.toml / anvil-deny-licenses
+        pub fn deny_bans() -> Artifact;          // deny.toml / anvil-deny-bans
+        pub fn deny_sources() -> Artifact;       // deny.toml / anvil-deny-sources
         pub fn rustfmt() -> Artifact;            // rustfmt.toml / anvil-rustfmt
         pub fn delta() -> Artifact;              // .delta.toml / anvil-delta
         pub fn spellcheck() -> Artifact;         // spellcheck.toml / anvil-spellcheck
