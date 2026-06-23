@@ -757,6 +757,38 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
         exit 0
     }
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    # Drop coverage-opted-out packages from the measured set. A crate that
+    # is entirely `#![cfg_attr(coverage_nightly, coverage(off))]` (e.g. a
+    # script-only crate) compiles to a test binary with no __llvm_covmap,
+    # and `llvm-cov export` aborts with "no coverage data found" whenever
+    # such a package is the *only* object in the report (e.g. it is the
+    # sole affected crate). Opt-out is declared via
+    # [package.metadata.coverage-gate] min-lines-percent = 0 -- the same
+    # marker cargo-coverage-gate already treats as NO DATA -> OK. If the
+    # affected set is *entirely* opted-out, there is nothing to measure,
+    # so we skip exactly like the empty-affected ('--skip') case.
+    if ($pkg -contains '--package') {
+        $optedOut = @(
+            (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+                Where-Object { $null -ne $_.metadata.'coverage-gate'.'min-lines-percent' -and [double]$_.metadata.'coverage-gate'.'min-lines-percent' -eq 0 } |
+                ForEach-Object { $_.name }
+        )
+        if ($optedOut.Count -gt 0) {
+            $filtered = [System.Collections.Generic.List[string]]::new()
+            for ($i = 0; $i -lt $pkg.Count; $i++) {
+                if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count -and $optedOut -contains $pkg[$i + 1]) {
+                    $i++
+                    continue
+                }
+                $filtered.Add($pkg[$i])
+            }
+            $pkg = $filtered.ToArray()
+        }
+        if (-not ($pkg -contains '--package')) {
+            Write-Host 'anvil-llvm-cov: only coverage-opted-out packages affected; nothing to measure, skipping'
+            exit 0
+        }
+    }
     # cargo-llvm-cov doesn't work on aarch64-pc-windows-msvc: the
     # llvm-profdata that ships with the rust toolchain there fails
     # to merge the .profraw set ("no profile can be merged"). Fall
