@@ -106,16 +106,22 @@ runs:
         #     warning rather than failing the whole build.
         declare -A pkg_map
         declare -A valid_pkgs
+        # `tr -d '\r'` strips carriage returns: on Windows runners the
+        # `cargo metadata | jq` (and cargo-delta) output can be CRLF-
+        # terminated, which would otherwise leave a trailing `\r` on the
+        # last `read` field — corrupting the map keys so valid packages
+        # get mis-classified as unknown and silently dropped.
         while IFS=$'\t' read -r pkg_name lib_name; do
             valid_pkgs["$pkg_name"]=1
             pkg_map["$pkg_name"]="$pkg_name"
             [ -n "$lib_name" ] && pkg_map["$lib_name"]="$pkg_name"
         done < <(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] as $p | ($p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)"), "\($p.name)\t"')
+            | jq -r '.packages[] as $p | ($p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)"), "\($p.name)\t"' \
+            | tr -d '\r')
         format_set() {
             local field="$1"
             local pkgs
-            pkgs=$(printf '%s' "$result" | jq -r --arg f "$field" '(.[$f] // []) | .[]' 2>/dev/null || true)
+            pkgs=$(printf '%s' "$result" | jq -r --arg f "$field" '(.[$f] // []) | .[]' 2>/dev/null | tr -d '\r' || true)
             if [ -z "$pkgs" ] ; then
                 printf '%s' "--skip"
             else
@@ -1800,6 +1806,38 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
         exit 0
     }
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    # Drop coverage-opted-out packages from the measured set. A crate that
+    # is entirely `#![cfg_attr(coverage_nightly, coverage(off))]` (e.g. a
+    # script-only crate) compiles to a test binary with no __llvm_covmap,
+    # and `llvm-cov export` aborts with "no coverage data found" whenever
+    # such a package is the *only* object in the report (e.g. it is the
+    # sole affected crate). Opt-out is declared via
+    # [package.metadata.coverage-gate] min-lines-percent = 0 -- the same
+    # marker cargo-coverage-gate already treats as NO DATA -> OK. If the
+    # affected set is *entirely* opted-out, there is nothing to measure,
+    # so we skip exactly like the empty-affected ('--skip') case.
+    if ($pkg -contains '--package') {
+        $optedOut = @(
+            (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+                Where-Object { $null -ne $_.metadata.'coverage-gate'.'min-lines-percent' -and [double]$_.metadata.'coverage-gate'.'min-lines-percent' -eq 0 } |
+                ForEach-Object { $_.name }
+        )
+        if ($optedOut.Count -gt 0) {
+            $filtered = [System.Collections.Generic.List[string]]::new()
+            for ($i = 0; $i -lt $pkg.Count; $i++) {
+                if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count -and $optedOut -contains $pkg[$i + 1]) {
+                    $i++
+                    continue
+                }
+                $filtered.Add($pkg[$i])
+            }
+            $pkg = $filtered.ToArray()
+        }
+        if (-not ($pkg -contains '--package')) {
+            Write-Host 'anvil-llvm-cov: only coverage-opted-out packages affected; nothing to measure, skipping'
+            exit 0
+        }
+    }
     # cargo-llvm-cov doesn't work on aarch64-pc-windows-msvc: the
     # llvm-profdata that ships with the rust toolchain there fails
     # to merge the .profraw set ("no profile can be merged"). Fall

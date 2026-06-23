@@ -89,16 +89,22 @@ runs:
         #     warning rather than failing the whole build.
         declare -A pkg_map
         declare -A valid_pkgs
+        # `tr -d '\r'` strips carriage returns: on Windows runners the
+        # `cargo metadata | jq` (and cargo-delta) output can be CRLF-
+        # terminated, which would otherwise leave a trailing `\r` on the
+        # last `read` field — corrupting the map keys so valid packages
+        # get mis-classified as unknown and silently dropped.
         while IFS=$'\t' read -r pkg_name lib_name; do
             valid_pkgs["$pkg_name"]=1
             pkg_map["$pkg_name"]="$pkg_name"
             [ -n "$lib_name" ] && pkg_map["$lib_name"]="$pkg_name"
         done < <(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] as $p | ($p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)"), "\($p.name)\t"')
+            | jq -r '.packages[] as $p | ($p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)"), "\($p.name)\t"' \
+            | tr -d '\r')
         format_set() {
             local field="$1"
             local pkgs
-            pkgs=$(printf '%s' "$result" | jq -r --arg f "$field" '(.[$f] // []) | .[]' 2>/dev/null || true)
+            pkgs=$(printf '%s' "$result" | jq -r --arg f "$field" '(.[$f] // []) | .[]' 2>/dev/null | tr -d '\r' || true)
             if [ -z "$pkgs" ] ; then
                 printf '%s' "--skip"
             else
