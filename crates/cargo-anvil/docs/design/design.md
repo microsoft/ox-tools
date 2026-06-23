@@ -283,7 +283,7 @@ Detail on each host:
   formatting opt the file out via the empty-stub mechanism in [updates.md](./updates.md).
 - **`.delta.toml`** — cargo-delta configuration that drives impact-scoped cloud-workflow runs. Created if
   absent. Region at the end of the file. Disabling the region opts the repo out of impact
-  scoping entirely. See [checks.md](./checks.md#impact-scoping) and the per-backend wiring in
+  scoping entirely. See [checks.md §5](./checks.md#5-impact-scoping-check--tier-mapping) and the per-backend wiring in
   [github.md](./github.md) / [ado.md](./ado.md).
 - **`.gitattributes`** — managed region pinning `*.rs text eol=lf` so Rust sources keep LF
   line endings on every platform (rustfmt and other tools assume LF). Created if absent;
@@ -355,7 +355,8 @@ outstanding proposed updates.
 
 ### 8.2 Monorepo / multi-workspace
 
-Out of scope for v1. `anvil-*` recipes always operate on `--workspace` from the repo root.
+Out of scope for v1. `anvil-*` recipes are rooted at the single workspace at the repo root
+(impact scoping narrows *which packages within it* run, never spans multiple workspaces).
 Repos with multiple workspaces (uncommon in the surveyed set) compose by having a separate
 anvil tree per workspace root, each with its own `cargo anvil`. Revisit after first
 adopters report friction.

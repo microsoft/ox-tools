@@ -27,7 +27,13 @@ repo/
     │                       reached transitively.
     ├── checks.just         per-check recipes (anvil-fmt, anvil-clippy, anvil-llvm-cov, …).
     │                       Starts with `set unstable` (needed for the `[script("pwsh")]`
-    │                       attribute on `anvil-pr-title`).
+    │                       attribute on `anvil-pr-title`). Each per-crate check depends on
+    │                       `anvil-impact` and resolves its scope via `_anvil-impact-include`
+    │                       (see §4).
+    ├── impact.just         the `anvil-impact` recipe + `_anvil-impact-snapshot` and
+    │                       `_anvil-impact-include` helpers. Computes the cargo-delta impact
+    │                       set into `target/anvil/impact/` (durable artifacts) and resolves
+    │                       per-tier include scope for the check recipes. See §4.
     ├── groups.just         group recipes (anvil-pr-fast, anvil-pr-test,
     │                       anvil-pr-runtime-analysis, anvil-pr-mutants, anvil-scheduled-test, …)
     │                       plus a convenience `anvil-pr-slow` umbrella that
@@ -66,12 +72,17 @@ from the command line.
 One recipe per individual check, each named `anvil-<check>`. Recipes are usually a single
 `cargo …` line; a handful (license-headers, ensure-no-cyclic-deps,
 ensure-no-default-features, pr-title, the bench smoke loop) are short `[script]` blocks.
-Every check recipe depends on its `*-validate-prereqs` recipe:
+Every check recipe depends on its `*-validate-prereqs` recipe; per-crate checks additionally
+depend on `anvil-impact` and resolve their scope from the impact cache (see §4):
 
 ```just
-anvil-clippy: anvil-clippy-validate-prereqs
-    cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
+    # body resolves scope via `_anvil-impact-include affected`, then:
+    # cargo clippy <include> --all-targets --all-features --locked -- -D warnings
 ```
+
+Unscoped checks (`pr-title`, `deny`, `audit`, `aprz`, `mutants-full`) take neither the
+`anvil-impact` dependency nor the scope preamble — they always run the full workspace.
 
 The per-check `*-validate-prereqs` recipe (in the `anvil-setup` group) chains the
 relevant atomic validators -- e.g. `anvil-component-default-clippy-validate-prereqs`
@@ -380,80 +391,252 @@ tolerance shims accumulating in the recipes. Pinning is one mechanism that handl
 present and future cases; tolerance shims are bespoke and silently degrade what the
 check actually validates.
 
-## 4. Impact-scoping pass-through env vars
+## 4. Impact scoping
 
-Every check recipe whose work is per-crate accepts an optional pass-through env var
-that the cloud-workflow wiring populates from the `anvil-impact` building block. There are three
-such env vars, one per cargo-delta tier:
+PR-tier checks only need to run against the crates a change can actually affect. anvil
+computes that blast radius with [`cargo-delta`](https://crates.io/crates/cargo-delta)
+and skips unaffected crates. The same computation runs **locally and in cloud workflows**
+through a single recipe — `anvil-impact` — so a one-file PR runs the same narrow set of
+crates whether the developer types `just anvil-pr` or the PR-tier workflow fires.
 
-| Env var                      | Bucket    | What recipes do with it                                                                       |
-|------------------------------|-----------|------------------------------------------------------------------------------------------------|
-| `ANVIL_INCLUDE_MODIFIED`  | modified  | `--skip` → recipe exits 0. Otherwise: run unconditionally (modified-tier tools are workspace-wide). |
-| `ANVIL_INCLUDE_AFFECTED`  | affected  | `--skip` → recipe exits 0. Otherwise: splice the value into the cargo invocation, defaulting to `--workspace` when unset. |
-| `ANVIL_INCLUDE_REQUIRED`  | required  | Same semantics as `ANVIL_INCLUDE_AFFECTED`, but consumed by recipes that need transitive dep graph in scope (doc-build, cargo-hack, udeps). |
+The previous design ran the impact analysis only in the cloud-workflow wiring (a composite
+action / step template that emitted pre-built `--package …` strings as job outputs, threaded
+forward as env vars). Local runs had no equivalent and always fell back to `--workspace`.
+This section describes the recipe-owned model that replaces it: the analysis is a `just`
+recipe that writes **durable artifacts** under `target/anvil/`, every per-crate check depends
+on it, and the cloud-workflow wiring simply *shares those artifacts between jobs* instead of
+recomputing or re-threading anything.
 
-Each var holds either the literal sentinel `--skip` (the tier is empty for this PR), or
-a pre-built argument string like `--package alpha --package beta`. The cloud-workflow wiring sets
-exactly one form; local invocations leave the vars unset, and recipes fall back to
-`--workspace`.
+> **Guiding principle restated.** `cargo-anvil` writes files; `just` runs them. Impact
+> analysis is no exception: it lives in `impact.just`, not in a backend's YAML. The cloud
+> workflows transport the artifact between jobs; they do not own the logic.
 
-A typical affected-tier recipe:
+### 4.1 The `anvil-impact` recipe and its artifacts
+
+`justfiles/anvil/impact.just` defines one public recipe and two private helpers:
+
+- **`_anvil-impact-snapshot`** (private) — produces the two cargo-delta snapshots the
+  impact compare needs:
+  - `target/anvil/impact/snapshots/current.json` — `cargo delta snapshot` of the working
+    tree (HEAD plus any uncommitted edits).
+  - `target/anvil/impact/snapshots/baseline.json` — `cargo delta snapshot` of the base ref.
+    cargo-delta has no `--base` shortcut, so the baseline is snapshotted inside a throwaway
+    `git worktree add --detach` at the base ref; the worktree is removed in a `finally` block
+    so an interrupted run never leaves one behind.
+- **`anvil-impact`** (public, `[group("anvil")]`) — the entry point. Its body, in order:
+  short-circuits when `ANVIL_IMPACT=off`; otherwise validates that `cargo-delta` meets its
+  pin, invokes `_anvil-impact-snapshot`, runs `cargo delta impact --baseline … --current …
+  --format json` to produce `impact.json`, and projects each tier into a pre-built include
+  string written to its cache file. The snapshot and the cargo-delta prereq check are invoked
+  **from the body, not as `just` dependencies**, so the single `ANVIL_IMPACT=off` guard skips
+  all of them — including the cargo-delta requirement — which is what lets a scheduled run
+  that never installed cargo-delta fire this recipe as a dependency and cleanly no-op.
+- **`_anvil-impact-include <tier>`** (private) — the resolver every per-crate check calls to
+  learn its scope for a tier. See §4.2.
+
+The full artifact set under `target/anvil/impact/`:
+
+| File                          | Producer            | Contents                                                                              |
+|-------------------------------|---------------------|---------------------------------------------------------------------------------------|
+| `snapshots/baseline.json`     | `_anvil-impact-snapshot` | cargo-delta snapshot of the base ref.                                             |
+| `snapshots/baseline.sha`      | `_anvil-impact-snapshot` | The base commit sha `baseline.json` was taken at. The baseline cache key.          |
+| `snapshots/current.json`      | `_anvil-impact-snapshot` | cargo-delta snapshot of the working tree.                                         |
+| `snapshots/current.state`     | `_anvil-impact-snapshot` | `<HEAD sha> <working-tree-diff hash>`. The current-snapshot cache key.             |
+| `impact.json`                 | `anvil-impact`      | Raw `cargo delta impact` output (TitleCase `Modified` / `Affected` / `Required` sets). The durable source of truth. |
+| `include_modified.txt`        | `anvil-impact`      | Projection of the `Modified` tier into `--package X --package Y …`, or the literal `--skip` when empty. |
+| `include_affected.txt`        | `anvil-impact`      | Same projection for the `Affected` tier (modified ∪ workspace rev-deps).               |
+| `include_required.txt`        | `anvil-impact`      | Same projection for the `Required` tier (affected ∪ workspace-internal transitive deps). |
+
+`impact.json` is the durable representation; the three `include_*.txt` files are a
+*projection* of it into the exact argument shape recipes splice. The `cargo-delta`-emitted
+crate names are library names (snake_case); the projection maps them back to cargo package
+names (which may be hyphenated, e.g. `cargo_anvil` → `cargo-anvil`) and drops any name that
+isn't a real workspace package, exactly as the prior cloud-workflow formatter did — that
+logic now lives in the recipe, in one place, instead of being duplicated across the GitHub
+and ADO templates.
+
+`target/` is cargo's build directory and is git-ignored, so these artifacts never enter the
+working tree the way a sidecar metadata file would. Putting them under `target/anvil/` keeps
+them next to the build outputs they describe and makes them trivially shareable as a
+cloud-workflow pipeline artifact (§4.4).
+
+#### Idempotency and the two independent cache keys
+
+The two snapshots have **different, independent** cache keys, because they cost very
+different amounts to produce and change at different rates:
+
+- **`baseline.json`** is the expensive one: snapshotting the base ref requires creating and
+  tearing down a throwaway `git worktree`. But it only depends on *where the base ref points*
+  — not on anything the developer is editing. So it is keyed solely on the base commit sha
+  (`snapshots/baseline.sha`). `_anvil-impact-snapshot` resolves the base sha
+  (`git rev-parse <base>`, sub-second) and **only recreates the worktree and re-snapshots the
+  baseline when that sha differs** from `baseline.sha`. On a normal edit-rebuild loop the base
+  doesn't move, so the worktree is never recreated after the first run.
+- **`current.json`** is cheap (an in-place snapshot of the working tree) and changes on every
+  edit. It is keyed on `<HEAD sha> <working-tree-diff hash>` (`snapshots/current.state`) and
+  re-taken whenever the working tree changes.
+
+`anvil-impact` then re-runs `cargo delta impact` and rewrites the projection only when either
+snapshot was regenerated (or `impact.json` / an `include_*.txt` is missing). Cache validity is
+keyed on the **content** of these marker files, never on file mtimes — mtimes are not reliably
+preserved when the artifacts are uploaded and re-downloaded as a cloud-workflow artifact
+(§4.4), so a downstream job that restored a fresh cache must still recognise it as fresh. Each
+marker is written *after* its snapshot completes, so a half-finished run never looks like a
+cache hit.
+
+So the first `just anvil-pr` after a code change re-snapshots the working tree and recomputes
+impact (seconds), but pays the worktree/baseline cost only when the base actually moved.
+A downstream cloud-workflow job that downloaded the artifact at the same commit sees both keys
+match and no-ops entirely.
+
+> **No-op when scoping is off.** `_anvil-impact-snapshot`, `anvil-impact`, and
+> `_anvil-impact-include` each read the `ANVIL_IMPACT` environment variable at the top of
+> their body and short-circuit when it is `off` (no git, no snapshot, no cargo-delta;
+> `_anvil-impact-include` returns the tier default). Because the variable is read from the
+> process environment, it is honored by these recipes even when they run as *dependencies* of
+> another recipe — `just` runs a dependency in the same environment as the invocation, so a
+> caller that exports `ANVIL_IMPACT=off` before invoking `just` disables scoping for the whole
+> run, deps included. (A recipe cannot set it for its own dependencies from its body, because
+> deps run before the body; see §4.3 for how the scheduled tier handles this.)
+
+#### Base-ref resolution, fresh clones, shallow clones
+
+The recipe resolves the base ref in this order:
+
+1. `$BASE_REF` if set (adopter / wiring override). It is run through the same normalization
+   as the branch names below — a bare branch (`release`) or a `refs/heads/`-qualified ref is
+   resolved to `origin/<branch>`; an already-qualified remote ref (`origin/release`) is used
+   as-is — so the ADO wiring can hand it `$(System.PullRequest.TargetBranch)` directly.
+2. The PR target-branch name reported by the backend — `$GITHUB_BASE_REF` on GitHub,
+   `$SYSTEM_PULLREQUEST_TARGETBRANCH` on ADO — **normalized** by stripping any leading
+   `refs/heads/` and prefixing `origin/`. (ADO reports the target branch as
+   `refs/heads/main` in some contexts and the short name in others; the normalization
+   collapses both to `origin/main`.)
+3. `origin/main`, then `origin/master`.
+
+The recipe **never fetches on the developer's behalf** — mutating the local git state as a
+side effect of a build check is surprising and can race with the user's own git operations.
+If the resolved base ref isn't present locally (a fresh clone that never fetched the base
+branch) it fails fast with a one-line `git fetch origin <branch>` hint. On a **shallow**
+clone — where the base ref's history is truncated and the worktree snapshot can't be
+materialized — it fails fast with a one-line `git fetch --unshallow` hint rather than
+producing a silently-wrong impact set.
+
+### 4.2 How checks consume the impact set
+
+Every per-crate check recipe gains two things:
+
+1. `anvil-impact` as a dependency, so the cache is fresh before the check reads it.
+2. A call to `_anvil-impact-include <tier>` at the top of its body to resolve its scope.
+
+`_anvil-impact-include <tier>` resolves a tier's scope with a simple rule and echoes the
+result:
+
+1. If `ANVIL_IMPACT=off`, return the **tier default** — `--workspace` for the
+   affected/required tiers, empty (run unconditionally) for the modified tier.
+2. Otherwise, if `target/anvil/impact/include_<tier>.txt` is present (the cache file
+   `anvil-impact` just wrote, or that a cloud-workflow job downloaded; §4.4), return its
+   contents.
+3. Otherwise, return the tier default. (This only happens if `anvil-impact` itself decided
+   not to write a cache — e.g. it was a no-op — so the safe behavior is to run wide.)
+
+There is intentionally **no per-tier override env var**. The only knob is `ANVIL_IMPACT=off`
+(§4.3), which forces the whole run to full-workspace; a per-tier "force this exact
+`--package` set" override would be a footgun (it silently diverges local results from what
+cargo-delta actually computed) with no real use case, so it isn't offered.
+
+Putting the rule in one helper means each check recipe is a two-line preamble plus its
+`cargo …` line. Because recipes in this tree are `[script("pwsh")]` (see
+[mod.just](#1-file-layout) note), the helper and the checks are pwsh:
 
 ```just
-anvil-clippy:
-    @if [ "$ANVIL_INCLUDE_AFFECTED" = "--skip" ]; then \
-        echo "anvil-clippy: no affected packages; skipping"; exit 0; \
-    fi; \
-    cargo clippy ${ANVIL_INCLUDE_AFFECTED:---workspace} --all-targets --all-features --locked -- -D warnings
+# affected-tier check
+[script("pwsh")]
+anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { Write-Host 'anvil-clippy: no affected crates; skipping'; exit 0 }
+    cargo clippy @($include -split ' ') --all-targets --all-features --locked -- -D warnings
 ```
 
-A typical modified-tier recipe (the tool is workspace-wide, so there's nothing to
-splice — only the skip guard matters):
-
 ```just
-anvil-fmt:
-    @if [ "$ANVIL_INCLUDE_MODIFIED" = "--skip" ]; then \
-        echo "anvil-fmt: no modified packages; skipping"; exit 0; \
-    fi; \
+# modified-tier check (tool is workspace-wide; only the skip guard matters)
+[script("pwsh")]
+anvil-fmt: anvil-fmt-validate-prereqs anvil-impact
+    if ((just _anvil-impact-include modified) -eq '--skip') { Write-Host 'anvil-fmt: no modified crates; skipping'; exit 0 }
     cargo fmt --all --check
 ```
 
-The mapping from check to bucket is fixed in the catalog (see
-[checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)). Unscoped checks
-(`pr-title`, `deny`, `audit`, `aprz`, `mutants-full`) ignore the vars entirely — they
-always run. Group recipes do not interpolate the vars themselves; each underlying check
-recipe reads what it needs, so a group recipe is just a dependency list and nothing
-changes when scoping is disabled.
+The check → tier (bucket) mapping is fixed in the catalog; the full table and the rationale
+for each assignment live in
+[checks.md §5](./checks.md#5-impact-scoping-check--tier-mapping). Unscoped checks
+(`pr-title`, `deny`, `audit`, `aprz`, `mutants-full`) take neither the dependency nor the
+preamble — they always run. Group recipes and the `anvil-pr` tier remain plain dependency
+lists that never read the include values themselves (the scheduled/full tiers are the one
+exception — thin wrappers; see §4.3), so moving a check between groups or tiers changes
+nothing in the wiring.
 
-### 4.1 The `--skip` sentinel
+#### The `--skip` sentinel
 
-`--skip` is a magic string the impact step emits when a tier is empty for the PR
-(typically a docs-only PR or a PR touching only files cargo-delta's
-`file_exclude_patterns` ignore). It is not a valid cargo argument, so there is no risk
-of collision with a real package name. Recipes test for it with `[ "$VAR" = "--skip" ]`
-and exit 0 cleanly, keeping the cloud-workflow job green while signalling that nothing in that tier
-needed to run.
+`--skip` is the magic value `anvil-impact` writes into a tier's cache file when that tier is
+empty (a docs-only PR, or a PR touching only files cargo-delta's `file_exclude_patterns`
+ignore). It is not a valid cargo argument, so it can never collide with a real package name.
+Recipes test for it explicitly and exit 0, keeping the run green while signalling that
+nothing in that tier needed to run. This is what makes "which checks can no-op when their
+tier is empty" a per-check property living in the recipe, not in the wiring.
 
-This separation is what makes the wiring layer durably structural: "which checks can
-no-op when nothing in the relevant tier is affected" is a per-check property living in
-the catalog/recipe, not in the wiring layer. Moving a check between buckets is a pure
-catalog change; the cloud workflow templates always thread all three vars and never gate jobs on
-their values.
+### 4.3 Turning scoping off (forcing a full-workspace run)
 
-### 4.2 Local impact-scoped runs
+There is exactly one lever: export `ANVIL_IMPACT=off` *in the environment that invokes
+`just`*. Because `just` runs dependencies in that same environment, the guard at the top of
+`anvil-impact` / `_anvil-impact-snapshot` / `_anvil-impact-include` is honored even when
+those recipes run as dependencies of a check: `anvil-impact` no-ops without computing
+anything (no git, no snapshot, no cargo-delta), and `_anvil-impact-include` returns the tier
+default (`--workspace` / run). So `ANVIL_IMPACT=off just anvil-clippy` runs clippy over the
+whole workspace, and `ANVIL_IMPACT=off just anvil-pr` runs the entire PR tier unscoped. This
+is also how the **scheduled tier stays full-workspace**.
 
-Not the default. To preview what cloud workflows would skip, run cargo-delta manually and export the
-env vars:
+The scheduled cloud-workflow jobs set `ANVIL_IMPACT=off` at the job/stage level, so the
+whole invocation — deps included — runs unscoped. For local exhaustive runs the catch is
+that a *dependency-only* tier recipe cannot set the variable for the check deps it pulls in
+(deps run before any body). So `anvil-scheduled` and `anvil-full` are **thin two-stage
+wrappers**: their body exports `ANVIL_IMPACT=off` and then re-invokes `just` on the actual
+group aggregator (`just _anvil-scheduled-impl` / `… anvil-pr _anvil-scheduled-impl`). That
+nested invocation inherits the variable, so its check deps no-op the impact recipe and run
+the whole workspace — and a PR-shaped cache left in `target/` by an earlier `anvil-pr` run
+never scopes them. (`anvil-pr` stays a plain dependency list, leaves `ANVIL_IMPACT` at its
+default, and is scoped.) Running a single scheduled check directly without the wrapper is
+scoped like any other check unless the developer exports `ANVIL_IMPACT=off` themselves.
 
-```sh
-# Compute the affected-tier include list (--package … form) against origin/main.
-export ANVIL_INCLUDE_AFFECTED="$(cargo delta impact --base origin/main --format cargo-args --affected)"
-just anvil-pr-test
-```
+This keeps the catch-all property of the scheduled tier intact: scheduled always runs the
+whole workspace, so anything PR-scoping skipped is caught within the schedule window.
 
-A wrapper recipe to compute and export all three vars in one shot is left to v2: it has
-subtle git-state interactions and the manual flow is good enough for the rare case a
-developer actually wants to reproduce cloud workflows scoping locally.
+### 4.4 Sharing the artifacts across cloud-workflow jobs
+
+Because the impact set is a set of files under `target/anvil/impact/`, the cloud-workflow
+backends do not recompute it per job and no longer thread `--package` strings as job
+outputs. Instead:
+
+1. A dedicated **impact job/stage** runs `just anvil-impact` and uploads
+   `target/anvil/impact/` as a pipeline artifact.
+2. Each downstream group job **downloads** that artifact into `target/anvil/impact/`
+   before running its group recipe. When the group recipe's checks fire their
+   `: anvil-impact` dependency, the recomputed cache keys match the marker files in the
+   downloaded artifact (`baseline.sha` and `current.state`), so the recipe no-ops (a
+   content-keyed cache hit) and the checks read the downloaded `include_*.txt` files. Both
+   keys are OS-independent on a clean CI checkout — they are commit shas and the hash of an
+   empty working-tree diff — so a Windows or aarch64 group job recognises the cache produced
+   by the Linux impact job.
+
+The artifact share is purely an **optimization, not a correctness requirement**. If the
+share wiring is removed, each group job's `: anvil-impact` dependency simply recomputes the
+impact set locally (the recipe handles both paths identically) — the only cost is repeating
+the snapshot work per job. anvil therefore includes `cargo-delta` in every PR-tier group's
+setup so the recompute fallback works even when no artifact is present.
+
+The backend-specific mechanics — which composite action / step template uploads and
+downloads, and how the fallback setup is wired — are in
+[github.md §6](./github.md#6-impact-scoping) and
+[ado.md §5](./ado.md#5-per-group-step-templates).
 
 ## 5. Daily driver
 
