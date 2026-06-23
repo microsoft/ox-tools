@@ -66,16 +66,22 @@ pub fn run(catalog: &Catalog, cli: &Cli) -> Result<(), AppError> {
 /// I/O, emitter, plan application).
 pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError> {
     let repo_root = workspace::find_workspace_root(start_dir)?;
-    let ws = workspace::load_workspace(&repo_root)?;
     let manifest = Manifest::load(&repo_root)?;
 
     // The single-tool guard: a repository is managed by exactly one
     // anvil-family tool. If the lock records a *different* tool, refuse
-    // before doing any planning work — content-free, and honored even under
+    // before doing any other work — content-free, and honored even under
     // --dry-run — unless --force is passed to switch ownership to this tool.
     // A lock with no `tool` field (first run, or a legacy pre-split lock) is
     // never blocked. See updates.md §1 "The single-tool guard".
+    //
+    // This runs immediately after loading the lock and before
+    // `load_workspace`, so a mismatched lock reliably refuses regardless of
+    // the workspace shape — the wrong tool never reaches workspace/member
+    // parsing, which could otherwise surface unrelated errors first.
     enforce_single_tool_guard(catalog, args, &manifest)?;
+
+    let ws = workspace::load_workspace(&repo_root)?;
 
     let backends = backend::resolve(&args.backends, args.no_backends, &repo_root)?;
     info!(
@@ -482,6 +488,26 @@ mod tests {
         assert!(msg.contains("managed by 'forge2'"), "got: {msg}");
         assert!(msg.contains("--force"), "refusal should suggest --force; got: {msg}");
         assert!(!tmp.path().join("justfiles/anvil/tools.just").exists(), "guard must write nothing");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn guard_refuses_before_workspace_parsing() {
+        // A root that `find_workspace_root` accepts (it declares
+        // `[workspace]`) but that `load_workspace` would reject (the explicit
+        // member `crates/missing` does not exist). With a lock naming a
+        // different tool, the guard must fire first: the refusal — not a
+        // workspace-parse error — is what surfaces. This pins the ordering
+        // (guard runs immediately after loading the lock, before
+        // `load_workspace`).
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        write(&root.join("Cargo.toml"), "[workspace]\nresolver = \"2\"\nmembers = [\"crates/missing\"]\n");
+        seed_lock_owner(root, "forge2");
+
+        let err = run_update(&Catalog::anvil(), &local_only(), root).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("managed by 'forge2'"), "guard must refuse before workspace parsing; got: {msg}");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

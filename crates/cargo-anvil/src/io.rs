@@ -24,18 +24,22 @@ pub fn read_file_if_present(path: &Path) -> Result<Option<String>, AppError> {
 }
 
 /// Resolve a repo-root-relative forward-slash path against the on-disk tree,
-/// matching each path segment case-insensitively and returning the **actual**
-/// stored casing.
+/// matching each path segment **ASCII**-case-insensitively and returning the
+/// **actual** stored casing.
 ///
 /// The catalog declares canonical paths (e.g. `Justfile`), but adopters may
 /// already carry a different casing (`justfile`). Every file anvil touches is
 /// therefore resolved to whatever is already on disk: an exact-case match
-/// wins, otherwise a case-insensitive match returns the real name, and a
-/// segment that doesn't exist (a file anvil is about to create) keeps the
+/// wins, otherwise an ASCII-case-insensitive match returns the real name, and
+/// a segment that doesn't exist (a file anvil is about to create) keeps the
 /// canonical casing. Returning the real on-disk name — rather than just
 /// testing existence of the literal — is what keeps drift tracking correct on
 /// case-insensitive filesystems, where the literal `Justfile` would otherwise
 /// "exist" even when the file is named `justfile`.
+///
+/// ASCII case folding is sufficient and deliberate: every catalog path is a
+/// fixed ASCII literal (`Justfile`, `Cargo.toml`, `deny.toml`, …), so there is
+/// no non-ASCII segment for which Unicode case folding could matter.
 #[must_use]
 pub fn resolve_existing_case_insensitive(repo_root: &Path, relpath: &str) -> String {
     let segments: Vec<&str> = relpath.split('/').filter(|s| !s.is_empty()).collect();
@@ -57,8 +61,8 @@ pub fn resolve_existing_case_insensitive(repo_root: &Path, relpath: &str) -> Str
 }
 
 /// Find a directory entry of `dir` whose name equals `name`, preferring an
-/// exact-case match and falling back to a case-insensitive one. Returns the
-/// entry's real on-disk name.
+/// exact-case match and falling back to an ASCII-case-insensitive one. Returns
+/// the entry's real on-disk name.
 fn find_entry_case_insensitive(dir: &Path, name: &str) -> Option<String> {
     let mut case_insensitive: Option<String> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
