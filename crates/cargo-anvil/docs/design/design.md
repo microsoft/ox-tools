@@ -238,6 +238,7 @@ repo/
 ├── deny.toml                                      managed-regions: anvil-deny-{advisories,licenses,bans,sources}
 ├── rustfmt.toml                                   managed-region: anvil-rustfmt (opt out with empty stub)
 ├── .delta.toml                                    managed-region: anvil-delta (opt out disables impact scoping)
+├── .gitattributes                                 managed-region: anvil-gitattributes (pins *.rs to LF)
 ├── rust-toolchain.toml                            user-authored (read only)
 ├── .cargo/config.toml                             user-authored (read only)
 │
@@ -284,6 +285,9 @@ Detail on each host:
   absent. Region at the end of the file. Disabling the region opts the repo out of impact
   scoping entirely. See [checks.md](./checks.md#impact-scoping) and the per-backend wiring in
   [github.md](./github.md) / [ado.md](./ado.md).
+- **`.gitattributes`** — managed region pinning `*.rs text eol=lf` so Rust sources keep LF
+  line endings on every platform (rustfmt and other tools assume LF). Created if absent;
+  users add their own attribute rules outside the region.
 - **`rust-toolchain.toml`** and **`.cargo/config.toml`** — never touched. Read-only inputs
   used by `anvil-tool-rustc-validate-prereqs` to validate the user's `rustc` version
   against the catalog minimum. the cloud workflow building blocks do not install Rust; that is the

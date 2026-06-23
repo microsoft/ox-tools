@@ -50,6 +50,7 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
         region::delta(),
         region::spellcheck(),
         region::clippy(),
+        region::gitattributes(),
     ];
 
     // Backend files (gated); both backends present, filtered by gate at plan time.
@@ -89,6 +90,7 @@ mod tests {
             region::delta(),
             region::spellcheck(),
             region::clippy(),
+            region::gitattributes(),
             github::setup_action(),
             github::impact_action(),
             github::pr_impl_workflow(),

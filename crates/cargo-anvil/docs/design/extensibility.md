@@ -211,6 +211,7 @@ pub mod artifacts {
         pub fn delta() -> Artifact;              // .delta.toml / anvil-delta
         pub fn spellcheck() -> Artifact;         // spellcheck.toml / anvil-spellcheck
         pub fn clippy() -> Artifact;             // clippy.toml / anvil-clippy
+        pub fn gitattributes() -> Artifact;      // .gitattributes / anvil-gitattributes
     }
     // Backend files are owned files gated on a backend (§4.3), grouped per backend.
     pub mod github {

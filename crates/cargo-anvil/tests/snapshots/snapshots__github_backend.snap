@@ -14,6 +14,13 @@ root-files = [
 ]
 # <<< anvil-managed: anvil-delta
 
+=== .gitattributes ===
+# >>> anvil-managed: anvil-gitattributes
+# Force LF line endings for Rust sources regardless of the checkout
+# platform, so rustfmt and other tooling see consistent newlines.
+*.rs text eol=lf
+# <<< anvil-managed: anvil-gitattributes
+
 === .github/actions/anvil-impact/action.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
@@ -1511,9 +1518,10 @@ anvil-readme-check: anvil-readme-check-validate-prereqs
 # human-edited `.spelling` file at the repo root and preprocess it
 # into the .dic format at check time (Hunspell .dic requires:
 # alphabetical sort, blank/numeric lines removed, line-count header).
-# If `.spelling` is present, we generate `target/spelling.dic` from it
-# automatically; otherwise we run cargo-spellcheck against whatever
-# the repo has already set up.
+# We always (re)generate `target/spelling.dic` so that a spellcheck.toml
+# pointing at it never fails on a missing file -- if `.spelling` is
+# absent we emit an empty dictionary (count `0`, no words) rather than
+# leaving the path dangling.
 [script("pwsh")]
 anvil-spellcheck: anvil-spellcheck-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1521,14 +1529,15 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
         Write-Host 'anvil-spellcheck: no modified packages; skipping'
         exit 0
     }
+    $output_file = 'target/spelling.dic'
+    $filtered_lines = @()
     if (Test-Path '.spelling') {
-        $output_file = 'target/spelling.dic'
         $lines = Get-Content '.spelling' | Sort-Object
-        $filtered_lines = $lines | Where-Object { $_ -notmatch '^\d+$' -and $_ -ne '' }
-        $line_count = $filtered_lines.Count
-        [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($output_file)) | Out-Null
-        @($line_count) + $filtered_lines | Set-Content $output_file
+        $filtered_lines = @($lines | Where-Object { $_ -notmatch '^\d+$' -and $_ -ne '' })
     }
+    $line_count = $filtered_lines.Count
+    [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($output_file)) | Out-Null
+    @($line_count) + $filtered_lines | Set-Content $output_file
     # Pass --cfg explicitly when a spellcheck.toml exists at repo root,
     # otherwise cargo-spellcheck falls back to its built-in defaults and
     # ignores user-curated dictionaries (`extra_dictionaries`, custom
@@ -3030,22 +3039,48 @@ _install-component toolchain component:
     }
 
 # _check-component: verify a component is installed on a toolchain.
+#
+# Detection avoids `rustup component list`, which msrustup does not
+# support. Instead each component is probed by the artifact it provides,
+# which works identically under rustup and msrustup:
+#   - clippy / rustfmt / miri expose a cargo subcommand, so we invoke
+#     `cargo [+toolchain] <subcommand> --version` (non-zero exit => absent).
+#   - rust-src / llvm-tools ship no command, so we probe the toolchain
+#     sysroot (`rustc [+toolchain] --print sysroot`) for their files.
 [script("pwsh")]
 _check-component toolchain component:
     $ErrorActionPreference = 'Stop'
     $toolchain = '{{toolchain}}'
     $component = '{{component}}'
-    $output = if ($toolchain -eq 'default') {
-        rustup component list --installed 2>$null
+    # Empty for the default toolchain; otherwise a `+<toolchain>` override
+    # spliced into the cargo/rustc invocation.
+    $tc = if ($toolchain -eq 'default') { @() } else { @("+$toolchain") }
+    $subcommand = switch ($component) {
+        'clippy'  { 'clippy' }
+        'rustfmt' { 'fmt' }
+        'miri'    { 'miri' }
+        default   { $null }
+    }
+    if ($null -ne $subcommand) {
+        & cargo @tc $subcommand --version *> $null
+        $present = ($LASTEXITCODE -eq 0)
     } else {
-        rustup component list --installed --toolchain $toolchain 2>$null
+        $sysroot = (& rustc @tc --print sysroot 2>$null)
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sysroot)) {
+            Write-Error "anvil: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain --profile minimal"
+            exit 1
+        }
+        $sysroot = $sysroot.Trim()
+        $present = switch ($component) {
+            # rust-src lands the standard-library sources under the sysroot.
+            'rust-src'   { Test-Path (Join-Path $sysroot 'lib/rustlib/src/rust/library') }
+            # llvm-tools ships llvm-profdata/llvm-cov under the per-target
+            # bin directory.
+            'llvm-tools' { @(Get-ChildItem (Join-Path $sysroot 'lib/rustlib') -Recurse -Filter 'llvm-profdata*' -ErrorAction SilentlyContinue).Count -gt 0 }
+            default      { $false }
+        }
     }
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "anvil: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain --profile minimal"
-        exit 1
-    }
-    $found = $output | Where-Object { $_ -like "$component*" }
-    if (-not $found) {
+    if (-not $present) {
         $cmd = if ($toolchain -eq 'default') { "rustup component add $component" } else { "rustup component add --toolchain $toolchain $component" }
         Write-Error "anvil: component '$component' not installed on toolchain '$toolchain'. Run: $cmd"
         exit 1
@@ -3112,8 +3147,9 @@ anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-valid
 # `cfg(coverage_nightly)` that the workspace's
 # `#[cfg_attr(coverage_nightly, coverage(off))]` exclusions depend on).
 # Use the canonical `llvm-tools` name (not the legacy `llvm-tools-preview`
-# alias): `rustup component list` reports it as `llvm-tools-<target>`, so
-# the `-preview` alias never prefix-matches in `_check-component`.
+# alias). Detection probes the sysroot for the `llvm-profdata` binary
+# (see `_check-component`), so the component name only matters for the
+# `rustup component add` install path.
 [group("anvil-setup")]
 anvil-component-nightly-llvm-tools-install: anvil-toolchain-nightly-install (_install-component rust_nightly "llvm-tools")
 

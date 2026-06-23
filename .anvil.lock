@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.1.0"
-catalog_checksum = "sha256:277448dc02dea41b10ec8b5cb5482594ba02933a1c4156d97a3014d912453558"
+catalog_checksum = "sha256:cda3a4a8e3b3a46ed820c545dbcdb9768215e7c61888821e939c3fa8a229d946"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"
@@ -61,7 +61,7 @@ checksum = "sha256:a45359b92a6d851fc39bfa1c03aeb489b544ae37a1cea390dbbf860b2def8
 
 [[file]]
 path = "justfiles/anvil/checks.just"
-checksum = "sha256:dd551ba9d70716674817ed0ac6639035c4cd468fa62e7811abfbf672703225af"
+checksum = "sha256:71aeb3c99d0d4e11d59356a603ff117eb5a0995828860342204fe59790dd1147"
 
 [[file]]
 path = "justfiles/anvil/groups.just"
@@ -77,7 +77,7 @@ checksum = "sha256:fd65dc16029c0e347f55f406e005ca1b264db4b482e3f1e8f6ef94aad7c51
 
 [[file]]
 path = "justfiles/anvil/tools.just"
-checksum = "sha256:e93424779c81d3855bd9b594e5c7b48435ce75460cc2591a07be29b5e35e58f7"
+checksum = "sha256:77dc8a2ee22053cb353705f9a2a36c108f1660ab8389fecb28682a8a90e9392a"
 
 [[file]]
 path = "justfiles/anvil/versions.just"
@@ -87,6 +87,11 @@ checksum = "sha256:9da2b99b5ce18785b508dc82c593d41ff972a6f1cdd587add0aa9186a6121
 host = ".delta.toml"
 id = "anvil-delta"
 checksum = "sha256:ef049abc4bba5e6dac7dfc07a4852d821de4682fe6ad46aace7ddfb2455cb597"
+
+[[region]]
+host = ".gitattributes"
+id = "anvil-gitattributes"
+checksum = "sha256:7d9051a56a2935a3fce2e4d8585fa5bb4ab8a89ace988cbdde77b52b0c4bcc9f"
 
 [[region]]
 host = "Cargo.toml"

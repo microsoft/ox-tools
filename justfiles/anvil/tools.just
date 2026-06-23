@@ -267,22 +267,48 @@ _install-component toolchain component:
     }
 
 # _check-component: verify a component is installed on a toolchain.
+#
+# Detection avoids `rustup component list`, which msrustup does not
+# support. Instead each component is probed by the artifact it provides,
+# which works identically under rustup and msrustup:
+#   - clippy / rustfmt / miri expose a cargo subcommand, so we invoke
+#     `cargo [+toolchain] <subcommand> --version` (non-zero exit => absent).
+#   - rust-src / llvm-tools ship no command, so we probe the toolchain
+#     sysroot (`rustc [+toolchain] --print sysroot`) for their files.
 [script("pwsh")]
 _check-component toolchain component:
     $ErrorActionPreference = 'Stop'
     $toolchain = '{{toolchain}}'
     $component = '{{component}}'
-    $output = if ($toolchain -eq 'default') {
-        rustup component list --installed 2>$null
+    # Empty for the default toolchain; otherwise a `+<toolchain>` override
+    # spliced into the cargo/rustc invocation.
+    $tc = if ($toolchain -eq 'default') { @() } else { @("+$toolchain") }
+    $subcommand = switch ($component) {
+        'clippy'  { 'clippy' }
+        'rustfmt' { 'fmt' }
+        'miri'    { 'miri' }
+        default   { $null }
+    }
+    if ($null -ne $subcommand) {
+        & cargo @tc $subcommand --version *> $null
+        $present = ($LASTEXITCODE -eq 0)
     } else {
-        rustup component list --installed --toolchain $toolchain 2>$null
+        $sysroot = (& rustc @tc --print sysroot 2>$null)
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sysroot)) {
+            Write-Error "anvil: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain --profile minimal"
+            exit 1
+        }
+        $sysroot = $sysroot.Trim()
+        $present = switch ($component) {
+            # rust-src lands the standard-library sources under the sysroot.
+            'rust-src'   { Test-Path (Join-Path $sysroot 'lib/rustlib/src/rust/library') }
+            # llvm-tools ships llvm-profdata/llvm-cov under the per-target
+            # bin directory.
+            'llvm-tools' { @(Get-ChildItem (Join-Path $sysroot 'lib/rustlib') -Recurse -Filter 'llvm-profdata*' -ErrorAction SilentlyContinue).Count -gt 0 }
+            default      { $false }
+        }
     }
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "anvil: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain --profile minimal"
-        exit 1
-    }
-    $found = $output | Where-Object { $_ -like "$component*" }
-    if (-not $found) {
+    if (-not $present) {
         $cmd = if ($toolchain -eq 'default') { "rustup component add $component" } else { "rustup component add --toolchain $toolchain $component" }
         Write-Error "anvil: component '$component' not installed on toolchain '$toolchain'. Run: $cmd"
         exit 1
@@ -349,8 +375,9 @@ anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-valid
 # `cfg(coverage_nightly)` that the workspace's
 # `#[cfg_attr(coverage_nightly, coverage(off))]` exclusions depend on).
 # Use the canonical `llvm-tools` name (not the legacy `llvm-tools-preview`
-# alias): `rustup component list` reports it as `llvm-tools-<target>`, so
-# the `-preview` alias never prefix-matches in `_check-component`.
+# alias). Detection probes the sysroot for the `llvm-profdata` binary
+# (see `_check-component`), so the component name only matters for the
+# `rustup component add` install path.
 [group("anvil-setup")]
 anvil-component-nightly-llvm-tools-install: anvil-toolchain-nightly-install (_install-component rust_nightly "llvm-tools")
 

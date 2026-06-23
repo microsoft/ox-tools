@@ -63,6 +63,11 @@ const CLIPPY_PATH: &str = "clippy.toml";
 /// Region id for the managed section of `clippy.toml`.
 const CLIPPY_REGION_ID: &str = "anvil-clippy";
 
+/// Repo-root-relative path of the git attributes file.
+const GITATTRIBUTES_PATH: &str = ".gitattributes";
+/// Region id for the managed section of `.gitattributes`.
+const GITATTRIBUTES_REGION_ID: &str = "anvil-gitattributes";
+
 /// Embedded body of the `deny.toml` `[advisories]` managed region.
 const DENY_ADVISORIES_BODY: &str = include_str!("../../../templates/regions/deny-advisories.toml");
 
@@ -86,6 +91,9 @@ const SPELLCHECK_BODY: &str = include_str!("../../../templates/regions/spellchec
 
 /// Embedded body of the clippy.toml managed region.
 const CLIPPY_BODY: &str = include_str!("../../../templates/regions/clippy.toml");
+
+/// Embedded body of the `.gitattributes` managed region.
+const GITATTRIBUTES_BODY: &str = include_str!("../../../templates/regions/gitattributes");
 
 /// Render the body of the workspace-scope lints region: `[workspace.lints]`
 /// header followed by the embedded catalog.
@@ -219,6 +227,16 @@ pub fn clippy() -> Artifact {
     path_region(CLIPPY_PATH, CLIPPY_REGION_ID, CLIPPY_BODY)
 }
 
+/// `.gitattributes` / `anvil-gitattributes`.
+///
+/// Pins `*.rs` to LF line endings so rustfmt and other tooling behave
+/// consistently regardless of the checkout platform (anvil-generated
+/// repos otherwise carry no line-ending policy). Created if absent.
+#[must_use]
+pub fn gitattributes() -> Artifact {
+    path_region(GITATTRIBUTES_PATH, GITATTRIBUTES_REGION_ID, GITATTRIBUTES_BODY)
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -342,6 +360,11 @@ mod tests {
             let headers: Vec<&str> = body.lines().map(str::trim_start).filter(|l| l.starts_with('[')).collect();
             assert_eq!(headers, vec![header], "deny section body must hold exactly its own table");
         }
+    }
+
+    #[test]
+    fn gitattributes_body_pins_rust_sources_to_lf() {
+        assert!(GITATTRIBUTES_BODY.contains("*.rs text eol=lf"));
     }
 
     #[test]

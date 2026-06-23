@@ -264,6 +264,7 @@ anchor:
 | `deny.toml`                           | `anvil-deny-advisories`, `anvil-deny-licenses`, `anvil-deny-bans`, `anvil-deny-sources` | End of file, in catalog order. One region per top-level section so users can add their own keys in the gaps between them. |
 | `rustfmt.toml`                        | `anvil-rustfmt`                         | End of file.                                                  |
 | `.delta.toml`                         | `anvil-delta`                           | End of file.                                                  |
+| `.gitattributes`                      | `anvil-gitattributes`                   | End of file.                                                  |
 
 When several regions target the same host (as `deny.toml`'s four sections do), the
 tool plans and applies them against an **accumulating in-memory host text**, seeded
