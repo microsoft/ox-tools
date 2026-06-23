@@ -25,9 +25,7 @@ categories = ["development-tools::cargo-plugins"]
 # clap types are no longer listed: the CLI parser (`cli::Cli`) is now a
 # crate-internal module reachable only via the doc-hidden `test_support`
 # seam, so no clap type appears in the public API surface.
-allowed_external_types = [
-    "ohno::app::error::AppError",
-]
+allowed_external_types = ["ohno::app::error::AppError"]
 
 [[bin]]
 name = "cargo-anvil"
