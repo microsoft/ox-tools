@@ -91,17 +91,37 @@ fn canonical_repr(artifact: &Artifact) -> String {
     const SEP: char = '\u{1f}';
     match artifact {
         Artifact::OwnedFile(spec) => {
-            format!("file{SEP}{}{SEP}gate={:?}{SEP}{}", spec.path, spec.gate, spec.body)
+            format!("file{SEP}{}{SEP}gate={}{SEP}{}", spec.path, gate_repr(spec.gate), spec.body)
         }
         Artifact::Region(spec) => {
             format!(
-                "region{SEP}{:?}{SEP}{}{SEP}{:?}{SEP}{}",
-                spec.host,
+                "region{SEP}{}{SEP}{}{SEP}{}{SEP}{}",
+                host_repr(&spec.host),
                 spec.id.as_str(),
-                spec.syntax,
+                syntax_repr(spec.syntax),
                 spec.body
             )
         }
+    }
+}
+
+fn gate_repr(gate: Option<crate::backend::Backend>) -> String {
+    gate.map_or_else(|| "none".to_owned(), |backend| backend.name().to_owned())
+}
+
+fn host_repr(host: &crate::catalog::HostSelector) -> String {
+    match host {
+        crate::catalog::HostSelector::Path(path) => format!("path:{path}"),
+        crate::catalog::HostSelector::EachMemberManifest => "each_member_manifest".to_owned(),
+        crate::catalog::HostSelector::WorkspaceCargoToml => "workspace_cargo_toml".to_owned(),
+        crate::catalog::HostSelector::SingleCrateCargoToml => "single_crate_cargo_toml".to_owned(),
+    }
+}
+
+fn syntax_repr(syntax: crate::region::CommentSyntax) -> &'static str {
+    match syntax {
+        crate::region::CommentSyntax::Hash => "hash",
+        crate::region::CommentSyntax::SlashSlash => "slashslash",
     }
 }
 
@@ -392,5 +412,25 @@ mod tests {
         assert_ne!(base, added);
         assert_ne!(base, removed);
         assert_ne!(added, removed);
+    }
+
+    #[test]
+    fn canonical_repr_uses_explicit_stable_tags() {
+        let file = Artifact::backend_file(crate::backend::Backend::GitHub, "x.txt", "body");
+        let region = Artifact::region(crate::catalog::RegionSpec {
+            host: crate::catalog::HostSelector::Path("Cargo.toml".to_owned()),
+            id: crate::catalog::RegionId::new("anvil"),
+            body: "region-body".to_owned(),
+            syntax: crate::region::CommentSyntax::SlashSlash,
+        });
+
+        let file_repr = canonical_repr(&file);
+        let region_repr = canonical_repr(&region);
+
+        assert!(file_repr.contains("gate=github"));
+        assert!(file_repr.contains("file"));
+        assert!(region_repr.contains("path:Cargo.toml"));
+        assert!(!region_repr.contains("single_crate_cargo_toml"));
+        assert!(region_repr.contains("slashslash"));
     }
 }

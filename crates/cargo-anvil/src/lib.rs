@@ -211,8 +211,8 @@ use std::process::ExitCode;
 // `run_app` (below), the catalog builder surface, the artifact model, the
 // backend enum, and the `artifacts` registry. Everything else — the manifest,
 // plan, decision table, region splicing, workspace discovery, the CLI parser,
-// and the checksum helpers — is engine internals; it stays reachable via its
-// module but is deliberately not surfaced at the crate root.
+// and the checksum helpers — is engine internals; it stays crate-private and
+// is deliberately not surfaced at the crate root.
 pub use anvil::artifacts;
 pub use backend::Backend;
 pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec};

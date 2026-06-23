@@ -101,15 +101,7 @@ impl Cli {
             .about(meta.about.clone())
             .long_about(meta.about.clone())
             .version(meta.version.clone())
-            .long_version(long_version)
-            .disable_version_flag(true)
-            .arg(
-                clap::Arg::new("version")
-                    .short('V')
-                    .long("version")
-                    .action(clap::ArgAction::Version)
-                    .help("Print version; --version also prints the catalog checksum"),
-            );
+            .long_version(long_version);
         let matches = command.try_get_matches_from(argv_iter)?;
         Self::from_arg_matches(&matches)
     }
@@ -183,6 +175,15 @@ mod tests {
             rendered.contains(&catalog.checksum()),
             "--version must print the catalog checksum; got: {rendered}"
         );
+    }
+
+    #[test]
+    fn terse_version_output_omits_catalog_checksum() {
+        let catalog = tiny_catalog();
+        let err = Cli::parse_from_cargo_args(&catalog, ["cargo-anvil", "-V"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+        let rendered = err.to_string();
+        assert!(!rendered.contains("catalog:"), "-V should stay terse; got: {rendered}");
     }
 
     #[test]
