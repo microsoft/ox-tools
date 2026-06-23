@@ -165,19 +165,34 @@
 
 #![deny(unsafe_code)]
 
-pub mod anvil;
-pub mod backend;
-pub mod catalog;
-pub mod checksum;
-pub mod cli;
-pub mod decision;
-pub mod emit;
-pub mod io;
-pub mod manifest;
-pub mod plan;
-pub mod region;
-pub mod run;
-pub mod workspace;
+pub(crate) mod anvil;
+pub(crate) mod backend;
+pub(crate) mod catalog;
+pub(crate) mod checksum;
+pub(crate) mod cli;
+pub(crate) mod decision;
+pub(crate) mod emit;
+pub(crate) mod io;
+pub(crate) mod manifest;
+pub(crate) mod plan;
+pub(crate) mod region;
+pub(crate) mod run;
+pub(crate) mod workspace;
+
+/// Engine internals exposed **only** for this crate's own integration tests
+/// (under `tests/`). This is not part of the public API: it is hidden from
+/// the docs and may change or disappear at any time. Downstream tool authors
+/// must not depend on it — use the crate-root surface (`Catalog`, `Artifact`,
+/// `artifacts`, `run_app`, …) instead.
+#[doc(hidden)]
+pub mod test_support {
+    pub use crate::cli::Cli;
+    pub use crate::decision::Decision;
+    pub use crate::manifest::{MANIFEST_FILE_NAME, Manifest};
+    pub use crate::plan::Target;
+    pub use crate::region::upsert_region;
+    pub use crate::run::{RunOutcome, run_update};
+}
 
 use std::process::ExitCode;
 
@@ -190,7 +205,7 @@ use std::process::ExitCode;
 // module but is deliberately not surfaced at the crate root.
 pub use anvil::artifacts;
 pub use backend::Backend;
-pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, RegionId, RegionSpec};
+pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec};
 pub use region::CommentSyntax;
 
 /// One-call entry point for a tool built on the anvil engine.

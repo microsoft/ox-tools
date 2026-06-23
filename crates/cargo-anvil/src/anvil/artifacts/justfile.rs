@@ -5,9 +5,8 @@
 //!
 //! Holds the embedded templates for the owned `.just` files and the registry
 //! functions that wrap them as [`Artifact`]s. The engine resolves the on-disk
-//! casing of every path generically (see
-//! [`crate::io::resolve_existing_case_insensitive`]), so `Justfile` /
-//! `justfile` need no special handling here.
+//! casing of every path generically, so `Justfile` / `justfile` need no
+//! special handling here.
 //!
 //! See [`local.md`](../../../docs/design/local.md) for the recipe surface.
 

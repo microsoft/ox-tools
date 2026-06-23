@@ -171,10 +171,10 @@ This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Br
 </sub>
 
  [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbOKGd9SPBdfobKjOs_WkWgQcbDDxCoIeuo6cbYeurLnzJsrZhZIGDa2NhcmdvLWFudmlsZTAuMS4wa2NhcmdvX2Fudmls
- [__link0]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=catalog::Catalog
- [__link1]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=catalog::Catalog::anvil
- [__link2]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=catalog::CliMeta
- [__link3]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=catalog::CatalogBuilder::with_artifact
- [__link4]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=catalog::CatalogBuilder::replace_artifact
- [__link5]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=catalog::CatalogBuilder::without_artifact
- [__link6]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=anvil::artifacts
+ [__link0]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=Catalog
+ [__link1]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=Catalog::anvil
+ [__link2]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CliMeta
+ [__link3]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CatalogBuilder::with_artifact
+ [__link4]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
+ [__link5]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CatalogBuilder::without_artifact
+ [__link6]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=artifacts

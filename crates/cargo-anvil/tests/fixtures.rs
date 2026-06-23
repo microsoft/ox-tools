@@ -31,10 +31,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cargo_anvil::cli::Cli;
-use cargo_anvil::decision::Decision;
-use cargo_anvil::plan::Target;
-use cargo_anvil::run::{RunOutcome, run_update};
+use cargo_anvil::test_support::{Cli, Decision, RunOutcome, Target, run_update};
 use tempfile::TempDir;
 
 const FIXTURES_ROOT: &str = env!("CARGO_MANIFEST_DIR");
@@ -132,8 +129,9 @@ fn single_crate_emits_crate_lints_and_justfiles() {
 /// first run keeps that opt-out across re-runs (LeaveAlone decision).
 #[test]
 fn empty_region_is_treated_as_opt_out() {
-    use cargo_anvil::anvil::artifacts::region::RUSTFMT_REGION_ID;
-    use cargo_anvil::region::{CommentSyntax, upsert_region};
+    use cargo_anvil::CommentSyntax;
+    use cargo_anvil::artifacts::region::RUSTFMT_REGION_ID;
+    use cargo_anvil::test_support::upsert_region;
 
     let tmp = stage_fixture("opt-outs");
     run(&tmp); // seed manifest and templates
@@ -155,8 +153,9 @@ fn empty_region_is_treated_as_opt_out() {
 /// template should be left alone on subsequent runs.
 #[test]
 fn user_edit_inside_region_is_left_alone() {
-    use cargo_anvil::anvil::artifacts::region::RUSTFMT_REGION_ID;
-    use cargo_anvil::region::{CommentSyntax, upsert_region};
+    use cargo_anvil::CommentSyntax;
+    use cargo_anvil::artifacts::region::RUSTFMT_REGION_ID;
+    use cargo_anvil::test_support::upsert_region;
 
     let tmp = stage_fixture("customized");
     run(&tmp);

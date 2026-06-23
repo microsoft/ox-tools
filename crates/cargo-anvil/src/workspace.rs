@@ -19,8 +19,6 @@ use toml_edit::DocumentMut;
 /// A discovered Cargo workspace.
 #[derive(Debug, Clone)]
 pub struct Workspace {
-    /// Absolute path to the workspace root directory.
-    pub root: PathBuf,
     /// The `[workspace]` members. A multi-crate workspace has one entry per
     /// member crate; a single-crate repo (no `[workspace]` table) has **no**
     /// workspace members — its lint catalog goes into the root `Cargo.toml`
@@ -122,7 +120,6 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, AppError> {
     };
 
     Ok(Workspace {
-        root: root.to_path_buf(),
         members,
         has_workspace_table,
     })

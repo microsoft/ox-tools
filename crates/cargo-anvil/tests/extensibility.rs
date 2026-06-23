@@ -19,9 +19,7 @@
 
 use std::path::Path;
 
-use cargo_anvil::cli::Cli;
-use cargo_anvil::manifest::Manifest;
-use cargo_anvil::run::run_update;
+use cargo_anvil::test_support::{Cli, Manifest, run_update};
 use cargo_anvil::{Artifact, Catalog, RegionId, artifacts};
 use tempfile::TempDir;
 

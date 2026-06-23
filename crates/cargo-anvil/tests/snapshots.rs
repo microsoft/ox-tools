@@ -26,9 +26,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cargo_anvil::cli::Cli;
-use cargo_anvil::manifest::MANIFEST_FILE_NAME;
-use cargo_anvil::run::run_update;
+use cargo_anvil::test_support::{Cli, MANIFEST_FILE_NAME, run_update};
 use tempfile::TempDir;
 
 fn write(path: &Path, contents: &str) {

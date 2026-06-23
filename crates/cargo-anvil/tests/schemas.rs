@@ -30,8 +30,7 @@
 use std::path::Path;
 use std::process::{Command, Output};
 
-use cargo_anvil::cli::Cli;
-use cargo_anvil::run::run_update;
+use cargo_anvil::test_support::{Cli, run_update};
 use tempfile::TempDir;
 
 fn write(path: &Path, contents: &str) {

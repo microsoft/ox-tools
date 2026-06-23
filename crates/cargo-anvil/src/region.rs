@@ -81,6 +81,10 @@ impl<'a> Region<'a> {
     /// whose body, after trimming line terminators and whitespace,
     /// contains no non-whitespace characters.
     #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "region opt-out predicate, currently exercised only by unit tests")
+    )]
     pub fn is_empty(&self) -> bool {
         self.body_str().trim().is_empty()
     }
