@@ -11,34 +11,35 @@ use crate::backend::Backend;
 use crate::catalog::Artifact;
 
 /// Embedded body of the shared setup step template.
-pub const SETUP_STEP: &str = include_str!("../../../templates/ado/steps/setup.yml");
+const SETUP_STEP: &str = include_str!("../../../templates/ado/steps/setup.yml");
 
 /// Embedded body of the cargo-delta impact step template.
-pub const IMPACT_STEP: &str = include_str!("../../../templates/ado/steps/impact.yml");
+const IMPACT_STEP: &str = include_str!("../../../templates/ado/steps/impact.yml");
 
 /// Embedded body of the advisory-comments step template.
-pub const ADVISORY_COMMENTS_STEP: &str = include_str!("../../../templates/ado/steps/advisory-comments.yml");
+const ADVISORY_COMMENTS_STEP: &str = include_str!("../../../templates/ado/steps/advisory-comments.yml");
 
 /// Embedded body of the dirty-file job wrapper.
-pub const JOB_WRAPPER: &str = include_str!("../../../templates/ado/steps/job.yml");
+const JOB_WRAPPER: &str = include_str!("../../../templates/ado/steps/job.yml");
 
 /// Embedded body of the PR-tier stages template.
-pub const PR_STAGES: &str = include_str!("../../../templates/ado/pr-stages.yml");
+const PR_STAGES: &str = include_str!("../../../templates/ado/pr-stages.yml");
 
 /// Embedded body of the scheduled-tier stages template.
-pub const SCHEDULED_STAGES: &str = include_str!("../../../templates/ado/scheduled-stages.yml");
+const SCHEDULED_STAGES: &str = include_str!("../../../templates/ado/scheduled-stages.yml");
 
 /// Embedded body of the PR root pipeline.
-pub const PR_ROOT_PIPELINE: &str = include_str!("../../../templates/ado/pr-root-pipeline.yml");
+const PR_ROOT_PIPELINE: &str = include_str!("../../../templates/ado/pr-root-pipeline.yml");
 
 /// Embedded body of the scheduled root pipeline.
-pub const SCHEDULED_ROOT_PIPELINE: &str = include_str!("../../../templates/ado/scheduled-root-pipeline.yml");
+const SCHEDULED_ROOT_PIPELINE: &str = include_str!("../../../templates/ado/scheduled-root-pipeline.yml");
 
 /// All check groups that get a per-group step template.
 ///
-/// See [`super::github::GROUPS`] for the rationale around splitting
-/// `pr-slow` into three cloud-workflow-visible sub-stages.
-pub const GROUPS: &[&str] = &[
+/// See `github::GROUPS` for the rationale around splitting `pr-slow` into
+/// three cloud-workflow-visible sub-stages.
+#[cfg(test)]
+const GROUPS: &[&str] = &[
     "pr-fast",
     "pr-test",
     "pr-runtime-analysis",
@@ -50,20 +51,21 @@ pub const GROUPS: &[&str] = &[
 
 /// Embedded template for one per-group step. `__GROUP__` is substituted with
 /// the group name at emit time.
-pub const GROUP_STEP_TEMPLATE: &str = include_str!("../../../templates/ado/steps/group.yml");
+const GROUP_STEP_TEMPLATE: &str = include_str!("../../../templates/ado/steps/group.yml");
 
 /// Placeholder token the per-group template uses for the group name.
 const GROUP_PLACEHOLDER: &str = "__GROUP__";
 
 /// Render the step template for one group.
 #[must_use]
-pub fn render_group_step(group: &str) -> String {
+fn render_group_step(group: &str) -> String {
     GROUP_STEP_TEMPLATE.replace(GROUP_PLACEHOLDER, group)
 }
 
 /// Repo-root-relative path for one group's step template.
+#[cfg(test)]
 #[must_use]
-pub fn group_step_path(group: &str) -> String {
+fn group_step_path(group: &str) -> String {
     format!(".pipelines/anvil/steps/{group}.yml")
 }
 

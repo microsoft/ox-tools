@@ -130,8 +130,7 @@ fn single_crate_emits_crate_lints_and_justfiles() {
 #[test]
 fn empty_region_is_treated_as_opt_out() {
     use cargo_anvil::CommentSyntax;
-    use cargo_anvil::artifacts::region::RUSTFMT_REGION_ID;
-    use cargo_anvil::test_support::upsert_region;
+    use cargo_anvil::test_support::{rustfmt_region_id, upsert_region};
 
     let tmp = stage_fixture("opt-outs");
     run(&tmp); // seed manifest and templates
@@ -139,12 +138,12 @@ fn empty_region_is_treated_as_opt_out() {
     // Simulate the user emptying the managed region.
     let rustfmt_path = tmp.path().join("rustfmt.toml");
     let body = std::fs::read_to_string(&rustfmt_path).unwrap();
-    let emptied = upsert_region(&body, RUSTFMT_REGION_ID, "", CommentSyntax::Hash).unwrap();
+    let emptied = upsert_region(&body, rustfmt_region_id(), "", CommentSyntax::Hash).unwrap();
     std::fs::write(&rustfmt_path, &emptied).unwrap();
 
     // Re-run and check the rustfmt region is LeaveAlone.
     let outcome = run(&tmp);
-    assert_eq!(region_decision(&outcome, "rustfmt.toml", RUSTFMT_REGION_ID), Decision::LeaveAlone);
+    assert_eq!(region_decision(&outcome, "rustfmt.toml", rustfmt_region_id()), Decision::LeaveAlone);
     let after = std::fs::read_to_string(&rustfmt_path).unwrap();
     assert_eq!(after, emptied, "opt-out region must not be re-populated");
 }
@@ -154,19 +153,18 @@ fn empty_region_is_treated_as_opt_out() {
 #[test]
 fn user_edit_inside_region_is_left_alone() {
     use cargo_anvil::CommentSyntax;
-    use cargo_anvil::artifacts::region::RUSTFMT_REGION_ID;
-    use cargo_anvil::test_support::upsert_region;
+    use cargo_anvil::test_support::{rustfmt_region_id, upsert_region};
 
     let tmp = stage_fixture("customized");
     run(&tmp);
 
     let rustfmt_path = tmp.path().join("rustfmt.toml");
     let body = std::fs::read_to_string(&rustfmt_path).unwrap();
-    let custom = upsert_region(&body, RUSTFMT_REGION_ID, "edition = \"2021\"\n", CommentSyntax::Hash).unwrap();
+    let custom = upsert_region(&body, rustfmt_region_id(), "edition = \"2021\"\n", CommentSyntax::Hash).unwrap();
     std::fs::write(&rustfmt_path, custom).unwrap();
 
     let outcome = run(&tmp);
-    assert_eq!(region_decision(&outcome, "rustfmt.toml", RUSTFMT_REGION_ID), Decision::LeaveAlone);
+    assert_eq!(region_decision(&outcome, "rustfmt.toml", rustfmt_region_id()), Decision::LeaveAlone);
     let after = std::fs::read_to_string(&rustfmt_path).unwrap();
     assert!(
         after.contains("edition = \"2021\""),

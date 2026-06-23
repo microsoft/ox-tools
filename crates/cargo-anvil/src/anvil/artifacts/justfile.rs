@@ -16,46 +16,46 @@ use crate::catalog::Artifact;
 ///
 /// This is the single-import entry point: it pulls in the sibling recipe
 /// files and defines `alias anvil := anvil-pr`.
-pub const MOD_JUST: &str = include_str!("../../../templates/justfiles/anvil/mod.just");
+const MOD_JUST: &str = include_str!("../../../templates/justfiles/anvil/mod.just");
 
 /// Repo-root-relative path of the entry-point recipe file.
-pub const MOD_JUST_PATH: &str = "justfiles/anvil/mod.just";
+const MOD_JUST_PATH: &str = "justfiles/anvil/mod.just";
 
 /// Contents of `justfiles/anvil/versions.just` baked into the binary.
-pub const VERSIONS_JUST: &str = include_str!("../../../templates/justfiles/anvil/versions.just");
+const VERSIONS_JUST: &str = include_str!("../../../templates/justfiles/anvil/versions.just");
 
 /// Repo-root-relative path of the pinned-versions recipe file.
-pub const VERSIONS_JUST_PATH: &str = "justfiles/anvil/versions.just";
+const VERSIONS_JUST_PATH: &str = "justfiles/anvil/versions.just";
 
 /// Contents of `justfiles/anvil/tools.just` baked into the binary.
-pub const TOOLS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tools.just");
+const TOOLS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tools.just");
 
 /// Repo-root-relative path of the tools recipe file.
-pub const TOOLS_JUST_PATH: &str = "justfiles/anvil/tools.just";
+const TOOLS_JUST_PATH: &str = "justfiles/anvil/tools.just";
 
 /// Contents of `justfiles/anvil/checks.just` baked into the binary.
-pub const CHECKS_JUST: &str = include_str!("../../../templates/justfiles/anvil/checks.just");
+const CHECKS_JUST: &str = include_str!("../../../templates/justfiles/anvil/checks.just");
 
 /// Repo-root-relative path of the per-check recipe file.
-pub const CHECKS_JUST_PATH: &str = "justfiles/anvil/checks.just";
+const CHECKS_JUST_PATH: &str = "justfiles/anvil/checks.just";
 
 /// Contents of `justfiles/anvil/groups.just` baked into the binary.
-pub const GROUPS_JUST: &str = include_str!("../../../templates/justfiles/anvil/groups.just");
+const GROUPS_JUST: &str = include_str!("../../../templates/justfiles/anvil/groups.just");
 
 /// Repo-root-relative path of the group recipe file.
-pub const GROUPS_JUST_PATH: &str = "justfiles/anvil/groups.just";
+const GROUPS_JUST_PATH: &str = "justfiles/anvil/groups.just";
 
 /// Contents of `justfiles/anvil/tiers.just` baked into the binary.
-pub const TIERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tiers.just");
+const TIERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tiers.just");
 
 /// Repo-root-relative path of the tier aggregator file.
-pub const TIERS_JUST_PATH: &str = "justfiles/anvil/tiers.just";
+const TIERS_JUST_PATH: &str = "justfiles/anvil/tiers.just";
 
 /// Embedded body of the `anvil-imports` region in the user's Justfile.
-pub const JUSTFILE_IMPORTS_BODY: &str = include_str!("../../../templates/regions/justfile-imports.just");
+pub(crate) const JUSTFILE_IMPORTS_BODY: &str = include_str!("../../../templates/regions/justfile-imports.just");
 
 /// Region id for the imports block in the user's `Justfile`.
-pub const JUSTFILE_REGION_ID: &str = "anvil-imports";
+pub(crate) const JUSTFILE_REGION_ID: &str = "anvil-imports";
 
 /// Canonical repo-root-relative path of the user's `Justfile`.
 ///
@@ -63,7 +63,7 @@ pub const JUSTFILE_REGION_ID: &str = "anvil-imports";
 /// build-config files (`Makefile`, `Dockerfile`, `Rakefile`, ...). `just`
 /// accepts either case, and the engine reuses whatever casing a repo already
 /// has on disk.
-pub const JUSTFILE_PATH: &str = "Justfile";
+pub(crate) const JUSTFILE_PATH: &str = "Justfile";
 
 /// `justfiles/anvil/mod.just` — the single-import entry point.
 #[must_use]

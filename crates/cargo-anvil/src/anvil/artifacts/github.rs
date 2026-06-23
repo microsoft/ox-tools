@@ -13,29 +13,30 @@ use crate::backend::Backend;
 use crate::catalog::Artifact;
 
 /// Embedded body of the shared setup composite action.
-pub const SETUP_ACTION: &str = include_str!("../../../templates/github/setup-action.yml");
+const SETUP_ACTION: &str = include_str!("../../../templates/github/setup-action.yml");
 
 /// Embedded body of the cargo-delta impact composite action.
-pub const IMPACT_ACTION: &str = include_str!("../../../templates/github/impact-action.yml");
+const IMPACT_ACTION: &str = include_str!("../../../templates/github/impact-action.yml");
 
 /// Embedded body of the PR reusable workflow.
-pub const PR_IMPL_WORKFLOW: &str = include_str!("../../../templates/github/pr-impl-workflow.yml");
+const PR_IMPL_WORKFLOW: &str = include_str!("../../../templates/github/pr-impl-workflow.yml");
 
 /// Embedded body of the scheduled reusable workflow.
-pub const SCHEDULED_IMPL_WORKFLOW: &str = include_str!("../../../templates/github/scheduled-impl-workflow.yml");
+const SCHEDULED_IMPL_WORKFLOW: &str = include_str!("../../../templates/github/scheduled-impl-workflow.yml");
 
 /// Embedded body of the PR root workflow.
-pub const PR_ROOT_WORKFLOW: &str = include_str!("../../../templates/github/pr-root-workflow.yml");
+const PR_ROOT_WORKFLOW: &str = include_str!("../../../templates/github/pr-root-workflow.yml");
 
 /// Embedded body of the scheduled root workflow.
-pub const SCHEDULED_ROOT_WORKFLOW: &str = include_str!("../../../templates/github/scheduled-root-workflow.yml");
+const SCHEDULED_ROOT_WORKFLOW: &str = include_str!("../../../templates/github/scheduled-root-workflow.yml");
 
 /// All check groups that get a per-group composite action.
 ///
 /// The PR-tier "pr-slow" umbrella is split into three cloud-workflow-visible
 /// sub-groups (`pr-test`, `pr-runtime-analysis`, `pr-mutants`) so each runs
 /// as its own job and they execute in parallel across the matrix.
-pub const GROUPS: &[&str] = &[
+#[cfg(test)]
+const GROUPS: &[&str] = &[
     "pr-fast",
     "pr-test",
     "pr-runtime-analysis",
@@ -47,20 +48,21 @@ pub const GROUPS: &[&str] = &[
 
 /// Embedded template for one per-group composite action. `__GROUP__` is
 /// substituted with the group name at emit time.
-pub const GROUP_ACTION_TEMPLATE: &str = include_str!("../../../templates/github/group-action.yml");
+const GROUP_ACTION_TEMPLATE: &str = include_str!("../../../templates/github/group-action.yml");
 
 /// Placeholder token the per-group template uses for the group name.
 const GROUP_PLACEHOLDER: &str = "__GROUP__";
 
 /// Render the `action.yml` for one check group's composite action.
 #[must_use]
-pub fn render_group_action(group: &str) -> String {
+fn render_group_action(group: &str) -> String {
     GROUP_ACTION_TEMPLATE.replace(GROUP_PLACEHOLDER, group)
 }
 
 /// Repo-root-relative path for a per-group composite action.
+#[cfg(test)]
 #[must_use]
-pub fn group_action_path(group: &str) -> String {
+fn group_action_path(group: &str) -> String {
     format!(".github/actions/anvil-{group}/action.yml")
 }
 

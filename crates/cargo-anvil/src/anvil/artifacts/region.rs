@@ -15,63 +15,67 @@ use crate::catalog::{Artifact, HostSelector, RegionId, RegionSpec};
 use crate::region::CommentSyntax;
 
 /// Region id for the workspace-scope lints (multi-crate workspaces).
-pub const WORKSPACE_LINTS_REGION_ID: &str = "anvil-workspace-lints";
+const WORKSPACE_LINTS_REGION_ID: &str = "anvil-workspace-lints";
 
 /// Region id for crate-scope lints — used both for single-crate repos (full
 /// catalog) and for each member of a multi-crate workspace (`workspace =
 /// true`).
-pub const CRATE_LINTS_REGION_ID: &str = "anvil-lints";
+const CRATE_LINTS_REGION_ID: &str = "anvil-lints";
 
 /// Embedded body of the lint catalog, in dotted-key form (no table header).
-pub const LINTS_BODY: &str = include_str!("../../../templates/regions/cargo-lints-body.toml");
+const LINTS_BODY: &str = include_str!("../../../templates/regions/cargo-lints-body.toml");
 
 /// Embedded body of a workspace-member lints region.
-pub const MEMBER_LINTS_BODY: &str = include_str!("../../../templates/regions/cargo-member-lints.toml");
+const MEMBER_LINTS_BODY: &str = include_str!("../../../templates/regions/cargo-member-lints.toml");
 
 /// Repo-root-relative path of the `cargo-deny` config.
-pub const DENY_PATH: &str = "deny.toml";
+const DENY_PATH: &str = "deny.toml";
 /// Region id for the managed section of `deny.toml`.
-pub const DENY_REGION_ID: &str = "anvil-deny";
+const DENY_REGION_ID: &str = "anvil-deny";
 
 /// Repo-root-relative path of the `rustfmt` config.
-pub const RUSTFMT_PATH: &str = "rustfmt.toml";
+const RUSTFMT_PATH: &str = "rustfmt.toml";
 /// Region id for the managed section of `rustfmt.toml`.
-pub const RUSTFMT_REGION_ID: &str = "anvil-rustfmt";
+///
+/// `pub(crate)` because the rustfmt region's opt-out (empty body) behavior is
+/// exercised by tests; everything else here is a private implementation
+/// detail of the registry functions below.
+pub(crate) const RUSTFMT_REGION_ID: &str = "anvil-rustfmt";
 
 /// Repo-root-relative path of the `cargo-delta` config.
-pub const DELTA_PATH: &str = ".delta.toml";
+const DELTA_PATH: &str = ".delta.toml";
 /// Region id for the managed section of `.delta.toml`.
-pub const DELTA_REGION_ID: &str = "anvil-delta";
+const DELTA_REGION_ID: &str = "anvil-delta";
 
 /// Repo-root-relative path of the `cargo-spellcheck` config.
-pub const SPELLCHECK_PATH: &str = "spellcheck.toml";
+const SPELLCHECK_PATH: &str = "spellcheck.toml";
 /// Region id for the managed section of `spellcheck.toml`.
-pub const SPELLCHECK_REGION_ID: &str = "anvil-spellcheck";
+const SPELLCHECK_REGION_ID: &str = "anvil-spellcheck";
 
 /// Repo-root-relative path of the `clippy` lint-tuning config.
-pub const CLIPPY_PATH: &str = "clippy.toml";
+const CLIPPY_PATH: &str = "clippy.toml";
 /// Region id for the managed section of `clippy.toml`.
-pub const CLIPPY_REGION_ID: &str = "anvil-clippy";
+const CLIPPY_REGION_ID: &str = "anvil-clippy";
 
 /// Embedded body of the deny.toml managed region.
-pub const DENY_BODY: &str = include_str!("../../../templates/regions/deny.toml");
+const DENY_BODY: &str = include_str!("../../../templates/regions/deny.toml");
 
 /// Embedded body of the rustfmt.toml managed region.
-pub const RUSTFMT_BODY: &str = include_str!("../../../templates/regions/rustfmt.toml");
+const RUSTFMT_BODY: &str = include_str!("../../../templates/regions/rustfmt.toml");
 
 /// Embedded body of the .delta.toml managed region.
-pub const DELTA_BODY: &str = include_str!("../../../templates/regions/delta.toml");
+const DELTA_BODY: &str = include_str!("../../../templates/regions/delta.toml");
 
 /// Embedded body of the spellcheck.toml managed region.
-pub const SPELLCHECK_BODY: &str = include_str!("../../../templates/regions/spellcheck.toml");
+const SPELLCHECK_BODY: &str = include_str!("../../../templates/regions/spellcheck.toml");
 
 /// Embedded body of the clippy.toml managed region.
-pub const CLIPPY_BODY: &str = include_str!("../../../templates/regions/clippy.toml");
+const CLIPPY_BODY: &str = include_str!("../../../templates/regions/clippy.toml");
 
 /// Render the body of the workspace-scope lints region: `[workspace.lints]`
 /// header followed by the embedded catalog.
 #[must_use]
-pub fn render_workspace_lints_body() -> String {
+fn render_workspace_lints_body() -> String {
     let mut out = String::with_capacity(LINTS_BODY.len() + 32);
     out.push_str("[workspace.lints]\n");
     out.push_str(LINTS_BODY);
@@ -81,7 +85,7 @@ pub fn render_workspace_lints_body() -> String {
 /// Render the body of the single-crate lints region: `[lints]` header
 /// followed by the embedded catalog.
 #[must_use]
-pub fn render_single_crate_lints_body() -> String {
+fn render_single_crate_lints_body() -> String {
     let mut out = String::with_capacity(LINTS_BODY.len() + 16);
     out.push_str("[lints]\n");
     out.push_str(LINTS_BODY);

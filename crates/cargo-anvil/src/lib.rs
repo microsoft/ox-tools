@@ -192,6 +192,16 @@ pub mod test_support {
     pub use crate::plan::Target;
     pub use crate::region::upsert_region;
     pub use crate::run::{RunOutcome, run_update};
+
+    /// The rustfmt managed-region id, for integration tests.
+    ///
+    /// Tests use it to exercise the region opt-out / leave-alone behavior.
+    /// Exposed as an accessor (rather than a re-export) so the underlying
+    /// constant stays `pub(crate)`.
+    #[must_use]
+    pub fn rustfmt_region_id() -> &'static str {
+        crate::anvil::artifacts::region::RUSTFMT_REGION_ID
+    }
 }
 
 use std::process::ExitCode;
