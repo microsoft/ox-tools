@@ -935,7 +935,6 @@ anvil-bench: anvil-bench-validate-prereqs
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     & cargo bench @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' }) --all-features --no-run
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # ============================================================================
 # Per-check setup + validate-prereqs

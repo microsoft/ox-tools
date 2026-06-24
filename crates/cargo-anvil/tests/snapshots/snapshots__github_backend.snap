@@ -197,8 +197,10 @@ runs:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
         ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
         ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
-        # built-in token so it can use the 1000 req/hr authenticated quota.
+        # Some checks (e.g. cargo-aprz, run only by groups that include it)
+        # hit the GitHub API; pass the built-in token so they use the
+        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
+        # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-pr-fast
 
@@ -243,8 +245,10 @@ runs:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
         ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
         ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
-        # built-in token so it can use the 1000 req/hr authenticated quota.
+        # Some checks (e.g. cargo-aprz, run only by groups that include it)
+        # hit the GitHub API; pass the built-in token so they use the
+        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
+        # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-pr-mutants
 
@@ -289,8 +293,10 @@ runs:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
         ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
         ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
-        # built-in token so it can use the 1000 req/hr authenticated quota.
+        # Some checks (e.g. cargo-aprz, run only by groups that include it)
+        # hit the GitHub API; pass the built-in token so they use the
+        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
+        # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-pr-runtime-analysis
 
@@ -335,8 +341,10 @@ runs:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
         ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
         ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
-        # built-in token so it can use the 1000 req/hr authenticated quota.
+        # Some checks (e.g. cargo-aprz, run only by groups that include it)
+        # hit the GitHub API; pass the built-in token so they use the
+        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
+        # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-pr-test
 
@@ -381,8 +389,10 @@ runs:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
         ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
         ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
-        # built-in token so it can use the 1000 req/hr authenticated quota.
+        # Some checks (e.g. cargo-aprz, run only by groups that include it)
+        # hit the GitHub API; pass the built-in token so they use the
+        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
+        # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-scheduled-advisories
 
@@ -427,8 +437,10 @@ runs:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
         ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
         ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
-        # built-in token so it can use the 1000 req/hr authenticated quota.
+        # Some checks (e.g. cargo-aprz, run only by groups that include it)
+        # hit the GitHub API; pass the built-in token so they use the
+        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
+        # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-scheduled-exhaustive
 
@@ -473,8 +485,10 @@ runs:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
         ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
         ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
-        # built-in token so it can use the 1000 req/hr authenticated quota.
+        # Some checks (e.g. cargo-aprz, run only by groups that include it)
+        # hit the GitHub API; pass the built-in token so they use the
+        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
+        # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-scheduled-runtime-analysis
 
@@ -519,8 +533,10 @@ runs:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
         ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
         ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
-        # built-in token so it can use the 1000 req/hr authenticated quota.
+        # Some checks (e.g. cargo-aprz, run only by groups that include it)
+        # hit the GitHub API; pass the built-in token so they use the
+        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
+        # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-scheduled-test
 
@@ -2193,7 +2209,6 @@ anvil-bench: anvil-bench-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     & cargo bench @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' }) --all-features --no-run
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # ============================================================================
