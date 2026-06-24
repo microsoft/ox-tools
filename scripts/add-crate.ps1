@@ -70,6 +70,17 @@ if (Test-Path $destinationDir) {
 Write-Host "Copying template from '$templateDir' to '$destinationDir'..."
 Copy-Item -Path $templateDir -Destination $destinationDir -Recurse
 
+# The template ships its manifest as `Cargo.toml.template`, not `Cargo.toml`,
+# so cargo never tries to parse the placeholder-laden file. A stray invalid
+# `Cargo.toml` here makes cargo's package scan emit a TOML parse error for
+# every consumer that checks this repo out as a git dependency (the error is
+# non-fatal, so `cargo doc`/`cargo metadata` print it but still exit 0).
+# Restore the real manifest name in the generated crate.
+$templatedManifest = Join-Path $destinationDir "Cargo.toml.template"
+if (Test-Path $templatedManifest) {
+    Move-Item -Path $templatedManifest -Destination (Join-Path $destinationDir "Cargo.toml")
+}
+
 # Prepare replacement values
 $crateNameUpper = ($crateName -replace '_', ' ').Split(' ') | ForEach-Object { $_.Substring(0, 1).ToUpper() + $_.Substring(1) } | Join-String -Separator ' '
 $formattedKeywords = ($crateKeywords.Split(',') | ForEach-Object { "`"$($_.Trim())`"" }) -join ", "
