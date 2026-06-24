@@ -2996,14 +2996,16 @@ _install-component toolchain component:
 #     `cargo [+toolchain] <subcommand> --version` (non-zero exit => absent).
 #   - rust-src / llvm-tools ship no command, so we probe the toolchain
 #     sysroot (`rustc [+toolchain] --print sysroot`) for their files.
+#
+# The `+<toolchain>` override is passed as a single explicit argument
+# rather than via array splat: the Windows rustup proxy mis-parses a
+# splatted toolchain token and reports `invalid toolchain name ''`, so a
+# splat would spuriously flag installed components as missing.
 [script("pwsh")]
 _check-component toolchain component:
     $ErrorActionPreference = 'Stop'
     $toolchain = '{{toolchain}}'
     $component = '{{component}}'
-    # Empty for the default toolchain; otherwise a `+<toolchain>` override
-    # spliced into the cargo/rustc invocation.
-    $tc = if ($toolchain -eq 'default') { @() } else { @("+$toolchain") }
     $subcommand = switch ($component) {
         'clippy'  { 'clippy' }
         'rustfmt' { 'fmt' }
@@ -3011,10 +3013,18 @@ _check-component toolchain component:
         default   { $null }
     }
     if ($null -ne $subcommand) {
-        & cargo @tc $subcommand --version *> $null
+        if ($toolchain -eq 'default') {
+            & cargo $subcommand --version *> $null
+        } else {
+            & cargo "+$toolchain" $subcommand --version *> $null
+        }
         $present = ($LASTEXITCODE -eq 0)
     } else {
-        $sysroot = (& rustc @tc --print sysroot 2>$null)
+        $sysroot = if ($toolchain -eq 'default') {
+            & rustc --print sysroot 2>$null
+        } else {
+            & rustc "+$toolchain" --print sysroot 2>$null
+        }
         if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sysroot)) {
             Write-Error "anvil: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain --profile minimal"
             exit 1
