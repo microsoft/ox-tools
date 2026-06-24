@@ -203,6 +203,40 @@ mod tests {
     }
 
     #[test]
+    fn setup_step_quotes_inline_command_values_containing_colons() {
+        // An inline `- bash: echo "x: y"` is a YAML *plain scalar*; the inner
+        // `: ` is parsed as a mapping separator ("Mapping values are not
+        // allowed in this context"), which ADO rejects at compile time. Such
+        // values must be wrapped in quotes. Guard every inline command scalar
+        // in the setup step (and catch the specific group=none echo).
+        assert!(
+            SETUP_STEP.contains(r#"- bash: 'echo "anvil-setup: group=none, skipping tool install"'"#),
+            "the group=none echo must be single-quoted so its colon stays literal",
+        );
+        for line in SETUP_STEP.lines() {
+            let trimmed = line.trim_start();
+            let Some(value) = trimmed
+                .strip_prefix("- bash:")
+                .or_else(|| trimmed.strip_prefix("- script:"))
+                .or_else(|| trimmed.strip_prefix("- pwsh:"))
+                .or_else(|| trimmed.strip_prefix("- powershell:"))
+            else {
+                continue;
+            };
+            let value = value.trim();
+            // A quoted scalar or a block scalar (`|`/`>`) is safe; a plain
+            // scalar must not contain a `: ` mapping-separator sequence.
+            if value.starts_with('\'') || value.starts_with('"') || value.starts_with('|') || value.starts_with('>') {
+                continue;
+            }
+            assert!(
+                !value.contains(": "),
+                "unquoted inline command scalar with a colon will break ADO YAML compilation: {line}",
+            );
+        }
+    }
+
+    #[test]
     fn group_step_passes_group_to_setup() {
         let body = render_group_step("pr-fast");
         assert!(body.contains("template: setup.yml"));

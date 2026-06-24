@@ -1048,7 +1048,7 @@ steps:
   #   group="none" -> skip; caller installs what it needs
   #   group=<x>    -> only that group's prerequisites
   - ${{ if eq(parameters.group, 'none') }}:
-      - bash: echo "anvil-setup: group=none, skipping tool install"
+      - bash: 'echo "anvil-setup: group=none, skipping tool install"'
         displayName: anvil setup (group=none -- skip tool install)
   - ${{ elseif eq(parameters.group, '') }}:
       - bash: just anvil-setup
