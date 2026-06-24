@@ -103,6 +103,8 @@ mod tests {
             ado::job_wrapper(),
             ado::pr_stages(),
             ado::scheduled_stages(),
+            ado::custom_pr_stages(),
+            ado::custom_scheduled_stages(),
             ado::pr_root_pipeline(),
             ado::scheduled_root_pipeline(),
         ];

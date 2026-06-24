@@ -194,6 +194,12 @@ Note the ADO topology differs from GitHub Actions in two places:
 └── anvil/
     ├── pr.yml                      owned   (PR-tier stages template)
     ├── scheduled.yml               owned   (scheduled-tier stages template)
+    ├── custom-pr-stages.yml        owned-but-user-customizable
+    │                                   (empty stub; add your own PR-tier
+    │                                    stages here -- see §3.1)
+    ├── custom-scheduled-stages.yml owned-but-user-customizable
+    │                                   (empty stub; add your own
+    │                                    scheduled-tier stages here)
     └── steps/
         ├── setup.yml               owned   (install just + catalog tools)
         ├── impact.yml              owned   (cargo-delta impact step; omitted if .delta.toml disabled)
@@ -240,6 +246,10 @@ stages:
   parameters:
     linuxPool:   { vmImage: ubuntu-latest }
     windowsPool: { vmImage: windows-latest }
+- template: anvil/custom-pr-stages.yml
+  parameters:
+    linuxPool:   { vmImage: ubuntu-latest }
+    windowsPool: { vmImage: windows-latest }
 ```
 
 The scheduled root pipeline adds a schedule:
@@ -261,12 +271,37 @@ stages:
   parameters:
     linuxPool:   { vmImage: ubuntu-latest }
     windowsPool: { vmImage: windows-latest }
+- template: anvil/custom-scheduled-stages.yml
+  parameters:
+    linuxPool:   { vmImage: ubuntu-latest }
+    windowsPool: { vmImage: windows-latest }
 ```
 
 The schedule lists both `main` and `master` so adopters using either canonical-branch
 name get coverage out of the box. ADO matches each entry against existing branches; an
 entry that matches nothing contributes nothing, so a repo using only `main` runs the
 schedule exactly once per cron tick.
+
+### 3.1 Custom stages extension point
+
+Some repos need their own stages — a deploy stage, a compliance gate, a downstream
+trigger — without forking the anvil-owned root pipeline or stages template. Each root
+pipeline therefore references a per-tier **`custom-*-stages.yml`** after the anvil
+stages:
+
+- `.pipelines/anvil/custom-pr-stages.yml` — runs in the PR pipeline.
+- `.pipelines/anvil/custom-scheduled-stages.yml` — runs on the schedule.
+
+anvil emits each as an empty `stages: []` stub that declares the `linuxPool` /
+`windowsPool` parameters the root passes (so custom stages can reuse the same pools).
+Because the overall pipeline already carries the anvil stages, an empty custom stub is
+valid — it simply contributes nothing until the adopter fills it in. These files are
+**owned-but-user-customizable** like `steps/job.yml`: once edited, the dirty-file flow
+takes over (anvil Proposes into a `.proposed` sibling rather than overwriting), so a
+repo's custom stages survive subsequent `cargo anvil` runs while the anvil-owned root and
+stages templates keep tracking upstream changes. ADO runs stages sequentially by default,
+so a custom stage depends on the preceding anvil stage unless it sets `dependsOn`
+explicitly.
 
 For an internal/compliance pipeline, the user replaces their root pipeline with one that
 extends 1ESPT/SubstratePT and passes anvil's stages template as the stages parameter,

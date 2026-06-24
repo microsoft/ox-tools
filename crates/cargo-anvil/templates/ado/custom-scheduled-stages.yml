@@ -1,0 +1,37 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+#
+# Extension point for **your own scheduled-tier stages**. Add stages here
+# without touching the anvil-owned root pipeline
+# (.pipelines/anvil-scheduled.yml) or the anvil stages template
+# (anvil/scheduled.yml): the root references this file after the anvil
+# stages, so anything you add runs on the same schedule alongside them.
+#
+# anvil emits this file once as an empty stub. The moment you edit it, the
+# standard dirty-file flow takes over -- subsequent `cargo anvil` runs
+# Propose into a `.proposed` sibling instead of overwriting your stages.
+#
+# The root passes the same `linuxPool` / `windowsPool` it hands the anvil
+# stages, so your stages can reuse them. ADO runs stages sequentially by
+# default, so a stage listed here depends on the preceding (anvil) stage
+# unless you set `dependsOn` explicitly. Example:
+#
+#   stages:
+#     - stage: my_scheduled_stage
+#       displayName: my scheduled stage
+#       dependsOn: []
+#       jobs:
+#         - job: nightly
+#           pool: ${{ parameters.linuxPool }}
+#           steps:
+#             - script: echo "my custom scheduled stage"
+parameters:
+  - name: linuxPool
+    type: object
+    default: { vmImage: ubuntu-latest }
+  - name: windowsPool
+    type: object
+    default: { vmImage: windows-latest }
+
+stages: []

@@ -28,6 +28,12 @@ const PR_STAGES: &str = include_str!("../../../templates/ado/pr-stages.yml");
 /// Embedded body of the scheduled-tier stages template.
 const SCHEDULED_STAGES: &str = include_str!("../../../templates/ado/scheduled-stages.yml");
 
+/// Embedded body of the user-owned PR-tier custom-stages extension stub.
+const CUSTOM_PR_STAGES: &str = include_str!("../../../templates/ado/custom-pr-stages.yml");
+
+/// Embedded body of the user-owned scheduled-tier custom-stages extension stub.
+const CUSTOM_SCHEDULED_STAGES: &str = include_str!("../../../templates/ado/custom-scheduled-stages.yml");
+
 /// Embedded body of the PR root pipeline.
 const PR_ROOT_PIPELINE: &str = include_str!("../../../templates/ado/pr-root-pipeline.yml");
 
@@ -106,6 +112,30 @@ pub fn scheduled_stages() -> Artifact {
     Artifact::backend_file(Backend::Ado, ".pipelines/anvil/scheduled.yml", SCHEDULED_STAGES)
 }
 
+/// `.pipelines/anvil/custom-pr-stages.yml` — the repo-owned extension point
+/// for PR-tier stages.
+///
+/// Emitted once as an empty `stages: []` stub. The PR root pipeline
+/// references it after the anvil stages, so an adopter can add their own
+/// stages here without editing the anvil-owned root or stages template.
+/// Once edited it follows the standard dirty-file flow (Propose, don't
+/// overwrite), exactly like `steps/job.yml`.
+#[must_use]
+pub fn custom_pr_stages() -> Artifact {
+    Artifact::backend_file(Backend::Ado, ".pipelines/anvil/custom-pr-stages.yml", CUSTOM_PR_STAGES)
+}
+
+/// `.pipelines/anvil/custom-scheduled-stages.yml` — the repo-owned extension
+/// point for scheduled-tier stages. See [`custom_pr_stages`].
+#[must_use]
+pub fn custom_scheduled_stages() -> Artifact {
+    Artifact::backend_file(
+        Backend::Ado,
+        ".pipelines/anvil/custom-scheduled-stages.yml",
+        CUSTOM_SCHEDULED_STAGES,
+    )
+}
+
 /// `.pipelines/anvil-pr.yml` — the PR root pipeline.
 #[must_use]
 pub fn pr_root_pipeline() -> Artifact {
@@ -145,6 +175,8 @@ pub(crate) fn all() -> Vec<Artifact> {
     }
     out.push(pr_stages());
     out.push(scheduled_stages());
+    out.push(custom_pr_stages());
+    out.push(custom_scheduled_stages());
     out.push(pr_root_pipeline());
     out.push(scheduled_root_pipeline());
     out
@@ -264,6 +296,55 @@ mod tests {
         assert!(
             !SCHEDULED_STAGES.contains("\n      - job: "),
             "Scheduled stages defines a bare `- job:` instead of going through steps/job.yml"
+        );
+    }
+
+    #[test]
+    fn custom_stages_stubs_are_empty_and_take_pool_parameters() {
+        // The extension stubs must emit a valid empty stages list (so the
+        // default emit doesn't break the pipeline) and declare the pool
+        // parameters the root pipelines pass them.
+        for body in [CUSTOM_PR_STAGES, CUSTOM_SCHEDULED_STAGES] {
+            assert!(body.contains("stages: []"), "custom-stages stub must default to an empty stages list");
+            assert!(body.contains("name: linuxPool"), "custom-stages stub must declare linuxPool");
+            assert!(body.contains("name: windowsPool"), "custom-stages stub must declare windowsPool");
+            // It must NOT define any concrete stage by default (the
+            // commented-out example doesn't count).
+            let defines_stage = body
+                .lines()
+                .map(str::trim_start)
+                .any(|l| !l.starts_with('#') && l.starts_with("- stage:"));
+            assert!(!defines_stage, "default custom-stages stub must not define a stage");
+        }
+    }
+
+    #[test]
+    fn custom_stages_artifacts_are_under_pipelines_anvil() {
+        match custom_pr_stages() {
+            Artifact::OwnedFile(spec) => {
+                assert_eq!(spec.path, ".pipelines/anvil/custom-pr-stages.yml");
+                assert_eq!(spec.gate, Some(Backend::Ado));
+            }
+            Artifact::Region(_) => panic!("expected owned file"),
+        }
+        match custom_scheduled_stages() {
+            Artifact::OwnedFile(spec) => {
+                assert_eq!(spec.path, ".pipelines/anvil/custom-scheduled-stages.yml");
+                assert_eq!(spec.gate, Some(Backend::Ado));
+            }
+            Artifact::Region(_) => panic!("expected owned file"),
+        }
+    }
+
+    #[test]
+    fn root_pipelines_reference_their_custom_stages_extension() {
+        assert!(
+            PR_ROOT_PIPELINE.contains("template: anvil/custom-pr-stages.yml"),
+            "PR root must reference the custom-pr-stages extension point"
+        );
+        assert!(
+            SCHEDULED_ROOT_PIPELINE.contains("template: anvil/custom-scheduled-stages.yml"),
+            "scheduled root must reference the custom-scheduled-stages extension point"
         );
     }
 
