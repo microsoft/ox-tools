@@ -54,6 +54,7 @@ if ($keywordsList.Count -gt 5) {
 }
 
 $crateCategories = Read-Host -Prompt "Enter comma-separated crate categories (see https://crates.io/categories for allowed categories)"
+$categoriesList = $crateCategories.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
 
 Write-Host $repoRoot
 # Define paths
@@ -81,10 +82,16 @@ if (Test-Path $templatedManifest) {
     Move-Item -Path $templatedManifest -Destination (Join-Path $destinationDir "Cargo.toml")
 }
 
-# Prepare replacement values
+# Prepare replacement values. Build the keyword/category lists from the
+# already-filtered lists ($keywordsList / $categoriesList) so a bare Enter
+# (empty entry) is dropped rather than emitted as an empty "" element. The
+# keywords array always leads with "oxidizer" in the template, so its
+# placeholder carries an optional leading comma -- empty input collapses to
+# `keywords = ["oxidizer"]`. Categories have no fixed element, so an empty
+# list collapses to `categories = []`.
 $crateNameUpper = ($crateName -replace '_', ' ').Split(' ') | ForEach-Object { $_.Substring(0, 1).ToUpper() + $_.Substring(1) } | Join-String -Separator ' '
-$formattedKeywords = ($crateKeywords.Split(',') | ForEach-Object { "`"$($_.Trim())`"" }) -join ", "
-$formattedCategories = ($crateCategories.Split(',') | ForEach-Object { "`"$($_.Trim())`"" }) -join ", "
+$formattedKeywords = if ($keywordsList.Count -gt 0) { ", " + (($keywordsList | ForEach-Object { "`"$_`"" }) -join ", ") } else { "" }
+$formattedCategories = ($categoriesList | ForEach-Object { "`"$_`"" }) -join ", "
 
 # Perform substitutions
 Get-ChildItem -Path $destinationDir -Recurse | ForEach-Object {
