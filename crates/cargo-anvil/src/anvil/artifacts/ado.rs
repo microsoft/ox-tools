@@ -339,7 +339,10 @@ mod tests {
         // default emit doesn't break the pipeline) and declare the pool
         // parameters the root pipelines pass them.
         for body in [CUSTOM_PR_STAGES, CUSTOM_SCHEDULED_STAGES] {
-            assert!(body.contains("stages: []"), "custom-stages stub must default to an empty stages list");
+            assert!(
+                body.contains("stages: []"),
+                "custom-stages stub must default to an empty stages list"
+            );
             assert!(body.contains("name: linuxPool"), "custom-stages stub must declare linuxPool");
             assert!(body.contains("name: windowsPool"), "custom-stages stub must declare windowsPool");
             // It must NOT define any concrete stage by default (the
