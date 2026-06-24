@@ -150,13 +150,44 @@ mod tests {
         for needle in ["anvil-pr-slow1:", "anvil-pr-slow2:", "anvil-pr-slow3:"] {
             assert!(!GROUPS_JUST.contains(needle), "groups.just still contains stale '{needle}'");
         }
-        assert!(GROUPS_JUST.contains("anvil-pr-slow: anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants"));
+        assert!(
+            GROUPS_JUST.contains("anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants")
+        );
+        // Every group recipe lists its own validate-prereqs aggregate first so
+        // all tool checks run up front (just dedups the per-check ones).
+        for needle in [
+            "anvil-pr-fast: anvil-pr-fast-validate-prereqs",
+            "anvil-pr-test: anvil-pr-test-validate-prereqs",
+            "anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs",
+            "anvil-pr-mutants: anvil-pr-mutants-validate-prereqs",
+            "anvil-scheduled-test: anvil-scheduled-test-validate-prereqs",
+            "anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs",
+            "anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prereqs",
+            "anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs",
+        ] {
+            assert!(
+                GROUPS_JUST.contains(needle),
+                "group recipe must run its validate-prereqs first: '{needle}'"
+            );
+        }
     }
 
     #[test]
     fn tiers_just_template_has_three_tiers() {
         for needle in ["anvil-pr:", "anvil-scheduled:", "anvil-full:"] {
             assert!(TIERS_JUST.contains(needle), "tiers.just missing '{needle}'");
+        }
+        // Each tier runs its validate-prereqs aggregate first so a missing
+        // tool fails up front rather than mid-run.
+        for needle in [
+            "anvil-pr: anvil-pr-validate-prereqs",
+            "anvil-scheduled: anvil-scheduled-validate-prereqs",
+            "anvil-full: anvil-full-validate-prereqs",
+        ] {
+            assert!(
+                TIERS_JUST.contains(needle),
+                "tier recipe must run its validate-prereqs first: '{needle}'"
+            );
         }
     }
 

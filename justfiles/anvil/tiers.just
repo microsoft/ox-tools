@@ -7,7 +7,7 @@
 # into two groups so the fast checks aren't blocked behind the slow
 # ones in cloud workflows.
 [group("anvil")]
-anvil-pr: \
+anvil-pr: anvil-pr-validate-prereqs \
     anvil-pr-fast \
     anvil-pr-slow
 
@@ -16,14 +16,14 @@ anvil-pr: \
 # exhaustive checks that don't fit in a PR budget. Runs on a schedule
 # against `main`, not on PRs.
 [group("anvil")]
-anvil-scheduled: \
+anvil-scheduled: anvil-scheduled-validate-prereqs \
     anvil-scheduled-test \
     anvil-scheduled-advisories \
     anvil-scheduled-exhaustive
 
 # Full tier: PR + scheduled, end-to-end. Useful before tagging a release.
 [group("anvil")]
-anvil-full: \
+anvil-full: anvil-full-validate-prereqs \
     anvil-pr \
     anvil-scheduled
 

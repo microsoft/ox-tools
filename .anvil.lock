@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.1.0"
-catalog_checksum = "sha256:2ce577dbf89efd66516d3bf78473cc782cd7bb9dbfff68d360493a1ef6bb4896"
+catalog_checksum = "sha256:8cba4a0f07c30cdb49e25dae14f06a9d0841b43f6778d9d51dddfcf152e08e33"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"
@@ -65,7 +65,7 @@ checksum = "sha256:ced4d4f171ca1bd22df96ba09612dbb578bd5420edfc8b0730b896c22d13e
 
 [[file]]
 path = "justfiles/anvil/groups.just"
-checksum = "sha256:90dfd2354cde09544d39e3f69231bec48bb78b9963da6a1daef626977f657364"
+checksum = "sha256:bd0720e41542271d9b482a348d6de191bd9eb6534e12abec11d840596e5f4f9b"
 
 [[file]]
 path = "justfiles/anvil/mod.just"
@@ -73,7 +73,7 @@ checksum = "sha256:06b486f1d154b36cf1c1a43333addd2e3ade8c69646600f7409a0c6a1c08c
 
 [[file]]
 path = "justfiles/anvil/tiers.just"
-checksum = "sha256:fd65dc16029c0e347f55f406e005ca1b264db4b482e3f1e8f6ef94aad7c51b64"
+checksum = "sha256:1bce4a9be0cc1af99d42b96ee0df5f2de0fea59a23f2759ed74034239bc3b2a1"
 
 [[file]]
 path = "justfiles/anvil/tools.just"

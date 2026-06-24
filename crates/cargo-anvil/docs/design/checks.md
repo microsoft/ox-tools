@@ -273,6 +273,13 @@ as the `just` recipe defines them. A failure in any check fails the group; the p
 lines are visible in the job log but the cloud workflow surface (the green/red pill in the PR view) is
 per-group.
 
+Each group and tier recipe lists its `*-validate-prereqs` aggregate as its **first** dependency, so all
+of the group's tool/component checks run **up front** -- a missing tool fails immediately rather than
+only when the recipe that needs it is finally reached, which matters most for a local `just anvil-pr`.
+Because `just` runs each recipe at most once per invocation, the per-check `validate-prereqs` dependency
+(e.g. `anvil-fmt: anvil-fmt-validate-prereqs`) is satisfied by the up-front aggregate and is not re-run,
+while still validating correctly when a single check is invoked on its own.
+
 This is the deliberate middle ground between "one giant cloud workflows step running `just anvil-pr`"
 (loses all per-check structure, one red X for any failure) and "twenty-five individual cloud workflows
 steps" (unmaintainable YAML, fragile, and the tool would have to re-emit the workflow file
