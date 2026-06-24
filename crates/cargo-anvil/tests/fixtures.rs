@@ -31,10 +31,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cargo_anvil::cli::Cli;
-use cargo_anvil::decision::Decision;
-use cargo_anvil::plan::Target;
-use cargo_anvil::run::{RunOutcome, run_update};
+use cargo_anvil::test_support::{Cli, Decision, RunOutcome, Target, run_update};
 use tempfile::TempDir;
 
 const FIXTURES_ROOT: &str = env!("CARGO_MANIFEST_DIR");
@@ -70,11 +67,12 @@ fn local_only_args() -> Cli {
         backends: vec![],
         no_backends: true,
         dry_run: false,
+        force: false,
     }
 }
 
 fn run(tmp: &TempDir) -> RunOutcome {
-    run_update(&local_only_args(), tmp.path()).unwrap()
+    run_update(&cargo_anvil::Catalog::anvil(), &local_only_args(), tmp.path()).unwrap()
 }
 
 fn region_decision(outcome: &RunOutcome, host: &str, id: &str) -> Decision {
@@ -131,8 +129,8 @@ fn single_crate_emits_crate_lints_and_justfiles() {
 /// first run keeps that opt-out across re-runs (LeaveAlone decision).
 #[test]
 fn empty_region_is_treated_as_opt_out() {
-    use cargo_anvil::emit::shared_configs::RUSTFMT_REGION_ID;
-    use cargo_anvil::region::{CommentSyntax, upsert_region};
+    use cargo_anvil::CommentSyntax;
+    use cargo_anvil::test_support::{rustfmt_region_id, upsert_region};
 
     let tmp = stage_fixture("opt-outs");
     run(&tmp); // seed manifest and templates
@@ -140,12 +138,12 @@ fn empty_region_is_treated_as_opt_out() {
     // Simulate the user emptying the managed region.
     let rustfmt_path = tmp.path().join("rustfmt.toml");
     let body = std::fs::read_to_string(&rustfmt_path).unwrap();
-    let emptied = upsert_region(&body, RUSTFMT_REGION_ID, "", CommentSyntax::Hash).unwrap();
+    let emptied = upsert_region(&body, rustfmt_region_id(), "", CommentSyntax::Hash).unwrap();
     std::fs::write(&rustfmt_path, &emptied).unwrap();
 
     // Re-run and check the rustfmt region is LeaveAlone.
     let outcome = run(&tmp);
-    assert_eq!(region_decision(&outcome, "rustfmt.toml", RUSTFMT_REGION_ID), Decision::LeaveAlone);
+    assert_eq!(region_decision(&outcome, "rustfmt.toml", rustfmt_region_id()), Decision::LeaveAlone);
     let after = std::fs::read_to_string(&rustfmt_path).unwrap();
     assert_eq!(after, emptied, "opt-out region must not be re-populated");
 }
@@ -154,19 +152,19 @@ fn empty_region_is_treated_as_opt_out() {
 /// template should be left alone on subsequent runs.
 #[test]
 fn user_edit_inside_region_is_left_alone() {
-    use cargo_anvil::emit::shared_configs::RUSTFMT_REGION_ID;
-    use cargo_anvil::region::{CommentSyntax, upsert_region};
+    use cargo_anvil::CommentSyntax;
+    use cargo_anvil::test_support::{rustfmt_region_id, upsert_region};
 
     let tmp = stage_fixture("customized");
     run(&tmp);
 
     let rustfmt_path = tmp.path().join("rustfmt.toml");
     let body = std::fs::read_to_string(&rustfmt_path).unwrap();
-    let custom = upsert_region(&body, RUSTFMT_REGION_ID, "edition = \"2021\"\n", CommentSyntax::Hash).unwrap();
+    let custom = upsert_region(&body, rustfmt_region_id(), "edition = \"2021\"\n", CommentSyntax::Hash).unwrap();
     std::fs::write(&rustfmt_path, custom).unwrap();
 
     let outcome = run(&tmp);
-    assert_eq!(region_decision(&outcome, "rustfmt.toml", RUSTFMT_REGION_ID), Decision::LeaveAlone);
+    assert_eq!(region_decision(&outcome, "rustfmt.toml", rustfmt_region_id()), Decision::LeaveAlone);
     let after = std::fs::read_to_string(&rustfmt_path).unwrap();
     assert!(
         after.contains("edition = \"2021\""),

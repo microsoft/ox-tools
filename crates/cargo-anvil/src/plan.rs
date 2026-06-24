@@ -348,7 +348,9 @@ impl Plan {
     )]
     pub fn apply(&self, repo_root: &Path, previous_manifest: &Manifest) -> Result<Manifest, AppError> {
         let mut next = Manifest {
-            rendered_by: Some(format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))),
+            tool: previous_manifest.tool.clone(),
+            tool_version: previous_manifest.tool_version.clone(),
+            catalog_checksum: previous_manifest.catalog_checksum.clone(),
             files: previous_manifest.files.clone(),
             regions: previous_manifest.regions.clone(),
         };
@@ -602,7 +604,25 @@ mod tests {
         let written = std::fs::read_to_string(tmp.path().join("subdir/a.txt")).unwrap();
         assert_eq!(written, "hello\n");
         assert_eq!(m.files.get("subdir/a.txt").map(String::as_str), Some("sha256:abcd"));
-        assert!(m.rendered_by.is_some());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn apply_carries_provenance_forward() {
+        // apply preserves the previous lock's provenance fields; run_update
+        // is what stamps the current tool's identity on save.
+        let tmp = TempDir::new().unwrap();
+        let plan = Plan::default();
+        let prev = Manifest {
+            tool: Some("forge2".into()),
+            tool_version: Some("1.2.3".into()),
+            catalog_checksum: Some("sha256:feed".into()),
+            ..Manifest::default()
+        };
+        let next = plan.apply(tmp.path(), &prev).unwrap();
+        assert_eq!(next.tool.as_deref(), Some("forge2"));
+        assert_eq!(next.tool_version.as_deref(), Some("1.2.3"));
+        assert_eq!(next.catalog_checksum.as_deref(), Some("sha256:feed"));
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

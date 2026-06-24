@@ -9,15 +9,17 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use ohno::AppError;
+use ohno::{AppError, bail};
 use tracing::info;
 
 use crate::backend::{self, Backend};
+use crate::catalog::Catalog;
+use crate::catalog::artifact::{Artifact, HostSelector, RegionSpec};
 use crate::checksum::checksum_str;
 use crate::cli::Cli;
 use crate::decision::{Decision, decide_removal};
-use crate::emit::{ado, cargo_toml, github, local, shared_configs};
-use crate::io::read_file_if_present;
+use crate::emit::{plan_managed_region, plan_owned_file};
+use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
 use crate::region::{CommentSyntax, find_region, remove_region};
@@ -44,8 +46,8 @@ pub struct RunOutcome {
 ///
 /// Returns an error when the underlying update flow fails.
 #[mutants::skip] // Thin process-boundary glue (cwd lookup, stdout print, `std::process::exit`); behavior covered by `run_update` tests which exercise every dispatch path.
-pub fn run(cli: &Cli) -> Result<(), AppError> {
-    let outcome = run_update(cli, &std::env::current_dir()?)?;
+pub fn run(catalog: &Catalog, cli: &Cli) -> Result<(), AppError> {
+    let outcome = run_update(catalog, cli, &std::env::current_dir()?)?;
     print!("{}", outcome.plan.summary(Some(&outcome.previous_manifest)));
     if cli.dry_run && outcome.plan.has_changes() {
         std::process::exit(1);
@@ -62,20 +64,24 @@ pub fn run(cli: &Cli) -> Result<(), AppError> {
 ///
 /// Propagates errors from any subsystem (workspace discovery, manifest
 /// I/O, emitter, plan application).
-pub fn run_update(args: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError> {
+pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError> {
     let repo_root = workspace::find_workspace_root(start_dir)?;
-    let ws = workspace::load_workspace(&repo_root)?;
-    let mut manifest = Manifest::load(&repo_root)?;
+    let manifest = Manifest::load(&repo_root)?;
 
-    // One-time legacy migration: an earlier version of cargo-anvil
-    // emitted the Justfile imports region under a lowercase `justfile`
-    // host path. The canonical capitalization is `Justfile` (matching
-    // Makefile / Dockerfile / Rakefile convention and the surveyed
-    // Microsoft Rust repos). For repos whose manifest still carries
-    // the lowercase entry, transfer it to the canonical case so the
-    // orphan-detection pass doesn't spuriously try to splice the
-    // region back out.
-    local::migrate_legacy_justfile_case(&mut manifest);
+    // The single-tool guard: a repository is managed by exactly one
+    // anvil-family tool. If the lock records a *different* tool, refuse
+    // before doing any other work — content-free, and honored even under
+    // --dry-run — unless --force is passed to switch ownership to this tool.
+    // A lock with no `tool` field (first run, or a legacy pre-split lock) is
+    // never blocked. See updates.md §1 "The single-tool guard".
+    //
+    // This runs immediately after loading the lock and before
+    // `load_workspace`, so a mismatched lock reliably refuses regardless of
+    // the workspace shape — the wrong tool never reaches workspace/member
+    // parsing, which could otherwise surface unrelated errors first.
+    enforce_single_tool_guard(catalog, args, &manifest)?;
+
+    let ws = workspace::load_workspace(&repo_root)?;
 
     let backends = backend::resolve(&args.backends, args.no_backends, &repo_root)?;
     info!(
@@ -85,12 +91,16 @@ pub fn run_update(args: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError> 
         "anvil"
     );
 
-    let plan = build_plan(&repo_root, &ws, &manifest, &backends)?;
+    let plan = build_plan(&repo_root, &ws, &manifest, &backends, catalog)?;
 
     let applied = if args.dry_run {
         false
     } else {
-        let next = plan.apply(&repo_root, &manifest)?;
+        let mut next = plan.apply(&repo_root, &manifest)?;
+        // Stamp this tool's provenance on every save.
+        next.tool = Some(catalog.cli().subcommand.clone());
+        next.tool_version = Some(catalog.cli().version.clone());
+        next.catalog_checksum = Some(catalog.checksum());
         next.save(&repo_root)?;
         true
     };
@@ -103,33 +113,56 @@ pub fn run_update(args: &Cli, start_dir: &Path) -> Result<RunOutcome, AppError> 
     })
 }
 
-/// Build the full plan: local files + selected cloud-workflow backends.
-fn build_plan(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, backends: &[Backend]) -> Result<Plan, AppError> {
+/// Enforce the single-tool guard: refuse if the lock names a different tool
+/// and `--force` was not passed.
+///
+/// # Errors
+///
+/// Returns a refusal error when `manifest.tool` is `Some` and differs from
+/// `catalog.cli().subcommand` and `args.force` is `false`.
+fn enforce_single_tool_guard(catalog: &Catalog, args: &Cli, manifest: &Manifest) -> Result<(), AppError> {
+    let current = &catalog.cli().subcommand;
+    if let Some(owner) = &manifest.tool
+        && owner != current
+        && !args.force
+    {
+        bail!(
+            "this repository is managed by '{owner}' (per .anvil.lock); refusing to run '{current}'. \
+             A repository must be managed by a single anvil-family tool. Run '{owner}' instead, \
+             or re-run with --force to switch this repository to '{current}'."
+        );
+    }
+    Ok(())
+}
+
+/// Build the full plan by iterating the catalog's artifacts.
+///
+/// Each artifact dispatches to the generic owned-file / managed-region
+/// driver. Owned files carrying a backend `gate` are emitted only when that
+/// backend is in the resolved set. Managed-region host selectors are expanded
+/// against the discovered workspace (see [`push_region`]). Every path is
+/// resolved to its on-disk casing so anvil follows whatever a repo already
+/// uses (e.g. `justfile` vs `Justfile`).
+fn build_plan(
+    repo_root: &Path,
+    workspace: &Workspace,
+    manifest: &Manifest,
+    backends: &[Backend],
+    catalog: &Catalog,
+) -> Result<Plan, AppError> {
     let mut plan = Plan::default();
 
-    for item in local::plan_local_just_tree(repo_root, manifest)? {
-        plan.push(item);
-    }
-    plan.push(local::plan_justfile_imports(repo_root, manifest)?);
-
-    for item in cargo_toml::plan_cargo_lints(repo_root, workspace, manifest)? {
-        plan.push(item);
-    }
-    for item in shared_configs::plan_shared_configs(repo_root, manifest)? {
-        plan.push(item);
-    }
-
-    for backend in backends {
-        match backend {
-            Backend::GitHub => {
-                for item in github::plan_github_backend(repo_root, manifest)? {
-                    plan.push(item);
+    for artifact in catalog.artifacts() {
+        match artifact {
+            Artifact::OwnedFile(spec) => {
+                let selected = spec.gate.is_none_or(|gate| backends.contains(&gate));
+                if selected {
+                    let path = resolve_existing_case_insensitive(repo_root, spec.path);
+                    plan.push(plan_owned_file(repo_root, manifest, &path, &spec.body)?);
                 }
             }
-            Backend::Ado => {
-                for item in ado::plan_ado_backend(repo_root, manifest)? {
-                    plan.push(item);
-                }
+            Artifact::Region(spec) => {
+                push_region(repo_root, workspace, manifest, &mut plan, spec)?;
             }
         }
     }
@@ -137,6 +170,56 @@ fn build_plan(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, back
     plan_removals(repo_root, manifest, &mut plan)?;
 
     Ok(plan)
+}
+
+/// Dispatch one managed-region artifact into the plan, expanding its host
+/// selector against the discovered workspace.
+///
+/// - [`HostSelector::Path`] — a single literal host.
+/// - [`HostSelector::EachMemberManifest`] — one host per workspace member (no
+///   hosts in a single-crate repo, which has no workspace members).
+/// - [`HostSelector::WorkspaceCargoToml`] / [`HostSelector::SingleCrateCargoToml`]
+///   — the root `Cargo.toml`, gated on whether it declares a `[workspace]`
+///   table.
+fn push_region(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, plan: &mut Plan, spec: &RegionSpec) -> Result<(), AppError> {
+    let id = spec.id.as_str();
+    match &spec.host {
+        HostSelector::Path(path) => {
+            push_region_at(repo_root, manifest, plan, path, id, &spec.body, spec.syntax)?;
+        }
+        HostSelector::WorkspaceCargoToml => {
+            if workspace.has_workspace_table {
+                push_region_at(repo_root, manifest, plan, "Cargo.toml", id, &spec.body, spec.syntax)?;
+            }
+        }
+        HostSelector::SingleCrateCargoToml => {
+            if !workspace.has_workspace_table {
+                push_region_at(repo_root, manifest, plan, "Cargo.toml", id, &spec.body, spec.syntax)?;
+            }
+        }
+        HostSelector::EachMemberManifest => {
+            for member in &workspace.members {
+                push_region_at(repo_root, manifest, plan, &member.manifest_relpath, id, &spec.body, spec.syntax)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Plan one managed region at a single host, resolving the host's on-disk
+/// casing first.
+fn push_region_at(
+    repo_root: &Path,
+    manifest: &Manifest,
+    plan: &mut Plan,
+    host: &str,
+    id: &str,
+    body: &str,
+    syntax: crate::region::CommentSyntax,
+) -> Result<(), AppError> {
+    let host = resolve_existing_case_insensitive(repo_root, host);
+    plan.push(plan_managed_region(repo_root, manifest, &host, id, body, syntax)?);
+    Ok(())
 }
 
 /// Scan the previous manifest for entries that the active plan items
@@ -228,6 +311,7 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+    use crate::anvil::artifacts::region;
 
     fn write(path: &Path, contents: &str) {
         if let Some(parent) = path.parent() {
@@ -253,14 +337,41 @@ mod tests {
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
+    fn existing_lowercase_justfile_is_reused_not_duplicated() {
+        // Proposal: anvil follows whatever casing the repo already uses. A
+        // pre-existing lowercase `justfile` must be spliced into, not shadowed
+        // by a new capital `Justfile`.
+        let tmp = empty_workspace();
+        std::fs::write(tmp.path().join("justfile"), "# user recipes\n").unwrap();
+        let args = local_only();
+
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+        assert!(outcome.applied);
+
+        let lower = std::fs::read_to_string(tmp.path().join("justfile")).unwrap();
+        assert!(lower.contains("# user recipes"), "user content preserved");
+        assert!(
+            lower.contains("anvil-managed: anvil-imports"),
+            "region spliced into the lowercase file"
+        );
+
+        // The manifest tracks the on-disk (lowercase) host, so a second run is
+        // a no-op rather than re-proposing or orphaning the region.
+        let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+        assert!(!second.plan.has_changes(), "second run should be idempotent");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
     fn first_run_writes_everything_local_only() {
         let tmp = empty_workspace();
         let args = Cli {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         };
-        let outcome = run_update(&args, tmp.path()).unwrap();
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(outcome.applied);
         assert!(outcome.backends.is_empty());
         assert!(outcome.plan.has_changes());
@@ -298,9 +409,10 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         };
-        let _ = run_update(&args, tmp.path()).unwrap();
-        let second = run_update(&args, tmp.path()).unwrap();
+        let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+        let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(!second.plan.has_changes(), "second run should be a no-op");
     }
 
@@ -312,12 +424,137 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: true,
+            force: false,
         };
-        let outcome = run_update(&args, tmp.path()).unwrap();
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(!outcome.applied);
         assert!(outcome.plan.has_changes());
         assert!(!tmp.path().join("justfiles/anvil/tools.just").exists());
         assert!(!tmp.path().join(".anvil.lock").exists());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn run_stamps_tool_and_catalog_checksum_into_lock() {
+        let tmp = empty_workspace();
+        let args = Cli {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+            force: false,
+        };
+        let catalog = Catalog::anvil();
+        let _ = run_update(&catalog, &args, tmp.path()).unwrap();
+
+        let saved = Manifest::load(tmp.path()).unwrap();
+        assert_eq!(saved.tool.as_deref(), Some("anvil"));
+        assert_eq!(saved.tool_version, Some(catalog.cli().version.clone()));
+        assert_eq!(saved.catalog_checksum, Some(catalog.checksum()));
+    }
+
+    fn local_only() -> Cli {
+        Cli {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+            force: false,
+        }
+    }
+
+    fn seed_lock_owner(root: &Path, tool: &str) {
+        let m = Manifest {
+            tool: Some(tool.to_owned()),
+            ..Manifest::default()
+        };
+        m.save(root).unwrap();
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn guard_allows_matching_tool() {
+        let tmp = empty_workspace();
+        seed_lock_owner(tmp.path(), "anvil");
+        let outcome = run_update(&Catalog::anvil(), &local_only(), tmp.path()).unwrap();
+        assert!(outcome.applied);
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn guard_refuses_mismatched_tool_and_writes_nothing() {
+        let tmp = empty_workspace();
+        seed_lock_owner(tmp.path(), "forge2");
+        let err = run_update(&Catalog::anvil(), &local_only(), tmp.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("managed by 'forge2'"), "got: {msg}");
+        assert!(msg.contains("--force"), "refusal should suggest --force; got: {msg}");
+        assert!(!tmp.path().join("justfiles/anvil/tools.just").exists(), "guard must write nothing");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn guard_refuses_before_workspace_parsing() {
+        // A root that `find_workspace_root` accepts (it declares
+        // `[workspace]`) but that `load_workspace` would reject (the explicit
+        // member `crates/missing` does not exist). With a lock naming a
+        // different tool, the guard must fire first: the refusal — not a
+        // workspace-parse error — is what surfaces. This pins the ordering
+        // (guard runs immediately after loading the lock, before
+        // `load_workspace`).
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("Cargo.toml"),
+            "[workspace]\nresolver = \"2\"\nmembers = [\"crates/missing\"]\n",
+        );
+        seed_lock_owner(root, "forge2");
+
+        let err = run_update(&Catalog::anvil(), &local_only(), root).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("managed by 'forge2'"),
+            "guard must refuse before workspace parsing; got: {msg}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn guard_refuses_mismatched_tool_under_dry_run() {
+        let tmp = empty_workspace();
+        seed_lock_owner(tmp.path(), "forge2");
+        let args = Cli {
+            dry_run: true,
+            ..local_only()
+        };
+        let err = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("managed by 'forge2'"));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn force_switches_ownership_and_rewrites_provenance() {
+        let tmp = empty_workspace();
+        seed_lock_owner(tmp.path(), "forge2");
+        let args = Cli {
+            force: true,
+            ..local_only()
+        };
+        let catalog = Catalog::anvil();
+        let outcome = run_update(&catalog, &args, tmp.path()).unwrap();
+        assert!(outcome.applied, "force should proceed as a normal update");
+        assert!(tmp.path().join("justfiles/anvil/tools.just").is_file());
+        let saved = Manifest::load(tmp.path()).unwrap();
+        assert_eq!(saved.tool.as_deref(), Some("anvil"), "force rewrites the lock owner");
+        assert_eq!(saved.catalog_checksum, Some(catalog.checksum()));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn legacy_lock_without_tool_is_not_blocked() {
+        let tmp = empty_workspace();
+        // A pre-split lock: rendered_by present, no `tool` field.
+        std::fs::write(tmp.path().join(".anvil.lock"), "version = 1\nrendered_by = \"cargo-anvil 0.0.1\"\n").unwrap();
+        let outcome = run_update(&Catalog::anvil(), &local_only(), tmp.path()).unwrap();
+        assert!(outcome.applied, "a legacy lock with no tool must not trigger the guard");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
@@ -328,23 +565,23 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         };
-        let _ = run_update(&args, tmp.path()).unwrap();
+        let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
 
         let path = tmp.path().join("rustfmt.toml");
         let host = fs::read_to_string(&path).unwrap();
-        let updated =
-            crate::region::upsert_region(&host, shared_configs::RUSTFMT_REGION_ID, "", crate::region::CommentSyntax::Hash).unwrap();
+        let updated = crate::region::upsert_region(&host, region::RUSTFMT_REGION_ID, "", crate::region::CommentSyntax::Hash).unwrap();
         fs::write(&path, updated).unwrap();
 
-        let outcome = run_update(&args, tmp.path()).unwrap();
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         let rustfmt_item = outcome
             .plan
             .items()
             .iter()
             .find(|i| {
                 matches!(&i.target, crate::plan::Target::Region { host, id }
-                    if host == "rustfmt.toml" && id == shared_configs::RUSTFMT_REGION_ID)
+                    if host == "rustfmt.toml" && id == region::RUSTFMT_REGION_ID)
             })
             .expect("rustfmt region item missing from plan");
         assert_eq!(rustfmt_item.decision, crate::decision::Decision::LeaveAlone);
@@ -358,28 +595,29 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         };
-        let _ = run_update(&args, tmp.path()).unwrap();
+        let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
 
         let path = tmp.path().join("rustfmt.toml");
         let host = fs::read_to_string(&path).unwrap();
         let updated = crate::region::upsert_region(
             &host,
-            shared_configs::RUSTFMT_REGION_ID,
+            region::RUSTFMT_REGION_ID,
             "edition = \"2021\"\n",
             crate::region::CommentSyntax::Hash,
         )
         .unwrap();
         fs::write(&path, updated).unwrap();
 
-        let outcome = run_update(&args, tmp.path()).unwrap();
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         let rustfmt_item = outcome
             .plan
             .items()
             .iter()
             .find(|i| {
                 matches!(&i.target, crate::plan::Target::Region { host, id }
-                    if host == "rustfmt.toml" && id == shared_configs::RUSTFMT_REGION_ID)
+                    if host == "rustfmt.toml" && id == region::RUSTFMT_REGION_ID)
             })
             .unwrap();
         assert_eq!(rustfmt_item.decision, crate::decision::Decision::LeaveAlone);
@@ -401,17 +639,18 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         };
 
         // First update: write everything.
-        let _ = run_update(&args, tmp.path()).unwrap();
+        let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
 
         // User edits the rustfmt region.
         let path = tmp.path().join("rustfmt.toml");
         let host = fs::read_to_string(&path).unwrap();
         let edited = crate::region::upsert_region(
             &host,
-            shared_configs::RUSTFMT_REGION_ID,
+            region::RUSTFMT_REGION_ID,
             "edition = \"2021\"\n",
             crate::region::CommentSyntax::Hash,
         )
@@ -426,21 +665,21 @@ mod tests {
         let mut manifest = Manifest::load(tmp.path()).unwrap();
         let key = RegionKey {
             host: "rustfmt.toml".to_owned(),
-            id: shared_configs::RUSTFMT_REGION_ID.to_owned(),
+            id: region::RUSTFMT_REGION_ID.to_owned(),
         };
         manifest.regions.insert(key, checksum_str("synthetic old template"));
         manifest.save(tmp.path()).unwrap();
         let _ = manifest_path; // sanity
 
         // Second update: should Propose (user diverged + template moved).
-        let second = run_update(&args, tmp.path()).unwrap();
+        let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         let item = second
             .plan
             .items()
             .iter()
             .find(|i| {
                 matches!(&i.target, crate::plan::Target::Region { host, id }
-                    if host == "rustfmt.toml" && id == shared_configs::RUSTFMT_REGION_ID)
+                    if host == "rustfmt.toml" && id == region::RUSTFMT_REGION_ID)
             })
             .unwrap();
         assert_eq!(item.decision, crate::decision::Decision::Propose);
@@ -452,14 +691,14 @@ mod tests {
         // Third update: nothing has changed since the second run; the
         // proposal should have been "burned through" and the next run
         // should see LeaveAlone (D ≠ L, L = T) — not Propose.
-        let third = run_update(&args, tmp.path()).unwrap();
+        let third = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         let item = third
             .plan
             .items()
             .iter()
             .find(|i| {
                 matches!(&i.target, crate::plan::Target::Region { host, id }
-                    if host == "rustfmt.toml" && id == shared_configs::RUSTFMT_REGION_ID)
+                    if host == "rustfmt.toml" && id == region::RUSTFMT_REGION_ID)
             })
             .unwrap();
         assert_eq!(
@@ -477,8 +716,9 @@ mod tests {
             backends: vec!["github".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         };
-        let outcome = run_update(&args, tmp.path()).unwrap();
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(outcome.applied);
         assert_eq!(outcome.backends, vec![Backend::GitHub]);
         for expected in [
@@ -508,9 +748,10 @@ mod tests {
             backends: vec!["github".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         };
-        let _ = run_update(&args, tmp.path()).unwrap();
-        let second = run_update(&args, tmp.path()).unwrap();
+        let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+        let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(
             !second.plan.has_changes(),
             "second github run should be a no-op:\n{}",
@@ -526,8 +767,9 @@ mod tests {
             backends: vec!["ado".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         };
-        let outcome = run_update(&args, tmp.path()).unwrap();
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(outcome.applied);
         assert_eq!(outcome.backends, vec![Backend::Ado]);
         for expected in [
@@ -558,9 +800,10 @@ mod tests {
             backends: vec!["github".to_owned(), "ado".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         };
-        let _ = run_update(&args, tmp.path()).unwrap();
-        let second = run_update(&args, tmp.path()).unwrap();
+        let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+        let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(!second.plan.has_changes());
     }
 
@@ -580,8 +823,9 @@ mod tests {
             backends: vec!["github".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         };
-        let first = run_update(&with_gh, tmp.path()).unwrap();
+        let first = run_update(&Catalog::anvil(), &with_gh, tmp.path()).unwrap();
         assert!(first.applied);
         let github_workflow = tmp.path().join(".github/workflows/anvil-pr.yml");
         assert!(github_workflow.is_file());
@@ -593,8 +837,9 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         };
-        let second = run_update(&no_be, tmp.path()).unwrap();
+        let second = run_update(&Catalog::anvil(), &no_be, tmp.path()).unwrap();
 
         let removed: Vec<&str> = second
             .plan
@@ -629,8 +874,9 @@ mod tests {
             backends: vec!["github".to_owned()],
             no_backends: false,
             dry_run: false,
+            force: false,
         };
-        let _ = run_update(&with_gh, tmp.path()).unwrap();
+        let _ = run_update(&Catalog::anvil(), &with_gh, tmp.path()).unwrap();
 
         let github_workflow = tmp.path().join(".github/workflows/anvil-pr.yml");
         fs::write(&github_workflow, "# user edited this\n").unwrap();
@@ -639,8 +885,9 @@ mod tests {
             backends: vec![],
             no_backends: true,
             dry_run: false,
+            force: false,
         };
-        let second = run_update(&no_be, tmp.path()).unwrap();
+        let second = run_update(&Catalog::anvil(), &no_be, tmp.path()).unwrap();
 
         let kept: Vec<&str> = second
             .plan

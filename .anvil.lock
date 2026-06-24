@@ -1,5 +1,7 @@
 version = 1
-rendered_by = "cargo-anvil 0.1.0"
+tool = "anvil"
+tool_version = "0.1.0"
+catalog_checksum = "sha256:a1ab42662e9b7d69a9ff8d120f832d61dffd4086a14f219c8d4ee26605d5ccbf"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"
@@ -55,7 +57,7 @@ checksum = "sha256:a45359b92a6d851fc39bfa1c03aeb489b544ae37a1cea390dbbf860b2def8
 
 [[file]]
 path = "justfiles/anvil/checks.just"
-checksum = "sha256:d7c4e8c7eb70c4214ae5bd527636c2c865605bd91c82dd32625a35f6f0b203be"
+checksum = "sha256:4fdce5b0806929c9dda59b9e807f6b2ac89a42042f55d721ee345efd928ba0ef"
 
 [[file]]
 path = "justfiles/anvil/groups.just"
@@ -75,7 +77,7 @@ checksum = "sha256:7c92f6cadca16c4e2d6897b1c9304e7a541fb7c7e380e27165304d4071a6d
 
 [[file]]
 path = "justfiles/anvil/versions.just"
-checksum = "sha256:42bea708c5dc7fc08847dcf4bfed8941b084ac98dbd43b6c28582c5d59449895"
+checksum = "sha256:59d77df9871456e53ffe1c1c12104555dfa2d50ae8f9ccb2201d07770c7ae289"
 
 [[region]]
 host = ".delta.toml"

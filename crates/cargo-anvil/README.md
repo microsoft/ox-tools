@@ -52,7 +52,7 @@ uses `just` (or plain `cargo`).
 ### Usage
 
 ```text
-cargo anvil [--backend <name>]... [--no-backends] [--dry-run]
+cargo anvil [--backend <name>]... [--no-backends] [--dry-run] [--force]
 ```
 
 `update` is the only subcommand. There is no separate `init`,
@@ -67,6 +67,14 @@ Flags:
   Mutually exclusive with `--backend`.
 * `--dry-run` — analyze without writing. Exits 1 if anything would be
   written or proposed.
+* `--force` — override the single-tool guard and switch the repository to
+  this tool, then run a normal update. A repo is managed by exactly one
+  anvil-family tool (recorded as `tool` in `.anvil.lock`); without
+  `--force`, a run refuses when that field names a different tool.
+
+`--version` prints the build version plus, on a second line, the
+`catalog:` checksum — a `sha256` over the whole compiled-in catalog — so
+two builds at the same version but different catalogs are distinguishable.
 
 ### Daily driver
 
@@ -98,6 +106,50 @@ Four escape valves, in increasing severity:
    region. The next `update` detects the dirt and writes a
    `.anvil-proposed` sibling instead of overwriting.
 
+### Extensibility: shipping your own tool
+
+Another team can ship its own cargo subcommand with its own catalog while
+reusing this entire engine. The downstream binary’s `main` is one line:
+
+```rust
+use std::process::ExitCode;
+
+fn main() -> ExitCode {
+    cargo_anvil::run_app(myforge::catalog())
+}
+```
+
+…plus a [`Catalog`][__link0] value that starts from [`Catalog::anvil`][__link1] and
+customizes the CLI identity ([`CliMeta`][__link2]) and artifact set:
+
+```rust
+use cargo_anvil::{Artifact, Catalog, artifacts};
+
+pub fn catalog() -> Catalog {
+    Catalog::anvil()
+        .into_builder()
+        .subcommand("myforge")
+        .with_artifact(Artifact::owned_file(
+            "justfiles/anvil/extra.just",
+            "# ...\n",
+        ))
+        .replace_artifact(artifacts::region::rustfmt().with_body("max_width = 80\n"))
+        .without_artifact(artifacts::region::clippy())
+        .build()
+        .expect("valid catalog")
+}
+```
+
+The on-disk vocabulary (`.anvil.lock`, `anvil-managed` sentinels,
+`justfiles/anvil/`, `anvil-` recipes) is the fixed engine format and is
+never rebranded. A fork customizes only its CLI identity and which
+artifacts it emits, via the three uniform builder verbs
+([`CatalogBuilder::with_artifact`][__link3], [`CatalogBuilder::replace_artifact`][__link4],
+[`CatalogBuilder::without_artifact`][__link5]) over the public [`artifacts`][__link6]
+registry. The `tool` field recorded in `.anvil.lock` keeps two
+anvil-family tools from clobbering one another in a shared repo (see `--force`).
+See `docs/design/extensibility.md`.
+
 ### Design docs
 
 See `docs/design/` for the full architecture:
@@ -106,6 +158,7 @@ See `docs/design/` for the full architecture:
 * `checks.md` — the opinionated check catalog.
 * `local.md` — the `justfiles/anvil/` tree.
 * `updates.md` — the drift-detection algorithm.
+* `extensibility.md` — how downstream tools ship their own catalog.
 * `github.md` — GitHub Actions emission.
 * `ado.md` — Azure DevOps Pipelines emission.
 
@@ -117,3 +170,11 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbOKGd9SPBdfobKjOs_WkWgQcbDDxCoIeuo6cbYeurLnzJsrZhZIGDa2NhcmdvLWFudmlsZTAuMS4wa2NhcmdvX2Fudmls
+ [__link0]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=Catalog
+ [__link1]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=Catalog::anvil
+ [__link2]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CliMeta
+ [__link3]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CatalogBuilder::with_artifact
+ [__link4]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
+ [__link5]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CatalogBuilder::without_artifact
+ [__link6]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=artifacts

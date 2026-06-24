@@ -7,7 +7,9 @@
 //! `anvil` as the first argument; we strip it and parse the
 //! remainder.
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
+
+use crate::catalog::Catalog;
 
 /// Parsed top-level CLI.
 ///
@@ -45,33 +47,63 @@ pub struct Cli {
     /// Exits with code 1 if anything would be written or proposed.
     #[arg(long)]
     pub dry_run: bool,
+
+    /// Override the single-tool guard and switch this repository to this tool.
+    ///
+    /// A repository is managed by exactly one anvil-family tool, recorded as
+    /// `tool` in `.anvil.lock`. If that field names a *different* tool, the
+    /// run refuses (writing nothing, even under `--dry-run`). `--force` lifts
+    /// that guard and proceeds as a normal update, rewriting the lock's
+    /// provenance to this tool on save.
+    #[arg(long)]
+    pub force: bool,
 }
 
 impl Cli {
     /// Parse the CLI from the raw `std::env::args_os` iterator that cargo
-    /// passes to its subcommand binaries.
+    /// passes to its subcommand binaries, rendering the command's name,
+    /// `about`, and version from the catalog's [`crate::CliMeta`].
     ///
-    /// Cargo invokes `cargo-anvil anvil <args…>` when the
-    /// user types `cargo anvil <args…>`. We drop the
-    /// `anvil` token if present so that clap sees a normal argv.
+    /// Cargo invokes `cargo-<sub> <sub> <args…>` when the user types
+    /// `cargo <sub> <args…>`. We drop the leading `<sub>` token (the
+    /// catalog's `subcommand`) if present so that clap sees a normal argv.
     ///
     /// # Errors
     ///
     /// Returns clap's parse error (typically with an exit code already
     /// encoded) on invalid input.
-    pub fn parse_from_cargo_args<I, T>(args: I) -> Result<Self, clap::Error>
+    pub fn parse_from_cargo_args<I, T>(catalog: &Catalog, args: I) -> Result<Self, clap::Error>
     where
         I: IntoIterator<Item = T>,
         T: Into<std::ffi::OsString> + Clone,
     {
+        let meta = catalog.cli();
         let mut iter = args.into_iter().map(Into::<std::ffi::OsString>::into);
         let exe = iter.next();
         let mut rest: Vec<std::ffi::OsString> = iter.collect();
-        if rest.first().is_some_and(|a| a == "anvil") {
+        if rest.first().is_some_and(|a| a == meta.subcommand.as_str()) {
             rest.remove(0);
         }
         let argv_iter = exe.into_iter().chain(rest);
-        Self::try_parse_from(argv_iter)
+
+        // clap's `string` feature lets `Command` metadata be owned `String`s
+        // (interned into `Str`), so the catalog's identity drives the CLI with
+        // no leak.
+        let usage_name = format!("cargo {}", meta.subcommand);
+        // `--version` prints a second line with the catalog checksum, so two
+        // builds reporting the same version but carrying different catalogs
+        // can be told apart; `-V` keeps the terse single-line version.
+        let long_version = format!("{}\ncatalog: {}", meta.version, catalog.checksum());
+
+        let command = Self::command()
+            .name(meta.bin_name.clone())
+            .bin_name(usage_name)
+            .about(meta.about.clone())
+            .long_about(meta.about.clone())
+            .version(meta.version.clone())
+            .long_version(long_version);
+        let matches = command.try_get_matches_from(argv_iter)?;
+        Self::from_arg_matches(&matches)
     }
 }
 
@@ -80,6 +112,18 @@ mod tests {
     use clap::Parser as _;
 
     use super::*;
+
+    /// A minimal catalog (no artifacts) for exercising the parse path. Its
+    /// checksum is over an empty artifact set, so `parse_from_cargo_args`
+    /// stays cheap under Miri while still interning the CLI metadata — which
+    /// keeps the Miri leak checker watching the metadata path without the
+    /// pathological cost of hashing the full embedded `anvil` catalog.
+    fn tiny_catalog() -> crate::catalog::Catalog {
+        crate::catalog::Catalog::builder(crate::catalog::CliMeta::new("anvil"))
+            .version("9.9.9")
+            .build()
+            .unwrap()
+    }
 
     #[test]
     fn parse_no_args() {
@@ -114,6 +158,35 @@ mod tests {
     }
 
     #[test]
+    fn parse_force() {
+        let cli = Cli::parse_from(["cargo-anvil", "--force"]);
+        assert!(cli.force);
+        let cli = Cli::parse_from(["cargo-anvil"]);
+        assert!(!cli.force);
+    }
+
+    #[test]
+    fn version_output_includes_catalog_checksum() {
+        let catalog = tiny_catalog();
+        let err = Cli::parse_from_cargo_args(&catalog, ["cargo-anvil", "--version"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains(&catalog.checksum()),
+            "--version must print the catalog checksum; got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn terse_version_output_omits_catalog_checksum() {
+        let catalog = tiny_catalog();
+        let err = Cli::parse_from_cargo_args(&catalog, ["cargo-anvil", "-V"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+        let rendered = err.to_string();
+        assert!(!rendered.contains("catalog:"), "-V should stay terse; got: {rendered}");
+    }
+
+    #[test]
     fn backend_and_no_backends_conflict() {
         let err = Cli::try_parse_from(["cargo-anvil", "--backend", "github", "--no-backends"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
@@ -121,13 +194,15 @@ mod tests {
 
     #[test]
     fn parse_from_cargo_args_strips_subcommand_token() {
-        let cli = Cli::parse_from_cargo_args(["cargo-anvil", "anvil", "--dry-run"]).unwrap();
+        let catalog = tiny_catalog();
+        let cli = Cli::parse_from_cargo_args(&catalog, ["cargo-anvil", "anvil", "--dry-run"]).unwrap();
         assert!(cli.dry_run);
     }
 
     #[test]
     fn parse_from_cargo_args_works_without_subcommand_token() {
-        let cli = Cli::parse_from_cargo_args(["cargo-anvil", "--dry-run"]).unwrap();
+        let catalog = tiny_catalog();
+        let cli = Cli::parse_from_cargo_args(&catalog, ["cargo-anvil", "--dry-run"]).unwrap();
         assert!(cli.dry_run);
     }
 
