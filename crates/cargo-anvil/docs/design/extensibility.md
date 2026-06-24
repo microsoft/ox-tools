@@ -1,9 +1,9 @@
 # cargo-anvil — Extensibility
 
-> **Status:** design proposal. Nothing in this document is implemented yet. It describes how
-> `cargo-anvil` should be refactored so that *other* teams can ship their own cargo
-> subcommand — with their own check catalog — while reusing the entire anvil engine
-> (decision table, region splicing, manifest tracking, backend resolution, dry-run, summary).
+> **Status:** implemented. `cargo-anvil` now exposes the extensibility surface described here so
+> *other* teams can ship their own cargo subcommand — with their own check catalog — while
+> reusing the same anvil engine (decision table, region splicing, manifest tracking, backend
+> resolution, dry-run, summary).
 
 This is a companion to the top-level [design.md](./design.md). It assumes familiarity with the
 core concepts defined there and in [checks.md](./checks.md), [local.md](./local.md), and
@@ -66,7 +66,7 @@ pub fn catalog() -> Catalog {
     Catalog::anvil()
         .into_builder()
         .subcommand("myforge")                         // CLI identity only
-        .about("MyForge: opinionated Rust build scaffolding for the Foo org")
+        .about("MyForge: unified Rust build scaffolding for the Foo org")
         .version(env!("CARGO_PKG_VERSION"))
         .with_artifact(Artifact::owned_file(           // append an owned file
             "justfiles/anvil/extra.just",
