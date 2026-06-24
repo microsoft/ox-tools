@@ -191,7 +191,10 @@ mod tests {
     fn setup_and_impact_step_templates_are_non_empty() {
         assert!(SETUP_STEP.contains("just anvil-setup"));
         assert!(IMPACT_STEP.contains("cargo-delta"));
-        assert!(IMPACT_STEP.contains("##vso[task.setvariable"));
+        // The impact step now runs the anvil-impact recipe (which writes the
+        // artifact tree); the legacy ##vso setvariable output threading is gone.
+        assert!(IMPACT_STEP.contains("just anvil-impact"));
+        assert!(!IMPACT_STEP.contains("##vso[task.setvariable"));
     }
 
     #[test]
@@ -258,28 +261,33 @@ mod tests {
             "name: steps",
             "type: stepList",
             "name: artifacts",
+            "name: inputArtifacts",
             "PublishPipelineArtifact@1",
+            "DownloadPipelineArtifact@2",
         ] {
             assert!(JOB_WRAPPER.contains(needle), "wrapper missing '{needle}'");
         }
     }
 
     #[test]
-    fn render_group_step_has_include_inputs_and_env() {
+    fn render_group_step_drops_include_params_keeps_pr_title() {
         let body = render_group_step("pr-fast");
-        assert!(body.contains("parameters:"));
-        assert!(body.contains("name: include_modified"));
-        assert!(body.contains("name: include_affected"));
-        assert!(body.contains("name: include_required"));
         assert!(body.contains("just anvil-pr-fast"));
-        assert!(body.contains("ANVIL_INCLUDE_MODIFIED"));
-        assert!(body.contains("ANVIL_INCLUDE_AFFECTED"));
-        assert!(body.contains("ANVIL_INCLUDE_REQUIRED"));
         // PR_TITLE is resolved from the REST API (ADO has no PR-title
         // predefined variable) and threaded via the PR_TITLE pipeline var.
         assert!(body.contains("PR_TITLE: $(PR_TITLE)"));
         assert!(body.contains("setvariable variable=PR_TITLE"));
         assert!(!body.contains("PR_TITLE: $(System.PullRequest.Title)"));
+        // Scope arrives as the downloaded impact artifact (restored by job.yml
+        // inputArtifacts), not as include params / ANVIL_INCLUDE_* env.
+        assert!(
+            !body.contains("include_modified"),
+            "group step still declares removed include params"
+        );
+        assert!(
+            !body.contains("ANVIL_INCLUDE_"),
+            "group step still threads removed ANVIL_INCLUDE_* env"
+        );
     }
 
     #[test]
@@ -305,8 +313,16 @@ mod tests {
                 "Stale stage '{needle}' should be gone after the pr-slow rename"
             );
         }
-        assert!(PR_STAGES.contains("stageDependencies.impact_linux.compute.outputs"));
-        assert!(PR_STAGES.contains("stageDependencies.impact_windows.compute.outputs"));
+        // Impact scope flows via the per-OS pipeline artifact (published by the
+        // impact stages, restored by each group stage through job.yml's
+        // inputArtifacts), not via stage-output variable threading.
+        assert!(PR_STAGES.contains("anvil-impact-linux"));
+        assert!(PR_STAGES.contains("anvil-impact-windows"));
+        assert!(PR_STAGES.contains("inputArtifacts:"));
+        assert!(
+            !PR_STAGES.contains("stageDependencies."),
+            "PR stages still threads removed stage-output variables"
+        );
         assert!(PR_STAGES.contains("- template: steps/job.yml"));
         assert!(
             !PR_STAGES.contains("\n      - job: "),

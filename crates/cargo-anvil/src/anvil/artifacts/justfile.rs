@@ -39,6 +39,16 @@ const CHECKS_JUST: &str = include_str!("../../../templates/justfiles/anvil/check
 /// Repo-root-relative path of the per-check recipe file.
 const CHECKS_JUST_PATH: &str = "justfiles/anvil/checks.just";
 
+/// Contents of `justfiles/anvil/impact.just` baked into the binary.
+///
+/// Defines the `anvil-impact` recipe (and its `_anvil-impact-snapshot` /
+/// `_anvil-impact-include` helpers) that compute the cargo-delta impact set
+/// into `target/anvil/impact/` and resolve per-tier scope for the checks.
+const IMPACT_JUST: &str = include_str!("../../../templates/justfiles/anvil/impact.just");
+
+/// Repo-root-relative path of the impact-scoping recipe file.
+const IMPACT_JUST_PATH: &str = "justfiles/anvil/impact.just";
+
 /// Contents of `justfiles/anvil/groups.just` baked into the binary.
 const GROUPS_JUST: &str = include_str!("../../../templates/justfiles/anvil/groups.just");
 
@@ -87,6 +97,12 @@ pub fn tools() -> Artifact {
 #[must_use]
 pub fn checks() -> Artifact {
     Artifact::owned_file(CHECKS_JUST_PATH, CHECKS_JUST)
+}
+
+/// `justfiles/anvil/impact.just` — the impact-scoping recipe + helpers.
+#[must_use]
+pub fn impact() -> Artifact {
+    Artifact::owned_file(IMPACT_JUST_PATH, IMPACT_JUST)
 }
 
 /// `justfiles/anvil/groups.just` — the group recipes.
@@ -178,11 +194,13 @@ mod tests {
             assert!(TIERS_JUST.contains(needle), "tiers.just missing '{needle}'");
         }
         // Each tier runs its validate-prereqs aggregate first so a missing
-        // tool fails up front rather than mid-run.
+        // tool fails up front rather than mid-run. anvil-pr is a plain
+        // dependency list; anvil-scheduled / anvil-full are ANVIL_IMPACT=off
+        // wrappers, so their prereqs run via the private impl recipes.
         for needle in [
             "anvil-pr: anvil-pr-validate-prereqs",
-            "anvil-scheduled: anvil-scheduled-validate-prereqs",
-            "anvil-full: anvil-full-validate-prereqs",
+            "_anvil-scheduled-impl: anvil-scheduled-validate-prereqs",
+            "_anvil-full-impl: anvil-full-validate-prereqs",
         ] {
             assert!(
                 TIERS_JUST.contains(needle),
@@ -217,6 +235,7 @@ mod tests {
     fn mod_just_imports_siblings_and_defines_alias() {
         for needle in [
             "import 'checks.just'",
+            "import 'impact.just'",
             "import 'groups.just'",
             "import 'tiers.just'",
             "import 'tools.just'",
@@ -224,6 +243,48 @@ mod tests {
             "alias anvil := anvil-pr",
         ] {
             assert!(MOD_JUST.contains(needle), "mod.just missing '{needle}'");
+        }
+    }
+
+    #[test]
+    fn impact_just_defines_recipe_and_helpers() {
+        for needle in [
+            "anvil-impact:",
+            "_anvil-impact-snapshot:",
+            "_anvil-impact-include tier:",
+            "ANVIL_IMPACT",
+            "include_$tier.txt",
+            "baseline.sha",
+            "current.state",
+        ] {
+            assert!(IMPACT_JUST.contains(needle), "impact.just missing '{needle}'");
+        }
+    }
+
+    #[test]
+    fn scoped_checks_depend_on_anvil_impact() {
+        // Every per-crate check should declare the anvil-impact dependency so
+        // the impact cache is fresh before the recipe resolves its scope.
+        for needle in [
+            "anvil-clippy: anvil-clippy-validate-prereqs anvil-impact",
+            "anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact",
+            "anvil-doc-build: anvil-doc-build-validate-prereqs anvil-impact",
+        ] {
+            assert!(CHECKS_JUST.contains(needle), "checks.just missing impact dep: '{needle}'");
+        }
+        // The legacy env-var threading must be fully gone.
+        assert!(
+            !CHECKS_JUST.contains("ANVIL_INCLUDE_"),
+            "checks.just still references the removed ANVIL_INCLUDE_* env vars"
+        );
+    }
+
+    #[test]
+    fn scheduled_and_full_tiers_disable_impact_scoping() {
+        // The scheduled/full tiers run full-workspace by setting ANVIL_IMPACT=off.
+        assert!(TIERS_JUST.contains("ANVIL_IMPACT"), "tiers.just missing ANVIL_IMPACT=off wrapper");
+        for needle in ["_anvil-scheduled-impl", "_anvil-full-impl"] {
+            assert!(TIERS_JUST.contains(needle), "tiers.just missing wrapper impl recipe '{needle}'");
         }
     }
 

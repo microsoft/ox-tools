@@ -177,17 +177,26 @@ mod tests {
         let body = render_group_action("pr-fast");
         assert!(body.contains("name: anvil-pr-fast"));
         assert!(body.contains("just anvil-pr-fast"));
-        assert!(body.contains("ANVIL_INCLUDE_MODIFIED"));
-        assert!(body.contains("ANVIL_INCLUDE_AFFECTED"));
-        assert!(body.contains("ANVIL_INCLUDE_REQUIRED"));
+        // The cache-based model carries scope via the downloaded artifact,
+        // not via ANVIL_INCLUDE_* env threading.
+        assert!(
+            !body.contains("ANVIL_INCLUDE_"),
+            "group action still threads removed ANVIL_INCLUDE_* env"
+        );
     }
 
     #[test]
-    fn group_actions_declare_include_inputs() {
+    fn group_actions_download_impact_artifact() {
         let body = render_group_action("scheduled-test");
-        assert!(body.contains("include_modified:"));
-        assert!(body.contains("include_affected:"));
-        assert!(body.contains("include_required:"));
+        assert!(body.contains("impact_artifact:"), "group action missing impact_artifact input");
+        assert!(
+            body.contains("actions/download-artifact"),
+            "group action missing impact artifact download step"
+        );
+        assert!(
+            !body.contains("include_modified:"),
+            "group action still declares removed include inputs"
+        );
     }
 
     #[test]

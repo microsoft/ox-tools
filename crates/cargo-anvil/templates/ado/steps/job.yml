@@ -26,6 +26,18 @@
 #                          at job level. The contract is the same either way,
 #                          so the stages templates don't need to know which
 #                          backend they're targeting.
+#   - inputArtifacts (object) Optional list of pipeline artifacts to consume.
+#                          Each item: { name: string, path: string }.
+#                          The default wrapper prepends one
+#                          DownloadPipelineArtifact@2 task per entry; 1ESPT
+#                          wrappers translate these into templateContext.inputs
+#                          (`{ input: pipelineArtifact, ... }`) blocks. This is
+#                          the symmetric counterpart of `artifacts`:
+#                          DownloadPipelineArtifact@2 is a `task:` step that some
+#                          compliance extension templates disallow in job bodies
+#                          and require as templateContext.inputs instead -- so,
+#                          as with publishing, the *list* is the stable contract
+#                          and how it's materialized is the wrapper's concern.
 parameters:
   - name: name
     type: string
@@ -36,11 +48,20 @@ parameters:
   - name: artifacts
     type: object
     default: []
+  - name: inputArtifacts
+    type: object
+    default: []
 
 jobs:
   - job: ${{ parameters.name }}
     pool: ${{ parameters.pool }}
     steps:
+      - ${{ each artifact in parameters.inputArtifacts }}:
+          - task: DownloadPipelineArtifact@2
+            displayName: Download ${{ artifact.name }}
+            inputs:
+              artifact: ${{ artifact.name }}
+              path: ${{ artifact.path }}
       - ${{ each step in parameters.steps }}:
           - ${{ step }}
       - ${{ each artifact in parameters.artifacts }}:

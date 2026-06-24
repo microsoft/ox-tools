@@ -6,41 +6,36 @@
 name: anvil-__GROUP__
 description: Run the __GROUP__ check group.
 inputs:
-  include_modified:
+  impact_artifact:
     description: |
-      Pre-formatted --package args (e.g. "--package alpha --package beta")
-      for the modified tier, or the sentinel "--skip" when nothing
-      modified. Local invocations leave it unset; recipes default to
-      --workspace.
-    default: ""
-    required: false
-  include_affected:
-    description: |
-      Same shape as include_modified, but for the affected tier
-      (modified ∪ rev-deps).
-    default: ""
-    required: false
-  include_required:
-    description: |
-      Same shape as include_modified, but for the required tier
-      (affected ∪ workspace-internal transitive deps).
+      Name of the `anvil-impact` pipeline artifact to restore into
+      target/anvil/impact/ before running the group. The group's checks
+      depend on `anvil-impact`, which finds the restored cache fresh and
+      no-ops (a cache hit) rather than recomputing. Leave empty to skip
+      the download; the checks then recompute the impact set in place
+      (cargo-delta is part of every PR-tier group's setup so the
+      recompute fallback works).
     default: ""
     required: false
 runs:
   using: composite
   steps:
+    # Restore the shared impact artifact when one was produced by an
+    # upstream impact job. The download is best-effort: if the artifact
+    # is absent the group's checks recompute the impact set themselves.
+    - name: Download anvil-impact artifact
+      if: inputs.impact_artifact != ''
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.impact_artifact }}
+        path: target/anvil/impact
     - uses: ./.github/actions/anvil-setup
       with:
         group: __GROUP__
     - name: Run just anvil-__GROUP__
       shell: bash
       env:
-        ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
-        ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
-        ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # Some checks (e.g. cargo-aprz, run only by groups that include it)
-        # hit the GitHub API; pass the built-in token so they use the
-        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
-        # checks never read it.
+        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
+        # built-in token so it can use the 1000 req/hr authenticated quota.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-__GROUP__

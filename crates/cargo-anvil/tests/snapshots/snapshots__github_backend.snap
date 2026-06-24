@@ -27,160 +27,38 @@ root-files = [
 # Owned by cargo-anvil; edit via `cargo anvil`.
 name: anvil-impact
 description: |
-  Compute the cargo-delta impact set for this PR and emit per-tier
-  include lists.
+  Compute the cargo-delta impact set for this PR by running the
+  `anvil-impact` just recipe, which writes the durable impact artifacts
+  to `target/anvil/impact/` (snapshots, impact.json, and the per-tier
+  include_*.txt cache files).
 
-  Outputs:
-    include_modified - "--package X --package Y" string for crates whose
-                       source files changed in the diff, or "--skip" if
-                       the modified set is empty.
-    include_affected - same shape, for crates in the affected set
-                       (modified ∪ rev-deps).
-    include_required - same shape, for crates in the required set
-                       (affected ∪ workspace-internal transitive deps).
-
-  Recipes in checks.just interpret each variable per their tier:
-  modified-tier recipes (fmt, license-headers, spellcheck, ...) short-
-  circuit on "--skip"; affected-tier recipes (clippy, tests, ...) and
-  required-tier recipes (doc, cargo-hack, udeps) splice their include
-  list into the cargo invocation, defaulting to --workspace when unset
-  (local runs without impact wiring).
-
-  Unscoped recipes (deny, audit, aprz, pr-title) ignore all three
-  variables and always run unconditionally.
-outputs:
-  include_modified:
-    description: Pre-formatted --package args for the modified tier.
-    value: ${{ steps.compute.outputs.include_modified }}
-  include_affected:
-    description: Pre-formatted --package args for the affected tier.
-    value: ${{ steps.compute.outputs.include_affected }}
-  include_required:
-    description: Pre-formatted --package args for the required tier.
-    value: ${{ steps.compute.outputs.include_required }}
+  This action only *produces* the artifacts. The calling workflow job is
+  responsible for uploading `target/anvil/impact/` as a pipeline artifact
+  (with an OS-specific name) so downstream group jobs can restore it. The
+  formatting/projection logic lives entirely in the recipe (one source of
+  truth), shared by local and cloud-workflow runs.
 runs:
   using: composite
   steps:
-    # anvil-setup with group=none bootstraps the rust toolchain +
-    # just + binstall + cache, but skips the full catalog install.
-    # We follow it with just the cargo-delta install (the only tool
-    # this composite needs). This keeps the impact stage lean -- it's
-    # the critical-path gating dep for every PR-tier group job.
+    # anvil-setup with group=none bootstraps the rust toolchain + just +
+    # binstall + cache, but skips the full catalog install. The
+    # anvil-impact recipe installs/validates cargo-delta itself, so this
+    # keeps the impact stage lean -- it's the critical-path gating dep
+    # for every PR-tier group job.
     - uses: ./.github/actions/anvil-setup
       with:
         group: none
     - name: Install cargo-delta
       shell: bash
       run: just anvil-tool-cargo-delta-install binstall
-    - id: compute
-      name: Compute impact
+    - name: Compute impact
       shell: bash
-      run: |
-        set -euo pipefail
-        # Resolve the baseline ref via the shared anvil resolver (single
-        # source of truth; see the _anvil-base-ref recipe). On GitHub PRs it
-        # resolves GITHUB_BASE_REF to origin/<branch>; BASE_REF overrides.
-        base="$(just _anvil-base-ref)"
-        # The baseline worktree is checked out at the merge target, whose
-        # rust-toolchain.toml may pin a toolchain that is NOT installed on the
-        # runner (any PR that bumps rust-toolchain.toml hits this). The
-        # snapshot is metadata-only (file presence + content hashes), so run
-        # the baseline under the runner's *active* toolchain via
-        # RUSTUP_TOOLCHAIN, which overrides the worktree's rust-toolchain.toml.
-        # Capture it here, in the PR checkout, where it is resolved + installed.
-        active_toolchain="$(rustup show active-toolchain | head -n1 | cut -d' ' -f1)"
-        # cargo delta has no --base flag; the flow is two snapshots
-        # (baseline at the merge target + current at HEAD) compared by
-        # `cargo delta impact`. We use a temporary worktree to snapshot
-        # the baseline without disturbing the checked-out tree.
-        cargo delta snapshot > "$RUNNER_TEMP/anvil-current.json"
-        git worktree add --detach "$RUNNER_TEMP/anvil-baseline" "$base"
-        # When anvil is first introduced (this PR adds the cargo workspace),
-        # the baseline branch has no root Cargo.toml, so there is no
-        # workspace for cargo-delta to snapshot. Detect that explicitly and
-        # fall back to full-workspace validation (empty include_* -> recipes
-        # default to --workspace) rather than running cargo-delta. This is a
-        # targeted check: any *other* cargo-delta failure below is a real
-        # error and is allowed to fail the impact job (and the gated pr-* jobs).
-        if [ ! -f "$RUNNER_TEMP/anvil-baseline/Cargo.toml" ] ; then
-            echo "anvil impact: baseline '$base' has no root Cargo.toml (not a cargo workspace yet -- first-time anvil adoption?). Falling back to full-workspace validation." >&2
-            git worktree remove --force "$RUNNER_TEMP/anvil-baseline"
-            {
-                echo "include_modified="
-                echo "include_affected="
-                echo "include_required="
-            } >> "$GITHUB_OUTPUT"
-            exit 0
-        fi
-        ( cd "$RUNNER_TEMP/anvil-baseline" \
-            && RUSTUP_TOOLCHAIN="$active_toolchain" cargo delta snapshot ) \
-            > "$RUNNER_TEMP/anvil-baseline.json"
-        git worktree remove --force "$RUNNER_TEMP/anvil-baseline"
-        result="$(cargo delta impact \
-            --baseline "$RUNNER_TEMP/anvil-baseline.json" \
-            --current  "$RUNNER_TEMP/anvil-current.json" \
-            --format json)"
-        # cargo-delta emits TitleCase keys (Modified / Affected /
-        # Required), not lowercase. Format each tier into the
-        # `--package X --package Y` shape recipes expect, or the
-        # literal "--skip" sentinel when the tier is empty.
-        #
-        # cargo-delta's impact output uses *library names* (snake_case)
-        # rather than cargo *package names* (which may use hyphens). For
-        # hyphenated packages — e.g. `cargo-anvil` — that means it
-        # emits `cargo_anvil`, which cargo rejects as a --package
-        # specification. We build:
-        #   * `pkg_map`: lib-name -> package-name (and identity for
-        #     package-name -> package-name), for translation;
-        #   * `valid_pkgs`: set of all known package names, for
-        #     validation. Names cargo-delta emits that aren't valid
-        #     packages (e.g. directory-leaf ambiguities like `ffi` /
-        #     `ffi_build` in deeply nested workspaces) are dropped with a
-        #     warning rather than failing the whole build.
-        declare -A pkg_map
-        declare -A valid_pkgs
-        # `tr -d '\r'` strips carriage returns: on Windows runners the
-        # `cargo metadata | jq` (and cargo-delta) output can be CRLF-
-        # terminated, which would otherwise leave a trailing `\r` on the
-        # last `read` field — corrupting the map keys so valid packages
-        # get mis-classified as unknown and silently dropped.
-        while IFS=$'\t' read -r pkg_name lib_name; do
-            valid_pkgs["$pkg_name"]=1
-            pkg_map["$pkg_name"]="$pkg_name"
-            [ -n "$lib_name" ] && pkg_map["$lib_name"]="$pkg_name"
-        done < <(cargo metadata --no-deps --format-version 1 \
-            | jq -r '.packages[] as $p | ($p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)"), "\($p.name)\t"' \
-            | tr -d '\r')
-        format_set() {
-            local field="$1"
-            local pkgs
-            pkgs=$(printf '%s' "$result" | jq -r --arg f "$field" '(.[$f] // []) | .[]' 2>/dev/null | tr -d '\r' || true)
-            if [ -z "$pkgs" ] ; then
-                printf '%s' "--skip"
-            else
-                local out=""
-                while IFS= read -r pkg ; do
-                    [ -z "$pkg" ] && continue
-                    local mapped="${pkg_map[$pkg]:-$pkg}"
-                    if [ -z "${valid_pkgs[$mapped]:-}" ] ; then
-                        echo "anvil impact: dropping unknown package '$pkg' (-> '$mapped') from $field set" >&2
-                        continue
-                    fi
-                    out="$out --package $mapped"
-                done <<EOF
-        $pkgs
-        EOF
-                if [ -z "$out" ] ; then
-                    printf '%s' "--skip"
-                else
-                    # shellcheck disable=SC2001
-                    printf '%s' "${out# }"
-                fi
-            fi
-        }
-        echo "include_modified=$(format_set Modified)" >> "$GITHUB_OUTPUT"
-        echo "include_affected=$(format_set Affected)" >> "$GITHUB_OUTPUT"
-        echo "include_required=$(format_set Required)" >> "$GITHUB_OUTPUT"
+      # GITHUB_BASE_REF is the target-branch name on a PR event (e.g.
+      # "main"); the recipe normalizes it to origin/<name>. Adopters can
+      # override via the BASE_REF env var. The recipe needs full history
+      # (the calling job checks out with fetch-depth: 0) to snapshot the
+      # base ref in a throwaway worktree.
+      run: just anvil-impact
 
 === .github/actions/anvil-pr-fast/action.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -191,42 +69,37 @@ runs:
 name: anvil-pr-fast
 description: Run the pr-fast check group.
 inputs:
-  include_modified:
+  impact_artifact:
     description: |
-      Pre-formatted --package args (e.g. "--package alpha --package beta")
-      for the modified tier, or the sentinel "--skip" when nothing
-      modified. Local invocations leave it unset; recipes default to
-      --workspace.
-    default: ""
-    required: false
-  include_affected:
-    description: |
-      Same shape as include_modified, but for the affected tier
-      (modified ∪ rev-deps).
-    default: ""
-    required: false
-  include_required:
-    description: |
-      Same shape as include_modified, but for the required tier
-      (affected ∪ workspace-internal transitive deps).
+      Name of the `anvil-impact` pipeline artifact to restore into
+      target/anvil/impact/ before running the group. The group's checks
+      depend on `anvil-impact`, which finds the restored cache fresh and
+      no-ops (a cache hit) rather than recomputing. Leave empty to skip
+      the download; the checks then recompute the impact set in place
+      (cargo-delta is part of every PR-tier group's setup so the
+      recompute fallback works).
     default: ""
     required: false
 runs:
   using: composite
   steps:
+    # Restore the shared impact artifact when one was produced by an
+    # upstream impact job. The download is best-effort: if the artifact
+    # is absent the group's checks recompute the impact set themselves.
+    - name: Download anvil-impact artifact
+      if: inputs.impact_artifact != ''
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.impact_artifact }}
+        path: target/anvil/impact
     - uses: ./.github/actions/anvil-setup
       with:
         group: pr-fast
     - name: Run just anvil-pr-fast
       shell: bash
       env:
-        ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
-        ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
-        ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # Some checks (e.g. cargo-aprz, run only by groups that include it)
-        # hit the GitHub API; pass the built-in token so they use the
-        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
-        # checks never read it.
+        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
+        # built-in token so it can use the 1000 req/hr authenticated quota.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-pr-fast
 
@@ -239,42 +112,37 @@ runs:
 name: anvil-pr-mutants
 description: Run the pr-mutants check group.
 inputs:
-  include_modified:
+  impact_artifact:
     description: |
-      Pre-formatted --package args (e.g. "--package alpha --package beta")
-      for the modified tier, or the sentinel "--skip" when nothing
-      modified. Local invocations leave it unset; recipes default to
-      --workspace.
-    default: ""
-    required: false
-  include_affected:
-    description: |
-      Same shape as include_modified, but for the affected tier
-      (modified ∪ rev-deps).
-    default: ""
-    required: false
-  include_required:
-    description: |
-      Same shape as include_modified, but for the required tier
-      (affected ∪ workspace-internal transitive deps).
+      Name of the `anvil-impact` pipeline artifact to restore into
+      target/anvil/impact/ before running the group. The group's checks
+      depend on `anvil-impact`, which finds the restored cache fresh and
+      no-ops (a cache hit) rather than recomputing. Leave empty to skip
+      the download; the checks then recompute the impact set in place
+      (cargo-delta is part of every PR-tier group's setup so the
+      recompute fallback works).
     default: ""
     required: false
 runs:
   using: composite
   steps:
+    # Restore the shared impact artifact when one was produced by an
+    # upstream impact job. The download is best-effort: if the artifact
+    # is absent the group's checks recompute the impact set themselves.
+    - name: Download anvil-impact artifact
+      if: inputs.impact_artifact != ''
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.impact_artifact }}
+        path: target/anvil/impact
     - uses: ./.github/actions/anvil-setup
       with:
         group: pr-mutants
     - name: Run just anvil-pr-mutants
       shell: bash
       env:
-        ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
-        ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
-        ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # Some checks (e.g. cargo-aprz, run only by groups that include it)
-        # hit the GitHub API; pass the built-in token so they use the
-        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
-        # checks never read it.
+        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
+        # built-in token so it can use the 1000 req/hr authenticated quota.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-pr-mutants
 
@@ -287,42 +155,37 @@ runs:
 name: anvil-pr-runtime-analysis
 description: Run the pr-runtime-analysis check group.
 inputs:
-  include_modified:
+  impact_artifact:
     description: |
-      Pre-formatted --package args (e.g. "--package alpha --package beta")
-      for the modified tier, or the sentinel "--skip" when nothing
-      modified. Local invocations leave it unset; recipes default to
-      --workspace.
-    default: ""
-    required: false
-  include_affected:
-    description: |
-      Same shape as include_modified, but for the affected tier
-      (modified ∪ rev-deps).
-    default: ""
-    required: false
-  include_required:
-    description: |
-      Same shape as include_modified, but for the required tier
-      (affected ∪ workspace-internal transitive deps).
+      Name of the `anvil-impact` pipeline artifact to restore into
+      target/anvil/impact/ before running the group. The group's checks
+      depend on `anvil-impact`, which finds the restored cache fresh and
+      no-ops (a cache hit) rather than recomputing. Leave empty to skip
+      the download; the checks then recompute the impact set in place
+      (cargo-delta is part of every PR-tier group's setup so the
+      recompute fallback works).
     default: ""
     required: false
 runs:
   using: composite
   steps:
+    # Restore the shared impact artifact when one was produced by an
+    # upstream impact job. The download is best-effort: if the artifact
+    # is absent the group's checks recompute the impact set themselves.
+    - name: Download anvil-impact artifact
+      if: inputs.impact_artifact != ''
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.impact_artifact }}
+        path: target/anvil/impact
     - uses: ./.github/actions/anvil-setup
       with:
         group: pr-runtime-analysis
     - name: Run just anvil-pr-runtime-analysis
       shell: bash
       env:
-        ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
-        ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
-        ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # Some checks (e.g. cargo-aprz, run only by groups that include it)
-        # hit the GitHub API; pass the built-in token so they use the
-        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
-        # checks never read it.
+        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
+        # built-in token so it can use the 1000 req/hr authenticated quota.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-pr-runtime-analysis
 
@@ -335,42 +198,37 @@ runs:
 name: anvil-pr-test
 description: Run the pr-test check group.
 inputs:
-  include_modified:
+  impact_artifact:
     description: |
-      Pre-formatted --package args (e.g. "--package alpha --package beta")
-      for the modified tier, or the sentinel "--skip" when nothing
-      modified. Local invocations leave it unset; recipes default to
-      --workspace.
-    default: ""
-    required: false
-  include_affected:
-    description: |
-      Same shape as include_modified, but for the affected tier
-      (modified ∪ rev-deps).
-    default: ""
-    required: false
-  include_required:
-    description: |
-      Same shape as include_modified, but for the required tier
-      (affected ∪ workspace-internal transitive deps).
+      Name of the `anvil-impact` pipeline artifact to restore into
+      target/anvil/impact/ before running the group. The group's checks
+      depend on `anvil-impact`, which finds the restored cache fresh and
+      no-ops (a cache hit) rather than recomputing. Leave empty to skip
+      the download; the checks then recompute the impact set in place
+      (cargo-delta is part of every PR-tier group's setup so the
+      recompute fallback works).
     default: ""
     required: false
 runs:
   using: composite
   steps:
+    # Restore the shared impact artifact when one was produced by an
+    # upstream impact job. The download is best-effort: if the artifact
+    # is absent the group's checks recompute the impact set themselves.
+    - name: Download anvil-impact artifact
+      if: inputs.impact_artifact != ''
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.impact_artifact }}
+        path: target/anvil/impact
     - uses: ./.github/actions/anvil-setup
       with:
         group: pr-test
     - name: Run just anvil-pr-test
       shell: bash
       env:
-        ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
-        ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
-        ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # Some checks (e.g. cargo-aprz, run only by groups that include it)
-        # hit the GitHub API; pass the built-in token so they use the
-        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
-        # checks never read it.
+        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
+        # built-in token so it can use the 1000 req/hr authenticated quota.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-pr-test
 
@@ -383,42 +241,37 @@ runs:
 name: anvil-scheduled-advisories
 description: Run the scheduled-advisories check group.
 inputs:
-  include_modified:
+  impact_artifact:
     description: |
-      Pre-formatted --package args (e.g. "--package alpha --package beta")
-      for the modified tier, or the sentinel "--skip" when nothing
-      modified. Local invocations leave it unset; recipes default to
-      --workspace.
-    default: ""
-    required: false
-  include_affected:
-    description: |
-      Same shape as include_modified, but for the affected tier
-      (modified ∪ rev-deps).
-    default: ""
-    required: false
-  include_required:
-    description: |
-      Same shape as include_modified, but for the required tier
-      (affected ∪ workspace-internal transitive deps).
+      Name of the `anvil-impact` pipeline artifact to restore into
+      target/anvil/impact/ before running the group. The group's checks
+      depend on `anvil-impact`, which finds the restored cache fresh and
+      no-ops (a cache hit) rather than recomputing. Leave empty to skip
+      the download; the checks then recompute the impact set in place
+      (cargo-delta is part of every PR-tier group's setup so the
+      recompute fallback works).
     default: ""
     required: false
 runs:
   using: composite
   steps:
+    # Restore the shared impact artifact when one was produced by an
+    # upstream impact job. The download is best-effort: if the artifact
+    # is absent the group's checks recompute the impact set themselves.
+    - name: Download anvil-impact artifact
+      if: inputs.impact_artifact != ''
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.impact_artifact }}
+        path: target/anvil/impact
     - uses: ./.github/actions/anvil-setup
       with:
         group: scheduled-advisories
     - name: Run just anvil-scheduled-advisories
       shell: bash
       env:
-        ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
-        ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
-        ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # Some checks (e.g. cargo-aprz, run only by groups that include it)
-        # hit the GitHub API; pass the built-in token so they use the
-        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
-        # checks never read it.
+        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
+        # built-in token so it can use the 1000 req/hr authenticated quota.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-scheduled-advisories
 
@@ -431,42 +284,37 @@ runs:
 name: anvil-scheduled-exhaustive
 description: Run the scheduled-exhaustive check group.
 inputs:
-  include_modified:
+  impact_artifact:
     description: |
-      Pre-formatted --package args (e.g. "--package alpha --package beta")
-      for the modified tier, or the sentinel "--skip" when nothing
-      modified. Local invocations leave it unset; recipes default to
-      --workspace.
-    default: ""
-    required: false
-  include_affected:
-    description: |
-      Same shape as include_modified, but for the affected tier
-      (modified ∪ rev-deps).
-    default: ""
-    required: false
-  include_required:
-    description: |
-      Same shape as include_modified, but for the required tier
-      (affected ∪ workspace-internal transitive deps).
+      Name of the `anvil-impact` pipeline artifact to restore into
+      target/anvil/impact/ before running the group. The group's checks
+      depend on `anvil-impact`, which finds the restored cache fresh and
+      no-ops (a cache hit) rather than recomputing. Leave empty to skip
+      the download; the checks then recompute the impact set in place
+      (cargo-delta is part of every PR-tier group's setup so the
+      recompute fallback works).
     default: ""
     required: false
 runs:
   using: composite
   steps:
+    # Restore the shared impact artifact when one was produced by an
+    # upstream impact job. The download is best-effort: if the artifact
+    # is absent the group's checks recompute the impact set themselves.
+    - name: Download anvil-impact artifact
+      if: inputs.impact_artifact != ''
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.impact_artifact }}
+        path: target/anvil/impact
     - uses: ./.github/actions/anvil-setup
       with:
         group: scheduled-exhaustive
     - name: Run just anvil-scheduled-exhaustive
       shell: bash
       env:
-        ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
-        ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
-        ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # Some checks (e.g. cargo-aprz, run only by groups that include it)
-        # hit the GitHub API; pass the built-in token so they use the
-        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
-        # checks never read it.
+        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
+        # built-in token so it can use the 1000 req/hr authenticated quota.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-scheduled-exhaustive
 
@@ -479,42 +327,37 @@ runs:
 name: anvil-scheduled-runtime-analysis
 description: Run the scheduled-runtime-analysis check group.
 inputs:
-  include_modified:
+  impact_artifact:
     description: |
-      Pre-formatted --package args (e.g. "--package alpha --package beta")
-      for the modified tier, or the sentinel "--skip" when nothing
-      modified. Local invocations leave it unset; recipes default to
-      --workspace.
-    default: ""
-    required: false
-  include_affected:
-    description: |
-      Same shape as include_modified, but for the affected tier
-      (modified ∪ rev-deps).
-    default: ""
-    required: false
-  include_required:
-    description: |
-      Same shape as include_modified, but for the required tier
-      (affected ∪ workspace-internal transitive deps).
+      Name of the `anvil-impact` pipeline artifact to restore into
+      target/anvil/impact/ before running the group. The group's checks
+      depend on `anvil-impact`, which finds the restored cache fresh and
+      no-ops (a cache hit) rather than recomputing. Leave empty to skip
+      the download; the checks then recompute the impact set in place
+      (cargo-delta is part of every PR-tier group's setup so the
+      recompute fallback works).
     default: ""
     required: false
 runs:
   using: composite
   steps:
+    # Restore the shared impact artifact when one was produced by an
+    # upstream impact job. The download is best-effort: if the artifact
+    # is absent the group's checks recompute the impact set themselves.
+    - name: Download anvil-impact artifact
+      if: inputs.impact_artifact != ''
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.impact_artifact }}
+        path: target/anvil/impact
     - uses: ./.github/actions/anvil-setup
       with:
         group: scheduled-runtime-analysis
     - name: Run just anvil-scheduled-runtime-analysis
       shell: bash
       env:
-        ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
-        ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
-        ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # Some checks (e.g. cargo-aprz, run only by groups that include it)
-        # hit the GitHub API; pass the built-in token so they use the
-        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
-        # checks never read it.
+        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
+        # built-in token so it can use the 1000 req/hr authenticated quota.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-scheduled-runtime-analysis
 
@@ -527,42 +370,37 @@ runs:
 name: anvil-scheduled-test
 description: Run the scheduled-test check group.
 inputs:
-  include_modified:
+  impact_artifact:
     description: |
-      Pre-formatted --package args (e.g. "--package alpha --package beta")
-      for the modified tier, or the sentinel "--skip" when nothing
-      modified. Local invocations leave it unset; recipes default to
-      --workspace.
-    default: ""
-    required: false
-  include_affected:
-    description: |
-      Same shape as include_modified, but for the affected tier
-      (modified ∪ rev-deps).
-    default: ""
-    required: false
-  include_required:
-    description: |
-      Same shape as include_modified, but for the required tier
-      (affected ∪ workspace-internal transitive deps).
+      Name of the `anvil-impact` pipeline artifact to restore into
+      target/anvil/impact/ before running the group. The group's checks
+      depend on `anvil-impact`, which finds the restored cache fresh and
+      no-ops (a cache hit) rather than recomputing. Leave empty to skip
+      the download; the checks then recompute the impact set in place
+      (cargo-delta is part of every PR-tier group's setup so the
+      recompute fallback works).
     default: ""
     required: false
 runs:
   using: composite
   steps:
+    # Restore the shared impact artifact when one was produced by an
+    # upstream impact job. The download is best-effort: if the artifact
+    # is absent the group's checks recompute the impact set themselves.
+    - name: Download anvil-impact artifact
+      if: inputs.impact_artifact != ''
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.impact_artifact }}
+        path: target/anvil/impact
     - uses: ./.github/actions/anvil-setup
       with:
         group: scheduled-test
     - name: Run just anvil-scheduled-test
       shell: bash
       env:
-        ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
-        ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
-        ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-        # Some checks (e.g. cargo-aprz, run only by groups that include it)
-        # hit the GitHub API; pass the built-in token so they use the
-        # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
-        # checks never read it.
+        # cargo-aprz hits the GitHub API (unauthenticated = 60 req/hr); pass the
+        # built-in token so it can use the 1000 req/hr authenticated quota.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-scheduled-test
 
@@ -772,6 +610,15 @@ on:
 # matrices were rejected because they added a silent failure mode
 # (mis-formatted inputs produced empty matrices) without meaningfully
 # expanding what adopters could customize.
+#
+# Note on impact scoping: the impact set is computed by the `anvil-impact`
+# just recipe (one source of truth, shared local + CI). The impact jobs
+# below run it and publish `target/anvil/impact/` as a pipeline artifact;
+# each downstream group leg downloads the artifact and the group's checks
+# (which depend on `anvil-impact`) find the cache fresh and no-op rather
+# than recomputing. The artifact share is an optimization, not a
+# correctness gate: a leg without the artifact recomputes the impact set
+# itself (cargo-delta is in every PR-tier group's setup).
 
 jobs:
   # cargo-delta impact runs per OS so that downstream legs consume an
@@ -782,32 +629,30 @@ jobs:
   # the Windows depgraph, so the Windows leg could skip tests that
   # ought to run. We split per-OS-family (not per-arch) -- arch-only
   # cfg gates are rare enough that paying for 4 impact jobs isn't
-  # justified; arm legs reuse their OS counterpart's impact set.
+  # justified; arm legs reuse their OS counterpart's impact artifact.
   impact-linux:
     runs-on: ${{ inputs.linux_runner }}
-    outputs:
-      include_modified: ${{ steps.delta.outputs.include_modified }}
-      include_affected: ${{ steps.delta.outputs.include_affected }}
-      include_required: ${{ steps.delta.outputs.include_required }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - id: delta
-        uses: ./.github/actions/anvil-impact
+      - uses: ./.github/actions/anvil-impact
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anvil-impact-linux
+          path: target/anvil/impact
 
   impact-windows:
     runs-on: ${{ inputs.windows_runner }}
-    outputs:
-      include_modified: ${{ steps.delta.outputs.include_modified }}
-      include_affected: ${{ steps.delta.outputs.include_affected }}
-      include_required: ${{ steps.delta.outputs.include_required }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - id: delta
-        uses: ./.github/actions/anvil-impact
+      - uses: ./.github/actions/anvil-impact
+      - uses: actions/upload-artifact@v4
+        with:
+          name: anvil-impact-windows
+          path: target/anvil/impact
 
   pr-fast:
     # Cross-OS / cross-arch because pr-fast contains compile-sensitive
@@ -823,15 +668,19 @@ jobs:
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
+    env:
+      PR_TITLE: ${{ github.event.pull_request.title }}
     steps:
+      # fetch-depth: 0 so the checks' anvil-impact dependency can resolve
+      # the base ref when validating the downloaded impact cache (a cache
+      # hit still recomputes the cheap cache keys, which needs the base
+      # commit present).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/anvil-pr-fast
         with:
-          include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
-          include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
-          include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
+          impact_artifact: ${{ startsWith(matrix.os, 'linux') && 'anvil-impact-linux' || 'anvil-impact-windows' }}
       # Advisory PR comments. Recipes that surface non-blocking findings
       # (e.g. cargo-semver-checks) write a markdown body to
       # `target/anvil/comments/<name>.md` and exit 0. The steps below
@@ -872,11 +721,11 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/anvil-pr-test
         with:
-          include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
-          include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
-          include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
+          impact_artifact: ${{ startsWith(matrix.os, 'linux') && 'anvil-impact-linux' || 'anvil-impact-windows' }}
       - name: Upload coverage to Codecov
         # Upload from every leg except windows-11-arm. OS/arch-gated
         # code only gets exercised on its native target, so a single-
@@ -888,22 +737,21 @@ jobs:
         # Codecov coalesces multiple uploads against the same commit;
         # the `flags:` tag distinguishes the per-leg slices in the
         # Codecov UI without changing the union total.
-        # lcov-*.info are produced by the anvil-llvm-cov recipe inside
-        # anvil-pr-test (one per feature config); if the affected set was
-        # empty the recipe no-ops and there is no file to upload, so we gate
-        # on the impact output. Codecov coalesces the two per-config files.
-        if: matrix.os != 'windows-arm' && ((startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected != '--skip') || (matrix.os == 'windows' && needs.impact-windows.outputs.include_affected != '--skip'))
+        # lcov.info is produced by the anvil-llvm-cov recipe inside
+        # anvil-pr-test; if the affected set was empty the recipe
+        # no-ops and writes no file, so we gate on the file's presence.
+        if: matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov.info') != ''
         uses: codecov/codecov-action@v5
         with:
-          files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
+          files: target/coverage/lcov.info
           flags: ${{ matrix.os }}
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
   pr-runtime-analysis:
-    # Stricter-runtime correctness: miri + careful.
+    # Stricter-runtime correctness: miri + careful + loom + bolero.
     # 4-leg matrix -- both checks compile per host target and can
-    # surface OS/arch-specific UB. Both are impact-scoped so the
+    # surface OS/arch-specific UB. All are impact-scoped so the
     # wall-clock is proportional to the PR's blast radius.
     needs: [impact-linux, impact-windows]
     strategy:
@@ -916,11 +764,11 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/anvil-pr-runtime-analysis
         with:
-          include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
-          include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
-          include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
+          impact_artifact: ${{ startsWith(matrix.os, 'linux') && 'anvil-impact-linux' || 'anvil-impact-windows' }}
 
   pr-mutants:
     # Mutation testing: cargo mutants (diff-scoped against the PR base).
@@ -937,17 +785,15 @@ jobs:
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
+    env:
+      BASE_REF: ${{ github.event.pull_request.base.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
       - uses: ./.github/actions/anvil-pr-mutants
         with:
-          include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
-          include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
-          include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
-        env:
-          BASE_REF: ${{ github.event.pull_request.base.sha }}
+          impact_artifact: ${{ startsWith(matrix.os, 'linux') && 'anvil-impact-linux' || 'anvil-impact-windows' }}
 
 === .github/workflows/anvil-pr.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -1014,6 +860,13 @@ on:
 
 jobs:
   scheduled-test:
+    # The scheduled tier runs full-workspace: ANVIL_IMPACT=off makes each
+    # check's `anvil-impact` dependency no-op and `_anvil-impact-include`
+    # return each tier's --workspace default, so the deliberately
+    # exhaustive tier never inherits PR-shaped scoping (and never needs
+    # cargo-delta or an impact artifact).
+    env:
+      ANVIL_IMPACT: "off"
     strategy:
       fail-fast: false
       matrix:
@@ -1043,6 +896,8 @@ jobs:
     # Cross-OS / cross-arch because clippy and udeps in this group
     # compile per host, so cfg-gated code must be linted/scanned on
     # every leg.
+    env:
+      ANVIL_IMPACT: "off"
     strategy:
       fail-fast: false
       matrix:
@@ -1066,6 +921,8 @@ jobs:
     # inside the composite action runs them sequentially within a
     # leg, which is the right trade -- the profiles share toolchain
     # setup and target/ cache.
+    env:
+      ANVIL_IMPACT: "off"
     strategy:
       fail-fast: false
       matrix:
@@ -1082,6 +939,8 @@ jobs:
     # x86_64-only by design: this group includes mutants-full (which
     # doesn't build on aarch64-pc-windows-msvc — winapi crate
     # incompatibility) plus cargo-hack feature powerset and bench.
+    env:
+      ANVIL_IMPACT: "off"
     strategy:
       fail-fast: false
       matrix:
@@ -1304,62 +1163,51 @@ unknown-git = "deny"
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # See ../../docs/design/checks.md for the catalog and rationale.
 #
-# Each check belongs to one of four buckets, which determines how it
-# interprets the impact env vars emitted by the cargo-delta impact step
-# in cloud workflows:
+# Each check belongs to one of four tiers, which determines how it
+# scopes its work to the cargo-delta impact set computed by the
+# `anvil-impact` recipe (see impact.just and ../../docs/design/local.md S4):
 #
 #   - "modified": only run when at least one package's source files
 #     changed in the diff. The check's underlying tool is workspace-wide
 #     or directory-scoped (cargo fmt --all, cargo heather, cargo
-#     spellcheck), so it doesn't take --package; we short-circuit on
-#     the ANVIL_INCLUDE_MODIFIED == "--skip" sentinel.
+#     spellcheck), so it doesn't take --package; we short-circuit when
+#     the resolved modified value is the "--skip" sentinel.
 #
 #   - "affected": run on the affected set (modified ∪ reverse-deps
 #     within the workspace). The check's underlying tool takes
-#     --package; we splice ANVIL_INCLUDE_AFFECTED into the cargo
-#     invocation, defaulting to --workspace for local invocations where
-#     no env var is set.
+#     --package; we splice the resolved affected value into the cargo
+#     invocation.
 #
 #   - "required": run on the required set (affected ∪ workspace-internal
-#     transitive deps). Same splice/default pattern as affected, but
-#     keyed on ANVIL_INCLUDE_REQUIRED. Used for checks whose tool
-#     resolves through the dep graph (cargo doc → intra-doc links;
-#     cargo hack → feature powerset; cargo udeps → unused-deps).
+#     transitive deps). Same splice pattern as affected, but resolves
+#     the required tier. Used for checks whose tool resolves through the
+#     dep graph (cargo doc → intra-doc links; cargo hack → feature
+#     powerset; cargo udeps → unused-deps).
 #
-#   - "unscoped": always run, no env var reference. External-input
-#     checks (deny, audit, aprz) and PR-context checks (pr-title) live
-#     here. Scheduled-exhaustive recipes (mutants-full) are also unscoped
-#     by design.
+#   - "unscoped": always run, no impact reference and no `anvil-impact`
+#     dependency. External-input checks (deny, audit, aprz) and
+#     PR-context checks (pr-title) live here. Scheduled-exhaustive
+#     recipes (mutants-full) are also unscoped by design.
 #
-# Local invocation (no impact wiring): all three env vars are unset or
-# empty (recipes fall back to "--workspace" via the truthiness check
-# below); modified-tier recipes simply skip the splice and run their
-# workspace-wide tool; affected/required-tier recipes splat
-# "--workspace" when the env var is empty or unset.
+# Scoped checks gain two things:
+#   1. `anvil-impact` as a dependency, so the impact cache under
+#      target/anvil/impact/ is fresh before the check reads it.
+#   2. `$include = (just _anvil-impact-include <tier>)` at the top of the
+#      body, which resolves the tier's scope to one of:
+#        * ""                          - modified-tier default (run; the
+#                                         tool is workspace-wide)
+#        * "--workspace"               - affected/required default
+#        * "--package A --package B"   - the impact set for this diff
+#        * "--skip"                    - the tier is empty (recipe exits 0)
+#      Resolution honors ANVIL_IMPACT=off (returns the tier default), so
+#      a full-workspace run is `ANVIL_IMPACT=off just anvil-pr`.
 #
-# Preparation contract: when a recipe reaches the cargo call, the
-# env var is one of:
-#
-#   * unset or ""                 - local run, or a cloud workflow (e.g.
-#                                    scheduled) that leaves the tier
-#                                    unscoped; the recipe substitutes
-#                                    "--workspace". An empty string is
-#                                    NOT $null, so we test truthiness
-#                                    rather than `?? "--workspace"`
-#                                    (which would only catch $null and
-#                                    splat an empty arg cargo rejects).
-#   * "--package A --package B"   - emitted by the cloud-workflow impact step when
-#                                    the tier has members
-#   * "--skip"                    - emitted by the cloud-workflow impact step when
-#                                    the tier is empty (recipe exits 0)
-#
-# This lets the simple recipes splat the var directly with
-#   & cargo X @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' }) ...
-# and reduces the per-recipe boilerplate to a single one-line skip
-# guard plus the cargo invocation.
-#
-# Modified-tier recipes never splice the env var into cargo (their
-# tools are workspace-wide); they only check the skip sentinel.
+# Affected/required recipes splat the value directly with
+#   & cargo X @(-split $include) ...
+# and reduce the per-recipe boilerplate to a single one-line skip guard
+# plus the cargo invocation. Modified-tier recipes never splice the
+# value into cargo (their tools are workspace-wide); they only check the
+# skip sentinel.
 #
 # Every recipe whose body uses multi-line conditionals or env-var
 # splicing is annotated with [script("pwsh")]. pwsh is preinstalled on
@@ -1393,9 +1241,10 @@ unknown-git = "deny"
 # format-drift breaking cloud workflows on rustup updates — the same trap we
 # explicitly avoid for udeps/miri/careful/external-types.
 [script("pwsh")]
-anvil-fmt: anvil-fmt-validate-prereqs
+anvil-fmt: anvil-fmt-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    $include = (just _anvil-impact-include modified)
+    if ($include -eq '--skip') { exit 0 }
     cargo '+{{ rust_nightly }}' fmt --all --check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1406,10 +1255,11 @@ anvil-fmt: anvil-fmt-validate-prereqs
 # we want downstream rev-deps to lint as well. cargo-clippy is a
 # rustup component; same reasoning as fmt for the require.
 [script("pwsh")]
-anvil-clippy: anvil-clippy-validate-prereqs
+anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    & cargo clippy @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' }) --all-targets --all-features --locked "--" '-D' 'warnings'
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    & cargo clippy @(-split $include) --all-targets --all-features --locked "--" '-D' 'warnings'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
@@ -1421,33 +1271,37 @@ anvil-clippy: anvil-clippy-validate-prereqs
 # The flag exists in 2.0.2 too (where it is a no-op, since that version
 # already errors on formatting), so it is safe across the supported range.
 [script("pwsh")]
-anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
+anvil-cargo-sort: anvil-cargo-sort-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    $include = (just _anvil-impact-include modified)
+    if ($include -eq '--skip') { exit 0 }
     cargo sort --workspace --check --check-format
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
 [script("pwsh")]
-anvil-license-headers: anvil-license-headers-validate-prereqs
+anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    $include = (just _anvil-impact-include modified)
+    if ($include -eq '--skip') { exit 0 }
     cargo heather
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
 [script("pwsh")]
-anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs
+anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    $include = (just _anvil-impact-include modified)
+    if ($include -eq '--skip') { exit 0 }
     cargo ensure-no-cyclic-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
 [script("pwsh")]
-anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs
+anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    $include = (just _anvil-impact-include modified)
+    if ($include -eq '--skip') { exit 0 }
     cargo ensure-no-default-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1455,11 +1309,12 @@ anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prer
 # graph, so a dep changing its public API can break doc-build in a
 # crate that wasn't itself modified.
 [script("pwsh")]
-anvil-doc-build: anvil-doc-build-validate-prereqs
+anvil-doc-build: anvil-doc-build-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
+    $include = (just _anvil-impact-include required)
+    if ($include -eq '--skip') { exit 0 }
     $env:RUSTDOCFLAGS = '-D warnings'
-    & cargo doc @(if ($env:ANVIL_INCLUDE_REQUIRED) { -split $env:ANVIL_INCLUDE_REQUIRED } else { '--workspace' }) --all-features --no-deps
+    & cargo doc @(-split $include) --all-features --no-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
@@ -1482,12 +1337,13 @@ anvil-doc-build: anvil-doc-build-validate-prereqs
 # (publish=false, [package.metadata.ox-gen-readme] disable), per-crate
 # Push-Location into the crate dir (cargo-doc2readme is CWD-sensitive
 # rather than --manifest-path-driven), and per-crate template-path
-# resolution. The ANVIL_INCLUDE_MODIFIED value would still need to
+# resolution. The resolved modified set would still need to
 # be intersected with the lib-crate set rather than splatted into cargo.
 [script("pwsh")]
-anvil-readme-check: anvil-readme-check-validate-prereqs
+anvil-readme-check: anvil-readme-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {
+    $include = (just _anvil-impact-include modified)
+    if ($include -eq '--skip') {
         Write-Host 'anvil-readme-check: no modified packages; skipping'
         exit 0
     }
@@ -1500,7 +1356,7 @@ anvil-readme-check: anvil-readme-check-validate-prereqs
     }
     # Iterate library crates. Filter by impact set when set, then drop
     # bin-only crates and opt-outs.
-    $pkg = @(if ($env:ANVIL_INCLUDE_MODIFIED) { -split $env:ANVIL_INCLUDE_MODIFIED } else { '--workspace' })
+    $pkg = @(-split $include)
     $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
     $byName = @{}
     foreach ($p in $meta.packages) { $byName[$p.name] = $p }
@@ -1574,9 +1430,10 @@ anvil-readme-check: anvil-readme-check-validate-prereqs
 # absent we emit an empty dictionary (count `0`, no words) rather than
 # leaving the path dangling.
 [script("pwsh")]
-anvil-spellcheck: anvil-spellcheck-validate-prereqs
+anvil-spellcheck: anvil-spellcheck-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {
+    $include = (just _anvil-impact-include modified)
+    if ($include -eq '--skip') {
         Write-Host 'anvil-spellcheck: no modified packages; skipping'
         exit 0
     }
@@ -1657,10 +1514,11 @@ anvil-audit: anvil-audit-validate-prereqs
 # A genuinely-unused dep is caught by both; the two together cover all
 # of {unused dep, unused dev-dep, dep that should be a dev-dep}.
 [script("pwsh")]
-anvil-udeps: anvil-udeps-validate-prereqs
+anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
-    $pkg = @(if ($env:ANVIL_INCLUDE_REQUIRED) { -split $env:ANVIL_INCLUDE_REQUIRED } else { '--workspace' })
+    $include = (just _anvil-impact-include required)
+    if ($include -eq '--skip') { exit 0 }
+    $pkg = @(-split $include)
     # Pass 1: default targets (lib + bins) -- surfaces [dependencies] that
     # are only used by tests/benches/examples (should be dev-deps).
     & cargo '+{{ rust_nightly }}' udeps @pkg --all-features
@@ -1696,20 +1554,21 @@ anvil-udeps: anvil-udeps-validate-prereqs
 # TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
 # skip/splat preamble, this recipe stays multi-step: cargo-metadata
 # filter to library crates (cargo-semver-checks --workspace fails on
-# bin-only workspaces), intersect ANVIL_INCLUDE_AFFECTED with that
+# bin-only workspaces), intersect the affected impact set with that
 # set, then per-crate invocation with selective error tolerance for
 # unpublished crates ("not found in registry") and bin->bin+lib
 # transitions ("no library targets found").
 [script("pwsh")]
-anvil-semver-check: anvil-semver-check-validate-prereqs
+anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    $include = (just _anvil-impact-include affected)
     $commentFile = 'target/anvil/comments/semver.md'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+    if ($include -eq '--skip') {
         Write-Host 'anvil-semver-check: no affected packages; skipping'
         Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
         exit 0
     }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $pkg = @(-split $include)
     # Build the candidate package list. Always iterate per-package over
     # library crates only -- cargo-semver-checks --workspace would fail
     # on workspaces that contain bin-only crates ("no library targets
@@ -1798,16 +1657,17 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
 # skip/splat preamble, this recipe stays multi-step: cargo-check-
 # external-types is per-manifest (no --package/--workspace), so we
 # build a name->manifest map from cargo metadata, filter to lib crates,
-# intersect with ANVIL_INCLUDE_AFFECTED, and call the tool once per
+# intersect with the affected impact set, and call the tool once per
 # crate. Hard-fails on errors (no tolerance, unlike semver-check).
 [script("pwsh")]
-anvil-external-types: anvil-external-types-validate-prereqs
+anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') {
         Write-Host 'anvil-external-types: no affected packages; skipping'
         exit 0
     }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $pkg = @(-split $include)
     # Build pkg-name -> manifest-path map, restricted to library crates.
     $libPkgs = @{}
     $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
@@ -1886,13 +1746,14 @@ anvil-aprz: anvil-aprz-validate-prereqs
 # etc.) wrongly counts against coverage. This matches the repo's own
 # `coverage-measure` recipe, which also runs on nightly.
 [script("pwsh")]
-anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
+anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') {
         Write-Host 'anvil-llvm-cov: no affected packages; skipping'
         exit 0
     }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $pkg = @(-split $include)
     # Drop coverage-opted-out packages from the measured set. A crate that
     # is entirely `#![cfg_attr(coverage_nightly, coverage(off))]` (e.g. a
     # script-only crate) compiles to a test binary with no __llvm_covmap,
@@ -2011,10 +1872,11 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
 # duplication is cheap because doctests are already a small fraction
 # of total compile/test time.
 [script("pwsh")]
-anvil-doc-test: anvil-doc-test-validate-prereqs
+anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    $pkg = @(-split $include)
     & cargo test --doc @pkg --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & cargo test --doc @pkg --locked
@@ -2022,10 +1884,11 @@ anvil-doc-test: anvil-doc-test-validate-prereqs
 
 # Affected tier.
 [script("pwsh")]
-anvil-examples: anvil-examples-validate-prereqs
+anvil-examples: anvil-examples-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    & cargo build @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' }) --examples --all-features --locked
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    & cargo build @(-split $include) --examples --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # === pr-mutants member ====================================================
@@ -2080,13 +1943,14 @@ _anvil-base-ref:
 # is the only sub-recipe that can't follow, so it bails out early on the
 # affected leg. Coverage on the other three legs is unchanged.
 [script("pwsh")]
-anvil-mutants-diff: anvil-mutants-diff-validate-prereqs
+anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    $include = (just _anvil-impact-include affected)
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
         Write-Host 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs aarch64-pc-windows-msvc -- cargo-mutants does not build here (winapi); skipping'
         exit 0
     }
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+    if ($include -eq '--skip') {
         Write-Host 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs no affected packages; skipping'
         exit 0
     }
@@ -2109,14 +1973,16 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs
 
 # === nightly-runtime members ============================================
 
-# Nightly checks always run full-workspace; impact env vars aren't set
-# by the scheduled workflow, so the affected-tier default (--workspace)
-# applies. Skip guards are still included for local diff-scoped runs.
+# Nightly checks run full-workspace under the scheduled tier, which sets
+# ANVIL_IMPACT=off so `_anvil-impact-include` returns the affected-tier
+# default (--workspace). The skip/scope guards still apply for local
+# diff-scoped runs (when ANVIL_IMPACT is left at its default).
 
 [script("pwsh")]
-anvil-miri: anvil-miri-validate-prereqs
+anvil-miri: anvil-miri-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
     # `--no-tests=pass`: miri-only exception. Tests that touch the
     # filesystem, spawn subprocesses, or use other miri-incompatible
     # APIs commonly carry `#[cfg_attr(miri, ignore)]` (this is the
@@ -2127,7 +1993,7 @@ anvil-miri: anvil-miri-validate-prereqs
     # empty test runs as success for miri only. Other nextest-using
     # recipes (llvm-cov) keep exit-4 as a failure because zero tests
     # there almost always indicates a config mistake.
-    & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @(-split $include)
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Stricter miri profiles. Each runs miri over the full workspace
@@ -2138,25 +2004,27 @@ anvil-miri: anvil-miri-validate-prereqs
 # The cfg names are declared in the workspace check-cfg list
 # (regions/cargo-lints-body.toml) so non-miri builds don't warn.
 #
-# These profiles always run full-workspace (scheduled-runtime-analysis
-# does not set ANVIL_INCLUDE_AFFECTED); the --skip / affected guards
-# below only apply if an adopter invokes them locally with the env
-# vars set.
+# These profiles run full-workspace under scheduled-runtime-analysis,
+# which sets ANVIL_IMPACT=off (so `_anvil-impact-include` returns
+# --workspace); the --skip / scope guards below only narrow the run if
+# an adopter invokes them locally with impact scoping left enabled.
 [script("pwsh")]
-anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs
+anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    $pkg = @(-split $include)
     $env:MIRIFLAGS = "-Zmiri-tree-borrows $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_tree_borrows $($env:RUSTFLAGS)".Trim()
     & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 [script("pwsh")]
-anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs
+anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    $pkg = @(-split $include)
     $env:MIRIFLAGS = "-Zmiri-strict-provenance $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_strict_provenance $($env:RUSTFLAGS)".Trim()
     & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @pkg
@@ -2169,10 +2037,11 @@ anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs
 # conditions surface as inter-seed nondeterminism rather than
 # per-seed crashes, so coverage matters more than depth-per-seed.
 [script("pwsh")]
-anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs
+anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    $pkg = @(-split $include)
     $day = (Get-Date).Day
     $low = (2 * $day) - 1
     $high = (2 * $day) + 1
@@ -2183,10 +2052,11 @@ anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 [script("pwsh")]
-anvil-careful: anvil-careful-validate-prereqs
+anvil-careful: anvil-careful-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    & cargo '+{{ rust_nightly }}' careful test @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' }) --all-features --locked
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    & cargo '+{{ rust_nightly }}' careful test @(-split $include) --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier. `loom` is a permutation-based concurrency model
@@ -2229,19 +2099,22 @@ anvil-careful: anvil-careful-validate-prereqs
 # $env: rather than --config so it propagates to cargo's child rustc
 # invocations cleanly on both pwsh/bash.
 [script("pwsh")]
-anvil-loom: anvil-loom-validate-prereqs
+anvil-loom: anvil-loom-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') {
         Write-Host 'anvil-loom: no affected packages; skipping'
         exit 0
     }
     $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    # Optional impact-scoping: restrict to the affected package set.
+    # Optional impact-scoping: restrict to the affected package set. `$include`
+    # is "--workspace" (no filter) or "--package A --package B ..."; extract the
+    # bare package names, treating --workspace as "all packages".
     $affected = $null
-    if ($env:ANVIL_INCLUDE_AFFECTED) {
-        $affected = @((-split $env:ANVIL_INCLUDE_AFFECTED) -replace '^-p$', '' | Where-Object { $_ })
+    if ($include -and $include -ne '--workspace') {
+        $affected = @((-split $include) | Where-Object { $_ -and ($_ -notlike '--*') -and ($_ -ne '-p') })
     }
     $pkgs = $meta.packages
     if ($null -ne $affected) {
@@ -2304,17 +2177,18 @@ anvil-loom: anvil-loom-validate-prereqs
 # not ship a long-form fuzz tier (the failure surface is too
 # repo-specific to standardize).
 [script("pwsh")]
-anvil-bolero: anvil-bolero-validate-prereqs
+anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    $include = (just _anvil-impact-include affected)
     if (-not $IsLinux) {
         Write-Host 'anvil-bolero: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only; harnesses still run under anvil-llvm-cov)'
         exit 0
     }
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+    if ($include -eq '--skip') {
         Write-Host 'anvil-bolero: no affected packages; skipping'
         exit 0
     }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $pkg = @(-split $include)
     # `cargo bolero list` emits one JSON object per target on stdout;
     # we want the set of (package, test) pairs over the affected set.
     $targetsJson = & cargo bolero list @pkg 2>$null
@@ -2349,18 +2223,20 @@ anvil-mutants-full: anvil-mutants-full-validate-prereqs
 # features, so the required set (workspace-internal transitive deps)
 # is the right scope.
 [script("pwsh")]
-anvil-cargo-hack: anvil-cargo-hack-validate-prereqs
+anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
-    & cargo hack @(if ($env:ANVIL_INCLUDE_REQUIRED) { -split $env:ANVIL_INCLUDE_REQUIRED } else { '--workspace' }) --feature-powerset --depth 2 check
+    $include = (just _anvil-impact-include required)
+    if ($include -eq '--skip') { exit 0 }
+    & cargo hack @(-split $include) --feature-powerset --depth 2 check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier.
 [script("pwsh")]
-anvil-bench: anvil-bench-validate-prereqs
+anvil-bench: anvil-bench-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    & cargo bench @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' }) --all-features --no-run
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    & cargo bench @(-split $include) --all-features --no-run
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # ============================================================================
@@ -2703,6 +2579,7 @@ anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
 
 [group("anvil-setup")]
 anvil-pr-fast-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-fmt-setup installer) \
     (anvil-clippy-setup installer) \
     (anvil-cargo-sort-setup installer) \
@@ -2722,6 +2599,7 @@ anvil-pr-fast-setup installer="install": \
 
 [group("anvil-setup")]
 anvil-pr-fast-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-fmt-validate-prereqs \
     anvil-clippy-validate-prereqs \
     anvil-cargo-sort-validate-prereqs \
@@ -2753,18 +2631,21 @@ anvil-pr-slow-validate-prereqs: \
 
 [group("anvil-setup")]
 anvil-pr-test-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
     (anvil-examples-setup installer)
 
 [group("anvil-setup")]
 anvil-pr-test-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \
     anvil-doc-test-validate-prereqs \
     anvil-examples-validate-prereqs
 
 [group("anvil-setup")]
 anvil-pr-runtime-analysis-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-miri-setup installer) \
     (anvil-careful-setup installer) \
     (anvil-loom-setup installer) \
@@ -2772,16 +2653,17 @@ anvil-pr-runtime-analysis-setup installer="install": \
 
 [group("anvil-setup")]
 anvil-pr-runtime-analysis-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-miri-validate-prereqs \
     anvil-careful-validate-prereqs \
     anvil-loom-validate-prereqs \
     anvil-bolero-validate-prereqs
 
 [group("anvil-setup")]
-anvil-pr-mutants-setup installer="install": (anvil-mutants-diff-setup installer)
+anvil-pr-mutants-setup installer="install": (anvil-tool-cargo-delta-install installer) (anvil-mutants-diff-setup installer)
 
 [group("anvil-setup")]
-anvil-pr-mutants-validate-prereqs: anvil-mutants-diff-validate-prereqs
+anvil-pr-mutants-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs anvil-mutants-diff-validate-prereqs
 
 [group("anvil-setup")]
 anvil-scheduled-test-setup installer="install": \
@@ -2835,6 +2717,234 @@ anvil-scheduled-exhaustive-validate-prereqs: \
     anvil-cargo-hack-validate-prereqs \
     anvil-bench-validate-prereqs
 
+=== justfiles/anvil/impact.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Owned by cargo-anvil; edit via `cargo anvil`.
+# See ../../docs/design/local.md S4 (Impact scoping) for the full design.
+#
+# Impact analysis lives in one place: the `anvil-impact` recipe. It runs
+# cargo-delta against the working tree vs. the base ref and writes durable
+# artifacts under target/anvil/impact/ that the per-crate check recipes
+# consume via `_anvil-impact-include`. The same recipe runs locally and in
+# cloud workflows; cloud workflows just share the artifacts between jobs.
+#
+# Escape hatch: set ANVIL_IMPACT=off in the environment that invokes `just`
+# to disable scoping entirely (no git, no snapshot, no cargo-delta). Because
+# `just` runs dependencies in that same environment, the guard is honored
+# even when these recipes run as a `: anvil-impact` dependency of a check.
+# This is how the scheduled tier stays full-workspace.
+
+# Private. Produces the two cargo-delta snapshots under
+# target/anvil/impact/snapshots/ with two independent cache keys:
+#   * baseline.json  -- snapshot of the base ref. EXPENSIVE (needs a throwaway
+#     git worktree). Keyed solely on the base commit sha (baseline.sha), so the
+#     worktree is only recreated when the base actually moves.
+#   * current.json   -- snapshot of the working tree. Cheap. Keyed on
+#     <HEAD sha + working-tree-diff hash> (current.state).
+[script("pwsh")]
+_anvil-impact-snapshot:
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_IMPACT -eq 'off') { exit 0 }
+
+    # cargo-delta is validated here (after the off-guard) rather than as a
+    # `just` dependency so that an ANVIL_IMPACT=off run -- e.g. the scheduled
+    # tier, whose jobs never install cargo-delta -- can fire `anvil-impact`
+    # as a check dependency and cleanly no-op without the tool present.
+    just anvil-tool-cargo-delta-validate-prereqs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    # --- Resolve + normalize the base ref (never fetch on the user's behalf). ---
+    function Normalize-Base([string]$ref) {
+        if (-not $ref) { return $null }
+        if ($ref -match '^refs/heads/(.+)$') { return "origin/$($Matches[1])" }
+        if ($ref -notmatch '/') { return "origin/$ref" }
+        return $ref
+    }
+    $base = Normalize-Base $env:BASE_REF
+    if (-not $base) { $base = Normalize-Base $env:GITHUB_BASE_REF }
+    if (-not $base) { $base = Normalize-Base $env:SYSTEM_PULLREQUEST_TARGETBRANCH }
+    if (-not $base) {
+        foreach ($candidate in @('origin/main', 'origin/master')) {
+            git rev-parse --verify "$candidate^{commit}" 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) { $base = $candidate; break }
+        }
+    }
+    if (-not $base) {
+        Write-Error 'anvil-impact: could not resolve a base ref (tried BASE_REF, PR target branch, origin/main, origin/master).'
+        exit 1
+    }
+
+    # Base ref must be present locally. We deliberately do NOT `git fetch` --
+    # mutating git state as a side effect of a build check is surprising and
+    # can race the user's own git operations.
+    git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        $branch = ($base -replace '^origin/', '')
+        Write-Error "anvil-impact: base ref '$base' not found locally. Run ``git fetch origin $branch`` and retry."
+        exit 1
+    }
+    if ((git rev-parse --is-shallow-repository) -eq 'true') {
+        Write-Error 'anvil-impact: shallow clone detected; cargo-delta needs full history for the base ref. Run ``git fetch --unshallow`` and retry.'
+        exit 1
+    }
+    $baseSha = (git rev-parse $base).Trim()
+
+    $impactDir = 'target/anvil/impact'
+    $snapDir = Join-Path $impactDir 'snapshots'
+    [System.IO.Directory]::CreateDirectory($snapDir) | Out-Null
+    $baselineJson = Join-Path $snapDir 'baseline.json'
+    $baselineShaFile = Join-Path $snapDir 'baseline.sha'
+    $currentJson = Join-Path $snapDir 'current.json'
+    $currentStateFile = Join-Path $snapDir 'current.state'
+
+    # --- Baseline snapshot: only when the base sha changed. ---
+    $haveBaseline = (Test-Path $baselineJson) -and (Test-Path $baselineShaFile) -and `
+        ((Get-Content -Raw $baselineShaFile).Trim() -eq $baseSha)
+    if ($haveBaseline) {
+        Write-Host "anvil-impact: baseline snapshot up to date (base $baseSha)"
+    } else {
+        Write-Host "anvil-impact: snapshotting baseline at $base ($baseSha)"
+        $tmpRoot = $env:RUNNER_TEMP
+        if (-not $tmpRoot) { $tmpRoot = $env:AGENT_TEMPDIRECTORY }
+        if (-not $tmpRoot) { $tmpRoot = [System.IO.Path]::GetTempPath() }
+        $wt = Join-Path $tmpRoot "anvil-baseline-$PID"
+        if (Test-Path $wt) { git worktree remove --force $wt 2>$null | Out-Null }
+        # GIT_LFS_SKIP_SMUDGE=1: the worktree inherits the repo config but not
+        # the credential helper, so LFS smudge would fail. cargo-delta only
+        # needs file content hashes; LFS pointer files hash consistently.
+        $env:GIT_LFS_SKIP_SMUDGE = '1'
+        git worktree add --detach $wt $baseSha 2>&1 | Select-Object -Last 1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Error "anvil-impact: failed to create baseline worktree at $wt"; exit 1 }
+        try {
+            Push-Location $wt
+            try {
+                $baseSnap = cargo delta snapshot
+                if ($LASTEXITCODE -ne 0) { throw 'cargo delta snapshot (baseline) failed' }
+            } finally {
+                Pop-Location
+            }
+        } finally {
+            git worktree remove --force $wt 2>$null | Out-Null
+        }
+        Set-Content -LiteralPath $baselineJson -Value $baseSnap -Encoding UTF8
+        Set-Content -LiteralPath $baselineShaFile -Value $baseSha -Encoding UTF8 -NoNewline
+    }
+
+    # --- Current snapshot: only when the working tree changed. ---
+    $headSha = (git rev-parse HEAD).Trim()
+    $diffText = (git diff HEAD) + "`n" + (git status --porcelain) | Out-String
+    $diffHash = [System.BitConverter]::ToString(
+        [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($diffText))
+    ).Replace('-', '')
+    $currentState = "$headSha $diffHash"
+    $haveCurrent = (Test-Path $currentJson) -and (Test-Path $currentStateFile) -and `
+        ((Get-Content -Raw $currentStateFile).Trim() -eq $currentState)
+    if ($haveCurrent) {
+        Write-Host 'anvil-impact: current snapshot up to date'
+    } else {
+        Write-Host 'anvil-impact: snapshotting working tree'
+        $curSnap = cargo delta snapshot
+        if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-impact: cargo delta snapshot (current) failed'; exit 1 }
+        Set-Content -LiteralPath $currentJson -Value $curSnap -Encoding UTF8
+        Set-Content -LiteralPath $currentStateFile -Value $currentState -Encoding UTF8 -NoNewline
+    }
+
+# Public. Computes the impact set from the two snapshots and projects each
+# tier into a pre-built `--package X --package Y` string (or the sentinel
+# `--skip` when the tier is empty), written to include_<tier>.txt. Per-crate
+# checks depend on this recipe and read those files via _anvil-impact-include.
+# Cache-aware: no-ops when the snapshots haven't changed.
+[group("anvil")]
+[script("pwsh")]
+anvil-impact: _anvil-impact-snapshot
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_IMPACT -eq 'off') { exit 0 }
+
+    $impactDir = 'target/anvil/impact'
+    $snapDir = Join-Path $impactDir 'snapshots'
+    $baselineJson = Join-Path $snapDir 'baseline.json'
+    $currentJson = Join-Path $snapDir 'current.json'
+    $baselineShaFile = Join-Path $snapDir 'baseline.sha'
+    $currentStateFile = Join-Path $snapDir 'current.state'
+    $impactJson = Join-Path $impactDir 'impact.json'
+    $impactStateFile = Join-Path $impactDir 'impact.state'
+
+    # Content cache key: regenerate the projection only when a snapshot moved
+    # or an output is missing. Keyed on the snapshot markers, not mtimes, so a
+    # downstream cloud-workflow job that downloaded the artifact recognizes it.
+    $wantState = ((Get-Content -Raw $baselineShaFile).Trim()) + ' ' + ((Get-Content -Raw $currentStateFile).Trim())
+    $includeFiles = @('modified', 'affected', 'required') | ForEach-Object { Join-Path $impactDir "include_$_.txt" }
+    $fresh = (Test-Path $impactJson) -and (Test-Path $impactStateFile) -and `
+        ((Get-Content -Raw $impactStateFile).Trim() -eq $wantState) -and `
+        (@($includeFiles | Where-Object { -not (Test-Path $_) }).Count -eq 0)
+    if ($fresh) {
+        Write-Host 'anvil-impact: impact set up to date (cache hit)'
+        exit 0
+    }
+
+    # Full impact JSON -- the durable source of truth. cargo-delta prints
+    # nothing when no files changed between baseline and current (it
+    # "quits" early), so default to an empty object so impact.json always
+    # exists -- the freshness check above keys on its presence, and a
+    # missing file would force a recompute on every invocation.
+    $impactOut = (cargo delta impact --baseline $baselineJson --current $currentJson | Out-String)
+    if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-impact: cargo delta impact failed'; exit 1 }
+    if ([string]::IsNullOrWhiteSpace($impactOut)) { $impactOut = '{}' }
+    Set-Content -LiteralPath $impactJson -Value $impactOut.Trim() -Encoding UTF8
+
+    # Build a name -> package-name map from cargo metadata. cargo-delta
+    # emits *library* names (snake_case, e.g. cargo_ensure_no_cyclic_deps),
+    # but cargo --package wants the *package* name (which may be hyphenated,
+    # e.g. cargo-ensure-no-cyclic-deps). Map both the package name (identity)
+    # and each target's lib name to the package name; names that match
+    # neither are dropped with a warning (defensive; rare).
+    $pkgMap = @{}
+    $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+    foreach ($p in $meta.packages) {
+        $pkgMap[$p.name] = $p.name
+        foreach ($t in $p.targets) {
+            if ($t.kind -contains 'lib') { $pkgMap[$t.name] = $p.name }
+        }
+    }
+
+    foreach ($tier in @('modified', 'affected', 'required')) {
+        $names = cargo delta impact --baseline $baselineJson --current $currentJson -f names "--$tier" 2>$null
+        $pkgs = @($names | Where-Object { $_ -and $_.Trim() } | ForEach-Object { $_.Trim() })
+        $args = @()
+        $seen = @{}
+        foreach ($pkg in $pkgs) {
+            $mapped = $pkgMap[$pkg]
+            if ($mapped) {
+                if (-not $seen[$mapped]) { $args += @('--package', $mapped); $seen[$mapped] = $true }
+            } else {
+                Write-Host "anvil-impact: dropping unknown package '$pkg' from $tier set" -ForegroundColor Yellow
+            }
+        }
+        $value = if ($args.Count -eq 0) { '--skip' } else { $args -join ' ' }
+        Set-Content -LiteralPath (Join-Path $impactDir "include_$tier.txt") -Value $value -Encoding UTF8 -NoNewline
+        Write-Host "anvil-impact: $tier -> $value"
+    }
+    Set-Content -LiteralPath $impactStateFile -Value $wantState -Encoding UTF8 -NoNewline
+
+# Private. Resolves a tier's scope for a check recipe and echoes it on stdout.
+#   1. ANVIL_IMPACT=off            -> tier default (full-workspace / run).
+#   2. include_<tier>.txt present  -> its contents (a --package list or --skip).
+#   3. otherwise                   -> tier default.
+# Tier default: --workspace for affected/required; empty (run) for modified.
+[script("pwsh")]
+_anvil-impact-include tier:
+    $ErrorActionPreference = 'Stop'
+    $tier = '{{ tier }}'
+    $default = if ($tier -eq 'modified') { '' } else { '--workspace' }
+    if ($env:ANVIL_IMPACT -eq 'off') { Write-Output $default; exit 0 }
+    $file = "target/anvil/impact/include_$tier.txt"
+    if (Test-Path $file) {
+        Write-Output ((Get-Content -Raw $file).Trim())
+    } else {
+        Write-Output $default
+    }
+
 === justfiles/anvil/mod.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
@@ -2873,6 +2983,7 @@ anvil-scheduled-exhaustive-validate-prereqs: \
 
 import 'checks.just'
 import 'groups.just'
+import 'impact.just'
 import 'tiers.just'
 import 'tools.just'
 import 'versions.just'
@@ -2898,18 +3009,42 @@ anvil-pr: anvil-pr-validate-prereqs \
 # without a commit (advisories, flakes) + the truly expensive
 # exhaustive checks that don't fit in a PR budget. Runs on a schedule
 # against `main`, not on PRs.
+#
+# The scheduled tier is deliberately NOT impact-scoped: it is the
+# catch-all that backstops PR-tier scoping. Because every check now
+# depends on `anvil-impact` and resolves its scope from the cache, the
+# tier sets ANVIL_IMPACT=off so `_anvil-impact-include` returns each
+# tier's full-workspace default and the `anvil-impact` dependency
+# no-ops. A dependency-only recipe can't set env for its own deps (deps
+# run before the body), so this is a thin two-stage wrapper: the body
+# exports the var and re-invokes `just` on the private impl recipe,
+# whose deps then inherit ANVIL_IMPACT=off.
 [group("anvil")]
-anvil-scheduled: anvil-scheduled-validate-prereqs \
+[script("pwsh")]
+anvil-scheduled:
+    $env:ANVIL_IMPACT = 'off'
+    just _anvil-scheduled-impl
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+_anvil-scheduled-impl: anvil-scheduled-validate-prereqs \
     anvil-scheduled-test \
     anvil-scheduled-advisories \
     anvil-scheduled-runtime-analysis \
     anvil-scheduled-exhaustive
 
 # Full tier: PR + scheduled, end-to-end. Useful before tagging a release.
+# Runs everything full-workspace (ANVIL_IMPACT=off), same wrapper shape
+# as anvil-scheduled.
 [group("anvil")]
-anvil-full: anvil-full-validate-prereqs \
+[script("pwsh")]
+anvil-full:
+    $env:ANVIL_IMPACT = 'off'
+    just _anvil-full-impl
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+_anvil-full-impl: anvil-full-validate-prereqs \
     anvil-pr \
-    anvil-scheduled
+    _anvil-scheduled-impl
 
 # Tier-level + global setup + validate-prereqs
 # ===========================================================================

@@ -113,6 +113,7 @@ anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
 
 [group("anvil-setup")]
 anvil-pr-fast-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-fmt-setup installer) \
     (anvil-clippy-setup installer) \
     (anvil-cargo-sort-setup installer) \
@@ -132,6 +133,7 @@ anvil-pr-fast-setup installer="install": \
 
 [group("anvil-setup")]
 anvil-pr-fast-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-fmt-validate-prereqs \
     anvil-clippy-validate-prereqs \
     anvil-cargo-sort-validate-prereqs \
@@ -163,18 +165,21 @@ anvil-pr-slow-validate-prereqs: \
 
 [group("anvil-setup")]
 anvil-pr-test-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
     (anvil-examples-setup installer)
 
 [group("anvil-setup")]
 anvil-pr-test-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \
     anvil-doc-test-validate-prereqs \
     anvil-examples-validate-prereqs
 
 [group("anvil-setup")]
 anvil-pr-runtime-analysis-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-miri-setup installer) \
     (anvil-careful-setup installer) \
     (anvil-loom-setup installer) \
@@ -182,16 +187,17 @@ anvil-pr-runtime-analysis-setup installer="install": \
 
 [group("anvil-setup")]
 anvil-pr-runtime-analysis-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-miri-validate-prereqs \
     anvil-careful-validate-prereqs \
     anvil-loom-validate-prereqs \
     anvil-bolero-validate-prereqs
 
 [group("anvil-setup")]
-anvil-pr-mutants-setup installer="install": (anvil-mutants-diff-setup installer)
+anvil-pr-mutants-setup installer="install": (anvil-tool-cargo-delta-install installer) (anvil-mutants-diff-setup installer)
 
 [group("anvil-setup")]
-anvil-pr-mutants-validate-prereqs: anvil-mutants-diff-validate-prereqs
+anvil-pr-mutants-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs anvil-mutants-diff-validate-prereqs
 
 [group("anvil-setup")]
 anvil-scheduled-test-setup installer="install": \
