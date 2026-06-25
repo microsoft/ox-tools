@@ -355,9 +355,10 @@ fn push_region_at(
 }
 
 /// Scan the previous manifest for entries that the active plan items
-/// don't cover. For each, classify as Remove (user untouched since the
-/// last render) or `OrphanedKept` (user customized — preserve and
-/// transfer ownership).
+/// don't cover. For each, classify as `Remove` (user untouched since the
+/// last render, or the file is already gone — the manifest entry is
+/// purged and the disk delete is a no-op when absent) or `OrphanedKept`
+/// (user customized — preserve and transfer ownership).
 ///
 /// This is what removes orphaned cloud-workflow artifacts, dropped catalog entries,
 /// disabled-backend files, and any other previously-tracked item that
@@ -387,11 +388,16 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan, hosts: 
         let disk = read_file_if_present(&repo_root.join(path))?;
         let disk_checksum = disk.as_deref().map(checksum_str);
         match decide_removal(last, disk_checksum.as_deref()) {
-            RemovalDecision::Remove => plan.push(PlanItem::remove_file(path.clone())),
-            // `AlreadyGone` means the file is already missing but we still
-            // want to purge the manifest entry, same as a customized orphan
-            // — both surface as no-op plan items that drop the entry.
-            RemovalDecision::OrphanedKept | RemovalDecision::AlreadyGone => {
+            // A file still matching its last render is safe to delete; an
+            // `AlreadyGone` file is removed too -- there is nothing on disk,
+            // so `remove_file`'s NotFound-idempotent apply is a no-op, while
+            // the summary accurately reports a removal (purging the stale
+            // manifest entry) instead of a misleading "customized orphan"
+            // transfer.
+            RemovalDecision::Remove | RemovalDecision::AlreadyGone => plan.push(PlanItem::remove_file(path.clone())),
+            // User customized the file since the last render: leave it in
+            // place and drop the manifest entry to transfer ownership.
+            RemovalDecision::OrphanedKept => {
                 plan.push(PlanItem::orphaned_kept(Target::File { path: path.clone() }));
             }
         }
@@ -1047,6 +1053,61 @@ mod tests {
             fs::read_to_string(&github_workflow).unwrap(),
             "# user edited this\n",
             "customized orphan contents must be preserved"
+        );
+    }
+
+    /// A previously-tracked owned file that is already missing on disk must
+    /// surface as `Remove` (purging the stale manifest entry), not as a
+    /// "customized orphan" transfer -- there is no content to keep. The
+    /// apply stays a disk no-op because `remove_file` absorbs `NotFound`.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn already_gone_orphan_file_surfaces_as_remove() {
+        use crate::decision::Decision;
+
+        let tmp = empty_workspace();
+        let with_gh = Cli {
+            backends: vec!["github".to_owned()],
+            no_backends: false,
+            dry_run: false,
+            force: false,
+        };
+        let _ = run_update(&Catalog::anvil(), &with_gh, tmp.path()).unwrap();
+
+        // Delete a tracked owned file so it is "already gone" on the next
+        // run while still present in the manifest.
+        let github_workflow = tmp.path().join(".github/workflows/anvil-pr.yml");
+        fs::remove_file(&github_workflow).unwrap();
+
+        let no_be = Cli {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+            force: false,
+        };
+        let second = run_update(&Catalog::anvil(), &no_be, tmp.path()).unwrap();
+
+        let classify = |decision: Decision| -> Vec<String> {
+            second
+                .plan
+                .items()
+                .iter()
+                .filter(|i| i.decision == decision)
+                .filter_map(|i| match &i.target {
+                    crate::plan::Target::File { path } => Some(path.clone()),
+                    crate::plan::Target::Region { .. } => None,
+                })
+                .collect()
+        };
+        let removed = classify(Decision::Remove);
+        let kept = classify(Decision::OrphanedKept);
+        assert!(
+            removed.iter().any(|p| p == ".github/workflows/anvil-pr.yml"),
+            "already-gone orphan must surface as Remove; got removed={removed:?}"
+        );
+        assert!(
+            !kept.iter().any(|p| p == ".github/workflows/anvil-pr.yml"),
+            "already-gone orphan must NOT be reported as a customized-orphan transfer; got kept={kept:?}"
         );
     }
 
