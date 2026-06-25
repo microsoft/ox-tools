@@ -46,10 +46,12 @@ if ($crateName -match "-") {
 }
 
 $crateDescription = Read-Host -Prompt "Enter the crate description"
-$crateKeywords = Read-Host -Prompt "Enter comma-separated crate keywords (max 5, see https://crates.io/keywords for inspiration)"
+$crateKeywords = Read-Host -Prompt "Enter comma-separated crate keywords (max 4; 'oxidizer' is always added automatically for 5 total, see https://crates.io/keywords for inspiration)"
 $keywordsList = $crateKeywords.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
-if ($keywordsList.Count -gt 5) {
-    Write-Error "Too many keywords. crates.io allows a maximum of 5 keywords, but $($keywordsList.Count) were provided."
+# The template always prepends the fixed "oxidizer" keyword, so the user
+# may supply at most 4 to stay within crates.io's max of 5 total.
+if ($keywordsList.Count -gt 4) {
+    Write-Error "Too many keywords. crates.io allows a maximum of 5 keywords and 'oxidizer' is always added, so provide at most 4, but $($keywordsList.Count) were provided."
     exit 1
 }
 

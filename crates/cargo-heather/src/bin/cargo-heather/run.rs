@@ -61,7 +61,7 @@ fn run_check(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> R
         };
         checked += 1;
         let result = cargo_heather::check(content.as_bytes(), &config.header_text, kind)
-            .expect("check reads from an in-memory slice and never performs fallible IO");
+            .expect("`content` is a String (valid UTF-8) read into memory by read_and_classify, so check's only fallible paths -- reader IO and UTF-8 decoding -- cannot fail on this in-memory slice");
         let relative = make_relative(path, project_dir);
         match &result {
             CheckResult::Ok => {}
@@ -96,7 +96,7 @@ fn run_fix(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> Res
         };
         let mut output: Vec<u8> = Vec::with_capacity(content.len() + 128);
         let result = cargo_heather::fix(content.as_bytes(), &mut output, &config.header_text, kind)
-            .expect("fix reads from an in-memory slice and writes to a Vec, both infallible");
+            .expect("`content` is a String (valid UTF-8) read into memory and `output` is a Vec, so fix's fallible paths -- reader IO/UTF-8 decoding and writer IO -- cannot fail here");
         let relative = make_relative(path, project_dir);
         match &result {
             CheckResult::Ok => {}
