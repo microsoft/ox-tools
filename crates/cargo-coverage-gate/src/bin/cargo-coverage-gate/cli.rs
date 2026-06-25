@@ -25,12 +25,15 @@ pub(crate) enum CargoCli {
 #[derive(Args, Debug, Clone)]
 #[command(version, about = "Gate pull requests on per-package line coverage")]
 pub(crate) struct CoverageGateArgs {
-    /// Path to the cargo-llvm-cov lcov tracefile.
+    /// Path(s) to the cargo-llvm-cov lcov tracefile(s).
     ///
-    /// Defaults to `target/coverage/lcov.info`, matching the recommended
+    /// May be repeated (`--lcov a.info --lcov b.info`); the tracefiles are
+    /// merged at the line level before gating, so multiple feature-config
+    /// exports can be evaluated together. Defaults to a single
+    /// `target/coverage/lcov.info` when omitted, matching the recommended
     /// `cargo llvm-cov report --lcov --output-path` invocation.
     #[arg(long = "lcov", value_name = "PATH")]
-    pub(crate) lcov: Option<PathBuf>,
+    pub(crate) lcov: Vec<PathBuf>,
 
     /// Restrict the operation to one or more package selectors.
     ///

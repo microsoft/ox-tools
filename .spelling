@@ -432,3 +432,5 @@ clobbering
 prereq
 aggregators
 filesystems
+lcovs
+tracefiles

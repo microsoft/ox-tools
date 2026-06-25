@@ -92,12 +92,12 @@ want to reproduce the gate locally.
 ### 5.2 CLI surface
 
 ```text
-cargo coverage-gate  [--lcov <path>] [-p <spec>]... [--package <spec>]...
+cargo coverage-gate  [--lcov <path>]... [-p <spec>]... [--package <spec>]...
                      [--summary-file <path>] [--quiet]
 ```
 
-A single command — no subcommands. The tool reads the cargo-llvm-cov
-lcov tracefile, resolves the effective per-package threshold (per-package metadata,
+A single command — no subcommands. The tool reads one or more cargo-llvm-cov
+lcov tracefiles (merging them at the line level), resolves the effective per-package threshold (per-package metadata,
 then workspace default, then the built-in default of `100.0`), computes
 per-package percentages, and emits a verdict table. Exit `0` if every
 in-scope package meets its threshold; exit `1` if any in-scope package
@@ -105,9 +105,15 @@ fails; exit `2` on configuration error.
 
 Flags:
 
-- `--lcov <path>` — path to the cargo-llvm-cov lcov tracefile. Defaults to
-  `target/coverage/lcov.info` (matching the recommended
-  `cargo llvm-cov report --lcov --output-path <path>` invocation).
+- `--lcov <path>` — path to a cargo-llvm-cov lcov tracefile. May be
+  repeated (`--lcov a.info --lcov b.info`); the tracefiles are merged at
+  the line level (per-line counts summed, line sets combined) before
+  gating, so multiple feature-config exports (`--all-features`,
+  `--no-default-features`) can be gated together without a separate,
+  platform-specific merge step (`lcov -a` is Linux-only). Defaults to a
+  single `target/coverage/lcov.info` when omitted (matching the
+  recommended `cargo llvm-cov report --lcov --output-path <path>`
+  invocation).
 - `-p` / `--package <spec>` — restrict the operation to one or more
   package selectors. Accepts the same idiom as `cargo build`: repeat
   the flag (`-p foo -p bar`) and/or use Unix shell glob patterns
@@ -228,6 +234,22 @@ For each `SF:` section the tool counts:
 Records other than `SF:` / `DA:` / `LF:` / `LH:` (function `FN:`,
 branch `BRDA:`, etc.) are accepted by the parser but not used; the
 gate is a line-coverage tool.
+
+#### Multiple tracefiles
+
+`--lcov` may be supplied more than once. The tool parses each tracefile
+and merges them at the line level **before** computing per-package
+aggregates: per-line hit counts are summed and the `DA:` line set is the
+union across inputs, so a line is `covered` if it was hit in *any* input.
+This is exactly the merge `cargo-llvm-cov` performs internally on its
+`.profraw` set, so passing the `--all-features` and
+`--no-default-features` exports here yields the same per-package line
+coverage as a single merged report. The motivation is to avoid a separate
+merge step in the producing recipe: `cargo-llvm-cov`'s union *report*
+step shells one `--object=` per test binary and overflows the Windows
+`CreateProcess` command-line limit on large workspaces, while the
+Linux-only `lcov -a` merger is not portable. Letting the gate consume the
+two per-config exports directly sidesteps both.
 
 #### Why lcov, not the JSON
 

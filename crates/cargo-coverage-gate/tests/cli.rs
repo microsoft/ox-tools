@@ -150,6 +150,40 @@ fn one_crate_below_threshold_exits_1() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
+fn multiple_lcov_files_merge_at_line_level() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(tmp.path(), &[("alpha", Some("80"))], None);
+    let src = tmp.path().join("alpha/src/lib.rs").to_string_lossy().replace('\\', "/");
+
+    // Two configs of the SAME file, each covering a disjoint half (50%
+    // alone, below the 80% threshold), but the union covers all 4 lines
+    // (100%). Only a correct line-level merge passes the gate.
+    let config_a = format!("TN:\nSF:{src}\nDA:1,5\nDA:2,5\nDA:3,0\nDA:4,0\nend_of_record\n");
+    let config_b = format!("TN:\nSF:{src}\nDA:1,0\nDA:2,0\nDA:3,5\nDA:4,5\nend_of_record\n");
+    let path_a = tmp.path().join("a.info");
+    let path_b = tmp.path().join("b.info");
+    fs::write(&path_a, &config_a).expect("write a.info");
+    fs::write(&path_b, &config_b).expect("write b.info");
+    let a = path_a.to_string_lossy().into_owned();
+    let b = path_b.to_string_lossy().into_owned();
+
+    // Either file alone is 50% -> fails.
+    coverage_gate(tmp.path())
+        .args(["--lcov", &a])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("FAIL"));
+
+    // Both together merge to 100% -> passes.
+    coverage_gate(tmp.path())
+        .args(["--lcov", &a, "--lcov", &b])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("all packages meet their threshold"));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn gated_crate_with_no_data_exits_2() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80")), ("beta", Some("80"))], None);
@@ -369,4 +403,24 @@ fn default_threshold_is_100_when_nothing_configured() {
         .code(1)
         .stdout(predicate::str::contains("100.0%"))
         .stdout(predicate::str::contains("default"));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
+fn defaults_to_target_coverage_lcov_when_flag_omitted() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace(tmp.path(), &[("alpha", Some("80"))], None);
+    // Write the lcov at the default location and omit --lcov entirely.
+    let default_dir = tmp.path().join("target/coverage");
+    fs::create_dir_all(&default_dir).expect("create target/coverage");
+    fs::write(
+        default_dir.join("lcov.info"),
+        make_coverage_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 100)]),
+    )
+    .expect("write default lcov");
+
+    coverage_gate(tmp.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("all packages meet their threshold"));
 }

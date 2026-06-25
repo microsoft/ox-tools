@@ -43,9 +43,14 @@
 //! ## Binary usage
 //!
 //! ```text
-//! cargo coverage-gate  [--lcov <path>] [-p|--package <spec>]...
+//! cargo coverage-gate  [--lcov <path>]... [-p|--package <spec>]...
 //!                      [--summary-file <path>] [--quiet]
 //! ```
+//!
+//! `--lcov` may be repeated; the tracefiles are merged at the line level
+//! (per-line counts summed) so multiple feature-config exports
+//! (`--all-features`, `--no-default-features`) can be gated together
+//! without a separate, platform-specific merge step.
 //!
 //! Exit codes: `0` if every gated package meets its threshold, `1` if any
 //! gated package falls below its threshold, and `2` for configuration
@@ -191,7 +196,36 @@ impl EvaluatedReport {
 ///
 /// [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
 pub fn evaluate(lcov_text: &str, manifest_path: Option<&Path>, gated_packages: &[String]) -> Result<EvaluatedReport, CoverageGateError> {
-    let report = lcov_cov::CoverageReport::from_str(lcov_text)?;
+    evaluate_many(std::slice::from_ref(&lcov_text), manifest_path, gated_packages)
+}
+
+/// Evaluate one or more [`cargo-llvm-cov`] lcov tracefiles against the
+/// workspace anchored at `manifest_path` and return the resolved
+/// [`EvaluatedReport`].
+///
+/// The tracefiles are merged at the line level before evaluation (per-line
+/// counts summed, line sets combined), so passing the `--all-features` and
+/// `--no-default-features` exports yields the same per-package line
+/// coverage as a single merged report — without a platform-specific lcov
+/// merger. An empty slice is treated as an empty report (every gated
+/// package then reports NO DATA).
+///
+/// `gated_packages` restricts the operation to a named subset; when
+/// empty, every workspace member is in scope.
+///
+/// # Errors
+///
+/// Returns a [`CoverageGateError`] under the same conditions as
+/// [`evaluate`]; additionally, any tracefile that fails to parse aborts
+/// the merge.
+///
+/// [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
+pub fn evaluate_many(
+    lcov_texts: &[&str],
+    manifest_path: Option<&Path>,
+    gated_packages: &[String],
+) -> Result<EvaluatedReport, CoverageGateError> {
+    let report = lcov_cov::CoverageReport::from_strs(lcov_texts)?;
     let ws = workspace::Workspace::load(manifest_path)?;
     let inner = verdict::evaluate(&report, &ws, gated_packages)?;
     Ok(EvaluatedReport { inner })

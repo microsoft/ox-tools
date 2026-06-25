@@ -52,9 +52,14 @@ Codecov / ADO numbers confusing.
 ### Binary usage
 
 ```text
-cargo coverage-gate  [--lcov <path>] [-p|--package <spec>]...
+cargo coverage-gate  [--lcov <path>]... [-p|--package <spec>]...
                      [--summary-file <path>] [--quiet]
 ```
+
+`--lcov` may be repeated; the tracefiles are merged at the line level
+(per-line counts summed) so multiple feature-config exports
+(`--all-features`, `--no-default-features`) can be gated together
+without a separate, platform-specific merge step.
 
 Exit codes: `0` if every gated package meets its threshold, `1` if any
 gated package falls below its threshold, and `2` for configuration
@@ -93,7 +98,7 @@ plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbeF2LfR_ePK8byPyoats3EC8bsrxruYf7nAgbR5nohqd2NEZhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4xLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG_Xxp5EYyYdlGw0p7mhT_6SoGwZIuLXM_3Q3G4FaX-pFFCbsYWSBg3NjYXJnby1jb3ZlcmFnZS1nYXRlZTAuMS4wc2NhcmdvX2NvdmVyYWdlX2dhdGU
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/fn.evaluate.html
  [__link2]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/struct.EvaluatedReport.html
