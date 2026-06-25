@@ -2125,17 +2125,49 @@ anvil-careful: anvil-careful-validate-prereqs
 # Affected tier. `loom` is a permutation-based concurrency model
 # checker: tests written behind `#[cfg(loom)]` are only compiled
 # (and only see the loom replacement primitives for std::sync,
-# std::thread, etc.) when the `loom` cfg is set. Crates with no
-# loom harness have no `#[cfg(loom)]` items, so `cargo test` finds
-# zero loom-specific targets and the run is effectively a no-op
-# (the regular tests already ran under anvil-llvm-cov, no need to
-# redo them here). We use --release because loom's permutation
-# exploration is wall-clock dominated by the SUT, and the loom docs
-# explicitly recommend release builds for non-trivial models.
+# std::thread, etc.) when the `loom` cfg is set. We use --release
+# because loom's permutation exploration is wall-clock dominated by
+# the SUT, and the loom docs explicitly recommend release builds for
+# non-trivial models.
+#
+# RUSTFLAGS=--cfg loom is a global flag: it reaches *every* rustc
+# invocation in the build graph, including third-party deps. Some
+# deps (e.g. concurrent-queue) gate `use loom::...` behind their own
+# `#[cfg(loom)]` but only *link* loom via an optional feature that
+# --all-features on the workspace members never turns on -- so a
+# workspace-wide `cargo test --cfg loom` makes those deps reference
+# an unlinked loom crate (E0432/E0433). The flag cannot be confined
+# to "just my crate" once it is set.
+#
+# We therefore enumerate only the crates that actually opt into loom
+# -- those that declare a `cfg(loom)`-gated dependency -- via `cargo
+# metadata`, and scope `cargo test` to them with `-p` instead of
+# `--workspace`. This:
+#   * resolves each loom crate's `[target.'cfg(loom)'.dependencies]`
+#     correctly (cargo evaluates the target cfg from the *global*
+#     --cfg loom, so the loom dep links), and
+#   * never builds leaking deps that are only reachable through
+#     *other* workspace members (concurrent-queue is not in a loom
+#     crate's own tree, so it is never compiled under --cfg loom).
+# `cargo metadata --no-deps` scans only the adopter's own members
+# (layout-agnostic; works for any `members` glob), reading the
+# resolved manifest model so it is immune to comments/formatting.
+# The `\bloom\b` word boundary avoids matching `cfg(feature="bloom")`
+# while still catching compound cfgs like `cfg(all(loom, ...))`.
+#
+# When no crate opts into loom (the common case) the recipe skips
+# with exit 0 -- the regular tests already ran under anvil-llvm-cov.
+#
+# Caveat: if a loom crate's *own* dependency tree contains a dep that
+# gates loom behind an unenabled optional feature, the global flag
+# still leaks into that dep. Confining loom to a crate's own code
+# while a same-tree dep also needs loom instrumentation is a
+# deliberate per-crate choice (enable the dep's `loom` feature) that
+# this generic recipe cannot infer -- out of scope.
 #
 # RUSTFLAGS goes via $env: rather than --config so it propagates
-# through to nextest/cargo's child rustc invocations cleanly on
-# both pwsh/bash.
+# through to cargo's child rustc invocations cleanly on both
+# pwsh/bash.
 [script("pwsh")]
 anvil-loom: anvil-loom-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2143,9 +2175,22 @@ anvil-loom: anvil-loom-validate-prereqs
         Write-Host 'anvil-loom: no affected packages; skipping'
         exit 0
     }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $loomPkgs = @($meta.packages |
+        Where-Object { $_.dependencies | Where-Object { $_.target -and $_.target -match 'cfg\(.*\bloom\b.*\)' } } |
+        Select-Object -ExpandProperty name -Unique)
+    if ($env:ANVIL_INCLUDE_AFFECTED) {
+        $affected = (-split $env:ANVIL_INCLUDE_AFFECTED) -replace '^-p$', '' | Where-Object { $_ }
+        $loomPkgs = @($loomPkgs | Where-Object { $_ -in $affected })
+    }
+    if (-not $loomPkgs) {
+        Write-Host 'anvil-loom: no loom-opted crates; skipping'
+        exit 0
+    }
+    $pkgArgs = $loomPkgs | ForEach-Object { '-p', $_ }
     $env:RUSTFLAGS = "--cfg loom $($env:RUSTFLAGS)".Trim()
-    & cargo test @pkg --release --all-features --locked --tests
+    & cargo test @pkgArgs --release --all-features --locked --tests
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier. Smoke-only fuzz pass via [bolero](https://crates.io/crates/bolero):
