@@ -208,7 +208,10 @@ pub fn evaluate(lcov_text: &str, manifest_path: Option<&Path>, gated_packages: &
 /// `--no-default-features` exports yields the same per-package line
 /// coverage as a single merged report — without a platform-specific lcov
 /// merger. An empty slice is treated as an empty report (every gated
-/// package then reports NO DATA).
+/// package then reports NO DATA). NO DATA is not a passing outcome:
+/// each such package classifies as `NoData`, which rolls the overall
+/// result up to [`Verdict::ConfigError`] (process exit code 2), so an
+/// empty slice never yields a successful verdict.
 ///
 /// `gated_packages` restricts the operation to a named subset; when
 /// empty, every workspace member is in scope.
