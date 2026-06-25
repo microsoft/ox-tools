@@ -716,7 +716,7 @@ jobs:
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # The token pr-fast is substituted by cargo-anvil at emit time with
-# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 parameters:
   - name: include_modified
     type: string
@@ -749,7 +749,7 @@ steps:
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # The token pr-mutants is substituted by cargo-anvil at emit time with
-# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 parameters:
   - name: include_modified
     type: string
@@ -782,7 +782,7 @@ steps:
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # The token pr-runtime-analysis is substituted by cargo-anvil at emit time with
-# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 parameters:
   - name: include_modified
     type: string
@@ -815,7 +815,7 @@ steps:
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # The token pr-test is substituted by cargo-anvil at emit time with
-# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 parameters:
   - name: include_modified
     type: string
@@ -848,7 +848,7 @@ steps:
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # The token scheduled-advisories is substituted by cargo-anvil at emit time with
-# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 parameters:
   - name: include_modified
     type: string
@@ -881,7 +881,7 @@ steps:
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # The token scheduled-exhaustive is substituted by cargo-anvil at emit time with
-# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 parameters:
   - name: include_modified
     type: string
@@ -914,7 +914,7 @@ steps:
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # The token scheduled-runtime-analysis is substituted by cargo-anvil at emit time with
-# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 parameters:
   - name: include_modified
     type: string
@@ -947,7 +947,7 @@ steps:
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # The token scheduled-test is substituted by cargo-anvil at emit time with
-# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 parameters:
   - name: include_modified
     type: string
@@ -2813,6 +2813,7 @@ anvil-pr: anvil-pr-validate-prereqs \
 anvil-scheduled: anvil-scheduled-validate-prereqs \
     anvil-scheduled-test \
     anvil-scheduled-advisories \
+    anvil-scheduled-runtime-analysis \
     anvil-scheduled-exhaustive
 
 # Full tier: PR + scheduled, end-to-end. Useful before tagging a release.
@@ -2847,12 +2848,14 @@ anvil-pr-validate-prereqs: \
 anvil-scheduled-setup installer="install": \
     (anvil-scheduled-test-setup installer) \
     (anvil-scheduled-advisories-setup installer) \
+    (anvil-scheduled-runtime-analysis-setup installer) \
     (anvil-scheduled-exhaustive-setup installer)
 
 [group("anvil-setup")]
 anvil-scheduled-validate-prereqs: \
     anvil-scheduled-test-validate-prereqs \
     anvil-scheduled-advisories-validate-prereqs \
+    anvil-scheduled-runtime-analysis-validate-prereqs \
     anvil-scheduled-exhaustive-validate-prereqs
 
 [group("anvil-setup")]

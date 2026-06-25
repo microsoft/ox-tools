@@ -189,6 +189,19 @@ mod tests {
                 "tier recipe must run its validate-prereqs first: '{needle}'"
             );
         }
+        // The scheduled tier must fan out to every scheduled group, including
+        // runtime-analysis (a separate group from exhaustive).
+        for needle in [
+            "anvil-scheduled-test",
+            "anvil-scheduled-advisories",
+            "anvil-scheduled-runtime-analysis",
+            "anvil-scheduled-exhaustive",
+        ] {
+            assert!(
+                TIERS_JUST.contains(needle),
+                "scheduled tier must reference group '{needle}'"
+            );
+        }
     }
 
     #[test]

@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # The token __GROUP__ is substituted by cargo-anvil at emit time with
-# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 parameters:
   - name: include_modified
     type: string

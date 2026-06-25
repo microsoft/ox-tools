@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # The token pr-runtime-analysis is substituted by cargo-anvil at emit time with
-# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 name: anvil-pr-runtime-analysis
 description: Run the pr-runtime-analysis check group.
 inputs:
