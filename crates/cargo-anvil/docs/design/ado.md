@@ -471,7 +471,9 @@ stages:
   - stage: pr_fast
     displayName: anvil pr-fast
     dependsOn: impact
-    condition: succeededOrFailed()
+    # Gate on impact via the default succeeded() condition (no explicit
+    # `condition:`). A failed impact stage skips pr-* and fails the pipeline,
+    # rather than leaving it green with a lone red impact stage.
     variables:
       include_modified: $[ stageDependencies.impact.compute.outputs['compute.include_modified'] ]
       include_affected: $[ stageDependencies.impact.compute.outputs['compute.include_affected'] ]
@@ -499,10 +501,19 @@ stages:
   # run as independent parallel stages.
 ```
 
-The wiring never gates jobs on impact output. Each group always runs; recipes inside
-the group decide whether a given check no-ops by testing for the literal sentinel
-`--skip` in the relevant include var. This matters because unscoped checks (`fmt`,
-`deny`, `audit`, `aprz`, `pr-title`, `mutants-full`) must run on every PR. See
+The pr-* stages gate on the impact stage *succeeding* (the default `succeeded()`
+condition on their `dependsOn: impact`): if impact fails, pr-* are skipped and the
+pipeline fails at impact. This is deliberate — using `succeededOrFailed()` would let
+pr-* run on a failed impact, leaving the pipeline green with a single red impact
+stage and misleading reviewers into investigating a "failure" while every actual
+check is green. Treating impact as a gate turns a broken impact into an unambiguous,
+blocking failure.
+
+The wiring never branches on impact's *output values*, though. When impact succeeds,
+each group always runs; recipes inside the group decide whether a given check no-ops
+by testing for the literal sentinel `--skip` in the relevant include var. This matters
+because unscoped checks (`fmt`, `deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
+must run on every PR. See
 [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars) for the recipe-side
 contract.
 

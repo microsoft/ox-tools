@@ -50,10 +50,18 @@ stages:
           steps:
             - template: steps/impact.yml
 
+  # The pr-* stages gate on impact via the default `succeeded()` condition
+  # (no explicit `condition:`): if either impact stage fails, the pr-*
+  # stages are skipped and the pipeline fails at impact. We deliberately do
+  # NOT use `succeededOrFailed()` here. Letting pr-* run on a failed impact
+  # would leave the pipeline green with a lone red impact stage -- confusing
+  # reviewers into investigating a "failure" while every actual check is
+  # green. Treating impact as a gate makes a broken impact an unambiguous,
+  # blocking failure instead. (impact still threads its include_* outputs to
+  # narrow what runs; an empty value falls back to full --workspace.)
   - stage: pr_fast
     displayName: anvil pr-fast
     dependsOn: [impact_linux, impact_windows]
-    condition: succeededOrFailed()
     variables:
       include_modified_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_modified'] ]
       include_affected_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_affected'] ]
@@ -107,7 +115,6 @@ stages:
   - stage: pr_test
     displayName: anvil pr-test (tests + coverage)
     dependsOn: [impact_linux, impact_windows]
-    condition: succeededOrFailed()
     variables:
       include_modified_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_modified'] ]
       include_affected_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_affected'] ]
@@ -162,7 +169,6 @@ stages:
   - stage: pr_runtime_analysis
     displayName: anvil pr-runtime-analysis (miri + careful)
     dependsOn: [impact_linux, impact_windows]
-    condition: succeededOrFailed()
     variables:
       include_modified_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_modified'] ]
       include_affected_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_affected'] ]
@@ -195,7 +201,6 @@ stages:
   - stage: pr_mutants
     displayName: anvil pr-mutants (mutants)
     dependsOn: [impact_linux, impact_windows]
-    condition: succeededOrFailed()
     variables:
       include_modified_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_modified'] ]
       include_affected_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_affected'] ]

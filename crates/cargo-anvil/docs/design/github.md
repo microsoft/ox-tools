@@ -363,11 +363,17 @@ empty matrices that GitHub Actions silently treats as "no legs to run") without
 meaningfully expanding what adopters could customize — anyone who wants to change
 the OS axis is almost certainly making other changes too.
 
-The wiring never gates whole jobs on impact output. Each group always runs; recipes
-inside the group decide whether a given check no-ops, by testing for the literal sentinel
-`--skip` in the relevant include var. This matters because unscoped checks (`fmt`, `deny`,
-`audit`, `aprz`, `pr-title`, `mutants-full`) must run on every PR, including docs-only
-PRs where every tier comes back `--skip`. See
+The pr-* jobs gate on the impact jobs *succeeding*: their `needs: [impact-linux,
+impact-windows]` uses GitHub's default behavior, so if an impact job fails the pr-*
+jobs are skipped and the run fails at impact (we add no `if: always()` / `if:
+!cancelled()` override that would let them run anyway). This keeps a broken impact a
+blocking failure rather than leaving the run green with a lone red impact job.
+
+The wiring never branches on impact's *output values*, though. When impact succeeds,
+each group always runs; recipes inside the group decide whether a given check no-ops,
+by testing for the literal sentinel `--skip` in the relevant include var. This matters
+because unscoped checks (`fmt`, `deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
+must run on every PR, including docs-only PRs where every tier comes back `--skip`. See
 [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars) for the recipe-side
 contract.
 
