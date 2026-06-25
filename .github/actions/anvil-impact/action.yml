@@ -53,10 +53,10 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # GITHUB_BASE_REF is the target-branch name on a PR event
-        # (e.g. "main"); we resolve it to origin/<name>. Adopters can
-        # override via the BASE_REF env var.
-        base="${BASE_REF:-origin/${GITHUB_BASE_REF:-main}}"
+        # Resolve the baseline ref via the shared anvil resolver (single
+        # source of truth; see the _anvil-base-ref recipe). On GitHub PRs it
+        # resolves GITHUB_BASE_REF to origin/<branch>; BASE_REF overrides.
+        base="$(just _anvil-base-ref)"
         # cargo delta has no --base flag; the flow is two snapshots
         # (baseline at the merge target + current at HEAD) compared by
         # `cargo delta impact`. We use a temporary worktree to snapshot

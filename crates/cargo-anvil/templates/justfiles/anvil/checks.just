@@ -697,6 +697,46 @@ anvil-examples: anvil-examples-validate-prereqs
 
 # === pr-mutants member ====================================================
 
+# _anvil-base-ref: single source of truth for "which git ref does a PR
+# diff against". Shared by the impact step (github/impact-action.yml,
+# ado/steps/impact.yml) and anvil-mutants-diff so the resolution lives in
+# exactly one place. Precedence:
+#   1. BASE_REF -- explicit override. GitHub sets it to the PR base commit
+#      SHA; adopters can set a full ref like `origin/release`.
+#   2. SYSTEM_PULLREQUEST_TARGETBRANCH -- ADO PR builds. This is the
+#      *fully-qualified* target ref (e.g. `refs/heads/main`), so strip the
+#      `refs/heads/` prefix and resolve to `origin/<branch>`
+#      (`origin/refs/heads/main` is not a valid ref).
+#   3. GITHUB_BASE_REF -- GitHub PR builds. Unqualified target branch name.
+#   4. origin/main, then origin/master -- local / non-PR fallback.
+# Prints ONLY the resolved ref to stdout so callers can capture it:
+#   pwsh : $base = (& {{just_executable()}} _anvil-base-ref)
+#   bash : base="$(just _anvil-base-ref)"
+[script("pwsh")]
+_anvil-base-ref:
+    $ErrorActionPreference = 'Stop'
+    if ($env:BASE_REF) {
+        Write-Output $env:BASE_REF
+        exit 0
+    }
+    if ($env:SYSTEM_PULLREQUEST_TARGETBRANCH) {
+        Write-Output ("origin/" + ($env:SYSTEM_PULLREQUEST_TARGETBRANCH -replace '^refs/heads/', ''))
+        exit 0
+    }
+    if ($env:GITHUB_BASE_REF) {
+        Write-Output "origin/$($env:GITHUB_BASE_REF)"
+        exit 0
+    }
+    foreach ($candidate in @('origin/main', 'origin/master')) {
+        git rev-parse --verify $candidate 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Output $candidate
+            exit 0
+        }
+    }
+    Write-Error 'anvil-base-ref: cannot resolve a base ref. Set BASE_REF, or ensure origin/main or origin/master exists.'
+    exit 1
+
 # Affected tier. cargo-mutants does its own diff-scoping via --in-diff;
 # the affected-tier guard is the wiring-layer's coarse filter (if no
 # affected packages exist, the entire mutants run is pointless).
@@ -717,23 +757,10 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs
         Write-Host 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs no affected packages; skipping'
         exit 0
     }
-    # Resolve BASE_REF: env override > origin/main > origin/master.
-    $base = $null
-    if ($env:BASE_REF) {
-        $base = $env:BASE_REF
-    } else {
-        foreach ($candidate in @('origin/main', 'origin/master')) {
-            git rev-parse --verify $candidate 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                $base = $candidate
-                break
-            }
-        }
-    }
-    if (-not $base) {
-        Write-Error 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs no BASE_REF set and neither origin/main nor origin/master is available. Set BASE_REF to the branch to diff against.'
-        exit 1
-    }
+    # Resolve the diff base via the shared resolver (single source of truth
+    # across the impact steps and this recipe; see _anvil-base-ref).
+    $base = (& "{{just_executable()}}" _anvil-base-ref)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # cargo-mutants --in-diff takes a FILE path containing a unified
     # diff, not a git revision range. Write the diff to a temp file
     # first. RUNNER_TEMP (GH) and AGENT_TEMPDIRECTORY (ADO) point at

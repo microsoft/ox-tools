@@ -24,22 +24,12 @@ steps:
     displayName: anvil impact (install cargo-delta)
   - bash: |
       set -euo pipefail
-      # Determine the baseline ref:
-      #   * Adopters can override via BASE_REF (full ref name, e.g.
-      #     `origin/release`).
-      #   * On PR build-validation runs, SYSTEM_PULLREQUEST_TARGETBRANCH
-      #     is the *fully-qualified* target ref (e.g. `refs/heads/main`),
-      #     so we strip the `refs/heads/` prefix before composing
-      #     `origin/<branch>` -- `origin/refs/heads/main` is not a valid
-      #     ref and `git worktree add` would reject it.
-      #   * Otherwise fall back to `master` so manual / branch cloud-workflow runs
-      #     produce a sensible diff against the default branch.
-      # The ADO macro form `$(System.PullRequest.TargetBranch)` is unsafe
-      # here: when the variable is unset (non-PR builds), ADO leaves the
-      # `$(...)` literal in the script, which bash then interprets as
-      # command substitution and fails with exit 127.
-      target="${SYSTEM_PULLREQUEST_TARGETBRANCH:-master}"
-      base="${BASE_REF:-origin/${target#refs/heads/}}"
+      # Resolve the baseline ref via the shared anvil resolver (single
+      # source of truth; see the _anvil-base-ref recipe). On ADO PRs it
+      # strips refs/heads/ from SYSTEM_PULLREQUEST_TARGETBRANCH and resolves
+      # to origin/<branch>; BASE_REF overrides; non-PR runs fall back to
+      # origin/main then origin/master.
+      base="$(just _anvil-base-ref)"
       # Two snapshots + impact compare (cargo-delta has no --base
       # shortcut). The baseline runs in a worktree at the merge target
       # so the checked-out tree is untouched.
