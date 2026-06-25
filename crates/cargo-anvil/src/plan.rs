@@ -159,19 +159,27 @@ impl PlanItem {
     /// Construct a plan item for a `Propose` decision on a region. The
     /// proposed payload is the *full host file* that would result from
     /// the splice (so the user can review by diffing the proposed file
-    /// against the live host). `body_checksum` is the checksum of the
-    /// rendered region body — the apply step records it in the
-    /// manifest so subsequent runs see the proposal as resolved (see
-    /// [`propose_file`](Self::propose_file)).
+    /// against the live host). `body` is the rendered region body, carried
+    /// so a post-planning pass can re-splice the proposal against the
+    /// *final* composed host (see `run::recompose_region_proposals`).
+    /// `body_checksum` is the checksum of the rendered region body — the
+    /// apply step records it in the manifest so subsequent runs see the
+    /// proposal as resolved (see [`propose_file`](Self::propose_file)).
     #[must_use]
-    pub fn propose_region(host: impl Into<String>, id: impl Into<String>, spliced_host: String, body_checksum: String) -> Self {
+    pub fn propose_region(
+        host: impl Into<String>,
+        id: impl Into<String>,
+        body: String,
+        spliced_host: String,
+        body_checksum: String,
+    ) -> Self {
         Self {
             target: Target::Region {
                 host: host.into(),
                 id: id.into(),
             },
             decision: Decision::Propose,
-            rendered: None,
+            rendered: Some(body),
             spliced_host: Some(spliced_host),
             rendered_checksum: Some(body_checksum),
         }
@@ -240,6 +248,13 @@ impl Plan {
     #[must_use]
     pub fn items(&self) -> &[PlanItem] {
         &self.items
+    }
+
+    /// Mutable access to all plan items in insertion order. Used by the
+    /// post-planning pass that recomposes region proposals against the
+    /// final host text (see `run::recompose_region_proposals`).
+    pub fn items_mut(&mut self) -> &mut [PlanItem] {
+        &mut self.items
     }
 
     /// Whether the plan would change anything on disk if applied.
@@ -672,6 +687,7 @@ mod tests {
         plan.push(PlanItem::propose_region(
             "Justfile",
             "anvil-imports",
+            "body\n".into(),
             "spliced host content\n".into(),
             "sha256:newt".into(),
         ));

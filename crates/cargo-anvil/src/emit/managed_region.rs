@@ -79,7 +79,7 @@ pub fn plan_managed_region(
         }
         UpdateDecision::Propose => {
             let spliced = splice(host_text, region_id, rendered_body, syntax)?;
-            PlanItem::propose_region(host_relpath, region_id, spliced, template_checksum)
+            PlanItem::propose_region(host_relpath, region_id, rendered_body.to_owned(), spliced, template_checksum)
         }
     };
 

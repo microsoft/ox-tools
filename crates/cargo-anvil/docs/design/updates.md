@@ -314,13 +314,19 @@ ready-to-use file**, not a fragment:
 
 - **Owned file proposal**: the freshly rendered file content.
 - **Managed-region proposal**: the host file with the affected region's body replaced
-  by the freshly rendered body, spliced against the *accumulated* host text — so any
-  sibling region that this run writes (`Write`) is already present in the proposed
-  file, while regions left untouched keep their current on-disk content.
-- **Multiple pending regions in one host**: each pending proposal is written to the
-  shared `<host>.anvil-proposed` sibling; the last region planned for that host wins, so
-  the sibling shows that region's proposed body composed on top of every `Write` this
-  run applies to the host. (Common case is one pending region per host.)
+  by the freshly rendered body, spliced against the *final composed* host text — every
+  sibling region this run writes (`Write`) or removes (region `Remove`) is already
+  folded in, while regions left untouched keep their current on-disk content. Because
+  proposals are planned eagerly (as each region is visited) but a sibling `Write`/`Remove`
+  on the same host may be planned *later*, a post-planning pass re-splices every region
+  proposal against the final host text. This guarantees the proposed file is composed on
+  top of every applied update regardless of region order, so `mv` never reverts a sibling
+  region's change.
+- **Multiple pending regions in one host**: all pending proposals for a host write to the
+  shared `<host>.anvil-proposed` sibling, and the re-splice pass composes *every* pending
+  region's proposed body on top of all sibling `Write`s — so each proposal for the host
+  converges on the same fully-updated content (no last-writer-wins clobber). (Common case
+  is one pending region per host.)
 
 Concretely the user can:
 

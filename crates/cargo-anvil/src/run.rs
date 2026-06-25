@@ -22,7 +22,7 @@ use crate::emit::{plan_managed_region, plan_owned_file};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
-use crate::region::{CommentSyntax, find_region, remove_region};
+use crate::region::{CommentSyntax, find_region, remove_region, upsert_region};
 use crate::workspace::{self, Workspace};
 
 /// Outcome of an `update` invocation.
@@ -171,7 +171,75 @@ fn build_plan(
 
     plan_removals(repo_root, manifest, &mut plan, &mut hosts)?;
 
+    // Region proposals are computed eagerly as each region is visited, so a
+    // `Propose` planned before a sibling `Write`/`Remove` on the same host
+    // captures a stale host (missing the later update). The accumulator is
+    // fully composed now, so re-splice every proposal against it.
+    recompose_region_proposals(repo_root, &mut plan, &mut hosts)?;
+
     Ok(plan)
+}
+
+/// Re-splice every region `Propose` item's `.anvil-proposed` payload against
+/// the *final* composed host text — the in-memory host after all `Write` and
+/// region `Remove` operations for that host have been folded into the
+/// accumulator.
+///
+/// Proposals are planned eagerly as each region is visited (see
+/// [`push_region_at`]), so a proposal computed before a sibling `Write` or
+/// region `Remove` on the same host would otherwise capture a stale host
+/// (missing the later update). Applying such a proposal via
+/// `mv <host>.anvil-proposed <host>` would silently revert those sibling
+/// updates. Re-splicing here guarantees the proposed sibling is composed on
+/// top of every applied region update in the run, honoring `updates.md`'s
+/// "ready-to-use" proposal guarantee.
+///
+/// When several regions on one host propose, each proposal's new body is
+/// spliced on top of the others' too, so every proposal for the host (which
+/// all share the single `<host>.anvil-proposed` path) converges on the same
+/// fully-updated content instead of the last write clobbering the rest.
+fn recompose_region_proposals(repo_root: &Path, plan: &mut Plan, hosts: &mut HostTextCache) -> Result<(), AppError> {
+    // Group region `Propose` item indices by host, preserving first-seen
+    // order so the recomposition is deterministic.
+    let mut hosts_in_order: Vec<String> = Vec::new();
+    let mut grouped: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, item) in plan.items().iter().enumerate() {
+        if item.decision != Decision::Propose {
+            continue;
+        }
+        if let Target::Region { host, .. } = &item.target {
+            if !grouped.contains_key(host) {
+                hosts_in_order.push(host.clone());
+            }
+            grouped.entry(host.clone()).or_default().push(idx);
+        }
+    }
+
+    for host in &hosts_in_order {
+        let idxs = &grouped[host];
+        let Some(mut composed) = hosts.get_or_read(repo_root, host)? else {
+            // Host file vanished (external race during the run); keep the
+            // eagerly-computed proposal rather than dropping it.
+            continue;
+        };
+        // Build the fully-updated host = final live host with every proposed
+        // region's new body spliced in.
+        for &idx in idxs {
+            let item = &plan.items()[idx];
+            if let Target::Region { id, .. } = &item.target {
+                let body = item.rendered.as_deref().expect("region Propose carries its rendered body");
+                // CommentSyntax is currently always Hash for managed regions
+                // (mirrors plan_managed_region / plan_removals); revisit when
+                // the manifest records per-region syntax.
+                composed = upsert_region(&composed, id, body, CommentSyntax::Hash)?;
+            }
+        }
+        // Stamp the composed host onto every proposal for this host.
+        for &idx in idxs {
+            plan.items_mut()[idx].spliced_host = Some(composed.clone());
+        }
+    }
+    Ok(())
 }
 
 /// In-memory accumulator of host-file text, shared across every region
@@ -1148,5 +1216,49 @@ mod tests {
         // And the migration settles: a re-run with the split catalog is a no-op.
         let third = run_update(&split, &local_only(), tmp.path()).unwrap();
         assert!(!third.plan.has_changes(), "post-split run should be idempotent");
+    }
+
+    /// A region `Propose` (the user customized that region) planned *before*
+    /// a sibling `Write` on the same host must still produce a
+    /// `.anvil-proposed` sibling composed on top of that later write.
+    /// Otherwise the eagerly-spliced proposal captures a stale host and
+    /// `mv shared.toml.anvil-proposed shared.toml` would silently revert the
+    /// sibling region's update.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn region_proposal_is_recomposed_against_sibling_writes_on_same_host() {
+        let tmp = empty_workspace();
+        let host = tmp.path().join("shared.toml");
+
+        // Run 1: seed both regions (anvil-sec-a is ordered before anvil-sec-b).
+        let v1 = two_region_catalog("shared.toml", "anvil-sec-a", "a = \"v1\"\n", "anvil-sec-b", "b = \"v1\"\n");
+        assert!(run_update(&v1, &local_only(), tmp.path()).unwrap().applied);
+
+        // User customizes region a on disk, so next run classifies a as Propose.
+        let cur = fs::read_to_string(&host).unwrap();
+        let customized = upsert_region(&cur, "anvil-sec-a", "a = \"USER\"\n", CommentSyntax::Hash).unwrap();
+        fs::write(&host, &customized).unwrap();
+
+        // Run 2: both region templates move. a -> Propose (user-edited),
+        // b -> Write (untouched). a is planned first, so without the
+        // recomposition pass its proposal is computed before b's write folds
+        // into the host.
+        let v2 = two_region_catalog("shared.toml", "anvil-sec-a", "a = \"v2\"\n", "anvil-sec-b", "b = \"v2\"\n");
+        assert!(run_update(&v2, &local_only(), tmp.path()).unwrap().applied);
+
+        // Live host: a keeps the user's content; b is updated to v2.
+        let live = fs::read_to_string(&host).unwrap();
+        assert!(live.contains("a = \"USER\""), "user's region a preserved live:\n{live}");
+        assert!(live.contains("b = \"v2\""), "sibling region b written live:\n{live}");
+
+        // Proposed sibling: must carry BOTH a's proposed v2 AND b's new v2
+        // (not the stale v1), so applying it doesn't revert b.
+        let proposed = fs::read_to_string(tmp.path().join("shared.toml.anvil-proposed")).unwrap();
+        assert!(proposed.contains("a = \"v2\""), "proposal applies a's update:\n{proposed}");
+        assert!(
+            proposed.contains("b = \"v2\""),
+            "proposal composed on top of b's write:\n{proposed}"
+        );
+        assert!(!proposed.contains("b = \"v1\""), "stale sibling content must be gone:\n{proposed}");
     }
 }
