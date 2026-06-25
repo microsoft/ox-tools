@@ -197,10 +197,7 @@ mod tests {
             "anvil-scheduled-runtime-analysis",
             "anvil-scheduled-exhaustive",
         ] {
-            assert!(
-                TIERS_JUST.contains(needle),
-                "scheduled tier must reference group '{needle}'"
-            );
+            assert!(TIERS_JUST.contains(needle), "scheduled tier must reference group '{needle}'");
         }
     }
 
