@@ -80,8 +80,7 @@ impl fmt::Display for HeatherError {
 impl std::error::Error for HeatherError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::FileRead { source, .. } => Some(source),
-            Self::FileWrite { source, .. } => Some(source),
+            Self::FileRead { source, .. } | Self::FileWrite { source, .. } => Some(source),
             _ => None,
         }
     }
