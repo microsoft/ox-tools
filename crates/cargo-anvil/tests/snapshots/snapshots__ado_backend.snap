@@ -228,12 +228,13 @@ stages:
       # stays as a sibling task on each OS job -- it's a results
       # publish (not a pipeline artifact), so 1ESPT permits it at step
       # level and we don't need to route it through `artifacts:`.
-      # cobertura.xml is produced by the anvil-llvm-cov recipe.
-      # Publishing from every OS leg matters because OS-gated code is
-      # only exercised on its native target; a single-leg upload would
-      # systematically under-report coverage of cfg(target_os = ...)
-      # branches. ADO's PublishCodeCoverageResults@2 coalesces multiple
-      # publishes against the same build into one coverage report.
+      # cobertura-*.xml are produced by the anvil-llvm-cov recipe (one per
+      # feature config). Publishing from every OS leg matters because
+      # OS-gated code is only exercised on its native target; a single-leg
+      # upload would systematically under-report coverage of
+      # cfg(target_os = ...) branches. ADO's PublishCodeCoverageResults@2
+      # coalesces multiple publishes (across legs and the per-config files)
+      # against the same build into one coverage report.
       - template: steps/job.yml
         parameters:
           name: linux
@@ -248,7 +249,7 @@ stages:
               condition: and(succeededOrFailed(), ne(variables.include_affected_linux, '--skip'))
               displayName: Publish coverage (linux)
               inputs:
-                summaryFileLocation: target/coverage/cobertura.xml
+                summaryFileLocation: target/coverage/cobertura-*.xml
                 failIfCoverageEmpty: false
       - template: steps/job.yml
         parameters:
@@ -264,7 +265,7 @@ stages:
               condition: and(succeededOrFailed(), ne(variables.include_affected_windows, '--skip'))
               displayName: Publish coverage (windows)
               inputs:
-                summaryFileLocation: target/coverage/cobertura.xml
+                summaryFileLocation: target/coverage/cobertura-*.xml
                 failIfCoverageEmpty: false
 
   - stage: pr_runtime_analysis
@@ -364,7 +365,7 @@ stages:
               condition: succeededOrFailed()
               displayName: Publish coverage (linux)
               inputs:
-                summaryFileLocation: target/coverage/cobertura.xml
+                summaryFileLocation: target/coverage/cobertura-*.xml
                 failIfCoverageEmpty: false
       - template: steps/job.yml
         parameters:
@@ -376,7 +377,7 @@ stages:
               condition: succeededOrFailed()
               displayName: Publish coverage (windows)
               inputs:
-                summaryFileLocation: target/coverage/cobertura.xml
+                summaryFileLocation: target/coverage/cobertura-*.xml
                 failIfCoverageEmpty: false
 
   - stage: scheduled_advisories
@@ -1950,54 +1951,64 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
         & cargo '+{{ rust_nightly }}' nextest run @pkg --all-features --locked
         exit $LASTEXITCODE
     }
-    # cargo llvm-cov writes the .profraw set into target/llvm-cov-target/
-    # but the *report* output directory (target/coverage/) is something
-    # we choose and must exist before --output-path runs.
+    # The *report* output directory (target/coverage/) is something we
+    # choose and must exist before --output-path runs.
     [System.IO.Directory]::CreateDirectory('target/coverage') | Out-Null
-    [System.IO.Directory]::CreateDirectory('target/coverage/html') | Out-Null
-    # Wipe stale .profraw data so the report reflects only this run.
-    # `--profraw-only` may not be combined with `--workspace` (cargo-llvm-cov
-    # warns and ignores the flag), so we scope to profraw without it.
-    cargo '+{{ rust_nightly }}' llvm-cov clean --profraw-only
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    # Instrument and run tests twice -- once with --all-features and
-    # once with --no-default-features -- merging both .profraw sets via
-    # the shared target/llvm-cov-target/ before any report runs. Dual
-    # invocation catches lines that only execute under one feature
-    # configuration: feature-gated code that's dead with default
-    # features off, plus code paths that only the default features
-    # exercise. The single merged report still produces one lcov.info
-    # (so Codecov / cobertura / HTML each have a single source of
-    # truth).
+    # Instrument and run tests once per feature configuration, each as a
+    # SELF-CONTAINED llvm-cov run that exports only its own config's
+    # objects. Dual config (--all-features + --no-default-features) catches
+    # lines that only execute under one feature configuration (feature-gated
+    # code dead with default features off, plus default-only code paths).
     #
-    # Note: nextest's exit-4 ("no tests to run") IS treated as a
-    # failure here -- a llvm-cov run that finds no tests almost
-    # always means a config mistake (wrong package filter, missing
-    # test target, etc.), not a legitimate empty set. anvil-miri
-    # is the exception (see its comment): miri-skipped tests are an
-    # expected design point for FS-heavy crates.
-    & cargo '+{{ rust_nightly }}' llvm-cov nextest @pkg --all-features --locked --no-report
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    & cargo '+{{ rust_nightly }}' llvm-cov nextest @pkg --no-default-features --locked --no-report
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    # lcov.info feeds Codecov on GitHub; cobertura.xml feeds
-    # PublishCodeCoverageResults@2 on Azure DevOps.
-    cargo '+{{ rust_nightly }}' llvm-cov report --lcov      --output-path target/coverage/lcov.info
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    cargo '+{{ rust_nightly }}' llvm-cov report --cobertura --output-path target/coverage/cobertura.xml
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    # Local-only HTML viewer (no cloud-workflow consumer); cheap once the data exists.
-    cargo '+{{ rust_nightly }}' llvm-cov report --html      --output-dir target/coverage/html
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # Crucially this does NOT merge both configs' objects into one report.
+    # A single `llvm-cov report` over the union shells one `--object=` per
+    # test binary and, on a large workspace, overflows the Windows
+    # CreateProcess command-line limit (os error 206, "filename or extension
+    # is too long"). Each per-config report references only ~half the
+    # objects and stays under the limit. The two configs are reconciled
+    # *downstream* instead of via a merged report:
+    #   * cargo-coverage-gate merges the two lcov files at the line level
+    #     (per-line counts summed) -- this is the gate;
+    #   * Codecov ingests both lcov files (it coalesces uploads);
+    #   * ADO's PublishCodeCoverageResults coalesces both cobertura files.
+    # This also avoids needing a platform-specific lcov merger (`lcov -a`
+    # is Linux-only). HTML output is dropped -- it had no cloud-workflow
+    # consumer and would reintroduce the overflowing union report; run
+    # `cargo llvm-cov --html` ad hoc for a local viewer.
+    #
+    # A full `llvm-cov clean` between configs wipes the prior config's
+    # objects so each `report` is scoped to the current config only.
+    #
+    # Note: nextest's exit-4 ("no tests to run") IS treated as a failure
+    # here -- a llvm-cov run that finds no tests almost always means a
+    # config mistake (wrong package filter, missing test target, etc.), not
+    # a legitimate empty set. anvil-miri is the exception (see its comment).
+    $configs = @(
+        @{ name = 'all-features'; flag = '--all-features' },
+        @{ name = 'no-default';   flag = '--no-default-features' }
+    )
+    foreach ($cfg in $configs) {
+        cargo '+{{ rust_nightly }}' llvm-cov clean --workspace
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & cargo '+{{ rust_nightly }}' llvm-cov nextest @pkg $cfg.flag --locked --no-report
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        # lcov feeds the gate + Codecov; cobertura feeds ADO's
+        # PublishCodeCoverageResults@2. Both reports are scoped to THIS
+        # config's objects, so neither overflows the Windows cmdline limit.
+        cargo '+{{ rust_nightly }}' llvm-cov report --lcov      --output-path "target/coverage/lcov-$($cfg.name).info"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        cargo '+{{ rust_nightly }}' llvm-cov report --cobertura --output-path "target/coverage/cobertura-$($cfg.name).xml"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
     # Local coverage gate: cargo-coverage-gate compares per-package line
-    # coverage from lcov.info against per-package thresholds carried in
-    # Cargo.toml ([package.metadata.coverage-gate] min-lines-percent,
-    # falling back to [workspace.metadata.coverage-gate], then the
-    # built-in 100.0 default). Exits non-zero when any gated package
-    # falls below its threshold, so coverage regressions fail the PR
-    # locally and in cloud workflows -- the upload to Codecov stays
-    # purely for display and historical trend, no longer the gate.
-    cargo coverage-gate --lcov target/coverage/lcov.info
+    # coverage against per-package thresholds carried in Cargo.toml
+    # ([package.metadata.coverage-gate] min-lines-percent, falling back to
+    # [workspace.metadata.coverage-gate], then the built-in 100.0 default).
+    # It merges the two per-config lcovs (line-level) so the gate sees the
+    # union coverage. Exits non-zero when any gated package falls below its
+    # threshold, so coverage regressions fail the PR locally and in cloud
+    # workflows -- the Codecov upload stays purely for display, not the gate.
+    cargo coverage-gate --lcov target/coverage/lcov-all-features.info --lcov target/coverage/lcov-no-default.info
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier. Two cargo-test invocations cover both feature

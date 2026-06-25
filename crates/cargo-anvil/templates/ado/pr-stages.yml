@@ -127,12 +127,13 @@ stages:
       # stays as a sibling task on each OS job -- it's a results
       # publish (not a pipeline artifact), so 1ESPT permits it at step
       # level and we don't need to route it through `artifacts:`.
-      # cobertura.xml is produced by the anvil-llvm-cov recipe.
-      # Publishing from every OS leg matters because OS-gated code is
-      # only exercised on its native target; a single-leg upload would
-      # systematically under-report coverage of cfg(target_os = ...)
-      # branches. ADO's PublishCodeCoverageResults@2 coalesces multiple
-      # publishes against the same build into one coverage report.
+      # cobertura-*.xml are produced by the anvil-llvm-cov recipe (one per
+      # feature config). Publishing from every OS leg matters because
+      # OS-gated code is only exercised on its native target; a single-leg
+      # upload would systematically under-report coverage of
+      # cfg(target_os = ...) branches. ADO's PublishCodeCoverageResults@2
+      # coalesces multiple publishes (across legs and the per-config files)
+      # against the same build into one coverage report.
       - template: steps/job.yml
         parameters:
           name: linux
@@ -147,7 +148,7 @@ stages:
               condition: and(succeededOrFailed(), ne(variables.include_affected_linux, '--skip'))
               displayName: Publish coverage (linux)
               inputs:
-                summaryFileLocation: target/coverage/cobertura.xml
+                summaryFileLocation: target/coverage/cobertura-*.xml
                 failIfCoverageEmpty: false
       - template: steps/job.yml
         parameters:
@@ -163,7 +164,7 @@ stages:
               condition: and(succeededOrFailed(), ne(variables.include_affected_windows, '--skip'))
               displayName: Publish coverage (windows)
               inputs:
-                summaryFileLocation: target/coverage/cobertura.xml
+                summaryFileLocation: target/coverage/cobertura-*.xml
                 failIfCoverageEmpty: false
 
   - stage: pr_runtime_analysis
