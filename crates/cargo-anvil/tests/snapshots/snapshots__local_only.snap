@@ -551,17 +551,29 @@ anvil-audit: anvil-audit-validate-prereqs
 # precisely what the required tier is for. Pinned to the general
 # nightly defined in versions.just.
 #
-# Deliberately omits `--all-targets`: with `--all-targets`, a dep
-# that's listed in BOTH `[dependencies]` and `[dev-dependencies]` and
-# used only by tests is reported as "all used" because the dev-deps
-# target satisfies the lookup, masking the unused entry in main
-# `[dependencies]`. Restricting to the default targets (lib + bins)
-# matches main repo cloud workflows' check and surfaces the real bug.
+# Run twice, because cargo-udeps only analyzes the targets it is told
+# to, and each invocation catches a variant the other masks:
+#   1. default targets (lib + bins): catches a dep in `[dependencies]`
+#      that is referenced only by tests/benches/examples -- it belongs
+#      in `[dev-dependencies]`. Under `--all-targets` such a dep looks
+#      "used" (the test/bench/example target satisfies the lookup), so
+#      this run is the only one that surfaces it.
+#   2. `--all-targets`: catches unused `[dev-dependencies]` -- which the
+#      default-targets run never compiles, so it is the only one that
+#      surfaces those.
+# A genuinely-unused dep is caught by both; the two together cover all
+# of {unused dep, unused dev-dep, dep that should be a dev-dep}.
 [script("pwsh")]
 anvil-udeps: anvil-udeps-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
-    & cargo '+{{ rust_nightly }}' udeps @(if ($env:ANVIL_INCLUDE_REQUIRED) { -split $env:ANVIL_INCLUDE_REQUIRED } else { '--workspace' }) --all-features
+    $pkg = @(if ($env:ANVIL_INCLUDE_REQUIRED) { -split $env:ANVIL_INCLUDE_REQUIRED } else { '--workspace' })
+    # Pass 1: default targets (lib + bins) -- surfaces [dependencies] that
+    # are only used by tests/benches/examples (should be dev-deps).
+    & cargo '+{{ rust_nightly }}' udeps @pkg --all-features
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # Pass 2: --all-targets -- surfaces unused [dev-dependencies].
+    & cargo '+{{ rust_nightly }}' udeps @pkg --all-features --all-targets
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier (compares published API of changed crates against the
