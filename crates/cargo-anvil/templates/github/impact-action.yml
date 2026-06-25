@@ -71,21 +71,16 @@ runs:
         # the baseline without disturbing the checked-out tree.
         cargo delta snapshot > "$RUNNER_TEMP/anvil-current.json"
         git worktree add --detach "$RUNNER_TEMP/anvil-baseline" "$base"
-        # Snapshot the baseline. When anvil is first introduced (this PR adds
-        # the cargo workspace), the baseline branch has no workspace, so
-        # cargo-delta can't snapshot it. Treat that as "everything changed":
-        # fall back to full-workspace validation by emitting empty include_*
-        # outputs (recipes default to --workspace when these are empty)
-        # instead of failing impact, which would block every pr-* job.
-        baseline_ok=1
-        ( cd "$RUNNER_TEMP/anvil-baseline" \
-            && RUSTUP_TOOLCHAIN="$active_toolchain" cargo delta snapshot ) \
-            > "$RUNNER_TEMP/anvil-baseline.json" \
-            2> "$RUNNER_TEMP/anvil-baseline.err" || baseline_ok=0
-        git worktree remove --force "$RUNNER_TEMP/anvil-baseline"
-        if [ "$baseline_ok" -eq 0 ] ; then
-            echo "anvil impact: could not snapshot baseline '$base' (not a cargo workspace yet? -- e.g. first-time anvil adoption). Falling back to full-workspace validation." >&2
-            sed 's/^/  baseline: /' "$RUNNER_TEMP/anvil-baseline.err" >&2 || true
+        # When anvil is first introduced (this PR adds the cargo workspace),
+        # the baseline branch has no root Cargo.toml, so there is no
+        # workspace for cargo-delta to snapshot. Detect that explicitly and
+        # fall back to full-workspace validation (empty include_* -> recipes
+        # default to --workspace) rather than running cargo-delta. This is a
+        # targeted check: any *other* cargo-delta failure below is a real
+        # error and is allowed to fail the impact job (and the gated pr-* jobs).
+        if [ ! -f "$RUNNER_TEMP/anvil-baseline/Cargo.toml" ] ; then
+            echo "anvil impact: baseline '$base' has no root Cargo.toml (not a cargo workspace yet -- first-time anvil adoption?). Falling back to full-workspace validation." >&2
+            git worktree remove --force "$RUNNER_TEMP/anvil-baseline"
             {
                 echo "include_modified="
                 echo "include_affected="
@@ -93,6 +88,10 @@ runs:
             } >> "$GITHUB_OUTPUT"
             exit 0
         fi
+        ( cd "$RUNNER_TEMP/anvil-baseline" \
+            && RUSTUP_TOOLCHAIN="$active_toolchain" cargo delta snapshot ) \
+            > "$RUNNER_TEMP/anvil-baseline.json"
+        git worktree remove --force "$RUNNER_TEMP/anvil-baseline"
         result="$(cargo delta impact \
             --baseline "$RUNNER_TEMP/anvil-baseline.json" \
             --current  "$RUNNER_TEMP/anvil-current.json" \

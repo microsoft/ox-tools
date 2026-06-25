@@ -593,26 +593,25 @@ steps:
       # is unaffected.
       cargo delta snapshot > "$AGENT_TEMPDIRECTORY/anvil-current.json"
       GIT_LFS_SKIP_SMUDGE=1 git worktree add --detach "$AGENT_TEMPDIRECTORY/anvil-baseline" "$base"
-      # Snapshot the baseline. When anvil is first introduced (this PR adds
-      # the cargo workspace), the baseline branch has no workspace, so
-      # cargo-delta can't snapshot it. Treat that as "everything changed":
-      # fall back to full-workspace validation by emitting empty include_*
-      # outputs (recipes default to --workspace when these are empty)
-      # instead of failing impact, which would block every pr-* stage.
-      baseline_ok=1
-      ( cd "$AGENT_TEMPDIRECTORY/anvil-baseline" \
-          && RUSTUP_TOOLCHAIN="$active_toolchain" cargo delta snapshot ) \
-          > "$AGENT_TEMPDIRECTORY/anvil-baseline.json" \
-          2> "$AGENT_TEMPDIRECTORY/anvil-baseline.err" || baseline_ok=0
-      git worktree remove --force "$AGENT_TEMPDIRECTORY/anvil-baseline"
-      if [ "$baseline_ok" -eq 0 ] ; then
-          echo "anvil impact: could not snapshot baseline '$base' (not a cargo workspace yet? -- e.g. first-time anvil adoption). Falling back to full-workspace validation." >&2
-          sed 's/^/  baseline: /' "$AGENT_TEMPDIRECTORY/anvil-baseline.err" >&2 || true
+      # When anvil is first introduced (this PR adds the cargo workspace),
+      # the baseline branch has no root Cargo.toml, so there is no workspace
+      # for cargo-delta to snapshot. Detect that explicitly and fall back to
+      # full-workspace validation (empty include_* -> recipes default to
+      # --workspace) rather than running cargo-delta. This is a targeted
+      # check: any *other* cargo-delta failure below is a real error and is
+      # allowed to fail the impact stage (and thus the gated pr-* stages).
+      if [ ! -f "$AGENT_TEMPDIRECTORY/anvil-baseline/Cargo.toml" ] ; then
+          echo "anvil impact: baseline '$base' has no root Cargo.toml (not a cargo workspace yet -- first-time anvil adoption?). Falling back to full-workspace validation." >&2
+          git worktree remove --force "$AGENT_TEMPDIRECTORY/anvil-baseline"
           echo "##vso[task.setvariable variable=include_modified;isOutput=true]"
           echo "##vso[task.setvariable variable=include_affected;isOutput=true]"
           echo "##vso[task.setvariable variable=include_required;isOutput=true]"
           exit 0
       fi
+      ( cd "$AGENT_TEMPDIRECTORY/anvil-baseline" \
+          && RUSTUP_TOOLCHAIN="$active_toolchain" cargo delta snapshot ) \
+          > "$AGENT_TEMPDIRECTORY/anvil-baseline.json"
+      git worktree remove --force "$AGENT_TEMPDIRECTORY/anvil-baseline"
       result="$(cargo delta impact \
           --baseline "$AGENT_TEMPDIRECTORY/anvil-baseline.json" \
           --current  "$AGENT_TEMPDIRECTORY/anvil-current.json" \
