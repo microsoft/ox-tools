@@ -568,14 +568,18 @@ steps:
       #   * Adopters can override via BASE_REF (full ref name, e.g.
       #     `origin/release`).
       #   * On PR build-validation runs, SYSTEM_PULLREQUEST_TARGETBRANCH
-      #     is set to the unqualified target branch (e.g. `main`).
+      #     is the *fully-qualified* target ref (e.g. `refs/heads/main`),
+      #     so we strip the `refs/heads/` prefix before composing
+      #     `origin/<branch>` -- `origin/refs/heads/main` is not a valid
+      #     ref and `git worktree add` would reject it.
       #   * Otherwise fall back to `master` so manual / branch cloud-workflow runs
       #     produce a sensible diff against the default branch.
       # The ADO macro form `$(System.PullRequest.TargetBranch)` is unsafe
       # here: when the variable is unset (non-PR builds), ADO leaves the
       # `$(...)` literal in the script, which bash then interprets as
       # command substitution and fails with exit 127.
-      base="${BASE_REF:-origin/${SYSTEM_PULLREQUEST_TARGETBRANCH:-master}}"
+      target="${SYSTEM_PULLREQUEST_TARGETBRANCH:-master}"
+      base="${BASE_REF:-origin/${target#refs/heads/}}"
       # Two snapshots + impact compare (cargo-delta has no --base
       # shortcut). The baseline runs in a worktree at the merge target
       # so the checked-out tree is untouched.
