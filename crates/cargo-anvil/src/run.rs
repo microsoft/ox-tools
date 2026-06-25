@@ -199,44 +199,42 @@ fn build_plan(
 /// all share the single `<host>.anvil-proposed` path) converges on the same
 /// fully-updated content instead of the last write clobbering the rest.
 fn recompose_region_proposals(repo_root: &Path, plan: &mut Plan, hosts: &mut HostTextCache) -> Result<(), AppError> {
-    // Group region `Propose` item indices by host, preserving first-seen
-    // order so the recomposition is deterministic.
+    // First pass: collect each region `Propose`'s (index, id, rendered body),
+    // grouped by host and preserving first-seen host order so the
+    // recomposition is deterministic.
     let mut hosts_in_order: Vec<String> = Vec::new();
-    let mut grouped: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut grouped: HashMap<String, Vec<(usize, String, String)>> = HashMap::new();
     for (idx, item) in plan.items().iter().enumerate() {
+        let Target::Region { host, id } = &item.target else {
+            continue;
+        };
         if item.decision != Decision::Propose {
             continue;
         }
-        if let Target::Region { host, .. } = &item.target {
-            if !grouped.contains_key(host) {
-                hosts_in_order.push(host.clone());
-            }
-            grouped.entry(host.clone()).or_default().push(idx);
+        let body = item.rendered.clone().expect("region Propose carries its rendered body");
+        if !grouped.contains_key(host) {
+            hosts_in_order.push(host.clone());
         }
+        grouped.entry(host.clone()).or_default().push((idx, id.clone(), body));
     }
 
     for host in &hosts_in_order {
-        let idxs = &grouped[host];
+        let entries = &grouped[host];
         let Some(mut composed) = hosts.get_or_read(repo_root, host)? else {
             // Host file vanished (external race during the run); keep the
-            // eagerly-computed proposal rather than dropping it.
+            // eagerly-computed proposals rather than dropping them.
             continue;
         };
         // Build the fully-updated host = final live host with every proposed
-        // region's new body spliced in.
-        for &idx in idxs {
-            let item = &plan.items()[idx];
-            if let Target::Region { id, .. } = &item.target {
-                let body = item.rendered.as_deref().expect("region Propose carries its rendered body");
-                // CommentSyntax is currently always Hash for managed regions
-                // (mirrors plan_managed_region / plan_removals); revisit when
-                // the manifest records per-region syntax.
-                composed = upsert_region(&composed, id, body, CommentSyntax::Hash)?;
-            }
+        // region's new body spliced in. CommentSyntax is currently always
+        // Hash for managed regions (mirrors plan_managed_region /
+        // plan_removals); revisit when the manifest records per-region syntax.
+        for (_, id, body) in entries {
+            composed = upsert_region(&composed, id, body, CommentSyntax::Hash)?;
         }
         // Stamp the composed host onto every proposal for this host.
-        for &idx in idxs {
-            plan.items_mut()[idx].spliced_host = Some(composed.clone());
+        for (idx, _, _) in entries {
+            plan.items_mut()[*idx].spliced_host = Some(composed.clone());
         }
     }
     Ok(())
@@ -1260,5 +1258,61 @@ mod tests {
             "proposal composed on top of b's write:\n{proposed}"
         );
         assert!(!proposed.contains("b = \"v1\""), "stale sibling content must be gone:\n{proposed}");
+    }
+
+    /// When several regions on one host propose, every proposal converges on
+    /// the same fully-updated `<host>.anvil-proposed` content (each proposed
+    /// body composed on top of the others), rather than last-writer-wins.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn recompose_converges_multiple_proposals_on_one_host() {
+        let tmp = TempDir::new().unwrap();
+        let host = "deny.toml";
+        // Final live host carries both regions at the user's content.
+        let final_live = "# >>> anvil-managed: a\nUSER a\n# <<< anvil-managed: a\n\
+             # >>> anvil-managed: b\nUSER b\n# <<< anvil-managed: b\n"
+            .to_owned();
+        let mut hosts = HostTextCache::default();
+        hosts.set(host, final_live);
+
+        let mut plan = Plan::default();
+        // Two proposals on the same host with deliberately stale payloads.
+        plan.push(PlanItem::propose_region(host, "a", "NEW a\n".into(), "stale-a".into(), "sa".into()));
+        plan.push(PlanItem::propose_region(host, "b", "NEW b\n".into(), "stale-b".into(), "sb".into()));
+
+        recompose_region_proposals(tmp.path(), &mut plan, &mut hosts).unwrap();
+
+        let p0 = plan.items()[0].spliced_host.as_deref().unwrap();
+        let p1 = plan.items()[1].spliced_host.as_deref().unwrap();
+        assert_eq!(p0, p1, "both proposals must converge on the same fully-updated host");
+        assert!(p0.contains("NEW a") && p0.contains("NEW b"), "every proposed body present:\n{p0}");
+    }
+
+    /// If a Propose item's host file vanished mid-run (external race), the
+    /// recomposition pass leaves the eagerly-computed proposal untouched
+    /// rather than dropping it.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn recompose_skips_when_host_file_is_absent() {
+        let tmp = TempDir::new().unwrap();
+        let mut plan = Plan::default();
+        let stale = "eagerly computed proposal\n".to_owned();
+        plan.push(PlanItem::propose_region(
+            "gone.toml",
+            "anvil-x",
+            "body\n".into(),
+            stale.clone(),
+            "sum".into(),
+        ));
+
+        // Empty cache + no file on disk -> get_or_read returns None.
+        let mut hosts = HostTextCache::default();
+        recompose_region_proposals(tmp.path(), &mut plan, &mut hosts).unwrap();
+
+        assert_eq!(
+            plan.items()[0].spliced_host.as_deref(),
+            Some(stale.as_str()),
+            "vanished host leaves the proposal as-is"
+        );
     }
 }
