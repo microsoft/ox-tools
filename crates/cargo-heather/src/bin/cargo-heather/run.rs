@@ -126,7 +126,7 @@ fn run_fix(files: &[PathBuf], config: &HeatherConfig, project_dir: &Path) -> Res
 /// This is the single filesystem-write edge of the `--fix` path,
 /// extracted from [`run_fix`] so the two fix arms share one write site.
 fn write_fixed(path: &Path, output: &[u8]) -> Result<(), AppError> {
-    std::fs::write(path, output).map_err(|e| HeatherError::FileRead {
+    std::fs::write(path, output).map_err(|e| HeatherError::FileWrite {
         path: path.to_path_buf(),
         source: e,
     })?;
@@ -272,10 +272,11 @@ mod tests {
     #[test]
     fn write_fixed_propagates_write_error() {
         // A directory occupies the target path, so `fs::write` fails and
-        // the error is surfaced as `FileRead`.
+        // the error is surfaced as `FileWrite`.
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().join("blocked");
         std::fs::create_dir(&dir).unwrap();
-        assert!(write_fixed(&dir, b"x").is_err());
+        let err = write_fixed(&dir, b"x").expect_err("writing to a directory path must fail");
+        assert!(err.to_string().contains("failed to write file"), "{err}");
     }
 }

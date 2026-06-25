@@ -17,6 +17,14 @@ pub enum HeatherError {
         source: std::io::Error,
     },
 
+    /// Failed to write a file to disk.
+    FileWrite {
+        /// Path to the file that could not be written.
+        path: PathBuf,
+        /// The underlying I/O error.
+        source: std::io::Error,
+    },
+
     /// Failed to parse the configuration file.
     ConfigParse {
         /// Path to the configuration file.
@@ -50,6 +58,9 @@ impl fmt::Display for HeatherError {
             Self::FileRead { path, source } => {
                 write!(f, "failed to read file '{}': {source}", path.display())
             }
+            Self::FileWrite { path, source } => {
+                write!(f, "failed to write file '{}': {source}", path.display())
+            }
             Self::ConfigParse { path, message } => {
                 write!(f, "failed to parse config '{}': {message}", path.display())
             }
@@ -70,6 +81,7 @@ impl std::error::Error for HeatherError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::FileRead { source, .. } => Some(source),
+            Self::FileWrite { source, .. } => Some(source),
             _ => None,
         }
     }
@@ -91,6 +103,13 @@ mod tests {
         };
         let source = err.source().expect("FileRead should have a source");
         assert!(source.to_string().contains("gone"));
+
+        let write_err = HeatherError::FileWrite {
+            path: PathBuf::from("/tmp/denied"),
+            source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+        };
+        let write_source = write_err.source().expect("FileWrite should have a source");
+        assert!(write_source.to_string().contains("denied"));
     }
 
     #[test]
@@ -109,6 +128,15 @@ mod tests {
             }
             .to_string()
             .contains("failed to read file")
+        );
+        let write_err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        assert!(
+            HeatherError::FileWrite {
+                path: PathBuf::from("/w"),
+                source: write_err,
+            }
+            .to_string()
+            .contains("failed to write file")
         );
         assert!(
             HeatherError::ConfigParse {

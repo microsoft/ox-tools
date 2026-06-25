@@ -53,8 +53,12 @@ if ($keywordsList.Count -gt 5) {
     exit 1
 }
 
-$crateCategories = Read-Host -Prompt "Enter comma-separated crate categories (see https://crates.io/categories for allowed categories)"
+$crateCategories = Read-Host -Prompt "Enter comma-separated crate categories (max 5, see https://crates.io/categories for allowed categories)"
 $categoriesList = $crateCategories.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+if ($categoriesList.Count -gt 5) {
+    Write-Error "Too many categories. crates.io allows a maximum of 5 categories, but $($categoriesList.Count) were provided."
+    exit 1
+}
 
 Write-Host $repoRoot
 # Define paths
