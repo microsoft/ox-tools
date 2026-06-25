@@ -69,7 +69,8 @@ fn git_init_with_origin(dir: &Path, origin: &str) {
 
 #[test]
 fn version_flag_prints_version() {
-    anvil(TempDir::new().unwrap().path(), &["--version"])
+    let tmp = TempDir::new().unwrap();
+    anvil(tmp.path(), &["--version"])
         .assert()
         .success()
         .stdout(predicates::str::contains(env!("CARGO_PKG_VERSION")));
@@ -77,7 +78,8 @@ fn version_flag_prints_version() {
 
 #[test]
 fn help_flag_succeeds_and_describes_backends() {
-    anvil(TempDir::new().unwrap().path(), &["--help"])
+    let tmp = TempDir::new().unwrap();
+    anvil(tmp.path(), &["--help"])
         .assert()
         .success()
         .stdout(predicates::str::contains("--backend"))
