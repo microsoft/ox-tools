@@ -305,16 +305,16 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
 # no-op when unset. Cloud workflows inject PR_TITLE explicitly: GH Actions
 # from ${{ github.event.pull_request.title }}; ADO resolves it via the REST
 # API in steps/group.yml (ADO has no PR-title predefined variable). Locally
-# it skips silently -- there is no reliable way to recover the PR title, so
-# the recipe defers the check to cloud workflows. The recipe also treats a
-# value that is still an unexpanded `$(...)` pipeline macro as "not set" and
-# skips, so a misconfigured/absent cloud variable degrades to a skip rather
-# than failing on the literal macro text.
+# it skips silently when PR_TITLE is unset -- there is no reliable way to
+# recover the PR title, so the recipe defers the check to cloud workflows.
+# It does NOT tolerate a non-empty-but-wrong value: a misconfigured cloud
+# variable (e.g. an unexpanded pipeline macro) is a real error and fails
+# the check loudly rather than silently passing.
 [script("pwsh")]
 anvil-pr-title: anvil-pr-title-validate-prereqs
     $title = $env:PR_TITLE
-    if (-not $title -or $title.StartsWith('$(')) {
-        Write-Host 'anvil-pr-title: PR_TITLE not set (or unexpanded); skipping (check runs in cloud workflows)'
+    if (-not $title) {
+        Write-Host 'anvil-pr-title: PR_TITLE env var not set; skipping (check runs in cloud workflows)'
         exit 0
     }
     if ($title -notmatch '^(feat|fix|chore|docs|refactor|test|build|cloud workflows|perf|revert)(\([^)]+\))?!?: .+') {
