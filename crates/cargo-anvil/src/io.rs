@@ -78,6 +78,7 @@ fn find_entry_case_insensitive(dir: &Path, name: &str) -> Option<String> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 
@@ -121,14 +122,14 @@ mod tests {
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
-    fn resolves_intermediate_directory_casing() {
+    fn read_file_if_present_propagates_non_not_found_errors() {
+        // A file containing invalid UTF-8 makes `read_to_string` fail with
+        // `InvalidData` (not `NotFound`), exercising the error passthrough
+        // arm rather than the `Ok(None)` missing-file arm.
         let tmp = TempDir::new().unwrap();
-        touch(tmp.path(), "Crates/alpha/Cargo.toml");
-        // Existing dir `Crates` is reused even though the catalog said `crates`;
-        // the not-yet-existing leaf keeps its canonical casing.
-        assert_eq!(
-            resolve_existing_case_insensitive(tmp.path(), "crates/alpha/new.toml"),
-            "Crates/alpha/new.toml"
-        );
+        let bad = tmp.path().join("bad.bin");
+        std::fs::write(&bad, [0xFFu8, 0xFE, 0xFF]).unwrap();
+        let err = read_file_if_present(&bad).unwrap_err();
+        assert!(err.to_string().contains("failed to read"), "{err}");
     }
 }

@@ -126,6 +126,10 @@ rust.unused_lifetimes = "warn"
 # customization is preserved.
 rust.unexpected_cfgs = { level = "warn", check-cfg = [
     'cfg(coverage,coverage_nightly)',
+    'cfg(loom)',
+    'cfg(miri_race_coverage)',
+    'cfg(miri_strict_provenance)',
+    'cfg(miri_tree_borrows)',
 ] }
 
 # --- rustdoc ---------------------------------------------------------------

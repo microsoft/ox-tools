@@ -19,9 +19,15 @@
 #   - libclang: required by cargo-spellcheck (clang-sys / hunspell-rs)
 #     at build time.
 #
-# Detection uses presence-only probes (file existence in standard install
-# dirs + `LIBCLANG_PATH` env var). No version checks -- system libs upgrade
-# independently and any reasonably modern libclang works for clang-sys.
+# Detection verifies libclang is *discoverable*, not merely present:
+# bindgen/clang-sys locate it via `LIBCLANG_PATH` or directories on
+# `PATH`, and on Windows the runtime loader resolves the DLL (and its
+# dependents) only via `PATH` -- it does NOT read `LIBCLANG_PATH`. A
+# winget `LLVM.LLVM` install sets neither, so the DLL exists but the
+# hunspell-sys build script fails to load it (STATUS_DLL_NOT_FOUND). We
+# therefore require the libclang directory to be on `PATH` on Windows,
+# catching that case up front. No version checks -- any reasonably modern
+# libclang works for clang-sys.
 #
 # On missing deps the recipe prints copy-paste install hints per OS /
 # package manager and exits non-zero. No auto-install: admin / sudo and
@@ -32,43 +38,48 @@ anvil-system-deps-check:
     $ErrorActionPreference = 'Stop'
     $missing = @()
 
-    # libclang: required to BUILD cargo-spellcheck from source.
-    $haveLibclang = $false
+    # libclang: required to BUILD cargo-spellcheck from source. Locate the
+    # *directory* it lives in (via LIBCLANG_PATH, then standard install
+    # dirs), so we can additionally verify discoverability below.
     $libclangFiles = @('libclang.dll', 'libclang.so', 'libclang.so.1', 'libclang.dylib')
+    $libclangDir = $null
     if ($env:LIBCLANG_PATH) {
         foreach ($f in $libclangFiles) {
-            if (Test-Path (Join-Path $env:LIBCLANG_PATH $f)) { $haveLibclang = $true; break }
+            if (Test-Path (Join-Path $env:LIBCLANG_PATH $f)) { $libclangDir = $env:LIBCLANG_PATH; break }
         }
     }
-    if (-not $haveLibclang) {
+    if (-not $libclangDir) {
         $probes = if ($IsWindows) {
             @(
-                'C:\Program Files\LLVM\bin\libclang.dll',
-                "$env:USERPROFILE\scoop\apps\llvm\current\bin\libclang.dll"
+                'C:\Program Files\LLVM\bin',
+                "$env:USERPROFILE\scoop\apps\llvm\current\bin"
             )
         } elseif ($IsMacOS) {
             @(
-                '/usr/local/opt/llvm/lib/libclang.dylib',
-                '/opt/homebrew/opt/llvm/lib/libclang.dylib'
+                '/usr/local/opt/llvm/lib',
+                '/opt/homebrew/opt/llvm/lib'
             )
         } else {
             @(
-                '/usr/lib/x86_64-linux-gnu/libclang.so.1',
-                '/usr/lib/aarch64-linux-gnu/libclang.so.1',
-                '/usr/lib64/libclang.so',
-                '/usr/lib64/libclang.so.1'
+                '/usr/lib/x86_64-linux-gnu',
+                '/usr/lib/aarch64-linux-gnu',
+                '/usr/lib64'
             )
         }
-        foreach ($p in $probes) {
-            if (Get-Item -LiteralPath $p -ErrorAction SilentlyContinue) { $haveLibclang = $true; break }
+        foreach ($d in $probes) {
+            foreach ($f in $libclangFiles) {
+                if (Test-Path (Join-Path $d $f)) { $libclangDir = $d; break }
+            }
+            if ($libclangDir) { break }
         }
         # Linux distros often add a version suffix (libclang-19.so etc.); glob fallback.
-        if (-not $haveLibclang -and -not $IsWindows -and -not $IsMacOS) {
-            $glob = Get-ChildItem -Path '/usr/lib','/usr/lib64','/usr/lib/x86_64-linux-gnu','/usr/lib/aarch64-linux-gnu' -Filter 'libclang*.so*' -ErrorAction SilentlyContinue
-            if ($glob) { $haveLibclang = $true }
+        if (-not $libclangDir -and -not $IsWindows -and -not $IsMacOS) {
+            $glob = Get-ChildItem -Path '/usr/lib','/usr/lib64','/usr/lib/x86_64-linux-gnu','/usr/lib/aarch64-linux-gnu' -Filter 'libclang*.so*' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($glob) { $libclangDir = $glob.DirectoryName }
         }
     }
-    if (-not $haveLibclang) {
+
+    if (-not $libclangDir) {
         $missing += [pscustomobject]@{
             name = 'libclang'
             why = 'cargo-spellcheck (clang-sys/hunspell-rs) needs libclang at build time'
@@ -76,9 +87,27 @@ anvil-system-deps-check:
                 'Linux (Ubuntu/Debian):    sudo apt-get install -y libclang-dev'
                 'Linux (Azure Linux/RHEL): sudo tdnf install -y clang-devel'
                 'macOS (homebrew):         brew install llvm'
-                'Windows (scoop):          scoop install llvm     # no admin'
-                'Windows (winget, admin):  winget install LLVM.LLVM'
+                'Windows (scoop):          scoop install llvm     # adds LLVM to PATH automatically'
+                'Windows (winget, admin):  winget install LLVM.LLVM   # then set LIBCLANG_PATH + add ...\LLVM\bin to PATH'
             )
+        }
+    } elseif ($IsWindows) {
+        # Present, but on Windows the directory must be on PATH so the
+        # hunspell-sys build script can LOAD libclang.dll at runtime (the
+        # loader ignores LIBCLANG_PATH). Catch the present-but-undiscoverable
+        # case here instead of letting the build fail with STATUS_DLL_NOT_FOUND.
+        $pathDirs = ($env:PATH -split ';') | Where-Object { $_ } | ForEach-Object { $_.TrimEnd('\') }
+        if ($pathDirs -notcontains $libclangDir.TrimEnd('\')) {
+            $missing += [pscustomobject]@{
+                name = 'libclang (present but not on PATH)'
+                why = "libclang.dll exists at '$libclangDir' but that directory is not on PATH; the hunspell-sys build script cannot load it (STATUS_DLL_NOT_FOUND)"
+                hints = @(
+                    "Add the libclang directory to PATH and set LIBCLANG_PATH, then restart the shell:"
+                    "  [Environment]::SetEnvironmentVariable('LIBCLANG_PATH', '$libclangDir', 'User')"
+                    "  # then add this directory to your User PATH (Settings > Environment Variables): $libclangDir"
+                    "Or install via scoop, which adds LLVM to PATH automatically: scoop install llvm"
+                )
+            }
         }
     }
 
@@ -222,25 +251,34 @@ _check-tool name version:
     }
 
 # _install-toolchain: install a specific rustup toolchain (no components).
+# Probe-first: if the toolchain is already installed, skip -- this keeps
+# the recipe idempotent and avoids redundant `rustup` network/update work
+# on warm or cache-restored runners. The probe uses `rustup toolchain list`
+# (a pure, no-network presence check). Substring match because rustup
+# suffixes the host triple to the toolchain name.
 [script("pwsh")]
 _install-toolchain toolchain:
     $ErrorActionPreference = 'Stop'
     $toolchain = '{{toolchain}}'
-    Write-Host "rustup toolchain install $toolchain --profile minimal --no-self-update"
-    rustup toolchain install $toolchain --profile minimal --no-self-update
+    if ((rustup toolchain list) -match [regex]::Escape($toolchain)) {
+        Write-Host "toolchain '$toolchain' already installed; skipping"
+        exit 0
+    }
+    Write-Host "rustup toolchain install $toolchain"
+    rustup toolchain install $toolchain
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Failed to install toolchain '$toolchain'"
         exit $LASTEXITCODE
     }
 
-# _check-toolchain: verify a rustup toolchain is installed.
+# _check-toolchain: verify a rustup toolchain is installed. Uses the same
+# `rustup toolchain list` substring probe as _install-toolchain.
 [script("pwsh")]
 _check-toolchain toolchain:
     $ErrorActionPreference = 'Stop'
     $toolchain = '{{toolchain}}'
-    rustup which --toolchain $toolchain rustc 2>$null | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "anvil: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain --profile minimal"
+    if (-not ((rustup toolchain list) -match [regex]::Escape($toolchain))) {
+        Write-Error "anvil: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain"
         exit 1
     }
 
@@ -249,11 +287,61 @@ _check-toolchain toolchain:
 # pinned toolchain string (which must already be installed -- the
 # per-component setup recipes ensure this via a dependency on
 # anvil-<toolchain>-install).
+#
+# Probe-first: if the component is already available, skip the
+# `rustup component add`. This keeps the recipe idempotent and robust
+# against toolchains that ship the component bundled and reject an
+# explicit add. The probe mirrors `_check-component` exactly -- artifact
+# detection (cargo subcommand / sysroot file) rather than `rustup
+# component list` -- so the install path uses the same detection the
+# check path already had.
 [script("pwsh")]
 _install-component toolchain component:
     $ErrorActionPreference = 'Stop'
     $toolchain = '{{toolchain}}'
     $component = '{{component}}'
+
+    # Probe whether the component is already present (see _check-component
+    # for the rationale behind each detection method and the `+toolchain`
+    # single-argument override).
+    $subcommand = switch ($component) {
+        'clippy'  { 'clippy' }
+        'rustfmt' { 'fmt' }
+        'miri'    { 'miri' }
+        default   { $null }
+    }
+    if ($null -ne $subcommand) {
+        if ($toolchain -eq 'default') {
+            & cargo $subcommand --version *> $null
+        } else {
+            & cargo "+$toolchain" $subcommand --version *> $null
+        }
+        $present = ($LASTEXITCODE -eq 0)
+    } else {
+        $sysroot = if ($toolchain -eq 'default') {
+            & rustc --print sysroot 2>$null
+        } else {
+            & rustc "+$toolchain" --print sysroot 2>$null
+        }
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sysroot)) {
+            # Toolchain not ready yet: treat as absent and let the add below
+            # surface a clear error (the install dependency should have
+            # installed the toolchain first).
+            $present = $false
+        } else {
+            $sysroot = $sysroot.Trim()
+            $present = switch ($component) {
+                'rust-src'   { Test-Path (Join-Path $sysroot 'lib/rustlib/src/rust/library') }
+                'llvm-tools' { @(Get-ChildItem (Join-Path $sysroot 'lib/rustlib') -Recurse -Filter 'llvm-profdata*' -ErrorAction SilentlyContinue).Count -gt 0 }
+                default      { $false }
+            }
+        }
+    }
+    if ($present) {
+        Write-Host "component '$component' already available on toolchain '$toolchain'; skipping install"
+        exit 0
+    }
+
     if ($toolchain -eq 'default') {
         Write-Host "rustup component add $component (default toolchain)"
         rustup component add $component
@@ -267,22 +355,57 @@ _install-component toolchain component:
     }
 
 # _check-component: verify a component is installed on a toolchain.
+#
+# Detection avoids `rustup component list`. Instead each component is
+# probed by the artifact it provides:
+#   - clippy / rustfmt / miri expose a cargo subcommand, so we invoke
+#     `cargo [+toolchain] <subcommand> --version` (non-zero exit => absent).
+#   - rust-src / llvm-tools ship no command, so we probe the toolchain
+#     sysroot (`rustc [+toolchain] --print sysroot`) for their files.
+#
+# The `+<toolchain>` override is passed as a single explicit argument
+# rather than via array splat: the Windows rustup proxy mis-parses a
+# splatted toolchain token and reports `invalid toolchain name ''`, so a
+# splat would spuriously flag installed components as missing.
 [script("pwsh")]
 _check-component toolchain component:
     $ErrorActionPreference = 'Stop'
     $toolchain = '{{toolchain}}'
     $component = '{{component}}'
-    $output = if ($toolchain -eq 'default') {
-        rustup component list --installed 2>$null
+    $subcommand = switch ($component) {
+        'clippy'  { 'clippy' }
+        'rustfmt' { 'fmt' }
+        'miri'    { 'miri' }
+        default   { $null }
+    }
+    if ($null -ne $subcommand) {
+        if ($toolchain -eq 'default') {
+            & cargo $subcommand --version *> $null
+        } else {
+            & cargo "+$toolchain" $subcommand --version *> $null
+        }
+        $present = ($LASTEXITCODE -eq 0)
     } else {
-        rustup component list --installed --toolchain $toolchain 2>$null
+        $sysroot = if ($toolchain -eq 'default') {
+            & rustc --print sysroot 2>$null
+        } else {
+            & rustc "+$toolchain" --print sysroot 2>$null
+        }
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sysroot)) {
+            Write-Error "anvil: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain"
+            exit 1
+        }
+        $sysroot = $sysroot.Trim()
+        $present = switch ($component) {
+            # rust-src lands the standard-library sources under the sysroot.
+            'rust-src'   { Test-Path (Join-Path $sysroot 'lib/rustlib/src/rust/library') }
+            # llvm-tools ships llvm-profdata/llvm-cov under the per-target
+            # bin directory.
+            'llvm-tools' { @(Get-ChildItem (Join-Path $sysroot 'lib/rustlib') -Recurse -Filter 'llvm-profdata*' -ErrorAction SilentlyContinue).Count -gt 0 }
+            default      { $false }
+        }
     }
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "anvil: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain --profile minimal"
-        exit 1
-    }
-    $found = $output | Where-Object { $_ -like "$component*" }
-    if (-not $found) {
+    if (-not $present) {
         $cmd = if ($toolchain -eq 'default') { "rustup component add $component" } else { "rustup component add --toolchain $toolchain $component" }
         Write-Error "anvil: component '$component' not installed on toolchain '$toolchain'. Run: $cmd"
         exit 1
@@ -343,6 +466,21 @@ anvil-component-nightly-rust-src-install: anvil-toolchain-nightly-install (_inst
 [group("anvil-setup")]
 anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "rust-src")
 
+# llvm-tools ships the llvm-profdata / llvm-cov binaries that
+# cargo-llvm-cov shells out to. Required on the nightly toolchain
+# because anvil runs coverage on nightly (so cargo-llvm-cov sets the
+# `cfg(coverage_nightly)` that the workspace's
+# `#[cfg_attr(coverage_nightly, coverage(off))]` exclusions depend on).
+# Use the canonical `llvm-tools` name (not the legacy `llvm-tools-preview`
+# alias). Detection probes the sysroot for the `llvm-profdata` binary
+# (see `_check-component`), so the component name only matters for the
+# `rustup component add` install path.
+[group("anvil-setup")]
+anvil-component-nightly-llvm-tools-install: anvil-toolchain-nightly-install (_install-component rust_nightly "llvm-tools")
+
+[group("anvil-setup")]
+anvil-component-nightly-llvm-tools-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "llvm-tools")
+
 # ============================================================================
 # Cargo subcommands
 # ============================================================================
@@ -364,6 +502,36 @@ anvil-tool-cargo-audit-install installer="install": (_install-tool "cargo-audit"
 [group("anvil-setup")]
 anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_version)
 
+# cargo-bolero is Linux-only: its `bolero-afl` build dependency
+# compiles AFL's native C (afl-fuzz.c), which needs POSIX headers
+# (`unistd.h`) and uses preprocessor constructs MSVC rejects, so the
+# install fails outright on windows-*-msvc. bolero's libfuzzer engine
+# is likewise Linux-only. oxidizer's reference workflow runs bolero
+# exclusively on ubuntu, so anvil follows suit: the install/validate
+# pair self-skips on non-Linux (analogous to cargo-mutants skipping
+# aarch64-pc-windows-msvc), and the anvil-bolero check self-skips on
+# the same hosts. The pr-runtime-analysis Windows/ARM legs therefore
+# treat bolero as a no-op rather than a setup failure.
+[group("anvil-setup")]
+[script("pwsh")]
+anvil-tool-cargo-bolero-install installer="install":
+    if (-not $IsLinux) {
+        Write-Host 'anvil-tool-cargo-bolero-install: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
+        exit 0
+    }
+    & just _install-tool cargo-bolero {{cargo_bolero_version}} {{installer}}
+    exit $LASTEXITCODE
+
+[group("anvil-setup")]
+[script("pwsh")]
+anvil-tool-cargo-bolero-validate-prereqs:
+    if (-not $IsLinux) {
+        Write-Host 'anvil-tool-cargo-bolero-validate-prereqs: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
+        exit 0
+    }
+    & just _check-tool cargo-bolero {{cargo_bolero_version}}
+    exit $LASTEXITCODE
+
 [group("anvil-setup")]
 anvil-tool-cargo-careful-install installer="install": (_install-tool "cargo-careful" cargo_careful_version installer)
 
@@ -375,6 +543,12 @@ anvil-tool-cargo-check-external-types-install installer="install": (_install-too
 
 [group("anvil-setup")]
 anvil-tool-cargo-check-external-types-validate-prereqs: (_check-tool "cargo-check-external-types" cargo_check_external_types_version)
+
+[group("anvil-setup")]
+anvil-tool-cargo-coverage-gate-install installer="install": (_install-tool "cargo-coverage-gate" cargo_coverage_gate_version installer)
+
+[group("anvil-setup")]
+anvil-tool-cargo-coverage-gate-validate-prereqs: (_check-tool "cargo-coverage-gate" cargo_coverage_gate_version)
 
 [group("anvil-setup")]
 anvil-tool-cargo-delta-install installer="install": (_install-tool "cargo-delta" cargo_delta_version installer)

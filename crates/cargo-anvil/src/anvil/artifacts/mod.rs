@@ -36,17 +36,22 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
         justfile::tools(),
         justfile::versions(),
         justfile::checks(),
+        justfile::impact(),
         justfile::groups(),
         justfile::tiers(),
         region::justfile_imports(),
         region::workspace_lints(),
         region::single_crate_lints(),
         region::member_lints(),
-        region::deny(),
+        region::deny_advisories(),
+        region::deny_licenses(),
+        region::deny_bans(),
+        region::deny_sources(),
         region::rustfmt(),
         region::delta(),
         region::spellcheck(),
         region::clippy(),
+        region::gitattributes(),
     ];
 
     // Backend files (gated); both backends present, filtered by gate at plan time.
@@ -57,6 +62,7 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::catalog::Catalog;
@@ -71,17 +77,22 @@ mod tests {
             justfile::versions(),
             justfile::tools(),
             justfile::checks(),
+            justfile::impact(),
             justfile::groups(),
             justfile::tiers(),
             region::justfile_imports(),
             region::workspace_lints(),
             region::single_crate_lints(),
             region::member_lints(),
-            region::deny(),
+            region::deny_advisories(),
+            region::deny_licenses(),
+            region::deny_bans(),
+            region::deny_sources(),
             region::rustfmt(),
             region::delta(),
             region::spellcheck(),
             region::clippy(),
+            region::gitattributes(),
             github::setup_action(),
             github::impact_action(),
             github::pr_impl_workflow(),
@@ -94,6 +105,8 @@ mod tests {
             ado::job_wrapper(),
             ado::pr_stages(),
             ado::scheduled_stages(),
+            ado::custom_pr_stages(),
+            ado::custom_scheduled_stages(),
             ado::pr_root_pipeline(),
             ado::scheduled_root_pipeline(),
         ];

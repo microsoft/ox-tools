@@ -15,6 +15,11 @@ parameters:
 stages:
   - stage: scheduled_test
     displayName: anvil scheduled-test
+    # Full-workspace tier: ANVIL_IMPACT=off makes each check's anvil-impact
+    # dependency no-op and resolve to --workspace, so the scheduled tier
+    # never scopes (and needs neither cargo-delta nor an impact artifact).
+    variables:
+      ANVIL_IMPACT: "off"
     jobs:
       # Publish coverage from both legs so OS-gated code is fully
       # represented (see the pr-stages.yml comment for the rationale).
@@ -28,7 +33,7 @@ stages:
               condition: succeededOrFailed()
               displayName: Publish coverage (linux)
               inputs:
-                summaryFileLocation: target/coverage/cobertura.xml
+                summaryFileLocation: target/coverage/cobertura-*.xml
                 failIfCoverageEmpty: false
       - template: steps/job.yml
         parameters:
@@ -40,12 +45,14 @@ stages:
               condition: succeededOrFailed()
               displayName: Publish coverage (windows)
               inputs:
-                summaryFileLocation: target/coverage/cobertura.xml
+                summaryFileLocation: target/coverage/cobertura-*.xml
                 failIfCoverageEmpty: false
 
   - stage: scheduled_advisories
     displayName: anvil scheduled-advisories
     dependsOn: []
+    variables:
+      ANVIL_IMPACT: "off"
     jobs:
       # Cross-OS because clippy and udeps in this group compile per host,
       # so cfg-gated code must be linted/scanned on both OSes.
@@ -62,9 +69,34 @@ stages:
           steps:
             - template: steps/scheduled-advisories.yml
 
+  - stage: scheduled_runtime_analysis
+    displayName: anvil scheduled-runtime-analysis
+    dependsOn: []
+    variables:
+      ANVIL_IMPACT: "off"
+    jobs:
+      # OS scope mirrors pr-runtime-analysis: any OS already considered
+      # "worth running miri on" gets the stricter profiles too. ADO
+      # hosted pools don't ship hosted ARM runners; adopters with self-
+      # hosted ARM agents override the matrix in their root pipeline.
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/scheduled-runtime-analysis.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/scheduled-runtime-analysis.yml
+
   - stage: scheduled_exhaustive
     displayName: anvil scheduled-exhaustive
     dependsOn: []
+    variables:
+      ANVIL_IMPACT: "off"
     jobs:
       # Cross-OS to match oxidizer's policy: full-workspace mutation
       # testing + cargo-hack powerset + bench compile checks all benefit

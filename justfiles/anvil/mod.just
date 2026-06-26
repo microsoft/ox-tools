@@ -35,6 +35,7 @@
 
 import 'checks.just'
 import 'groups.just'
+import 'impact.just'
 import 'tiers.just'
 import 'tools.just'
 import 'versions.just'

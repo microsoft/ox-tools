@@ -4,12 +4,20 @@
 # See ../../docs/design/checks.md for the catalog and rationale.
 
 # Each group is one cloud-workflow job. Within a group, checks run sequentially.
+#
+# Every group (and tier) recipe lists its `*-validate-prereqs` aggregate as
+# its FIRST dependency, so all of the group's tool/component checks run up
+# front -- a missing tool fails immediately rather than only when the recipe
+# that needs it is finally reached. just runs each recipe at most once per
+# invocation, so the per-check `validate-prereqs` dependencies (e.g.
+# `anvil-fmt: anvil-fmt-validate-prereqs`) don't re-run -- they're satisfied
+# by the up-front aggregate and stay correct when a single check is run alone.
 
 # PR groups
 # ===========================================================================
 
 [group("anvil")]
-anvil-pr-fast: \
+anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-fmt \
     anvil-clippy \
     anvil-cargo-sort \
@@ -45,40 +53,54 @@ anvil-pr-fast: \
 #   $ just anvil-pr-runtime-analysis   # miri + careful only
 #   $ just anvil-pr-mutants   # mutants only
 [group("anvil")]
-anvil-pr-slow: anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants
+anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants
 
 [group("anvil")]
-anvil-pr-test: \
+anvil-pr-test: anvil-pr-test-validate-prereqs \
     anvil-llvm-cov \
     anvil-doc-test \
     anvil-examples
 
 [group("anvil")]
-anvil-pr-runtime-analysis: \
+anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
     anvil-miri \
-    anvil-careful
+    anvil-careful \
+    anvil-loom \
+    anvil-bolero
 
 [group("anvil")]
-anvil-pr-mutants: anvil-mutants-diff
+anvil-pr-mutants: anvil-pr-mutants-validate-prereqs anvil-mutants-diff
 
 # Scheduled groups
 # ===========================================================================
 
 [group("anvil")]
-anvil-scheduled-test: \
+anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
     anvil-llvm-cov \
     anvil-doc-test \
     anvil-examples
 
 [group("anvil")]
-anvil-scheduled-advisories: \
+anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
     anvil-deny \
     anvil-audit \
     anvil-aprz \
     anvil-clippy
 
+# scheduled-runtime-analysis is the full-workspace counterpart of
+# pr-runtime-analysis: it re-runs miri unscoped (PR-tier miri is
+# impact-scoped, so crates untouched by a PR never get miri coverage)
+# and adds the three stricter miri profiles (tree-borrows, strict-
+# provenance, race-coverage) which are too expensive for PR.
 [group("anvil")]
-anvil-scheduled-exhaustive: \
+anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prereqs \
+    anvil-miri \
+    anvil-miri-tree-borrows \
+    anvil-miri-strict-provenance \
+    anvil-miri-race-coverage
+
+[group("anvil")]
+anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
     anvil-mutants-full \
     anvil-cargo-hack \
     anvil-bench
@@ -91,6 +113,7 @@ anvil-scheduled-exhaustive: \
 
 [group("anvil-setup")]
 anvil-pr-fast-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-fmt-setup installer) \
     (anvil-clippy-setup installer) \
     (anvil-cargo-sort-setup installer) \
@@ -110,6 +133,7 @@ anvil-pr-fast-setup installer="install": \
 
 [group("anvil-setup")]
 anvil-pr-fast-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-fmt-validate-prereqs \
     anvil-clippy-validate-prereqs \
     anvil-cargo-sort-validate-prereqs \
@@ -141,31 +165,39 @@ anvil-pr-slow-validate-prereqs: \
 
 [group("anvil-setup")]
 anvil-pr-test-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
     (anvil-examples-setup installer)
 
 [group("anvil-setup")]
 anvil-pr-test-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \
     anvil-doc-test-validate-prereqs \
     anvil-examples-validate-prereqs
 
 [group("anvil-setup")]
 anvil-pr-runtime-analysis-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-miri-setup installer) \
-    (anvil-careful-setup installer)
+    (anvil-careful-setup installer) \
+    (anvil-loom-setup installer) \
+    (anvil-bolero-setup installer)
 
 [group("anvil-setup")]
 anvil-pr-runtime-analysis-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-miri-validate-prereqs \
-    anvil-careful-validate-prereqs
+    anvil-careful-validate-prereqs \
+    anvil-loom-validate-prereqs \
+    anvil-bolero-validate-prereqs
 
 [group("anvil-setup")]
-anvil-pr-mutants-setup installer="install": (anvil-mutants-diff-setup installer)
+anvil-pr-mutants-setup installer="install": (anvil-tool-cargo-delta-install installer) (anvil-mutants-diff-setup installer)
 
 [group("anvil-setup")]
-anvil-pr-mutants-validate-prereqs: anvil-mutants-diff-validate-prereqs
+anvil-pr-mutants-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs anvil-mutants-diff-validate-prereqs
 
 [group("anvil-setup")]
 anvil-scheduled-test-setup installer="install": \
@@ -192,6 +224,20 @@ anvil-scheduled-advisories-validate-prereqs: \
     anvil-audit-validate-prereqs \
     anvil-aprz-validate-prereqs \
     anvil-clippy-validate-prereqs
+
+[group("anvil-setup")]
+anvil-scheduled-runtime-analysis-setup installer="install": \
+    (anvil-miri-setup installer) \
+    (anvil-miri-tree-borrows-setup installer) \
+    (anvil-miri-strict-provenance-setup installer) \
+    (anvil-miri-race-coverage-setup installer)
+
+[group("anvil-setup")]
+anvil-scheduled-runtime-analysis-validate-prereqs: \
+    anvil-miri-validate-prereqs \
+    anvil-miri-tree-borrows-validate-prereqs \
+    anvil-miri-strict-provenance-validate-prereqs \
+    anvil-miri-race-coverage-validate-prereqs
 
 [group("anvil-setup")]
 anvil-scheduled-exhaustive-setup installer="install": \

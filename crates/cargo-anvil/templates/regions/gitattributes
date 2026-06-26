@@ -1,0 +1,3 @@
+# Force LF line endings for Rust sources regardless of the checkout
+# platform, so rustfmt and other tooling see consistent newlines.
+*.rs text eol=lf

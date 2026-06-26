@@ -3,56 +3,51 @@
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # See ../../docs/design/checks.md for the catalog and rationale.
 #
-# Each check belongs to one of four buckets, which determines how it
-# interprets the impact env vars emitted by the cargo-delta impact step
-# in cloud workflows:
+# Each check belongs to one of four tiers, which determines how it
+# scopes its work to the cargo-delta impact set computed by the
+# `anvil-impact` recipe (see impact.just and ../../docs/design/local.md S4):
 #
 #   - "modified": only run when at least one package's source files
 #     changed in the diff. The check's underlying tool is workspace-wide
 #     or directory-scoped (cargo fmt --all, cargo heather, cargo
-#     spellcheck), so it doesn't take --package; we short-circuit on
-#     the ANVIL_INCLUDE_MODIFIED == "--skip" sentinel.
+#     spellcheck), so it doesn't take --package; we short-circuit when
+#     the resolved modified value is the "--skip" sentinel.
 #
 #   - "affected": run on the affected set (modified ∪ reverse-deps
 #     within the workspace). The check's underlying tool takes
-#     --package; we splice ANVIL_INCLUDE_AFFECTED into the cargo
-#     invocation, defaulting to --workspace for local invocations where
-#     no env var is set.
+#     --package; we splice the resolved affected value into the cargo
+#     invocation.
 #
 #   - "required": run on the required set (affected ∪ workspace-internal
-#     transitive deps). Same splice/default pattern as affected, but
-#     keyed on ANVIL_INCLUDE_REQUIRED. Used for checks whose tool
-#     resolves through the dep graph (cargo doc → intra-doc links;
-#     cargo hack → feature powerset; cargo udeps → unused-deps).
+#     transitive deps). Same splice pattern as affected, but resolves
+#     the required tier. Used for checks whose tool resolves through the
+#     dep graph (cargo doc → intra-doc links; cargo hack → feature
+#     powerset; cargo udeps → unused-deps).
 #
-#   - "unscoped": always run, no env var reference. External-input
-#     checks (deny, audit, aprz) and PR-context checks (pr-title) live
-#     here. Scheduled-exhaustive recipes (mutants-full) are also unscoped
-#     by design.
+#   - "unscoped": always run, no impact reference and no `anvil-impact`
+#     dependency. External-input checks (deny, audit, aprz) and
+#     PR-context checks (pr-title) live here. Scheduled-exhaustive
+#     recipes (mutants-full) are also unscoped by design.
 #
-# Local invocation (no impact wiring): all three env vars are unset
-# (recipes use the `?? "--workspace"` null-coalescing fallback below);
-# modified-tier recipes simply skip the splice and run their
-# workspace-wide tool; affected/required-tier recipes splat
-# "--workspace" when the env var is unset.
+# Scoped checks gain two things:
+#   1. `anvil-impact` as a dependency, so the impact cache under
+#      target/anvil/impact/ is fresh before the check reads it.
+#   2. `$include = (just _anvil-impact-include <tier>)` at the top of the
+#      body, which resolves the tier's scope to one of:
+#        * ""                          - modified-tier default (run; the
+#                                         tool is workspace-wide)
+#        * "--workspace"               - affected/required default
+#        * "--package A --package B"   - the impact set for this diff
+#        * "--skip"                    - the tier is empty (recipe exits 0)
+#      Resolution honors ANVIL_IMPACT=off (returns the tier default), so
+#      a full-workspace run is `ANVIL_IMPACT=off just anvil-pr`.
 #
-# Preparation contract: when a recipe reaches the cargo call, the
-# env var is one of:
-#
-#   * unset                       - local run; the recipe substitutes
-#                                    "--workspace" via `?? "--workspace"`
-#   * "--package A --package B"   - emitted by the cloud-workflow impact step when
-#                                    the tier has members
-#   * "--skip"                    - emitted by the cloud-workflow impact step when
-#                                    the tier is empty (recipe exits 0)
-#
-# This lets the simple recipes splat the var directly with
-#   & cargo X @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace")) ...
-# and reduces the per-recipe boilerplate to a single one-line skip
-# guard plus the cargo invocation.
-#
-# Modified-tier recipes never splice the env var into cargo (their
-# tools are workspace-wide); they only check the skip sentinel.
+# Affected/required recipes splat the value directly with
+#   & cargo X @(-split $include) ...
+# and reduce the per-recipe boilerplate to a single one-line skip guard
+# plus the cargo invocation. Modified-tier recipes never splice the
+# value into cargo (their tools are workspace-wide); they only check the
+# skip sentinel.
 #
 # Every recipe whose body uses multi-line conditionals or env-var
 # splicing is annotated with [script("pwsh")]. pwsh is preinstalled on
@@ -61,13 +56,16 @@
 # installer. We chose pwsh over bash because just's shebang dispatch
 # requires `cygpath` on Windows (only on PATH from inside Git Bash),
 # while [script("pwsh")] works from plain PowerShell with no PATH
-# augmentation. The `??` null-coalescing operator used in the splat
-# requires pwsh 7+, which is the floor we already require via
-# _anvil-require pwsh.
+# augmentation. We require pwsh 7+ (enforced via _anvil-require pwsh)
+# for consistent semantics of the array-splat splice and the modern
+# operators used across these recipes.
 #
-# Single-command recipes (cargo deny check, cargo audit) are plain
-# just recipes that inherit the adopter's default shell — they're
-# shell-agnostic.
+# Every recipe that runs a command is annotated with [script("pwsh")],
+# including single-command ones (cargo deny check, cargo audit). They do
+# NOT inherit the adopter's default shell: just defaults to `sh`, which is
+# absent on Windows and varies across environments, so relying on it makes
+# these recipes non-portable. Routing every command through pwsh keeps
+# behavior identical on every platform.
 #
 # Note: [script(...)] requires `set unstable`. The adopter's root
 # justfile must declare it (typically as a top-level line). anvil's
@@ -83,9 +81,10 @@
 # format-drift breaking cloud workflows on rustup updates — the same trap we
 # explicitly avoid for udeps/miri/careful/external-types.
 [script("pwsh")]
-anvil-fmt: anvil-fmt-validate-prereqs
+anvil-fmt: anvil-fmt-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    $include = (just _anvil-impact-include modified)
+    if ($include -eq '--skip') { exit 0 }
     cargo '+{{ rust_nightly }}' fmt --all --check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -96,10 +95,11 @@ anvil-fmt: anvil-fmt-validate-prereqs
 # we want downstream rev-deps to lint as well. cargo-clippy is a
 # rustup component; same reasoning as fmt for the require.
 [script("pwsh")]
-anvil-clippy: anvil-clippy-validate-prereqs
+anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    & cargo clippy @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace")) --all-targets --all-features --locked "--" '-D' 'warnings'
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    & cargo clippy @(-split $include) --all-targets --all-features --locked "--" '-D' 'warnings'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
@@ -111,33 +111,37 @@ anvil-clippy: anvil-clippy-validate-prereqs
 # The flag exists in 2.0.2 too (where it is a no-op, since that version
 # already errors on formatting), so it is safe across the supported range.
 [script("pwsh")]
-anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
+anvil-cargo-sort: anvil-cargo-sort-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    $include = (just _anvil-impact-include modified)
+    if ($include -eq '--skip') { exit 0 }
     cargo sort --workspace --check --check-format
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
 [script("pwsh")]
-anvil-license-headers: anvil-license-headers-validate-prereqs
+anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    $include = (just _anvil-impact-include modified)
+    if ($include -eq '--skip') { exit 0 }
     cargo heather
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
 [script("pwsh")]
-anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs
+anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    $include = (just _anvil-impact-include modified)
+    if ($include -eq '--skip') { exit 0 }
     cargo ensure-no-cyclic-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
 [script("pwsh")]
-anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs
+anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    $include = (just _anvil-impact-include modified)
+    if ($include -eq '--skip') { exit 0 }
     cargo ensure-no-default-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -145,11 +149,12 @@ anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prer
 # graph, so a dep changing its public API can break doc-build in a
 # crate that wasn't itself modified.
 [script("pwsh")]
-anvil-doc-build: anvil-doc-build-validate-prereqs
+anvil-doc-build: anvil-doc-build-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
+    $include = (just _anvil-impact-include required)
+    if ($include -eq '--skip') { exit 0 }
     $env:RUSTDOCFLAGS = '-D warnings'
-    & cargo doc @(-split ($env:ANVIL_INCLUDE_REQUIRED ?? "--workspace")) --all-features --no-deps
+    & cargo doc @(-split $include) --all-features --no-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Modified tier.
@@ -172,12 +177,13 @@ anvil-doc-build: anvil-doc-build-validate-prereqs
 # (publish=false, [package.metadata.ox-gen-readme] disable), per-crate
 # Push-Location into the crate dir (cargo-doc2readme is CWD-sensitive
 # rather than --manifest-path-driven), and per-crate template-path
-# resolution. The ANVIL_INCLUDE_MODIFIED value would still need to
+# resolution. The resolved modified set would still need to
 # be intersected with the lib-crate set rather than splatted into cargo.
 [script("pwsh")]
-anvil-readme-check: anvil-readme-check-validate-prereqs
+anvil-readme-check: anvil-readme-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {
+    $include = (just _anvil-impact-include modified)
+    if ($include -eq '--skip') {
         Write-Host 'anvil-readme-check: no modified packages; skipping'
         exit 0
     }
@@ -190,7 +196,7 @@ anvil-readme-check: anvil-readme-check-validate-prereqs
     }
     # Iterate library crates. Filter by impact set when set, then drop
     # bin-only crates and opt-outs.
-    $pkg = @(if ($env:ANVIL_INCLUDE_MODIFIED) { -split $env:ANVIL_INCLUDE_MODIFIED } else { '--workspace' })
+    $pkg = @(-split $include)
     $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
     $byName = @{}
     foreach ($p in $meta.packages) { $byName[$p.name] = $p }
@@ -259,24 +265,27 @@ anvil-readme-check: anvil-readme-check-validate-prereqs
 # human-edited `.spelling` file at the repo root and preprocess it
 # into the .dic format at check time (Hunspell .dic requires:
 # alphabetical sort, blank/numeric lines removed, line-count header).
-# If `.spelling` is present, we generate `target/spelling.dic` from it
-# automatically; otherwise we run cargo-spellcheck against whatever
-# the repo has already set up.
+# We always (re)generate `target/spelling.dic` so that a spellcheck.toml
+# pointing at it never fails on a missing file -- if `.spelling` is
+# absent we emit an empty dictionary (count `0`, no words) rather than
+# leaving the path dangling.
 [script("pwsh")]
-anvil-spellcheck: anvil-spellcheck-validate-prereqs
+anvil-spellcheck: anvil-spellcheck-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {
+    $include = (just _anvil-impact-include modified)
+    if ($include -eq '--skip') {
         Write-Host 'anvil-spellcheck: no modified packages; skipping'
         exit 0
     }
+    $output_file = 'target/spelling.dic'
+    $filtered_lines = @()
     if (Test-Path '.spelling') {
-        $output_file = 'target/spelling.dic'
         $lines = Get-Content '.spelling' | Sort-Object
-        $filtered_lines = $lines | Where-Object { $_ -notmatch '^\d+$' -and $_ -ne '' }
-        $line_count = $filtered_lines.Count
-        [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($output_file)) | Out-Null
-        @($line_count) + $filtered_lines | Set-Content $output_file
+        $filtered_lines = @($lines | Where-Object { $_ -notmatch '^\d+$' -and $_ -ne '' })
     }
+    $line_count = $filtered_lines.Count
+    [System.IO.Directory]::CreateDirectory([System.IO.Path]::GetDirectoryName($output_file)) | Out-Null
+    @($line_count) + $filtered_lines | Set-Content $output_file
     # Pass --cfg explicitly when a spellcheck.toml exists at repo root,
     # otherwise cargo-spellcheck falls back to its built-in defaults and
     # ignores user-curated dictionaries (`extra_dictionaries`, custom
@@ -291,12 +300,14 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
 # Unscoped (PR title is not source-related).
 #
 # Validates that $env:PR_TITLE matches Conventional Commits when set;
-# no-op when unset. Cloud workflows inject PR_TITLE explicitly (GH Actions:
-# ${{ github.event.pull_request.title }}; ADO: $(System.PullRequest.Title))
-# so the check has authoritative input there. Locally it skips silently --
-# there is no reliable way to recover the PR title for the ADO backend
-# (no equivalent of `gh pr view`), so the recipe stays simple and
-# defers the check to cloud workflows.
+# no-op when unset. Cloud workflows inject PR_TITLE explicitly: GH Actions
+# from ${{ github.event.pull_request.title }}; ADO resolves it via the REST
+# API in steps/group.yml (ADO has no PR-title predefined variable). Locally
+# it skips silently when PR_TITLE is unset -- there is no reliable way to
+# recover the PR title, so the recipe defers the check to cloud workflows.
+# It does NOT tolerate a non-empty-but-wrong value: a misconfigured cloud
+# variable (e.g. an unexpanded pipeline macro) is a real error and fails
+# the check loudly rather than silently passing.
 [script("pwsh")]
 anvil-pr-title: anvil-pr-title-validate-prereqs
     $title = $env:PR_TITLE
@@ -310,30 +321,50 @@ anvil-pr-title: anvil-pr-title-validate-prereqs
     }
 
 # Unscoped (consults external advisory DB; reads Cargo.lock, not
-# workspace members). Single command — inherits adopter's default shell.
+# workspace members). Single command, but run under pwsh so it does not
+# depend on the adopter's default shell (absent/varying on Windows).
+[script("pwsh")]
 anvil-deny: anvil-deny-validate-prereqs
-    cargo deny check
+    $ErrorActionPreference = 'Stop'
+    & cargo deny check
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Unscoped (consults external advisory DB; reads Cargo.lock).
+[script("pwsh")]
 anvil-audit: anvil-audit-validate-prereqs
-    cargo audit
+    $ErrorActionPreference = 'Stop'
+    & cargo audit
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Required tier. cargo-udeps detects unused dependencies by resolving
 # the full crate graph and seeing which deps are referenced; that's
 # precisely what the required tier is for. Pinned to the general
 # nightly defined in versions.just.
 #
-# Deliberately omits `--all-targets`: with `--all-targets`, a dep
-# that's listed in BOTH `[dependencies]` and `[dev-dependencies]` and
-# used only by tests is reported as "all used" because the dev-deps
-# target satisfies the lookup, masking the unused entry in main
-# `[dependencies]`. Restricting to the default targets (lib + bins)
-# matches main repo cloud workflows' check and surfaces the real bug.
+# Run twice, because cargo-udeps only analyzes the targets it is told
+# to, and each invocation catches a variant the other masks:
+#   1. default targets (lib + bins): catches a dep in `[dependencies]`
+#      that is referenced only by tests/benches/examples -- it belongs
+#      in `[dev-dependencies]`. Under `--all-targets` such a dep looks
+#      "used" (the test/bench/example target satisfies the lookup), so
+#      this run is the only one that surfaces it.
+#   2. `--all-targets`: catches unused `[dev-dependencies]` -- which the
+#      default-targets run never compiles, so it is the only one that
+#      surfaces those.
+# A genuinely-unused dep is caught by both; the two together cover all
+# of {unused dep, unused dev-dep, dep that should be a dev-dep}.
 [script("pwsh")]
-anvil-udeps: anvil-udeps-validate-prereqs
+anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
-    & cargo '+{{ rust_nightly }}' udeps @(-split ($env:ANVIL_INCLUDE_REQUIRED ?? "--workspace")) --all-features
+    $include = (just _anvil-impact-include required)
+    if ($include -eq '--skip') { exit 0 }
+    $pkg = @(-split $include)
+    # Pass 1: default targets (lib + bins) -- surfaces [dependencies] that
+    # are only used by tests/benches/examples (should be dev-deps).
+    & cargo '+{{ rust_nightly }}' udeps @pkg --all-features
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # Pass 2: --all-targets -- surfaces unused [dev-dependencies].
+    & cargo '+{{ rust_nightly }}' udeps @pkg --all-features --all-targets
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier (compares published API of changed crates against the
@@ -363,20 +394,21 @@ anvil-udeps: anvil-udeps-validate-prereqs
 # TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
 # skip/splat preamble, this recipe stays multi-step: cargo-metadata
 # filter to library crates (cargo-semver-checks --workspace fails on
-# bin-only workspaces), intersect ANVIL_INCLUDE_AFFECTED with that
+# bin-only workspaces), intersect the affected impact set with that
 # set, then per-crate invocation with selective error tolerance for
 # unpublished crates ("not found in registry") and bin->bin+lib
 # transitions ("no library targets found").
 [script("pwsh")]
-anvil-semver-check: anvil-semver-check-validate-prereqs
+anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    $include = (just _anvil-impact-include affected)
     $commentFile = 'target/anvil/comments/semver.md'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+    if ($include -eq '--skip') {
         Write-Host 'anvil-semver-check: no affected packages; skipping'
         Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
         exit 0
     }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $pkg = @(-split $include)
     # Build the candidate package list. Always iterate per-package over
     # library crates only -- cargo-semver-checks --workspace would fail
     # on workspaces that contain bin-only crates ("no library targets
@@ -465,16 +497,17 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
 # skip/splat preamble, this recipe stays multi-step: cargo-check-
 # external-types is per-manifest (no --package/--workspace), so we
 # build a name->manifest map from cargo metadata, filter to lib crates,
-# intersect with ANVIL_INCLUDE_AFFECTED, and call the tool once per
+# intersect with the affected impact set, and call the tool once per
 # crate. Hard-fails on errors (no tolerance, unlike semver-check).
 [script("pwsh")]
-anvil-external-types: anvil-external-types-validate-prereqs
+anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') {
         Write-Host 'anvil-external-types: no affected packages; skipping'
         exit 0
     }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $pkg = @(-split $include)
     # Build pkg-name -> manifest-path map, restricted to library crates.
     $libPkgs = @{}
     $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
@@ -545,15 +578,54 @@ anvil-aprz: anvil-aprz-validate-prereqs
 
 # === pr-test members ====================================================
 
-# Affected tier.
+# Affected tier. Runs on the pinned nightly toolchain: cargo-llvm-cov
+# only sets the `cfg(coverage_nightly)` that gates the workspace's
+# `#[cfg_attr(coverage_nightly, coverage(off))]` exclusions when it
+# instruments on nightly. On stable those exclusions are inert and
+# untestable code (process-shelling error paths, script-only crates,
+# etc.) wrongly counts against coverage. This matches the repo's own
+# `coverage-measure` recipe, which also runs on nightly.
 [script("pwsh")]
-anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
+anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') {
         Write-Host 'anvil-llvm-cov: no affected packages; skipping'
         exit 0
     }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $pkg = @(-split $include)
+    # Drop coverage-opted-out packages from the measured set. A crate that
+    # is entirely `#![cfg_attr(coverage_nightly, coverage(off))]` (e.g. a
+    # script-only crate) compiles to a test binary with no __llvm_covmap,
+    # and `llvm-cov export` aborts with "no coverage data found" whenever
+    # such a package is the *only* object in the report (e.g. it is the
+    # sole affected crate). Opt-out is declared via
+    # [package.metadata.coverage-gate] min-lines-percent = 0 -- the same
+    # marker cargo-coverage-gate already treats as NO DATA -> OK. If the
+    # affected set is *entirely* opted-out, there is nothing to measure,
+    # so we skip exactly like the empty-affected ('--skip') case.
+    if ($pkg -contains '--package') {
+        $optedOut = @(
+            (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages |
+                Where-Object { $null -ne $_.metadata.'coverage-gate'.'min-lines-percent' -and [double]$_.metadata.'coverage-gate'.'min-lines-percent' -eq 0 } |
+                ForEach-Object { $_.name }
+        )
+        if ($optedOut.Count -gt 0) {
+            $filtered = [System.Collections.Generic.List[string]]::new()
+            for ($i = 0; $i -lt $pkg.Count; $i++) {
+                if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count -and $optedOut -contains $pkg[$i + 1]) {
+                    $i++
+                    continue
+                }
+                $filtered.Add($pkg[$i])
+            }
+            $pkg = $filtered.ToArray()
+        }
+        if (-not ($pkg -contains '--package')) {
+            Write-Host 'anvil-llvm-cov: only coverage-opted-out packages affected; nothing to measure, skipping'
+            exit 0
+        }
+    }
     # cargo-llvm-cov doesn't work on aarch64-pc-windows-msvc: the
     # llvm-profdata that ships with the rust toolchain there fails
     # to merge the .profraw set ("no profile can be merged"). Fall
@@ -562,54 +634,144 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
     # been used anyway (coverage upload is gated on Linux only).
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
         Write-Host 'anvil-llvm-cov: aarch64-pc-windows-msvc -- skipping coverage; running plain nextest'
-        & cargo nextest run @pkg --all-features --locked
+        & cargo '+{{ rust_nightly }}' nextest run @pkg --all-features --locked
         exit $LASTEXITCODE
     }
-    # cargo llvm-cov writes the .profraw set into target/llvm-cov-target/
-    # but the *report* output directory (target/coverage/) is something
-    # we choose and must exist before --output-path runs.
+    # The *report* output directory (target/coverage/) is something we
+    # choose and must exist before --output-path runs.
     [System.IO.Directory]::CreateDirectory('target/coverage') | Out-Null
-    [System.IO.Directory]::CreateDirectory('target/coverage/html') | Out-Null
-    # Wipe stale .profraw data so the report reflects only this run.
-    cargo llvm-cov clean --workspace --profraw-only
+    # Instrument and run tests once per feature configuration, each as a
+    # SELF-CONTAINED llvm-cov run that exports only its own config's
+    # objects. Dual config (--all-features + --no-default-features) catches
+    # lines that only execute under one feature configuration (feature-gated
+    # code dead with default features off, plus default-only code paths).
+    #
+    # Crucially this does NOT merge both configs' objects into one report.
+    # A single `llvm-cov report` over the union shells one `--object=` per
+    # test binary and, on a large workspace, overflows the Windows
+    # CreateProcess command-line limit (os error 206, "filename or extension
+    # is too long"). Each per-config report references only ~half the
+    # objects and stays under the limit. The two configs are reconciled
+    # *downstream* instead of via a merged report:
+    #   * cargo-coverage-gate merges the two lcov files at the line level
+    #     (per-line counts summed) -- this is the gate;
+    #   * Codecov ingests both lcov files (it coalesces uploads);
+    #   * ADO's PublishCodeCoverageResults coalesces both cobertura files.
+    # This also avoids needing a platform-specific lcov merger (`lcov -a`
+    # is Linux-only). HTML output is dropped -- it had no cloud-workflow
+    # consumer and would reintroduce the overflowing union report; run
+    # `cargo llvm-cov --html` ad hoc for a local viewer.
+    #
+    # A full `llvm-cov clean` between configs wipes the prior config's
+    # objects so each `report` is scoped to the current config only.
+    #
+    # Note: nextest's exit-4 ("no tests to run") IS treated as a failure
+    # here -- a llvm-cov run that finds no tests almost always means a
+    # config mistake (wrong package filter, missing test target, etc.), not
+    # a legitimate empty set. anvil-miri is the exception (see its comment).
+    $configs = @(
+        @{ name = 'all-features'; flag = '--all-features' },
+        @{ name = 'no-default';   flag = '--no-default-features' }
+    )
+    foreach ($cfg in $configs) {
+        cargo '+{{ rust_nightly }}' llvm-cov clean --workspace
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        & cargo '+{{ rust_nightly }}' llvm-cov nextest @pkg $cfg.flag --locked --no-report
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        # lcov feeds the gate + Codecov; cobertura feeds ADO's
+        # PublishCodeCoverageResults@2. Both reports are scoped to THIS
+        # config's objects, so neither overflows the Windows cmdline limit.
+        cargo '+{{ rust_nightly }}' llvm-cov report --lcov      --output-path "target/coverage/lcov-$($cfg.name).info"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        cargo '+{{ rust_nightly }}' llvm-cov report --cobertura --output-path "target/coverage/cobertura-$($cfg.name).xml"
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+    # Local coverage gate: cargo-coverage-gate compares per-package line
+    # coverage against per-package thresholds carried in Cargo.toml
+    # ([package.metadata.coverage-gate] min-lines-percent, falling back to
+    # [workspace.metadata.coverage-gate], then the built-in 100.0 default).
+    # It merges the two per-config lcovs (line-level) so the gate sees the
+    # union coverage. Exits non-zero when any gated package falls below its
+    # threshold, so coverage regressions fail the PR locally and in cloud
+    # workflows -- the Codecov upload stays purely for display, not the gate.
+    #
+    # Scope the gate to the SAME package set we measured. When impact
+    # scoping is active, $pkg holds `--package X ...` (already opt-out
+    # filtered above); pass those through so the gate only gates packages
+    # that were actually instrumented -- otherwise unmeasured members would
+    # report NO DATA and fail the gate. When unscoped, $pkg is `--workspace`
+    # (no gate flag); drop it so the gate defaults to every member.
+    $gateArgs = @($pkg | Where-Object { $_ -ne '--workspace' })
+    cargo coverage-gate @gateArgs --lcov target/coverage/lcov-all-features.info --lcov target/coverage/lcov-no-default.info
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    # Instrument and run tests; defer report generation so we can emit
-    # multiple formats from the same profraw set without re-running.
-    # Note: nextest's exit-4 ("no tests to run") IS treated as a
-    # failure here -- a llvm-cov run that finds no tests almost
-    # always means a config mistake (wrong package filter, missing
-    # test target, etc.), not a legitimate empty set. anvil-miri
-    # is the exception (see its comment): miri-skipped tests are an
-    # expected design point for FS-heavy crates.
-    & cargo llvm-cov nextest @pkg --all-features --locked --no-report
+
+# Affected tier. Two cargo-test invocations cover both feature
+# configurations: --all-features catches doctests that only compile
+# with optional features enabled; the default-features run catches
+# doctests that only compile when those features are off. The
+# duplication is cheap because doctests are already a small fraction
+# of total compile/test time.
+[script("pwsh")]
+anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
+    $ErrorActionPreference = 'Stop'
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    $pkg = @(-split $include)
+    & cargo test --doc @pkg --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    # lcov.info feeds Codecov on GitHub; cobertura.xml feeds
-    # PublishCodeCoverageResults@2 on Azure DevOps.
-    cargo llvm-cov report --lcov      --output-path target/coverage/lcov.info
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    cargo llvm-cov report --cobertura --output-path target/coverage/cobertura.xml
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    # Local-only HTML viewer (no cloud-workflow consumer); cheap once the data exists.
-    cargo llvm-cov report --html      --output-dir target/coverage/html
+    & cargo test --doc @pkg --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier.
 [script("pwsh")]
-anvil-doc-test: anvil-doc-test-validate-prereqs
+anvil-examples: anvil-examples-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    & cargo test --doc @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace")) --all-features --locked
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-# Affected tier.
-[script("pwsh")]
-anvil-examples: anvil-examples-validate-prereqs
-    $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    & cargo build @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace")) --examples --all-features --locked
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    & cargo build @(-split $include) --examples --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # === pr-mutants member ====================================================
+
+# _anvil-base-ref: single source of truth for "which git ref does a PR
+# diff against". Shared by the impact step (github/impact-action.yml,
+# ado/steps/impact.yml) and anvil-mutants-diff so the resolution lives in
+# exactly one place. Precedence:
+#   1. BASE_REF -- explicit override. GitHub sets it to the PR base commit
+#      SHA; adopters can set a full ref like `origin/release`.
+#   2. SYSTEM_PULLREQUEST_TARGETBRANCH -- ADO PR builds. This is the
+#      *fully-qualified* target ref (e.g. `refs/heads/main`), so strip the
+#      `refs/heads/` prefix and resolve to `origin/<branch>`
+#      (`origin/refs/heads/main` is not a valid ref).
+#   3. GITHUB_BASE_REF -- GitHub PR builds. Unqualified target branch name.
+#   4. origin/main, then origin/master -- local / non-PR fallback.
+# Prints ONLY the resolved ref to stdout so callers can capture it:
+#   pwsh : $base = (& {{just_executable()}} _anvil-base-ref)
+#   bash : base="$(just _anvil-base-ref)"
+[script("pwsh")]
+_anvil-base-ref:
+    $ErrorActionPreference = 'Stop'
+    if ($env:BASE_REF) {
+        Write-Output $env:BASE_REF
+        exit 0
+    }
+    if ($env:SYSTEM_PULLREQUEST_TARGETBRANCH) {
+        Write-Output ("origin/" + ($env:SYSTEM_PULLREQUEST_TARGETBRANCH -replace '^refs/heads/', ''))
+        exit 0
+    }
+    if ($env:GITHUB_BASE_REF) {
+        Write-Output "origin/$($env:GITHUB_BASE_REF)"
+        exit 0
+    }
+    foreach ($candidate in @('origin/main', 'origin/master')) {
+        git rev-parse --verify $candidate 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Output $candidate
+            exit 0
+        }
+    }
+    Write-Error 'anvil-base-ref: cannot resolve a base ref. Set BASE_REF, or ensure origin/main or origin/master exists.'
+    exit 1
 
 # Affected tier. cargo-mutants does its own diff-scoping via --in-diff;
 # the affected-tier guard is the wiring-layer's coarse filter (if no
@@ -621,33 +783,21 @@ anvil-examples: anvil-examples-validate-prereqs
 # is the only sub-recipe that can't follow, so it bails out early on the
 # affected leg. Coverage on the other three legs is unchanged.
 [script("pwsh")]
-anvil-mutants-diff: anvil-mutants-diff-validate-prereqs
+anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    $include = (just _anvil-impact-include affected)
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
         Write-Host 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs aarch64-pc-windows-msvc -- cargo-mutants does not build here (winapi); skipping'
         exit 0
     }
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+    if ($include -eq '--skip') {
         Write-Host 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs no affected packages; skipping'
         exit 0
     }
-    # Resolve BASE_REF: env override > origin/main > origin/master.
-    $base = $null
-    if ($env:BASE_REF) {
-        $base = $env:BASE_REF
-    } else {
-        foreach ($candidate in @('origin/main', 'origin/master')) {
-            git rev-parse --verify $candidate 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) {
-                $base = $candidate
-                break
-            }
-        }
-    }
-    if (-not $base) {
-        Write-Error 'anvil-mutants-diff: anvil-mutants-diff-validate-prereqs no BASE_REF set and neither origin/main nor origin/master is available. Set BASE_REF to the branch to diff against.'
-        exit 1
-    }
+    # Resolve the diff base via the shared resolver (single source of truth
+    # across the impact steps and this recipe; see _anvil-base-ref).
+    $base = (& "{{just_executable()}}" _anvil-base-ref)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     # cargo-mutants --in-diff takes a FILE path containing a unified
     # diff, not a git revision range. Write the diff to a temp file
     # first. RUNNER_TEMP (GH) and AGENT_TEMPDIRECTORY (ADO) point at
@@ -663,14 +813,16 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs
 
 # === nightly-runtime members ============================================
 
-# Nightly checks always run full-workspace; impact env vars aren't set
-# by the scheduled workflow, so the affected-tier default (--workspace)
-# applies. Skip guards are still included for local diff-scoped runs.
+# Nightly checks run full-workspace under the scheduled tier, which sets
+# ANVIL_IMPACT=off so `_anvil-impact-include` returns the affected-tier
+# default (--workspace). The skip/scope guards still apply for local
+# diff-scoped runs (when ANVIL_IMPACT is left at its default).
 
 [script("pwsh")]
-anvil-miri: anvil-miri-validate-prereqs
+anvil-miri: anvil-miri-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
     # `--no-tests=pass`: miri-only exception. Tests that touch the
     # filesystem, spawn subprocesses, or use other miri-incompatible
     # APIs commonly carry `#[cfg_attr(miri, ignore)]` (this is the
@@ -681,40 +833,250 @@ anvil-miri: anvil-miri-validate-prereqs
     # empty test runs as success for miri only. Other nextest-using
     # recipes (llvm-cov) keep exit-4 as a failure because zero tests
     # there almost always indicates a config mistake.
-    & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace"))
+    & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @(-split $include)
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Stricter miri profiles. Each runs miri over the full workspace
+# with a profile-specific MIRIFLAGS plus a profile-specific
+# `--cfg miri_<profile>` set via RUSTFLAGS. Per-test opt-outs use
+# `#[cfg_attr(miri_<profile>, ignore = "<reason>")]`, keeping the
+# suppression next to the test rather than in a sidecar file.
+# The cfg names are declared in the workspace check-cfg list
+# (regions/cargo-lints-body.toml) so non-miri builds don't warn.
+#
+# These profiles run full-workspace under scheduled-runtime-analysis,
+# which sets ANVIL_IMPACT=off (so `_anvil-impact-include` returns
+# --workspace); the --skip / scope guards below only narrow the run if
+# an adopter invokes them locally with impact scoping left enabled.
+[script("pwsh")]
+anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs anvil-impact
+    $ErrorActionPreference = 'Stop'
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    $pkg = @(-split $include)
+    $env:MIRIFLAGS = "-Zmiri-tree-borrows $($env:MIRIFLAGS)".Trim()
+    $env:RUSTFLAGS = "--cfg miri_tree_borrows $($env:RUSTFLAGS)".Trim()
+    & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 [script("pwsh")]
-anvil-careful: anvil-careful-validate-prereqs
+anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    & cargo '+{{ rust_nightly }}' careful test @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace")) --all-features --locked
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    $pkg = @(-split $include)
+    $env:MIRIFLAGS = "-Zmiri-strict-provenance $($env:MIRIFLAGS)".Trim()
+    $env:RUSTFLAGS = "--cfg miri_strict_provenance $($env:RUSTFLAGS)".Trim()
+    & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Race coverage rotates the miri-many-seeds window daily by
+# day-of-month: day N -> seeds [2N-1, 2N+1) (2 seeds/day,
+# ~62 seeds/month). Rotating amortizes the seed space across the
+# schedule rather than retesting the same seeds every night; race
+# conditions surface as inter-seed nondeterminism rather than
+# per-seed crashes, so coverage matters more than depth-per-seed.
+[script("pwsh")]
+anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs anvil-impact
+    $ErrorActionPreference = 'Stop'
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    $pkg = @(-split $include)
+    $day = (Get-Date).Day
+    $low = (2 * $day) - 1
+    $high = (2 * $day) + 1
+    $env:MIRIFLAGS = "-Zmiri-many-seeds=$low..$high $($env:MIRIFLAGS)".Trim()
+    $env:RUSTFLAGS = "--cfg miri_race_coverage $($env:RUSTFLAGS)".Trim()
+    Write-Host "anvil-miri-race-coverage: seed window $low..$high (day $day)"
+    & cargo '+{{ rust_nightly }}' miri nextest run --no-tests=pass @pkg
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+[script("pwsh")]
+anvil-careful: anvil-careful-validate-prereqs anvil-impact
+    $ErrorActionPreference = 'Stop'
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    & cargo '+{{ rust_nightly }}' careful test @(-split $include) --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Affected tier. `loom` is a permutation-based concurrency model
+# checker: a crate exercises it through a dedicated `[[test]]` target
+# that declares `required-features = ["loom"]` (e.g. tests/loom.rs).
+# We detect those targets *structurally* from `cargo metadata` -- a
+# test target whose `kind` contains "test" and whose `required-features`
+# contains "loom" -- so detection is authoritative manifest data, not a
+# filename / cfg / comment heuristic. Running only those targets (via
+# `--test <name>`) keeps loom off the crate's ordinary tests, which must
+# not run under loom.
+#
+# Two independent switches must both be on, and they answer different
+# questions:
+#   * The `loom` feature answers "which target": `required-features`
+#     makes Cargo select the loom test only when the feature is enabled,
+#     so a normal `cargo test` / coverage run never compiles or runs it.
+#     We pass --all-features so feature-gated loom sub-modules (e.g.
+#     `#![cfg(all(loom, feature = "..."))]`) still compile.
+#   * `RUSTFLAGS=--cfg loom` answers "how it compiles": loom's own
+#     machinery and the ecosystem gate on `cfg(loom)`, not on a feature
+#     (source swaps std<->loom atomics on `#[cfg(loom)]`, and
+#     `[target.'cfg(loom)'.dependencies] loom` links only under the cfg).
+#     The feature does NOT replace the cfg; both are required.
+# We scope `cargo test` to the owning package with `-p` (never
+# `--workspace`) so a global `--cfg loom` never leaks into deps reachable
+# only through *other* members (e.g. concurrent-queue), and run
+# single-threaded (loom drives its own scheduling). --release per the
+# loom docs: permutation exploration is wall-clock dominated by the SUT.
+#
+# Fail-loud guard: a crate that *declares* loom support -- a `loom`
+# feature or a `cfg(loom)`-gated dependency -- but exposes no
+# `required-features = ["loom"]` test target is almost certainly a
+# regression (renamed/removed target), so we error rather than silently
+# skip it. When no crate ships a loom target (the common case) the recipe
+# skips with exit 0 -- the regular tests already ran under anvil-llvm-cov.
+#
+# `cargo metadata --no-deps` scans only the adopter's own members
+# (layout-agnostic; works for any `members` glob). RUSTFLAGS goes via
+# $env: rather than --config so it propagates to cargo's child rustc
+# invocations cleanly on both pwsh/bash.
+[script("pwsh")]
+anvil-loom: anvil-loom-validate-prereqs anvil-impact
+    $ErrorActionPreference = 'Stop'
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') {
+        Write-Host 'anvil-loom: no affected packages; skipping'
+        exit 0
+    }
+    $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    # Optional impact-scoping: restrict to the affected package set. `$include`
+    # is "--workspace" (no filter) or "--package A --package B ..."; extract the
+    # bare package names, treating --workspace as "all packages".
+    $affected = $null
+    if ($include -and $include -ne '--workspace') {
+        $affected = @((-split $include) | Where-Object { $_ -and ($_ -notlike '--*') -and ($_ -ne '-p') })
+    }
+    $pkgs = $meta.packages
+    if ($null -ne $affected) {
+        $pkgs = @($pkgs | Where-Object { $_.name -in $affected })
+    }
+
+    # Authoritative detection: [[test]] targets with required-features = ["loom"].
+    $loomTargets = @(foreach ($pkg in $pkgs) {
+        foreach ($t in $pkg.targets) {
+            if (($t.kind -contains 'test') -and ($t.'required-features' -contains 'loom')) {
+                [pscustomobject]@{ pkg = $pkg.name; target = $t.name }
+            }
+        }
+    })
+    $loomTargetPkgs = @($loomTargets | ForEach-Object { $_.pkg } | Select-Object -Unique)
+
+    # Fail loud: crates that declare loom support but ship no loom target.
+    $declarers = @(foreach ($pkg in $pkgs) {
+        $hasFeature = ($pkg.features.PSObject.Properties.Name -contains 'loom')
+        $hasCfgDep = [bool]($pkg.dependencies | Where-Object { $_.target -and $_.target -match 'cfg\(.*\bloom\b.*\)' })
+        if ($hasFeature -or $hasCfgDep) { $pkg.name }
+    })
+    $missing = @($declarers | Where-Object { $_ -notin $loomTargetPkgs } | Select-Object -Unique)
+    if ($missing) {
+        Write-Error ('anvil-loom: crate(s) declare loom support (a loom feature or a cfg(loom) dependency) but expose no [[test]] target with required-features = ["loom"]: ' + ($missing -join ', ') + '. Add a [[test]] target with required-features = ["loom"] (e.g. tests/loom.rs), or remove the loom feature / cfg(loom) dependency.')
+        exit 1
+    }
+
+    if (-not $loomTargets) {
+        Write-Host 'anvil-loom: no loom test targets; skipping'
+        exit 0
+    }
+
+    $env:RUSTFLAGS = "--cfg loom $($env:RUSTFLAGS)".Trim()
+    foreach ($lt in $loomTargets) {
+        Write-Host "anvil-loom: $($lt.pkg) :: $($lt.target)"
+        & cargo test -p $lt.pkg --release --all-features --locked --test $lt.target -- --test-threads=1
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+
+# Affected tier. Smoke-only fuzz pass via [bolero](https://crates.io/crates/bolero):
+# each fuzz target gets a 60-second libfuzzer run, just enough to
+# surface obvious crashes/hangs introduced by a PR without paying for
+# a long fuzzing campaign.
+#
+# Linux-only: cargo-bolero's libfuzzer engine (and its bolero-afl
+# build dependency) only builds on Linux, so the recipe self-skips on
+# non-Linux hosts -- the pr-runtime-analysis Windows/ARM legs treat
+# bolero as a no-op rather than a failure. This matches oxidizer's
+# reference workflow, whose bolero job runs exclusively on ubuntu.
+# Crates that ship bolero harnesses still get them compiled and
+# exercised as ordinary tests by anvil-llvm-cov on every leg; the
+# libfuzzer campaign is the Linux-only extra.
+#
+# Target discovery is `cargo bolero list` over the affected packages.
+# Crates with no bolero harness print zero targets and the recipe
+# no-ops. The libfuzzer engine requires nightly, so the test
+# invocation uses the pinned rust_nightly. Adopters who want longer
+# campaigns wire a separate scheduled job; anvil deliberately does
+# not ship a long-form fuzz tier (the failure surface is too
+# repo-specific to standardize).
+[script("pwsh")]
+anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
+    $ErrorActionPreference = 'Stop'
+    $include = (just _anvil-impact-include affected)
+    if (-not $IsLinux) {
+        Write-Host 'anvil-bolero: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only; harnesses still run under anvil-llvm-cov)'
+        exit 0
+    }
+    if ($include -eq '--skip') {
+        Write-Host 'anvil-bolero: no affected packages; skipping'
+        exit 0
+    }
+    $pkg = @(-split $include)
+    # `cargo bolero list` emits one JSON object per target on stdout;
+    # we want the set of (package, test) pairs over the affected set.
+    $targetsJson = & cargo bolero list @pkg 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host 'anvil-bolero: bolero list failed; assuming no targets'
+        exit 0
+    }
+    $targets = @($targetsJson | Where-Object { $_ -match '^\{' } | ForEach-Object { ConvertFrom-Json $_ })
+    if ($targets.Count -eq 0) {
+        Write-Host 'anvil-bolero: no fuzz targets in affected packages; skipping'
+        exit 0
+    }
+    $failed = $false
+    foreach ($t in $targets) {
+        Write-Host "anvil-bolero: $($t.package_name)::$($t.test_name)"
+        & cargo '+{{ rust_nightly }}' bolero test --release --engine libfuzzer -T 60s --package $t.package_name $t.test_name
+        if ($LASTEXITCODE -ne 0) { $failed = $true }
+    }
+    if ($failed) { exit 1 }
 
 # === nightly-exhaustive members =========================================
 
 # Unscoped. Scheduled-exhaustive deliberately runs over the whole
 # workspace regardless of diff.
+[script("pwsh")]
 anvil-mutants-full: anvil-mutants-full-validate-prereqs
-    cargo mutants --workspace --no-shuffle --jobs 0
+    $ErrorActionPreference = 'Stop'
+    & cargo mutants --workspace --no-shuffle --jobs 0
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Required tier. cargo-hack's feature powerset cascades through dep
 # features, so the required set (workspace-internal transitive deps)
 # is the right scope.
 [script("pwsh")]
-anvil-cargo-hack: anvil-cargo-hack-validate-prereqs
+anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
-    & cargo hack @(-split ($env:ANVIL_INCLUDE_REQUIRED ?? "--workspace")) --feature-powerset --depth 2 check
+    $include = (just _anvil-impact-include required)
+    if ($include -eq '--skip') { exit 0 }
+    & cargo hack @(-split $include) --feature-powerset --depth 2 check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier.
 [script("pwsh")]
-anvil-bench: anvil-bench-validate-prereqs
+anvil-bench: anvil-bench-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    & cargo bench @(-split ($env:ANVIL_INCLUDE_AFFECTED ?? "--workspace")) --all-features --no-run
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $include = (just _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    & cargo bench @(-split $include) --all-features --no-run
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # ============================================================================
@@ -840,10 +1202,10 @@ anvil-aprz-validate-prereqs: anvil-tool-cargo-aprz-validate-prereqs
 # --- pr-test members (shared with scheduled-test) ---
 
 [group("anvil-setup")]
-anvil-llvm-cov-setup installer="install": (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer)
+anvil-llvm-cov-setup installer="install": anvil-component-nightly-llvm-tools-install (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer) (anvil-tool-cargo-coverage-gate-install installer)
 
 [group("anvil-setup")]
-anvil-llvm-cov-validate-prereqs: anvil-tool-cargo-llvm-cov-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs
+anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-prereqs anvil-tool-cargo-llvm-cov-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs anvil-tool-cargo-coverage-gate-validate-prereqs
 
 [group("anvil-setup")]
 anvil-doc-test-setup installer="install": anvil-tool-rustc-validate-prereqs
@@ -865,11 +1227,50 @@ anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil
 [group("anvil-setup")]
 anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs
 
+# The three nightly-miri profiles share the same toolchain prereqs
+# as anvil-miri; they only differ in the MIRIFLAGS / RUSTFLAGS the
+# recipe sets. Separate setup recipes keep the per-check fan-out
+# regular (groups.just can iterate without special-casing).
+[group("anvil-setup")]
+anvil-miri-tree-borrows-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-nextest-install installer)
+
+[group("anvil-setup")]
+anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs
+
+[group("anvil-setup")]
+anvil-miri-strict-provenance-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-nextest-install installer)
+
+[group("anvil-setup")]
+anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs
+
+[group("anvil-setup")]
+anvil-miri-race-coverage-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install (anvil-tool-cargo-nextest-install installer)
+
+[group("anvil-setup")]
+anvil-miri-race-coverage-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs
+
 [group("anvil-setup")]
 anvil-careful-setup installer="install": anvil-component-nightly-rust-src-install (anvil-tool-cargo-careful-install installer)
 
 [group("anvil-setup")]
 anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-careful-validate-prereqs
+
+# loom is a regular cargo-test invocation with RUSTFLAGS=--cfg loom;
+# no dedicated tool to install. The rust toolchain (rustc + cargo)
+# is the only prerequisite.
+[group("anvil-setup")]
+anvil-loom-setup installer="install": anvil-tool-rustc-validate-prereqs
+
+[group("anvil-setup")]
+anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs
+
+# bolero needs cargo-bolero plus the pinned nightly toolchain
+# (libfuzzer engine requires nightly rustc features).
+[group("anvil-setup")]
+anvil-bolero-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-bolero-install installer)
+
+[group("anvil-setup")]
+anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-bolero-validate-prereqs
 
 # --- pr-mutants members ---
 

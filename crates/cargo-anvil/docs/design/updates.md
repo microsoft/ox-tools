@@ -261,9 +261,19 @@ anchor:
 | Workspace `Cargo.toml` (workspace)    | `anvil-workspace-lints`                 | End of file (after the last existing table).                  |
 | Workspace `Cargo.toml` (single-crate) | `anvil-lints`                           | End of file.                                                  |
 | Per-crate `Cargo.toml`                | `anvil-lints`                           | End of file.                                                  |
-| `deny.toml`                           | `anvil-deny`                            | End of file.                                                  |
+| `deny.toml`                           | `anvil-deny-advisories`, `anvil-deny-licenses`, `anvil-deny-bans`, `anvil-deny-sources` | End of file, in catalog order. One region per top-level section so users can add their own keys in the gaps between them. |
 | `rustfmt.toml`                        | `anvil-rustfmt`                         | End of file.                                                  |
 | `.delta.toml`                         | `anvil-delta`                           | End of file.                                                  |
+| `.gitattributes`                      | `anvil-gitattributes`                   | End of file.                                                  |
+
+When several regions target the same host (as `deny.toml`'s four sections do), the
+tool plans and applies them against an **accumulating in-memory host text**, seeded
+from disk and threaded through every region (and any region removal) for that host. Each
+region splices on top of the previous one's result instead of re-reading the original
+disk state, so the composed file preserves every region — a later write or removal never
+overwrites an earlier one. Drift detection stays per region: a region's decision still
+compares only its own sentinel-delimited body, which sibling regions in the same host
+never touch.
 
 If the host file is missing entirely (and the region is not disabled by a pre-created
 stub), the tool creates it containing only the managed region.
@@ -304,12 +314,19 @@ ready-to-use file**, not a fragment:
 
 - **Owned file proposal**: the freshly rendered file content.
 - **Managed-region proposal**: the host file with the affected region's body replaced
-  by the freshly rendered body. All content outside the sentinels is preserved
-  byte-for-byte from the host's current on-disk state. Other managed regions in the
-  same host that are not pending an update keep their current on-disk content.
-- **Multiple pending regions in one host**: bundled into a single proposal file
-  showing what the host would look like if every pending region update were accepted.
-  (Common case is one region per host; bundling is the conservative fallback.)
+  by the freshly rendered body, spliced against the *final composed* host text — every
+  sibling region this run writes (`Write`) or removes (region `Remove`) is already
+  folded in, while regions left untouched keep their current on-disk content. Because
+  proposals are planned eagerly (as each region is visited) but a sibling `Write`/`Remove`
+  on the same host may be planned *later*, a post-planning pass re-splices every region
+  proposal against the final host text. This guarantees the proposed file is composed on
+  top of every applied update regardless of region order, so `mv` never reverts a sibling
+  region's change.
+- **Multiple pending regions in one host**: all pending proposals for a host write to the
+  shared `<host>.anvil-proposed` sibling, and the re-splice pass composes *every* pending
+  region's proposed body on top of all sibling `Write`s — so each proposal for the host
+  converges on the same fully-updated content (no last-writer-wins clobber). (Common case
+  is one pending region per host.)
 
 Concretely the user can:
 

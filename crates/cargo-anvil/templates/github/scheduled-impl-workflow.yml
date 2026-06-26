@@ -34,6 +34,13 @@ on:
 
 jobs:
   scheduled-test:
+    # The scheduled tier runs full-workspace: ANVIL_IMPACT=off makes each
+    # check's `anvil-impact` dependency no-op and `_anvil-impact-include`
+    # return each tier's --workspace default, so the deliberately
+    # exhaustive tier never inherits PR-shaped scoping (and never needs
+    # cargo-delta or an impact artifact).
+    env:
+      ANVIL_IMPACT: "off"
     strategy:
       fail-fast: false
       matrix:
@@ -54,7 +61,7 @@ jobs:
         if: matrix.os != 'windows-arm'
         uses: codecov/codecov-action@v5
         with:
-          files: target/coverage/lcov.info
+          files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
           flags: scheduled,${{ matrix.os }}
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
@@ -63,6 +70,8 @@ jobs:
     # Cross-OS / cross-arch because clippy and udeps in this group
     # compile per host, so cfg-gated code must be linted/scanned on
     # every leg.
+    env:
+      ANVIL_IMPACT: "off"
     strategy:
       fail-fast: false
       matrix:
@@ -75,10 +84,37 @@ jobs:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/anvil-scheduled-advisories
 
+  scheduled-runtime-analysis:
+    # Full-workspace counterpart of pr-runtime-analysis. OS matrix
+    # mirrors pr-runtime-analysis so any OS already considered "worth
+    # running miri on" gets the stricter profiles (tree-borrows,
+    # strict-provenance, race-coverage) too. Each profile runs in
+    # one job: keeping them as members of one composite action would
+    # serialize them (hours per profile, days per run). The matrix
+    # gives parallelism across OS legs; the per-profile fan-out
+    # inside the composite action runs them sequentially within a
+    # leg, which is the right trade -- the profiles share toolchain
+    # setup and target/ cache.
+    env:
+      ANVIL_IMPACT: "off"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows, linux-arm, windows-arm]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/anvil-scheduled-runtime-analysis
+
   scheduled-exhaustive:
     # x86_64-only by design: this group includes mutants-full (which
     # doesn't build on aarch64-pc-windows-msvc — winapi crate
     # incompatibility) plus cargo-hack feature powerset and bench.
+    env:
+      ANVIL_IMPACT: "off"
     strategy:
       fail-fast: false
       matrix:

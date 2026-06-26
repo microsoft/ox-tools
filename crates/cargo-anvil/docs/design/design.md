@@ -235,9 +235,10 @@ repo/
 ├── justfiles/anvil/                               owned (see local.md)
 ├── Cargo.toml                                     managed-region: anvil-workspace-lints (or anvil-lints in single-crate)
 ├── crates/<member>/Cargo.toml                     managed-region: anvil-lints (one per workspace member)
-├── deny.toml                                      managed-region: anvil-deny
+├── deny.toml                                      managed-regions: anvil-deny-{advisories,licenses,bans,sources}
 ├── rustfmt.toml                                   managed-region: anvil-rustfmt (opt out with empty stub)
 ├── .delta.toml                                    managed-region: anvil-delta (opt out disables impact scoping)
+├── .gitattributes                                 managed-region: anvil-gitattributes (pins *.rs to LF)
 ├── rust-toolchain.toml                            user-authored (read only)
 ├── .cargo/config.toml                             user-authored (read only)
 │
@@ -272,16 +273,21 @@ Detail on each host:
   manipulation. In a single-crate repo (no `[workspace]` table), the workspace region
   becomes `anvil-lints` and contains a single `[lints]` table with the same
   dotted-key layout.
-- **`deny.toml`** — managed region at the end of the file with the tool's baseline
-  license/advisory rules. Users add their own keys outside the region. Created if absent.
-  Content detailed in [checks.md](./checks.md).
+- **`deny.toml`** — one managed region per top-level section (`[advisories]`, `[licenses]`,
+  `[bans]`, `[sources]`) carrying the tool's baseline license/advisory rules. Splitting the
+  sections into separate regions lets users add their own keys in the gaps between them
+  (the engine composes the co-hosted regions into one file). Users may also add keys
+  outside the regions. Created if absent. Content detailed in [checks.md](./checks.md).
 - **`rustfmt.toml`** — created with the opinionated baseline if absent; managed region at the
   end of the file. The most contested opinion in the catalog; users who want to keep their own
   formatting opt the file out via the empty-stub mechanism in [updates.md](./updates.md).
 - **`.delta.toml`** — cargo-delta configuration that drives impact-scoped cloud-workflow runs. Created if
   absent. Region at the end of the file. Disabling the region opts the repo out of impact
-  scoping entirely. See [checks.md](./checks.md#impact-scoping) and the per-backend wiring in
+  scoping entirely. See [checks.md §5](./checks.md#5-impact-scoping-check--tier-mapping) and the per-backend wiring in
   [github.md](./github.md) / [ado.md](./ado.md).
+- **`.gitattributes`** — managed region pinning `*.rs text eol=lf` so Rust sources keep LF
+  line endings on every platform (rustfmt and other tools assume LF). Created if absent;
+  users add their own attribute rules outside the region.
 - **`rust-toolchain.toml`** and **`.cargo/config.toml`** — never touched. Read-only inputs
   used by `anvil-tool-rustc-validate-prereqs` to validate the user's `rustc` version
   against the catalog minimum. the cloud workflow building blocks do not install Rust; that is the
@@ -302,7 +308,8 @@ Four escape valves, in increasing severity:
    prefixed `anvil-` is left alone). Add your own `.pipelines/` templates and root pipelines.
    The path of least resistance and the recommended approach for project-specific checks.
 2. **Edit a managed-region host file outside the sentinels**: extra recipes in your
-   `Justfile`, extra rules in `deny.toml` outside the managed region, extra clippy
+   `Justfile`, extra rules in `deny.toml` outside the managed regions (or in the gaps
+   between its per-section regions), extra clippy
    lints written in dotted-key form after the closing sentinel (e.g. `clippy.pedantic = "warn"`
    in the `[workspace.lints]` scope). The tool preserves everything outside the
    sentinels verbatim. Note that TOML forbids redeclaring a table header (`[workspace.lints.clippy]`
@@ -348,7 +355,8 @@ outstanding proposed updates.
 
 ### 8.2 Monorepo / multi-workspace
 
-Out of scope for v1. `anvil-*` recipes always operate on `--workspace` from the repo root.
+Out of scope for v1. `anvil-*` recipes are rooted at the single workspace at the repo root
+(impact scoping narrows *which packages within it* run, never spans multiple workspaces).
 Repos with multiple workspaces (uncommon in the surveyed set) compose by having a separate
 anvil tree per workspace root, each with its own `cargo anvil`. Revisit after first
 adopters report friction.

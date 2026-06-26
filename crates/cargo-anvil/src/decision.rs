@@ -34,6 +34,48 @@ pub struct DecisionInputs<'a> {
     pub template: &'a str,
 }
 
+/// Decision for one item that is still in the catalog (an *update* pass).
+///
+/// This is the return type of [`decide`]; it deliberately omits the
+/// removal outcomes so callers never need an unreachable arm. The
+/// variants map 1:1 onto the matching [`Decision`] values when a plan
+/// item is built.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateDecision {
+    /// Item is in sync with the current template. Do nothing; manifest
+    /// entry stays.
+    InSync,
+    /// Render the current template to disk and refresh the manifest.
+    Write,
+    /// User has diverged AND the template changed since last render —
+    /// write a `.anvil-proposed` sibling and leave the user's content
+    /// alone. Manifest stays unchanged.
+    Propose,
+    /// User has diverged but the template hasn't changed; leave the
+    /// user's content alone with no proposed file. Manifest stays
+    /// unchanged. Also the steady-state outcome for opt-out (empty file
+    /// or empty region body) when the template hasn't moved.
+    LeaveAlone,
+}
+
+/// Decision for a previously-tracked item no longer in the catalog (a
+/// *removal* pass).
+///
+/// Returned by [`decide_removal`]; omitting the update outcomes lets
+/// callers match exhaustively without an unreachable arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemovalDecision {
+    /// On-disk content is already missing; just purge the residual
+    /// manifest entry (no file action).
+    AlreadyGone,
+    /// On-disk content still matches `last_rendered`; safe to delete the
+    /// file or splice out the region. Manifest entry is dropped.
+    Remove,
+    /// User customized the content since the last render; leave it in
+    /// place but drop the manifest entry so ownership transfers.
+    OrphanedKept,
+}
+
 /// Decision the driver should carry out for one item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Decision {
@@ -80,36 +122,36 @@ impl Decision {
 
 /// Compute the decision for one item.
 #[must_use]
-pub fn decide(inputs: &DecisionInputs<'_>) -> Decision {
+pub fn decide(inputs: &DecisionInputs<'_>) -> UpdateDecision {
     match (inputs.disk, inputs.last_rendered) {
         // The on-disk file (or host file) is missing entirely. Either the
         // user deleted it to re-bless, or it has never been written.
         // Either way, we render.
-        (None, _) => Decision::Write,
+        (None, _) => UpdateDecision::Write,
 
         // Item exists on disk. Compare against template & manifest.
-        (Some(d), _) if d == inputs.template => Decision::InSync,
+        (Some(d), _) if d == inputs.template => UpdateDecision::InSync,
         (Some(d), Some(l)) if d == l => {
             // User hasn't touched it since last render, and it doesn't
             // match the current template => template moved on, so write.
-            Decision::Write
+            UpdateDecision::Write
         }
         (Some(_), Some(l)) if l == inputs.template => {
             // User has diverged but the template hasn't changed since
             // last render. Don't pester them. (This is also the
             // steady-state outcome for opt-out: empty content stays
             // empty, template hasn't moved.)
-            Decision::LeaveAlone
+            UpdateDecision::LeaveAlone
         }
         (Some(_), Some(_)) => {
             // User diverged AND template moved. Propose.
-            Decision::Propose
+            UpdateDecision::Propose
         }
         (Some(_), None) => {
             // First time we're tracking this item, but the user already
             // has content there that doesn't match the template. Treat as
             // adoption-with-divergence: propose.
-            Decision::Propose
+            UpdateDecision::Propose
         }
     }
 }
@@ -118,22 +160,23 @@ pub fn decide(inputs: &DecisionInputs<'_>) -> Decision {
 /// longer in the catalog.
 ///
 /// - If the on-disk content is missing, the item is already gone;
-///   treat the residual manifest entry as in-sync (no plan item needed,
-///   just purge the manifest).
+///   treat the residual manifest entry as already-gone (no plan item
+///   needed beyond purging the manifest).
 /// - If the on-disk content matches `last_rendered`, the user hasn't
 ///   touched it since anvil wrote it. Safe to remove.
 /// - Otherwise the user has customized; transfer ownership and leave
 ///   the content in place.
 #[must_use]
-pub fn decide_removal(last_rendered: &str, disk: Option<&str>) -> Decision {
+pub fn decide_removal(last_rendered: &str, disk: Option<&str>) -> RemovalDecision {
     match disk {
-        None => Decision::InSync,
-        Some(d) if d == last_rendered => Decision::Remove,
-        Some(_) => Decision::OrphanedKept,
+        None => RemovalDecision::AlreadyGone,
+        Some(d) if d == last_rendered => RemovalDecision::Remove,
+        Some(_) => RemovalDecision::OrphanedKept,
     }
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -147,34 +190,34 @@ mod tests {
 
     #[test]
     fn missing_disk_writes() {
-        assert_eq!(decide(&inputs(None, None, "T")), Decision::Write);
-        assert_eq!(decide(&inputs(Some("L"), None, "T")), Decision::Write);
+        assert_eq!(decide(&inputs(None, None, "T")), UpdateDecision::Write);
+        assert_eq!(decide(&inputs(Some("L"), None, "T")), UpdateDecision::Write);
     }
 
     #[test]
     fn disk_matches_template_in_sync() {
-        assert_eq!(decide(&inputs(Some("L"), Some("T"), "T")), Decision::InSync);
-        assert_eq!(decide(&inputs(None, Some("T"), "T")), Decision::InSync);
+        assert_eq!(decide(&inputs(Some("L"), Some("T"), "T")), UpdateDecision::InSync);
+        assert_eq!(decide(&inputs(None, Some("T"), "T")), UpdateDecision::InSync);
     }
 
     #[test]
     fn disk_matches_last_template_changed_writes() {
-        assert_eq!(decide(&inputs(Some("L"), Some("L"), "T")), Decision::Write);
+        assert_eq!(decide(&inputs(Some("L"), Some("L"), "T")), UpdateDecision::Write);
     }
 
     #[test]
     fn user_diverged_template_unchanged_leaves_alone() {
-        assert_eq!(decide(&inputs(Some("L"), Some("D"), "L")), Decision::LeaveAlone);
+        assert_eq!(decide(&inputs(Some("L"), Some("D"), "L")), UpdateDecision::LeaveAlone);
     }
 
     #[test]
     fn user_diverged_template_changed_proposes() {
-        assert_eq!(decide(&inputs(Some("L"), Some("D"), "T")), Decision::Propose);
+        assert_eq!(decide(&inputs(Some("L"), Some("D"), "T")), UpdateDecision::Propose);
     }
 
     #[test]
     fn first_time_with_existing_user_content_proposes() {
-        assert_eq!(decide(&inputs(None, Some("D"), "T")), Decision::Propose);
+        assert_eq!(decide(&inputs(None, Some("D"), "T")), UpdateDecision::Propose);
     }
 
     #[test]
@@ -184,7 +227,7 @@ mod tests {
         // Template hasn't moved (T == L). Result: LeaveAlone, silent.
         let empty = "sha256:empty";
         let tmpl = "sha256:template";
-        assert_eq!(decide(&inputs(Some(tmpl), Some(empty), tmpl)), Decision::LeaveAlone);
+        assert_eq!(decide(&inputs(Some(tmpl), Some(empty), tmpl)), UpdateDecision::LeaveAlone);
     }
 
     #[test]
@@ -192,7 +235,10 @@ mod tests {
         // Same as above but the template has since moved — the user gets
         // a proposed sibling so they can see what's new.
         let empty = "sha256:empty";
-        assert_eq!(decide(&inputs(Some("sha256:old"), Some(empty), "sha256:new")), Decision::Propose);
+        assert_eq!(
+            decide(&inputs(Some("sha256:old"), Some(empty), "sha256:new")),
+            UpdateDecision::Propose
+        );
     }
 
     #[test]
@@ -216,20 +262,20 @@ mod tests {
     }
 
     #[test]
-    fn removal_missing_disk_is_in_sync() {
+    fn removal_missing_disk_is_already_gone() {
         // Already gone — no action needed beyond manifest purge.
-        assert_eq!(decide_removal("sha256:abc", None), Decision::InSync);
+        assert_eq!(decide_removal("sha256:abc", None), RemovalDecision::AlreadyGone);
     }
 
     #[test]
     fn removal_untouched_disk_removes() {
         // Disk matches what we wrote last; safe to delete.
-        assert_eq!(decide_removal("sha256:abc", Some("sha256:abc")), Decision::Remove);
+        assert_eq!(decide_removal("sha256:abc", Some("sha256:abc")), RemovalDecision::Remove);
     }
 
     #[test]
     fn removal_customized_disk_orphans() {
         // User edited since last render — keep, transfer ownership.
-        assert_eq!(decide_removal("sha256:abc", Some("sha256:xyz")), Decision::OrphanedKept);
+        assert_eq!(decide_removal("sha256:abc", Some("sha256:xyz")), RemovalDecision::OrphanedKept);
     }
 }

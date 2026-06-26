@@ -1,0 +1,3 @@
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
