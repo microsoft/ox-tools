@@ -692,7 +692,15 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
     # union coverage. Exits non-zero when any gated package falls below its
     # threshold, so coverage regressions fail the PR locally and in cloud
     # workflows -- the Codecov upload stays purely for display, not the gate.
-    cargo coverage-gate --lcov target/coverage/lcov-all-features.info --lcov target/coverage/lcov-no-default.info
+    #
+    # Scope the gate to the SAME package set we measured. When impact
+    # scoping is active, $pkg holds `--package X ...` (already opt-out
+    # filtered above); pass those through so the gate only gates packages
+    # that were actually instrumented -- otherwise unmeasured members would
+    # report NO DATA and fail the gate. When unscoped, $pkg is `--workspace`
+    # (no gate flag); drop it so the gate defaults to every member.
+    $gateArgs = @($pkg | Where-Object { $_ -ne '--workspace' })
+    cargo coverage-gate @gateArgs --lcov target/coverage/lcov-all-features.info --lcov target/coverage/lcov-no-default.info
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Affected tier. Two cargo-test invocations cover both feature
