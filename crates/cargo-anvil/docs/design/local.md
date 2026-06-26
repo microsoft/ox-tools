@@ -330,20 +330,6 @@ user-environment-appropriate install command in the failure message
 (`rustup install nightly-YYYY-MM-DD` or "ask your team's pipeline owner to add
 nightly to msrustup").
 
-**msrustup-swappable toolchain recipes.** The private `_install-toolchain` /
-`_check-toolchain` helpers are written so a downstream catalog targeting an
-**msrustup-only** environment (no OSS `rustup`; e.g. SubstratePT / 1ES) can reuse
-this `tools.just` verbatim via a pure `s/rustup/msrustup` body transform — no
-`if`-branching on toolchain name, no flag-stripping. Two constraints make the swap
-clean: (1) the presence probe is `rustup toolchain list` (a no-network check both
-rustup and msrustup support; `msrustup` has no `which` subcommand), matched as a
-substring because rustup suffixes the host triple while msrustup lists the bare
-build name; and (2) `toolchain install` is called **flag-free** (`msrustup
-toolchain install` rejects `--profile` / `--no-self-update`). The component
-recipes already swap cleanly (`rustup component add` → `msrustup component add`)
-and their probes use `cargo +<tc>` / `rustc +<tc>` multiplexing, which msrustup
-provides. Preserve both constraints when editing these recipes.
-
 ### 3.6 Nightly pinning
 
 A handful of catalog checks need nightly Rust: `fmt`, `udeps`, `miri`, `careful`, and
