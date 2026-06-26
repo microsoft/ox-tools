@@ -98,11 +98,11 @@ plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG_Xxp5EYyYdlGw0p7mhT_6SoGwZIuLXM_3Q3G4FaX-pFFCbsYWSBg3NjYXJnby1jb3ZlcmFnZS1nYXRlZTAuMS4wc2NhcmdvX2NvdmVyYWdlX2dhdGU
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG_Xxp5EYyYdlGw0p7mhT_6SoGwZIuLXM_3Q3G4FaX-pFFCbsYWSBg3NjYXJnby1jb3ZlcmFnZS1nYXRlZTAuMi4wc2NhcmdvX2NvdmVyYWdlX2dhdGU
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
- [__link1]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/fn.evaluate.html
- [__link2]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/struct.EvaluatedReport.html
- [__link3]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
- [__link4]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
- [__link5]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/enum.Verdict.html
- [__link6]: https://docs.rs/cargo-coverage-gate/0.1.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
+ [__link1]: https://docs.rs/cargo-coverage-gate/0.2.0/cargo_coverage_gate/fn.evaluate.html
+ [__link2]: https://docs.rs/cargo-coverage-gate/0.2.0/cargo_coverage_gate/struct.EvaluatedReport.html
+ [__link3]: https://docs.rs/cargo-coverage-gate/0.2.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
+ [__link4]: https://docs.rs/cargo-coverage-gate/0.2.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
+ [__link5]: https://docs.rs/cargo-coverage-gate/0.2.0/cargo_coverage_gate/enum.Verdict.html
+ [__link6]: https://docs.rs/cargo-coverage-gate/0.2.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
