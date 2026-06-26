@@ -15,10 +15,19 @@ use ohno::{AppError, IntoAppError};
 use crate::cli::CoverageGateArgs;
 
 pub(crate) fn run(args: &CoverageGateArgs) -> Result<ExitCode, AppError> {
-    let lcov_path = args.lcov.clone().unwrap_or_else(|| PathBuf::from("target/coverage/lcov.info"));
-    let lcov_text = fs::read_to_string(&lcov_path).into_app_err(format!("failed to read lcov tracefile `{}`", lcov_path.display()))?;
+    let lcov_paths: Vec<PathBuf> = if args.lcov.is_empty() {
+        vec![PathBuf::from("target/coverage/lcov.info")]
+    } else {
+        args.lcov.clone()
+    };
+    let mut lcov_texts: Vec<String> = Vec::with_capacity(lcov_paths.len());
+    for path in &lcov_paths {
+        let text = fs::read_to_string(path).into_app_err(format!("failed to read lcov tracefile `{}`", path.display()))?;
+        lcov_texts.push(text);
+    }
+    let lcov_refs: Vec<&str> = lcov_texts.iter().map(String::as_str).collect();
 
-    let report = cargo_coverage_gate::evaluate(&lcov_text, None, &args.packages).into_app_err("failed to evaluate coverage")?;
+    let report = cargo_coverage_gate::evaluate_many(&lcov_refs, None, &args.packages).into_app_err("failed to evaluate coverage")?;
 
     write_text_output(&report, args.quiet).into_app_err("failed to write verdict to stdout")?;
 

@@ -227,4 +227,37 @@ mod tests {
         let s = render_to_string(&report);
         assert!(!s.contains("Note:"), "did not expect unattributed warning, got:\n{s}");
     }
+
+    /// Writer that errors the first time a write contains `needle`,
+    /// used to exercise the `?` error-propagation branch on the
+    /// multi-line unattributed-note `writeln!`.
+    struct FailOnNeedle {
+        needle: &'static [u8],
+    }
+
+    impl io::Write for FailOnNeedle {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            if buf.windows(self.needle.len()).any(|w| w == self.needle) {
+                return Err(io::Error::other("injected write failure"));
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn propagates_error_from_unattributed_note_write() {
+        // "had paths" appears only in the unattributed-note `writeln!`,
+        // so failing on it covers that statement's `?` after the rest of
+        // the table has been written successfully.
+        let report = Report {
+            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok)],
+            unattributed: 2,
+        };
+        let mut w = FailOnNeedle { needle: b"had paths" };
+        assert!(render(&mut w, &report).is_err());
+    }
 }

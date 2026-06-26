@@ -62,9 +62,44 @@ impl CoverageReport {
     /// lcov tracefile.
     #[ohno::enrich_err("failed to parse lcov tracefile")]
     pub(crate) fn from_str(input: &str) -> Result<Self, CoverageGateError> {
-        let reader = lcov::Reader::new(input.as_bytes());
-        let report = lcov::Report::from_reader(reader).map_err(ParseLcovError::from)?;
-        Ok(Self::from_lcov_report(report))
+        Self::from_strs(std::slice::from_ref(&input))
+    }
+
+    /// Parse and merge one or more lcov tracefiles.
+    ///
+    /// Each input is parsed independently and merged at the line level
+    /// (per-line execution counts are summed, so a line is covered if it
+    /// was hit in *any* input and the line set is the union across inputs).
+    /// This matches `cargo-llvm-cov`'s own profdata merge: feeding the
+    /// `--all-features` and `--no-default-features` lcovs here yields the
+    /// same per-file line coverage as a single merged report, without
+    /// needing a platform-specific lcov merger (`lcov -a` is Linux-only).
+    ///
+    /// An empty slice yields an empty report (no files); callers that
+    /// require at least one input enforce that at the CLI layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CoverageGateError`] if any input is not a well-formed
+    /// lcov tracefile.
+    #[ohno::enrich_err("failed to parse lcov tracefile")]
+    pub(crate) fn from_strs(inputs: &[&str]) -> Result<Self, CoverageGateError> {
+        let mut merged: Option<lcov::Report> = None;
+        for input in inputs {
+            let reader = lcov::Reader::new(input.as_bytes());
+            let report = lcov::Report::from_reader(reader).map_err(ParseLcovError::from)?;
+            match &mut merged {
+                None => merged = Some(report),
+                // `merge_lossy` sums per-line counts and unions the line
+                // sets, ignoring checksum conflicts. The inputs are
+                // different feature configs of the *same* sources, so a
+                // strict `merge` would only differ by erroring on a
+                // checksum mismatch that cannot meaningfully occur here;
+                // the lossy variant is the robust choice.
+                Some(acc) => acc.merge_lossy(report),
+            }
+        }
+        Ok(Self::from_lcov_report(merged.unwrap_or_default()))
     }
 
     /// Parse an lcov tracefile from a file on disk.
@@ -160,6 +195,68 @@ end_of_record
     #[test]
     fn malformed_is_rejected() {
         let err = CoverageReport::from_str(MALFORMED).expect_err("garbage should fail to parse");
+        assert!(err.to_string().contains("lcov tracefile"));
+    }
+
+    #[test]
+    fn from_strs_empty_slice_yields_empty_report() {
+        let report = CoverageReport::from_strs(&[]).expect("empty slice parses");
+        assert!(report.files.is_empty());
+    }
+
+    #[test]
+    fn from_strs_merges_line_counts_and_unions_lines() {
+        // Two configs of the SAME file: config A covers lines 1,2 (line 3
+        // missed); config B covers line 3 (and instruments line 4, which it
+        // misses). Merged: union of lines {1,2,3,4}, covered where hit in
+        // EITHER input => {1,2,3} covered, 4 missed.
+        let config_a = "\
+TN:
+SF:/repo/crates/alpha/src/lib.rs
+DA:1,1
+DA:2,3
+DA:3,0
+end_of_record
+";
+        let config_b = "\
+TN:
+SF:/repo/crates/alpha/src/lib.rs
+DA:1,0
+DA:2,0
+DA:3,2
+DA:4,0
+end_of_record
+";
+        let report = CoverageReport::from_strs(&[config_a, config_b]).expect("merge parses");
+        assert_eq!(report.files.len(), 1, "same file must merge into one entry");
+        let f = &report.files[0];
+        assert_eq!(f.lines_total, 4, "line set is the union across configs");
+        assert_eq!(f.lines_covered, 3, "covered if hit in either config");
+    }
+
+    #[test]
+    fn from_strs_unions_distinct_files() {
+        let file_x = "\
+TN:
+SF:/repo/crates/x/src/lib.rs
+DA:1,1
+end_of_record
+";
+        let file_y = "\
+TN:
+SF:/repo/crates/y/src/lib.rs
+DA:1,1
+DA:2,0
+end_of_record
+";
+        let report = CoverageReport::from_strs(&[file_x, file_y]).expect("merge parses");
+        // Two inputs naming distinct files merge into two entries.
+        assert_eq!(report.files.len(), 2);
+    }
+
+    #[test]
+    fn from_strs_propagates_parse_error_from_any_input() {
+        let err = CoverageReport::from_strs(&[SINGLE_FILE, MALFORMED]).expect_err("a malformed input must fail the merge");
         assert!(err.to_string().contains("lcov tracefile"));
     }
 
