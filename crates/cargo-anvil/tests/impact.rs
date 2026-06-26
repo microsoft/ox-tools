@@ -50,11 +50,7 @@ fn tools_available() -> bool {
         ("just", "--version"),
         ("pwsh", "--version"),
     ] {
-        let ok = Command::new(tool)
-            .arg(args)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
+        let ok = Command::new(tool).arg(args).output().map(|o| o.status.success()).unwrap_or(false);
         if !ok {
             eprintln!("skipping: required tool '{tool}' not available");
             return false;
@@ -89,7 +85,10 @@ fn workspace() -> TempDir {
     let root = tmp.path();
 
     // A minimal two-crate workspace cargo-delta can snapshot.
-    write(&root.join("Cargo.toml"), "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n");
+    write(
+        &root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+    );
     write(
         &root.join("crates/alpha/Cargo.toml"),
         "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
@@ -102,7 +101,12 @@ fn workspace() -> TempDir {
     write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\n");
 
     // Emit the anvil recipe tree (Justfile import region + justfiles/anvil/*).
-    let args = Cli { backends: vec![], no_backends: true, dry_run: false, force: false };
+    let args = Cli {
+        backends: vec![],
+        no_backends: true,
+        dry_run: false,
+        force: false,
+    };
     run_update(&cargo_anvil::Catalog::anvil(), &args, root).unwrap();
 
     // Initialize git and create the base ref the recipe resolves to
@@ -141,8 +145,7 @@ fn run_impact(root: &Path) -> String {
         .current_dir(root)
         .output()
         .unwrap();
-    let combined =
-        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "just anvil-impact failed:\n{combined}");
     combined
 }
@@ -158,7 +161,10 @@ fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
 
     // --- 1. First run: both snapshots are produced from scratch. ---
     let first = run_impact(root);
-    assert!(first.contains("snapshotting baseline"), "first run should snapshot the baseline:\n{first}");
+    assert!(
+        first.contains("snapshotting baseline"),
+        "first run should snapshot the baseline:\n{first}"
+    );
     assert!(
         first.contains("snapshotting working tree"),
         "first run should snapshot the working tree:\n{first}"
@@ -179,8 +185,14 @@ fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
 
     // --- 2. No change: both snapshots are reused (cache hit). ---
     let noop = run_impact(root);
-    assert!(noop.contains("baseline snapshot up to date"), "no-op run should reuse baseline:\n{noop}");
-    assert!(noop.contains("current snapshot up to date"), "no-op run should reuse current:\n{noop}");
+    assert!(
+        noop.contains("baseline snapshot up to date"),
+        "no-op run should reuse baseline:\n{noop}"
+    );
+    assert!(
+        noop.contains("current snapshot up to date"),
+        "no-op run should reuse current:\n{noop}"
+    );
     assert!(noop.contains("cache hit"), "no-op run should report an impact cache hit:\n{noop}");
 
     // --- 3. Working tree changes: only `current.json` is regenerated. ---
@@ -239,13 +251,75 @@ fn impact_off_short_circuits_without_computing() {
         .current_dir(root)
         .output()
         .unwrap();
-    let combined =
-        format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "ANVIL_IMPACT=off run failed:\n{combined}");
     // No snapshotting, no projection, and -- crucially -- no artifacts written.
     assert!(!combined.contains("snapshotting"), "off run must not snapshot:\n{combined}");
     assert!(
         !root.join("target/anvil/impact/impact.json").exists(),
         "off run must not write impact artifacts"
+    );
+}
+
+#[test]
+fn impact_falls_back_to_full_workspace_when_base_has_no_workspace() {
+    if !tools_available() {
+        return;
+    }
+    // First-time anvil adoption: the base commit predates the cargo workspace
+    // (no root Cargo.toml), so there is nothing for cargo-delta to snapshot at
+    // the baseline. The recipe must fall back to full-workspace validation
+    // rather than failing.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    git(root, &["init", "--initial-branch=main"]);
+    git(root, &["config", "user.email", "anvil@example.com"]);
+    git(root, &["config", "user.name", "anvil test"]);
+    git(root, &["config", "core.autocrlf", "false"]);
+    git(root, &["config", "core.safecrlf", "false"]);
+
+    // Base commit: a repo with no cargo workspace at all.
+    write(&root.join("README.md"), "pre-anvil repo\n");
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "before anvil (no workspace)"]);
+    let base = git_stdout(root, &["rev-parse", "HEAD"]);
+    git(root, &["update-ref", "refs/remotes/origin/master", &base]);
+
+    // The introducing commit: add the cargo workspace + emit the anvil tree.
+    write(
+        &root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+    );
+    write(
+        &root.join("crates/alpha/Cargo.toml"),
+        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(&root.join("crates/alpha/src/lib.rs"), "pub fn a() {}\n");
+    let args = Cli {
+        backends: vec![],
+        no_backends: true,
+        dry_run: false,
+        force: false,
+    };
+    run_update(&cargo_anvil::Catalog::anvil(), &args, root).unwrap();
+    git(root, &["add", "-A"]);
+    git(root, &["commit", "-q", "-m", "introduce anvil"]);
+
+    let out = run_impact(root);
+    assert!(
+        out.contains("baseline has no workspace") || out.contains("no root Cargo.toml"),
+        "first-time-adoption run should detect the workspace-less baseline:\n{out}"
+    );
+    // The affected/required tiers default to --workspace (run everything),
+    // and the impact set is still produced (no failure).
+    let impact_dir = root.join("target/anvil/impact");
+    assert_eq!(
+        std::fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap().trim(),
+        "--workspace"
+    );
+    assert_eq!(
+        std::fs::read_to_string(impact_dir.join("include_required.txt")).unwrap().trim(),
+        "--workspace"
     );
 }

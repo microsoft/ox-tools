@@ -3002,10 +3002,23 @@ _anvil-impact-snapshot:
     # --- Baseline snapshot: only when the base sha changed. ---
     $haveBaseline = (Test-Path $baselineJson) -and (Test-Path $baselineShaFile) -and `
         ((Get-Content -Raw $baselineShaFile).Trim() -eq $baseSha)
+    $noWorkspaceMarker = Join-Path $snapDir 'baseline-no-workspace'
     if ($haveBaseline) {
         Write-Host "anvil-impact: baseline snapshot up to date (base $baseSha)"
     } else {
         Write-Host "anvil-impact: snapshotting baseline at $base ($baseSha)"
+        Remove-Item -LiteralPath $noWorkspaceMarker -ErrorAction SilentlyContinue
+        # The baseline worktree is checked out at the merge target, whose
+        # rust-toolchain.toml may pin a toolchain that is NOT installed on this
+        # machine (any PR that bumps rust-toolchain.toml hits this). The
+        # snapshot is metadata-only (file presence + content hashes), so run it
+        # under the *active* toolchain via RUSTUP_TOOLCHAIN -- resolved here, in
+        # the current checkout, where it is installed -- which overrides the
+        # worktree's rust-toolchain.toml. Best-effort: skip if rustup is absent.
+        $activeToolchain = $null
+        $rt = (rustup show active-toolchain 2>$null)
+        if (($LASTEXITCODE -eq 0) -and $rt) { $activeToolchain = (($rt | Select-Object -First 1) -split '\s+')[0] }
+
         $tmpRoot = $env:RUNNER_TEMP
         if (-not $tmpRoot) { $tmpRoot = $env:AGENT_TEMPDIRECTORY }
         if (-not $tmpRoot) { $tmpRoot = [System.IO.Path]::GetTempPath() }
@@ -3018,18 +3031,30 @@ _anvil-impact-snapshot:
         git worktree add --detach $wt $baseSha 2>&1 | Select-Object -Last 1 | Out-Null
         if ($LASTEXITCODE -ne 0) { Write-Error "anvil-impact: failed to create baseline worktree at $wt"; exit 1 }
         try {
-            Push-Location $wt
-            try {
-                $baseSnap = cargo delta snapshot
-                if ($LASTEXITCODE -ne 0) { throw 'cargo delta snapshot (baseline) failed' }
-            } finally {
-                Pop-Location
+            if (-not (Test-Path (Join-Path $wt 'Cargo.toml'))) {
+                # First-time anvil adoption: the base predates the cargo
+                # workspace (no root Cargo.toml), so there is nothing for
+                # cargo-delta to snapshot. Record a marker; anvil-impact falls
+                # back to full-workspace validation rather than failing.
+                Write-Host "anvil-impact: base '$base' has no root Cargo.toml (first-time adoption?); falling back to full-workspace"
+                New-Item -ItemType File -Path $noWorkspaceMarker -Force | Out-Null
+                Set-Content -LiteralPath $baselineShaFile -Value $baseSha -Encoding UTF8 -NoNewline
+            } else {
+                Push-Location $wt
+                try {
+                    if ($activeToolchain) { $env:RUSTUP_TOOLCHAIN = $activeToolchain }
+                    $baseSnap = cargo delta snapshot
+                    if ($LASTEXITCODE -ne 0) { throw 'cargo delta snapshot (baseline) failed' }
+                } finally {
+                    Remove-Item Env:\RUSTUP_TOOLCHAIN -ErrorAction SilentlyContinue
+                    Pop-Location
+                }
+                Set-Content -LiteralPath $baselineJson -Value $baseSnap -Encoding UTF8
+                Set-Content -LiteralPath $baselineShaFile -Value $baseSha -Encoding UTF8 -NoNewline
             }
         } finally {
             git worktree remove --force $wt 2>$null | Out-Null
         }
-        Set-Content -LiteralPath $baselineJson -Value $baseSnap -Encoding UTF8
-        Set-Content -LiteralPath $baselineShaFile -Value $baseSha -Encoding UTF8 -NoNewline
     }
 
     # --- Current snapshot: only when the working tree changed. ---
@@ -3081,6 +3106,20 @@ anvil-impact: _anvil-impact-snapshot
         (@($includeFiles | Where-Object { -not (Test-Path $_) }).Count -eq 0)
     if ($fresh) {
         Write-Host 'anvil-impact: impact set up to date (cache hit)'
+        exit 0
+    }
+
+    # First-time anvil adoption: the base predates the cargo workspace, so
+    # there is no baseline to diff against. Fall back to full-workspace
+    # validation -- modified runs unconditionally, affected/required default
+    # to --workspace -- rather than failing the impact computation.
+    if (Test-Path (Join-Path $snapDir 'baseline-no-workspace')) {
+        Write-Host 'anvil-impact: baseline has no workspace; defaulting all tiers to full-workspace'
+        Set-Content -LiteralPath (Join-Path $impactDir 'include_modified.txt') -Value '' -Encoding UTF8 -NoNewline
+        Set-Content -LiteralPath (Join-Path $impactDir 'include_affected.txt') -Value '--workspace' -Encoding UTF8 -NoNewline
+        Set-Content -LiteralPath (Join-Path $impactDir 'include_required.txt') -Value '--workspace' -Encoding UTF8 -NoNewline
+        Set-Content -LiteralPath $impactJson -Value '{}' -Encoding UTF8
+        Set-Content -LiteralPath $impactStateFile -Value $wantState -Encoding UTF8 -NoNewline
         exit 0
     }
 
