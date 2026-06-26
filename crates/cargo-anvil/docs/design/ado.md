@@ -545,9 +545,6 @@ buckets) is a pure catalog change.
 ```yaml
 # .pipelines/anvil/steps/pr-fast.yml  (owned by cargo-anvil)
 parameters:
-- name: prTitle
-  type: string
-  default: $(System.PullRequest.Title)
 - name: includeModified
   type: string
   default: ""
@@ -559,10 +556,22 @@ parameters:
   default: ""
 steps:
 - template: setup.yml
+# ADO has no PR-title predefined variable (System.PullRequest.Title does
+# not exist), so resolve it from the REST API on PR builds and publish it
+# as PR_TITLE. Best-effort: empty on non-PR / fork / API failure, in which
+# case anvil-pr-title skips.
+- pwsh: |
+    $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
+    if (-not $prId) { Write-Host '##vso[task.setvariable variable=PR_TITLE]'; exit 0 }
+    $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
+    try { $r = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }; Write-Host "##vso[task.setvariable variable=PR_TITLE]$($r.title)" }
+    catch { Write-Host '##vso[task.setvariable variable=PR_TITLE]' }
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 - script: just anvil-pr-fast
   displayName: anvil pr-fast
   env:
-    PR_TITLE: ${{ parameters.prTitle }}
+    PR_TITLE: $(PR_TITLE)
     ANVIL_INCLUDE_MODIFIED: ${{ parameters.includeModified }}
     ANVIL_INCLUDE_AFFECTED: ${{ parameters.includeAffected }}
     ANVIL_INCLUDE_REQUIRED: ${{ parameters.includeRequired }}
@@ -580,7 +589,7 @@ Per-group additions (only where the group consumes PR-context strings the recipe
 
 | Template                  | Extra parameters                                                        |
 |---------------------------|-------------------------------------------------------------------------|
-| `pr-fast.yml`             | `prTitle` (default `$(System.PullRequest.Title)`)                       |
+| `pr-fast.yml`             | `prTitle` (resolved from the REST API; ADO has no PR-title variable)     |
 | `pr-mutants.yml`            | `prBaseRef` (default `$(System.PullRequest.TargetBranch)`)              |
 | `pr-test.yml`, `pr-runtime-analysis.yml`, `scheduled-*.yml` | —                                                                       |
 

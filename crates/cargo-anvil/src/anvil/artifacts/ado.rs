@@ -275,7 +275,11 @@ mod tests {
         assert!(body.contains("ANVIL_INCLUDE_MODIFIED"));
         assert!(body.contains("ANVIL_INCLUDE_AFFECTED"));
         assert!(body.contains("ANVIL_INCLUDE_REQUIRED"));
-        assert!(body.contains("PR_TITLE: $(System.PullRequest.Title)"));
+        // PR_TITLE is resolved from the REST API (ADO has no PR-title
+        // predefined variable) and threaded via the PR_TITLE pipeline var.
+        assert!(body.contains("PR_TITLE: $(PR_TITLE)"));
+        assert!(body.contains("setvariable variable=PR_TITLE"));
+        assert!(!body.contains("PR_TITLE: $(System.PullRequest.Title)"));
     }
 
     #[test]

@@ -756,15 +756,40 @@ steps:
   - template: setup.yml
     parameters:
       group: pr-fast
+  # ADO has no PR-title predefined variable: `System.PullRequest.Title`
+  # does NOT exist, so `$(System.PullRequest.Title)` would expand to the
+  # literal unexpanded macro text (non-empty) and make anvil-pr-title
+  # validate that string. Resolve the real title from the REST API on PR
+  # builds and publish it as the PR_TITLE pipeline variable. Only
+  # anvil-pr-title (in pr-fast) consults it; other groups ignore it, but we
+  # resolve uniformly to keep group.yml the same across groups. Best-effort:
+  # on a non-PR build, a fork PR with a restricted token, or any API error,
+  # PR_TITLE is left empty and anvil-pr-title skips.
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
+      if (-not $prId) {
+          Write-Host 'anvil: not a PR build; leaving PR_TITLE empty'
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+          exit 0
+      }
+      $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
+      try {
+          $resp = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }
+          Write-Host "##vso[task.setvariable variable=PR_TITLE]$($resp.title)"
+      } catch {
+          Write-Host "anvil: could not resolve PR title ($_); leaving PR_TITLE empty"
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+      }
+    displayName: anvil-pr-fast (resolve PR title)
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: just anvil-pr-fast
     displayName: anvil-pr-fast
     env:
-      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
-      # but injecting it on every group keeps group.yml uniform across
-      # groups. ADO sets $(System.PullRequest.Title) to an empty string
-      # on non-PR builds; anvil-pr-title treats empty as "no title set"
-      # and skips.
-      PR_TITLE: $(System.PullRequest.Title)
+      # Resolved by the preceding step (empty on non-PR / fork / API
+      # failure, in which case anvil-pr-title skips).
+      PR_TITLE: $(PR_TITLE)
       ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
       ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
       ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
@@ -789,15 +814,40 @@ steps:
   - template: setup.yml
     parameters:
       group: pr-mutants
+  # ADO has no PR-title predefined variable: `System.PullRequest.Title`
+  # does NOT exist, so `$(System.PullRequest.Title)` would expand to the
+  # literal unexpanded macro text (non-empty) and make anvil-pr-title
+  # validate that string. Resolve the real title from the REST API on PR
+  # builds and publish it as the PR_TITLE pipeline variable. Only
+  # anvil-pr-title (in pr-fast) consults it; other groups ignore it, but we
+  # resolve uniformly to keep group.yml the same across groups. Best-effort:
+  # on a non-PR build, a fork PR with a restricted token, or any API error,
+  # PR_TITLE is left empty and anvil-pr-title skips.
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
+      if (-not $prId) {
+          Write-Host 'anvil: not a PR build; leaving PR_TITLE empty'
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+          exit 0
+      }
+      $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
+      try {
+          $resp = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }
+          Write-Host "##vso[task.setvariable variable=PR_TITLE]$($resp.title)"
+      } catch {
+          Write-Host "anvil: could not resolve PR title ($_); leaving PR_TITLE empty"
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+      }
+    displayName: anvil-pr-mutants (resolve PR title)
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: just anvil-pr-mutants
     displayName: anvil-pr-mutants
     env:
-      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
-      # but injecting it on every group keeps group.yml uniform across
-      # groups. ADO sets $(System.PullRequest.Title) to an empty string
-      # on non-PR builds; anvil-pr-title treats empty as "no title set"
-      # and skips.
-      PR_TITLE: $(System.PullRequest.Title)
+      # Resolved by the preceding step (empty on non-PR / fork / API
+      # failure, in which case anvil-pr-title skips).
+      PR_TITLE: $(PR_TITLE)
       ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
       ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
       ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
@@ -822,15 +872,40 @@ steps:
   - template: setup.yml
     parameters:
       group: pr-runtime-analysis
+  # ADO has no PR-title predefined variable: `System.PullRequest.Title`
+  # does NOT exist, so `$(System.PullRequest.Title)` would expand to the
+  # literal unexpanded macro text (non-empty) and make anvil-pr-title
+  # validate that string. Resolve the real title from the REST API on PR
+  # builds and publish it as the PR_TITLE pipeline variable. Only
+  # anvil-pr-title (in pr-fast) consults it; other groups ignore it, but we
+  # resolve uniformly to keep group.yml the same across groups. Best-effort:
+  # on a non-PR build, a fork PR with a restricted token, or any API error,
+  # PR_TITLE is left empty and anvil-pr-title skips.
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
+      if (-not $prId) {
+          Write-Host 'anvil: not a PR build; leaving PR_TITLE empty'
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+          exit 0
+      }
+      $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
+      try {
+          $resp = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }
+          Write-Host "##vso[task.setvariable variable=PR_TITLE]$($resp.title)"
+      } catch {
+          Write-Host "anvil: could not resolve PR title ($_); leaving PR_TITLE empty"
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+      }
+    displayName: anvil-pr-runtime-analysis (resolve PR title)
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: just anvil-pr-runtime-analysis
     displayName: anvil-pr-runtime-analysis
     env:
-      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
-      # but injecting it on every group keeps group.yml uniform across
-      # groups. ADO sets $(System.PullRequest.Title) to an empty string
-      # on non-PR builds; anvil-pr-title treats empty as "no title set"
-      # and skips.
-      PR_TITLE: $(System.PullRequest.Title)
+      # Resolved by the preceding step (empty on non-PR / fork / API
+      # failure, in which case anvil-pr-title skips).
+      PR_TITLE: $(PR_TITLE)
       ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
       ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
       ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
@@ -855,15 +930,40 @@ steps:
   - template: setup.yml
     parameters:
       group: pr-test
+  # ADO has no PR-title predefined variable: `System.PullRequest.Title`
+  # does NOT exist, so `$(System.PullRequest.Title)` would expand to the
+  # literal unexpanded macro text (non-empty) and make anvil-pr-title
+  # validate that string. Resolve the real title from the REST API on PR
+  # builds and publish it as the PR_TITLE pipeline variable. Only
+  # anvil-pr-title (in pr-fast) consults it; other groups ignore it, but we
+  # resolve uniformly to keep group.yml the same across groups. Best-effort:
+  # on a non-PR build, a fork PR with a restricted token, or any API error,
+  # PR_TITLE is left empty and anvil-pr-title skips.
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
+      if (-not $prId) {
+          Write-Host 'anvil: not a PR build; leaving PR_TITLE empty'
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+          exit 0
+      }
+      $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
+      try {
+          $resp = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }
+          Write-Host "##vso[task.setvariable variable=PR_TITLE]$($resp.title)"
+      } catch {
+          Write-Host "anvil: could not resolve PR title ($_); leaving PR_TITLE empty"
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+      }
+    displayName: anvil-pr-test (resolve PR title)
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: just anvil-pr-test
     displayName: anvil-pr-test
     env:
-      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
-      # but injecting it on every group keeps group.yml uniform across
-      # groups. ADO sets $(System.PullRequest.Title) to an empty string
-      # on non-PR builds; anvil-pr-title treats empty as "no title set"
-      # and skips.
-      PR_TITLE: $(System.PullRequest.Title)
+      # Resolved by the preceding step (empty on non-PR / fork / API
+      # failure, in which case anvil-pr-title skips).
+      PR_TITLE: $(PR_TITLE)
       ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
       ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
       ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
@@ -888,15 +988,40 @@ steps:
   - template: setup.yml
     parameters:
       group: scheduled-advisories
+  # ADO has no PR-title predefined variable: `System.PullRequest.Title`
+  # does NOT exist, so `$(System.PullRequest.Title)` would expand to the
+  # literal unexpanded macro text (non-empty) and make anvil-pr-title
+  # validate that string. Resolve the real title from the REST API on PR
+  # builds and publish it as the PR_TITLE pipeline variable. Only
+  # anvil-pr-title (in pr-fast) consults it; other groups ignore it, but we
+  # resolve uniformly to keep group.yml the same across groups. Best-effort:
+  # on a non-PR build, a fork PR with a restricted token, or any API error,
+  # PR_TITLE is left empty and anvil-pr-title skips.
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
+      if (-not $prId) {
+          Write-Host 'anvil: not a PR build; leaving PR_TITLE empty'
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+          exit 0
+      }
+      $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
+      try {
+          $resp = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }
+          Write-Host "##vso[task.setvariable variable=PR_TITLE]$($resp.title)"
+      } catch {
+          Write-Host "anvil: could not resolve PR title ($_); leaving PR_TITLE empty"
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+      }
+    displayName: anvil-scheduled-advisories (resolve PR title)
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: just anvil-scheduled-advisories
     displayName: anvil-scheduled-advisories
     env:
-      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
-      # but injecting it on every group keeps group.yml uniform across
-      # groups. ADO sets $(System.PullRequest.Title) to an empty string
-      # on non-PR builds; anvil-pr-title treats empty as "no title set"
-      # and skips.
-      PR_TITLE: $(System.PullRequest.Title)
+      # Resolved by the preceding step (empty on non-PR / fork / API
+      # failure, in which case anvil-pr-title skips).
+      PR_TITLE: $(PR_TITLE)
       ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
       ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
       ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
@@ -921,15 +1046,40 @@ steps:
   - template: setup.yml
     parameters:
       group: scheduled-exhaustive
+  # ADO has no PR-title predefined variable: `System.PullRequest.Title`
+  # does NOT exist, so `$(System.PullRequest.Title)` would expand to the
+  # literal unexpanded macro text (non-empty) and make anvil-pr-title
+  # validate that string. Resolve the real title from the REST API on PR
+  # builds and publish it as the PR_TITLE pipeline variable. Only
+  # anvil-pr-title (in pr-fast) consults it; other groups ignore it, but we
+  # resolve uniformly to keep group.yml the same across groups. Best-effort:
+  # on a non-PR build, a fork PR with a restricted token, or any API error,
+  # PR_TITLE is left empty and anvil-pr-title skips.
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
+      if (-not $prId) {
+          Write-Host 'anvil: not a PR build; leaving PR_TITLE empty'
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+          exit 0
+      }
+      $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
+      try {
+          $resp = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }
+          Write-Host "##vso[task.setvariable variable=PR_TITLE]$($resp.title)"
+      } catch {
+          Write-Host "anvil: could not resolve PR title ($_); leaving PR_TITLE empty"
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+      }
+    displayName: anvil-scheduled-exhaustive (resolve PR title)
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: just anvil-scheduled-exhaustive
     displayName: anvil-scheduled-exhaustive
     env:
-      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
-      # but injecting it on every group keeps group.yml uniform across
-      # groups. ADO sets $(System.PullRequest.Title) to an empty string
-      # on non-PR builds; anvil-pr-title treats empty as "no title set"
-      # and skips.
-      PR_TITLE: $(System.PullRequest.Title)
+      # Resolved by the preceding step (empty on non-PR / fork / API
+      # failure, in which case anvil-pr-title skips).
+      PR_TITLE: $(PR_TITLE)
       ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
       ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
       ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
@@ -954,15 +1104,40 @@ steps:
   - template: setup.yml
     parameters:
       group: scheduled-runtime-analysis
+  # ADO has no PR-title predefined variable: `System.PullRequest.Title`
+  # does NOT exist, so `$(System.PullRequest.Title)` would expand to the
+  # literal unexpanded macro text (non-empty) and make anvil-pr-title
+  # validate that string. Resolve the real title from the REST API on PR
+  # builds and publish it as the PR_TITLE pipeline variable. Only
+  # anvil-pr-title (in pr-fast) consults it; other groups ignore it, but we
+  # resolve uniformly to keep group.yml the same across groups. Best-effort:
+  # on a non-PR build, a fork PR with a restricted token, or any API error,
+  # PR_TITLE is left empty and anvil-pr-title skips.
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
+      if (-not $prId) {
+          Write-Host 'anvil: not a PR build; leaving PR_TITLE empty'
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+          exit 0
+      }
+      $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
+      try {
+          $resp = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }
+          Write-Host "##vso[task.setvariable variable=PR_TITLE]$($resp.title)"
+      } catch {
+          Write-Host "anvil: could not resolve PR title ($_); leaving PR_TITLE empty"
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+      }
+    displayName: anvil-scheduled-runtime-analysis (resolve PR title)
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: just anvil-scheduled-runtime-analysis
     displayName: anvil-scheduled-runtime-analysis
     env:
-      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
-      # but injecting it on every group keeps group.yml uniform across
-      # groups. ADO sets $(System.PullRequest.Title) to an empty string
-      # on non-PR builds; anvil-pr-title treats empty as "no title set"
-      # and skips.
-      PR_TITLE: $(System.PullRequest.Title)
+      # Resolved by the preceding step (empty on non-PR / fork / API
+      # failure, in which case anvil-pr-title skips).
+      PR_TITLE: $(PR_TITLE)
       ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
       ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
       ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
@@ -987,15 +1162,40 @@ steps:
   - template: setup.yml
     parameters:
       group: scheduled-test
+  # ADO has no PR-title predefined variable: `System.PullRequest.Title`
+  # does NOT exist, so `$(System.PullRequest.Title)` would expand to the
+  # literal unexpanded macro text (non-empty) and make anvil-pr-title
+  # validate that string. Resolve the real title from the REST API on PR
+  # builds and publish it as the PR_TITLE pipeline variable. Only
+  # anvil-pr-title (in pr-fast) consults it; other groups ignore it, but we
+  # resolve uniformly to keep group.yml the same across groups. Best-effort:
+  # on a non-PR build, a fork PR with a restricted token, or any API error,
+  # PR_TITLE is left empty and anvil-pr-title skips.
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
+      if (-not $prId) {
+          Write-Host 'anvil: not a PR build; leaving PR_TITLE empty'
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+          exit 0
+      }
+      $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
+      try {
+          $resp = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }
+          Write-Host "##vso[task.setvariable variable=PR_TITLE]$($resp.title)"
+      } catch {
+          Write-Host "anvil: could not resolve PR title ($_); leaving PR_TITLE empty"
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+      }
+    displayName: anvil-scheduled-test (resolve PR title)
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: just anvil-scheduled-test
     displayName: anvil-scheduled-test
     env:
-      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
-      # but injecting it on every group keeps group.yml uniform across
-      # groups. ADO sets $(System.PullRequest.Title) to an empty string
-      # on non-PR builds; anvil-pr-title treats empty as "no title set"
-      # and skips.
-      PR_TITLE: $(System.PullRequest.Title)
+      # Resolved by the preceding step (empty on non-PR / fork / API
+      # failure, in which case anvil-pr-title skips).
+      PR_TITLE: $(PR_TITLE)
       ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
       ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
       ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
@@ -1620,17 +1820,19 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
 # Unscoped (PR title is not source-related).
 #
 # Validates that $env:PR_TITLE matches Conventional Commits when set;
-# no-op when unset. Cloud workflows inject PR_TITLE explicitly (GH Actions:
-# ${{ github.event.pull_request.title }}; ADO: $(System.PullRequest.Title))
-# so the check has authoritative input there. Locally it skips silently --
-# there is no reliable way to recover the PR title for the ADO backend
-# (no equivalent of `gh pr view`), so the recipe stays simple and
-# defers the check to cloud workflows.
+# no-op when unset. Cloud workflows inject PR_TITLE explicitly: GH Actions
+# from ${{ github.event.pull_request.title }}; ADO resolves it via the REST
+# API in steps/group.yml (ADO has no PR-title predefined variable). Locally
+# it skips silently -- there is no reliable way to recover the PR title, so
+# the recipe defers the check to cloud workflows. The recipe also treats a
+# value that is still an unexpanded `$(...)` pipeline macro as "not set" and
+# skips, so a misconfigured/absent cloud variable degrades to a skip rather
+# than failing on the literal macro text.
 [script("pwsh")]
 anvil-pr-title: anvil-pr-title-validate-prereqs
     $title = $env:PR_TITLE
-    if (-not $title) {
-        Write-Host 'anvil-pr-title: PR_TITLE env var not set; skipping (check runs in cloud workflows)'
+    if (-not $title -or $title.StartsWith('$(')) {
+        Write-Host 'anvil-pr-title: PR_TITLE not set (or unexpanded); skipping (check runs in cloud workflows)'
         exit 0
     }
     if ($title -notmatch '^(feat|fix|chore|docs|refactor|test|build|cloud workflows|perf|revert)(\([^)]+\))?!?: .+') {
