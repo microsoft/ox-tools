@@ -6,7 +6,10 @@
 #
 # Output variables (consumed in pr-stages.yml via
 # stageDependencies.impact.compute.outputs['compute.<name>']):
-#   include_modified - "--package X --package Y" or "--skip" sentinel.
+#   include_modified - "--package X@ver --package Y@ver" or "--skip"
+#                      sentinel. Packages are version-qualified cargo
+#                      specs so they resolve uniquely even when a like-
+#                      named crate is also a transitive dependency.
 #   include_affected - same shape, for the affected set (modified ∪ rev-deps).
 #   include_required - same shape, for the required set
 #                      (affected ∪ workspace-internal transitive deps).
@@ -78,7 +81,14 @@ steps:
           --format json)"
       # cargo-delta emits TitleCase keys (Modified / Affected /
       # Required). Format each tier into the --package args shape
-      # recipes expect, with --skip as the empty-set sentinel.
+      # recipes expect, with --skip as the empty-set sentinel. Each
+      # package is emitted as a version-qualified cargo spec
+      # (`name@version`) so it resolves uniquely to the workspace member
+      # even when a like-named crate is also a different-versioned
+      # transitive dependency (a bare `--package foo` would make
+      # `cargo build -p foo` fail with "multiple packages named foo").
+      # The version comes from `cargo metadata --no-deps` (workspace
+      # members only), so it always matches exactly one member.
       #
       # cargo-delta's impact output uses *library names* (snake_case)
       # rather than cargo *package names* (which may use hyphens). For
@@ -87,24 +97,27 @@ steps:
       # specification. We build:
       #   * `pkg_map`: lib-name -> package-name (and identity for
       #     package-name -> package-name), for translation;
+      #   * `pkg_ver`: package-name -> version, for the `@ver` suffix;
       #   * `valid_pkgs`: set of all known package names, for
       #     validation. Names cargo-delta emits that aren't valid
       #     packages (e.g. directory-leaf ambiguities like `ffi` /
       #     `ffi_build` in deeply nested workspaces) are dropped with a
       #     warning rather than failing the whole build.
       declare -A pkg_map
+      declare -A pkg_ver
       declare -A valid_pkgs
       # `tr -d '\r'` strips carriage returns: on Windows runners the
       # `cargo metadata | jq` (and cargo-delta) output can be CRLF-
       # terminated, which would otherwise leave a trailing `\r` on the
       # last `read` field — corrupting the map keys so valid packages
       # get mis-classified as unknown and silently dropped.
-      while IFS=$'\t' read -r pkg_name lib_name; do
+      while IFS=$'\t' read -r pkg_name lib_name version; do
           valid_pkgs["$pkg_name"]=1
           pkg_map["$pkg_name"]="$pkg_name"
+          pkg_ver["$pkg_name"]="$version"
           [ -n "$lib_name" ] && pkg_map["$lib_name"]="$pkg_name"
       done < <(cargo metadata --no-deps --format-version 1 \
-          | jq -r '.packages[] as $p | ($p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)"), "\($p.name)\t"' \
+          | jq -r '.packages[] as $p | ($p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)\t\($p.version)"), "\($p.name)\t\t\($p.version)"' \
           | tr -d '\r')
       format_set() {
           local field="$1"
@@ -121,7 +134,12 @@ steps:
                       echo "anvil impact: dropping unknown package '$pkg' (-> '$mapped') from $field set; see https://github.com/microsoft/ox-tools/issues for tracking" >&2
                       continue
                   fi
-                  out="$out --package $mapped"
+                  local ver="${pkg_ver[$mapped]:-}"
+                  if [ -n "$ver" ] ; then
+                      out="$out --package ${mapped}@${ver}"
+                  else
+                      out="$out --package $mapped"
+                  fi
               done <<EOF
       $pkgs
       EOF

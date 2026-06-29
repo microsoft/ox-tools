@@ -547,7 +547,10 @@ steps:
 #
 # Output variables (consumed in pr-stages.yml via
 # stageDependencies.impact.compute.outputs['compute.<name>']):
-#   include_modified - "--package X --package Y" or "--skip" sentinel.
+#   include_modified - "--package X@ver --package Y@ver" or "--skip"
+#                      sentinel. Packages are version-qualified cargo
+#                      specs so they resolve uniquely even when a like-
+#                      named crate is also a transitive dependency.
 #   include_affected - same shape, for the affected set (modified ∪ rev-deps).
 #   include_required - same shape, for the required set
 #                      (affected ∪ workspace-internal transitive deps).
@@ -619,7 +622,14 @@ steps:
           --format json)"
       # cargo-delta emits TitleCase keys (Modified / Affected /
       # Required). Format each tier into the --package args shape
-      # recipes expect, with --skip as the empty-set sentinel.
+      # recipes expect, with --skip as the empty-set sentinel. Each
+      # package is emitted as a version-qualified cargo spec
+      # (`name@version`) so it resolves uniquely to the workspace member
+      # even when a like-named crate is also a different-versioned
+      # transitive dependency (a bare `--package foo` would make
+      # `cargo build -p foo` fail with "multiple packages named foo").
+      # The version comes from `cargo metadata --no-deps` (workspace
+      # members only), so it always matches exactly one member.
       #
       # cargo-delta's impact output uses *library names* (snake_case)
       # rather than cargo *package names* (which may use hyphens). For
@@ -628,24 +638,27 @@ steps:
       # specification. We build:
       #   * `pkg_map`: lib-name -> package-name (and identity for
       #     package-name -> package-name), for translation;
+      #   * `pkg_ver`: package-name -> version, for the `@ver` suffix;
       #   * `valid_pkgs`: set of all known package names, for
       #     validation. Names cargo-delta emits that aren't valid
       #     packages (e.g. directory-leaf ambiguities like `ffi` /
       #     `ffi_build` in deeply nested workspaces) are dropped with a
       #     warning rather than failing the whole build.
       declare -A pkg_map
+      declare -A pkg_ver
       declare -A valid_pkgs
       # `tr -d '\r'` strips carriage returns: on Windows runners the
       # `cargo metadata | jq` (and cargo-delta) output can be CRLF-
       # terminated, which would otherwise leave a trailing `\r` on the
       # last `read` field — corrupting the map keys so valid packages
       # get mis-classified as unknown and silently dropped.
-      while IFS=$'\t' read -r pkg_name lib_name; do
+      while IFS=$'\t' read -r pkg_name lib_name version; do
           valid_pkgs["$pkg_name"]=1
           pkg_map["$pkg_name"]="$pkg_name"
+          pkg_ver["$pkg_name"]="$version"
           [ -n "$lib_name" ] && pkg_map["$lib_name"]="$pkg_name"
       done < <(cargo metadata --no-deps --format-version 1 \
-          | jq -r '.packages[] as $p | ($p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)"), "\($p.name)\t"' \
+          | jq -r '.packages[] as $p | ($p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)\t\($p.version)"), "\($p.name)\t\t\($p.version)"' \
           | tr -d '\r')
       format_set() {
           local field="$1"
@@ -662,7 +675,12 @@ steps:
                       echo "anvil impact: dropping unknown package '$pkg' (-> '$mapped') from $field set; see https://github.com/microsoft/ox-tools/issues for tracking" >&2
                       continue
                   fi
-                  out="$out --package $mapped"
+                  local ver="${pkg_ver[$mapped]:-}"
+                  if [ -n "$ver" ] ; then
+                      out="$out --package ${mapped}@${ver}"
+                  else
+                      out="$out --package $mapped"
+                  fi
               done <<EOF
       $pkgs
       EOF
@@ -1565,8 +1583,11 @@ unknown-git = "deny"
 #                                    rather than `?? "--workspace"`
 #                                    (which would only catch $null and
 #                                    splat an empty arg cargo rejects).
-#   * "--package A --package B"   - emitted by the cloud-workflow impact step when
-#                                    the tier has members
+#   * "--package A@v --package B@v"  - emitted by the cloud-workflow impact step
+#                                    when the tier has members. Packages are
+#                                    version-qualified cargo specs so they
+#                                    resolve uniquely even when a like-named
+#                                    crate is also a transitive dependency.
 #   * "--skip"                    - emitted by the cloud-workflow impact step when
 #                                    the tier is empty (recipe exits 0)
 #
@@ -1727,7 +1748,10 @@ anvil-readme-check: anvil-readme-check-validate-prereqs
         $names = @()
         for ($i = 0; $i -lt $pkg.Count; $i++) {
             if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
-                $names += $pkg[$i + 1]; $i++
+                # Impact emits version-qualified specs (name@version);
+                # strip the @version to recover the bare package name
+                # this metadata lookup keys on.
+                $names += ($pkg[$i + 1] -split '@', 2)[0]; $i++
             }
         }
         $names
@@ -1946,7 +1970,10 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
         $packages = @()
         for ($i = 0; $i -lt $pkg.Count; $i++) {
             if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
-                if ($libPkgs[$pkg[$i + 1]]) { $packages += $pkg[$i + 1] }
+                # Impact emits version-qualified specs (name@version);
+                # strip the @version to recover the bare package name.
+                $name = ($pkg[$i + 1] -split '@', 2)[0]
+                if ($libPkgs[$name]) { $packages += $name }
                 $i++
             }
         }
@@ -2040,7 +2067,11 @@ anvil-external-types: anvil-external-types-validate-prereqs
     } else {
         for ($i = 0; $i -lt $pkg.Count; $i++) {
             if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
-                if ($libPkgs.ContainsKey($pkg[$i + 1])) { $packages += $pkg[$i + 1] }
+                # Impact emits version-qualified specs (name@version);
+                # strip the @version to recover the bare package name
+                # this manifest-path map keys on.
+                $name = ($pkg[$i + 1] -split '@', 2)[0]
+                if ($libPkgs.ContainsKey($name)) { $packages += $name }
                 $i++
             }
         }
@@ -2129,7 +2160,11 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
         if ($optedOut.Count -gt 0) {
             $filtered = [System.Collections.Generic.List[string]]::new()
             for ($i = 0; $i -lt $pkg.Count; $i++) {
-                if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count -and $optedOut -contains $pkg[$i + 1]) {
+                # Impact emits version-qualified specs (name@version);
+                # compare the bare name against the opt-out set, but keep
+                # the full name@version token in $pkg so the llvm-cov
+                # measurement below resolves unambiguously.
+                if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count -and $optedOut -contains (($pkg[$i + 1] -split '@', 2)[0])) {
                     $i++
                     continue
                 }
@@ -2212,12 +2247,25 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
     # workflows -- the Codecov upload stays purely for display, not the gate.
     #
     # Scope the gate to the SAME package set we measured. When impact
-    # scoping is active, $pkg holds `--package X ...` (already opt-out
+    # scoping is active, $pkg holds `--package X@ver ...` (already opt-out
     # filtered above); pass those through so the gate only gates packages
     # that were actually instrumented -- otherwise unmeasured members would
     # report NO DATA and fail the gate. When unscoped, $pkg is `--workspace`
     # (no gate flag); drop it so the gate defaults to every member.
-    $gateArgs = @($pkg | Where-Object { $_ -ne '--workspace' })
+    #
+    # cargo-coverage-gate keys on bare package names from cargo metadata, so
+    # strip the @version qualifier the measurement used for disambiguation.
+    $gateArgs = [System.Collections.Generic.List[string]]::new()
+    for ($i = 0; $i -lt $pkg.Count; $i++) {
+        if ($pkg[$i] -eq '--workspace') { continue }
+        if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
+            $gateArgs.Add('--package')
+            $gateArgs.Add(($pkg[$i + 1] -split '@', 2)[0])
+            $i++
+            continue
+        }
+        $gateArgs.Add($pkg[$i])
+    }
     cargo coverage-gate @gateArgs --lcov target/coverage/lcov-all-features.info --lcov target/coverage/lcov-no-default.info
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -2532,9 +2580,22 @@ anvil-bolero: anvil-bolero-validate-prereqs
         exit 0
     }
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    # Impact emits version-qualified specs (name@version); strip the
+    # @version qualifier -- cargo-bolero resolves over workspace members
+    # only, so bare names suffice and avoid any spec-parsing surprises.
+    $bareArgs = [System.Collections.Generic.List[string]]::new()
+    for ($i = 0; $i -lt $pkg.Count; $i++) {
+        if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
+            $bareArgs.Add('--package')
+            $bareArgs.Add(($pkg[$i + 1] -split '@', 2)[0])
+            $i++
+            continue
+        }
+        $bareArgs.Add($pkg[$i])
+    }
     # `cargo bolero list` emits one JSON object per target on stdout;
     # we want the set of (package, test) pairs over the affected set.
-    $targetsJson = & cargo bolero list @pkg 2>$null
+    $targetsJson = & cargo bolero list @bareArgs 2>$null
     if ($LASTEXITCODE -ne 0) {
         Write-Host 'anvil-bolero: bolero list failed; assuming no targets'
         exit 0

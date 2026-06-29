@@ -555,14 +555,15 @@ runs:
 3. `cargo delta impact --base $base_ref --format json` once, capturing the JSON tier
    sets in a single invocation.
 4. For each of the three tiers (`modified`, `affected`, `required`), format the crate
-   list into a pre-built `--package X --package Y …` string, or emit the sentinel
-   `--skip` when the tier is empty.
+   list into a pre-built `--package X@ver --package Y@ver …` string (version-qualified
+   cargo specs, so `-p` resolves uniquely even when a like-named transitive dependency
+   exists), or emit the sentinel `--skip` when the tier is empty.
 
 Outputs:
 
 | Output             | Meaning                                                                                                                                                                |
 |--------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `include_modified` | `--package X --package Y …` for cargo-delta's `modified` tier, or `--skip` when empty.                                                                                  |
+| `include_modified` | `--package X@ver --package Y@ver …` for cargo-delta's `modified` tier, or `--skip` when empty.                                                                          |
 | `include_affected` | Same shape, for the `affected` tier (modified ∪ workspace rev-deps).                                                                                                    |
 | `include_required` | Same shape, for the `required` tier (affected ∪ workspace-internal transitive deps).                                                                                    |
 

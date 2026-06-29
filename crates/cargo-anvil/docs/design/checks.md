@@ -323,10 +323,12 @@ workflow/pipeline file alongside the anvil composite actions / step templates.
 The tool uses [`cargo-delta`](https://crates.io/crates/cargo-delta) to skip checks for
 unaffected workspace members on PR runs. cargo-delta computes three concentric impact tiers
 (`required ⊇ affected ⊇ modified`) and emits each as a list of crate names. The
-`anvil-impact` building block formats each tier into a pre-built `--package X --package Y`
+`anvil-impact` building block formats each tier into a pre-built `--package X@ver --package Y@ver`
 string (or the literal sentinel `--skip` when the tier is empty), publishes the result as
 `ANVIL_INCLUDE_MODIFIED`, `ANVIL_INCLUDE_AFFECTED`, and `ANVIL_INCLUDE_REQUIRED`
-env vars, and the recipes in `checks.just` consume them.
+env vars, and the recipes in `checks.just` consume them. Each package is a version-qualified
+cargo spec (`name@version`) so `-p` resolves uniquely to the workspace member even when a
+like-named crate is also pulled in as a different-versioned transitive dependency.
 
 Each catalog check is tagged with one of four buckets:
 

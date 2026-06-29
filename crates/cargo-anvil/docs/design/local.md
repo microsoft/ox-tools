@@ -393,9 +393,10 @@ such env vars, one per cargo-delta tier:
 | `ANVIL_INCLUDE_REQUIRED`  | required  | Same semantics as `ANVIL_INCLUDE_AFFECTED`, but consumed by recipes that need transitive dep graph in scope (doc-build, cargo-hack, udeps). |
 
 Each var holds either the literal sentinel `--skip` (the tier is empty for this PR), or
-a pre-built argument string like `--package alpha --package beta`. The cloud-workflow wiring sets
-exactly one form; local invocations leave the vars unset, and recipes fall back to
-`--workspace`.
+a pre-built argument string like `--package alpha@1.0.0 --package beta@0.2.0` (version-qualified
+cargo specs, so `-p` resolves uniquely even against a like-named transitive dependency). The
+cloud-workflow wiring sets exactly one form; local invocations leave the vars unset, and recipes
+fall back to `--workspace`.
 
 A typical affected-tier recipe:
 
