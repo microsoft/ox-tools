@@ -75,86 +75,20 @@ steps:
           && RUSTUP_TOOLCHAIN="$active_toolchain" cargo delta snapshot ) \
           > "$AGENT_TEMPDIRECTORY/anvil-baseline.json"
       git worktree remove --force "$AGENT_TEMPDIRECTORY/anvil-baseline"
-      result="$(cargo delta impact \
+      cargo delta impact \
           --baseline "$AGENT_TEMPDIRECTORY/anvil-baseline.json" \
           --current  "$AGENT_TEMPDIRECTORY/anvil-current.json" \
-          --format json)"
-      # cargo-delta emits TitleCase keys (Modified / Affected /
-      # Required). Format each tier into the --package args shape
-      # recipes expect, with --skip as the empty-set sentinel. Each
-      # package is emitted as a version-qualified cargo spec
-      # (`name@version`) so it resolves uniquely to the workspace member
-      # even when a like-named crate is also a different-versioned
-      # transitive dependency (a bare `--package foo` would make
-      # `cargo build -p foo` fail with "multiple packages named foo").
-      # The version comes from `cargo metadata --no-deps` (workspace
-      # members only), so it always matches exactly one member.
-      #
-      # cargo-delta's impact output uses *library names* (snake_case)
-      # rather than cargo *package names* (which may use hyphens). For
-      # hyphenated packages — e.g. `cargo-anvil` — that means it
-      # emits `cargo_anvil`, which cargo rejects as a --package
-      # specification. We build:
-      #   * `pkg_map`: lib-name -> package-name (and identity for
-      #     package-name -> package-name), for translation;
-      #   * `pkg_ver`: package-name -> version, for the `@ver` suffix;
-      #   * `valid_pkgs`: set of all known package names, for
-      #     validation. Names cargo-delta emits that aren't valid
-      #     packages (e.g. directory-leaf ambiguities like `ffi` /
-      #     `ffi_build` in deeply nested workspaces) are dropped with a
-      #     warning rather than failing the whole build.
-      declare -A pkg_map
-      declare -A pkg_ver
-      declare -A valid_pkgs
-      # `tr -d '\r'` strips carriage returns: on Windows runners the
-      # `cargo metadata | jq` (and cargo-delta) output can be CRLF-
-      # terminated, which would otherwise leave a trailing `\r` on the
-      # last `read` field — corrupting the map keys so valid packages
-      # get mis-classified as unknown and silently dropped.
-      while IFS=$'\t' read -r pkg_name lib_name version; do
-          valid_pkgs["$pkg_name"]=1
-          pkg_map["$pkg_name"]="$pkg_name"
-          pkg_ver["$pkg_name"]="$version"
-          [ -n "$lib_name" ] && pkg_map["$lib_name"]="$pkg_name"
-      done < <(cargo metadata --no-deps --format-version 1 \
-          | jq -r '.packages[] as $p | ($p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)\t\($p.version)"), "\($p.name)\t\t\($p.version)"' \
-          | tr -d '\r')
-      format_set() {
-          local field="$1"
-          local pkgs
-          pkgs=$(printf '%s' "$result" | jq -r --arg f "$field" '(.[$f] // []) | .[]' 2>/dev/null | tr -d '\r' || true)
-          if [ -z "$pkgs" ] ; then
-              printf '%s' "--skip"
-          else
-              local out=""
-              while IFS= read -r pkg ; do
-                  [ -z "$pkg" ] && continue
-                  local mapped="${pkg_map[$pkg]:-$pkg}"
-                  if [ -z "${valid_pkgs[$mapped]:-}" ] ; then
-                      echo "anvil impact: dropping unknown package '$pkg' (-> '$mapped') from $field set; see https://github.com/microsoft/ox-tools/issues for tracking" >&2
-                      continue
-                  fi
-                  local ver="${pkg_ver[$mapped]:-}"
-                  if [ -n "$ver" ] ; then
-                      out="$out --package ${mapped}@${ver}"
-                  else
-                      out="$out --package $mapped"
-                  fi
-              done <<EOF
-      $pkgs
-      EOF
-              if [ -z "$out" ] ; then
-                  printf '%s' "--skip"
-              else
-                  printf '%s' "${out# }"
-              fi
-          fi
-      }
-      include_modified="$(format_set Modified)"
-      include_affected="$(format_set Affected)"
-      include_required="$(format_set Required)"
-      echo "##vso[task.setvariable variable=include_modified;isOutput=true]$include_modified"
-      echo "##vso[task.setvariable variable=include_affected;isOutput=true]$include_affected"
-      echo "##vso[task.setvariable variable=include_required;isOutput=true]$include_required"
+          --format json \
+          > "$AGENT_TEMPDIRECTORY/anvil-impact.json"
+      # Format each tier into the `--package name@version ...` shape the
+      # checks.just recipes consume (or the "--skip" sentinel when a tier
+      # is empty), via the shared _anvil-impact-format recipe -- single
+      # source of truth across the GitHub and ADO impact steps. See that
+      # recipe in checks.just for the version-qualification and lib-name
+      # translation rationale.
+      for tier in modified affected required; do
+          val="$(just _anvil-impact-format "$tier" "$AGENT_TEMPDIRECTORY/anvil-impact.json")"
+          echo "##vso[task.setvariable variable=include_${tier};isOutput=true]$val"
+      done
     name: compute
     displayName: anvil impact (cargo-delta)
