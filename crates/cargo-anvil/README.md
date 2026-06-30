@@ -106,6 +106,116 @@ Four escape valves, in increasing severity:
    region. The next `update` detects the dirt and writes a
    `.anvil-proposed` sibling instead of overwriting.
 
+### Per-crate check conventions
+
+A few checks read source-level or `Cargo.toml` knobs in *your* crates.
+These are stable conventions: set them in your own code, and the
+`anvil-` recipes pick them up. None require editing the generated
+`justfiles/anvil/` tree.
+
+#### Coverage (`llvm-cov` + `cargo-coverage-gate`)
+
+Per-package line-coverage thresholds live in `Cargo.toml` metadata. A
+per-package value wins; otherwise the workspace value applies; the
+built-in default is `100.0`:
+
+```toml
+# workspace root: the default threshold for every member
+[workspace.metadata.coverage-gate]
+min-lines-percent = 90.0
+
+# a single crate: override (or opt out with 0)
+[package.metadata.coverage-gate]
+min-lines-percent = 0      # 0 == opt this crate out of the gate entirely
+```
+
+To exclude an individual item (an untestable error arm, a
+process-shelling path) from coverage, use the standard attribute —
+the `coverage`/`coverage_nightly` cfgs are pre-declared (see *Custom
+cfg names* below), and coverage is measured on nightly so the
+exclusion is live:
+
+```text
+#[cfg_attr(coverage_nightly, coverage(off))]
+```
+
+#### Undefined-behavior checking (`miri`)
+
+The PR-tier `miri` check runs `cargo miri test --all-features --tests`
+(libtest, not nextest — process-per-test is roughly twice as slow under miri).
+Opt a test out of miri when it touches the filesystem, spawns
+subprocesses, or otherwise can’t run under the interpreter:
+
+```text
+#[cfg_attr(miri, ignore)]
+```
+
+The **scheduled** tier adds three stricter miri profiles, each of
+which sets a distinct cfg so you can quarantine a test from one
+profile without affecting the others (e.g. a test that OOMs only
+under tree-borrows):
+
+```text
+#[cfg_attr(miri_tree_borrows,      ignore = "OOMs under -Zmiri-tree-borrows")]
+#[cfg_attr(miri_strict_provenance, ignore = "int-to-ptr cast by design")]
+#[cfg_attr(miri_race_coverage,     ignore = "nondeterministic across seeds")]
+```
+
+#### Concurrency model checking (`loom`)
+
+The `loom` check runs only the test targets that opt in, detected
+**structurally** (no filename/comment heuristic). A crate opts in by
+declaring a `loom` feature, a dedicated `[[test]]` target that
+requires it, and a `cfg(loom)`-gated `loom` dependency:
+
+```toml
+[features]
+loom = []
+
+[[test]]
+name = "loom"               # tests/loom.rs
+required-features = ["loom"]
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+```
+
+In source, swap std atomics for loom’s under the cfg
+(`#[cfg(loom)] use loom::sync::atomic::...`). The recipe builds those
+targets with `--cfg loom`, per-package so the cfg never leaks into
+other members’ dependencies. It is **fail-loud**: a crate that
+declares loom support (a `loom` feature or a `cfg(loom)` dependency)
+but ships no such test target errors out rather than silently
+skipping. When no crate ships a loom target the check is a no-op.
+
+#### Fuzz smoke-testing (`bolero`)
+
+The `bolero` check runs each [`bolero`][__link0]
+harness for about 60 seconds as a crash/hang smoke test. It is **Linux-only**
+(the libfuzzer engine and `bolero-afl` don’t build on
+Windows/macOS); on other hosts the check self-skips, but harnesses
+still compile and run as ordinary tests under `llvm-cov`. A crate
+with no bolero harness is a no-op.
+
+#### Custom cfg names
+
+Every cfg the checks rely on — `coverage`, `coverage_nightly`,
+`loom`, `miri_tree_borrows`, `miri_strict_provenance`,
+`miri_race_coverage` — is pre-declared in the managed `[workspace.lints]`
+`unexpected_cfgs.check-cfg` list, so the catalog’s `-D warnings` cloud
+policy doesn’t reject the conventions above. Need another custom cfg?
+Take ownership of that one `check-cfg` line; the drift detector
+preserves your edit and emits a `.anvil-proposed` sibling on future
+catalog bumps.
+
+#### Note: `careful` self-cleans on a toolchain bump
+
+Not a knob, but worth knowing: the `careful` check builds an
+instrumented std into a version-stable cache that cargo’s fingerprint
+can’t see, so on a pinned-nightly or cargo-careful bump it runs
+`cargo clean` once (announced in the log) to avoid linking stale
+artifacts against a freshly rebuilt std.
+
 ### Extensibility: shipping your own tool
 
 Another team can ship its own cargo subcommand with its own catalog while
@@ -119,8 +229,8 @@ fn main() -> ExitCode {
 }
 ```
 
-…plus a [`Catalog`][__link0] value that starts from [`Catalog::anvil`][__link1] and
-customizes the CLI identity ([`CliMeta`][__link2]) and artifact set:
+…plus a [`Catalog`][__link1] value that starts from [`Catalog::anvil`][__link2] and
+customizes the CLI identity ([`CliMeta`][__link3]) and artifact set:
 
 ```rust
 use cargo_anvil::{Artifact, Catalog, artifacts};
@@ -144,8 +254,8 @@ The on-disk vocabulary (`.anvil.lock`, `anvil-managed` sentinels,
 `justfiles/anvil/`, `anvil-` recipes) is the fixed engine format and is
 never rebranded. A fork customizes only its CLI identity and which
 artifacts it emits, via the three uniform builder verbs
-([`CatalogBuilder::with_artifact`][__link3], [`CatalogBuilder::replace_artifact`][__link4],
-[`CatalogBuilder::without_artifact`][__link5]) over the public [`artifacts`][__link6]
+([`CatalogBuilder::with_artifact`][__link4], [`CatalogBuilder::replace_artifact`][__link5],
+[`CatalogBuilder::without_artifact`][__link6]) over the public [`artifacts`][__link7]
 registry. The `tool` field recorded in `.anvil.lock` keeps two
 anvil-family tools from clobbering one another in a shared repo (see `--force`).
 See `docs/design/extensibility.md`.
@@ -170,11 +280,12 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbOKGd9SPBdfobKjOs_WkWgQcbDDxCoIeuo6cbYeurLnzJsrZhZIGDa2NhcmdvLWFudmlsZTAuMS4wa2NhcmdvX2Fudmls
- [__link0]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=Catalog
- [__link1]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=Catalog::anvil
- [__link2]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CliMeta
- [__link3]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CatalogBuilder::with_artifact
- [__link4]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
- [__link5]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CatalogBuilder::without_artifact
- [__link6]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=artifacts
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG4NZNOqjh6EvG_Q0K9EA8V3RG43-IYQ08b4wG0Q3wrD2FvnsYWSBg2tjYXJnby1hbnZpbGUwLjEuMGtjYXJnb19hbnZpbA
+ [__link0]: https://crates.io/crates/bolero
+ [__link1]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=Catalog
+ [__link2]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=Catalog::anvil
+ [__link3]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CliMeta
+ [__link4]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CatalogBuilder::with_artifact
+ [__link5]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
+ [__link6]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=CatalogBuilder::without_artifact
+ [__link7]: https://docs.rs/cargo-anvil/0.1.0/cargo_anvil/?search=artifacts

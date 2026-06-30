@@ -105,6 +105,116 @@
 //!    region. The next `update` detects the dirt and writes a
 //!    `.anvil-proposed` sibling instead of overwriting.
 //!
+//! ## Per-crate check conventions
+//!
+//! A few checks read source-level or `Cargo.toml` knobs in *your* crates.
+//! These are stable conventions: set them in your own code, and the
+//! `anvil-` recipes pick them up. None require editing the generated
+//! `justfiles/anvil/` tree.
+//!
+//! ### Coverage (`llvm-cov` + `cargo-coverage-gate`)
+//!
+//! Per-package line-coverage thresholds live in `Cargo.toml` metadata. A
+//! per-package value wins; otherwise the workspace value applies; the
+//! built-in default is `100.0`:
+//!
+//! ```toml
+//! # workspace root: the default threshold for every member
+//! [workspace.metadata.coverage-gate]
+//! min-lines-percent = 90.0
+//!
+//! # a single crate: override (or opt out with 0)
+//! [package.metadata.coverage-gate]
+//! min-lines-percent = 0      # 0 == opt this crate out of the gate entirely
+//! ```
+//!
+//! To exclude an individual item (an untestable error arm, a
+//! process-shelling path) from coverage, use the standard attribute —
+//! the `coverage`/`coverage_nightly` cfgs are pre-declared (see *Custom
+//! cfg names* below), and coverage is measured on nightly so the
+//! exclusion is live:
+//!
+//! ```text
+//! #[cfg_attr(coverage_nightly, coverage(off))]
+//! ```
+//!
+//! ### Undefined-behavior checking (`miri`)
+//!
+//! The PR-tier `miri` check runs `cargo miri test --all-features --tests`
+//! (libtest, not nextest — process-per-test is roughly twice as slow under miri).
+//! Opt a test out of miri when it touches the filesystem, spawns
+//! subprocesses, or otherwise can't run under the interpreter:
+//!
+//! ```text
+//! #[cfg_attr(miri, ignore)]
+//! ```
+//!
+//! The **scheduled** tier adds three stricter miri profiles, each of
+//! which sets a distinct cfg so you can quarantine a test from one
+//! profile without affecting the others (e.g. a test that OOMs only
+//! under tree-borrows):
+//!
+//! ```text
+//! #[cfg_attr(miri_tree_borrows,      ignore = "OOMs under -Zmiri-tree-borrows")]
+//! #[cfg_attr(miri_strict_provenance, ignore = "int-to-ptr cast by design")]
+//! #[cfg_attr(miri_race_coverage,     ignore = "nondeterministic across seeds")]
+//! ```
+//!
+//! ### Concurrency model checking (`loom`)
+//!
+//! The `loom` check runs only the test targets that opt in, detected
+//! **structurally** (no filename/comment heuristic). A crate opts in by
+//! declaring a `loom` feature, a dedicated `[[test]]` target that
+//! requires it, and a `cfg(loom)`-gated `loom` dependency:
+//!
+//! ```toml
+//! [features]
+//! loom = []
+//!
+//! [[test]]
+//! name = "loom"               # tests/loom.rs
+//! required-features = ["loom"]
+//!
+//! [target.'cfg(loom)'.dependencies]
+//! loom = "0.7"
+//! ```
+//!
+//! In source, swap std atomics for loom's under the cfg
+//! (`#[cfg(loom)] use loom::sync::atomic::...`). The recipe builds those
+//! targets with `--cfg loom`, per-package so the cfg never leaks into
+//! other members' dependencies. It is **fail-loud**: a crate that
+//! declares loom support (a `loom` feature or a `cfg(loom)` dependency)
+//! but ships no such test target errors out rather than silently
+//! skipping. When no crate ships a loom target the check is a no-op.
+//!
+//! ### Fuzz smoke-testing (`bolero`)
+//!
+//! The `bolero` check runs each [`bolero`](https://crates.io/crates/bolero)
+//! harness for about 60 seconds as a crash/hang smoke test. It is **Linux-only**
+//! (the libfuzzer engine and `bolero-afl` don't build on
+//! Windows/macOS); on other hosts the check self-skips, but harnesses
+//! still compile and run as ordinary tests under `llvm-cov`. A crate
+//! with no bolero harness is a no-op.
+//!
+//! ### Custom cfg names
+//!
+//! Every cfg the checks rely on — `coverage`, `coverage_nightly`,
+//! `loom`, `miri_tree_borrows`, `miri_strict_provenance`,
+//! `miri_race_coverage` — is pre-declared in the managed `[workspace.lints]`
+//! `unexpected_cfgs.check-cfg` list, so the catalog's `-D warnings` cloud
+//! policy doesn't reject the conventions above. Need another custom cfg?
+//! Take ownership of that one `check-cfg` line; the drift detector
+//! preserves your edit and emits a `.anvil-proposed` sibling on future
+//! catalog bumps.
+//!
+//! ### Note: `careful` self-cleans on a toolchain bump
+//!
+//! Not a knob, but worth knowing: the `careful` check builds an
+//! instrumented std into a version-stable cache that cargo's fingerprint
+//! can't see, so on a pinned-nightly or cargo-careful bump it runs
+//! `cargo clean` once (announced in the log) to avoid linking stale
+//! artifacts against a freshly rebuilt std.
+//!
 //! ## Extensibility: shipping your own tool
 //!
 //! Another team can ship its own cargo subcommand with its own catalog while
