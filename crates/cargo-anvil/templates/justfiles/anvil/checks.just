@@ -953,13 +953,20 @@ anvil-miri: anvil-miri-validate-prereqs
     # (miri cannot run them) and benches/examples. We use `--tests` rather
     # than `--lib --tests` because `--lib` errors with "no library targets
     # found" on a bin-only affected package under impact scoping; `--tests`
-    # already covers lib unit tests and tolerates libless packages.
+    # already covers lib unit tests and tolerates libless packages. We do
+    # NOT use `--all-targets`: it would add `--benches` (criterion benches
+    # have `harness = false` and run a full measurement loop -- ruinously
+    # slow under miri) and `--examples` (runs each example's `main`, often
+    # miri-incompatible I/O), without adding doctest coverage.
+    #
+    # `--all-features` exercises feature-gated code so UB hidden behind an
+    # optional feature is caught, matching how upstream runs miri.
     #
     # libtest exits 0 when a binary has zero runnable tests (e.g. a crate
     # whose tests are all `#[cfg_attr(miri, ignore)]` -- the canonical
     # opt-out for build-tooling / CLI crates), so the old nextest
     # `--no-tests=pass` workaround is no longer needed.
-    & cargo '+{{ rust_nightly }}' miri test --tests @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Stricter miri profiles. Each runs miri over the full workspace
@@ -981,7 +988,7 @@ anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
     $env:MIRIFLAGS = "-Zmiri-tree-borrows $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_tree_borrows $($env:RUSTFLAGS)".Trim()
-    & cargo '+{{ rust_nightly }}' miri test --tests @pkg
+    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 [script("pwsh")]
@@ -991,7 +998,7 @@ anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
     $env:MIRIFLAGS = "-Zmiri-strict-provenance $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_strict_provenance $($env:RUSTFLAGS)".Trim()
-    & cargo '+{{ rust_nightly }}' miri test --tests @pkg
+    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Race coverage rotates the miri-many-seeds window daily by
@@ -1011,7 +1018,7 @@ anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs
     $env:MIRIFLAGS = "-Zmiri-many-seeds=$low..$high $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_race_coverage $($env:RUSTFLAGS)".Trim()
     Write-Host "anvil-miri-race-coverage: seed window $low..$high (day $day)"
-    & cargo '+{{ rust_nightly }}' miri test --tests @pkg
+    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 [script("pwsh")]
