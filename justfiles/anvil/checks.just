@@ -1033,10 +1033,19 @@ anvil-careful: anvil-careful-validate-prereqs
     $idSource = $rustcVV.Trim() + "`ncargo-careful {{ cargo_careful_version }}"
     $sha = [System.Security.Cryptography.SHA256]::Create()
     $idHash = ([System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($idSource)))).Replace('-', '').ToLower()
+    # Human-readable identity for log output: the first `rustc -vV` line
+    # (e.g. "rustc 1.98.0-nightly (<hash> <date>)") plus the careful version.
+    $idLabel = "$(($rustcVV -split "`n")[0].Trim()) + cargo-careful {{ cargo_careful_version }}"
     $marker = Join-Path 'target' 'anvil/careful-sysroot.id'
     $prev = if (Test-Path -LiteralPath $marker) { (Get-Content -LiteralPath $marker -Raw).Trim() } else { $null }
     if ($null -ne $prev -and $prev -ne $idHash) {
-        Write-Host 'anvil-careful: careful sysroot identity changed (nightly/tool bump); running `cargo clean` to avoid stale-std artifacts'
+        Write-Host 'anvil-careful: careful sysroot identity changed since the last run -- running `cargo clean` so the'
+        Write-Host '  workspace is rebuilt against the freshly-built careful std (cargo cannot detect the in-place'
+        Write-Host '  sysroot rebuild on its own, so stale artifacts would otherwise fail with an'
+        Write-Host '  "incompatible version of rustc" / metadata mismatch).'
+        Write-Host "  reason : the pinned nightly toolchain and/or the cargo-careful version changed"
+        Write-Host "  now    : $idLabel"
+        Write-Host "  identity: $($prev.Substring(0, [Math]::Min(12, $prev.Length)))... -> $($idHash.Substring(0, 12))..."
         cargo clean
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
