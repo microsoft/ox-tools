@@ -33,7 +33,14 @@ among:
    root `Cargo.toml`, or
 1. The built-in default of `100.0` — full coverage required.
 
-Setting `min-lines-percent = 0.0` explicitly opts a package out of gating.
+Setting `min-lines-percent = 0.0` explicitly opts a package out of
+gating (it always passes, regardless of attributed data). A package
+that legitimately contains no coverable lines (pure re-exports, type
+definitions, a thin binary shim) instead declares
+`expect-no-coverable-lines = true`: the gate passes only while that
+holds and fails — as a regression — if coverable lines later appear.
+The two keys are mutually exclusive, and `expect-no-coverable-lines`
+is package-scoped only.
 
 ### Why lcov, not the JSON?
 
@@ -98,7 +105,7 @@ plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG_Xxp5EYyYdlGw0p7mhT_6SoGwZIuLXM_3Q3G4FaX-pFFCbsYWSBg3NjYXJnby1jb3ZlcmFnZS1nYXRlZTAuMi4wc2NhcmdvX2NvdmVyYWdlX2dhdGU
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEGw80cH9KnXVkG0Ik84btPmxNG1_q7rZL3w7mGyE4F77TF4kVYWSBg3NjYXJnby1jb3ZlcmFnZS1nYXRlZTAuMi4wc2NhcmdvX2NvdmVyYWdlX2dhdGU
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://docs.rs/cargo-coverage-gate/0.2.0/cargo_coverage_gate/fn.evaluate.html
  [__link2]: https://docs.rs/cargo-coverage-gate/0.2.0/cargo_coverage_gate/struct.EvaluatedReport.html
