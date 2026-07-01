@@ -28,33 +28,22 @@ stages:
   # `[target.'cfg(target_os = ...)'.dependencies]`) computed on Linux
   # wouldn't include the cross-OS reverse-deps that only show up in
   # the Windows depgraph, so the Windows leg could skip tests that
-  # ought to run. We pay for one impact stage per OS family; downstream
-  # stages select the right one per leg.
-  - stage: impact_linux
-    displayName: anvil impact (linux)
-    # Explicit empty dependency: without `dependsOn`, ADO makes a stage
-    # depend on the stage that precedes it in the file, which would make
-    # impact_windows wait for impact_linux and serialize the two impact
-    # stages. `dependsOn: []` lets both impact stages start immediately and
-    # run in parallel.
-    dependsOn: []
+  # ought to run. The two per-OS computations are two *jobs* in a single
+  # `impact` stage (matching how the pr-* stages run per-OS jobs), so they
+  # run in parallel and downstream stages take a single `dependsOn: impact`
+  # while still selecting the right per-OS output.
+  - stage: impact
+    displayName: anvil impact
     jobs:
       - template: steps/job.yml
         parameters:
-          name: compute
+          name: compute_linux
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/impact.yml
-
-  - stage: impact_windows
-    displayName: anvil impact (windows)
-    # See impact_linux: empty dependency so this runs in parallel with the
-    # Linux impact stage rather than defaulting to depend on it.
-    dependsOn: []
-    jobs:
       - template: steps/job.yml
         parameters:
-          name: compute
+          name: compute_windows
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/impact.yml
@@ -70,14 +59,14 @@ stages:
   # narrow what runs; an empty value falls back to full --workspace.)
   - stage: pr_fast
     displayName: anvil pr-fast
-    dependsOn: [impact_linux, impact_windows]
+    dependsOn: [impact]
     variables:
-      include_modified_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_modified'] ]
-      include_affected_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_affected'] ]
-      include_required_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_required'] ]
-      include_modified_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_modified'] ]
-      include_affected_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_affected'] ]
-      include_required_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_required'] ]
+      include_modified_linux: $[ stageDependencies.impact.compute_linux.outputs['compute.include_modified'] ]
+      include_affected_linux: $[ stageDependencies.impact.compute_linux.outputs['compute.include_affected'] ]
+      include_required_linux: $[ stageDependencies.impact.compute_linux.outputs['compute.include_required'] ]
+      include_modified_windows: $[ stageDependencies.impact.compute_windows.outputs['compute.include_modified'] ]
+      include_affected_windows: $[ stageDependencies.impact.compute_windows.outputs['compute.include_affected'] ]
+      include_required_windows: $[ stageDependencies.impact.compute_windows.outputs['compute.include_required'] ]
     jobs:
       # Cross-OS because pr-fast contains compile-sensitive checks
       # (clippy, doc-build, udeps, semver-check, external-types) whose
@@ -123,14 +112,14 @@ stages:
 
   - stage: pr_test
     displayName: anvil pr-test (tests + coverage)
-    dependsOn: [impact_linux, impact_windows]
+    dependsOn: [impact]
     variables:
-      include_modified_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_modified'] ]
-      include_affected_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_affected'] ]
-      include_required_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_required'] ]
-      include_modified_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_modified'] ]
-      include_affected_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_affected'] ]
-      include_required_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_required'] ]
+      include_modified_linux: $[ stageDependencies.impact.compute_linux.outputs['compute.include_modified'] ]
+      include_affected_linux: $[ stageDependencies.impact.compute_linux.outputs['compute.include_affected'] ]
+      include_required_linux: $[ stageDependencies.impact.compute_linux.outputs['compute.include_required'] ]
+      include_modified_windows: $[ stageDependencies.impact.compute_windows.outputs['compute.include_modified'] ]
+      include_affected_windows: $[ stageDependencies.impact.compute_windows.outputs['compute.include_affected'] ]
+      include_required_windows: $[ stageDependencies.impact.compute_windows.outputs['compute.include_required'] ]
     jobs:
       # pr-test runs llvm-cov / doc-test / examples. Coverage publish
       # stays as a sibling task on each OS job -- it's a results
@@ -178,14 +167,14 @@ stages:
 
   - stage: pr_runtime_analysis
     displayName: anvil pr-runtime-analysis (miri + careful)
-    dependsOn: [impact_linux, impact_windows]
+    dependsOn: [impact]
     variables:
-      include_modified_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_modified'] ]
-      include_affected_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_affected'] ]
-      include_required_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_required'] ]
-      include_modified_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_modified'] ]
-      include_affected_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_affected'] ]
-      include_required_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_required'] ]
+      include_modified_linux: $[ stageDependencies.impact.compute_linux.outputs['compute.include_modified'] ]
+      include_affected_linux: $[ stageDependencies.impact.compute_linux.outputs['compute.include_affected'] ]
+      include_required_linux: $[ stageDependencies.impact.compute_linux.outputs['compute.include_required'] ]
+      include_modified_windows: $[ stageDependencies.impact.compute_windows.outputs['compute.include_modified'] ]
+      include_affected_windows: $[ stageDependencies.impact.compute_windows.outputs['compute.include_affected'] ]
+      include_required_windows: $[ stageDependencies.impact.compute_windows.outputs['compute.include_required'] ]
     jobs:
       - template: steps/job.yml
         parameters:
@@ -210,14 +199,14 @@ stages:
 
   - stage: pr_mutants
     displayName: anvil pr-mutants (mutants)
-    dependsOn: [impact_linux, impact_windows]
+    dependsOn: [impact]
     variables:
-      include_modified_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_modified'] ]
-      include_affected_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_affected'] ]
-      include_required_linux: $[ stageDependencies.impact_linux.compute.outputs['compute.include_required'] ]
-      include_modified_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_modified'] ]
-      include_affected_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_affected'] ]
-      include_required_windows: $[ stageDependencies.impact_windows.compute.outputs['compute.include_required'] ]
+      include_modified_linux: $[ stageDependencies.impact.compute_linux.outputs['compute.include_modified'] ]
+      include_affected_linux: $[ stageDependencies.impact.compute_linux.outputs['compute.include_affected'] ]
+      include_required_linux: $[ stageDependencies.impact.compute_linux.outputs['compute.include_required'] ]
+      include_modified_windows: $[ stageDependencies.impact.compute_windows.outputs['compute.include_modified'] ]
+      include_affected_windows: $[ stageDependencies.impact.compute_windows.outputs['compute.include_affected'] ]
+      include_required_windows: $[ stageDependencies.impact.compute_windows.outputs['compute.include_required'] ]
     jobs:
       # anvil-mutants-diff self-skips on aarch64-pc-windows-msvc as a
       # defence-in-depth measure for adopters with self-hosted ARM pools.

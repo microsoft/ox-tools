@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.1.0"
-catalog_checksum = "sha256:834c3a48f539019cbf2579c69004aaec873109b898496e919bf4a99ffc5899c2"
+catalog_checksum = "sha256:482a46ccf609690b8f6fa1a56e62786cfd6fe3cb4c0f6da24179e3b71fd6445a"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"

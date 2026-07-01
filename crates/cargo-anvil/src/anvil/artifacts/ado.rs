@@ -290,8 +290,7 @@ mod tests {
     #[test]
     fn pr_stages_has_impact_and_group_stages() {
         for needle in [
-            "stage: impact_linux",
-            "stage: impact_windows",
+            "stage: impact\n",
             "stage: pr_fast",
             "stage: pr_test",
             "stage: pr_runtime_analysis",
@@ -299,14 +298,26 @@ mod tests {
         ] {
             assert!(PR_STAGES.contains(needle), "PR stages missing '{needle}'");
         }
+        // The impact computation is a single stage with two per-OS jobs, not a
+        // stage per OS -- matching how the pr-* stages run per-OS jobs.
+        for needle in ["stage: impact_linux", "stage: impact_windows"] {
+            assert!(
+                !PR_STAGES.contains(needle),
+                "impact should be one stage with per-OS jobs, not '{needle}'"
+            );
+        }
         for needle in ["stage: pr_slow\n", "stage: pr_slow1\n", "stage: pr_slow2\n", "stage: pr_slow3\n"] {
             assert!(
                 !PR_STAGES.contains(needle),
                 "Stale stage '{needle}' should be gone after the pr-slow rename"
             );
         }
-        assert!(PR_STAGES.contains("stageDependencies.impact_linux.compute.outputs"));
-        assert!(PR_STAGES.contains("stageDependencies.impact_windows.compute.outputs"));
+        // Two per-OS jobs in the single impact stage.
+        assert!(PR_STAGES.contains("name: compute_linux"));
+        assert!(PR_STAGES.contains("name: compute_windows"));
+        // Downstream stages consume the per-OS job outputs from the one stage.
+        assert!(PR_STAGES.contains("stageDependencies.impact.compute_linux.outputs"));
+        assert!(PR_STAGES.contains("stageDependencies.impact.compute_windows.outputs"));
         assert!(PR_STAGES.contains("- template: steps/job.yml"));
         assert!(
             !PR_STAGES.contains("\n      - job: "),
@@ -317,16 +328,11 @@ mod tests {
             2,
             "cobertura publish should appear once per pr_test job (linux + windows)"
         );
-        // Both impact stages must declare an explicit empty dependency so they
-        // run in parallel. Without it, ADO makes a stage depend on the one that
-        // precedes it in the file, serializing impact_windows behind
-        // impact_linux. Match the indented stage-property form (not the prose
-        // mention in the explanatory comment); expect exactly two (one per
-        // impact stage). The pr-* stages use non-empty `dependsOn: [impact_*]`.
+        // Every pr-* stage depends on the single impact stage.
         assert_eq!(
-            PR_STAGES.matches("\n    dependsOn: []").count(),
-            2,
-            "both impact stages must declare `dependsOn: []` to run in parallel"
+            PR_STAGES.matches("dependsOn: [impact]").count(),
+            4,
+            "each of the four pr-* stages must depend on the single impact stage"
         );
     }
 
