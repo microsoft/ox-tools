@@ -159,7 +159,7 @@ that provided the strongest version of the check.
 |--------------------------------|-----------------------------------------------------------|--------|
 | `fmt`                          | `cargo +<pinned-nightly> fmt --all --check`               | all |
 | `clippy`                       | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
-| `cargo-sort`                   | `cargo sort --workspace --check`                          | oxidizer-github |
+| `cargo-sort`                   | `cargo sort --workspace --grouped --check --check-format` | oxidizer-github |
 | `license-headers`              | `cargo heather --workspace`                               | oxidizer (`heather`), oxidizer-github |
 | `ensure-no-cyclic-deps`        | `cargo ensure-no-cyclic-deps --workspace`                 | oxidizer-github (sibling crate in `ox-tools-gh`) |
 | `ensure-no-default-features`   | `cargo ensure-no-default-features --workspace`            | oxidizer-github |
