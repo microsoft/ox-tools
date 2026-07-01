@@ -103,17 +103,32 @@
 //! the table below maps each check to the group(s) that run it.
 //!
 //! **PR tier** (`anvil-pr`) — runs on every pull request, impact-scoped in
-//! cloud workflows:
+//! cloud workflows. Two jobs: `pr-fast`, and `pr-slow` (whose three
+//! sub-groups run sequentially within the one job per OS leg):
 //!
-//! | Group | Checks |
-//! |-------|--------|
-//! | `pr-fast` | `fmt`, `clippy`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`, `deny`, `audit`, `udeps`, `semver-check`, `external-types`, `aprz` |
-//! | `pr-test` | `llvm-cov` (coverage), `doc-test`, `examples` |
-//! | `pr-runtime-analysis` | `miri`, `careful`, `loom`, `bolero` |
-//! | `pr-mutants` | `mutants-diff` (diff-scoped mutation testing) |
-//!
-//! (`pr-test`, `pr-runtime-analysis`, and `pr-mutants` are sub-recipes of a
-//! single `pr-slow` job, run sequentially per OS leg.)
+//! <table>
+//!   <thead><tr><th>Job</th><th>Sub-group</th><th>Checks</th></tr></thead>
+//!   <tbody>
+//!     <tr>
+//!       <td><code>pr-fast</code></td>
+//!       <td>—</td>
+//!       <td><code>fmt</code>, <code>clippy</code>, <code>cargo-sort</code>, <code>license-headers</code>, <code>ensure-no-cyclic-deps</code>, <code>ensure-no-default-features</code>, <code>doc-build</code>, <code>readme-check</code>, <code>spellcheck</code>, <code>pr-title</code>, <code>deny</code>, <code>audit</code>, <code>udeps</code>, <code>semver-check</code>, <code>external-types</code>, <code>aprz</code></td>
+//!     </tr>
+//!     <tr>
+//!       <td rowspan="3"><code>pr-slow</code></td>
+//!       <td><code>pr-test</code></td>
+//!       <td><code>llvm-cov</code> (coverage), <code>doc-test</code>, <code>examples</code></td>
+//!     </tr>
+//!     <tr>
+//!       <td><code>pr-runtime-analysis</code></td>
+//!       <td><code>miri</code>, <code>careful</code>, <code>loom</code>, <code>bolero</code></td>
+//!     </tr>
+//!     <tr>
+//!       <td><code>pr-mutants</code></td>
+//!       <td><code>mutants-diff</code> (diff-scoped mutation testing)</td>
+//!     </tr>
+//!   </tbody>
+//! </table>
 //!
 //! **Scheduled tier** (`anvil-scheduled`) — full-workspace, runs on a
 //! schedule against the default branch, not on PRs:
