@@ -441,3 +441,7 @@ libfuzzer
 libtest
 OOMs
 subprocesses
+PRs
+READMEs
+RUSTSEC
+UB

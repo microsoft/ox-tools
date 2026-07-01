@@ -86,8 +86,81 @@
 //! $ just anvil-full     # both, sequentially
 //! ```
 //!
-//! cloud workflows invokes the same recipes. Local and cloud-workflow runs are bit-identical because
-//! they share one implementation in the imported `.just` files.
+//! cloud workflows invoke the same recipes, so a check behaves identically
+//! locally and in cloud workflows — they share one implementation in the
+//! imported `.just` files. The one difference is scope: cloud-workflow PR
+//! runs perform impact analysis (via [`cargo-delta`](https://crates.io/crates/cargo-delta))
+//! and run each check only over the affected packages, whereas a local
+//! `just anvil-pr` runs every check over the whole workspace.
+//!
+//! ## Checks and tiers
+//!
+//! Checks are grouped into **tiers** (`anvil-pr`, `anvil-scheduled`) that
+//! fan out to **groups** (one cloud-workflow job each), which in turn run
+//! individual checks sequentially. `anvil-full` runs both tiers.
+//!
+//! ```mermaid
+//! flowchart TD
+//!   pr["anvil-pr (PR tier)"]
+//!   sched["anvil-scheduled (scheduled tier)"]
+//!
+//!   pr --> fast["pr-fast"]
+//!   pr --> slow["pr-slow"]
+//!   slow --> test["pr-test"]
+//!   slow --> runtime["pr-runtime-analysis"]
+//!   slow --> mut["pr-mutants"]
+//!
+//!   sched --> stest["scheduled-test"]
+//!   sched --> sadv["scheduled-advisories"]
+//!   sched --> sruntime["scheduled-runtime-analysis"]
+//!   sched --> sexh["scheduled-exhaustive"]
+//! ```
+//!
+//! The catalog and per-check rationale live in `docs/design/checks.md`;
+//! the table below maps each check to the group(s) that run it.
+//!
+//! **PR tier** (`anvil-pr`) — runs on every pull request, impact-scoped in
+//! cloud workflows:
+//!
+//! | Group | Checks |
+//! |-------|--------|
+//! | `pr-fast` | `fmt`, `clippy`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features`, `doc-build`, `readme-check`, `spellcheck`, `pr-title`, `deny`, `audit`, `udeps`, `semver-check`, `external-types`, `aprz` |
+//! | `pr-test` | `llvm-cov` (coverage), `doc-test`, `examples` |
+//! | `pr-runtime-analysis` | `miri`, `careful`, `loom`, `bolero` |
+//! | `pr-mutants` | `mutants-diff` (diff-scoped mutation testing) |
+//!
+//! (`pr-test`, `pr-runtime-analysis`, and `pr-mutants` are sub-recipes of a
+//! single `pr-slow` job, run sequentially per OS leg.)
+//!
+//! **Scheduled tier** (`anvil-scheduled`) — full-workspace, runs on a
+//! schedule against the default branch, not on PRs:
+//!
+//! | Group | Checks |
+//! |-------|--------|
+//! | `scheduled-test` | `llvm-cov`, `doc-test`, `examples` |
+//! | `scheduled-advisories` | `deny`, `audit`, `aprz`, `clippy` (re-run to catch newly-published advisories / lints) |
+//! | `scheduled-runtime-analysis` | `miri` and the three stricter miri profiles: `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage` |
+//! | `scheduled-exhaustive` | `mutants-full`, `cargo-hack` (feature-powerset), `bench` (compile-only) |
+//!
+//! What each tool does:
+//!
+//! - **Formatting / hygiene**: `fmt` (rustfmt), `cargo-sort` (sorted
+//!   `Cargo.toml`), `license-headers`, `spellcheck`, `readme-check`
+//!   (READMEs match crate docs), `pr-title` (conventional-commit title).
+//! - **Linting / API**: `clippy`, `doc-build` (intra-doc links),
+//!   `semver-check` (advisory API-break detection), `external-types`
+//!   (public API doesn't leak un-approved external types), `udeps`
+//!   (unused dependencies), `cargo-hack` (feature-powerset compile).
+//! - **Dependency health**: `deny` (licenses / bans / advisories),
+//!   `audit` (RUSTSEC), `aprz` (supply-chain risk appraisal),
+//!   `ensure-no-cyclic-deps`, `ensure-no-default-features`.
+//! - **Tests / coverage**: `doc-test`, `examples`, `llvm-cov` (line
+//!   coverage, gated by [`cargo-coverage-gate`](https://crates.io/crates/cargo-coverage-gate)).
+//! - **Runtime correctness**: `miri` (UB detection), `careful`
+//!   (debug-instrumented std), `loom` (concurrency model checking),
+//!   `bolero` (fuzz smoke test, Linux-only).
+//! - **Mutation testing**: `mutants-diff` (PR, diff-scoped) and
+//!   `mutants-full` (scheduled, whole workspace).
 //!
 //! ## Customization
 //!
@@ -105,38 +178,18 @@
 //!    region. The next `update` detects the dirt and writes a
 //!    `.anvil-proposed` sibling instead of overwriting.
 //!
-//! ## Per-crate check conventions
+//! ## In-tree tool customization
 //!
-//! A few checks read source-level or `Cargo.toml` knobs in *your* crates.
-//! These are stable conventions: set them in your own code, and the
-//! `anvil-` recipes pick them up. None require editing the generated
-//! `justfiles/anvil/` tree.
+//! anvil follows a few source-level and `Cargo.toml` conventions so you
+//! can customize how some of the executed tools behave from within your
+//! own crates — without editing the generated `justfiles/anvil/` tree.
 //!
-//! ### Coverage (`llvm-cov` + `cargo-coverage-gate`)
+//! ### Coverage (`llvm-cov`)
 //!
-//! Per-package line-coverage thresholds live in `Cargo.toml` metadata. A
-//! per-package value wins; otherwise the workspace value applies; the
-//! built-in default is `100.0`:
-//!
-//! ```toml
-//! # workspace root: the default threshold for every member
-//! [workspace.metadata.coverage-gate]
-//! min-lines-percent = 90.0
-//!
-//! # a single crate: override (or opt out with 0)
-//! [package.metadata.coverage-gate]
-//! min-lines-percent = 0      # 0 == opt this crate out of the gate entirely
-//! ```
-//!
-//! To exclude an individual item (an untestable error arm, a
-//! process-shelling path) from coverage, use the standard attribute —
-//! the `coverage`/`coverage_nightly` cfgs are pre-declared (see *Custom
-//! cfg names* below), and coverage is measured on nightly so the
-//! exclusion is live:
-//!
-//! ```text
-//! #[cfg_attr(coverage_nightly, coverage(off))]
-//! ```
+//! Coverage is gated by [`cargo-coverage-gate`](https://crates.io/crates/cargo-coverage-gate);
+//! per-package and per-workspace thresholds, the coverage-exclusion
+//! attribute, and opt-out are all configured through its `Cargo.toml`
+//! metadata conventions — see its documentation.
 //!
 //! ### Undefined-behavior checking (`miri`)
 //!
@@ -186,26 +239,6 @@
 //! declares loom support (a `loom` feature or a `cfg(loom)` dependency)
 //! but ships no such test target errors out rather than silently
 //! skipping. When no crate ships a loom target the check is a no-op.
-//!
-//! ### Fuzz smoke-testing (`bolero`)
-//!
-//! The `bolero` check runs each [`bolero`](https://crates.io/crates/bolero)
-//! harness for about 60 seconds as a crash/hang smoke test. It is **Linux-only**
-//! (the libfuzzer engine and `bolero-afl` don't build on
-//! Windows/macOS); on other hosts the check self-skips, but harnesses
-//! still compile and run as ordinary tests under `llvm-cov`. A crate
-//! with no bolero harness is a no-op.
-//!
-//! ### Custom cfg names
-//!
-//! Every cfg the checks rely on — `coverage`, `coverage_nightly`,
-//! `loom`, `miri_tree_borrows`, `miri_strict_provenance`,
-//! `miri_race_coverage` — is pre-declared in the managed `[workspace.lints]`
-//! `unexpected_cfgs.check-cfg` list, so the catalog's `-D warnings` cloud
-//! policy doesn't reject the conventions above. Need another custom cfg?
-//! Take ownership of that one `check-cfg` line; the drift detector
-//! preserves your edit and emits a `.anvil-proposed` sibling on future
-//! catalog bumps.
 //!
 //! ### Note: `careful` self-cleans on a toolchain bump
 //!
