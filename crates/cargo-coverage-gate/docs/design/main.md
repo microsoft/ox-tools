@@ -72,6 +72,10 @@ Corollaries:
 - Each workspace member gets an effective threshold via the
   three-layer resolution (per-package → workspace → built-in `100.0`).
   Opting a package out of gating is explicit: set `min-lines-percent = 0.0`.
+  A package that legitimately has **no coverable lines** instead declares
+  `expect-no-coverable-lines = true` — a self-validating assertion that
+  passes while the package stays empty and fails if coverable lines
+  appear (see §5.3).
 - The gate compares **measured percentage for package X against the threshold
   for package X**, in isolation. There is no cross-package dependency.
 - Whether the build that produced the coverage data ran one package's tests
@@ -166,6 +170,59 @@ package with no metadata anywhere will only pass if every measured line is
 covered. To opt a package out of gating, set `min-lines-percent = 0.0` explicitly
 (at the package or workspace level). There is no implicit opt-out.
 
+#### `expect-no-coverable-lines`: empty crates vs. opt-out
+
+`min-lines-percent = 0.0` is a deliberately loose opt-out: "I don't
+require any coverage for this package." It says nothing about whether the
+package *has* coverable code — it always passes, and it suppresses the
+no-data configuration error (§6.3) so a package no test binary touches
+still passes. That conflates two distinct intents:
+
+- **"This package is not covered by tests"** — it has real, executable
+  code, we simply choose not to gate it. `min-lines-percent = 0.0`.
+- **"This package has no coverable lines at all"** — pure re-exports,
+  trait/type definitions, a thin `main` shim, a build-script-only crate.
+  There is genuinely nothing to cover, and that fact should be asserted
+  and re-checked, not silently waved through.
+
+For the second intent, declare it explicitly:
+
+```toml
+[package.metadata.coverage-gate]
+expect-no-coverable-lines = true
+```
+
+Semantics:
+
+- The package **passes** as long as it has zero coverable lines (which
+  includes the "no attributed coverage data at all" case — that is the
+  expected state, not the §6.3 configuration error).
+- If coverable lines ever appear, the package **fails the gate**
+  (exit `1`), exactly like a coverage regression. The author either
+  removes the code, or — if the new code is meant to stay — replaces the
+  assertion with a real `min-lines-percent` floor in the same PR. The
+  change is visible in the diff and reviewed.
+
+This is the key difference from `min-lines-percent = 0.0`: the assertion
+is **self-validating**. `0.0` keeps passing forever no matter what the
+package grows into; `expect-no-coverable-lines = true` actively re-checks
+the claim on every run.
+
+Rules:
+
+- `expect-no-coverable-lines` is **package-scoped only**. Setting it to
+  `true` in `[workspace.metadata.coverage-gate]` is a configuration
+  error (exit `2`) — a workspace-wide "no coverable lines" default is
+  nonsensical. (An explicit `expect-no-coverable-lines = false` there is
+  accepted and ignored, since `false` is everywhere equivalent to
+  omitting the key.)
+- It is **mutually exclusive** with `min-lines-percent` on the same
+  package: setting both is a configuration error (exit `2`). A numeric
+  floor describes code that should be covered; the assertion declares
+  there is no such code.
+- A non-boolean value is a configuration error (exit `2`). An explicit
+  `false` is identical to omitting the key.
+
 ### 5.4 The verdict table
 
 The tool prints a table to stdout (and to the summary file when
@@ -186,6 +243,14 @@ coverage-gate
 
 The `Source` column reports which layer supplied the threshold: `package`,
 `workspace`, or `default` (the built-in `100.0`).
+
+The `Status` column is `OK` / `FAIL` for normally-gated packages,
+`NO DATA` for a gated package with no attributed coverage data (a
+configuration error, §6.3), and — for packages declaring
+`expect-no-coverable-lines` (§5.3) — `EMPTY` when the assertion holds
+(passing) or `NOT EMPTY` when coverable lines were found (failing). For
+the `EMPTY` / `NOT EMPTY` rows the `Threshold` and `Δ vs threshold`
+columns render `(no lines)` and `—`, since there is no percentage floor.
 
 Markdown variant uses the same columns and a leading `### coverage-gate`
 header so it renders cleanly in GitHub job summaries and ADO build summaries.
@@ -307,6 +372,12 @@ with code `2`. This converts a silent gap — a typo in `--package`,
 a broken impact tool, a `--ignore-filename-regex` mismatch — into a
 loud failure that surfaces immediately in CI.
 
+The exception is a package that declares `expect-no-coverable-lines =
+true` (§5.3): for that package, zero attributed lines is the *expected*
+state and classifies as a pass (`EMPTY` / `➖`), not the no-data
+configuration error. Conversely, if such a package *does* have attributed
+coverable lines, it fails the gate (exit `1`) rather than passing.
+
 ### 6.4 Cross-package test attribution
 
 Per-package aggregation groups measurements by **source-file ownership**
@@ -396,7 +467,9 @@ To shape the policy, the maintainer either:
 - sets a `[workspace.metadata.coverage-gate]` default for the repo,
 - adds per-package `[package.metadata.coverage-gate]` overrides for
   packages whose realistic floor differs, or
-- explicitly opts packages out with `min-lines-percent = 0.0`.
+- explicitly opts packages out with `min-lines-percent = 0.0`, or
+  declares genuinely empty packages with
+  `expect-no-coverable-lines = true` (§5.3).
 
 All three live in `Cargo.toml` files, so the policy lands as a normal
 reviewed change. From that point on, every PR runs the gate.

@@ -90,6 +90,7 @@ mod tests {
             name: name.to_owned(),
             manifest_dir: PathBuf::from(format!("/repo/crates/{name}")),
             min_lines_percent,
+            expect_no_coverable_lines: false,
         }
     }
 
