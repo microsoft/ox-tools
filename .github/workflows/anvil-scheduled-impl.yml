@@ -52,7 +52,7 @@ jobs:
         # the Codecov UI can distinguish PR-tier uploads from scheduled
         # uploads while still tracking each platform separately.
         if: matrix.os != 'windows-arm'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           files: target/coverage/lcov.info
           flags: scheduled,${{ matrix.os }}
