@@ -6,7 +6,10 @@
 #
 # Output variables (consumed in pr-stages.yml via
 # stageDependencies.impact.compute.outputs['compute.<name>']):
-#   include_modified - "--package X --package Y" or "--skip" sentinel.
+#   include_modified - "--package X@ver --package Y@ver" or "--skip"
+#                      sentinel. Packages are version-qualified cargo
+#                      specs so they resolve uniquely even when a like-
+#                      named crate is also a transitive dependency.
 #   include_affected - same shape, for the affected set (modified ∪ rev-deps).
 #   include_required - same shape, for the required set
 #                      (affected ∪ workspace-internal transitive deps).
@@ -24,18 +27,21 @@ steps:
     displayName: anvil impact (install cargo-delta)
   - bash: |
       set -euo pipefail
-      # Determine the baseline ref:
-      #   * Adopters can override via BASE_REF (full ref name, e.g.
-      #     `origin/release`).
-      #   * On PR build-validation runs, SYSTEM_PULLREQUEST_TARGETBRANCH
-      #     is set to the unqualified target branch (e.g. `main`).
-      #   * Otherwise fall back to `master` so manual / branch cloud-workflow runs
-      #     produce a sensible diff against the default branch.
-      # The ADO macro form `$(System.PullRequest.TargetBranch)` is unsafe
-      # here: when the variable is unset (non-PR builds), ADO leaves the
-      # `$(...)` literal in the script, which bash then interprets as
-      # command substitution and fails with exit 127.
-      base="${BASE_REF:-origin/${SYSTEM_PULLREQUEST_TARGETBRANCH:-master}}"
+      # Resolve the baseline ref via the shared anvil resolver (single
+      # source of truth; see the _anvil-base-ref recipe). On ADO PRs it
+      # strips refs/heads/ from SYSTEM_PULLREQUEST_TARGETBRANCH and resolves
+      # to origin/<branch>; BASE_REF overrides; non-PR runs fall back to
+      # origin/main then origin/master.
+      base="$(just _anvil-base-ref)"
+      # The baseline worktree is checked out at the merge target, whose
+      # rust-toolchain.toml may pin a toolchain that is NOT installed on the
+      # agent (any PR that bumps rust-toolchain.toml hits this -- the agent
+      # only has the PR's pinned toolchain). The snapshot is metadata-only
+      # (file presence + content hashes), so run the baseline under the
+      # agent's *active* toolchain via RUSTUP_TOOLCHAIN, which overrides the
+      # worktree's rust-toolchain.toml. Capture it here, in the PR checkout,
+      # where the active toolchain is resolved and installed.
+      active_toolchain="$(rustup show active-toolchain | head -n1 | cut -d' ' -f1)"
       # Two snapshots + impact compare (cargo-delta has no --base
       # shortcut). The baseline runs in a worktree at the merge target
       # so the checked-out tree is untouched.
@@ -50,68 +56,39 @@ steps:
       # is unaffected.
       cargo delta snapshot > "$AGENT_TEMPDIRECTORY/anvil-current.json"
       GIT_LFS_SKIP_SMUDGE=1 git worktree add --detach "$AGENT_TEMPDIRECTORY/anvil-baseline" "$base"
-      ( cd "$AGENT_TEMPDIRECTORY/anvil-baseline" && cargo delta snapshot ) \
+      # When anvil is first introduced (this PR adds the cargo workspace),
+      # the baseline branch has no root Cargo.toml, so there is no workspace
+      # for cargo-delta to snapshot. Detect that explicitly and fall back to
+      # full-workspace validation (empty include_* -> recipes default to
+      # --workspace) rather than running cargo-delta. This is a targeted
+      # check: any *other* cargo-delta failure below is a real error and is
+      # allowed to fail the impact stage (and thus the gated pr-* stages).
+      if [ ! -f "$AGENT_TEMPDIRECTORY/anvil-baseline/Cargo.toml" ] ; then
+          echo "anvil impact: baseline '$base' has no root Cargo.toml (not a cargo workspace yet -- first-time anvil adoption?). Falling back to full-workspace validation." >&2
+          git worktree remove --force "$AGENT_TEMPDIRECTORY/anvil-baseline"
+          echo "##vso[task.setvariable variable=include_modified;isOutput=true]"
+          echo "##vso[task.setvariable variable=include_affected;isOutput=true]"
+          echo "##vso[task.setvariable variable=include_required;isOutput=true]"
+          exit 0
+      fi
+      ( cd "$AGENT_TEMPDIRECTORY/anvil-baseline" \
+          && RUSTUP_TOOLCHAIN="$active_toolchain" cargo delta snapshot ) \
           > "$AGENT_TEMPDIRECTORY/anvil-baseline.json"
       git worktree remove --force "$AGENT_TEMPDIRECTORY/anvil-baseline"
-      result="$(cargo delta impact \
+      cargo delta impact \
           --baseline "$AGENT_TEMPDIRECTORY/anvil-baseline.json" \
           --current  "$AGENT_TEMPDIRECTORY/anvil-current.json" \
-          --format json)"
-      # cargo-delta emits TitleCase keys (Modified / Affected /
-      # Required). Format each tier into the --package args shape
-      # recipes expect, with --skip as the empty-set sentinel.
-      #
-      # cargo-delta's impact output uses *library names* (snake_case)
-      # rather than cargo *package names* (which may use hyphens). For
-      # hyphenated packages — e.g. `cargo-anvil` — that means it
-      # emits `cargo_anvil`, which cargo rejects as a --package
-      # specification. We build:
-      #   * `pkg_map`: lib-name -> package-name (and identity for
-      #     package-name -> package-name), for translation;
-      #   * `valid_pkgs`: set of all known package names, for
-      #     validation. Names cargo-delta emits that aren't valid
-      #     packages (e.g. directory-leaf ambiguities like `ffi` /
-      #     `ffi_build` in deeply nested workspaces) are dropped with a
-      #     warning rather than failing the whole build.
-      declare -A pkg_map
-      declare -A valid_pkgs
-      while IFS=$'\t' read -r pkg_name lib_name; do
-          valid_pkgs["$pkg_name"]=1
-          pkg_map["$pkg_name"]="$pkg_name"
-          [ -n "$lib_name" ] && pkg_map["$lib_name"]="$pkg_name"
-      done < <(cargo metadata --no-deps --format-version 1 \
-          | jq -r '.packages[] as $p | ($p.targets[] | select(.kind | index("lib")) | "\($p.name)\t\(.name)"), "\($p.name)\t"')
-      format_set() {
-          local field="$1"
-          local pkgs
-          pkgs=$(printf '%s' "$result" | jq -r --arg f "$field" '(.[$f] // []) | .[]' 2>/dev/null || true)
-          if [ -z "$pkgs" ] ; then
-              printf '%s' "--skip"
-          else
-              local out=""
-              while IFS= read -r pkg ; do
-                  [ -z "$pkg" ] && continue
-                  local mapped="${pkg_map[$pkg]:-$pkg}"
-                  if [ -z "${valid_pkgs[$mapped]:-}" ] ; then
-                      echo "anvil impact: dropping unknown package '$pkg' (-> '$mapped') from $field set; see https://github.com/microsoft/ox-tools/issues for tracking" >&2
-                      continue
-                  fi
-                  out="$out --package $mapped"
-              done <<EOF
-      $pkgs
-      EOF
-              if [ -z "$out" ] ; then
-                  printf '%s' "--skip"
-              else
-                  printf '%s' "${out# }"
-              fi
-          fi
-      }
-      include_modified="$(format_set Modified)"
-      include_affected="$(format_set Affected)"
-      include_required="$(format_set Required)"
-      echo "##vso[task.setvariable variable=include_modified;isOutput=true]$include_modified"
-      echo "##vso[task.setvariable variable=include_affected;isOutput=true]$include_affected"
-      echo "##vso[task.setvariable variable=include_required;isOutput=true]$include_required"
+          --format json \
+          > "$AGENT_TEMPDIRECTORY/anvil-impact.json"
+      # Format each tier into the `--package name@version ...` shape the
+      # checks.just recipes consume (or the "--skip" sentinel when a tier
+      # is empty), via the shared _anvil-impact-format recipe -- single
+      # source of truth across the GitHub and ADO impact steps. See that
+      # recipe in checks.just for the version-qualification and lib-name
+      # translation rationale.
+      for tier in modified affected required; do
+          val="$(just _anvil-impact-format "$tier" "$AGENT_TEMPDIRECTORY/anvil-impact.json")"
+          echo "##vso[task.setvariable variable=include_${tier};isOutput=true]$val"
+      done
     name: compute
     displayName: anvil impact (cargo-delta)

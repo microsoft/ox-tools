@@ -172,6 +172,7 @@ impl CommentStyle {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -189,6 +190,11 @@ mod tests {
     #[test]
     fn valid_cargo_script() {
         assert!(is_cargo_script("#!/usr/bin/env cargo\n---\n"));
+    }
+
+    #[test]
+    fn empty_content_is_not_cargo_script() {
+        assert!(!is_cargo_script(""));
     }
 
     #[test]

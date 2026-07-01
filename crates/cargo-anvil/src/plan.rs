@@ -159,19 +159,27 @@ impl PlanItem {
     /// Construct a plan item for a `Propose` decision on a region. The
     /// proposed payload is the *full host file* that would result from
     /// the splice (so the user can review by diffing the proposed file
-    /// against the live host). `body_checksum` is the checksum of the
-    /// rendered region body — the apply step records it in the
-    /// manifest so subsequent runs see the proposal as resolved (see
-    /// [`propose_file`](Self::propose_file)).
+    /// against the live host). `body` is the rendered region body, carried
+    /// so a post-planning pass can re-splice the proposal against the
+    /// *final* composed host (see `run::recompose_region_proposals`).
+    /// `body_checksum` is the checksum of the rendered region body — the
+    /// apply step records it in the manifest so subsequent runs see the
+    /// proposal as resolved (see [`propose_file`](Self::propose_file)).
     #[must_use]
-    pub fn propose_region(host: impl Into<String>, id: impl Into<String>, spliced_host: String, body_checksum: String) -> Self {
+    pub fn propose_region(
+        host: impl Into<String>,
+        id: impl Into<String>,
+        body: String,
+        spliced_host: String,
+        body_checksum: String,
+    ) -> Self {
         Self {
             target: Target::Region {
                 host: host.into(),
                 id: id.into(),
             },
             decision: Decision::Propose,
-            rendered: None,
+            rendered: Some(body),
             spliced_host: Some(spliced_host),
             rendered_checksum: Some(body_checksum),
         }
@@ -240,6 +248,13 @@ impl Plan {
     #[must_use]
     pub fn items(&self) -> &[PlanItem] {
         &self.items
+    }
+
+    /// Mutable access to all plan items in insertion order. Used by the
+    /// post-planning pass that recomposes region proposals against the
+    /// final host text (see `run::recompose_region_proposals`).
+    pub fn items_mut(&mut self) -> &mut [PlanItem] {
+        &mut self.items
     }
 
     /// Whether the plan would change anything on disk if applied.
@@ -493,9 +508,10 @@ fn write_section(out: &mut String, header: &str, items: &[&PlanItem]) {
 }
 
 fn write_file(path: &Path, content: &str) -> Result<(), AppError> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).into_app_err_with(|| format!("failed to create parent directory {}", parent.display()))?;
-    }
+    let parent = path
+        .parent()
+        .expect("write_file targets are always repo-root-joined paths, which always have a parent");
+    std::fs::create_dir_all(parent).into_app_err_with(|| format!("failed to create parent directory {}", parent.display()))?;
     let tmp = make_temp_path(path);
     std::fs::write(&tmp, content).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
     std::fs::rename(&tmp, path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
@@ -509,6 +525,7 @@ fn make_temp_path(path: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 
@@ -670,6 +687,7 @@ mod tests {
         plan.push(PlanItem::propose_region(
             "Justfile",
             "anvil-imports",
+            "body\n".into(),
             "spliced host content\n".into(),
             "sha256:newt".into(),
         ));
@@ -833,5 +851,116 @@ mod tests {
             id: "x".into(),
         };
         assert_eq!(t.label(), "Justfile [x]");
+    }
+
+    #[test]
+    fn summary_lists_propose_and_leave_alone_sections() {
+        // Covers the Propose and LeaveAlone categorization arms of summary().
+        let mut plan = Plan::default();
+        plan.push(PlanItem::propose_file("p.txt", "x".into(), "sha256:1".into()));
+        plan.push(PlanItem::noop(Target::File { path: "l.txt".into() }, Decision::LeaveAlone));
+        let s = plan.summary(None);
+        assert!(s.contains("Will propose: 1 item(s)"), "summary:\n{s}");
+        assert!(s.contains("- p.txt"), "summary:\n{s}");
+        assert!(s.contains("Will leave alone (silent): 1 item(s)"), "summary:\n{s}");
+        assert!(s.contains("- l.txt"), "summary:\n{s}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn apply_orphaned_kept_region_preserves_host_and_drops_manifest() {
+        // OrphanedKept for a Region target: the host file and its in-region
+        // content are left untouched; only the manifest entry is dropped.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(
+            tmp.path().join("Justfile"),
+            "# >>> anvil-managed: r\nuser edited\n# <<< anvil-managed: r\n",
+        )
+        .unwrap();
+        let mut prev = Manifest::default();
+        prev.set_region("Justfile", "r", "sha256:original");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::orphaned_kept(Target::Region {
+            host: "Justfile".into(),
+            id: "r".into(),
+        }));
+        let next = plan.apply(tmp.path(), &prev).unwrap();
+        // Host file untouched.
+        let host = std::fs::read_to_string(tmp.path().join("Justfile")).unwrap();
+        assert!(host.contains("user edited"));
+        // Manifest region entry dropped.
+        assert!(next.regions.is_empty(), "{:?}", next.regions);
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn apply_insync_region_refreshes_stale_manifest_l() {
+        // InSync for a Region target with a rendered checksum: the manifest
+        // region L is self-healed to the current template checksum (covers
+        // the Region arm of the InSync refresh).
+        let tmp = TempDir::new().unwrap();
+        let key = RegionKey {
+            host: "Justfile".into(),
+            id: "r".into(),
+        };
+        let mut prev = Manifest::default();
+        prev.set_region("Justfile", "r", "sha256:stale");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::insync(
+            Target::Region {
+                host: "Justfile".into(),
+                id: "r".into(),
+            },
+            "sha256:current".into(),
+        ));
+        let next = plan.apply(tmp.path(), &prev).unwrap();
+        assert_eq!(
+            next.regions.get(&key).map(String::as_str),
+            Some("sha256:current"),
+            "InSync must refresh the region L to the current template checksum",
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn apply_insync_without_checksum_preserves_manifest_entry() {
+        // An InSync item built via `noop` carries no rendered checksum, so
+        // the self-heal `if let Some(..)` takes its empty else branch and
+        // the previous manifest entry is preserved verbatim.
+        let tmp = TempDir::new().unwrap();
+        let mut prev = Manifest::default();
+        prev.set_file("a.txt", "sha256:k");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::noop(Target::File { path: "a.txt".into() }, Decision::InSync));
+        let next = plan.apply(tmp.path(), &prev).unwrap();
+        assert_eq!(next.files.get("a.txt").map(String::as_str), Some("sha256:k"));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn apply_remove_file_propagates_non_not_found_error() {
+        // A directory occupies the target path, so `remove_file` fails with
+        // a non-NotFound error that must propagate (not be absorbed like the
+        // idempotent already-gone case).
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("blocked")).unwrap();
+        let mut prev = Manifest::default();
+        prev.set_file("blocked", "sha256:old");
+        let mut plan = Plan::default();
+        plan.push(PlanItem::remove_file("blocked"));
+        let err = plan.apply(tmp.path(), &prev).unwrap_err();
+        assert!(err.to_string().contains("failed to remove"), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn write_file_propagates_create_dir_all_error() {
+        // A regular file occupies what would be the parent directory, so
+        // `create_dir_all` fails and the error propagates.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("occupied"), "x").unwrap();
+        let target = tmp.path().join("occupied").join("child.txt");
+        let err = write_file(&target, "data").unwrap_err();
+        assert!(err.to_string().contains("failed to create parent directory"), "{err}");
     }
 }

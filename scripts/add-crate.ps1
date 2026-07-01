@@ -46,14 +46,21 @@ if ($crateName -match "-") {
 }
 
 $crateDescription = Read-Host -Prompt "Enter the crate description"
-$crateKeywords = Read-Host -Prompt "Enter comma-separated crate keywords (max 5, see https://crates.io/keywords for inspiration)"
+$crateKeywords = Read-Host -Prompt "Enter comma-separated crate keywords (max 4; 'oxidizer' is always added automatically for 5 total, see https://crates.io/keywords for inspiration)"
 $keywordsList = $crateKeywords.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
-if ($keywordsList.Count -gt 5) {
-    Write-Error "Too many keywords. crates.io allows a maximum of 5 keywords, but $($keywordsList.Count) were provided."
+# The template always prepends the fixed "oxidizer" keyword, so the user
+# may supply at most 4 to stay within crates.io's max of 5 total.
+if ($keywordsList.Count -gt 4) {
+    Write-Error "Too many keywords. crates.io allows a maximum of 5 keywords and 'oxidizer' is always added, so provide at most 4, but $($keywordsList.Count) were provided."
     exit 1
 }
 
-$crateCategories = Read-Host -Prompt "Enter comma-separated crate categories (see https://crates.io/categories for allowed categories)"
+$crateCategories = Read-Host -Prompt "Enter comma-separated crate categories (max 5, see https://crates.io/categories for allowed categories)"
+$categoriesList = $crateCategories.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+if ($categoriesList.Count -gt 5) {
+    Write-Error "Too many categories. crates.io allows a maximum of 5 categories, but $($categoriesList.Count) were provided."
+    exit 1
+}
 
 Write-Host $repoRoot
 # Define paths
@@ -70,10 +77,27 @@ if (Test-Path $destinationDir) {
 Write-Host "Copying template from '$templateDir' to '$destinationDir'..."
 Copy-Item -Path $templateDir -Destination $destinationDir -Recurse
 
-# Prepare replacement values
+# The template ships its manifest as `Cargo.toml.template`, not `Cargo.toml`,
+# so cargo never tries to parse the placeholder-laden file. A stray invalid
+# `Cargo.toml` here makes cargo's package scan emit a TOML parse error for
+# every consumer that checks this repo out as a git dependency (the error is
+# non-fatal, so `cargo doc`/`cargo metadata` print it but still exit 0).
+# Restore the real manifest name in the generated crate.
+$templatedManifest = Join-Path $destinationDir "Cargo.toml.template"
+if (Test-Path $templatedManifest) {
+    Move-Item -Path $templatedManifest -Destination (Join-Path $destinationDir "Cargo.toml")
+}
+
+# Prepare replacement values. Build the keyword/category lists from the
+# already-filtered lists ($keywordsList / $categoriesList) so a bare Enter
+# (empty entry) is dropped rather than emitted as an empty "" element. The
+# keywords array always leads with "oxidizer" in the template, so its
+# placeholder carries an optional leading comma -- empty input collapses to
+# `keywords = ["oxidizer"]`. Categories have no fixed element, so an empty
+# list collapses to `categories = []`.
 $crateNameUpper = ($crateName -replace '_', ' ').Split(' ') | ForEach-Object { $_.Substring(0, 1).ToUpper() + $_.Substring(1) } | Join-String -Separator ' '
-$formattedKeywords = ($crateKeywords.Split(',') | ForEach-Object { "`"$($_.Trim())`"" }) -join ", "
-$formattedCategories = ($crateCategories.Split(',') | ForEach-Object { "`"$($_.Trim())`"" }) -join ", "
+$formattedKeywords = if ($keywordsList.Count -gt 0) { ", " + (($keywordsList | ForEach-Object { "`"$_`"" }) -join ", ") } else { "" }
+$formattedCategories = ($categoriesList | ForEach-Object { "`"$_`"" }) -join ", "
 
 # Perform substitutions
 Get-ChildItem -Path $destinationDir -Recurse | ForEach-Object {

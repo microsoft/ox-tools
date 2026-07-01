@@ -178,17 +178,7 @@ fn try_load_from_cargo_toml(path: &Path) -> Result<Option<HeatherConfig>, Heathe
 }
 
 fn resolve_workspace_license(package_cargo_toml: &Path) -> Result<Option<HeatherConfig>, HeatherError> {
-    let workspace_root = find_workspace_root(package_cargo_toml)?;
-
-    let content = std::fs::read_to_string(&workspace_root).map_err(|e| HeatherError::FileRead {
-        path: workspace_root.clone(),
-        source: e,
-    })?;
-
-    let manifest: CargoManifest = toml::from_str(&content).map_err(|e| HeatherError::ConfigParse {
-        path: workspace_root,
-        message: e.to_string(),
-    })?;
+    let (_, manifest) = find_workspace_root(package_cargo_toml)?;
 
     let spdx_id = manifest
         .workspace
@@ -205,7 +195,10 @@ fn resolve_workspace_license(package_cargo_toml: &Path) -> Result<Option<Heather
     }
 }
 
-fn find_workspace_root(package_cargo_toml: &Path) -> Result<PathBuf, HeatherError> {
+/// Walk up from `package_cargo_toml` to the nearest ancestor `Cargo.toml`
+/// that declares a `[workspace]` table, returning both its path and its
+/// already-parsed manifest so callers don't have to re-read and re-parse it.
+fn find_workspace_root(package_cargo_toml: &Path) -> Result<(PathBuf, CargoManifest), HeatherError> {
     let start_dir = package_cargo_toml
         .parent()
         .ok_or_else(|| HeatherError::ConfigInvalid(format!("cannot determine parent directory of '{}'", package_cargo_toml.display())))?;
@@ -214,8 +207,11 @@ fn find_workspace_root(package_cargo_toml: &Path) -> Result<PathBuf, HeatherErro
 
     loop {
         let candidate = current.join("Cargo.toml");
-        if candidate.exists() && cargo_toml_has_workspace(&candidate)? {
-            return Ok(candidate);
+        if candidate.exists() {
+            let manifest = parse_cargo_manifest(&candidate)?;
+            if manifest.workspace.is_some() {
+                return Ok((candidate, manifest));
+            }
         }
 
         match current.parent() {
@@ -230,21 +226,252 @@ fn find_workspace_root(package_cargo_toml: &Path) -> Result<PathBuf, HeatherErro
     )))
 }
 
-fn cargo_toml_has_workspace(path: &Path) -> Result<bool, HeatherError> {
+fn parse_cargo_manifest(path: &Path) -> Result<CargoManifest, HeatherError> {
     let content = std::fs::read_to_string(path).map_err(|e| HeatherError::FileRead {
         path: path.to_path_buf(),
         source: e,
     })?;
 
-    let manifest: CargoManifest = toml::from_str(&content).map_err(|e| HeatherError::ConfigParse {
+    toml::from_str(&content).map_err(|e| HeatherError::ConfigParse {
         path: path.to_path_buf(),
         message: e.to_string(),
-    })?;
-
-    Ok(manifest.workspace.is_some())
+    })
 }
 
 /// Return the expected config file path for a project directory.
 pub(crate) fn config_path_for(project_dir: &Path) -> PathBuf {
     project_dir.join(CONFIG_FILE_NAME)
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn write(dir: &Path, name: &str, contents: &str) -> PathBuf {
+        let p = dir.join(name);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).unwrap();
+        }
+        std::fs::write(&p, contents).unwrap();
+        p
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn read_config_file_missing_path_is_config_not_found() {
+        let err = read_config_file(Path::new("/definitely/missing/.cargo-heather.toml")).unwrap_err();
+        assert!(matches!(err, HeatherError::ConfigNotFound(_)), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn read_config_file_on_directory_is_file_read_error() {
+        let tmp = TempDir::new().unwrap();
+        // A directory exists() but read_to_string fails on it.
+        let err = read_config_file(tmp.path()).unwrap_err();
+        assert!(matches!(err, HeatherError::FileRead { .. }), "{err}");
+    }
+
+    #[test]
+    fn parse_raw_config_rejects_malformed_toml() {
+        let err = parse_raw_config(Path::new("x.toml"), "this = = not toml").unwrap_err();
+        assert!(matches!(err, HeatherError::ConfigParse { .. }), "{err}");
+    }
+
+    #[test]
+    fn resolve_config_rejects_both_license_and_header() {
+        let raw = RawConfig {
+            license: Some("MIT".into()),
+            header: Some("// H".into()),
+            scripts: None,
+            dot_toml: None,
+            exclude: None,
+        };
+        assert!(matches!(resolve_config(raw), Err(HeatherError::ConfigInvalid(_))));
+    }
+
+    #[test]
+    fn resolve_config_rejects_neither_license_nor_header() {
+        let raw = RawConfig {
+            license: None,
+            header: None,
+            scripts: None,
+            dot_toml: None,
+            exclude: None,
+        };
+        assert!(matches!(resolve_config(raw), Err(HeatherError::ConfigInvalid(_))));
+    }
+
+    #[test]
+    fn resolve_config_rejects_empty_header() {
+        let raw = RawConfig {
+            license: None,
+            header: Some("   ".into()),
+            scripts: None,
+            dot_toml: None,
+            exclude: None,
+        };
+        assert!(matches!(resolve_config(raw), Err(HeatherError::ConfigInvalid(_))));
+    }
+
+    #[test]
+    fn resolve_config_accepts_spdx_license_and_applies_option_defaults() {
+        let raw = RawConfig {
+            license: Some("MIT".into()),
+            header: None,
+            scripts: None,
+            dot_toml: None,
+            exclude: None,
+        };
+        let cfg = resolve_config(raw).unwrap();
+        assert!(!cfg.header_text.is_empty());
+        assert!(cfg.scripts); // default true
+        assert!(!cfg.dot_toml); // default false
+        assert!(cfg.exclude.is_empty());
+    }
+
+    #[test]
+    fn resolve_config_accepts_custom_header_and_explicit_options() {
+        let raw = RawConfig {
+            license: None,
+            header: Some("// Custom".into()),
+            scripts: Some(false),
+            dot_toml: Some(true),
+            exclude: Some(vec!["target".into()]),
+        };
+        let cfg = resolve_config(raw).unwrap();
+        assert_eq!(cfg.header_text, "// Custom");
+        assert!(!cfg.scripts);
+        assert!(cfg.dot_toml);
+        assert_eq!(cfg.exclude, vec!["target".to_owned()]);
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn load_config_errors_when_neither_config_nor_cargo_toml_present() {
+        let tmp = TempDir::new().unwrap();
+        let err = load_config(tmp.path()).unwrap_err();
+        assert!(matches!(err, HeatherError::ConfigNotFound(_)), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn load_config_falls_back_to_cargo_toml_license() {
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "Cargo.toml", "[package]\nname = \"x\"\nlicense = \"MIT\"\n");
+        let cfg = load_config(tmp.path()).unwrap();
+        assert!(!cfg.header_text.is_empty());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn try_load_from_cargo_toml_rejects_malformed() {
+        let tmp = TempDir::new().unwrap();
+        let p = write(tmp.path(), "Cargo.toml", "not = = toml");
+        assert!(matches!(try_load_from_cargo_toml(&p), Err(HeatherError::ConfigParse { .. })));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn try_load_from_cargo_toml_without_license_is_none() {
+        let tmp = TempDir::new().unwrap();
+        let p = write(tmp.path(), "Cargo.toml", "[package]\nname = \"x\"\n");
+        assert!(try_load_from_cargo_toml(&p).unwrap().is_none());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn try_load_from_cargo_toml_empty_or_false_workspace_license_is_none() {
+        let tmp = TempDir::new().unwrap();
+        // Plain but empty license string → None.
+        let p = write(tmp.path(), "Cargo.toml", "[package]\nname = \"x\"\nlicense = \"\"\n");
+        assert!(try_load_from_cargo_toml(&p).unwrap().is_none());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn try_load_from_cargo_toml_uses_workspace_package_license() {
+        let tmp = TempDir::new().unwrap();
+        let p = write(tmp.path(), "Cargo.toml", "[workspace.package]\nlicense = \"MIT\"\n");
+        let cfg = try_load_from_cargo_toml(&p).unwrap().unwrap();
+        assert!(!cfg.header_text.is_empty());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn try_load_from_cargo_toml_resolves_workspace_inherited_license() {
+        // package license = { workspace = true } walks up to the workspace root.
+        let tmp = TempDir::new().unwrap();
+        write(
+            tmp.path(),
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"member\"]\n[workspace.package]\nlicense = \"MIT\"\n",
+        );
+        let member = write(
+            tmp.path(),
+            "member/Cargo.toml",
+            "[package]\nname = \"m\"\nlicense.workspace = true\n",
+        );
+        let cfg = try_load_from_cargo_toml(&member).unwrap().unwrap();
+        assert!(!cfg.header_text.is_empty());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn find_workspace_root_errors_when_no_workspace_ancestor() {
+        let tmp = TempDir::new().unwrap();
+        let p = write(tmp.path(), "Cargo.toml", "[package]\nname = \"x\"\n");
+        let err = find_workspace_root(&p).unwrap_err();
+        assert!(matches!(err, HeatherError::ConfigInvalid(_)), "{err}");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn parse_cargo_manifest_distinguishes_workspace_tables() {
+        let tmp = TempDir::new().unwrap();
+        let ws = write(tmp.path(), "ws/Cargo.toml", "[workspace]\nmembers = []\n");
+        let pkg = write(tmp.path(), "pkg/Cargo.toml", "[package]\nname = \"x\"\n");
+        assert!(parse_cargo_manifest(&ws).unwrap().workspace.is_some());
+        assert!(parse_cargo_manifest(&pkg).unwrap().workspace.is_none());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn try_load_from_cargo_toml_on_directory_is_file_read_error() {
+        let tmp = TempDir::new().unwrap();
+        assert!(matches!(try_load_from_cargo_toml(tmp.path()), Err(HeatherError::FileRead { .. })));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn workspace_inherited_license_absent_resolves_to_none() {
+        // member inherits license, but the workspace root declares no
+        // [workspace.package].license -> resolve_workspace_license None arm.
+        let tmp = TempDir::new().unwrap();
+        write(tmp.path(), "Cargo.toml", "[workspace]\nmembers = [\"member\"]\n");
+        let member = write(
+            tmp.path(),
+            "member/Cargo.toml",
+            "[package]\nname = \"m\"\nlicense.workspace = true\n",
+        );
+        assert!(try_load_from_cargo_toml(&member).unwrap().is_none());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn parse_cargo_manifest_on_directory_is_file_read_error() {
+        let tmp = TempDir::new().unwrap();
+        assert!(matches!(parse_cargo_manifest(tmp.path()), Err(HeatherError::FileRead { .. })));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn parse_cargo_manifest_on_malformed_is_parse_error() {
+        let tmp = TempDir::new().unwrap();
+        let p = write(tmp.path(), "Cargo.toml", "x = = bad");
+        assert!(matches!(parse_cargo_manifest(&p), Err(HeatherError::ConfigParse { .. })));
+    }
 }

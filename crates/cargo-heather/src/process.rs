@@ -57,6 +57,7 @@ pub fn fix<R: Read, W: Write>(mut reader: R, mut writer: W, expected_header: &st
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

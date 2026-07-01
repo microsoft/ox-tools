@@ -1,0 +1,5 @@
+[advisories]
+yanked = "deny"
+# Scope of unmaintained-crate checks: "all" surfaces transitive
+# dependencies too; tighten to "workspace" if the noise is high.
+unmaintained = "all"

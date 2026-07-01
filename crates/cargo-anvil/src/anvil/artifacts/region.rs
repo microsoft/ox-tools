@@ -30,8 +30,14 @@ const MEMBER_LINTS_BODY: &str = include_str!("../../../templates/regions/cargo-m
 
 /// Repo-root-relative path of the `cargo-deny` config.
 const DENY_PATH: &str = "deny.toml";
-/// Region id for the managed section of `deny.toml`.
-const DENY_REGION_ID: &str = "anvil-deny";
+/// Region id for the `[advisories]` section of `deny.toml`.
+const DENY_ADVISORIES_REGION_ID: &str = "anvil-deny-advisories";
+/// Region id for the `[licenses]` section of `deny.toml`.
+const DENY_LICENSES_REGION_ID: &str = "anvil-deny-licenses";
+/// Region id for the `[bans]` section of `deny.toml`.
+const DENY_BANS_REGION_ID: &str = "anvil-deny-bans";
+/// Region id for the `[sources]` section of `deny.toml`.
+const DENY_SOURCES_REGION_ID: &str = "anvil-deny-sources";
 
 /// Repo-root-relative path of the `rustfmt` config.
 const RUSTFMT_PATH: &str = "rustfmt.toml";
@@ -57,8 +63,22 @@ const CLIPPY_PATH: &str = "clippy.toml";
 /// Region id for the managed section of `clippy.toml`.
 const CLIPPY_REGION_ID: &str = "anvil-clippy";
 
-/// Embedded body of the deny.toml managed region.
-const DENY_BODY: &str = include_str!("../../../templates/regions/deny.toml");
+/// Repo-root-relative path of the git attributes file.
+const GITATTRIBUTES_PATH: &str = ".gitattributes";
+/// Region id for the managed section of `.gitattributes`.
+const GITATTRIBUTES_REGION_ID: &str = "anvil-gitattributes";
+
+/// Embedded body of the `deny.toml` `[advisories]` managed region.
+const DENY_ADVISORIES_BODY: &str = include_str!("../../../templates/regions/deny-advisories.toml");
+
+/// Embedded body of the `deny.toml` `[licenses]` managed region.
+const DENY_LICENSES_BODY: &str = include_str!("../../../templates/regions/deny-licenses.toml");
+
+/// Embedded body of the `deny.toml` `[bans]` managed region.
+const DENY_BANS_BODY: &str = include_str!("../../../templates/regions/deny-bans.toml");
+
+/// Embedded body of the `deny.toml` `[sources]` managed region.
+const DENY_SOURCES_BODY: &str = include_str!("../../../templates/regions/deny-sources.toml");
 
 /// Embedded body of the rustfmt.toml managed region.
 const RUSTFMT_BODY: &str = include_str!("../../../templates/regions/rustfmt.toml");
@@ -71,6 +91,9 @@ const SPELLCHECK_BODY: &str = include_str!("../../../templates/regions/spellchec
 
 /// Embedded body of the clippy.toml managed region.
 const CLIPPY_BODY: &str = include_str!("../../../templates/regions/clippy.toml");
+
+/// Embedded body of the `.gitattributes` managed region.
+const GITATTRIBUTES_BODY: &str = include_str!("../../../templates/regions/gitattributes");
 
 /// Render the body of the workspace-scope lints region: `[workspace.lints]`
 /// header followed by the embedded catalog.
@@ -150,10 +173,34 @@ pub fn member_lints() -> Artifact {
     Artifact::member_region(RegionId::new(CRATE_LINTS_REGION_ID), MEMBER_LINTS_BODY)
 }
 
-/// `deny.toml` / `anvil-deny`.
+/// `deny.toml` / `anvil-deny-advisories` — the `[advisories]` section.
+///
+/// `deny.toml` carries one managed region per top-level section
+/// (`[advisories]`, `[licenses]`, `[bans]`, `[sources]`) rather than a
+/// single combined region, so users can add their own keys in the gaps
+/// between the sections. The engine composes the regions that share the
+/// host into one file (see `updates.md §4`).
 #[must_use]
-pub fn deny() -> Artifact {
-    path_region(DENY_PATH, DENY_REGION_ID, DENY_BODY)
+pub fn deny_advisories() -> Artifact {
+    path_region(DENY_PATH, DENY_ADVISORIES_REGION_ID, DENY_ADVISORIES_BODY)
+}
+
+/// `deny.toml` / `anvil-deny-licenses` — the `[licenses]` section.
+#[must_use]
+pub fn deny_licenses() -> Artifact {
+    path_region(DENY_PATH, DENY_LICENSES_REGION_ID, DENY_LICENSES_BODY)
+}
+
+/// `deny.toml` / `anvil-deny-bans` — the `[bans]` section.
+#[must_use]
+pub fn deny_bans() -> Artifact {
+    path_region(DENY_PATH, DENY_BANS_REGION_ID, DENY_BANS_BODY)
+}
+
+/// `deny.toml` / `anvil-deny-sources` — the `[sources]` section.
+#[must_use]
+pub fn deny_sources() -> Artifact {
+    path_region(DENY_PATH, DENY_SOURCES_REGION_ID, DENY_SOURCES_BODY)
 }
 
 /// `rustfmt.toml` / `anvil-rustfmt`.
@@ -180,7 +227,18 @@ pub fn clippy() -> Artifact {
     path_region(CLIPPY_PATH, CLIPPY_REGION_ID, CLIPPY_BODY)
 }
 
+/// `.gitattributes` / `anvil-gitattributes`.
+///
+/// Pins `*.rs` to LF line endings so rustfmt and other tooling behave
+/// consistently regardless of the checkout platform (anvil-generated
+/// repos otherwise carry no line-ending policy). Created if absent.
+#[must_use]
+pub fn gitattributes() -> Artifact {
+    path_region(GITATTRIBUTES_PATH, GITATTRIBUTES_REGION_ID, GITATTRIBUTES_BODY)
+}
+
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::region::upsert_region;
@@ -279,12 +337,34 @@ mod tests {
     }
 
     #[test]
-    fn deny_body_includes_allowlist_and_advisories() {
-        assert!(DENY_BODY.contains("[licenses]"));
-        assert!(DENY_BODY.contains("\"MIT\""));
-        assert!(DENY_BODY.contains("\"Apache-2.0\""));
-        assert!(DENY_BODY.contains("[advisories]"));
-        assert!(DENY_BODY.contains("yanked = \"deny\""));
+    fn deny_bodies_include_allowlist_and_advisories() {
+        assert!(DENY_LICENSES_BODY.contains("[licenses]"));
+        assert!(DENY_LICENSES_BODY.contains("\"MIT\""));
+        assert!(DENY_LICENSES_BODY.contains("\"Apache-2.0\""));
+        assert!(DENY_ADVISORIES_BODY.contains("[advisories]"));
+        assert!(DENY_ADVISORIES_BODY.contains("yanked = \"deny\""));
+        assert!(DENY_BANS_BODY.contains("[bans]"));
+        assert!(DENY_SOURCES_BODY.contains("[sources]"));
+    }
+
+    #[test]
+    fn deny_sections_each_hold_exactly_one_table() {
+        // Each deny region is a single top-level section so users can add
+        // their own keys in the gaps between the managed regions.
+        for (header, body) in [
+            ("[advisories]", DENY_ADVISORIES_BODY),
+            ("[licenses]", DENY_LICENSES_BODY),
+            ("[bans]", DENY_BANS_BODY),
+            ("[sources]", DENY_SOURCES_BODY),
+        ] {
+            let headers: Vec<&str> = body.lines().map(str::trim_start).filter(|l| l.starts_with('[')).collect();
+            assert_eq!(headers, vec![header], "deny section body must hold exactly its own table");
+        }
+    }
+
+    #[test]
+    fn gitattributes_body_pins_rust_sources_to_lf() {
+        assert!(GITATTRIBUTES_BODY.contains("*.rs text eol=lf"));
     }
 
     #[test]
@@ -327,7 +407,10 @@ mod tests {
     #[test]
     fn shared_config_bodies_round_trip_through_toml_parser() {
         for (id, body) in [
-            (DENY_REGION_ID, DENY_BODY),
+            (DENY_ADVISORIES_REGION_ID, DENY_ADVISORIES_BODY),
+            (DENY_LICENSES_REGION_ID, DENY_LICENSES_BODY),
+            (DENY_BANS_REGION_ID, DENY_BANS_BODY),
+            (DENY_SOURCES_REGION_ID, DENY_SOURCES_BODY),
             (RUSTFMT_REGION_ID, RUSTFMT_BODY),
             (DELTA_REGION_ID, DELTA_BODY),
             (SPELLCHECK_REGION_ID, SPELLCHECK_BODY),

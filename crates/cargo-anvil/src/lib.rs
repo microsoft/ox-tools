@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg_attr(
     test,
     allow(
@@ -85,8 +86,79 @@
 //! $ just anvil-full     # both, sequentially
 //! ```
 //!
-//! cloud workflows invokes the same recipes. Local and cloud-workflow runs are bit-identical because
-//! they share one implementation in the imported `.just` files.
+//! cloud workflows invoke the same recipes, so a check behaves identically
+//! locally and in cloud workflows — they share one implementation in the
+//! imported `.just` files. The one difference is scope: cloud-workflow PR
+//! runs perform impact analysis (via [`cargo-delta`](https://crates.io/crates/cargo-delta))
+//! and run each check only over the affected packages, whereas a local
+//! `just anvil-pr` runs every check over the whole workspace.
+//!
+//! ## Checks and tiers
+//!
+//! Checks are grouped into **tiers** (`anvil-pr`, `anvil-scheduled`) that
+//! fan out to **groups** (one cloud-workflow job each), which in turn run
+//! individual checks sequentially. `anvil-full` runs both tiers.
+//!
+//! The catalog and per-check rationale live in `docs/design/checks.md`;
+//! the tables below map each check to the group that runs it, link each
+//! check to its tool's documentation, and note anything anvil-specific.
+//!
+//! **PR tier** (`anvil-pr`) — runs on every pull request, impact-scoped in
+//! cloud workflows. Two jobs: `pr-fast`, and `pr-slow` (whose three
+//! sub-groups run sequentially within the one job per OS leg):
+//!
+//! <table>
+//!   <thead><tr><th>Job</th><th>Sub-group</th><th>Check</th><th>Notes</th></tr></thead>
+//!   <tbody>
+//!     <tr><td rowspan="16"><code>pr-fast</code></td><td rowspan="16">—</td><td><a href="https://rust-lang.github.io/rustfmt/">fmt</a></td><td>predefined configuration with nightly features</td></tr>
+//!     <tr><td><a href="https://doc.rust-lang.org/clippy/">clippy</a></td><td>predefined lints</td></tr>
+//!     <tr><td><a href="https://crates.io/crates/cargo-sort">cargo-sort</a></td><td>keeps blank-line groups (<code>--grouped</code>)</td></tr>
+//!     <tr><td><a href="https://crates.io/crates/cargo-heather">license-headers</a></td><td></td></tr>
+//!     <tr><td><a href="https://crates.io/crates/cargo-ensure-no-cyclic-deps">ensure-no-cyclic-deps</a></td><td></td></tr>
+//!     <tr><td><a href="https://crates.io/crates/cargo-ensure-no-default-features">ensure-no-default-features</a></td><td></td></tr>
+//!     <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-doc.html">doc-build</a></td><td></td></tr>
+//!     <tr><td><a href="https://crates.io/crates/cargo-doc2readme">readme-check</a></td><td></td></tr>
+//!     <tr><td><a href="https://crates.io/crates/cargo-spellcheck">spellcheck</a></td><td>custom dictionary: <code>.spelling</code></td></tr>
+//!     <tr><td><a href="https://www.conventionalcommits.org/">pr-title</a></td><td>cloud-only; skipped locally</td></tr>
+//!     <tr><td><a href="https://embarkstudios.github.io/cargo-deny/">deny</a></td><td></td></tr>
+//!     <tr><td><a href="https://crates.io/crates/cargo-audit">audit</a></td><td></td></tr>
+//!     <tr><td><a href="https://crates.io/crates/cargo-udeps">udeps</a></td><td>runs twice: with and without <code>--all-targets</code></td></tr>
+//!     <tr><td><a href="https://crates.io/crates/cargo-semver-checks">semver-check</a></td><td>advisory-only; never fails the build (posts a PR comment)</td></tr>
+//!     <tr><td><a href="https://crates.io/crates/cargo-check-external-types">external-types</a></td><td></td></tr>
+//!     <tr><td><a href="https://crates.io/crates/cargo-aprz">aprz</a></td><td>fails on a high-risk crate</td></tr>
+//!     <tr><td rowspan="8"><code>pr-slow</code></td><td rowspan="3"><code>pr-test</code></td><td><a href="https://crates.io/crates/cargo-llvm-cov">llvm-cov</a></td><td>dual feature-config; gated by <a href="https://crates.io/crates/cargo-coverage-gate">cargo-coverage-gate</a></td></tr>
+//!     <tr><td><a href="https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html">doc-test</a></td><td>runs both feature configs</td></tr>
+//!     <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-build.html">examples</a></td><td>compile-only</td></tr>
+//!     <tr><td rowspan="4"><code>pr-runtime-analysis</code></td><td><a href="https://github.com/rust-lang/miri">miri</a></td><td>libtest, not nextest</td></tr>
+//!     <tr><td><a href="https://crates.io/crates/cargo-careful">careful</a></td><td>self-cleans on a toolchain bump</td></tr>
+//!     <tr><td><a href="https://crates.io/crates/loom">loom</a></td><td>opt-in targets only</td></tr>
+//!     <tr><td><a href="https://crates.io/crates/bolero">bolero</a></td><td>60s smoke only; Linux-only</td></tr>
+//!     <tr><td><code>pr-mutants</code></td><td><a href="https://mutants.rs/">mutants-diff</a></td><td>diff-scoped (<code>--in-diff</code>)</td></tr>
+//!   </tbody>
+//! </table>
+//!
+//! **Scheduled tier** (`anvil-scheduled`) — full-workspace, runs on a
+//! schedule against the default branch, not on PRs:
+//!
+//! <table>
+//!   <thead><tr><th>Group</th><th>Check</th><th>Notes</th></tr></thead>
+//!   <tbody>
+//!     <tr><td rowspan="3"><code>scheduled-test</code></td><td><a href="https://crates.io/crates/cargo-llvm-cov">llvm-cov</a></td><td></td></tr>
+//!     <tr><td><a href="https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html">doc-test</a></td><td></td></tr>
+//!     <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-build.html">examples</a></td><td></td></tr>
+//!     <tr><td rowspan="4"><code>scheduled-advisories</code></td><td><a href="https://embarkstudios.github.io/cargo-deny/">deny</a></td><td rowspan="4">re-run to catch newly-published advisories / lints</td></tr>
+//!     <tr><td><a href="https://crates.io/crates/cargo-audit">audit</a></td></tr>
+//!     <tr><td><a href="https://crates.io/crates/cargo-aprz">aprz</a></td></tr>
+//!     <tr><td><a href="https://doc.rust-lang.org/clippy/">clippy</a></td></tr>
+//!     <tr><td rowspan="4"><code>scheduled-runtime-analysis</code></td><td><a href="https://github.com/rust-lang/miri">miri</a></td><td></td></tr>
+//!     <tr><td><a href="https://github.com/rust-lang/miri">miri-tree-borrows</a></td><td><code>-Zmiri-tree-borrows</code></td></tr>
+//!     <tr><td><a href="https://github.com/rust-lang/miri">miri-strict-provenance</a></td><td><code>-Zmiri-strict-provenance</code></td></tr>
+//!     <tr><td><a href="https://github.com/rust-lang/miri">miri-race-coverage</a></td><td>day-rotated seed window</td></tr>
+//!     <tr><td rowspan="3"><code>scheduled-exhaustive</code></td><td><a href="https://mutants.rs/">mutants-full</a></td><td></td></tr>
+//!     <tr><td><a href="https://crates.io/crates/cargo-hack">cargo-hack</a></td><td>feature powerset</td></tr>
+//!     <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-bench.html">bench</a></td><td>compile-only</td></tr>
+//!   </tbody>
+//! </table>
 //!
 //! ## Customization
 //!
@@ -103,6 +175,77 @@
 //! 4. **Take ownership by editing inside** an owned file or managed
 //!    region. The next `update` detects the dirt and writes a
 //!    `.anvil-proposed` sibling instead of overwriting.
+//!
+//! ## In-tree tool customization
+//!
+//! anvil follows a few source-level and `Cargo.toml` conventions so you
+//! can customize how some of the executed tools behave from within your
+//! own crates — without editing the generated `justfiles/anvil/` tree.
+//!
+//! ### Spelling dictionary (`spellcheck`)
+//!
+//! The `spellcheck` check ([`cargo-spellcheck`](https://crates.io/crates/cargo-spellcheck))
+//! reads a repo-root `.spelling` file — one word per line — as its custom
+//! dictionary. Add project-specific terms (crate names, acronyms,
+//! identifiers) there to silence false positives; the `anvil-spellcheck`
+//! recipe sorts and filters it into the dictionary cargo-spellcheck
+//! consumes. Keep the file `LF`-terminated.
+//!
+//! ### Coverage (`llvm-cov`)
+//!
+//! Coverage is gated by [`cargo-coverage-gate`](https://crates.io/crates/cargo-coverage-gate);
+//! per-package and per-workspace thresholds, the coverage-exclusion
+//! attribute, and opt-out are all configured through its `Cargo.toml`
+//! metadata conventions — see its documentation.
+//!
+//! ### Undefined-behavior checking (`miri`)
+//!
+//! The PR-tier `miri` check runs `cargo miri test --all-features --tests`
+//! (libtest, not nextest — process-per-test is roughly twice as slow under miri).
+//! Opt a test out of miri when it touches the filesystem, spawns
+//! subprocesses, or otherwise can't run under the interpreter:
+//!
+//! ```text
+//! #[cfg_attr(miri, ignore)]
+//! ```
+//!
+//! The **scheduled** tier adds three stricter miri profiles, each of
+//! which sets a distinct cfg so you can quarantine a test from one
+//! profile without affecting the others (e.g. a test that OOMs only
+//! under tree-borrows):
+//!
+//! ```text
+//! #[cfg_attr(miri_tree_borrows,      ignore = "OOMs under -Zmiri-tree-borrows")]
+//! #[cfg_attr(miri_strict_provenance, ignore = "int-to-ptr cast by design")]
+//! #[cfg_attr(miri_race_coverage,     ignore = "nondeterministic across seeds")]
+//! ```
+//!
+//! ### Concurrency model checking (`loom`)
+//!
+//! The `loom` check runs only the test targets that opt in, detected
+//! **structurally** (no filename/comment heuristic). A crate opts in by
+//! declaring a `loom` feature, a dedicated `[[test]]` target that
+//! requires it, and a `cfg(loom)`-gated `loom` dependency:
+//!
+//! ```toml
+//! [features]
+//! loom = []
+//!
+//! [[test]]
+//! name = "loom"               # tests/loom.rs
+//! required-features = ["loom"]
+//!
+//! [target.'cfg(loom)'.dependencies]
+//! loom = "0.7"
+//! ```
+//!
+//! In source, swap std atomics for loom's under the cfg
+//! (`#[cfg(loom)] use loom::sync::atomic::...`). The recipe builds those
+//! targets with `--cfg loom`, per-package so the cfg never leaks into
+//! other members' dependencies. It is **fail-loud**: a crate that
+//! declares loom support (a `loom` feature or a `cfg(loom)` dependency)
+//! but ships no such test target errors out rather than silently
+//! skipping. When no crate ships a loom target the check is a no-op.
 //!
 //! ## Extensibility: shipping your own tool
 //!
@@ -235,6 +378,7 @@ pub use region::CommentSyntax;
 /// }
 /// ```
 #[must_use]
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[mutants::skip] // Entry point: tracing/clap setup + dispatch to run; behavior is integration-tested via run_update.
 #[expect(
     clippy::needless_pass_by_value,

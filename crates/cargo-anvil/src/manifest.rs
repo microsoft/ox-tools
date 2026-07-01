@@ -208,10 +208,15 @@ impl Manifest {
             doc.insert("region", Item::ArrayOfTables(tables));
         }
 
-        let mut out = doc.to_string();
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
+        // Normalize to exactly one trailing newline regardless of how
+        // toml_edit serialized the document — `trim_end_matches` collapses
+        // zero-or-more trailing newlines so there is no conditional branch
+        // to leave uncovered.
+        let body = doc.to_string();
+        let trimmed = body.trim_end_matches('\n');
+        let mut out = String::with_capacity(trimmed.len() + 1);
+        out.push_str(trimmed);
+        out.push('\n');
         out
     }
 
@@ -251,6 +256,7 @@ impl Manifest {
 // yet (they will once writers gain inline-table support in later commits).
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use tempfile::TempDir;
 
@@ -264,7 +270,7 @@ mod tests {
             ..Manifest::default()
         };
         m.set_file("Justfile", "sha256:aaaa");
-        m.set_file("justfiles/anvil/checks.just", "sha256:bbbb");
+        m.set_file("justfiles/anvil/checks/fmt.just", "sha256:bbbb");
         m.set_region("Cargo.toml", "anvil-workspace-lints", "sha256:cccc");
         m.set_region("Justfile", "anvil-imports", "sha256:dddd");
         m
@@ -375,6 +381,15 @@ mod tests {
         let text = "version = 1\n[[file]]\npath=\"x\"\nchecksum=\"sha256:1\"\n[[file]]\npath=\"x\"\nchecksum=\"sha256:2\"\n";
         let err = Manifest::parse(text).unwrap_err();
         assert!(err.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn rejects_duplicate_region_entry() {
+        let text = "version = 1\n\
+            [[region]]\nhost=\"Justfile\"\nid=\"anvil-x\"\nchecksum=\"sha256:1\"\n\
+            [[region]]\nhost=\"Justfile\"\nid=\"anvil-x\"\nchecksum=\"sha256:2\"\n";
+        let err = Manifest::parse(text).unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]

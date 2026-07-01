@@ -193,8 +193,9 @@ pub mod artifacts {
         pub fn entry() -> Artifact;     // justfiles/anvil/mod.just (imports the siblings)
         pub fn versions() -> Artifact;  // justfiles/anvil/versions.just
         pub fn tools() -> Artifact;     // justfiles/anvil/tools.just
-        pub fn checks() -> Artifact;    // justfiles/anvil/checks.just
-        pub fn groups() -> Artifact;    // justfiles/anvil/groups.just
+        pub fn helpers() -> Artifact;   // justfiles/anvil/helpers.just (shared helper recipes)
+        pub fn check_files() -> Vec<Artifact>; // justfiles/anvil/checks/<check>.just (one per check)
+        pub fn group_files() -> Vec<Artifact>; // justfiles/anvil/groups/<group>.just (one per group)
         pub fn tiers() -> Artifact;     // justfiles/anvil/tiers.just
     }
     // Managed regions spliced into user-composed host files.
@@ -203,11 +204,15 @@ pub mod artifacts {
         pub fn workspace_lints() -> Artifact;    // Cargo.toml (workspace) / anvil-workspace-lints
         pub fn single_crate_lints() -> Artifact; // Cargo.toml (single crate) / anvil-lints
         pub fn member_lints() -> Artifact;       // <member>/Cargo.toml / anvil-lints
-        pub fn deny() -> Artifact;               // deny.toml / anvil-deny
+        pub fn deny_advisories() -> Artifact;    // deny.toml / anvil-deny-advisories
+        pub fn deny_licenses() -> Artifact;      // deny.toml / anvil-deny-licenses
+        pub fn deny_bans() -> Artifact;          // deny.toml / anvil-deny-bans
+        pub fn deny_sources() -> Artifact;       // deny.toml / anvil-deny-sources
         pub fn rustfmt() -> Artifact;            // rustfmt.toml / anvil-rustfmt
         pub fn delta() -> Artifact;              // .delta.toml / anvil-delta
         pub fn spellcheck() -> Artifact;         // spellcheck.toml / anvil-spellcheck
         pub fn clippy() -> Artifact;             // clippy.toml / anvil-clippy
+        pub fn gitattributes() -> Artifact;      // .gitattributes / anvil-gitattributes
     }
     // Backend files are owned files gated on a backend (§4.3), grouped per backend.
     pub mod github {

@@ -2,7 +2,7 @@
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # The token __GROUP__ is substituted by cargo-anvil at emit time with
-# the concrete check-group name (pr-fast, pr-test, scheduled-runtime, ...).
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 parameters:
   - name: include_modified
     type: string
@@ -17,15 +17,40 @@ steps:
   - template: setup.yml
     parameters:
       group: __GROUP__
+  # ADO has no PR-title predefined variable: `System.PullRequest.Title`
+  # does NOT exist, so `$(System.PullRequest.Title)` would expand to the
+  # literal unexpanded macro text (non-empty) and make anvil-pr-title
+  # validate that string. Resolve the real title from the REST API on PR
+  # builds and publish it as the PR_TITLE pipeline variable. Only
+  # anvil-pr-title (in pr-fast) consults it; other groups ignore it, but we
+  # resolve uniformly to keep group.yml the same across groups. Best-effort:
+  # on a non-PR build, a fork PR with a restricted token, or any API error,
+  # PR_TITLE is left empty and anvil-pr-title skips.
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
+      if (-not $prId) {
+          Write-Host 'anvil: not a PR build; leaving PR_TITLE empty'
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+          exit 0
+      }
+      $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
+      try {
+          $resp = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }
+          Write-Host "##vso[task.setvariable variable=PR_TITLE]$($resp.title)"
+      } catch {
+          Write-Host "anvil: could not resolve PR title ($_); leaving PR_TITLE empty"
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+      }
+    displayName: anvil-__GROUP__ (resolve PR title)
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: just anvil-__GROUP__
     displayName: anvil-__GROUP__
     env:
-      # Only anvil-pr-title (in the pr-fast group) consults PR_TITLE,
-      # but injecting it on every group keeps group.yml uniform across
-      # groups. ADO sets $(System.PullRequest.Title) to an empty string
-      # on non-PR builds; anvil-pr-title treats empty as "no title set"
-      # and skips.
-      PR_TITLE: $(System.PullRequest.Title)
+      # Resolved by the preceding step (empty on non-PR / fork / API
+      # failure, in which case anvil-pr-title skips).
+      PR_TITLE: $(PR_TITLE)
       ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
       ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
       ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}

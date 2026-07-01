@@ -28,6 +28,12 @@ const PR_STAGES: &str = include_str!("../../../templates/ado/pr-stages.yml");
 /// Embedded body of the scheduled-tier stages template.
 const SCHEDULED_STAGES: &str = include_str!("../../../templates/ado/scheduled-stages.yml");
 
+/// Embedded body of the user-owned PR-tier custom-stages extension stub.
+const CUSTOM_PR_STAGES: &str = include_str!("../../../templates/ado/custom-pr-stages.yml");
+
+/// Embedded body of the user-owned scheduled-tier custom-stages extension stub.
+const CUSTOM_SCHEDULED_STAGES: &str = include_str!("../../../templates/ado/custom-scheduled-stages.yml");
+
 /// Embedded body of the PR root pipeline.
 const PR_ROOT_PIPELINE: &str = include_str!("../../../templates/ado/pr-root-pipeline.yml");
 
@@ -46,6 +52,7 @@ const GROUPS: &[&str] = &[
     "pr-mutants",
     "scheduled-test",
     "scheduled-advisories",
+    "scheduled-runtime-analysis",
     "scheduled-exhaustive",
 ];
 
@@ -105,6 +112,30 @@ pub fn scheduled_stages() -> Artifact {
     Artifact::backend_file(Backend::Ado, ".pipelines/anvil/scheduled.yml", SCHEDULED_STAGES)
 }
 
+/// `.pipelines/anvil/custom-pr-stages.yml` — the repo-owned extension point
+/// for PR-tier stages.
+///
+/// Emitted once as an empty `stages: []` stub. The PR root pipeline
+/// references it after the anvil stages, so an adopter can add their own
+/// stages here without editing the anvil-owned root or stages template.
+/// Once edited it follows the standard dirty-file flow (Propose, don't
+/// overwrite), exactly like `steps/job.yml`.
+#[must_use]
+pub fn custom_pr_stages() -> Artifact {
+    Artifact::backend_file(Backend::Ado, ".pipelines/anvil/custom-pr-stages.yml", CUSTOM_PR_STAGES)
+}
+
+/// `.pipelines/anvil/custom-scheduled-stages.yml` — the repo-owned extension
+/// point for scheduled-tier stages. See [`custom_pr_stages`].
+#[must_use]
+pub fn custom_scheduled_stages() -> Artifact {
+    Artifact::backend_file(
+        Backend::Ado,
+        ".pipelines/anvil/custom-scheduled-stages.yml",
+        CUSTOM_SCHEDULED_STAGES,
+    )
+}
+
 /// `.pipelines/anvil-pr.yml` — the PR root pipeline.
 #[must_use]
 pub fn pr_root_pipeline() -> Artifact {
@@ -128,6 +159,10 @@ pub(crate) const GROUP_STEPS: &[(&str, &str)] = &[
     ("pr-mutants", ".pipelines/anvil/steps/pr-mutants.yml"),
     ("scheduled-test", ".pipelines/anvil/steps/scheduled-test.yml"),
     ("scheduled-advisories", ".pipelines/anvil/steps/scheduled-advisories.yml"),
+    (
+        "scheduled-runtime-analysis",
+        ".pipelines/anvil/steps/scheduled-runtime-analysis.yml",
+    ),
     ("scheduled-exhaustive", ".pipelines/anvil/steps/scheduled-exhaustive.yml"),
 ];
 
@@ -140,12 +175,15 @@ pub(crate) fn all() -> Vec<Artifact> {
     }
     out.push(pr_stages());
     out.push(scheduled_stages());
+    out.push(custom_pr_stages());
+    out.push(custom_scheduled_stages());
     out.push(pr_root_pipeline());
     out.push(scheduled_root_pipeline());
     out
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 
@@ -162,6 +200,40 @@ mod tests {
         assert!(SETUP_STEP.contains("just anvil-setup"));
         assert!(SETUP_STEP.contains("just anvil-${{ parameters.group }}-setup"));
         assert!(SETUP_STEP.contains("eq(parameters.group, 'none')"));
+    }
+
+    #[test]
+    fn setup_step_quotes_inline_command_values_containing_colons() {
+        // An inline `- bash: echo "x: y"` is a YAML *plain scalar*; the inner
+        // `: ` is parsed as a mapping separator ("Mapping values are not
+        // allowed in this context"), which ADO rejects at compile time. Such
+        // values must be wrapped in quotes. Guard every inline command scalar
+        // in the setup step (and catch the specific group=none echo).
+        assert!(
+            SETUP_STEP.contains(r#"- bash: 'echo "anvil-setup: group=none, skipping tool install"'"#),
+            "the group=none echo must be single-quoted so its colon stays literal",
+        );
+        for line in SETUP_STEP.lines() {
+            let trimmed = line.trim_start();
+            let Some(value) = trimmed
+                .strip_prefix("- bash:")
+                .or_else(|| trimmed.strip_prefix("- script:"))
+                .or_else(|| trimmed.strip_prefix("- pwsh:"))
+                .or_else(|| trimmed.strip_prefix("- powershell:"))
+            else {
+                continue;
+            };
+            let value = value.trim();
+            // A quoted scalar or a block scalar (`|`/`>`) is safe; a plain
+            // scalar must not contain a `: ` mapping-separator sequence.
+            if value.starts_with('\'') || value.starts_with('"') || value.starts_with('|') || value.starts_with('>') {
+                continue;
+            }
+            assert!(
+                !value.contains(": "),
+                "unquoted inline command scalar with a colon will break ADO YAML compilation: {line}",
+            );
+        }
     }
 
     #[test]
@@ -203,7 +275,11 @@ mod tests {
         assert!(body.contains("ANVIL_INCLUDE_MODIFIED"));
         assert!(body.contains("ANVIL_INCLUDE_AFFECTED"));
         assert!(body.contains("ANVIL_INCLUDE_REQUIRED"));
-        assert!(body.contains("PR_TITLE: $(System.PullRequest.Title)"));
+        // PR_TITLE is resolved from the REST API (ADO has no PR-title
+        // predefined variable) and threaded via the PR_TITLE pipeline var.
+        assert!(body.contains("PR_TITLE: $(PR_TITLE)"));
+        assert!(body.contains("setvariable variable=PR_TITLE"));
+        assert!(!body.contains("PR_TITLE: $(System.PullRequest.Title)"));
     }
 
     #[test]
@@ -214,8 +290,7 @@ mod tests {
     #[test]
     fn pr_stages_has_impact_and_group_stages() {
         for needle in [
-            "stage: impact_linux",
-            "stage: impact_windows",
+            "stage: impact\n",
             "stage: pr_fast",
             "stage: pr_test",
             "stage: pr_runtime_analysis",
@@ -223,14 +298,26 @@ mod tests {
         ] {
             assert!(PR_STAGES.contains(needle), "PR stages missing '{needle}'");
         }
+        // The impact computation is a single stage with two per-OS jobs, not a
+        // stage per OS -- matching how the pr-* stages run per-OS jobs.
+        for needle in ["stage: impact_linux", "stage: impact_windows"] {
+            assert!(
+                !PR_STAGES.contains(needle),
+                "impact should be one stage with per-OS jobs, not '{needle}'"
+            );
+        }
         for needle in ["stage: pr_slow\n", "stage: pr_slow1\n", "stage: pr_slow2\n", "stage: pr_slow3\n"] {
             assert!(
                 !PR_STAGES.contains(needle),
                 "Stale stage '{needle}' should be gone after the pr-slow rename"
             );
         }
-        assert!(PR_STAGES.contains("stageDependencies.impact_linux.compute.outputs"));
-        assert!(PR_STAGES.contains("stageDependencies.impact_windows.compute.outputs"));
+        // Two per-OS jobs in the single impact stage.
+        assert!(PR_STAGES.contains("name: compute_linux"));
+        assert!(PR_STAGES.contains("name: compute_windows"));
+        // Downstream stages consume the per-OS job outputs from the one stage.
+        assert!(PR_STAGES.contains("stageDependencies.impact.compute_linux.outputs"));
+        assert!(PR_STAGES.contains("stageDependencies.impact.compute_windows.outputs"));
         assert!(PR_STAGES.contains("- template: steps/job.yml"));
         assert!(
             !PR_STAGES.contains("\n      - job: "),
@@ -241,23 +328,81 @@ mod tests {
             2,
             "cobertura publish should appear once per pr_test job (linux + windows)"
         );
+        // Every pr-* stage depends on the single impact stage.
+        assert_eq!(
+            PR_STAGES.matches("dependsOn: [impact]").count(),
+            4,
+            "each of the four pr-* stages must depend on the single impact stage"
+        );
     }
 
     #[test]
-    fn scheduled_stages_has_three_groups() {
+    fn scheduled_stages_has_four_groups() {
         for needle in [
             "stage: scheduled_test",
             "stage: scheduled_advisories",
+            "stage: scheduled_runtime_analysis",
             "stage: scheduled_exhaustive",
         ] {
             assert!(SCHEDULED_STAGES.contains(needle), "scheduled stages missing '{needle}'");
         }
-        assert!(!SCHEDULED_STAGES.contains("scheduled_runtime"));
         assert!(SCHEDULED_STAGES.contains("PublishCodeCoverageResults@2"));
         assert!(SCHEDULED_STAGES.contains("- template: steps/job.yml"));
         assert!(
             !SCHEDULED_STAGES.contains("\n      - job: "),
             "Scheduled stages defines a bare `- job:` instead of going through steps/job.yml"
+        );
+    }
+
+    #[test]
+    fn custom_stages_stubs_are_empty_and_take_pool_parameters() {
+        // The extension stubs must emit a valid empty stages list (so the
+        // default emit doesn't break the pipeline) and declare the pool
+        // parameters the root pipelines pass them.
+        for body in [CUSTOM_PR_STAGES, CUSTOM_SCHEDULED_STAGES] {
+            assert!(
+                body.contains("stages: []"),
+                "custom-stages stub must default to an empty stages list"
+            );
+            assert!(body.contains("name: linuxPool"), "custom-stages stub must declare linuxPool");
+            assert!(body.contains("name: windowsPool"), "custom-stages stub must declare windowsPool");
+            // It must NOT define any concrete stage by default (the
+            // commented-out example doesn't count).
+            let defines_stage = body
+                .lines()
+                .map(str::trim_start)
+                .any(|l| !l.starts_with('#') && l.starts_with("- stage:"));
+            assert!(!defines_stage, "default custom-stages stub must not define a stage");
+        }
+    }
+
+    #[test]
+    fn custom_stages_artifacts_are_under_pipelines_anvil() {
+        match custom_pr_stages() {
+            Artifact::OwnedFile(spec) => {
+                assert_eq!(spec.path, ".pipelines/anvil/custom-pr-stages.yml");
+                assert_eq!(spec.gate, Some(Backend::Ado));
+            }
+            Artifact::Region(_) => panic!("expected owned file"),
+        }
+        match custom_scheduled_stages() {
+            Artifact::OwnedFile(spec) => {
+                assert_eq!(spec.path, ".pipelines/anvil/custom-scheduled-stages.yml");
+                assert_eq!(spec.gate, Some(Backend::Ado));
+            }
+            Artifact::Region(_) => panic!("expected owned file"),
+        }
+    }
+
+    #[test]
+    fn root_pipelines_reference_their_custom_stages_extension() {
+        assert!(
+            PR_ROOT_PIPELINE.contains("template: anvil/custom-pr-stages.yml"),
+            "PR root must reference the custom-pr-stages extension point"
+        );
+        assert!(
+            SCHEDULED_ROOT_PIPELINE.contains("template: anvil/custom-scheduled-stages.yml"),
+            "scheduled root must reference the custom-scheduled-stages extension point"
         );
     }
 

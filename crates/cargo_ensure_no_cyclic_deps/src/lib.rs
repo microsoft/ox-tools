@@ -54,6 +54,7 @@
 //! The tool will exit with code 0 if no cycles are found, or code 1 if cycles are detected.
 
 use std::collections::HashMap;
+use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use cargo_metadata::{Metadata, MetadataCommand, PackageId};
@@ -85,9 +86,17 @@ enum Command {
 
 /// Main entry point for the library, called from the binary crate
 ///
+/// Returns [`ExitCode::SUCCESS`] when no cycles are found and
+/// [`ExitCode::FAILURE`] when cycles are detected. Returning an exit
+/// code (rather than calling `std::process::exit`) lets `main` unwind
+/// normally so the process terminates through the standard runtime
+/// path -- important under coverage instrumentation, where an abrupt
+/// `process::exit` skips the profile flush on some platforms (notably
+/// Windows) and drops the coverage for the cycle-detection path.
+///
 /// # Errors
 /// Returns an error if cargo metadata cannot be loaded or processed
-pub fn run() -> Result<()> {
+pub fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
 
     let manifest_path = match cli.cmd {
@@ -112,7 +121,7 @@ pub fn run() -> Result<()> {
 
     if cycles.is_empty() {
         println!("No cyclic dependencies found.");
-        Ok(())
+        Ok(ExitCode::SUCCESS)
     } else {
         eprintln!("Error: Cyclic dependencies detected!\n");
         for (i, cycle) in cycles.iter().enumerate() {
@@ -120,7 +129,7 @@ pub fn run() -> Result<()> {
             eprintln!("  {}", format_cycle(cycle, &metadata));
             eprintln!();
         }
-        std::process::exit(1);
+        Ok(ExitCode::FAILURE)
     }
 }
 
@@ -162,11 +171,13 @@ fn detect_cycles(metadata: &Metadata) -> Vec<Vec<PackageId>> {
 
     // Detect self-loops (a node depending on itself)
     for package in metadata.workspace_packages() {
-        if let Some(&node_idx) = node_map.get(&package.id) {
-            // Check if there's an edge from this node to itself
-            if graph.contains_edge(node_idx, node_idx) {
-                cycles.push(vec![package.id.clone()]);
-            }
+        // Every workspace package was inserted into `node_map` above, so
+        // index directly (matching the edge-building loop) rather than a
+        // fallible lookup whose `None` arm can never be taken.
+        let node_idx = node_map[&package.id];
+        // Check if there's an edge from this node to itself
+        if graph.contains_edge(node_idx, node_idx) {
+            cycles.push(vec![package.id.clone()]);
         }
     }
 
