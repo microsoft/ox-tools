@@ -210,9 +210,12 @@ the claim on every run.
 
 Rules:
 
-- `expect-no-coverable-lines` is **package-scoped only**. Setting it in
-  `[workspace.metadata.coverage-gate]` is a configuration error (exit
-  `2`) — a workspace-wide "no coverable lines" default is nonsensical.
+- `expect-no-coverable-lines` is **package-scoped only**. Setting it to
+  `true` in `[workspace.metadata.coverage-gate]` is a configuration
+  error (exit `2`) — a workspace-wide "no coverable lines" default is
+  nonsensical. (An explicit `expect-no-coverable-lines = false` there is
+  accepted and ignored, since `false` is everywhere equivalent to
+  omitting the key.)
 - It is **mutually exclusive** with `min-lines-percent` on the same
   package: setting both is a configuration error (exit `2`). A numeric
   floor describes code that should be covered; the assertion declares

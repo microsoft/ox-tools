@@ -69,8 +69,9 @@ impl Workspace {
         let metadata = cmd.exec().map_err(LoadMetadataError::caused_by)?;
 
         // The workspace scope may carry a `min-lines-percent` default but
-        // must not carry the per-package `expect-no-coverable-lines`
-        // assertion.
+        // must not assert `expect-no-coverable-lines = true` (an explicit
+        // `false` there is accepted and ignored, since it is equivalent to
+        // omitting the key).
         let workspace_default = extract_coverage_gate(&metadata.workspace_metadata, "workspace", Scope::Workspace)?.min_lines_percent;
 
         let mut members: Vec<Member> = metadata
