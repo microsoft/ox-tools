@@ -99,23 +99,6 @@
 //! fan out to **groups** (one cloud-workflow job each), which in turn run
 //! individual checks sequentially. `anvil-full` runs both tiers.
 //!
-//! ```mermaid
-//! flowchart TD
-//!   pr["anvil-pr (PR tier)"]
-//!   sched["anvil-scheduled (scheduled tier)"]
-//!
-//!   pr --> fast["pr-fast"]
-//!   pr --> slow["pr-slow"]
-//!   slow --> test["pr-test"]
-//!   slow --> runtime["pr-runtime-analysis"]
-//!   slow --> mut["pr-mutants"]
-//!
-//!   sched --> stest["scheduled-test"]
-//!   sched --> sadv["scheduled-advisories"]
-//!   sched --> sruntime["scheduled-runtime-analysis"]
-//!   sched --> sexh["scheduled-exhaustive"]
-//! ```
-//!
 //! The catalog and per-check rationale live in `docs/design/checks.md`;
 //! the table below maps each check to the group(s) that run it.
 //!

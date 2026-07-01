@@ -100,23 +100,6 @@ Checks are grouped into **tiers** (`anvil-pr`, `anvil-scheduled`) that
 fan out to **groups** (one cloud-workflow job each), which in turn run
 individual checks sequentially. `anvil-full` runs both tiers.
 
-```mermaid
-flowchart TD
-  pr["anvil-pr (PR tier)"]
-  sched["anvil-scheduled (scheduled tier)"]
-
-  pr --> fast["pr-fast"]
-  pr --> slow["pr-slow"]
-  slow --> test["pr-test"]
-  slow --> runtime["pr-runtime-analysis"]
-  slow --> mut["pr-mutants"]
-
-  sched --> stest["scheduled-test"]
-  sched --> sadv["scheduled-advisories"]
-  sched --> sruntime["scheduled-runtime-analysis"]
-  sched --> sexh["scheduled-exhaustive"]
-```
-
 The catalog and per-check rationale live in `docs/design/checks.md`;
 the table below maps each check to the group(s) that run it.
 
@@ -313,7 +296,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG3O7Ztu3AQwkGx4zxqAPtR2_G3oCWq-k3MyjGwYA2LVhvJckYWSBg2tjYXJnby1hbnZpbGUwLjEuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG1l8XM6G1yMjG60-HaOwdZt8G3jKonmXi81OG2vnT_RjaES-YWSBg2tjYXJnby1hbnZpbGUwLjEuMGtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-coverage-gate
  [__link2]: https://crates.io/crates/cargo-coverage-gate
