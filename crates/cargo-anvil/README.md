@@ -111,30 +111,30 @@ sub-groups run sequentially within the one job per OS leg):
 <table>
   <thead><tr><th>Job</th><th>Sub-group</th><th>Check</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td rowspan="16"><code>pr-fast</code></td><td rowspan="16">—</td><td><a href="https://rust-lang.github.io/rustfmt/">fmt</a></td><td>rustfmt, pinned nightly, <code>--all --check</code></td></tr>
-    <tr><td><a href="https://doc.rust-lang.org/clippy/">clippy</a></td><td><code>--all-targets --all-features</code>, <code>-D warnings</code></td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-sort">cargo-sort</a></td><td><code>--grouped --check --check-format</code></td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-heather">license-headers</a></td><td>SPDX license-header presence</td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-ensure-no-cyclic-deps">ensure-no-cyclic-deps</a></td><td>no dependency cycles between workspace members</td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-ensure-no-default-features">ensure-no-default-features</a></td><td>members don't enable default features on internal deps</td></tr>
-    <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-doc.html">doc-build</a></td><td><code>RUSTDOCFLAGS=-D warnings</code>, <code>--no-deps</code></td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-doc2readme">readme-check</a></td><td>per-crate README matches crate-level docs</td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-spellcheck">spellcheck</a></td><td>dictionary in <code>.spelling</code></td></tr>
-    <tr><td><a href="https://www.conventionalcommits.org/">pr-title</a></td><td>Conventional Commits; cloud-only, skipped when the title var is unset</td></tr>
-    <tr><td><a href="https://embarkstudios.github.io/cargo-deny/">deny</a></td><td>licenses / bans / advisories / sources</td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-audit">audit</a></td><td>RUSTSEC advisory scan</td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-udeps">udeps</a></td><td>unused deps; runs twice (with and without <code>--all-targets</code>)</td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-semver-checks">semver-check</a></td><td>advisory-only: writes a PR comment file, exits 0</td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-check-external-types">external-types</a></td><td>per-manifest, pinned nightly; public API doesn't leak un-approved external types</td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-aprz">aprz</a></td><td>supply-chain risk appraisal; fails on a high-risk crate</td></tr>
+    <tr><td rowspan="16"><code>pr-fast</code></td><td rowspan="16">—</td><td><a href="https://rust-lang.github.io/rustfmt/">fmt</a></td><td>predefined configuration with nightly features</td></tr>
+    <tr><td><a href="https://doc.rust-lang.org/clippy/">clippy</a></td><td>predefined lints</td></tr>
+    <tr><td><a href="https://crates.io/crates/cargo-sort">cargo-sort</a></td><td>keeps blank-line groups (<code>--grouped</code>)</td></tr>
+    <tr><td><a href="https://crates.io/crates/cargo-heather">license-headers</a></td><td></td></tr>
+    <tr><td><a href="https://crates.io/crates/cargo-ensure-no-cyclic-deps">ensure-no-cyclic-deps</a></td><td></td></tr>
+    <tr><td><a href="https://crates.io/crates/cargo-ensure-no-default-features">ensure-no-default-features</a></td><td></td></tr>
+    <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-doc.html">doc-build</a></td><td></td></tr>
+    <tr><td><a href="https://crates.io/crates/cargo-doc2readme">readme-check</a></td><td></td></tr>
+    <tr><td><a href="https://crates.io/crates/cargo-spellcheck">spellcheck</a></td><td>custom dictionary: <code>.spelling</code></td></tr>
+    <tr><td><a href="https://www.conventionalcommits.org/">pr-title</a></td><td>cloud-only; skipped locally</td></tr>
+    <tr><td><a href="https://embarkstudios.github.io/cargo-deny/">deny</a></td><td></td></tr>
+    <tr><td><a href="https://crates.io/crates/cargo-audit">audit</a></td><td></td></tr>
+    <tr><td><a href="https://crates.io/crates/cargo-udeps">udeps</a></td><td>runs twice: with and without <code>--all-targets</code></td></tr>
+    <tr><td><a href="https://crates.io/crates/cargo-semver-checks">semver-check</a></td><td>advisory-only; never fails the build (posts a PR comment)</td></tr>
+    <tr><td><a href="https://crates.io/crates/cargo-check-external-types">external-types</a></td><td></td></tr>
+    <tr><td><a href="https://crates.io/crates/cargo-aprz">aprz</a></td><td>fails on a high-risk crate</td></tr>
     <tr><td rowspan="8"><code>pr-slow</code></td><td rowspan="3"><code>pr-test</code></td><td><a href="https://crates.io/crates/cargo-llvm-cov">llvm-cov</a></td><td>dual feature-config; gated by <a href="https://crates.io/crates/cargo-coverage-gate">cargo-coverage-gate</a></td></tr>
     <tr><td><a href="https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html">doc-test</a></td><td>runs both feature configs</td></tr>
-    <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-build.html">examples</a></td><td>compile-only (<code>--examples</code>)</td></tr>
-    <tr><td rowspan="4"><code>pr-runtime-analysis</code></td><td><a href="https://github.com/rust-lang/miri">miri</a></td><td>UB detection; <code>miri test --all-features --tests</code> (libtest)</td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-careful">careful</a></td><td>debug-instrumented std; self-cleans on a toolchain bump</td></tr>
-    <tr><td><a href="https://crates.io/crates/loom">loom</a></td><td>concurrency model checking; opt-in targets only, per-package <code>--cfg loom</code></td></tr>
-    <tr><td><a href="https://crates.io/crates/bolero">bolero</a></td><td>60s smoke fuzz per harness; Linux-only self-skip</td></tr>
-    <tr><td><code>pr-mutants</code></td><td><a href="https://mutants.rs/">mutants-diff</a></td><td>diff-scoped via <code>--in-diff</code></td></tr>
+    <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-build.html">examples</a></td><td>compile-only</td></tr>
+    <tr><td rowspan="4"><code>pr-runtime-analysis</code></td><td><a href="https://github.com/rust-lang/miri">miri</a></td><td>libtest, not nextest</td></tr>
+    <tr><td><a href="https://crates.io/crates/cargo-careful">careful</a></td><td>self-cleans on a toolchain bump</td></tr>
+    <tr><td><a href="https://crates.io/crates/loom">loom</a></td><td>opt-in targets only</td></tr>
+    <tr><td><a href="https://crates.io/crates/bolero">bolero</a></td><td>60s smoke only; Linux-only</td></tr>
+    <tr><td><code>pr-mutants</code></td><td><a href="https://mutants.rs/">mutants-diff</a></td><td>diff-scoped (<code>--in-diff</code>)</td></tr>
   </tbody>
 </table>
 
@@ -144,20 +144,20 @@ schedule against the default branch, not on PRs:
 <table>
   <thead><tr><th>Group</th><th>Check</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td rowspan="3"><code>scheduled-test</code></td><td><a href="https://crates.io/crates/cargo-llvm-cov">llvm-cov</a></td><td>as PR, whole workspace</td></tr>
-    <tr><td><a href="https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html">doc-test</a></td><td>as PR, whole workspace</td></tr>
-    <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-build.html">examples</a></td><td>as PR, whole workspace</td></tr>
+    <tr><td rowspan="3"><code>scheduled-test</code></td><td><a href="https://crates.io/crates/cargo-llvm-cov">llvm-cov</a></td><td></td></tr>
+    <tr><td><a href="https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html">doc-test</a></td><td></td></tr>
+    <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-build.html">examples</a></td><td></td></tr>
     <tr><td rowspan="4"><code>scheduled-advisories</code></td><td><a href="https://embarkstudios.github.io/cargo-deny/">deny</a></td><td rowspan="4">re-run to catch newly-published advisories / lints</td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-audit">audit</a></td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-aprz">aprz</a></td></tr>
     <tr><td><a href="https://doc.rust-lang.org/clippy/">clippy</a></td></tr>
-    <tr><td rowspan="4"><code>scheduled-runtime-analysis</code></td><td><a href="https://github.com/rust-lang/miri">miri</a></td><td>full-workspace (PR-tier miri is impact-scoped)</td></tr>
+    <tr><td rowspan="4"><code>scheduled-runtime-analysis</code></td><td><a href="https://github.com/rust-lang/miri">miri</a></td><td></td></tr>
     <tr><td><a href="https://github.com/rust-lang/miri">miri-tree-borrows</a></td><td><code>-Zmiri-tree-borrows</code></td></tr>
     <tr><td><a href="https://github.com/rust-lang/miri">miri-strict-provenance</a></td><td><code>-Zmiri-strict-provenance</code></td></tr>
-    <tr><td><a href="https://github.com/rust-lang/miri">miri-race-coverage</a></td><td>day-rotated <code>-Zmiri-many-seeds</code> window</td></tr>
-    <tr><td rowspan="3"><code>scheduled-exhaustive</code></td><td><a href="https://mutants.rs/">mutants-full</a></td><td>whole-workspace exhaustive mutation testing</td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-hack">cargo-hack</a></td><td><code>--feature-powerset --depth 2</code></td></tr>
-    <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-bench.html">bench</a></td><td>compile-only (<code>--no-run</code>)</td></tr>
+    <tr><td><a href="https://github.com/rust-lang/miri">miri-race-coverage</a></td><td>day-rotated seed window</td></tr>
+    <tr><td rowspan="3"><code>scheduled-exhaustive</code></td><td><a href="https://mutants.rs/">mutants-full</a></td><td></td></tr>
+    <tr><td><a href="https://crates.io/crates/cargo-hack">cargo-hack</a></td><td>feature powerset</td></tr>
+    <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-bench.html">bench</a></td><td>compile-only</td></tr>
   </tbody>
 </table>
 
@@ -312,7 +312,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG47ioXvyAdj7G1klV5FVTWOxG4RNuam7dv5hGxCyrtLNOYDoYWSBg2tjYXJnby1hbnZpbGUwLjEuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEGyP1SgbkjjEVG38f-NSEjzVAG1PqaH9kwF0ZGzmzzA0rX3BIYWSBg2tjYXJnby1hbnZpbGUwLjEuMGtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate
