@@ -32,6 +32,12 @@ stages:
   # stages select the right one per leg.
   - stage: impact_linux
     displayName: anvil impact (linux)
+    # Explicit empty dependency: without `dependsOn`, ADO makes a stage
+    # depend on the stage that precedes it in the file, which would make
+    # impact_windows wait for impact_linux and serialize the two impact
+    # stages. `dependsOn: []` lets both impact stages start immediately and
+    # run in parallel.
+    dependsOn: []
     jobs:
       - template: steps/job.yml
         parameters:
@@ -42,6 +48,9 @@ stages:
 
   - stage: impact_windows
     displayName: anvil impact (windows)
+    # See impact_linux: empty dependency so this runs in parallel with the
+    # Linux impact stage rather than defaulting to depend on it.
+    dependsOn: []
     jobs:
       - template: steps/job.yml
         parameters:

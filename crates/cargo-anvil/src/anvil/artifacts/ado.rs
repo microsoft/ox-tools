@@ -317,6 +317,17 @@ mod tests {
             2,
             "cobertura publish should appear once per pr_test job (linux + windows)"
         );
+        // Both impact stages must declare an explicit empty dependency so they
+        // run in parallel. Without it, ADO makes a stage depend on the one that
+        // precedes it in the file, serializing impact_windows behind
+        // impact_linux. Match the indented stage-property form (not the prose
+        // mention in the explanatory comment); expect exactly two (one per
+        // impact stage). The pr-* stages use non-empty `dependsOn: [impact_*]`.
+        assert_eq!(
+            PR_STAGES.matches("\n    dependsOn: []").count(),
+            2,
+            "both impact stages must declare `dependsOn: []` to run in parallel"
+        );
     }
 
     #[test]

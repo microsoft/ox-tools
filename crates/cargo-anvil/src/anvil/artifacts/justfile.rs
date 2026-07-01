@@ -299,6 +299,19 @@ mod tests {
         ] {
             assert!(TIERS_JUST.contains(needle), "scheduled tier must reference group '{needle}'");
         }
+        // The catch-all `anvil-setup` / `anvil-validate-prereqs` must also
+        // install / verify cargo-delta (the impact tool), so a local
+        // `just anvil-setup` provisions a complete environment even though
+        // cargo-delta isn't wired into any per-group setup.
+        assert!(
+            TIERS_JUST
+                .contains("anvil-setup installer=\"install\": (anvil-full-setup installer) (anvil-tool-cargo-delta-install installer)"),
+            "anvil-setup must install cargo-delta"
+        );
+        assert!(
+            TIERS_JUST.contains("anvil-validate-prereqs: anvil-full-validate-prereqs anvil-tool-cargo-delta-validate-prereqs"),
+            "anvil-validate-prereqs must verify cargo-delta"
+        );
     }
 
     #[test]
