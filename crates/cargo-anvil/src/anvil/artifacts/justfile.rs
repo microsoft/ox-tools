@@ -60,22 +60,58 @@ macro_rules! split_recipe_files {
 
 /// One `justfiles/anvil/checks/<check>.just` file per catalog check
 /// (the check recipe plus its paired `*-setup` / `*-validate-prereqs`).
-const CHECK_FILES: &[(&str, &str)] = split_recipe_files!("checks", [
-    "aprz", "audit", "bench", "bolero", "careful", "cargo-hack", "cargo-sort",
-    "clippy", "deny", "doc-build", "doc-test", "ensure-no-cyclic-deps",
-    "ensure-no-default-features", "examples", "external-types", "fmt",
-    "license-headers", "llvm-cov", "loom", "miri", "miri-race-coverage",
-    "miri-strict-provenance", "miri-tree-borrows", "mutants-diff", "mutants-full",
-    "pr-title", "readme-check", "semver-check", "spellcheck", "udeps",
-]);
+const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
+    "checks",
+    [
+        "aprz",
+        "audit",
+        "bench",
+        "bolero",
+        "careful",
+        "cargo-hack",
+        "cargo-sort",
+        "clippy",
+        "deny",
+        "doc-build",
+        "doc-test",
+        "ensure-no-cyclic-deps",
+        "ensure-no-default-features",
+        "examples",
+        "external-types",
+        "fmt",
+        "license-headers",
+        "llvm-cov",
+        "loom",
+        "miri",
+        "miri-race-coverage",
+        "miri-strict-provenance",
+        "miri-tree-borrows",
+        "mutants-diff",
+        "mutants-full",
+        "pr-title",
+        "readme-check",
+        "semver-check",
+        "spellcheck",
+        "udeps",
+    ]
+);
 
 /// One `justfiles/anvil/groups/<group>.just` file per group (the group
 /// recipe plus its paired `*-setup` / `*-validate-prereqs`).
-const GROUP_FILES: &[(&str, &str)] = split_recipe_files!("groups", [
-    "pr-fast", "pr-slow", "pr-test", "pr-runtime-analysis", "pr-mutants",
-    "scheduled-test", "scheduled-advisories", "scheduled-runtime-analysis",
-    "scheduled-exhaustive",
-]);
+const GROUP_FILES: &[(&str, &str)] = split_recipe_files!(
+    "groups",
+    [
+        "pr-fast",
+        "pr-slow",
+        "pr-test",
+        "pr-runtime-analysis",
+        "pr-mutants",
+        "scheduled-test",
+        "scheduled-advisories",
+        "scheduled-runtime-analysis",
+        "scheduled-exhaustive",
+    ]
+);
 
 /// Contents of `justfiles/anvil/tiers.just` baked into the binary.
 const TIERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tiers.just");
@@ -125,14 +161,14 @@ pub fn helpers() -> Artifact {
 /// per catalog check.
 #[must_use]
 pub fn check_files() -> Vec<Artifact> {
-    CHECK_FILES.iter().map(|(path, body)| Artifact::owned_file(*path, *body)).collect()
+    CHECK_FILES.iter().map(|&(path, body)| Artifact::owned_file(path, body)).collect()
 }
 
 /// The `justfiles/anvil/groups/<group>.just` files — one owned artifact
 /// per group.
 #[must_use]
 pub fn group_files() -> Vec<Artifact> {
-    GROUP_FILES.iter().map(|(path, body)| Artifact::owned_file(*path, *body)).collect()
+    GROUP_FILES.iter().map(|&(path, body)| Artifact::owned_file(path, body)).collect()
 }
 
 /// `justfiles/anvil/tiers.just` — the tier aggregators.
@@ -216,9 +252,7 @@ mod tests {
         for needle in ["anvil-pr-slow1:", "anvil-pr-slow2:", "anvil-pr-slow3:"] {
             assert!(!groups.contains(needle), "groups tree still contains stale '{needle}'");
         }
-        assert!(
-            groups.contains("anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants")
-        );
+        assert!(groups.contains("anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants"));
         // Every group recipe lists its own validate-prereqs aggregate first so
         // all tool checks run up front (just dedups the per-check ones).
         for needle in [
