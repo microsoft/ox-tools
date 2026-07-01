@@ -743,7 +743,7 @@ anvil-fmt: anvil-fmt-validate-prereqs
 #
 # Each check has matching `*-setup` and `*-validate-prereqs` recipes
 # that install / verify the tools and components it needs. The setup
-# recipes accept an `installer=install|install` parameter that
+# recipes accept an `installer=install|binstall` parameter that
 # forwards to the underlying tool-install recipes; the validate-prereqs
 # recipes take no parameters.
 #
@@ -1285,7 +1285,7 @@ anvil-pr-title: anvil-pr-title-validate-prereqs
         Write-Host 'anvil-pr-title: PR_TITLE env var not set; skipping (check runs in cloud workflows)'
         exit 0
     }
-    if ($title -notmatch '^(feat|fix|chore|docs|refactor|test|build|cloud workflows|perf|revert)(\([^)]+\))?!?: .+') {
+    if ($title -notmatch '^(feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(\([^)]+\))?!?: .+') {
         Write-Error "PR title '$title' does not match Conventional Commits"
         exit 1
     }

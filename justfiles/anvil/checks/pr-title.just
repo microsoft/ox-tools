@@ -21,7 +21,7 @@ anvil-pr-title: anvil-pr-title-validate-prereqs
         Write-Host 'anvil-pr-title: PR_TITLE env var not set; skipping (check runs in cloud workflows)'
         exit 0
     }
-    if ($title -notmatch '^(feat|fix|chore|docs|refactor|test|build|cloud workflows|perf|revert)(\([^)]+\))?!?: .+') {
+    if ($title -notmatch '^(feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(\([^)]+\))?!?: .+') {
         Write-Error "PR title '$title' does not match Conventional Commits"
         exit 1
     }

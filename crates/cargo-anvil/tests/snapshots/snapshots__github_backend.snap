@@ -1034,13 +1034,13 @@ jobs:
     # Full-workspace counterpart of pr-runtime-analysis. OS matrix
     # mirrors pr-runtime-analysis so any OS already considered "worth
     # running miri on" gets the stricter profiles (tree-borrows,
-    # strict-provenance, race-coverage) too. Each profile runs in
-    # one job: keeping them as members of one composite action would
-    # serialize them (hours per profile, days per run). The matrix
-    # gives parallelism across OS legs; the per-profile fan-out
-    # inside the composite action runs them sequentially within a
-    # leg, which is the right trade -- the profiles share toolchain
-    # setup and target/ cache.
+    # strict-provenance, race-coverage) too. One job per OS leg runs
+    # `just anvil-scheduled-runtime-analysis`, which executes all four
+    # miri profiles (base miri + the three stricter ones) sequentially
+    # within the leg. Parallelism is across OS legs, not across profiles:
+    # running the profiles sequentially lets them share toolchain setup
+    # and the target/ cache, which is the right trade given each profile
+    # already costs hours.
     strategy:
       fail-fast: false
       matrix:
@@ -1809,7 +1809,7 @@ anvil-fmt: anvil-fmt-validate-prereqs
 #
 # Each check has matching `*-setup` and `*-validate-prereqs` recipes
 # that install / verify the tools and components it needs. The setup
-# recipes accept an `installer=install|install` parameter that
+# recipes accept an `installer=install|binstall` parameter that
 # forwards to the underlying tool-install recipes; the validate-prereqs
 # recipes take no parameters.
 #
@@ -2351,7 +2351,7 @@ anvil-pr-title: anvil-pr-title-validate-prereqs
         Write-Host 'anvil-pr-title: PR_TITLE env var not set; skipping (check runs in cloud workflows)'
         exit 0
     }
-    if ($title -notmatch '^(feat|fix|chore|docs|refactor|test|build|cloud workflows|perf|revert)(\([^)]+\))?!?: .+') {
+    if ($title -notmatch '^(feat|fix|chore|docs|refactor|test|build|ci|perf|revert)(\([^)]+\))?!?: .+') {
         Write-Error "PR title '$title' does not match Conventional Commits"
         exit 1
     }

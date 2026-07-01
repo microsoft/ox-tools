@@ -20,7 +20,7 @@ anvil-fmt: anvil-fmt-validate-prereqs
 #
 # Each check has matching `*-setup` and `*-validate-prereqs` recipes
 # that install / verify the tools and components it needs. The setup
-# recipes accept an `installer=install|install` parameter that
+# recipes accept an `installer=install|binstall` parameter that
 # forwards to the underlying tool-install recipes; the validate-prereqs
 # recipes take no parameters.
 #
