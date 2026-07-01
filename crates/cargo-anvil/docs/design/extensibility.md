@@ -193,8 +193,9 @@ pub mod artifacts {
         pub fn entry() -> Artifact;     // justfiles/anvil/mod.just (imports the siblings)
         pub fn versions() -> Artifact;  // justfiles/anvil/versions.just
         pub fn tools() -> Artifact;     // justfiles/anvil/tools.just
-        pub fn checks() -> Artifact;    // justfiles/anvil/checks.just
-        pub fn groups() -> Artifact;    // justfiles/anvil/groups.just
+        pub fn helpers() -> Artifact;   // justfiles/anvil/helpers.just (shared helper recipes)
+        pub fn check_files() -> Vec<Artifact>; // justfiles/anvil/checks/<check>.just (one per check)
+        pub fn group_files() -> Vec<Artifact>; // justfiles/anvil/groups/<group>.just (one per group)
         pub fn tiers() -> Artifact;     // justfiles/anvil/tiers.just
     }
     // Managed regions spliced into user-composed host files.

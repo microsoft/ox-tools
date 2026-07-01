@@ -200,8 +200,8 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --check
 ```
 
-The same commands appear as the body of the corresponding `just` recipes in
-`justfiles/anvil/checks.just`, so they are discoverable by reading that file. The fallback
+The same commands appear as the body of the corresponding `just` recipes under
+`justfiles/anvil/checks/`, so they are discoverable by reading that check's file. The fallback
 covers core hygiene only — coverage, miri, mutants, etc. still require their respective tools.
 
 ## 6. Repo Layout

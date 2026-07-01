@@ -33,17 +33,49 @@ const TOOLS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tools.
 /// Repo-root-relative path of the tools recipe file.
 const TOOLS_JUST_PATH: &str = "justfiles/anvil/tools.just";
 
-/// Contents of `justfiles/anvil/checks.just` baked into the binary.
-const CHECKS_JUST: &str = include_str!("../../../templates/justfiles/anvil/checks.just");
+/// Contents of `justfiles/anvil/helpers.just` baked into the binary.
+///
+/// Holds the shared helper recipes (`_anvil-base-ref`,
+/// `_anvil-impact-format`) and the impact env-var contract that the
+/// per-check recipes rely on.
+const HELPERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/helpers.just");
 
-/// Repo-root-relative path of the per-check recipe file.
-const CHECKS_JUST_PATH: &str = "justfiles/anvil/checks.just";
+/// Repo-root-relative path of the shared-helpers recipe file.
+const HELPERS_JUST_PATH: &str = "justfiles/anvil/helpers.just";
 
-/// Contents of `justfiles/anvil/groups.just` baked into the binary.
-const GROUPS_JUST: &str = include_str!("../../../templates/justfiles/anvil/groups.just");
+/// Emits `(path, include_str!)` pairs for a set of split recipe files that
+/// live under a subdirectory of `justfiles/anvil/`. Each file is one owned
+/// artifact, so the recipe tree is one file per check / per group rather
+/// than a single monolithic `checks.just` / `groups.just`.
+macro_rules! split_recipe_files {
+    ($subdir:literal, [$($name:literal),* $(,)?]) => {
+        &[$(
+            (
+                concat!("justfiles/anvil/", $subdir, "/", $name, ".just"),
+                include_str!(concat!("../../../templates/justfiles/anvil/", $subdir, "/", $name, ".just")),
+            ),
+        )*]
+    };
+}
 
-/// Repo-root-relative path of the group recipe file.
-const GROUPS_JUST_PATH: &str = "justfiles/anvil/groups.just";
+/// One `justfiles/anvil/checks/<check>.just` file per catalog check
+/// (the check recipe plus its paired `*-setup` / `*-validate-prereqs`).
+const CHECK_FILES: &[(&str, &str)] = split_recipe_files!("checks", [
+    "aprz", "audit", "bench", "bolero", "careful", "cargo-hack", "cargo-sort",
+    "clippy", "deny", "doc-build", "doc-test", "ensure-no-cyclic-deps",
+    "ensure-no-default-features", "examples", "external-types", "fmt",
+    "license-headers", "llvm-cov", "loom", "miri", "miri-race-coverage",
+    "miri-strict-provenance", "miri-tree-borrows", "mutants-diff", "mutants-full",
+    "pr-title", "readme-check", "semver-check", "spellcheck", "udeps",
+]);
+
+/// One `justfiles/anvil/groups/<group>.just` file per group (the group
+/// recipe plus its paired `*-setup` / `*-validate-prereqs`).
+const GROUP_FILES: &[(&str, &str)] = split_recipe_files!("groups", [
+    "pr-fast", "pr-slow", "pr-test", "pr-runtime-analysis", "pr-mutants",
+    "scheduled-test", "scheduled-advisories", "scheduled-runtime-analysis",
+    "scheduled-exhaustive",
+]);
 
 /// Contents of `justfiles/anvil/tiers.just` baked into the binary.
 const TIERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tiers.just");
@@ -83,16 +115,24 @@ pub fn tools() -> Artifact {
     Artifact::owned_file(TOOLS_JUST_PATH, TOOLS_JUST)
 }
 
-/// `justfiles/anvil/checks.just` — the per-check recipes.
+/// `justfiles/anvil/helpers.just` — shared helper recipes + impact contract.
 #[must_use]
-pub fn checks() -> Artifact {
-    Artifact::owned_file(CHECKS_JUST_PATH, CHECKS_JUST)
+pub fn helpers() -> Artifact {
+    Artifact::owned_file(HELPERS_JUST_PATH, HELPERS_JUST)
 }
 
-/// `justfiles/anvil/groups.just` — the group recipes.
+/// The `justfiles/anvil/checks/<check>.just` files — one owned artifact
+/// per catalog check.
 #[must_use]
-pub fn groups() -> Artifact {
-    Artifact::owned_file(GROUPS_JUST_PATH, GROUPS_JUST)
+pub fn check_files() -> Vec<Artifact> {
+    CHECK_FILES.iter().map(|(path, body)| Artifact::owned_file(*path, *body)).collect()
+}
+
+/// The `justfiles/anvil/groups/<group>.just` files — one owned artifact
+/// per group.
+#[must_use]
+pub fn group_files() -> Vec<Artifact> {
+    GROUP_FILES.iter().map(|(path, body)| Artifact::owned_file(*path, *body)).collect()
 }
 
 /// `justfiles/anvil/tiers.just` — the tier aggregators.
@@ -115,8 +155,19 @@ mod tests {
         assert!(TOOLS_JUST.contains("anvil-toolchain-nightly-install"));
     }
 
+    /// All `checks/*.just` bodies concatenated, for content assertions.
+    fn all_check_bodies() -> String {
+        CHECK_FILES.iter().map(|(_, b)| *b).collect::<Vec<_>>().join("\n")
+    }
+
+    /// All `groups/*.just` bodies concatenated, for content assertions.
+    fn all_group_bodies() -> String {
+        GROUP_FILES.iter().map(|(_, b)| *b).collect::<Vec<_>>().join("\n")
+    }
+
     #[test]
     fn checks_just_template_includes_all_catalog_checks() {
+        let checks = all_check_bodies();
         for needle in [
             "anvil-fmt:",
             "anvil-clippy:",
@@ -129,12 +180,27 @@ mod tests {
             "anvil-mutants-full:",
             "anvil-bench:",
         ] {
-            assert!(CHECKS_JUST.contains(needle), "checks.just missing recipe '{needle}'");
+            assert!(checks.contains(needle), "checks tree missing recipe '{needle}'");
+        }
+    }
+
+    #[test]
+    fn each_check_file_defines_its_own_check_recipe() {
+        // The file `checks/<name>.just` must define `anvil-<name>:` -- guards
+        // against a mis-split that files a check's recipe under the wrong name.
+        for (path, body) in CHECK_FILES {
+            let stem = path
+                .strip_prefix("justfiles/anvil/checks/")
+                .and_then(|p| p.strip_suffix(".just"))
+                .expect("check file path has the expected shape");
+            let needle = format!("anvil-{stem}:");
+            assert!(body.contains(&needle), "{path} must define '{needle}'");
         }
     }
 
     #[test]
     fn groups_just_template_includes_all_groups_and_pr_slow_sub_recipes() {
+        let groups = all_group_bodies();
         for needle in [
             "anvil-pr-fast:",
             "anvil-pr-slow:",
@@ -145,13 +211,13 @@ mod tests {
             "anvil-scheduled-advisories:",
             "anvil-scheduled-exhaustive:",
         ] {
-            assert!(GROUPS_JUST.contains(needle), "groups.just missing '{needle}'");
+            assert!(groups.contains(needle), "groups tree missing '{needle}'");
         }
         for needle in ["anvil-pr-slow1:", "anvil-pr-slow2:", "anvil-pr-slow3:"] {
-            assert!(!GROUPS_JUST.contains(needle), "groups.just still contains stale '{needle}'");
+            assert!(!groups.contains(needle), "groups tree still contains stale '{needle}'");
         }
         assert!(
-            GROUPS_JUST.contains("anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants")
+            groups.contains("anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants")
         );
         // Every group recipe lists its own validate-prereqs aggregate first so
         // all tool checks run up front (just dedups the per-check ones).
@@ -166,7 +232,7 @@ mod tests {
             "anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs",
         ] {
             assert!(
-                GROUPS_JUST.contains(needle),
+                groups.contains(needle),
                 "group recipe must run its validate-prereqs first: '{needle}'"
             );
         }
@@ -216,14 +282,25 @@ mod tests {
     #[test]
     fn mod_just_imports_siblings_and_defines_alias() {
         for needle in [
-            "import 'checks.just'",
-            "import 'groups.just'",
+            "import 'helpers.just'",
+            "import 'checks/fmt.just'",
+            "import 'checks/miri.just'",
+            "import 'groups/pr-fast.just'",
+            "import 'groups/scheduled-exhaustive.just'",
             "import 'tiers.just'",
             "import 'tools.just'",
             "import 'versions.just'",
             "alias anvil := anvil-pr",
         ] {
             assert!(MOD_JUST.contains(needle), "mod.just missing '{needle}'");
+        }
+        // Every split recipe file must be imported by mod.just.
+        for (path, _) in CHECK_FILES.iter().chain(GROUP_FILES.iter()) {
+            let import = format!(
+                "import '{}'",
+                path.strip_prefix("justfiles/anvil/").expect("path under justfiles/anvil/")
+            );
+            assert!(MOD_JUST.contains(&import), "mod.just missing '{import}'");
         }
     }
 
@@ -238,15 +315,16 @@ mod tests {
 
     #[test]
     fn checks_just_has_no_floating_nightly_invocations() {
-        for line in CHECKS_JUST.lines() {
+        let checks = all_check_bodies();
+        for line in checks.lines() {
             let stripped = line.split('#').next().unwrap_or("");
             assert!(
                 !stripped.contains("+nightly "),
-                "checks.just has a floating '+nightly' invocation: {line}"
+                "checks tree has a floating '+nightly' invocation: {line}"
             );
             assert!(
                 !stripped.contains("'+nightly'"),
-                "checks.just has a floating '+nightly' invocation: {line}"
+                "checks tree has a floating '+nightly' invocation: {line}"
             );
         }
     }

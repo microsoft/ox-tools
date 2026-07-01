@@ -270,7 +270,7 @@ mod tests {
             ..Manifest::default()
         };
         m.set_file("Justfile", "sha256:aaaa");
-        m.set_file("justfiles/anvil/checks.just", "sha256:bbbb");
+        m.set_file("justfiles/anvil/checks/fmt.just", "sha256:bbbb");
         m.set_region("Cargo.toml", "anvil-workspace-lints", "sha256:cccc");
         m.set_region("Justfile", "anvil-imports", "sha256:dddd");
         m
