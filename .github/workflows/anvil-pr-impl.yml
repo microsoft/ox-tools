@@ -158,7 +158,7 @@ jobs:
         # no-ops and there is no file to upload, so we gate on the
         # impact output.
         if: matrix.os != 'windows-arm' && ((startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected != '--skip') || (matrix.os == 'windows' && needs.impact-windows.outputs.include_affected != '--skip'))
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           files: target/coverage/lcov.info
           flags: ${{ matrix.os }}
