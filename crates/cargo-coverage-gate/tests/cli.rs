@@ -198,6 +198,92 @@ fn gated_crate_with_no_data_exits_2() {
         .stdout(predicate::str::contains("no attributed coverage data"));
 }
 
+/// Write a workspace whose members carry an explicit
+/// `[package.metadata.coverage-gate]` body. Each entry is
+/// `(name, gate_body)`; an empty `gate_body` omits the block entirely.
+fn make_workspace_with_gate(dir: &Path, members: &[(&str, &str)]) {
+    let members_list = members.iter().map(|(n, _)| format!("\"{n}\"")).collect::<Vec<_>>().join(", ");
+    fs::write(
+        dir.join("Cargo.toml"),
+        format!("[workspace]\nresolver = \"2\"\nmembers = [{members_list}]\n"),
+    )
+    .expect("write workspace root Cargo.toml");
+
+    for (name, gate_body) in members {
+        let member_dir = dir.join(name);
+        fs::create_dir_all(member_dir.join("src")).expect("mkdir member src");
+        let metadata = if gate_body.is_empty() {
+            String::new()
+        } else {
+            format!("\n[package.metadata.coverage-gate]\n{gate_body}\n")
+        };
+        fs::write(
+            member_dir.join("Cargo.toml"),
+            format!(
+                r#"[package]
+name = "{name}"
+version = "0.1.0"
+edition = "2021"
+{metadata}"#
+            ),
+        )
+        .expect("write member Cargo.toml");
+        fs::write(member_dir.join("src/lib.rs"), "// empty\n").expect("write lib.rs");
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
+fn expect_no_coverable_lines_passes_with_no_data() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace_with_gate(
+        tmp.path(),
+        &[("alpha", "min-lines-percent = 80"), ("beta", "expect-no-coverable-lines = true")],
+    );
+    // Only alpha contributes coverage data; beta legitimately has none.
+    let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95)]);
+
+    coverage_gate(tmp.path())
+        .args(["--lcov", &lcov_path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("EMPTY"))
+        .stdout(predicate::str::contains("all packages meet their threshold"));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
+fn expect_no_coverable_lines_fails_when_lines_present_exits_1() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace_with_gate(
+        tmp.path(),
+        &[("alpha", "min-lines-percent = 80"), ("beta", "expect-no-coverable-lines = true")],
+    );
+    // beta declared no coverable lines but the tracefile attributes some.
+    let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 100, 95), ("beta/src/lib.rs", 5, 0)]);
+
+    coverage_gate(tmp.path())
+        .args(["--lcov", &lcov_path])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("NOT EMPTY"))
+        .stdout(predicate::str::contains("unexpected coverable lines"));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
+fn conflicting_coverage_metadata_exits_2() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace_with_gate(tmp.path(), &[("alpha", "min-lines-percent = 50\nexpect-no-coverable-lines = true")]);
+    let lcov_path = write_lcov(tmp.path(), &[("alpha/src/lib.rs", 10, 10)]);
+
+    coverage_gate(tmp.path())
+        .args(["--lcov", &lcov_path])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("cannot set both"));
+}
+
 #[test]
 #[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn package_flag_restricts_scope() {

@@ -10,9 +10,7 @@
 
 use std::io;
 
-use crate::render::{
-    count_failures, count_no_data, files, format_delta, format_lines, format_source, format_status_markdown, format_threshold, packages,
-};
+use crate::render::{files, format_delta, format_lines, format_source, format_status_markdown, format_threshold, result_summary};
 use crate::verdict::Report;
 
 /// Render `report` as a GFM table to `out`.
@@ -35,14 +33,7 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
     }
     writeln!(out)?;
 
-    let failures = count_failures(&report.outcomes);
-    let no_data = count_no_data(&report.outcomes);
-    match (failures, no_data) {
-        (0, 0) => writeln!(out, "**Result:** all packages meet their threshold.")?,
-        (n, 0) => writeln!(out, "**Result:** {} below threshold.", packages(n))?,
-        (0, n) => writeln!(out, "**Result:** {} with no attributed coverage data.", packages(n))?,
-        (f, d) => writeln!(out, "**Result:** {} below threshold, {d} with no attributed data.", packages(f))?,
-    }
+    writeln!(out, "**Result:** {}", result_summary(&report.outcomes))?;
     if report.unattributed > 0 {
         writeln!(
             out,
@@ -141,7 +132,7 @@ mod tests {
 
     #[test]
     fn renders_combined_fail_and_no_data_summary() {
-        // Exercises the `(f, d)` summary arm: a report with both a
+        // Exercises the multi-clause summary: a report with both a
         // below-threshold package and a no-data package.
         let report = Report {
             outcomes: vec![
@@ -152,9 +143,40 @@ mod tests {
         };
         let s = render_to_string(&report);
         assert!(
-            s.contains("below threshold") && s.contains("no attributed data"),
+            s.contains("below threshold") && s.contains("no attributed coverage data"),
             "expected combined summary, got:\n{s}"
         );
+    }
+
+    #[test]
+    fn renders_no_coverable_lines_with_dash_emoji() {
+        let report = Report {
+            outcomes: vec![outcome("alpha", 0, 0, 0.0, ThresholdSource::Package, Status::NoCoverableLines)],
+            unattributed: 0,
+        };
+        let s = render_to_string(&report);
+        assert!(s.contains("| ➖ |"));
+        assert!(s.contains("| (no lines) |"));
+        assert!(s.contains("all packages meet their threshold"));
+    }
+
+    #[test]
+    fn renders_unexpected_coverable_lines_with_cross_and_summary() {
+        let report = Report {
+            outcomes: vec![outcome(
+                "alpha",
+                1,
+                0,
+                0.0,
+                ThresholdSource::Package,
+                Status::UnexpectedCoverableLines,
+            )],
+            unattributed: 0,
+        };
+        let s = render_to_string(&report);
+        assert!(s.contains("| ❌ |"));
+        assert!(s.contains("| 1 line |"));
+        assert!(s.contains("1 package with unexpected coverable lines"));
     }
 
     /// Writer that returns an error the first time a write contains

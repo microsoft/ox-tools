@@ -20,7 +20,7 @@ use crate::aggregate::{LineTotals, aggregate};
 use crate::attribute::{AttributionOutcome, attribute};
 use crate::error::{CoverageGateError, UnknownPackageSelectorError};
 use crate::lcov_cov::CoverageReport;
-use crate::threshold::Threshold;
+use crate::threshold::{Threshold, ThresholdSource};
 use crate::workspace::{Member, Workspace};
 
 /// Status of a single package against its threshold.
@@ -34,6 +34,14 @@ pub(crate) enum Status {
     /// as a configuration error: a package that we asked to gate must
     /// have some test binary contributing data.
     NoData,
+    /// The package declared `expect-no-coverable-lines = true` and indeed
+    /// had no coverable lines. A passing outcome.
+    NoCoverableLines,
+    /// The package declared `expect-no-coverable-lines = true` but
+    /// coverable lines were found. Treated as a gate failure (a
+    /// regression): either the new code should be tested under a real
+    /// `min-lines-percent` floor, or it should not be there.
+    UnexpectedCoverableLines,
 }
 
 /// One row of the verdict report.
@@ -72,15 +80,16 @@ impl Report {
     /// Roll the per-package outcomes up into an overall [`Verdict`].
     ///
     /// `NoData` dominates `Fail` dominates `Ok`: any `NoData` produces
-    /// [`Verdict::ConfigError`]; otherwise any `Fail` produces
-    /// [`Verdict::Fail`]; otherwise [`Verdict::Pass`].
+    /// [`Verdict::ConfigError`]; otherwise any `Fail` or
+    /// `UnexpectedCoverableLines` produces [`Verdict::Fail`]; otherwise
+    /// [`Verdict::Pass`]. `NoCoverableLines` is a passing outcome.
     pub(crate) fn verdict(&self) -> Verdict {
         let mut has_fail = false;
         for o in &self.outcomes {
             match o.status {
                 Status::NoData => return Verdict::ConfigError,
-                Status::Fail => has_fail = true,
-                Status::Ok => {}
+                Status::Fail | Status::UnexpectedCoverableLines => has_fail = true,
+                Status::Ok | Status::NoCoverableLines => {}
             }
         }
         if has_fail { Verdict::Fail } else { Verdict::Pass }
@@ -104,8 +113,22 @@ pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_pac
         .map(|m| {
             let attrib = by_member.get(m.name.as_str()).map_or(&[][..], Vec::as_slice);
             let totals = aggregate(attrib);
-            let threshold = Threshold::resolve(m, workspace);
-            let status = classify(totals, threshold);
+            // A package that asserts it has no coverable lines is gated by
+            // that assertion, not by a numeric floor: the resolved
+            // threshold value is unused for display (the renderer
+            // special-cases the status), but the `package` source label is
+            // accurate because the assertion is always package-scoped.
+            let (threshold, status) = if m.expect_no_coverable_lines {
+                let threshold = Threshold {
+                    min_lines_percent: 0.0,
+                    source: ThresholdSource::Package,
+                };
+                (threshold, classify_no_coverable_lines(totals))
+            } else {
+                let threshold = Threshold::resolve(m, workspace);
+                let status = classify(totals, threshold);
+                (threshold, status)
+            };
             PackageOutcome {
                 name: m.name.clone(),
                 threshold,
@@ -238,6 +261,20 @@ fn round_to_displayed_precision(pct: f64) -> f64 {
     (pct * 10.0).round() / 10.0
 }
 
+/// Classify a package that declared `expect-no-coverable-lines = true`.
+///
+/// The assertion holds when no coverable lines were attributed (which
+/// includes the "no attributed files at all" case, since that yields a
+/// zero line count). Any coverable lines mean the assertion is now false
+/// — the package grew testable code — so it fails as a regression.
+fn classify_no_coverable_lines(totals: LineTotals) -> Status {
+    if totals.count == 0 {
+        Status::NoCoverableLines
+    } else {
+        Status::UnexpectedCoverableLines
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -245,7 +282,6 @@ mod tests {
 
     use super::*;
     use crate::lcov_cov::FileReport;
-    use crate::threshold::ThresholdSource;
 
     fn make_file(path: &str, count: u32, covered: u32) -> FileReport {
         FileReport {
@@ -260,6 +296,16 @@ mod tests {
             name: name.to_owned(),
             manifest_dir: PathBuf::from(manifest_dir),
             min_lines_percent,
+            expect_no_coverable_lines: false,
+        }
+    }
+
+    fn make_member_expect_empty(name: &str, manifest_dir: &str) -> Member {
+        Member {
+            name: name.to_owned(),
+            manifest_dir: PathBuf::from(manifest_dir),
+            min_lines_percent: None,
+            expect_no_coverable_lines: true,
         }
     }
 
@@ -554,6 +600,91 @@ mod tests {
             source: ThresholdSource::Package,
         };
         assert_eq!(classify(totals, threshold), Status::NoData);
+    }
+
+    #[test]
+    fn classify_no_coverable_lines_passes_when_empty() {
+        // The genuinely-empty crate: no attributed files (or files with
+        // zero coverable lines) satisfies the assertion.
+        assert_eq!(
+            classify_no_coverable_lines(LineTotals { count: 0, covered: 0 }),
+            Status::NoCoverableLines
+        );
+    }
+
+    #[test]
+    fn classify_no_coverable_lines_fails_when_lines_appear() {
+        // Any coverable line — even a fully-covered one — violates the
+        // "no coverable lines" assertion.
+        assert_eq!(
+            classify_no_coverable_lines(LineTotals { count: 1, covered: 1 }),
+            Status::UnexpectedCoverableLines
+        );
+        assert_eq!(
+            classify_no_coverable_lines(LineTotals { count: 10, covered: 0 }),
+            Status::UnexpectedCoverableLines
+        );
+    }
+
+    #[test]
+    fn expect_no_coverable_lines_crate_with_no_data_passes() {
+        // End-to-end: a crate declaring no coverable lines, with no
+        // attributed data, passes — and does not trip the NoData config
+        // error that a normal gated crate would.
+        let report = make_report(vec![make_file("/repo/crates/alpha/src/lib.rs", 100, 95)]);
+        let ws = make_workspace(
+            vec![
+                make_member("alpha", "/repo/crates/alpha", Some(80.0)),
+                make_member_expect_empty("beta", "/repo/crates/beta"),
+            ],
+            None,
+        );
+        let r = evaluate(&report, &ws, &[]).expect("evaluate");
+        assert_eq!(r.verdict(), Verdict::Pass);
+        let beta = r.outcomes.iter().find(|o| o.name == "beta").unwrap();
+        assert_eq!(beta.status, Status::NoCoverableLines);
+        assert_eq!(beta.threshold.source, ThresholdSource::Package);
+        // The assertion path stores a fixed, never-displayed sentinel
+        // threshold; pin it so a mutated literal is caught.
+        assert!((beta.threshold.min_lines_percent - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn expect_no_coverable_lines_crate_with_lines_fails() {
+        // A crate that declared no coverable lines but actually has some
+        // fails the gate (exit 1), not a config error.
+        let report = make_report(vec![
+            make_file("/repo/crates/alpha/src/lib.rs", 100, 95),
+            make_file("/repo/crates/beta/src/lib.rs", 5, 0),
+        ]);
+        let ws = make_workspace(
+            vec![
+                make_member("alpha", "/repo/crates/alpha", Some(80.0)),
+                make_member_expect_empty("beta", "/repo/crates/beta"),
+            ],
+            None,
+        );
+        let r = evaluate(&report, &ws, &[]).expect("evaluate");
+        assert_eq!(r.verdict(), Verdict::Fail);
+        let beta = r.outcomes.iter().find(|o| o.name == "beta").unwrap();
+        assert_eq!(beta.status, Status::UnexpectedCoverableLines);
+    }
+
+    #[test]
+    fn no_data_dominates_unexpected_coverable_lines() {
+        // NoData (config error, exit 2) must dominate a gate failure.
+        let report = make_report(vec![make_file("/repo/crates/beta/src/lib.rs", 5, 0)]);
+        let ws = make_workspace(
+            vec![
+                // alpha is gated with a normal floor but has no data.
+                make_member("alpha", "/repo/crates/alpha", Some(80.0)),
+                // beta declared empty but has lines -> UnexpectedCoverableLines.
+                make_member_expect_empty("beta", "/repo/crates/beta"),
+            ],
+            None,
+        );
+        let r = evaluate(&report, &ws, &[]).expect("evaluate");
+        assert_eq!(r.verdict(), Verdict::ConfigError);
     }
 
     #[test]
