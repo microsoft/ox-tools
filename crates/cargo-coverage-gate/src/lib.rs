@@ -24,7 +24,14 @@
 //!    root `Cargo.toml`, or
 //! 3. The built-in default of `100.0` — full coverage required.
 //!
-//! Setting `min-lines-percent = 0.0` explicitly opts a package out of gating.
+//! Setting `min-lines-percent = 0.0` explicitly opts a package out of
+//! gating (it always passes, regardless of attributed data). A package
+//! that legitimately contains no coverable lines (pure re-exports, type
+//! definitions, a thin binary shim) instead declares
+//! `expect-no-coverable-lines = true`: the gate passes only while that
+//! holds and fails — as a regression — if coverable lines later appear.
+//! The two keys are mutually exclusive, and `expect-no-coverable-lines`
+//! is package-scoped only.
 //!
 //! ## Why lcov, not the JSON?
 //!

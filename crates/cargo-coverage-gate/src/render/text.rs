@@ -5,9 +5,7 @@
 
 use std::io;
 
-use crate::render::{
-    count_failures, count_no_data, files, format_delta, format_lines, format_source, format_status_text, format_threshold, packages,
-};
+use crate::render::{files, format_delta, format_lines, format_source, format_status_text, format_threshold, result_summary};
 use crate::verdict::Report;
 
 const HEADERS: [&str; 6] = ["Package", "Lines", "Threshold", "Δ vs threshold", "Status", "Source"];
@@ -49,14 +47,7 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
     }
     write_separator(out, &widths)?;
 
-    let failures = count_failures(&report.outcomes);
-    let no_data = count_no_data(&report.outcomes);
-    match (failures, no_data) {
-        (0, 0) => writeln!(out, "Result: all packages meet their threshold.")?,
-        (n, 0) => writeln!(out, "Result: {} below threshold.", packages(n))?,
-        (0, n) => writeln!(out, "Result: {} with no attributed coverage data.", packages(n))?,
-        (f, d) => writeln!(out, "Result: {} below threshold, {d} with no attributed data.", packages(f))?,
-    }
+    writeln!(out, "Result: {}", result_summary(&report.outcomes))?;
     if report.unattributed > 0 {
         writeln!(
             out,
@@ -192,7 +183,40 @@ mod tests {
             unattributed: 0,
         };
         let s = render_to_string(&report);
-        assert!(s.contains("1 package below threshold, 1 with no attributed data"));
+        assert!(s.contains("1 package below threshold, 1 package with no attributed coverage data"));
+    }
+
+    #[test]
+    fn renders_no_coverable_lines_row() {
+        // A package asserting (and having) no coverable lines renders as a
+        // passing EMPTY row with dashes in the numeric columns.
+        let report = Report {
+            outcomes: vec![outcome("alpha", 0, 0, 0.0, ThresholdSource::Package, Status::NoCoverableLines)],
+            unattributed: 0,
+        };
+        let s = render_to_string(&report);
+        assert!(s.contains("EMPTY"));
+        assert!(s.contains("(no lines)"));
+        assert!(s.contains("all packages meet their threshold"));
+    }
+
+    #[test]
+    fn renders_unexpected_coverable_lines_row_and_summary() {
+        let report = Report {
+            outcomes: vec![outcome(
+                "alpha",
+                7,
+                0,
+                0.0,
+                ThresholdSource::Package,
+                Status::UnexpectedCoverableLines,
+            )],
+            unattributed: 0,
+        };
+        let s = render_to_string(&report);
+        assert!(s.contains("NOT EMPTY"));
+        assert!(s.contains("7 lines"));
+        assert!(s.contains("1 package with unexpected coverable lines"));
     }
 
     #[test]

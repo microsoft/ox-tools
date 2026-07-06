@@ -40,6 +40,7 @@ backends
 backoff
 backtrace
 backtraces
+boolean
 Barbosa
 Base64-encoded
 binstall
@@ -88,6 +89,7 @@ clippy
 clonable
 cobertura
 codebase
+coverable
 codebases
 Codecov
 Codecov's

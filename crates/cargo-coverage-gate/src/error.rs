@@ -31,6 +31,9 @@ use serde_json::Value;
     LoadMetadataError,
     InvalidThresholdValueError,
     ThresholdOutOfRangeError,
+    InvalidNoCoverableLinesValueError,
+    ConflictingCoverageMetadataError,
+    WorkspaceScopedNoCoverableLinesError,
     ParseLcovError,
     ReadLcovError,
     UnknownPackageSelectorError
@@ -65,6 +68,39 @@ pub(crate) struct ThresholdOutOfRangeError {
     pub lower: f64,
     pub upper: f64,
 }
+
+/// The `coverage-gate.expect-no-coverable-lines` key was present in
+/// metadata but its value was not a JSON boolean.
+#[ohno::error]
+#[display("{source}: `coverage-gate.expect-no-coverable-lines` must be a boolean, got {value}")]
+pub(crate) struct InvalidNoCoverableLinesValueError {
+    pub source: String,
+    pub value: Value,
+}
+
+/// A package set both `coverage-gate.min-lines-percent` and
+/// `coverage-gate.expect-no-coverable-lines = true`. The two are
+/// mutually exclusive: a numeric floor describes code that should be
+/// covered, while the assertion declares there is no coverable code at
+/// all.
+#[ohno::error]
+#[display(
+    "{source}: `coverage-gate` cannot set both `min-lines-percent` and \
+     `expect-no-coverable-lines`; pick one"
+)]
+pub(crate) struct ConflictingCoverageMetadataError {
+    pub source: String,
+}
+
+/// `coverage-gate.expect-no-coverable-lines` was set in
+/// `[workspace.metadata.coverage-gate]`. The assertion is about a single
+/// package's contents, so it is only meaningful per-package.
+#[ohno::error]
+#[display(
+    "`coverage-gate.expect-no-coverable-lines` is a package-level assertion and \
+     cannot be set in `[workspace.metadata.coverage-gate]`"
+)]
+pub(crate) struct WorkspaceScopedNoCoverableLinesError;
 
 /// An lcov tracefile was syntactically malformed.
 #[ohno::error]
@@ -124,5 +160,32 @@ mod tests {
         assert!(rendered.contains("150"));
         assert!(rendered.contains("alpha"));
         assert!(rendered.contains("0.0..=100.0"));
+    }
+
+    #[test]
+    fn invalid_no_coverable_lines_value_renders_source_and_value() {
+        let err = InvalidNoCoverableLinesValueError::new("alpha".to_owned(), Value::from("yes"));
+        let rendered = err.to_string();
+        assert!(rendered.contains("alpha"));
+        assert!(rendered.contains("expect-no-coverable-lines"));
+        assert!(rendered.contains("boolean"));
+        assert!(rendered.contains("yes"));
+    }
+
+    #[test]
+    fn conflicting_coverage_metadata_renders_source() {
+        let err = ConflictingCoverageMetadataError::new("alpha".to_owned());
+        let rendered = err.to_string();
+        assert!(rendered.contains("alpha"));
+        assert!(rendered.contains("min-lines-percent"));
+        assert!(rendered.contains("expect-no-coverable-lines"));
+    }
+
+    #[test]
+    fn workspace_scoped_no_coverable_lines_mentions_workspace() {
+        let err = WorkspaceScopedNoCoverableLinesError::new();
+        let rendered = err.to_string();
+        assert!(rendered.contains("expect-no-coverable-lines"));
+        assert!(rendered.contains("workspace.metadata.coverage-gate"));
     }
 }
