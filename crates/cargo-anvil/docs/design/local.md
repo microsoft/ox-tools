@@ -25,13 +25,19 @@ repo/
     │                       `alias anvil := anvil-pr`. The user's Justfile
     │                       region pulls in this single file; everything else is
     │                       reached transitively.
-    ├── checks.just         per-check recipes (anvil-fmt, anvil-clippy, anvil-llvm-cov, …).
-    │                       Starts with `set unstable` (needed for the `[script("pwsh")]`
-    │                       attribute on `anvil-pr-title`).
-    ├── groups.just         group recipes (anvil-pr-fast, anvil-pr-test,
-    │                       anvil-pr-runtime-analysis, anvil-pr-mutants, anvil-scheduled-test, …)
-    │                       plus a convenience `anvil-pr-slow` umbrella that
-    │                       invokes the three pr-slow* sub-recipes sequentially.
+    ├── helpers.just        shared helper recipes (_anvil-base-ref,
+    │                       _anvil-impact-format) and the impact env-var contract
+    │                       that the per-check recipes rely on.
+    ├── checks/             one file per check: checks/<check>.just holds the
+    │                       `anvil-<check>` recipe plus its paired `*-setup` and
+    │                       `*-validate-prereqs` recipes (anvil-fmt, anvil-clippy,
+    │                       anvil-llvm-cov, anvil-miri, …).
+    ├── groups/             one file per group: groups/<group>.just holds the
+    │                       `anvil-<group>` recipe plus its `*-setup` /
+    │                       `*-validate-prereqs` (anvil-pr-fast, anvil-pr-test,
+    │                       anvil-pr-runtime-analysis, anvil-pr-mutants,
+    │                       anvil-scheduled-test, …). `anvil-pr-slow` is a
+    │                       convenience umbrella over the three pr-slow sub-groups.
     ├── tiers.just          tier aggregators (anvil-pr, anvil-scheduled, anvil-full).
     ├── tools.just          tool/component/toolchain install + validate-prereqs recipes,
     │                       plus anvil-system-deps-check and anvil-validate-prereqs.
@@ -50,9 +56,9 @@ imported `.just` files. The alias `anvil := anvil-pr` lives in `mod.just`, not i
 the user's `Justfile`, so renaming or retargeting the alias is a template update with
 no managed-region churn.
 
-Recipes in `groups.just`, `tiers.just`, and `checks.just` that actually *run* checks
+Recipes in the `groups/`, `tiers.just`, and `checks/` files that actually *run* checks
 are annotated with `[group("anvil")]`. The install/validate-prereqs/setup recipes
-in `tools.just` (and the per-check/group/tier setup recipes appended to the other
+in `tools.just` (and the per-check/group/tier setup recipes colocated in the same
 files) are annotated with `[group("anvil-setup")]`. `just --groups` therefore shows
 two clean clusters: one for "run checks", one for "install prereqs".
 
@@ -61,9 +67,10 @@ two clean clusters: one for "run checks", one for "install prereqs".
 `justfiles/anvil/` is structured to make all three levels (check, group, tier) addressable
 from the command line.
 
-### checks.just
+### checks/
 
-One recipe per individual check, each named `anvil-<check>`. Recipes are usually a single
+One file per individual check, `checks/<check>.just`, defining `anvil-<check>` (plus its
+paired `*-setup` / `*-validate-prereqs`). Recipes are usually a single
 `cargo …` line; a handful (license-headers, ensure-no-cyclic-deps,
 ensure-no-default-features, pr-title, the bench smoke loop) are short `[script]` blocks.
 Every check recipe depends on its `*-validate-prereqs` recipe:
@@ -81,9 +88,10 @@ confirm the tool meets the catalog's pin. Missing or below-pin tools fail with a
 one-line install hint pointing at the matching `anvil-tool-<name>-install` recipe.
 The cost is a handful of cheap lookups per check, well under a second on a warm cache.
 
-### groups.just
+### groups/
 
-One recipe per cloud-workflow-visible group, named `anvil-<tier>-<group>`. The check-recipe and group-recipe
+One file per cloud-workflow-visible group, `groups/<group>.just`, defining
+`anvil-<tier>-<group>`. The check-recipe and group-recipe
 namespaces are kept disjoint by naming choice: no check is named `<tier>-<group>` for
 any tier × group combination (e.g. the coverage-instrumented test check is named
 `llvm-cov`, not `test`, so that group names like `anvil-pr-test` unambiguously refer to a group recipe).
@@ -393,9 +401,10 @@ such env vars, one per cargo-delta tier:
 | `ANVIL_INCLUDE_REQUIRED`  | required  | Same semantics as `ANVIL_INCLUDE_AFFECTED`, but consumed by recipes that need transitive dep graph in scope (doc-build, cargo-hack, udeps). |
 
 Each var holds either the literal sentinel `--skip` (the tier is empty for this PR), or
-a pre-built argument string like `--package alpha --package beta`. The cloud-workflow wiring sets
-exactly one form; local invocations leave the vars unset, and recipes fall back to
-`--workspace`.
+a pre-built argument string like `--package alpha@1.0.0 --package beta@0.2.0` (version-qualified
+cargo specs, so `-p` resolves uniquely even against a like-named transitive dependency). The
+cloud-workflow wiring sets exactly one form; local invocations leave the vars unset, and recipes
+fall back to `--workspace`.
 
 A typical affected-tier recipe:
 
@@ -479,8 +488,8 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 cargo fmt --check
 ```
 
-The same commands appear as the body of the corresponding `just` recipes in
-`justfiles/anvil/checks.just`, so they are discoverable by reading that file. The fallback
+The same commands appear as the body of the corresponding `just` recipes under
+`justfiles/anvil/checks/`, so they are discoverable by reading that check's file. The fallback
 covers core hygiene only — coverage, miri, mutants, etc. still require their respective
 tools.
 

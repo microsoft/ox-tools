@@ -126,18 +126,23 @@ flowchart LR
     sched_impl[".github/workflows/<br/>anvil-scheduled-impl.yml<br/>(reusable workflow_call)"]:::impl
     stest_job["scheduled-test<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     sadv_job["scheduled-advisories<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
+    srun_job["scheduled-runtime-analysis<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     sexh_job["scheduled-exhaustive<br/>matrix: linux, windows"]:::job
     stest_setup[".github/actions/<br/>anvil-setup"]:::action
     sadv_setup[".github/actions/<br/>anvil-setup"]:::action
+    srun_setup[".github/actions/<br/>anvil-setup"]:::action
     sexh_setup[".github/actions/<br/>anvil-setup"]:::action
     stest_act[".github/actions/<br/>anvil-scheduled-test"]:::action
     sadv_act[".github/actions/<br/>anvil-scheduled-advisories"]:::action
+    srun_act[".github/actions/<br/>anvil-scheduled-runtime-analysis"]:::action
     sexh_act[".github/actions/<br/>anvil-scheduled-exhaustive"]:::action
     codecov_act["codecov/codecov-action@v5"]:::external
     stest_just["just anvil-scheduled-test"]:::recipe
     stest_setup_just["just anvil-setup"]:::recipe
     sadv_just["just anvil-scheduled-advisories"]:::recipe
     sadv_setup_just["just anvil-setup"]:::recipe
+    srun_just["just anvil-scheduled-runtime-analysis"]:::recipe
+    srun_setup_just["just anvil-setup"]:::recipe
     sexh_just["just anvil-scheduled-exhaustive"]:::recipe
     sexh_setup_just["just anvil-setup"]:::recipe
 
@@ -187,6 +192,7 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 │   ├── anvil-pr-mutants/action.yml      owned
 │   ├── anvil-scheduled-test/action.yml  owned
 │   ├── anvil-scheduled-advisories/action.yml  owned
+│   ├── anvil-scheduled-runtime-analysis/action.yml  owned
 │   └── anvil-scheduled-exhaustive/action.yml  owned
 └── workflows/
     ├── anvil-pr-impl.yml              owned   (reusable workflow doing the wiring)
@@ -357,11 +363,17 @@ empty matrices that GitHub Actions silently treats as "no legs to run") without
 meaningfully expanding what adopters could customize — anyone who wants to change
 the OS axis is almost certainly making other changes too.
 
-The wiring never gates whole jobs on impact output. Each group always runs; recipes
-inside the group decide whether a given check no-ops, by testing for the literal sentinel
-`--skip` in the relevant include var. This matters because unscoped checks (`fmt`, `deny`,
-`audit`, `aprz`, `pr-title`, `mutants-full`) must run on every PR, including docs-only
-PRs where every tier comes back `--skip`. See
+The pr-* jobs gate on the impact jobs *succeeding*: their `needs: [impact-linux,
+impact-windows]` uses GitHub's default behavior, so if an impact job fails the pr-*
+jobs are skipped and the run fails at impact (we add no `if: always()` / `if:
+!cancelled()` override that would let them run anyway). This keeps a broken impact a
+blocking failure rather than leaving the run green with a lone red impact job.
+
+The wiring never branches on impact's *output values*, though. When impact succeeds,
+each group always runs; recipes inside the group decide whether a given check no-ops,
+by testing for the literal sentinel `--skip` in the relevant include var. This matters
+because unscoped checks (`fmt`, `deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
+must run on every PR, including docs-only PRs where every tier comes back `--skip`. See
 [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars) for the recipe-side
 contract.
 
@@ -543,14 +555,15 @@ runs:
 3. `cargo delta impact --base $base_ref --format json` once, capturing the JSON tier
    sets in a single invocation.
 4. For each of the three tiers (`modified`, `affected`, `required`), format the crate
-   list into a pre-built `--package X --package Y …` string, or emit the sentinel
-   `--skip` when the tier is empty.
+   list into a pre-built `--package X@ver --package Y@ver …` string (version-qualified
+   cargo specs, so `-p` resolves uniquely even when a like-named transitive dependency
+   exists), or emit the sentinel `--skip` when the tier is empty.
 
 Outputs:
 
 | Output             | Meaning                                                                                                                                                                |
 |--------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `include_modified` | `--package X --package Y …` for cargo-delta's `modified` tier, or `--skip` when empty.                                                                                  |
+| `include_modified` | `--package X@ver --package Y@ver …` for cargo-delta's `modified` tier, or `--skip` when empty.                                                                          |
 | `include_affected` | Same shape, for the `affected` tier (modified ∪ workspace rev-deps).                                                                                                    |
 | `include_required` | Same shape, for the `required` tier (affected ∪ workspace-internal transitive deps).                                                                                    |
 

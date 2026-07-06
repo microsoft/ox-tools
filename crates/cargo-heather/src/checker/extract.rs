@@ -86,3 +86,19 @@ pub(super) fn script_header(content: &str, style: CommentStyle) -> Option<String
     }
     collect_comment_block(lines, style)
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn script_header_returns_none_when_second_line_is_not_dash() {
+        // Shebang present but the second line isn't the `---` frontmatter
+        // opener, so there is no script header to extract.
+        assert_eq!(
+            script_header("#!/usr/bin/env cargo\nnot-dashes\n// c\n", CommentStyle::DoubleSlash),
+            None
+        );
+    }
+}

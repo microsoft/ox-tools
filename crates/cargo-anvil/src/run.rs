@@ -6,7 +6,7 @@
 //! Orchestrates: workspace discovery, manifest load, backend resolution,
 //! emitter invocation, plan accumulation, and final apply/summarize.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
 use ohno::{AppError, bail};
@@ -17,12 +17,12 @@ use crate::catalog::Catalog;
 use crate::catalog::artifact::{Artifact, HostSelector, RegionSpec};
 use crate::checksum::checksum_str;
 use crate::cli::Cli;
-use crate::decision::{Decision, decide_removal};
+use crate::decision::{Decision, RemovalDecision, decide_removal};
 use crate::emit::{plan_managed_region, plan_owned_file};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
-use crate::region::{CommentSyntax, find_region, remove_region};
+use crate::region::{CommentSyntax, find_region, remove_region, upsert_region};
 use crate::workspace::{self, Workspace};
 
 /// Outcome of an `update` invocation.
@@ -45,6 +45,7 @@ pub struct RunOutcome {
 /// # Errors
 ///
 /// Returns an error when the underlying update flow fails.
+#[cfg_attr(coverage_nightly, coverage(off))]
 #[mutants::skip] // Thin process-boundary glue (cwd lookup, stdout print, `std::process::exit`); behavior covered by `run_update` tests which exercise every dispatch path.
 pub fn run(catalog: &Catalog, cli: &Cli) -> Result<(), AppError> {
     let outcome = run_update(catalog, cli, &std::env::current_dir()?)?;
@@ -151,6 +152,7 @@ fn build_plan(
     catalog: &Catalog,
 ) -> Result<Plan, AppError> {
     let mut plan = Plan::default();
+    let mut hosts = HostTextCache::default();
 
     for artifact in catalog.artifacts() {
         match artifact {
@@ -162,14 +164,121 @@ fn build_plan(
                 }
             }
             Artifact::Region(spec) => {
-                push_region(repo_root, workspace, manifest, &mut plan, spec)?;
+                push_region(repo_root, workspace, manifest, &mut plan, &mut hosts, spec)?;
             }
         }
     }
 
-    plan_removals(repo_root, manifest, &mut plan)?;
+    plan_removals(repo_root, manifest, &mut plan, &mut hosts)?;
+
+    // Region proposals are computed eagerly as each region is visited, so a
+    // `Propose` planned before a sibling `Write`/`Remove` on the same host
+    // captures a stale host (missing the later update). The accumulator is
+    // fully composed now, so re-splice every proposal against it.
+    recompose_region_proposals(repo_root, &mut plan, &mut hosts)?;
 
     Ok(plan)
+}
+
+/// Re-splice every region `Propose` item's `.anvil-proposed` payload against
+/// the *final* composed host text — the in-memory host after all `Write` and
+/// region `Remove` operations for that host have been folded into the
+/// accumulator.
+///
+/// Proposals are planned eagerly as each region is visited (see
+/// [`push_region_at`]), so a proposal computed before a sibling `Write` or
+/// region `Remove` on the same host would otherwise capture a stale host
+/// (missing the later update). Applying such a proposal via
+/// `mv <host>.anvil-proposed <host>` would silently revert those sibling
+/// updates. Re-splicing here guarantees the proposed sibling is composed on
+/// top of every applied region update in the run, honoring `updates.md`'s
+/// "ready-to-use" proposal guarantee.
+///
+/// When several regions on one host propose, each proposal's new body is
+/// spliced on top of the others' too, so every proposal for the host (which
+/// all share the single `<host>.anvil-proposed` path) converges on the same
+/// fully-updated content instead of the last write clobbering the rest.
+fn recompose_region_proposals(repo_root: &Path, plan: &mut Plan, hosts: &mut HostTextCache) -> Result<(), AppError> {
+    // First pass: collect each region `Propose`'s (index, id, rendered body),
+    // grouped by host and preserving first-seen host order so the
+    // recomposition is deterministic.
+    let mut hosts_in_order: Vec<String> = Vec::new();
+    let mut grouped: HashMap<String, Vec<(usize, String, String)>> = HashMap::new();
+    for (idx, item) in plan.items().iter().enumerate() {
+        let Target::Region { host, id } = &item.target else {
+            continue;
+        };
+        if item.decision != Decision::Propose {
+            continue;
+        }
+        let body = item.rendered.clone().expect("region Propose carries its rendered body");
+        if !grouped.contains_key(host) {
+            hosts_in_order.push(host.clone());
+        }
+        grouped.entry(host.clone()).or_default().push((idx, id.clone(), body));
+    }
+
+    for host in &hosts_in_order {
+        let entries = &grouped[host];
+        let Some(mut composed) = hosts.get_or_read(repo_root, host)? else {
+            // Host file vanished (external race during the run); keep the
+            // eagerly-computed proposals rather than dropping them.
+            continue;
+        };
+        // Build the fully-updated host = final live host with every proposed
+        // region's new body spliced in. CommentSyntax is currently always
+        // Hash for managed regions (mirrors plan_managed_region /
+        // plan_removals); revisit when the manifest records per-region syntax.
+        for (_, id, body) in entries {
+            composed = upsert_region(&composed, id, body, CommentSyntax::Hash)?;
+        }
+        // Stamp the composed host onto every proposal for this host.
+        for (idx, _, _) in entries {
+            plan.items_mut()[*idx].spliced_host = Some(composed.clone());
+        }
+    }
+    Ok(())
+}
+
+/// In-memory accumulator of host-file text, shared across every region
+/// (and region removal) targeting the same host file within one planning
+/// pass.
+///
+/// Several managed regions can target a single host file — for example the
+/// `[advisories]`, `[licenses]`, `[bans]`, and `[sources]` sections of
+/// `deny.toml`. Planning each region against the original on-disk text and
+/// then writing each region's full spliced host back would make the last
+/// write overwrite the others (and, for a brand-new file, lose every region
+/// but the last). Instead, the first region to touch a host seeds the
+/// cache from disk; every subsequent region splices against — and, when it
+/// writes, updates — the accumulated in-memory text, so the composed
+/// result preserves every region. See `updates.md §4`.
+#[derive(Default)]
+struct HostTextCache {
+    texts: HashMap<String, Option<String>>,
+}
+
+impl HostTextCache {
+    /// The current in-memory text for `host`, reading from disk on first
+    /// access. `None` means the host file does not (yet) exist on disk and
+    /// no in-memory write has created it.
+    fn get_or_read(&mut self, repo_root: &Path, host: &str) -> Result<Option<String>, AppError> {
+        if let Some(text) = self.texts.get(host) {
+            return Ok(text.clone());
+        }
+        let text = read_file_if_present(&repo_root.join(host))?;
+        self.texts.insert(host.to_owned(), text.clone());
+        Ok(text)
+    }
+
+    /// Record the host text that results from splicing a region in or out
+    /// in memory, so later regions targeting the same host compose on top
+    /// of it. Only operations that change the host file on disk (`Write`,
+    /// region `Remove`) update the cache; proposals leave the live host
+    /// untouched and so must not.
+    fn set(&mut self, host: &str, text: String) {
+        self.texts.insert(host.to_owned(), Some(text));
+    }
 }
 
 /// Dispatch one managed-region artifact into the plan, expanding its host
@@ -181,25 +290,31 @@ fn build_plan(
 /// - [`HostSelector::WorkspaceCargoToml`] / [`HostSelector::SingleCrateCargoToml`]
 ///   — the root `Cargo.toml`, gated on whether it declares a `[workspace]`
 ///   table.
-fn push_region(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, plan: &mut Plan, spec: &RegionSpec) -> Result<(), AppError> {
-    let id = spec.id.as_str();
+fn push_region(
+    repo_root: &Path,
+    workspace: &Workspace,
+    manifest: &Manifest,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+    spec: &RegionSpec,
+) -> Result<(), AppError> {
     match &spec.host {
         HostSelector::Path(path) => {
-            push_region_at(repo_root, manifest, plan, path, id, &spec.body, spec.syntax)?;
+            push_region_at(repo_root, manifest, plan, hosts, path, spec)?;
         }
         HostSelector::WorkspaceCargoToml => {
             if workspace.has_workspace_table {
-                push_region_at(repo_root, manifest, plan, "Cargo.toml", id, &spec.body, spec.syntax)?;
+                push_region_at(repo_root, manifest, plan, hosts, "Cargo.toml", spec)?;
             }
         }
         HostSelector::SingleCrateCargoToml => {
             if !workspace.has_workspace_table {
-                push_region_at(repo_root, manifest, plan, "Cargo.toml", id, &spec.body, spec.syntax)?;
+                push_region_at(repo_root, manifest, plan, hosts, "Cargo.toml", spec)?;
             }
         }
         HostSelector::EachMemberManifest => {
             for member in &workspace.members {
-                push_region_at(repo_root, manifest, plan, &member.manifest_relpath, id, &spec.body, spec.syntax)?;
+                push_region_at(repo_root, manifest, plan, hosts, &member.manifest_relpath, spec)?;
             }
         }
     }
@@ -208,29 +323,47 @@ fn push_region(repo_root: &Path, workspace: &Workspace, manifest: &Manifest, pla
 
 /// Plan one managed region at a single host, resolving the host's on-disk
 /// casing first.
+///
+/// The region is planned against the host's *accumulated* in-memory text
+/// (see [`HostTextCache`]), so a region composes on top of any earlier
+/// region already spliced into the same host this pass. When the decision
+/// writes, the spliced result is fed back into the cache so the next
+/// region targeting this host builds on it instead of re-reading the
+/// original disk state.
 fn push_region_at(
     repo_root: &Path,
     manifest: &Manifest,
     plan: &mut Plan,
+    hosts: &mut HostTextCache,
     host: &str,
-    id: &str,
-    body: &str,
-    syntax: crate::region::CommentSyntax,
+    spec: &RegionSpec,
 ) -> Result<(), AppError> {
     let host = resolve_existing_case_insensitive(repo_root, host);
-    plan.push(plan_managed_region(repo_root, manifest, &host, id, body, syntax)?);
+    let current = hosts.get_or_read(repo_root, &host)?;
+    let item = plan_managed_region(manifest, &host, current.as_deref(), spec.id.as_str(), &spec.body, spec.syntax)?;
+    // Only a `Write` mutates the live host on disk; fold its spliced
+    // output back into the accumulator so sibling regions compose. A
+    // `Propose` writes a sibling, not the host, so it must not advance the
+    // live host text.
+    if item.decision == Decision::Write
+        && let Some(spliced) = &item.spliced_host
+    {
+        hosts.set(&host, spliced.clone());
+    }
+    plan.push(item);
     Ok(())
 }
 
 /// Scan the previous manifest for entries that the active plan items
-/// don't cover. For each, classify as Remove (user untouched since the
-/// last render) or `OrphanedKept` (user customized — preserve and
-/// transfer ownership).
+/// don't cover. For each, classify as `Remove` (user untouched since the
+/// last render, or the file is already gone — the manifest entry is
+/// purged and the disk delete is a no-op when absent) or `OrphanedKept`
+/// (user customized — preserve and transfer ownership).
 ///
 /// This is what removes orphaned cloud-workflow artifacts, dropped catalog entries,
 /// disabled-backend files, and any other previously-tracked item that
 /// is no longer in scope.
-fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan) -> Result<(), AppError> {
+fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan, hosts: &mut HostTextCache) -> Result<(), AppError> {
     let live_files: BTreeSet<String> = plan
         .items()
         .iter()
@@ -255,12 +388,18 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan) -> Resu
         let disk = read_file_if_present(&repo_root.join(path))?;
         let disk_checksum = disk.as_deref().map(checksum_str);
         match decide_removal(last, disk_checksum.as_deref()) {
-            Decision::Remove => plan.push(PlanItem::remove_file(path.clone())),
-            // `InSync` means the file is already gone but we still want
-            // to purge the manifest entry, same as a customized orphan —
-            // both surface as no-op plan items that drop the entry.
-            Decision::OrphanedKept | Decision::InSync => plan.push(PlanItem::orphaned_kept(Target::File { path: path.clone() })),
-            other => unreachable!("decide_removal returned {other:?} for a file orphan"),
+            // A file still matching its last render is safe to delete; an
+            // `AlreadyGone` file is removed too -- there is nothing on disk,
+            // so `remove_file`'s NotFound-idempotent apply is a no-op, while
+            // the summary accurately reports a removal (purging the stale
+            // manifest entry) instead of a misleading "customized orphan"
+            // transfer.
+            RemovalDecision::Remove | RemovalDecision::AlreadyGone => plan.push(PlanItem::remove_file(path.clone())),
+            // User customized the file since the last render: leave it in
+            // place and drop the manifest entry to transfer ownership.
+            RemovalDecision::OrphanedKept => {
+                plan.push(PlanItem::orphaned_kept(Target::File { path: path.clone() }));
+            }
         }
     }
 
@@ -268,8 +407,7 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan) -> Resu
         if live_regions.contains(&(key.host.clone(), key.id.clone())) {
             continue;
         }
-        let host_path = repo_root.join(&key.host);
-        let Some(host_text) = read_file_if_present(&host_path)? else {
+        let Some(host_text) = hosts.get_or_read(repo_root, &key.host)? else {
             // Host file is gone entirely; just drop the manifest
             // entry. Emit OrphanedKept (no-op apply) so the plan
             // can record the transfer of ownership consistently.
@@ -287,17 +425,21 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan) -> Resu
         let region = find_region(&host_text, &key.id, syntax)?;
         let body_checksum = region.as_ref().map(|r| checksum_str(r.body_str()));
         match decide_removal(last, body_checksum.as_deref()) {
-            Decision::Remove => {
+            RemovalDecision::Remove => {
+                // Splice against — and update — the accumulated host text
+                // so a removal composes with the writes already planned
+                // for this host this pass instead of clobbering them
+                // (their item is applied earlier; this one, later).
                 let spliced = remove_region(&host_text, &key.id, syntax)?;
+                hosts.set(&key.host, spliced.clone());
                 plan.push(PlanItem::remove_region(key.host.clone(), key.id.clone(), spliced));
             }
-            Decision::OrphanedKept | Decision::InSync => {
+            RemovalDecision::OrphanedKept | RemovalDecision::AlreadyGone => {
                 plan.push(PlanItem::orphaned_kept(Target::Region {
                     host: key.host.clone(),
                     id: key.id.clone(),
                 }));
             }
-            other => unreachable!("decide_removal returned {other:?} for a region orphan"),
         }
     }
 
@@ -305,6 +447,7 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan) -> Resu
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
 
@@ -379,8 +522,11 @@ mod tests {
         for expected in [
             "Justfile",
             "justfiles/anvil/mod.just",
-            "justfiles/anvil/checks.just",
-            "justfiles/anvil/groups.just",
+            "justfiles/anvil/helpers.just",
+            "justfiles/anvil/checks/fmt.just",
+            "justfiles/anvil/checks/miri.just",
+            "justfiles/anvil/groups/pr-fast.just",
+            "justfiles/anvil/groups/scheduled-exhaustive.just",
             "justfiles/anvil/tiers.just",
             "justfiles/anvil/tools.just",
             "justfiles/anvil/versions.just",
@@ -730,6 +876,7 @@ mod tests {
             ".github/actions/anvil-pr-mutants/action.yml",
             ".github/actions/anvil-scheduled-test/action.yml",
             ".github/actions/anvil-scheduled-advisories/action.yml",
+            ".github/actions/anvil-scheduled-runtime-analysis/action.yml",
             ".github/actions/anvil-scheduled-exhaustive/action.yml",
             ".github/workflows/anvil-pr-impl.yml",
             ".github/workflows/anvil-scheduled-impl.yml",
@@ -782,6 +929,7 @@ mod tests {
             ".pipelines/anvil/steps/pr-mutants.yml",
             ".pipelines/anvil/steps/scheduled-test.yml",
             ".pipelines/anvil/steps/scheduled-advisories.yml",
+            ".pipelines/anvil/steps/scheduled-runtime-analysis.yml",
             ".pipelines/anvil/steps/scheduled-exhaustive.yml",
             ".pipelines/anvil/pr.yml",
             ".pipelines/anvil/scheduled.yml",
@@ -908,6 +1056,327 @@ mod tests {
             fs::read_to_string(&github_workflow).unwrap(),
             "# user edited this\n",
             "customized orphan contents must be preserved"
+        );
+    }
+
+    /// A previously-tracked owned file that is already missing on disk must
+    /// surface as `Remove` (purging the stale manifest entry), not as a
+    /// "customized orphan" transfer -- there is no content to keep. The
+    /// apply stays a disk no-op because `remove_file` absorbs `NotFound`.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn already_gone_orphan_file_surfaces_as_remove() {
+        use crate::decision::Decision;
+
+        let tmp = empty_workspace();
+        let with_gh = Cli {
+            backends: vec!["github".to_owned()],
+            no_backends: false,
+            dry_run: false,
+            force: false,
+        };
+        let _ = run_update(&Catalog::anvil(), &with_gh, tmp.path()).unwrap();
+
+        // Delete a tracked owned file so it is "already gone" on the next
+        // run while still present in the manifest.
+        let github_workflow = tmp.path().join(".github/workflows/anvil-pr.yml");
+        fs::remove_file(&github_workflow).unwrap();
+
+        let no_be = Cli {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+            force: false,
+        };
+        let second = run_update(&Catalog::anvil(), &no_be, tmp.path()).unwrap();
+
+        let classify = |decision: Decision| -> Vec<String> {
+            second
+                .plan
+                .items()
+                .iter()
+                .filter(|i| i.decision == decision)
+                .filter_map(|i| match &i.target {
+                    crate::plan::Target::File { path } => Some(path.clone()),
+                    crate::plan::Target::Region { .. } => None,
+                })
+                .collect()
+        };
+        let removed = classify(Decision::Remove);
+        let kept = classify(Decision::OrphanedKept);
+        assert!(
+            removed.iter().any(|p| p == ".github/workflows/anvil-pr.yml"),
+            "already-gone orphan must surface as Remove; got removed={removed:?}"
+        );
+        assert!(
+            !kept.iter().any(|p| p == ".github/workflows/anvil-pr.yml"),
+            "already-gone orphan must NOT be reported as a customized-orphan transfer; got kept={kept:?}"
+        );
+    }
+
+    /// Direct unit test of `plan_removals` for a region orphan whose host
+    /// file no longer exists: it must surface as `OrphanedKept` (drop the
+    /// manifest entry, no disk action).
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn plan_removals_region_orphan_with_missing_host() {
+        use crate::decision::Decision;
+
+        let tmp = TempDir::new().unwrap();
+        let mut previous = Manifest::default();
+        previous.set_region("Justfile", "anvil-r", "sha256:body");
+        let mut plan = Plan::default();
+        plan_removals(tmp.path(), &previous, &mut plan, &mut HostTextCache::default()).unwrap();
+        let orphans: Vec<(&str, &str)> = plan
+            .items()
+            .iter()
+            .filter(|i| i.decision == Decision::OrphanedKept)
+            .filter_map(|i| match &i.target {
+                Target::Region { host, id } => Some((host.as_str(), id.as_str())),
+                Target::File { .. } => None,
+            })
+            .collect();
+        assert_eq!(orphans, vec![("Justfile", "anvil-r")]);
+    }
+
+    /// Direct unit test of `plan_removals` for a region orphan whose host
+    /// file exists with a customized (checksum-diverged) region body: it
+    /// must surface as `OrphanedKept`, preserving the user's edits.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn plan_removals_region_orphan_customized_is_kept() {
+        use crate::decision::Decision;
+
+        let tmp = TempDir::new().unwrap();
+        write(
+            &tmp.path().join("Justfile"),
+            "# >>> anvil-managed: anvil-r\nuser edited body\n# <<< anvil-managed: anvil-r\n",
+        );
+        let mut previous = Manifest::default();
+        // Stored checksum deliberately differs from the on-disk body, so
+        // decide_removal classifies the region as a customized orphan.
+        previous.set_region("Justfile", "anvil-r", "sha256:stored-different");
+        let mut plan = Plan::default();
+        plan_removals(tmp.path(), &previous, &mut plan, &mut HostTextCache::default()).unwrap();
+        let orphans: Vec<(&str, &str)> = plan
+            .items()
+            .iter()
+            .filter(|i| i.decision == Decision::OrphanedKept)
+            .filter_map(|i| match &i.target {
+                Target::Region { host, id } => Some((host.as_str(), id.as_str())),
+                Target::File { .. } => None,
+            })
+            .collect();
+        assert_eq!(orphans, vec![("Justfile", "anvil-r")]);
+        // Host file untouched.
+        assert!(
+            fs::read_to_string(tmp.path().join("Justfile"))
+                .unwrap()
+                .contains("user edited body"),
+            "customized region body must be preserved",
+        );
+    }
+
+    /// A catalog with two managed regions targeting the same host file —
+    /// the shape that `deny.toml`'s per-section split uses. Built on the
+    /// `anvil` identity so the single-tool guard stays satisfied.
+    fn two_region_catalog(host: &str, id_a: &str, body_a: &str, id_b: &str, body_b: &str) -> Catalog {
+        use crate::catalog::CliMeta;
+        use crate::catalog::artifact::RegionId;
+
+        let region = |id: &'static str, body: &str| {
+            Artifact::region(RegionSpec {
+                host: HostSelector::Path(host.to_owned()),
+                id: RegionId::new(id),
+                body: body.to_owned(),
+                syntax: CommentSyntax::Hash,
+            })
+        };
+        // Leak the ids so RegionId (which holds &'static str) can borrow
+        // them; this is test-only setup.
+        let id_a: &'static str = Box::leak(id_a.to_owned().into_boxed_str());
+        let id_b: &'static str = Box::leak(id_b.to_owned().into_boxed_str());
+        Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(region(id_a, body_a))
+            .with_artifact(region(id_b, body_b))
+            .build()
+            .unwrap()
+    }
+
+    /// Two managed regions targeting one not-yet-existing host file must
+    /// both land in the composed result — the second write must not
+    /// overwrite the first. This is the core bug the in-memory host-text
+    /// accumulator fixes.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn two_regions_in_one_host_compose_on_fresh_file() {
+        let tmp = empty_workspace();
+        let catalog = two_region_catalog("shared.toml", "anvil-sec-a", "a = 1\n", "anvil-sec-b", "b = 2\n");
+
+        let outcome = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+        assert!(outcome.applied);
+
+        let shared = fs::read_to_string(tmp.path().join("shared.toml")).unwrap();
+        assert!(
+            shared.contains("# >>> anvil-managed: anvil-sec-a"),
+            "first region present:\n{shared}"
+        );
+        assert!(shared.contains("a = 1"), "first body present:\n{shared}");
+        assert!(
+            shared.contains("# >>> anvil-managed: anvil-sec-b"),
+            "second region present:\n{shared}"
+        );
+        assert!(shared.contains("b = 2"), "second body present:\n{shared}");
+
+        // Steady state: both regions are now tracked, so a re-run is a no-op.
+        let second = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+        assert!(!second.plan.has_changes(), "second run should be idempotent");
+    }
+
+    /// Splitting one region into several on the same host (the `deny.toml`
+    /// migration): the old combined region is removed while the new
+    /// per-section regions are written, all in one host. The removal must
+    /// compose with the writes — not overwrite them.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn splitting_a_region_removes_old_and_keeps_new_in_one_host() {
+        use crate::catalog::CliMeta;
+        use crate::catalog::artifact::RegionId;
+
+        let tmp = empty_workspace();
+
+        // First run: a single combined region on shared.toml.
+        let combined = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::region(RegionSpec {
+                host: HostSelector::Path("shared.toml".to_owned()),
+                id: RegionId::new("anvil-combined"),
+                body: "a = 1\nb = 2\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .build()
+            .unwrap();
+        assert!(run_update(&combined, &local_only(), tmp.path()).unwrap().applied);
+
+        // Second run: the combined region is gone from the catalog,
+        // replaced by two per-section regions on the same host.
+        let split = two_region_catalog("shared.toml", "anvil-sec-a", "a = 1\n", "anvil-sec-b", "b = 2\n");
+        let outcome = run_update(&split, &local_only(), tmp.path()).unwrap();
+        assert!(outcome.applied);
+
+        let shared = fs::read_to_string(tmp.path().join("shared.toml")).unwrap();
+        assert!(
+            !shared.contains("anvil-managed: anvil-combined"),
+            "old combined region must be spliced out:\n{shared}"
+        );
+        assert!(shared.contains("anvil-managed: anvil-sec-a"), "new region a kept:\n{shared}");
+        assert!(shared.contains("anvil-managed: anvil-sec-b"), "new region b kept:\n{shared}");
+        assert!(
+            shared.contains("a = 1") && shared.contains("b = 2"),
+            "both new bodies kept:\n{shared}"
+        );
+
+        // And the migration settles: a re-run with the split catalog is a no-op.
+        let third = run_update(&split, &local_only(), tmp.path()).unwrap();
+        assert!(!third.plan.has_changes(), "post-split run should be idempotent");
+    }
+
+    /// A region `Propose` (the user customized that region) planned *before*
+    /// a sibling `Write` on the same host must still produce a
+    /// `.anvil-proposed` sibling composed on top of that later write.
+    /// Otherwise the eagerly-spliced proposal captures a stale host and
+    /// `mv shared.toml.anvil-proposed shared.toml` would silently revert the
+    /// sibling region's update.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn region_proposal_is_recomposed_against_sibling_writes_on_same_host() {
+        let tmp = empty_workspace();
+        let host = tmp.path().join("shared.toml");
+
+        // Run 1: seed both regions (anvil-sec-a is ordered before anvil-sec-b).
+        let v1 = two_region_catalog("shared.toml", "anvil-sec-a", "a = \"v1\"\n", "anvil-sec-b", "b = \"v1\"\n");
+        assert!(run_update(&v1, &local_only(), tmp.path()).unwrap().applied);
+
+        // User customizes region a on disk, so next run classifies a as Propose.
+        let cur = fs::read_to_string(&host).unwrap();
+        let customized = upsert_region(&cur, "anvil-sec-a", "a = \"USER\"\n", CommentSyntax::Hash).unwrap();
+        fs::write(&host, &customized).unwrap();
+
+        // Run 2: both region templates move. a -> Propose (user-edited),
+        // b -> Write (untouched). a is planned first, so without the
+        // recomposition pass its proposal is computed before b's write folds
+        // into the host.
+        let v2 = two_region_catalog("shared.toml", "anvil-sec-a", "a = \"v2\"\n", "anvil-sec-b", "b = \"v2\"\n");
+        assert!(run_update(&v2, &local_only(), tmp.path()).unwrap().applied);
+
+        // Live host: a keeps the user's content; b is updated to v2.
+        let live = fs::read_to_string(&host).unwrap();
+        assert!(live.contains("a = \"USER\""), "user's region a preserved live:\n{live}");
+        assert!(live.contains("b = \"v2\""), "sibling region b written live:\n{live}");
+
+        // Proposed sibling: must carry BOTH a's proposed v2 AND b's new v2
+        // (not the stale v1), so applying it doesn't revert b.
+        let proposed = fs::read_to_string(tmp.path().join("shared.toml.anvil-proposed")).unwrap();
+        assert!(proposed.contains("a = \"v2\""), "proposal applies a's update:\n{proposed}");
+        assert!(
+            proposed.contains("b = \"v2\""),
+            "proposal composed on top of b's write:\n{proposed}"
+        );
+        assert!(!proposed.contains("b = \"v1\""), "stale sibling content must be gone:\n{proposed}");
+    }
+
+    /// When several regions on one host propose, every proposal converges on
+    /// the same fully-updated `<host>.anvil-proposed` content (each proposed
+    /// body composed on top of the others), rather than last-writer-wins.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn recompose_converges_multiple_proposals_on_one_host() {
+        let tmp = TempDir::new().unwrap();
+        let host = "deny.toml";
+        // Final live host carries both regions at the user's content.
+        let final_live = "# >>> anvil-managed: a\nUSER a\n# <<< anvil-managed: a\n\
+             # >>> anvil-managed: b\nUSER b\n# <<< anvil-managed: b\n"
+            .to_owned();
+        let mut hosts = HostTextCache::default();
+        hosts.set(host, final_live);
+
+        let mut plan = Plan::default();
+        // Two proposals on the same host with deliberately stale payloads.
+        plan.push(PlanItem::propose_region(host, "a", "NEW a\n".into(), "stale-a".into(), "sa".into()));
+        plan.push(PlanItem::propose_region(host, "b", "NEW b\n".into(), "stale-b".into(), "sb".into()));
+
+        recompose_region_proposals(tmp.path(), &mut plan, &mut hosts).unwrap();
+
+        let p0 = plan.items()[0].spliced_host.as_deref().unwrap();
+        let p1 = plan.items()[1].spliced_host.as_deref().unwrap();
+        assert_eq!(p0, p1, "both proposals must converge on the same fully-updated host");
+        assert!(p0.contains("NEW a") && p0.contains("NEW b"), "every proposed body present:\n{p0}");
+    }
+
+    /// If a Propose item's host file vanished mid-run (external race), the
+    /// recomposition pass leaves the eagerly-computed proposal untouched
+    /// rather than dropping it.
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn recompose_skips_when_host_file_is_absent() {
+        let tmp = TempDir::new().unwrap();
+        let mut plan = Plan::default();
+        let stale = "eagerly computed proposal\n".to_owned();
+        plan.push(PlanItem::propose_region(
+            "gone.toml",
+            "anvil-x",
+            "body\n".into(),
+            stale.clone(),
+            "sum".into(),
+        ));
+
+        // Empty cache + no file on disk -> get_or_read returns None.
+        let mut hosts = HostTextCache::default();
+        recompose_region_proposals(tmp.path(), &mut plan, &mut hosts).unwrap();
+
+        assert_eq!(
+            plan.items()[0].spliced_host.as_deref(),
+            Some(stale.as_str()),
+            "vanished host leaves the proposal as-is"
         );
     }
 }

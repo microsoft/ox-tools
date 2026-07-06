@@ -35,19 +35,26 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
         justfile::entry(),
         justfile::tools(),
         justfile::versions(),
-        justfile::checks(),
-        justfile::groups(),
+        justfile::helpers(),
         justfile::tiers(),
         region::justfile_imports(),
         region::workspace_lints(),
         region::single_crate_lints(),
         region::member_lints(),
-        region::deny(),
+        region::deny_advisories(),
+        region::deny_licenses(),
+        region::deny_bans(),
+        region::deny_sources(),
         region::rustfmt(),
         region::delta(),
         region::spellcheck(),
         region::clippy(),
+        region::gitattributes(),
     ];
+
+    // One owned file per check and per group (the split recipe tree).
+    out.extend(justfile::check_files());
+    out.extend(justfile::group_files());
 
     // Backend files (gated); both backends present, filtered by gate at plan time.
     out.extend(github::all());
@@ -57,6 +64,7 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::catalog::Catalog;
@@ -70,18 +78,21 @@ mod tests {
             justfile::entry(),
             justfile::versions(),
             justfile::tools(),
-            justfile::checks(),
-            justfile::groups(),
+            justfile::helpers(),
             justfile::tiers(),
             region::justfile_imports(),
             region::workspace_lints(),
             region::single_crate_lints(),
             region::member_lints(),
-            region::deny(),
+            region::deny_advisories(),
+            region::deny_licenses(),
+            region::deny_bans(),
+            region::deny_sources(),
             region::rustfmt(),
             region::delta(),
             region::spellcheck(),
             region::clippy(),
+            region::gitattributes(),
             github::setup_action(),
             github::impact_action(),
             github::pr_impl_workflow(),
@@ -94,6 +105,8 @@ mod tests {
             ado::job_wrapper(),
             ado::pr_stages(),
             ado::scheduled_stages(),
+            ado::custom_pr_stages(),
+            ado::custom_scheduled_stages(),
             ado::pr_root_pipeline(),
             ado::scheduled_root_pipeline(),
         ];
@@ -103,6 +116,10 @@ mod tests {
 
         for artifact in github::all().iter().chain(ado::all().iter()) {
             assert!(present(artifact), "backend artifact is not in Catalog::anvil(): {artifact:?}");
+        }
+
+        for artifact in justfile::check_files().iter().chain(justfile::group_files().iter()) {
+            assert!(present(artifact), "split recipe file is not in Catalog::anvil(): {artifact:?}");
         }
     }
 }

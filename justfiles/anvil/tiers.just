@@ -7,7 +7,7 @@
 # into two groups so the fast checks aren't blocked behind the slow
 # ones in cloud workflows.
 [group("anvil")]
-anvil-pr: \
+anvil-pr: anvil-pr-validate-prereqs \
     anvil-pr-fast \
     anvil-pr-slow
 
@@ -16,14 +16,15 @@ anvil-pr: \
 # exhaustive checks that don't fit in a PR budget. Runs on a schedule
 # against `main`, not on PRs.
 [group("anvil")]
-anvil-scheduled: \
+anvil-scheduled: anvil-scheduled-validate-prereqs \
     anvil-scheduled-test \
     anvil-scheduled-advisories \
+    anvil-scheduled-runtime-analysis \
     anvil-scheduled-exhaustive
 
 # Full tier: PR + scheduled, end-to-end. Useful before tagging a release.
 [group("anvil")]
-anvil-full: \
+anvil-full: anvil-full-validate-prereqs \
     anvil-pr \
     anvil-scheduled
 
@@ -53,12 +54,14 @@ anvil-pr-validate-prereqs: \
 anvil-scheduled-setup installer="install": \
     (anvil-scheduled-test-setup installer) \
     (anvil-scheduled-advisories-setup installer) \
+    (anvil-scheduled-runtime-analysis-setup installer) \
     (anvil-scheduled-exhaustive-setup installer)
 
 [group("anvil-setup")]
 anvil-scheduled-validate-prereqs: \
     anvil-scheduled-test-validate-prereqs \
     anvil-scheduled-advisories-validate-prereqs \
+    anvil-scheduled-runtime-analysis-validate-prereqs \
     anvil-scheduled-exhaustive-validate-prereqs
 
 [group("anvil-setup")]
@@ -74,8 +77,17 @@ anvil-full-validate-prereqs: \
 # Global aliases. `anvil-setup` (no suffix) installs everything the
 # catalog knows about; `anvil-validate-prereqs` verifies every tool
 # and component is present at or above its pinned version.
+#
+# These also install / verify cargo-delta, the impact-analysis tool.
+# cargo-delta is only invoked by the cloud-workflow impact step (not by
+# any check), so it is deliberately NOT part of the per-group / per-tier
+# setup recipes -- a CI group job installs only what its checks need, and
+# the impact step installs cargo-delta itself. But the catch-all
+# `anvil-setup` is "install everything the catalog knows about", so it
+# includes cargo-delta too (a local `just anvil-setup` then provisions a
+# complete environment, impact tool included).
 [group("anvil-setup")]
-anvil-setup installer="install": (anvil-full-setup installer)
+anvil-setup installer="install": (anvil-full-setup installer) (anvil-tool-cargo-delta-install installer)
 
 [group("anvil-setup")]
-anvil-validate-prereqs: anvil-full-validate-prereqs
+anvil-validate-prereqs: anvil-full-validate-prereqs anvil-tool-cargo-delta-validate-prereqs

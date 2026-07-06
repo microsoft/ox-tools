@@ -108,8 +108,11 @@ fn single_crate_emits_crate_lints_and_justfiles() {
         "Justfile",
         "justfiles/anvil/mod.just",
         "justfiles/anvil/tools.just",
-        "justfiles/anvil/checks.just",
-        "justfiles/anvil/groups.just",
+        "justfiles/anvil/helpers.just",
+        "justfiles/anvil/checks/fmt.just",
+        "justfiles/anvil/checks/miri.just",
+        "justfiles/anvil/groups/pr-fast.just",
+        "justfiles/anvil/groups/scheduled-exhaustive.just",
         "justfiles/anvil/tiers.just",
         "justfiles/anvil/versions.just",
     ] {

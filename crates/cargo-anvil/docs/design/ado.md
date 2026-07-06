@@ -128,17 +128,22 @@ flowchart LR
     stest_s["stage: scheduled_test<br/>linux + windows jobs"]:::stage
     sadv_s["stage: scheduled_advisories<br/>linux + windows jobs"]:::stage
     sexh_s["stage: scheduled_exhaustive<br/>linux + windows jobs"]:::stage
+    srun_s["stage: scheduled_runtime_analysis<br/>linux + windows jobs"]:::stage
     stest_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     sadv_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
+    srun_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     sexh_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
     stest_step[".pipelines/anvil/<br/>steps/scheduled-test.yml"]:::step
     sadv_step[".pipelines/anvil/<br/>steps/scheduled-advisories.yml"]:::step
+    srun_step[".pipelines/anvil/<br/>steps/scheduled-runtime-analysis.yml"]:::step
     sexh_step[".pipelines/anvil/<br/>steps/scheduled-exhaustive.yml"]:::step
     publish_coverage["PublishCodeCoverageResults@2"]:::external
     stest_just["just anvil-scheduled-test"]:::recipe
     stest_setup_just["just anvil-setup"]:::recipe
     sadv_just["just anvil-scheduled-advisories"]:::recipe
     sadv_setup_just["just anvil-setup"]:::recipe
+    srun_just["just anvil-scheduled-runtime-analysis"]:::recipe
+    srun_setup_just["just anvil-setup"]:::recipe
     sexh_just["just anvil-scheduled-exhaustive"]:::recipe
     sexh_setup_just["just anvil-setup"]:::recipe
 
@@ -146,6 +151,7 @@ flowchart LR
     sched_root -. extends .-> sched_stages
     sched_stages --> stest_s
     sched_stages --> sadv_s
+    sched_stages --> srun_s
     sched_stages --> sexh_s
 
     stest_s ==> stest_step
@@ -188,6 +194,12 @@ Note the ADO topology differs from GitHub Actions in two places:
 └── anvil/
     ├── pr.yml                      owned   (PR-tier stages template)
     ├── scheduled.yml               owned   (scheduled-tier stages template)
+    ├── custom-pr-stages.yml        owned-but-user-customizable
+    │                                   (empty stub; add your own PR-tier
+    │                                    stages here -- see §3.1)
+    ├── custom-scheduled-stages.yml owned-but-user-customizable
+    │                                   (empty stub; add your own
+    │                                    scheduled-tier stages here)
     └── steps/
         ├── setup.yml               owned   (install just + catalog tools)
         ├── impact.yml              owned   (cargo-delta impact step; omitted if .delta.toml disabled)
@@ -202,6 +214,7 @@ Note the ADO topology differs from GitHub Actions in two places:
         ├── pr-mutants.yml            owned
         ├── scheduled-test.yml        owned
         ├── scheduled-advisories.yml  owned
+        ├── scheduled-runtime-analysis.yml  owned
         └── scheduled-exhaustive.yml  owned
 ```
 
@@ -233,6 +246,10 @@ stages:
   parameters:
     linuxPool:   { vmImage: ubuntu-latest }
     windowsPool: { vmImage: windows-latest }
+- template: anvil/custom-pr-stages.yml
+  parameters:
+    linuxPool:   { vmImage: ubuntu-latest }
+    windowsPool: { vmImage: windows-latest }
 ```
 
 The scheduled root pipeline adds a schedule:
@@ -254,12 +271,37 @@ stages:
   parameters:
     linuxPool:   { vmImage: ubuntu-latest }
     windowsPool: { vmImage: windows-latest }
+- template: anvil/custom-scheduled-stages.yml
+  parameters:
+    linuxPool:   { vmImage: ubuntu-latest }
+    windowsPool: { vmImage: windows-latest }
 ```
 
 The schedule lists both `main` and `master` so adopters using either canonical-branch
 name get coverage out of the box. ADO matches each entry against existing branches; an
 entry that matches nothing contributes nothing, so a repo using only `main` runs the
 schedule exactly once per cron tick.
+
+### 3.1 Custom stages extension point
+
+Some repos need their own stages — a deploy stage, a compliance gate, a downstream
+trigger — without forking the anvil-owned root pipeline or stages template. Each root
+pipeline therefore references a per-tier **`custom-*-stages.yml`** after the anvil
+stages:
+
+- `.pipelines/anvil/custom-pr-stages.yml` — runs in the PR pipeline.
+- `.pipelines/anvil/custom-scheduled-stages.yml` — runs on the schedule.
+
+anvil emits each as an empty `stages: []` stub that declares the `linuxPool` /
+`windowsPool` parameters the root passes (so custom stages can reuse the same pools).
+Because the overall pipeline already carries the anvil stages, an empty custom stub is
+valid — it simply contributes nothing until the adopter fills it in. These files are
+**owned-but-user-customizable** like `steps/job.yml`: once edited, the dirty-file flow
+takes over (anvil Proposes into a `.proposed` sibling rather than overwriting), so a
+repo's custom stages survive subsequent `cargo anvil` runs while the anvil-owned root and
+stages templates keep tracking upstream changes. ADO runs stages sequentially by default,
+so a custom stage depends on the preceding anvil stage unless it sets `dependsOn`
+explicitly.
 
 For an internal/compliance pipeline, the user replaces their root pipeline with one that
 extends 1ESPT/SubstratePT and passes anvil's stages template as the stages parameter,
@@ -429,7 +471,9 @@ stages:
   - stage: pr_fast
     displayName: anvil pr-fast
     dependsOn: impact
-    condition: succeededOrFailed()
+    # Gate on impact via the default succeeded() condition (no explicit
+    # `condition:`). A failed impact stage skips pr-* and fails the pipeline,
+    # rather than leaving it green with a lone red impact stage.
     variables:
       include_modified: $[ stageDependencies.impact.compute.outputs['compute.include_modified'] ]
       include_affected: $[ stageDependencies.impact.compute.outputs['compute.include_affected'] ]
@@ -457,10 +501,19 @@ stages:
   # run as independent parallel stages.
 ```
 
-The wiring never gates jobs on impact output. Each group always runs; recipes inside
-the group decide whether a given check no-ops by testing for the literal sentinel
-`--skip` in the relevant include var. This matters because unscoped checks (`fmt`,
-`deny`, `audit`, `aprz`, `pr-title`, `mutants-full`) must run on every PR. See
+The pr-* stages gate on the impact stage *succeeding* (the default `succeeded()`
+condition on their `dependsOn: impact`): if impact fails, pr-* are skipped and the
+pipeline fails at impact. This is deliberate — using `succeededOrFailed()` would let
+pr-* run on a failed impact, leaving the pipeline green with a single red impact
+stage and misleading reviewers into investigating a "failure" while every actual
+check is green. Treating impact as a gate turns a broken impact into an unambiguous,
+blocking failure.
+
+The wiring never branches on impact's *output values*, though. When impact succeeds,
+each group always runs; recipes inside the group decide whether a given check no-ops
+by testing for the literal sentinel `--skip` in the relevant include var. This matters
+because unscoped checks (`fmt`, `deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
+must run on every PR. See
 [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars) for the recipe-side
 contract.
 
@@ -492,9 +545,6 @@ buckets) is a pure catalog change.
 ```yaml
 # .pipelines/anvil/steps/pr-fast.yml  (owned by cargo-anvil)
 parameters:
-- name: prTitle
-  type: string
-  default: $(System.PullRequest.Title)
 - name: includeModified
   type: string
   default: ""
@@ -506,10 +556,22 @@ parameters:
   default: ""
 steps:
 - template: setup.yml
+# ADO has no PR-title predefined variable (System.PullRequest.Title does
+# not exist), so resolve it from the REST API on PR builds and publish it
+# as PR_TITLE. Best-effort: empty on non-PR / fork / API failure, in which
+# case anvil-pr-title skips.
+- pwsh: |
+    $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
+    if (-not $prId) { Write-Host '##vso[task.setvariable variable=PR_TITLE]'; exit 0 }
+    $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
+    try { $r = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }; Write-Host "##vso[task.setvariable variable=PR_TITLE]$($r.title)" }
+    catch { Write-Host '##vso[task.setvariable variable=PR_TITLE]' }
+  env:
+    SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 - script: just anvil-pr-fast
   displayName: anvil pr-fast
   env:
-    PR_TITLE: ${{ parameters.prTitle }}
+    PR_TITLE: $(PR_TITLE)
     ANVIL_INCLUDE_MODIFIED: ${{ parameters.includeModified }}
     ANVIL_INCLUDE_AFFECTED: ${{ parameters.includeAffected }}
     ANVIL_INCLUDE_REQUIRED: ${{ parameters.includeRequired }}
@@ -527,7 +589,7 @@ Per-group additions (only where the group consumes PR-context strings the recipe
 
 | Template                  | Extra parameters                                                        |
 |---------------------------|-------------------------------------------------------------------------|
-| `pr-fast.yml`             | `prTitle` (default `$(System.PullRequest.Title)`)                       |
+| `pr-fast.yml`             | `prTitle` (resolved from the REST API; ADO has no PR-title variable)     |
 | `pr-mutants.yml`            | `prBaseRef` (default `$(System.PullRequest.TargetBranch)`)              |
 | `pr-test.yml`, `pr-runtime-analysis.yml`, `scheduled-*.yml` | —                                                                       |
 
