@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
-tool_version = "0.2.0"
-catalog_checksum = "sha256:a08fd1d3b2d01f9be1f14129271d6fce693a6e5196dbc333408bc11c6a4a1193"
+tool_version = "0.2.1"
+catalog_checksum = "sha256:2b4592a1adbb3257b627a65f8507f8f7645245cd3ab64ad04a5db378246f7f12"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"
@@ -133,7 +133,7 @@ checksum = "sha256:f1afc18f8f4279b8cfcd8b4c9ba81fa96620b4d90ea7519a4811e0cb38855
 
 [[file]]
 path = "justfiles/anvil/checks/loom.just"
-checksum = "sha256:fa8bb122d6345f0bc986aba42e187627ec2d39728216109e87cbd25d3cfa6326"
+checksum = "sha256:43e94dd10601d7ad69d1af7f7d4bc6e549a0fa5088fa26fdb7df2d17928edd31"
 
 [[file]]
 path = "justfiles/anvil/checks/miri-race-coverage.just"
