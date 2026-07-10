@@ -705,7 +705,6 @@ runs:
           ~/.cargo/.crates.toml
           ~/.cargo/.crates2.json
           target/
-          target/
 
 === .github/workflows/anvil-pr-impl.yml ===
 # Copyright (c) Microsoft Corporation.
