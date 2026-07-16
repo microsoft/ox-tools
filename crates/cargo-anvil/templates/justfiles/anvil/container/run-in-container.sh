@@ -33,13 +33,13 @@ target_volume="anvil-target-${repo_id}-${image_id:0:12}"
 ANVIL_CONTAINER_BUILD_ARGS=()
 ANVIL_CONTAINER_RUN_ARGS=()
 ANVIL_CONTAINER_CLEANUP=:
+cleanup() { "$ANVIL_CONTAINER_CLEANUP"; }
+trap cleanup EXIT
+
 if [[ -f "$script_dir/auth.sh" ]]; then
     # shellcheck source=/dev/null
     source "$script_dir/auth.sh"
 fi
-
-cleanup() { "$ANVIL_CONTAINER_CLEANUP"; }
-trap cleanup EXIT
 
 if ! podman image exists "$image"; then
     if [[ "${ANVIL_CONTAINER_NO_REBUILD:-}" == "1" ]]; then
@@ -56,7 +56,7 @@ if ! podman image exists "$image"; then
 fi
 
 run_args=(
-    run --rm
+    run --rm --pull=never
     --userns keep-id
     --env ANVIL_IN_CONTAINER=1
     --env HOME=/tmp/anvil-user
@@ -67,6 +67,16 @@ run_args=(
     --workdir /workspace
 )
 run_args+=("${ANVIL_CONTAINER_RUN_ARGS[@]}")
+for name in PR_TITLE BASE_REF ANVIL_INCLUDE_MODIFIED ANVIL_INCLUDE_AFFECTED ANVIL_INCLUDE_REQUIRED GITHUB_BASE_REF SYSTEM_PULLREQUEST_TARGETBRANCH; do
+    if [[ -v "$name" ]]; then run_args+=(--env "$name"); fi
+done
+if [[ "${ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN:-}" == "1" ]]; then
+    if [[ ! -v GITHUB_TOKEN ]]; then
+        echo "anvil-container: ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN=1 but GITHUB_TOKEN is unset." >&2
+        exit 1
+    fi
+    run_args+=(--env GITHUB_TOKEN)
+fi
 
 if (($# == 0)); then
     podman "${run_args[@]}" --interactive --tty "$image" bash

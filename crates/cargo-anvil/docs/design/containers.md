@@ -10,9 +10,7 @@ See also:
 - [design.md](./design.md) for the overall principles (esp. §4 "writes files / `just` runs them").
 - [local.md](./local.md) for the `justfiles/anvil/` recipe surface this backend wraps.
 - [extensibility.md](./extensibility.md) for the catalog seam a downstream fork uses to supply
-  its own image + auth (see [`cargo-anvil-substrate`'s container doc][substrate-containers]).
-
-[substrate-containers]: https://o365exchange.visualstudio.com/O365%20Core/_git/ox-tools?path=/sources/dev/cargo-anvil-substrate/docs/containers.md
+  its own image + auth.
 
 ## 1. Problem
 
@@ -221,6 +219,10 @@ The **engine default base** uses public `rustup` + crates.io, consistent with an
 dependencies stance ([design.md §2 goal 8][design]). A fork overrides `BASE_IMAGE` (and the toolchain
 installer / auth) via the catalog — see §8.
 
+The backend requires a repository-owned `rust-toolchain.toml`. It does not use
+floating `stable` as a fallback because that would allow identical image tags
+to resolve to different compiler versions over time.
+
 ## 6. Drivers
 
 Two scripts implement one contract: *ensure the image, then `podman run <args>` against the tree*.
@@ -240,10 +242,11 @@ logic lives here.
 |---|---|
 | `ANVIL_CONTAINER_IMAGE` | Override the image name (default `anvil-dev`). |
 | `ANVIL_CONTAINER_NO_REBUILD=1` | Fail instead of auto-building a missing/stale image. |
+| `ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN=1` | Forward an already-set host `GITHUB_TOKEN` to the running container. Explicit opt-in because it is a credential. |
 | `ANVIL_IN_CONTAINER` | Set *by* the image; the wrapper recipe uses it to avoid recursion (§4). |
 
 ### 6.3 Auth hook (the catalog seam)
-The engine driver needs no credentials (crates.io is public). Internal forks do. The driver therefore
+The engine driver needs no credentials (crates.io is public). Some downstream catalogs do. The driver therefore
 **sources `container/auth.sh` / `auth.ps1` if it exists**, before `podman build`/`podman run`, to
 populate registry/toolchain tokens (e.g. as a BuildKit `--secret` at build time and an `--env-file`
 at run time). The engine ships no `auth.*`; a fork supplies it via the catalog (§8). This keeps the
@@ -252,10 +255,10 @@ hard, environment-specific credential dance out of the open-source engine.
 ## 7. Relationship to CI
 
 This backend is **local-only**. CI continues to run the recipes natively on its own pool
-(GitHub-hosted runners or 1ESPT — see [ado.md][ado] / [github.md][github]). The container image is
+(see [ado.md][ado] / [github.md][github]). The container image is
 *pinned to match* CI's distro, giving local↔CI parity, but it is a separate image, not the CI
 environment itself. Running the *CI* jobs inside the same image (for bit-for-bit parity) is possible
-but is gated by each backend's constraints (e.g. the 1ES Rust tasks expect to own the toolchain) and
+but is gated by each backend's constraints (for example, setup tasks may expect to own the toolchain) and
 is left as future work, not part of this opt-in.
 
 ## 8. Extensibility — how a fork supplies image + auth
@@ -264,14 +267,13 @@ The container backend is an ordinary catalog artifact group, so a fork customize
 `replace_artifact` / `without_artifact` levers as any other artifact ([extensibility.md][ext]):
 
 - **`replace_artifact`** the `Containerfile` to change `BASE_IMAGE` and the toolchain installer
-  (e.g. an internal distro + an internal toolchain source).
-- **`with_artifact`** an `auth.sh` / `auth.ps1` to inject internal-feed credentials (§6.3).
+  (for example, an organization-specific distro and toolchain source).
+- **`with_artifact`** an `auth.sh` / `auth.ps1` to inject private-registry credentials (§6.3).
 - **`without_artifact`** the whole group to ship a catalog with no container backend at all.
 
 The driver scripts, the `anvil-container` recipe, and the image-tagging logic are inherited
 unchanged, so a fork writes only the two things that are genuinely environment-specific: the image
-base and the credential hook. [`cargo-anvil-substrate`][substrate-containers] does exactly this —
-AzureLinux 3 + msrustup + an `az`-token auth hook for the Enzyme feeds.
+base and the credential hook.
 
 ## 9. Costs and trade-offs (honest accounting)
 

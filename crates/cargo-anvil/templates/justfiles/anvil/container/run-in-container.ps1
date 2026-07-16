@@ -47,11 +47,12 @@ $AnvilContainerRunArgs = @()
 $AnvilContainerCleanup = $null
 $exitCode = 0
 $authScript = Join-Path $scriptDir 'auth.ps1'
-if (Test-Path -LiteralPath $authScript -PathType Leaf) {
-    . $authScript
-}
 
 try {
+    if (Test-Path -LiteralPath $authScript -PathType Leaf) {
+        . $authScript
+    }
+
     & podman image exists $image
     if ($LASTEXITCODE -ne 0) {
         if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {
@@ -69,7 +70,7 @@ try {
     }
 
     $runArgs = @(
-        'run', '--rm',
+        'run', '--rm', '--pull=never',
         '--userns', 'keep-id',
         '--env', 'ANVIL_IN_CONTAINER=1',
         '--env', 'HOME=/tmp/anvil-user',
@@ -80,6 +81,23 @@ try {
         '--workdir', '/workspace'
     )
     $runArgs += $AnvilContainerRunArgs
+    foreach ($name in @(
+        'PR_TITLE',
+        'BASE_REF',
+        'ANVIL_INCLUDE_MODIFIED',
+        'ANVIL_INCLUDE_AFFECTED',
+        'ANVIL_INCLUDE_REQUIRED',
+        'GITHUB_BASE_REF',
+        'SYSTEM_PULLREQUEST_TARGETBRANCH'
+    )) {
+        if (Test-Path "Env:$name") { $runArgs += @('--env', $name) }
+    }
+    if ($env:ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN -eq '1') {
+        if (-not $env:GITHUB_TOKEN) {
+            throw 'anvil-container: ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN=1 but GITHUB_TOKEN is unset.'
+        }
+        $runArgs += @('--env', 'GITHUB_TOKEN')
+    }
 
     if ($Recipe.Count -eq 0) {
         & podman @runArgs --interactive --tty $image bash

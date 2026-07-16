@@ -43,6 +43,12 @@ const HELPERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/help
 /// Repo-root-relative path of the shared-helpers recipe file.
 const HELPERS_JUST_PATH: &str = "justfiles/anvil/helpers.just";
 
+/// Contents of `justfiles/anvil/runner.just` baked into the binary.
+const RUNNER_JUST: &str = include_str!("../../../templates/justfiles/anvil/runner.just");
+
+/// Repo-root-relative path of the tier execution router.
+const RUNNER_JUST_PATH: &str = "justfiles/anvil/runner.just";
+
 /// Emits `(path, include_str!)` pairs for a set of split recipe files that
 /// live under a subdirectory of `justfiles/anvil/`. Each file is one owned
 /// artifact, so the recipe tree is one file per check / per group rather
@@ -56,6 +62,13 @@ macro_rules! split_recipe_files {
             ),
         )*]
     };
+}
+
+#[test]
+fn runner_routes_tiers_and_guards_recursion() {
+    assert!(RUNNER_JUST.contains("ANVIL_IN_CONTAINER"));
+    assert!(RUNNER_JUST.contains("'{{runner}}' -eq 'container'"));
+    assert!(RUNNER_JUST.contains("& $just anvil-container $nativeTier"));
 }
 
 /// One `justfiles/anvil/checks/<check>.just` file per catalog check
@@ -155,6 +168,12 @@ pub fn tools() -> Artifact {
 #[must_use]
 pub fn helpers() -> Artifact {
     Artifact::owned_file(HELPERS_JUST_PATH, HELPERS_JUST)
+}
+
+/// `justfiles/anvil/runner.just` — native/container tier routing.
+#[must_use]
+pub fn runner() -> Artifact {
+    Artifact::owned_file(RUNNER_JUST_PATH, RUNNER_JUST)
 }
 
 /// The `justfiles/anvil/checks/<check>.just` files — one owned artifact
@@ -274,15 +293,22 @@ mod tests {
 
     #[test]
     fn tiers_just_template_has_three_tiers() {
-        for needle in ["anvil-pr:", "anvil-scheduled:", "anvil-full:"] {
+        for needle in [
+            "anvil-pr:",
+            "anvil-scheduled:",
+            "anvil-full:",
+            "_anvil-pr:",
+            "_anvil-scheduled:",
+            "_anvil-full:",
+        ] {
             assert!(TIERS_JUST.contains(needle), "tiers.just missing '{needle}'");
         }
         // Each tier runs its validate-prereqs aggregate first so a missing
         // tool fails up front rather than mid-run.
         for needle in [
-            "anvil-pr: anvil-pr-validate-prereqs",
-            "anvil-scheduled: anvil-scheduled-validate-prereqs",
-            "anvil-full: anvil-full-validate-prereqs",
+            "anvil-pr: (_anvil-run \"pr\" anvil_runner)",
+            "anvil-scheduled: (_anvil-run \"scheduled\" anvil_runner)",
+            "anvil-full: (_anvil-run \"full\" anvil_runner)",
         ] {
             assert!(
                 TIERS_JUST.contains(needle),
@@ -335,6 +361,7 @@ mod tests {
             "import 'container/container.just'",
             "import 'groups/pr-fast.just'",
             "import 'groups/scheduled-exhaustive.just'",
+            "import 'runner.just'",
             "import 'tiers.just'",
             "import 'tools.just'",
             "import 'versions.just'",

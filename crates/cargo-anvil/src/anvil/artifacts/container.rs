@@ -128,6 +128,8 @@ mod tests {
         assert!(CONTAINERFILE.contains("just anvil-setup"));
         assert!(CONTAINERFILE.contains("COPY . ."));
         assert!(IGNORE.contains("!justfiles/anvil/**"));
+        assert!(CONTAINERFILE.contains("anvil_runner := \\\"native\\\""));
+        assert!(CONTAINERFILE.contains("requires rust-toolchain.toml"));
     }
 
     #[test]
@@ -138,7 +140,17 @@ mod tests {
             assert!(driver.contains("ANVIL_CONTAINER_NO_REBUILD"));
             assert!(driver.contains("ANVIL_CONTAINER_IMAGE"));
             assert!(driver.contains("ANVIL_IN_CONTAINER"));
+            assert!(driver.contains("ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN"));
+            assert!(driver.contains("PR_TITLE"));
+            assert!(driver.contains("--pull=never"));
         }
+    }
+
+    #[test]
+    fn drivers_support_interactive_shell_mode() {
+        assert!(SHELL_DRIVER.contains("--interactive --tty"));
+        assert!(SHELL_DRIVER.contains("\"$image\" bash"));
+        assert!(POWERSHELL_DRIVER.contains("@runArgs --interactive --tty $image bash"));
     }
 
     #[test]
