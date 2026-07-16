@@ -19,7 +19,19 @@ $toolchainPath = Join-Path $repoRoot 'rust-toolchain.toml'
 if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
     throw 'anvil-container requires a repository-owned rust-toolchain.toml.'
 }
-$inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File |
+$inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File -Filter '*.just' |
+    ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
+$runtimeOnly = @(
+    'auth.ps1',
+    'auth.sh',
+    'container.just',
+    'image-id.ps1',
+    'README.md',
+    'run-in-container.ps1',
+    'run-in-container.sh'
+)
+$inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil/container') -File |
+    Where-Object { $_.Name -notin $runtimeOnly } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
 $inputs = $inputs | Sort-Object -Unique
 

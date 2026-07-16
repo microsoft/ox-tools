@@ -31,6 +31,8 @@ repo_id="$(printf '%s' "$repo_root" | sha256sum | cut -c1-12)"
 target_volume="anvil-target-${repo_id}-${image_id:0:12}"
 
 ANVIL_CONTAINER_BUILD_ARGS=()
+ANVIL_CONTAINER_PREPARE_ARGS=()
+ANVIL_CONTAINER_PREPARE_COMMAND=()
 ANVIL_CONTAINER_RUN_ARGS=()
 ANVIL_CONTAINER_CLEANUP=:
 cleanup() { "$ANVIL_CONTAINER_CLEANUP"; }
@@ -50,6 +52,7 @@ if ! podman image exists "$image"; then
             --tag "$image" \
             --file "$script_dir/Containerfile" \
             --ignorefile "$script_dir/container.ignore" \
+            --build-arg "ANVIL_IMAGE_ID=$image_id" \
             "${ANVIL_CONTAINER_BUILD_ARGS[@]}" \
             "$repo_root"
     fi
@@ -66,6 +69,7 @@ run_args=(
     --volume "$target_volume:/workspace/target:U"
     --workdir /workspace
 )
+prepare_run_args=("${run_args[@]}")
 run_args+=("${ANVIL_CONTAINER_RUN_ARGS[@]}")
 for name in PR_TITLE BASE_REF ANVIL_INCLUDE_MODIFIED ANVIL_INCLUDE_AFFECTED ANVIL_INCLUDE_REQUIRED GITHUB_BASE_REF SYSTEM_PULLREQUEST_TARGETBRANCH; do
     if [[ -v "$name" ]]; then run_args+=(--env "$name"); fi
@@ -76,6 +80,13 @@ if [[ "${ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN:-}" == "1" ]]; then
         exit 1
     fi
     run_args+=(--env GITHUB_TOKEN)
+fi
+
+if ((${#ANVIL_CONTAINER_PREPARE_COMMAND[@]} > 0)); then
+    podman "${prepare_run_args[@]}" \
+        "${ANVIL_CONTAINER_PREPARE_ARGS[@]}" \
+        "$image" \
+        "${ANVIL_CONTAINER_PREPARE_COMMAND[@]}"
 fi
 
 if (($# == 0)); then

@@ -2919,6 +2919,7 @@ anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-too
 ARG BASE_IMAGE=docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
 FROM ${BASE_IMAGE}
 
+ARG ANVIL_IMAGE_ID
 ARG JUST_VERSION=1.56.0
 ARG JUST_SHA256=fa2a8ec1015d9df5330941ade12437488fc40d33f9c9f8cd4eb70a26de11b639
 ARG POWERSHELL_VERSION=7.6.3
@@ -2974,6 +2975,7 @@ RUN --mount=type=cache,id=anvil-cargo-registry,target=/usr/local/cargo/registry 
     && CARGO_TARGET_DIR=/tmp/anvil-target just anvil-setup
 
 ENV ANVIL_IN_CONTAINER=1
+LABEL io.github.cargo-anvil.image-id="${ANVIL_IMAGE_ID}"
 WORKDIR /workspace
 CMD ["bash"]
 
@@ -3018,6 +3020,8 @@ The final command opens an interactive shell.
 
 Downstream catalogs can provide `auth.sh` and/or `auth.ps1` beside these files.
 They may populate `ANVIL_CONTAINER_BUILD_ARGS` / `AnvilContainerBuildArgs`,
+`ANVIL_CONTAINER_PREPARE_ARGS` / `AnvilContainerPrepareArgs`,
+`ANVIL_CONTAINER_PREPARE_COMMAND` / `AnvilContainerPrepareCommand`,
 `ANVIL_CONTAINER_RUN_ARGS` / `AnvilContainerRunArgs`, and a cleanup callback.
 On Windows, an auth hook can set `AnvilContainerBuildInMachine = $true` when
 Podman build secrets must be resolved through the WSL-backed Podman machine.
@@ -3075,7 +3079,19 @@ $toolchainPath = Join-Path $repoRoot 'rust-toolchain.toml'
 if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
     throw 'anvil-container requires a repository-owned rust-toolchain.toml.'
 }
-$inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File |
+$inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File -Filter '*.just' |
+    ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
+$runtimeOnly = @(
+    'auth.ps1',
+    'auth.sh',
+    'container.just',
+    'image-id.ps1',
+    'README.md',
+    'run-in-container.ps1',
+    'run-in-container.sh'
+)
+$inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil/container') -File |
+    Where-Object { $_.Name -notin $runtimeOnly } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
 $inputs = $inputs | Sort-Object -Unique
 
@@ -3143,6 +3159,8 @@ $repoHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($rep
 $targetVolume = "anvil-target-$($repoHash.Substring(0, 12))-$($imageId.Substring(0, 12))"
 
 $AnvilContainerBuildArgs = @()
+$AnvilContainerPrepareArgs = @()
+$AnvilContainerPrepareCommand = @()
 $AnvilContainerRunArgs = @()
 $AnvilContainerBuildInMachine = $false
 $AnvilContainerCleanup = $null
@@ -3165,7 +3183,8 @@ try {
                 'podman', 'build',
                 '--tag', $image,
                 '--file', 'justfiles/anvil/container/Containerfile',
-                '--ignorefile', 'justfiles/anvil/container/container.ignore'
+                '--ignorefile', 'justfiles/anvil/container/container.ignore',
+                '--build-arg', "ANVIL_IMAGE_ID=$imageId"
             )
             $buildArgs += $AnvilContainerBuildArgs
             $buildArgs += '.'
@@ -3177,6 +3196,7 @@ try {
                 --tag $image `
                 --file (Join-Path $scriptDir 'Containerfile') `
                 --ignorefile (Join-Path $scriptDir 'container.ignore') `
+                --build-arg "ANVIL_IMAGE_ID=$imageId" `
                 @AnvilContainerBuildArgs `
                 $repoRoot
         }
@@ -3196,6 +3216,7 @@ try {
         '--volume', "${targetVolume}:/workspace/target:U",
         '--workdir', '/workspace'
     )
+    $prepareRunArgs = @($runArgs)
     $runArgs += $AnvilContainerRunArgs
     foreach ($name in @(
         'PR_TITLE',
@@ -3213,6 +3234,13 @@ try {
             throw 'anvil-container: ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN=1 but GITHUB_TOKEN is unset.'
         }
         $runArgs += @('--env', 'GITHUB_TOKEN')
+    }
+
+    if ($AnvilContainerPrepareCommand.Count -gt 0) {
+        & podman @prepareRunArgs @AnvilContainerPrepareArgs $image @AnvilContainerPrepareCommand
+        if ($LASTEXITCODE -ne 0) {
+            throw "anvil-container: preparation command failed with exit code $LASTEXITCODE."
+        }
     }
 
     if ($Recipe.Count -eq 0) {
@@ -3261,6 +3289,8 @@ repo_id="$(printf '%s' "$repo_root" | sha256sum | cut -c1-12)"
 target_volume="anvil-target-${repo_id}-${image_id:0:12}"
 
 ANVIL_CONTAINER_BUILD_ARGS=()
+ANVIL_CONTAINER_PREPARE_ARGS=()
+ANVIL_CONTAINER_PREPARE_COMMAND=()
 ANVIL_CONTAINER_RUN_ARGS=()
 ANVIL_CONTAINER_CLEANUP=:
 cleanup() { "$ANVIL_CONTAINER_CLEANUP"; }
@@ -3280,6 +3310,7 @@ if ! podman image exists "$image"; then
             --tag "$image" \
             --file "$script_dir/Containerfile" \
             --ignorefile "$script_dir/container.ignore" \
+            --build-arg "ANVIL_IMAGE_ID=$image_id" \
             "${ANVIL_CONTAINER_BUILD_ARGS[@]}" \
             "$repo_root"
     fi
@@ -3296,6 +3327,7 @@ run_args=(
     --volume "$target_volume:/workspace/target:U"
     --workdir /workspace
 )
+prepare_run_args=("${run_args[@]}")
 run_args+=("${ANVIL_CONTAINER_RUN_ARGS[@]}")
 for name in PR_TITLE BASE_REF ANVIL_INCLUDE_MODIFIED ANVIL_INCLUDE_AFFECTED ANVIL_INCLUDE_REQUIRED GITHUB_BASE_REF SYSTEM_PULLREQUEST_TARGETBRANCH; do
     if [[ -v "$name" ]]; then run_args+=(--env "$name"); fi
@@ -3306,6 +3338,13 @@ if [[ "${ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN:-}" == "1" ]]; then
         exit 1
     fi
     run_args+=(--env GITHUB_TOKEN)
+fi
+
+if ((${#ANVIL_CONTAINER_PREPARE_COMMAND[@]} > 0)); then
+    podman "${prepare_run_args[@]}" \
+        "${ANVIL_CONTAINER_PREPARE_ARGS[@]}" \
+        "$image" \
+        "${ANVIL_CONTAINER_PREPARE_COMMAND[@]}"
 fi
 
 if (($# == 0)); then

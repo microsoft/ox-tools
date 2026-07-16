@@ -47,6 +47,8 @@ $repoHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($rep
 $targetVolume = "anvil-target-$($repoHash.Substring(0, 12))-$($imageId.Substring(0, 12))"
 
 $AnvilContainerBuildArgs = @()
+$AnvilContainerPrepareArgs = @()
+$AnvilContainerPrepareCommand = @()
 $AnvilContainerRunArgs = @()
 $AnvilContainerBuildInMachine = $false
 $AnvilContainerCleanup = $null
@@ -69,7 +71,8 @@ try {
                 'podman', 'build',
                 '--tag', $image,
                 '--file', 'justfiles/anvil/container/Containerfile',
-                '--ignorefile', 'justfiles/anvil/container/container.ignore'
+                '--ignorefile', 'justfiles/anvil/container/container.ignore',
+                '--build-arg', "ANVIL_IMAGE_ID=$imageId"
             )
             $buildArgs += $AnvilContainerBuildArgs
             $buildArgs += '.'
@@ -81,6 +84,7 @@ try {
                 --tag $image `
                 --file (Join-Path $scriptDir 'Containerfile') `
                 --ignorefile (Join-Path $scriptDir 'container.ignore') `
+                --build-arg "ANVIL_IMAGE_ID=$imageId" `
                 @AnvilContainerBuildArgs `
                 $repoRoot
         }
@@ -100,6 +104,7 @@ try {
         '--volume', "${targetVolume}:/workspace/target:U",
         '--workdir', '/workspace'
     )
+    $prepareRunArgs = @($runArgs)
     $runArgs += $AnvilContainerRunArgs
     foreach ($name in @(
         'PR_TITLE',
@@ -117,6 +122,13 @@ try {
             throw 'anvil-container: ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN=1 but GITHUB_TOKEN is unset.'
         }
         $runArgs += @('--env', 'GITHUB_TOKEN')
+    }
+
+    if ($AnvilContainerPrepareCommand.Count -gt 0) {
+        & podman @prepareRunArgs @AnvilContainerPrepareArgs $image @AnvilContainerPrepareCommand
+        if ($LASTEXITCODE -ne 0) {
+            throw "anvil-container: preparation command failed with exit code $LASTEXITCODE."
+        }
     }
 
     if ($Recipe.Count -eq 0) {

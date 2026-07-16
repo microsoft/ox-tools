@@ -146,6 +146,7 @@ mod tests {
             assert!(driver.contains("--pull=never"));
         }
         assert!(POWERSHELL_DRIVER.contains("AnvilContainerBuildInMachine"));
+        assert!(POWERSHELL_DRIVER.contains("AnvilContainerPrepareCommand"));
         assert!(POWERSHELL_DRIVER.contains("podman machine ssh"));
     }
 
