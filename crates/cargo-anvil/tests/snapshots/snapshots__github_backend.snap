@@ -2877,13 +2877,12 @@ if ($LASTEXITCODE -ne 0 -or -not $repoRoot) {
 
 $inputs = @(
     'rust-toolchain.toml'
-    'justfiles/anvil/container/Containerfile'
 )
 $toolchainPath = Join-Path $repoRoot 'rust-toolchain.toml'
 if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
     throw 'anvil-container requires a repository-owned rust-toolchain.toml.'
 }
-$inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File -Filter '*.just' |
+$inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
 $inputs = $inputs | Sort-Object -Unique
 
