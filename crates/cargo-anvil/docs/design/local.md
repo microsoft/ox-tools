@@ -48,8 +48,7 @@ repo/
 ```
 
 The Justfile region is the only file anvil adds to that the user co-owns, and it's
-a single `import` line — everything anvil-specific lives inside `justfiles/anvil/`.
-All files under that directory are tool-owned (tracked by full-file checksum in
+a single `import` line — everything anvil-specific lives inside `justfiles/anvil/`.All files under that directory are tool-owned (tracked by full-file checksum in
 the sidecar manifest). If the user wants to add project-specific recipes, they add them
 to the top-level `Justfile` outside the managed region, or to their own additional
 imported `.just` files. The alias `anvil := anvil-pr` lives in `mod.just`, not in
@@ -61,6 +60,12 @@ are annotated with `[group("anvil")]`. The install/validate-prereqs/setup recipe
 in `tools.just` (and the per-check/group/tier setup recipes colocated in the same
 files) are annotated with `[group("anvil-setup")]`. `just --groups` therefore shows
 two clean clusters: one for "run checks", one for "install prereqs".
+
+> **Optional container backend.** When a catalog includes the opt-in container backend, an
+> additional `justfiles/anvil/container/` subtree adds one more recipe — `anvil-container <recipe>`
+> — that runs any of the recipes below inside a pinned Linux image (Linux-on-Windows parity, distro
+> pinning) instead of against the host toolchain. The recipe bodies are unchanged; see
+> [containers.md](./containers.md).
 
 ## 2. Recipe layers
 

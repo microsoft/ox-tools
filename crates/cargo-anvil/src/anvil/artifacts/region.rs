@@ -363,8 +363,9 @@ mod tests {
     }
 
     #[test]
-    fn gitattributes_body_pins_rust_sources_to_lf() {
+    fn gitattributes_body_pins_rust_and_shell_sources_to_lf() {
         assert!(GITATTRIBUTES_BODY.contains("*.rs text eol=lf"));
+        assert!(GITATTRIBUTES_BODY.contains("*.sh text eol=lf"));
     }
 
     #[test]

@@ -464,6 +464,22 @@ the relevant `OwnedFile` (e.g. `checks.just`) wholesale rather than editing indi
 This is a modest, low-risk refactor: it data-drives the artifact list (§4) without disturbing the
 engine internals or the template format.
 
+### 6.1 Optional container runner
+
+The public base catalog emits `justfiles/anvil/container/`: an explicit
+`anvil-container` recipe, generic Containerfile, Podman drivers,
+content-address helper, and README. Native `just anvil-*` execution remains the
+default.
+
+A downstream catalog replaces only environment-specific artifacts such as
+`artifacts::container::containerfile()` and adds optional
+`artifacts::container::auth_shell(...)` /
+`artifacts::container::auth_powershell(...)` hooks. The public drivers, image
+hashing, caches, repository mounts, and recipe forwarding remain unchanged.
+
+The public engine contains no private image, registry, cloud, or
+credential-provider details.
+
 ## 7. Multi-level catalogs (extension chains)
 
 Extension is transitive: a third tool can extend a second tool's catalog exactly as the second
