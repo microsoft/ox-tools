@@ -127,7 +127,8 @@ mod tests {
     fn containerfile_installs_the_generated_toolset() {
         assert!(CONTAINERFILE.contains("just anvil-setup"));
         assert!(CONTAINERFILE.contains("COPY . ."));
-        assert!(IGNORE.contains("!justfiles/anvil/**"));
+        assert!(IGNORE.contains("!justfiles/anvil/container/*"));
+        assert!(IGNORE.contains("!justfiles/anvil/checks/*.just"));
         assert!(CONTAINERFILE.contains("anvil_runner := \\\"native\\\""));
         assert!(CONTAINERFILE.contains("requires rust-toolchain.toml"));
     }
@@ -144,6 +145,8 @@ mod tests {
             assert!(driver.contains("PR_TITLE"));
             assert!(driver.contains("--pull=never"));
         }
+        assert!(POWERSHELL_DRIVER.contains("AnvilContainerBuildInMachine"));
+        assert!(POWERSHELL_DRIVER.contains("podman machine ssh"));
     }
 
     #[test]

@@ -10,6 +10,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function ConvertTo-PosixShellArg([string]$Value) {
+    "'" + $Value.Replace("'", "'`"`"'`"'") + "'"
+}
+
 if ($env:ANVIL_IN_CONTAINER) {
     if ($Recipe.Count -eq 0) { & bash } else { & just @Recipe }
     exit $LASTEXITCODE
@@ -44,6 +48,7 @@ $targetVolume = "anvil-target-$($repoHash.Substring(0, 12))-$($imageId.Substring
 
 $AnvilContainerBuildArgs = @()
 $AnvilContainerRunArgs = @()
+$AnvilContainerBuildInMachine = $false
 $AnvilContainerCleanup = $null
 $exitCode = 0
 $authScript = Join-Path $scriptDir 'auth.ps1'
@@ -58,12 +63,27 @@ try {
         if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {
             throw "anvil-container: image $image is missing and ANVIL_CONTAINER_NO_REBUILD=1."
         }
-        & podman build `
-            --tag $image `
-            --file (Join-Path $scriptDir 'Containerfile') `
-            --ignorefile (Join-Path $scriptDir 'container.ignore') `
-            @AnvilContainerBuildArgs `
-            $repoRoot
+        if ($AnvilContainerBuildInMachine) {
+            $machineRepo = (wsl -e wslpath -a $repoRoot).Trim()
+            $buildArgs = @(
+                'podman', 'build',
+                '--tag', $image,
+                '--file', 'justfiles/anvil/container/Containerfile',
+                '--ignorefile', 'justfiles/anvil/container/container.ignore'
+            )
+            $buildArgs += $AnvilContainerBuildArgs
+            $buildArgs += '.'
+            $buildCommand = ($buildArgs | ForEach-Object { ConvertTo-PosixShellArg $_ }) -join ' '
+            $command = "cd $(ConvertTo-PosixShellArg $machineRepo) && $buildCommand"
+            & podman machine ssh -- $command
+        } else {
+            & podman build `
+                --tag $image `
+                --file (Join-Path $scriptDir 'Containerfile') `
+                --ignorefile (Join-Path $scriptDir 'container.ignore') `
+                @AnvilContainerBuildArgs `
+                $repoRoot
+        }
         if ($LASTEXITCODE -ne 0) {
             throw "anvil-container: Podman build failed with exit code $LASTEXITCODE."
         }

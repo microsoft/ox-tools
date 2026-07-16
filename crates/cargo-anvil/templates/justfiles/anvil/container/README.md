@@ -39,3 +39,5 @@ The final command opens an interactive shell.
 Downstream catalogs can provide `auth.sh` and/or `auth.ps1` beside these files.
 They may populate `ANVIL_CONTAINER_BUILD_ARGS` / `AnvilContainerBuildArgs`,
 `ANVIL_CONTAINER_RUN_ARGS` / `AnvilContainerRunArgs`, and a cleanup callback.
+On Windows, an auth hook can set `AnvilContainerBuildInMachine = $true` when
+Podman build secrets must be resolved through the WSL-backed Podman machine.

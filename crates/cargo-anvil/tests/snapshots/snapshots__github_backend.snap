@@ -2826,13 +2826,21 @@ The final command opens an interactive shell.
 Downstream catalogs can provide `auth.sh` and/or `auth.ps1` beside these files.
 They may populate `ANVIL_CONTAINER_BUILD_ARGS` / `AnvilContainerBuildArgs`,
 `ANVIL_CONTAINER_RUN_ARGS` / `AnvilContainerRunArgs`, and a cleanup callback.
+On Windows, an auth hook can set `AnvilContainerBuildInMachine = $true` when
+Podman build secrets must be resolved through the WSL-backed Podman machine.
 
 === justfiles/anvil/container/container.ignore ===
 **
 !rust-toolchain.toml
-!justfiles/
-!justfiles/anvil/
-!justfiles/anvil/**
+!justfiles
+!justfiles/anvil
+!justfiles/anvil/*.just
+!justfiles/anvil/checks
+!justfiles/anvil/checks/*.just
+!justfiles/anvil/container
+!justfiles/anvil/container/*
+!justfiles/anvil/groups
+!justfiles/anvil/groups/*.just
 
 === justfiles/anvil/container/container.just ===
 # Copyright (c) Microsoft Corporation.
@@ -2906,6 +2914,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
+function ConvertTo-PosixShellArg([string]$Value) {
+    "'" + $Value.Replace("'", "'`"`"'`"'") + "'"
+}
+
 if ($env:ANVIL_IN_CONTAINER) {
     if ($Recipe.Count -eq 0) { & bash } else { & just @Recipe }
     exit $LASTEXITCODE
@@ -2940,6 +2952,7 @@ $targetVolume = "anvil-target-$($repoHash.Substring(0, 12))-$($imageId.Substring
 
 $AnvilContainerBuildArgs = @()
 $AnvilContainerRunArgs = @()
+$AnvilContainerBuildInMachine = $false
 $AnvilContainerCleanup = $null
 $exitCode = 0
 $authScript = Join-Path $scriptDir 'auth.ps1'
@@ -2954,12 +2967,27 @@ try {
         if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {
             throw "anvil-container: image $image is missing and ANVIL_CONTAINER_NO_REBUILD=1."
         }
-        & podman build `
-            --tag $image `
-            --file (Join-Path $scriptDir 'Containerfile') `
-            --ignorefile (Join-Path $scriptDir 'container.ignore') `
-            @AnvilContainerBuildArgs `
-            $repoRoot
+        if ($AnvilContainerBuildInMachine) {
+            $machineRepo = (wsl -e wslpath -a $repoRoot).Trim()
+            $buildArgs = @(
+                'podman', 'build',
+                '--tag', $image,
+                '--file', 'justfiles/anvil/container/Containerfile',
+                '--ignorefile', 'justfiles/anvil/container/container.ignore'
+            )
+            $buildArgs += $AnvilContainerBuildArgs
+            $buildArgs += '.'
+            $buildCommand = ($buildArgs | ForEach-Object { ConvertTo-PosixShellArg $_ }) -join ' '
+            $command = "cd $(ConvertTo-PosixShellArg $machineRepo) && $buildCommand"
+            & podman machine ssh -- $command
+        } else {
+            & podman build `
+                --tag $image `
+                --file (Join-Path $scriptDir 'Containerfile') `
+                --ignorefile (Join-Path $scriptDir 'container.ignore') `
+                @AnvilContainerBuildArgs `
+                $repoRoot
+        }
         if ($LASTEXITCODE -ne 0) {
             throw "anvil-container: Podman build failed with exit code $LASTEXITCODE."
         }
