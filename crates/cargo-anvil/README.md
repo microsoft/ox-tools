@@ -94,6 +94,89 @@ runs perform impact analysis (via [`cargo-delta`][__link0])
 and run each check only over the affected packages, whereas a local
 `just anvil-pr` runs every check over the whole workspace.
 
+### Containerized local checks
+
+Anvil can run any generated recipe in a content-addressed Linux container.
+This is useful for Linux-on-Windows checks and for matching a pinned CI
+distribution without installing the full Rust/tool catalog on the host.
+
+#### Prerequisites
+
+* Podman 4.3 or newer.
+* `git`, `just`, and PowerShell Core (`pwsh`) on the host.
+* A repository-owned `rust-toolchain.toml`.
+* On Windows, a running Podman machine:
+
+```powershell
+podman machine init   # once
+podman machine start
+```
+
+#### Run a recipe
+
+```text
+just anvil-container anvil-clippy
+just anvil-container anvil-pr
+just anvil-container
+```
+
+The no-argument form opens an interactive shell. The first invocation builds
+the matching image locally; later invocations reuse it. Changes to the Rust
+toolchain, generated Anvil files, Containerfile, or downstream build helpers
+produce a different image tag and trigger a new build.
+
+Cargo registry, Cargo Git, and `target/` data use named Podman volumes. The
+repository is mounted at `/workspace`, while build output stays off the
+Windows bind-mount hot path.
+
+#### Make tiers use the container
+
+Native execution remains the default. Enable container execution for the
+current shell:
+
+```powershell
+$env:ANVIL_RUNNER = "container"
+just anvil-pr
+```
+
+On Unix:
+
+```sh
+ANVIL_RUNNER=container just anvil-pr
+```
+
+A one-off override is also supported:
+
+```text
+just anvil_runner=container anvil-pr
+```
+
+To make containers the project default, change the generated
+`anvil-runner` region in the repository `Justfile` from `"native"` to
+`"container"` and commit that user-owned policy change. Set
+`ANVIL_RUNNER=native` to override it for one shell.
+
+#### Controls
+
+|Variable|Effect|
+|--------|------|
+|`ANVIL_CONTAINER_IMAGE`|Override the local image name. The content hash remains the tag.|
+|`ANVIL_CONTAINER_NO_REBUILD=1`|Fail when the matching image is missing instead of building it.|
+|`ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN=1`|Forward an existing `GITHUB_TOKEN` to checks that require authenticated GitHub API access.|
+
+The public driver never pulls `ANVIL_CONTAINER_IMAGE` remotely. Downstream
+catalogs can add private image-build or dependency-preparation hooks without
+changing the public command surface.
+
+#### Troubleshooting
+
+* A first-run image build is expected and may take several minutes.
+* `podman images anvil-dev` lists locally cached Anvil images.
+* `ANVIL_CONTAINER_NO_REBUILD=1` distinguishes a cache miss from a build
+  failure.
+* Regenerate managed files with `cargo anvil`; do not hand-edit
+  `justfiles/anvil/container/`.
+
 ### Checks and tiers
 
 Checks are grouped into **tiers** (`anvil-pr`, `anvil-scheduled`) that
@@ -312,7 +395,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEGyP1SgbkjjEVG38f-NSEjzVAG1PqaH9kwF0ZGzmzzA0rX3BIYWSBg2tjYXJnby1hbnZpbGUwLjIuMWtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG4V8DpYlvEgcG-cCCsIYpKfiG47pVjigUns3G6ytm5mkV4LpYWSBg2tjYXJnby1hbnZpbGUwLjIuMWtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

@@ -18,6 +18,30 @@ The final command opens an interactive shell.
 - On Windows, initialize and start a Podman machine through Podman Desktop or
   `podman machine init` / `podman machine start`.
 
+## Default tier execution
+
+Native execution is the default. Use the container for the current shell:
+
+```powershell
+$env:ANVIL_RUNNER = 'container'
+just anvil-pr
+```
+
+On Unix:
+
+```sh
+ANVIL_RUNNER=container just anvil-pr
+```
+
+For one invocation:
+
+```text
+just anvil_runner=container anvil-pr
+```
+
+To make containers the project default, change the `anvil-runner` region in the
+repository `Justfile` from `"native"` to `"container"` and commit it.
+
 ## Behavior
 
 - The image tag is derived from `rust-toolchain.toml`, the generated Anvil
@@ -35,6 +59,13 @@ The final command opens an interactive shell.
 - `ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN=1`: forward an already-set host
   `GITHUB_TOKEN` for checks such as `anvil-aprz`. This is opt-in because the
   token becomes part of the running container's environment.
+
+## Troubleshooting
+
+- The first run builds the matching image and may take several minutes.
+- `podman images anvil-dev` lists cached images.
+- Use `ANVIL_CONTAINER_NO_REBUILD=1` to fail on a cache miss.
+- Rerun `cargo anvil` to update generated files; do not edit this directory.
 
 Downstream catalogs can provide `auth.sh` and/or `auth.ps1` beside these files.
 They may populate `ANVIL_CONTAINER_BUILD_ARGS` / `AnvilContainerBuildArgs`,
