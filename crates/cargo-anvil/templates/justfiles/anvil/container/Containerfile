@@ -58,7 +58,11 @@ RUN --mount=type=cache,id=anvil-cargo-registry,target=/usr/local/cargo/registry 
     printf "anvil_runner := \"native\"\nimport 'justfiles/anvil/mod.just'\n" > Justfile \
     && CARGO_TARGET_DIR=/tmp/anvil-target just anvil-setup
 
+COPY justfiles/anvil/container/entrypoint.sh /usr/local/bin/anvil-container-entrypoint
+RUN chmod 755 /usr/local/bin/anvil-container-entrypoint
+
 ENV ANVIL_IN_CONTAINER=1
 LABEL io.github.cargo-anvil.image-id="${ANVIL_IMAGE_ID}"
 WORKDIR /workspace
+ENTRYPOINT ["anvil-container-entrypoint"]
 CMD ["bash"]

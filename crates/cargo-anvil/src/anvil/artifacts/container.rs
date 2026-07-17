@@ -12,6 +12,7 @@ use crate::catalog::Artifact;
 const RECIPE: &str = include_str!("../../../templates/justfiles/anvil/container/container.just");
 const CONTAINERFILE: &str = include_str!("../../../templates/justfiles/anvil/container/Containerfile");
 const IGNORE: &str = include_str!("../../../templates/justfiles/anvil/container/container.ignore");
+const ENTRYPOINT: &str = include_str!("../../../templates/justfiles/anvil/container/entrypoint.sh");
 const IMAGE_ID: &str = include_str!("../../../templates/justfiles/anvil/container/image-id.ps1");
 const SHELL_DRIVER: &str = include_str!("../../../templates/justfiles/anvil/container/run-in-container.sh");
 const POWERSHELL_DRIVER: &str = include_str!("../../../templates/justfiles/anvil/container/run-in-container.ps1");
@@ -20,6 +21,7 @@ const README: &str = include_str!("../../../templates/justfiles/anvil/container/
 const RECIPE_PATH: &str = "justfiles/anvil/container/container.just";
 const CONTAINERFILE_PATH: &str = "justfiles/anvil/container/Containerfile";
 const IGNORE_PATH: &str = "justfiles/anvil/container/container.ignore";
+const ENTRYPOINT_PATH: &str = "justfiles/anvil/container/entrypoint.sh";
 const IMAGE_ID_PATH: &str = "justfiles/anvil/container/image-id.ps1";
 const SHELL_DRIVER_PATH: &str = "justfiles/anvil/container/run-in-container.sh";
 const POWERSHELL_DRIVER_PATH: &str = "justfiles/anvil/container/run-in-container.ps1";
@@ -34,6 +36,7 @@ pub fn all() -> Vec<Artifact> {
         recipe(),
         containerfile(),
         ignore_file(),
+        entrypoint(),
         image_id(),
         shell_driver(),
         powershell_driver(),
@@ -57,6 +60,12 @@ pub fn containerfile() -> Artifact {
 #[must_use]
 pub fn ignore_file() -> Artifact {
     Artifact::owned_file(IGNORE_PATH, IGNORE)
+}
+
+/// The generic non-root Cargo metadata entry point.
+#[must_use]
+pub fn entrypoint() -> Artifact {
+    Artifact::owned_file(ENTRYPOINT_PATH, ENTRYPOINT)
 }
 
 /// The cross-platform content-addressed image-id helper.
@@ -115,6 +124,7 @@ mod tests {
                 RECIPE_PATH,
                 CONTAINERFILE_PATH,
                 IGNORE_PATH,
+                ENTRYPOINT_PATH,
                 IMAGE_ID_PATH,
                 SHELL_DRIVER_PATH,
                 POWERSHELL_DRIVER_PATH,
@@ -131,6 +141,7 @@ mod tests {
         assert!(IGNORE.contains("!justfiles/anvil/checks/*.just"));
         assert!(CONTAINERFILE.contains("anvil_runner := \\\"native\\\""));
         assert!(CONTAINERFILE.contains("requires rust-toolchain.toml"));
+        assert!(CONTAINERFILE.contains("anvil-container-entrypoint"));
     }
 
     #[test]

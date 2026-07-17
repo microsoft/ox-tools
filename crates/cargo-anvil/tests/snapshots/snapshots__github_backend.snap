@@ -2781,9 +2781,13 @@ RUN --mount=type=cache,id=anvil-cargo-registry,target=/usr/local/cargo/registry 
     printf "anvil_runner := \"native\"\nimport 'justfiles/anvil/mod.just'\n" > Justfile \
     && CARGO_TARGET_DIR=/tmp/anvil-target just anvil-setup
 
+COPY justfiles/anvil/container/entrypoint.sh /usr/local/bin/anvil-container-entrypoint
+RUN chmod 755 /usr/local/bin/anvil-container-entrypoint
+
 ENV ANVIL_IN_CONTAINER=1
 LABEL io.github.cargo-anvil.image-id="${ANVIL_IMAGE_ID}"
 WORKDIR /workspace
+ENTRYPOINT ["anvil-container-entrypoint"]
 CMD ["bash"]
 
 === justfiles/anvil/container/README.md ===
@@ -2807,6 +2811,30 @@ The final command opens an interactive shell.
 - On Windows, initialize and start a Podman machine through Podman Desktop or
   `podman machine init` / `podman machine start`.
 
+## Default tier execution
+
+Native execution is the default. Use the container for the current shell:
+
+```powershell
+$env:ANVIL_RUNNER = 'container'
+just anvil-pr
+```
+
+On Unix:
+
+```sh
+ANVIL_RUNNER=container just anvil-pr
+```
+
+For one invocation:
+
+```text
+just anvil_runner=container anvil-pr
+```
+
+To make containers the project default, change the `anvil-runner` region in the
+repository `Justfile` from `"native"` to `"container"` and commit it.
+
 ## Behavior
 
 - The image tag is derived from `rust-toolchain.toml`, the generated Anvil
@@ -2824,6 +2852,13 @@ The final command opens an interactive shell.
 - `ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN=1`: forward an already-set host
   `GITHUB_TOKEN` for checks such as `anvil-aprz`. This is opt-in because the
   token becomes part of the running container's environment.
+
+## Troubleshooting
+
+- The first run builds the matching image and may take several minutes.
+- `podman images anvil-dev` lists cached images.
+- Use `ANVIL_CONTAINER_NO_REBUILD=1` to fail on a cache miss.
+- Rerun `cargo anvil` to update generated files; do not edit this directory.
 
 Downstream catalogs can provide `auth.sh` and/or `auth.ps1` beside these files.
 They may populate `ANVIL_CONTAINER_BUILD_ARGS` / `AnvilContainerBuildArgs`,
@@ -2863,6 +2898,30 @@ anvil-container *recipe:
         & bash 'justfiles/anvil/container/run-in-container.sh' @requested
     }
     exit $LASTEXITCODE
+
+=== justfiles/anvil/container/entrypoint.sh ===
+#!/bin/sh
+set -eu
+
+if [ "$(id -u)" -ne 0 ]; then
+    if [ -z "${HOME:-}" ] || [ "$HOME" = "/" ]; then
+        HOME="/tmp/anvil-user"
+        export HOME
+    fi
+
+    user_cargo_home="$HOME/.cargo"
+    mkdir -p "$user_cargo_home"
+    for file in config.toml .crates.toml .crates2.json; do
+        if [ -r "$CARGO_HOME/$file" ]; then
+            cp -f "$CARGO_HOME/$file" "$user_cargo_home/$file"
+        fi
+    done
+    export CARGO_HOME="$user_cargo_home"
+    ln -sfn /usr/local/cargo/registry "$CARGO_HOME/registry"
+    ln -sfn /usr/local/cargo/git "$CARGO_HOME/git"
+fi
+
+exec "$@"
 
 === justfiles/anvil/container/image-id.ps1 ===
 # Copyright (c) Microsoft Corporation.
