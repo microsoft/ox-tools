@@ -103,7 +103,7 @@ distribution without installing the full Rust/tool catalog on the host.
 #### Prerequisites
 
 * Podman 4.3 or newer.
-* `git`, `just`, and PowerShell Core (`pwsh`) on the host.
+* `git`, `just`, and `PowerShell` Core (`pwsh`) on the host.
 * A repository-owned `rust-toolchain.toml`.
 * On Windows, a running Podman machine:
 
@@ -395,7 +395,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG4V8DpYlvEgcG-cCCsIYpKfiG47pVjigUns3G6ytm5mkV4LpYWSBg2tjYXJnby1hbnZpbGUwLjIuMWtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG_ORj40zH2fPG-H_I69JWWtyGxt71wbUNGmBG_qwPj64exeyYWSBg2tjYXJnby1hbnZpbGUwLjIuMWtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

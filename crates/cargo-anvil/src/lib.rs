@@ -102,7 +102,7 @@
 //! ### Prerequisites
 //!
 //! - Podman 4.3 or newer.
-//! - `git`, `just`, and PowerShell Core (`pwsh`) on the host.
+//! - `git`, `just`, and `PowerShell` Core (`pwsh`) on the host.
 //! - A repository-owned `rust-toolchain.toml`.
 //! - On Windows, a running Podman machine:
 //!
