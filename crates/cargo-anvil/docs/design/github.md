@@ -319,6 +319,7 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }  # semver-check needs origin/<base> resolvable for --baseline-rev
       - uses: ./.github/actions/anvil-pr-fast
         with:
           include_modified: ${{ needs.impact.outputs.include_modified }}
