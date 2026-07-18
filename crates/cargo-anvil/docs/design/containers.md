@@ -249,7 +249,11 @@ For checks such as `anvil-aprz`, the driver uses an existing host `GITHUB_TOKEN`
 or obtains one non-interactively from the authenticated host `gh` CLI. It writes
 the token to a user-only temporary file, mounts that file read-only for the
 container command, and removes it on exit. The token is not stored in the image
-or passed through the OCI environment.
+or passed through the OCI environment. If an interactive host has `gh`
+installed but is not authenticated, the driver explains why authentication is
+needed, waits while the user runs `gh auth login` in another terminal, and
+retries after the user presses Enter. Non-interactive runs fail before image
+building with the same remediation.
 
 ### 6.4 Auth hook (the catalog seam)
 The engine driver needs no credentials (crates.io is public). Some downstream catalogs do. The driver therefore

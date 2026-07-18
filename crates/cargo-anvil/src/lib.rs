@@ -168,7 +168,9 @@
 //! For GitHub API checks, the driver automatically uses an existing host
 //! `GITHUB_TOKEN` or the token from an authenticated host `gh` CLI session. It
 //! mounts the token read-only for the command and removes the temporary file
-//! afterward.
+//! afterward. If `gh` is installed but not authenticated, an interactive run
+//! pauses before building the image, explains the unauthenticated API limit,
+//! and continues after the user completes `gh auth login` and presses Enter.
 //!
 //! ### Troubleshooting
 //!
@@ -176,8 +178,8 @@
 //! - `podman images anvil-dev` lists locally cached Anvil images.
 //! - `ANVIL_CONTAINER_NO_REBUILD=1` distinguishes a cache miss from a build
 //!   failure.
-//! - If `anvil-aprz` reports that GitHub authentication is unavailable, run
-//!   `gh auth login` on the host or set host `GITHUB_TOKEN`, then rerun.
+//! - Non-interactive runs cannot pause for login. Authenticate `gh` or set host
+//!   `GITHUB_TOKEN` before starting them.
 //! - Regenerate managed files with `cargo anvil`; do not hand-edit
 //!   `justfiles/anvil/container/`.
 //!

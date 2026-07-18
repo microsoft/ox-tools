@@ -169,7 +169,9 @@ changing the public command surface.
 For GitHub API checks, the driver automatically uses an existing host
 `GITHUB_TOKEN` or the token from an authenticated host `gh` CLI session. It
 mounts the token read-only for the command and removes the temporary file
-afterward.
+afterward. If `gh` is installed but not authenticated, an interactive run
+pauses before building the image, explains the unauthenticated API limit,
+and continues after the user completes `gh auth login` and presses Enter.
 
 #### Troubleshooting
 
@@ -177,8 +179,8 @@ afterward.
 * `podman images anvil-dev` lists locally cached Anvil images.
 * `ANVIL_CONTAINER_NO_REBUILD=1` distinguishes a cache miss from a build
   failure.
-* If `anvil-aprz` reports that GitHub authentication is unavailable, run
-  `gh auth login` on the host or set host `GITHUB_TOKEN`, then rerun.
+* Non-interactive runs cannot pause for login. Authenticate `gh` or set host
+  `GITHUB_TOKEN` before starting them.
 * Regenerate managed files with `cargo anvil`; do not hand-edit
   `justfiles/anvil/container/`.
 
@@ -400,7 +402,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG7AtwDA9zfB5G-Tq8hqK7WjvG4rRSgkTosEGG1EZhH_Wi8wTYWSBg2tjYXJnby1hbnZpbGUwLjIuMWtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG6Rtmurx_w8HG0B1_J-ckZgNG0XyM_2Uw6dUG_3ttMj0FUGgYWSBg2tjYXJnby1hbnZpbGUwLjIuMWtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

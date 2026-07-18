@@ -60,15 +60,17 @@ repository `Justfile` from `"native"` to `"container"` and commit it.
 For GitHub API checks, the driver automatically uses an existing host
 `GITHUB_TOKEN` or the token from an authenticated host `gh` CLI session. It
 mounts the token read-only for the command and removes the temporary file
-afterward.
+afterward. If `gh` is installed but not authenticated, an interactive run
+pauses before building the image, explains the unauthenticated API limit, and
+continues after the user completes `gh auth login` and presses Enter.
 
 ## Troubleshooting
 
 - The first run builds the matching image and may take several minutes.
 - `podman images anvil-dev` lists cached images.
 - Use `ANVIL_CONTAINER_NO_REBUILD=1` to fail on a cache miss.
-- If `anvil-aprz` reports that GitHub authentication is unavailable, run
-  `gh auth login` on the host or set host `GITHUB_TOKEN`, then rerun.
+- Non-interactive runs cannot pause for login. Authenticate `gh` or set host
+  `GITHUB_TOKEN` before starting them.
 - Rerun `cargo anvil` to update generated files; do not edit this directory.
 
 Downstream catalogs can provide `auth.sh` and/or `auth.ps1` beside these files.

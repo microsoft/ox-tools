@@ -28,6 +28,21 @@ function Test-AnvilRecipeNeedsGitHubToken([string]$Name) {
     )
 }
 
+function Get-AnvilGitHubToken {
+    $token = $env:GITHUB_TOKEN
+    if (-not $token -and (Get-Command gh -ErrorAction SilentlyContinue)) {
+        try {
+            $token = (& gh auth token --hostname github.com 2>$null)
+            if ($LASTEXITCODE -ne 0) { $token = $null }
+        } catch {
+            $token = $null
+        }
+    }
+    if ($token) { $token = $token.Trim() }
+    if ($token) { return $token }
+    return $null
+}
+
 if ($env:ANVIL_IN_CONTAINER) {
     if ($Recipe.Count -eq 0) { & bash } else { & just @Recipe }
     exit $LASTEXITCODE
@@ -59,6 +74,29 @@ $image = "${imageBase}:$imageId"
 $repoBytes = [Text.Encoding]::UTF8.GetBytes($repoRoot.ToLowerInvariant())
 $repoHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($repoBytes)).ToLowerInvariant()
 $targetVolume = "anvil-target-$($repoHash.Substring(0, 12))-$($imageId.Substring(0, 12))"
+
+$needsGitHubToken = $false
+foreach ($name in $Recipe) {
+    if (Test-AnvilRecipeNeedsGitHubToken $name) {
+        $needsGitHubToken = $true
+        break
+    }
+}
+$githubToken = if ($needsGitHubToken) { Get-AnvilGitHubToken } else { $null }
+if ($needsGitHubToken -and -not $githubToken) {
+    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+        throw 'anvil-container: GitHub authentication is required for anvil-aprz. Install the GitHub CLI and run `gh auth login --hostname github.com`, or set GITHUB_TOKEN before rerunning.'
+    }
+    if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) {
+        throw 'anvil-container: GitHub authentication is required for anvil-aprz. Run `gh auth login --hostname github.com` or set GITHUB_TOKEN before rerunning.'
+    }
+    Write-Host 'anvil-container: anvil-aprz requires GitHub authentication to avoid the 60 requests/hour unauthenticated API limit.'
+    [void](Read-Host 'Run `gh auth login --hostname github.com` in another terminal, then press Enter to continue (Ctrl+C to cancel)')
+    $githubToken = Get-AnvilGitHubToken
+    if (-not $githubToken) {
+        throw 'anvil-container: GitHub authentication is still unavailable. Complete `gh auth login --hostname github.com`, then rerun.'
+    }
+}
 
 $AnvilContainerBuildArgs = @()
 $AnvilContainerPrepareArgs = @()
@@ -139,44 +177,23 @@ try {
         }
     }
 
-    $needsGitHubToken = $false
-    foreach ($name in $Recipe) {
-        if (Test-AnvilRecipeNeedsGitHubToken $name) {
-            $needsGitHubToken = $true
-            break
+    if ($githubToken) {
+        $githubTokenFile = Join-Path ([IO.Path]::GetTempPath()) "anvil-github-token-$PID-$([guid]::NewGuid().ToString('N'))"
+        [IO.File]::WriteAllText($githubTokenFile, $githubToken, [Text.Encoding]::ASCII)
+        if ($IsWindows) {
+            $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            & icacls.exe $githubTokenFile '/inheritance:r' '/grant:r' "*$($userSid):(F)" | Out-Null
+        } else {
+            & chmod 600 $githubTokenFile
         }
-    }
-    if ($needsGitHubToken) {
-        $githubToken = $env:GITHUB_TOKEN
-        if (-not $githubToken -and (Get-Command gh -ErrorAction SilentlyContinue)) {
-            try {
-                $githubToken = (& gh auth token --hostname github.com 2>$null)
-                if ($LASTEXITCODE -ne 0) { $githubToken = $null }
-            } catch {
-                $githubToken = $null
-            }
+        if ($LASTEXITCODE -ne 0) {
+            throw 'anvil-container: failed to restrict permissions on the temporary GitHub token file.'
         }
-        if ($githubToken) {
-            $githubToken = $githubToken.Trim()
-        }
-        if ($githubToken) {
-            $githubTokenFile = Join-Path ([IO.Path]::GetTempPath()) "anvil-github-token-$PID-$([guid]::NewGuid().ToString('N'))"
-            [IO.File]::WriteAllText($githubTokenFile, $githubToken, [Text.Encoding]::ASCII)
-            if ($IsWindows) {
-                $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-                & icacls.exe $githubTokenFile '/inheritance:r' '/grant:r' "*$($userSid):(F)" | Out-Null
-            } else {
-                & chmod 600 $githubTokenFile
-            }
-            if ($LASTEXITCODE -ne 0) {
-                throw 'anvil-container: failed to restrict permissions on the temporary GitHub token file.'
-            }
-            $githubToken = $null
-            $runArgs += @(
-                '--mount',
-                "type=bind,src=$githubTokenFile,dst=/run/secrets/anvil-github-token,readonly"
-            )
-        }
+        $githubToken = $null
+        $runArgs += @(
+            '--mount',
+            "type=bind,src=$githubTokenFile,dst=/run/secrets/anvil-github-token,readonly"
+        )
     }
 
     if ($Recipe.Count -eq 0) {

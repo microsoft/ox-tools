@@ -39,6 +39,44 @@ image="${image_base}:${image_id}"
 repo_id="$(printf '%s' "$repo_root" | sha256sum | cut -c1-12)"
 target_volume="anvil-target-${repo_id}-${image_id:0:12}"
 
+needs_github_token=false
+for recipe in "$@"; do
+    if anvil_recipe_needs_github_token "$recipe"; then
+        needs_github_token=true
+        break
+    fi
+done
+github_token=""
+if "$needs_github_token"; then
+    gh_command=""
+    if command -v gh >/dev/null 2>&1; then
+        gh_command=gh
+    elif command -v gh.exe >/dev/null 2>&1; then
+        gh_command=gh.exe
+    fi
+    github_token="${GITHUB_TOKEN:-}"
+    if [[ -z "$github_token" && -n "$gh_command" ]]; then
+        github_token="$("$gh_command" auth token --hostname github.com 2>/dev/null | tr -d '\r' || true)"
+    fi
+    if [[ -z "$github_token" ]]; then
+        if [[ -z "$gh_command" ]]; then
+            echo 'anvil-container: GitHub authentication is required for anvil-aprz. Install the GitHub CLI and run `gh auth login --hostname github.com`, or set GITHUB_TOKEN before rerunning.' >&2
+            exit 1
+        fi
+        if [[ ! -t 0 ]]; then
+            echo 'anvil-container: GitHub authentication is required for anvil-aprz. Run `gh auth login --hostname github.com` or set GITHUB_TOKEN before rerunning.' >&2
+            exit 1
+        fi
+        echo 'anvil-container: anvil-aprz requires GitHub authentication to avoid the 60 requests/hour unauthenticated API limit.' >&2
+        read -r -p 'Run `gh auth login --hostname github.com` in another terminal, then press Enter to continue (Ctrl+C to cancel) '
+        github_token="$("$gh_command" auth token --hostname github.com 2>/dev/null | tr -d '\r' || true)"
+        if [[ -z "$github_token" ]]; then
+            echo 'anvil-container: GitHub authentication is still unavailable. Complete `gh auth login --hostname github.com`, then rerun.' >&2
+            exit 1
+        fi
+    fi
+fi
+
 ANVIL_CONTAINER_BUILD_ARGS=()
 ANVIL_CONTAINER_PREPARE_ARGS=()
 ANVIL_CONTAINER_PREPARE_COMMAND=()
@@ -94,29 +132,12 @@ if ((${#ANVIL_CONTAINER_PREPARE_COMMAND[@]} > 0)); then
         "${ANVIL_CONTAINER_PREPARE_COMMAND[@]}"
 fi
 
-needs_github_token=false
-for recipe in "$@"; do
-    if anvil_recipe_needs_github_token "$recipe"; then
-        needs_github_token=true
-        break
-    fi
-done
-if "$needs_github_token"; then
-    github_token="${GITHUB_TOKEN:-}"
-    if [[ -z "$github_token" ]]; then
-        gh_command=gh
-        if ! command -v "$gh_command" >/dev/null 2>&1; then gh_command=gh.exe; fi
-        if command -v "$gh_command" >/dev/null 2>&1; then
-            github_token="$("$gh_command" auth token --hostname github.com 2>/dev/null | tr -d '\r' || true)"
-        fi
-    fi
-    if [[ -n "$github_token" ]]; then
-        github_token_file="$(mktemp)"
-        chmod 600 "$github_token_file"
-        printf '%s' "$github_token" > "$github_token_file"
-        unset github_token
-        run_args+=(--volume "$github_token_file:/run/secrets/anvil-github-token:ro,Z")
-    fi
+if [[ -n "$github_token" ]]; then
+    github_token_file="$(mktemp)"
+    chmod 600 "$github_token_file"
+    printf '%s' "$github_token" > "$github_token_file"
+    unset github_token
+    run_args+=(--volume "$github_token_file:/run/secrets/anvil-github-token:ro,Z")
 fi
 
 if (($# == 0)); then

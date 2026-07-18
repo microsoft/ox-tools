@@ -153,18 +153,28 @@ mod tests {
             assert!(driver.contains("ANVIL_CONTAINER_IMAGE"));
             assert!(driver.contains("ANVIL_IN_CONTAINER"));
             assert!(driver.contains("auth token --hostname github.com"));
+            assert!(driver.contains("gh auth login --hostname github.com"));
             assert!(driver.contains("/run/secrets/anvil-github-token"));
             assert!(driver.contains("anvil-pr-fast"));
             assert!(driver.contains("anvil-scheduled-advisories"));
             assert!(driver.contains("PR_TITLE"));
             assert!(driver.contains("--pull=never"));
             assert!(!driver.contains("--env GITHUB_TOKEN"));
+            assert!(
+                driver.find("gh auth login --hostname github.com")
+                    < driver.find("podman image exists"),
+                "GitHub authentication must be checked before image building"
+            );
         }
         assert!(POWERSHELL_DRIVER.contains("AnvilContainerBuildInMachine"));
         assert!(POWERSHELL_DRIVER.contains("AnvilContainerPrepareCommand"));
         assert!(POWERSHELL_DRIVER.contains("podman machine ssh"));
         assert!(POWERSHELL_DRIVER.contains("foreach ($name in $Recipe)"));
+        assert!(POWERSHELL_DRIVER.contains("[Console]::IsInputRedirected"));
+        assert!(POWERSHELL_DRIVER.contains("Read-Host"));
         assert!(SHELL_DRIVER.contains("for recipe in \"$@\""));
+        assert!(SHELL_DRIVER.contains("[[ ! -t 0 ]]"));
+        assert!(SHELL_DRIVER.contains("read -r -p"));
     }
 
     #[test]
