@@ -14,6 +14,20 @@ function ConvertTo-PosixShellArg([string]$Value) {
     "'" + $Value.Replace("'", "'`"`"'`"'") + "'"
 }
 
+function Test-AnvilRecipeNeedsGitHubToken([string]$Name) {
+    $Name -in @(
+        'anvil-aprz',
+        'anvil-pr',
+        '_anvil-pr',
+        'anvil-pr-fast',
+        'anvil-scheduled',
+        '_anvil-scheduled',
+        'anvil-scheduled-advisories',
+        'anvil-full',
+        '_anvil-full'
+    )
+}
+
 if ($env:ANVIL_IN_CONTAINER) {
     if ($Recipe.Count -eq 0) { & bash } else { & just @Recipe }
     exit $LASTEXITCODE
@@ -52,6 +66,7 @@ $AnvilContainerPrepareCommand = @()
 $AnvilContainerRunArgs = @()
 $AnvilContainerBuildInMachine = $false
 $AnvilContainerCleanup = $null
+$githubTokenFile = $null
 $exitCode = 0
 $authScript = Join-Path $scriptDir 'auth.ps1'
 
@@ -117,17 +132,50 @@ try {
     )) {
         if (Test-Path "Env:$name") { $runArgs += @('--env', $name) }
     }
-    if ($env:ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN -eq '1') {
-        if (-not $env:GITHUB_TOKEN) {
-            throw 'anvil-container: ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN=1 but GITHUB_TOKEN is unset.'
-        }
-        $runArgs += @('--env', 'GITHUB_TOKEN')
-    }
-
     if ($AnvilContainerPrepareCommand.Count -gt 0) {
         & podman @prepareRunArgs @AnvilContainerPrepareArgs $image @AnvilContainerPrepareCommand
         if ($LASTEXITCODE -ne 0) {
             throw "anvil-container: preparation command failed with exit code $LASTEXITCODE."
+        }
+    }
+
+    $needsGitHubToken = $false
+    foreach ($name in $Recipe) {
+        if (Test-AnvilRecipeNeedsGitHubToken $name) {
+            $needsGitHubToken = $true
+            break
+        }
+    }
+    if ($needsGitHubToken) {
+        $githubToken = $env:GITHUB_TOKEN
+        if (-not $githubToken -and (Get-Command gh -ErrorAction SilentlyContinue)) {
+            try {
+                $githubToken = (& gh auth token --hostname github.com 2>$null)
+                if ($LASTEXITCODE -ne 0) { $githubToken = $null }
+            } catch {
+                $githubToken = $null
+            }
+        }
+        if ($githubToken) {
+            $githubToken = $githubToken.Trim()
+        }
+        if ($githubToken) {
+            $githubTokenFile = Join-Path ([IO.Path]::GetTempPath()) "anvil-github-token-$PID-$([guid]::NewGuid().ToString('N'))"
+            [IO.File]::WriteAllText($githubTokenFile, $githubToken, [Text.Encoding]::ASCII)
+            if ($IsWindows) {
+                $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                & icacls.exe $githubTokenFile '/inheritance:r' '/grant:r' "*$($userSid):(F)" | Out-Null
+            } else {
+                & chmod 600 $githubTokenFile
+            }
+            if ($LASTEXITCODE -ne 0) {
+                throw 'anvil-container: failed to restrict permissions on the temporary GitHub token file.'
+            }
+            $githubToken = $null
+            $runArgs += @(
+                '--mount',
+                "type=bind,src=$githubTokenFile,dst=/run/secrets/anvil-github-token,readonly"
+            )
         }
     }
 
@@ -138,6 +186,9 @@ try {
     }
     $exitCode = $LASTEXITCODE
 } finally {
+    if ($githubTokenFile) {
+        Remove-Item -LiteralPath $githubTokenFile -Force -ErrorAction SilentlyContinue
+    }
     if ($AnvilContainerCleanup) { & $AnvilContainerCleanup }
 }
 

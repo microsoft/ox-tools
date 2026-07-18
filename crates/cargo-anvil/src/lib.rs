@@ -161,11 +161,14 @@
 //! |---|---|
 //! | `ANVIL_CONTAINER_IMAGE` | Override the local image name. The content hash remains the tag. |
 //! | `ANVIL_CONTAINER_NO_REBUILD=1` | Fail when the matching image is missing instead of building it. |
-//! | `ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN=1` | Forward an existing `GITHUB_TOKEN` to checks that require authenticated GitHub API access. |
 //!
 //! The public driver never pulls `ANVIL_CONTAINER_IMAGE` remotely. Downstream
 //! catalogs can add private image-build or dependency-preparation hooks without
 //! changing the public command surface.
+//! For GitHub API checks, the driver automatically uses an existing host
+//! `GITHUB_TOKEN` or the token from an authenticated host `gh` CLI session. It
+//! mounts the token read-only for the command and removes the temporary file
+//! afterward.
 //!
 //! ### Troubleshooting
 //!
@@ -173,6 +176,8 @@
 //! - `podman images anvil-dev` lists locally cached Anvil images.
 //! - `ANVIL_CONTAINER_NO_REBUILD=1` distinguishes a cache miss from a build
 //!   failure.
+//! - If `anvil-aprz` reports that GitHub authentication is unavailable, run
+//!   `gh auth login` on the host or set host `GITHUB_TOKEN`, then rerun.
 //! - Regenerate managed files with `cargo anvil`; do not hand-edit
 //!   `justfiles/anvil/container/`.
 //!

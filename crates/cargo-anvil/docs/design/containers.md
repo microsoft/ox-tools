@@ -242,10 +242,16 @@ logic lives here.
 |---|---|
 | `ANVIL_CONTAINER_IMAGE` | Override the image name (default `anvil-dev`). |
 | `ANVIL_CONTAINER_NO_REBUILD=1` | Fail instead of auto-building a missing/stale image. |
-| `ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN=1` | Forward an already-set host `GITHUB_TOKEN` to the running container. Explicit opt-in because it is a credential. |
 | `ANVIL_IN_CONTAINER` | Set *by* the image; the wrapper recipe uses it to avoid recursion (§4). |
 
-### 6.3 Auth hook (the catalog seam)
+### 6.3 GitHub authentication
+For checks such as `anvil-aprz`, the driver uses an existing host `GITHUB_TOKEN`
+or obtains one non-interactively from the authenticated host `gh` CLI. It writes
+the token to a user-only temporary file, mounts that file read-only for the
+container command, and removes it on exit. The token is not stored in the image
+or passed through the OCI environment.
+
+### 6.4 Auth hook (the catalog seam)
 The engine driver needs no credentials (crates.io is public). Some downstream catalogs do. The driver therefore
 **sources `container/auth.sh` / `auth.ps1` if it exists**, before `podman build`/`podman run`, to
 populate registry/toolchain tokens (e.g. as a BuildKit `--secret` at build time and an `--env-file`

@@ -1,6 +1,5 @@
 ---
 source: crates/cargo-anvil/tests/snapshots.rs
-assertion_line: 121
 expression: render_tree(tmp.path())
 ---
 === .delta.toml ===
@@ -1287,11 +1286,11 @@ unknown-git = "deny"
 # cargo-aprz queries the GitHub advisory API. Unauthenticated access is
 # capped at 60 requests/hour and fails on a full run; an authenticated
 # token raises the cap to 5000/hour. CI injects GITHUB_TOKEN
-# (github.token). For local runs, if GITHUB_TOKEN is unset we borrow the
-# gh CLI's stored token (non-interactive: `gh auth token` prints the
-# active account's token for github.com and never opens a browser/auth
-# prompt). If neither is available we warn with instructions and proceed
-# unauthenticated.
+# (github.token). Container drivers mount an existing host GITHUB_TOKEN
+# or the host gh CLI's stored token as a temporary read-only secret.
+# Native runs borrow the gh CLI token directly. Native runs warn and
+# proceed unauthenticated if neither is available; container runs fail
+# before cargo-aprz can exhaust the unauthenticated rate limit.
 #
 # Unscoped (consults external risk DB).
 [script("pwsh")]
@@ -1299,12 +1298,18 @@ anvil-aprz: anvil-aprz-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if (-not $env:GITHUB_TOKEN) {
         $tok = $null
-        if (Get-Command gh -ErrorAction SilentlyContinue) {
+        $containerTokenFile = '/run/secrets/anvil-github-token'
+        if ($env:ANVIL_IN_CONTAINER -and (Test-Path -LiteralPath $containerTokenFile -PathType Leaf)) {
+            try { $tok = Get-Content -LiteralPath $containerTokenFile -Raw } catch { $tok = $null }
+        } elseif (Get-Command gh -ErrorAction SilentlyContinue) {
             try { $tok = (gh auth token --hostname github.com 2>$null) } catch { $tok = $null }
         }
         if ($tok) {
             $env:GITHUB_TOKEN = $tok.Trim()
         } else {
+            if ($env:ANVIL_IN_CONTAINER) {
+                throw 'anvil-aprz: GitHub authentication is unavailable. Run `gh auth login` on the host or set host GITHUB_TOKEN, then re-run the container command.'
+            }
             Write-Warning 'anvil-aprz: GITHUB_TOKEN is not set and no token could be obtained from the gh CLI.'
             Write-Warning 'cargo-aprz will use the unauthenticated GitHub API (60 requests/hour) and may fail on a full run.'
             Write-Warning 'To fix: run `gh auth login` (recommended), or set $env:GITHUB_TOKEN to a GitHub token, then re-run.'
@@ -2849,15 +2854,19 @@ repository `Justfile` from `"native"` to `"container"` and commit it.
 - `ANVIL_CONTAINER_IMAGE`: change the local image repository/name. The content
   hash remains the tag; the public driver never pulls it remotely.
 - `ANVIL_CONTAINER_NO_REBUILD=1`: fail if the matching image is unavailable.
-- `ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN=1`: forward an already-set host
-  `GITHUB_TOKEN` for checks such as `anvil-aprz`. This is opt-in because the
-  token becomes part of the running container's environment.
+
+For GitHub API checks, the driver automatically uses an existing host
+`GITHUB_TOKEN` or the token from an authenticated host `gh` CLI session. It
+mounts the token read-only for the command and removes the temporary file
+afterward.
 
 ## Troubleshooting
 
 - The first run builds the matching image and may take several minutes.
 - `podman images anvil-dev` lists cached images.
 - Use `ANVIL_CONTAINER_NO_REBUILD=1` to fail on a cache miss.
+- If `anvil-aprz` reports that GitHub authentication is unavailable, run
+  `gh auth login` on the host or set host `GITHUB_TOKEN`, then rerun.
 - Rerun `cargo anvil` to update generated files; do not edit this directory.
 
 Downstream catalogs can provide `auth.sh` and/or `auth.ps1` beside these files.
@@ -2992,6 +3001,20 @@ function ConvertTo-PosixShellArg([string]$Value) {
     "'" + $Value.Replace("'", "'`"`"'`"'") + "'"
 }
 
+function Test-AnvilRecipeNeedsGitHubToken([string]$Name) {
+    $Name -in @(
+        'anvil-aprz',
+        'anvil-pr',
+        '_anvil-pr',
+        'anvil-pr-fast',
+        'anvil-scheduled',
+        '_anvil-scheduled',
+        'anvil-scheduled-advisories',
+        'anvil-full',
+        '_anvil-full'
+    )
+}
+
 if ($env:ANVIL_IN_CONTAINER) {
     if ($Recipe.Count -eq 0) { & bash } else { & just @Recipe }
     exit $LASTEXITCODE
@@ -3030,6 +3053,7 @@ $AnvilContainerPrepareCommand = @()
 $AnvilContainerRunArgs = @()
 $AnvilContainerBuildInMachine = $false
 $AnvilContainerCleanup = $null
+$githubTokenFile = $null
 $exitCode = 0
 $authScript = Join-Path $scriptDir 'auth.ps1'
 
@@ -3095,17 +3119,50 @@ try {
     )) {
         if (Test-Path "Env:$name") { $runArgs += @('--env', $name) }
     }
-    if ($env:ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN -eq '1') {
-        if (-not $env:GITHUB_TOKEN) {
-            throw 'anvil-container: ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN=1 but GITHUB_TOKEN is unset.'
-        }
-        $runArgs += @('--env', 'GITHUB_TOKEN')
-    }
-
     if ($AnvilContainerPrepareCommand.Count -gt 0) {
         & podman @prepareRunArgs @AnvilContainerPrepareArgs $image @AnvilContainerPrepareCommand
         if ($LASTEXITCODE -ne 0) {
             throw "anvil-container: preparation command failed with exit code $LASTEXITCODE."
+        }
+    }
+
+    $needsGitHubToken = $false
+    foreach ($name in $Recipe) {
+        if (Test-AnvilRecipeNeedsGitHubToken $name) {
+            $needsGitHubToken = $true
+            break
+        }
+    }
+    if ($needsGitHubToken) {
+        $githubToken = $env:GITHUB_TOKEN
+        if (-not $githubToken -and (Get-Command gh -ErrorAction SilentlyContinue)) {
+            try {
+                $githubToken = (& gh auth token --hostname github.com 2>$null)
+                if ($LASTEXITCODE -ne 0) { $githubToken = $null }
+            } catch {
+                $githubToken = $null
+            }
+        }
+        if ($githubToken) {
+            $githubToken = $githubToken.Trim()
+        }
+        if ($githubToken) {
+            $githubTokenFile = Join-Path ([IO.Path]::GetTempPath()) "anvil-github-token-$PID-$([guid]::NewGuid().ToString('N'))"
+            [IO.File]::WriteAllText($githubTokenFile, $githubToken, [Text.Encoding]::ASCII)
+            if ($IsWindows) {
+                $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+                & icacls.exe $githubTokenFile '/inheritance:r' '/grant:r' "*$($userSid):(F)" | Out-Null
+            } else {
+                & chmod 600 $githubTokenFile
+            }
+            if ($LASTEXITCODE -ne 0) {
+                throw 'anvil-container: failed to restrict permissions on the temporary GitHub token file.'
+            }
+            $githubToken = $null
+            $runArgs += @(
+                '--mount',
+                "type=bind,src=$githubTokenFile,dst=/run/secrets/anvil-github-token,readonly"
+            )
         }
     }
 
@@ -3116,6 +3173,9 @@ try {
     }
     $exitCode = $LASTEXITCODE
 } finally {
+    if ($githubTokenFile) {
+        Remove-Item -LiteralPath $githubTokenFile -Force -ErrorAction SilentlyContinue
+    }
     if ($AnvilContainerCleanup) { & $AnvilContainerCleanup }
 }
 
@@ -3133,6 +3193,15 @@ if (($# > 0)) && [[ ! "$1" =~ ^_?anvil-[A-Za-z0-9-]+$ ]]; then
     echo "anvil-container: expected an anvil-* recipe, got '$1'." >&2
     exit 2
 fi
+
+anvil_recipe_needs_github_token() {
+    case "$1" in
+        anvil-aprz | anvil-pr | _anvil-pr | anvil-pr-fast \
+            | anvil-scheduled | _anvil-scheduled | anvil-scheduled-advisories \
+            | anvil-full | _anvil-full) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 command -v podman >/dev/null 2>&1 || {
     echo "anvil-container: Podman is required. See justfiles/anvil/container/README.md." >&2
@@ -3159,7 +3228,11 @@ ANVIL_CONTAINER_PREPARE_ARGS=()
 ANVIL_CONTAINER_PREPARE_COMMAND=()
 ANVIL_CONTAINER_RUN_ARGS=()
 ANVIL_CONTAINER_CLEANUP=:
-cleanup() { "$ANVIL_CONTAINER_CLEANUP"; }
+github_token_file=""
+cleanup() {
+    if [[ -n "$github_token_file" ]]; then rm -f -- "$github_token_file"; fi
+    "$ANVIL_CONTAINER_CLEANUP"
+}
 trap cleanup EXIT
 
 if [[ -f "$script_dir/auth.sh" ]]; then
@@ -3198,19 +3271,36 @@ run_args+=("${ANVIL_CONTAINER_RUN_ARGS[@]}")
 for name in PR_TITLE BASE_REF ANVIL_INCLUDE_MODIFIED ANVIL_INCLUDE_AFFECTED ANVIL_INCLUDE_REQUIRED GITHUB_BASE_REF SYSTEM_PULLREQUEST_TARGETBRANCH; do
     if [[ -v "$name" ]]; then run_args+=(--env "$name"); fi
 done
-if [[ "${ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN:-}" == "1" ]]; then
-    if [[ ! -v GITHUB_TOKEN ]]; then
-        echo "anvil-container: ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN=1 but GITHUB_TOKEN is unset." >&2
-        exit 1
-    fi
-    run_args+=(--env GITHUB_TOKEN)
-fi
-
 if ((${#ANVIL_CONTAINER_PREPARE_COMMAND[@]} > 0)); then
     podman "${prepare_run_args[@]}" \
         "${ANVIL_CONTAINER_PREPARE_ARGS[@]}" \
         "$image" \
         "${ANVIL_CONTAINER_PREPARE_COMMAND[@]}"
+fi
+
+needs_github_token=false
+for recipe in "$@"; do
+    if anvil_recipe_needs_github_token "$recipe"; then
+        needs_github_token=true
+        break
+    fi
+done
+if "$needs_github_token"; then
+    github_token="${GITHUB_TOKEN:-}"
+    if [[ -z "$github_token" ]]; then
+        gh_command=gh
+        if ! command -v "$gh_command" >/dev/null 2>&1; then gh_command=gh.exe; fi
+        if command -v "$gh_command" >/dev/null 2>&1; then
+            github_token="$("$gh_command" auth token --hostname github.com 2>/dev/null | tr -d '\r' || true)"
+        fi
+    fi
+    if [[ -n "$github_token" ]]; then
+        github_token_file="$(mktemp)"
+        chmod 600 "$github_token_file"
+        printf '%s' "$github_token" > "$github_token_file"
+        unset github_token
+        run_args+=(--volume "$github_token_file:/run/secrets/anvil-github-token:ro,Z")
+    fi
 fi
 
 if (($# == 0)); then

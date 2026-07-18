@@ -152,13 +152,19 @@ mod tests {
             assert!(driver.contains("ANVIL_CONTAINER_NO_REBUILD"));
             assert!(driver.contains("ANVIL_CONTAINER_IMAGE"));
             assert!(driver.contains("ANVIL_IN_CONTAINER"));
-            assert!(driver.contains("ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN"));
+            assert!(driver.contains("auth token --hostname github.com"));
+            assert!(driver.contains("/run/secrets/anvil-github-token"));
+            assert!(driver.contains("anvil-pr-fast"));
+            assert!(driver.contains("anvil-scheduled-advisories"));
             assert!(driver.contains("PR_TITLE"));
             assert!(driver.contains("--pull=never"));
+            assert!(!driver.contains("--env GITHUB_TOKEN"));
         }
         assert!(POWERSHELL_DRIVER.contains("AnvilContainerBuildInMachine"));
         assert!(POWERSHELL_DRIVER.contains("AnvilContainerPrepareCommand"));
         assert!(POWERSHELL_DRIVER.contains("podman machine ssh"));
+        assert!(POWERSHELL_DRIVER.contains("foreach ($name in $Recipe)"));
+        assert!(SHELL_DRIVER.contains("for recipe in \"$@\""));
     }
 
     #[test]

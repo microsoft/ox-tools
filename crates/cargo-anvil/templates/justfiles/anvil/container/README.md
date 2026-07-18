@@ -56,15 +56,19 @@ repository `Justfile` from `"native"` to `"container"` and commit it.
 - `ANVIL_CONTAINER_IMAGE`: change the local image repository/name. The content
   hash remains the tag; the public driver never pulls it remotely.
 - `ANVIL_CONTAINER_NO_REBUILD=1`: fail if the matching image is unavailable.
-- `ANVIL_CONTAINER_FORWARD_GITHUB_TOKEN=1`: forward an already-set host
-  `GITHUB_TOKEN` for checks such as `anvil-aprz`. This is opt-in because the
-  token becomes part of the running container's environment.
+
+For GitHub API checks, the driver automatically uses an existing host
+`GITHUB_TOKEN` or the token from an authenticated host `gh` CLI session. It
+mounts the token read-only for the command and removes the temporary file
+afterward.
 
 ## Troubleshooting
 
 - The first run builds the matching image and may take several minutes.
 - `podman images anvil-dev` lists cached images.
 - Use `ANVIL_CONTAINER_NO_REBUILD=1` to fail on a cache miss.
+- If `anvil-aprz` reports that GitHub authentication is unavailable, run
+  `gh auth login` on the host or set host `GITHUB_TOKEN`, then rerun.
 - Rerun `cargo anvil` to update generated files; do not edit this directory.
 
 Downstream catalogs can provide `auth.sh` and/or `auth.ps1` beside these files.
