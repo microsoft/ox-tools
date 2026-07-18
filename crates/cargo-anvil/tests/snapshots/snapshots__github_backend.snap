@@ -2594,7 +2594,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
     $base = $base.Trim()
     & git rev-parse --verify "$base^{commit}" 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "anvil-semver-check: baseline '$base' is not present in this clone. This job needs full git history -- GitHub: set the checkout's fetch-depth: 0; local: use a non-shallow clone with origin/main present."
+        Write-Error "anvil-semver-check: baseline '$base' is not present in this clone (shallow/truncated history? fetch it or unshallow)."
         exit 1
     }
     $findings = New-Object System.Collections.Generic.List[string]
