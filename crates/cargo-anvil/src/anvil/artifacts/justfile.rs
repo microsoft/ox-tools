@@ -247,6 +247,7 @@ mod tests {
         for needle in [
             "_anvil-base-ref",
             "git rev-parse --verify \"$base^{commit}\"",
+            "git cat-file -e $baselineManifest",
             "cargo semver-checks --package $p --baseline-rev $base",
         ] {
             assert!(body.contains(needle), "semver check template missing '{needle}'");
