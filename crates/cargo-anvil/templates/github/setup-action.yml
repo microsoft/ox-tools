@@ -26,7 +26,7 @@ runs:
       run: echo "version=$(rustc --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
     - name: Restore cargo cache
       id: cargo-cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         # Key on OS + arch + rustc version + lockfile hashes + catalog
         # hash so a Rust toolchain bump, a cross-arch matrix leg, or a
@@ -135,11 +135,11 @@ runs:
         esac
 
     # Save the cache as the LAST step of setup, regardless of whether
-    # any earlier install step partially failed. `actions/cache@v4`
+    # any earlier install step partially failed. `actions/cache`
     # used to support this via `save-always: true`, but that knob is
     # deprecated as of 2025 with the explicit message "does not work
     # as intended" — failing runs simply don't save. The supported
-    # replacement is to call `actions/cache/save@v4` directly as its
+    # replacement is to call `actions/cache/save` directly as its
     # own step with `if: always()`.
     #
     # Without this, a single catalog issue that fails the install
@@ -151,7 +151,7 @@ runs:
     # until the catalog is complete.
     - name: Save cargo cache
       if: always() && steps.cargo-cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
         path: |
