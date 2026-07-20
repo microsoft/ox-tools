@@ -78,18 +78,14 @@ pub fn run_cargo(args: impl Iterator<Item = impl AsRef<str>>) -> Result<(), AppE
 
     println!("cargo {args_str}");
 
-    let output = duct::cmd("cargo", args).run()?;
+    // `.unchecked()` stops duct from turning a non-zero exit into an `Err`
+    // itself, so the status check below is the single, observable place that
+    // decides success or failure. Output is inherited (piped live to the
+    // parent's stdout/stderr), so there is nothing to capture here.
+    let output = duct::cmd("cargo", args).unchecked().run()?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        ohno::bail!(
-            "cargo {} failed with exit code {:?}\nstdout: {}\nstderr: {}",
-            args_str,
-            output.status.code(),
-            stdout,
-            stderr
-        );
+        ohno::bail!("cargo {args_str} failed with exit code {:?}", output.status.code());
     }
 
     Ok(())
@@ -110,5 +106,24 @@ mod tests {
         assert!(automation.is_some(), "{packages:?}");
         assert!(!automation.unwrap().manifest_path.is_empty());
         assert!(!automation.unwrap().targets.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_run_cargo_success() {
+        // `cargo --version` is fast and side-effect-free; a stubbed-out body
+        // (`Ok(())`) would also pass here, but the failure test below pins the
+        // real behavior.
+        run_cargo(["--version"].into_iter()).expect("cargo --version should succeed");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn test_run_cargo_reports_failure() {
+        // An unknown subcommand makes cargo exit non-zero. This asserts that
+        // `run_cargo` surfaces the failure as an `Err`, which kills the
+        // "delete `!`" and "replace body with `Ok(())`" mutants.
+        let result = run_cargo(["this-is-not-a-real-cargo-subcommand"].into_iter());
+        assert!(result.is_err(), "expected an error for an unknown cargo subcommand");
     }
 }
