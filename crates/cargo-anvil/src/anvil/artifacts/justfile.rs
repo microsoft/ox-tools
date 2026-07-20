@@ -235,6 +235,26 @@ mod tests {
     }
 
     #[test]
+    fn semver_check_compares_against_the_pr_branch_baseline() {
+        let (_, body) = CHECK_FILES
+            .iter()
+            .find(|(path, _)| *path == "justfiles/anvil/checks/semver-check.just")
+            .expect("semver check template is registered");
+
+        // The recipe must resolve the PR target branch via the shared
+        // resolver _anvil-base-ref, and pass it to cargo-semver-checks
+        // as the baseline rather than comparing against the last crates.io release.
+        for needle in [
+            "_anvil-base-ref",
+            "git rev-parse --verify \"$base^{commit}\"",
+            "git cat-file -e $baselineManifest",
+            "cargo semver-checks --package $p --baseline-rev $base",
+        ] {
+            assert!(body.contains(needle), "semver check template missing '{needle}'");
+        }
+    }
+
+    #[test]
     fn groups_just_template_includes_all_groups_and_pr_slow_sub_recipes() {
         let groups = all_group_bodies();
         for needle in [
