@@ -63,7 +63,7 @@ flowchart LR
     test_act[".github/actions/<br/>anvil-pr-test"]:::action
     runtime_act[".github/actions/<br/>anvil-pr-runtime-analysis"]:::action
     mutants_act[".github/actions/<br/>anvil-pr-mutants"]:::action
-    codecov_act["codecov/codecov-action@v5"]:::external
+    codecov_act["codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f<br/>v7.0.0"]:::external
     impact_just["cargo delta"]:::recipe
     fast_just["just anvil-pr-fast"]:::recipe
     fast_setup_just["just anvil-setup"]:::recipe
@@ -136,7 +136,7 @@ flowchart LR
     sadv_act[".github/actions/<br/>anvil-scheduled-advisories"]:::action
     srun_act[".github/actions/<br/>anvil-scheduled-runtime-analysis"]:::action
     sexh_act[".github/actions/<br/>anvil-scheduled-exhaustive"]:::action
-    codecov_act["codecov/codecov-action@v5"]:::external
+    codecov_act["codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f<br/>v7.0.0"]:::external
     stest_just["just anvil-scheduled-test"]:::recipe
     stest_setup_just["just anvil-setup"]:::recipe
     sadv_just["just anvil-scheduled-advisories"]:::recipe
@@ -656,7 +656,7 @@ The upload step:
 ```yaml
 - name: Upload coverage to Codecov
   if: matrix.os != 'windows-arm' && needs.impact.outputs.skip != 'true'
-  uses: codecov/codecov-action@v5
+  uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
   with:
     files: target/coverage/lcov.info
     flags: ${{ matrix.os }}
