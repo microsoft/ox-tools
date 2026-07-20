@@ -211,7 +211,7 @@ unknown-git = "deny"
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # cargo-aprz queries the GitHub advisory API. Unauthenticated access is
 # capped at 60 requests/hour and fails on a full run; an authenticated
@@ -252,7 +252,7 @@ anvil-aprz-validate-prereqs: anvil-tool-cargo-aprz-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Unscoped (consults external advisory DB; reads Cargo.lock).
 [script("pwsh")]
@@ -271,7 +271,7 @@ anvil-audit-validate-prereqs: anvil-tool-cargo-audit-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier.
 [script("pwsh")]
@@ -293,7 +293,7 @@ anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. Smoke-only fuzz pass via [bolero](https://crates.io/crates/bolero):
 # each fuzz target gets a 60-second libfuzzer run, just enough to
@@ -373,7 +373,7 @@ anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-to
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 [script("pwsh")]
 anvil-careful: anvil-careful-validate-prereqs
@@ -435,7 +435,7 @@ anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereq
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Required tier. cargo-hack's feature powerset cascades through dep
 # features, so the required set (workspace-internal transitive deps)
@@ -457,7 +457,7 @@ anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
 #
@@ -489,7 +489,7 @@ anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. Per project policy, clippy runs on the affected set
 # rather than the modified set: a change in a crate can introduce a
@@ -514,7 +514,7 @@ anvil-clippy-validate-prereqs: anvil-component-default-clippy-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Unscoped (consults external advisory DB; reads Cargo.lock, not
 # workspace members). Single command, but run under pwsh so it does not
@@ -535,7 +535,7 @@ anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Required tier. cargo doc resolves intra-doc links through the dep
 # graph, so a dep changing its public API can break doc-build in a
@@ -561,7 +561,7 @@ anvil-doc-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. Two cargo-test invocations cover both feature
 # configurations: --all-features catches doctests that only compile
@@ -589,7 +589,7 @@ anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
 [script("pwsh")]
@@ -609,7 +609,7 @@ anvil-ensure-no-cyclic-deps-validate-prereqs: anvil-tool-cargo-ensure-no-cyclic-
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
 [script("pwsh")]
@@ -629,7 +629,7 @@ anvil-ensure-no-default-features-validate-prereqs: anvil-tool-cargo-ensure-no-de
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier.
 [script("pwsh")]
@@ -649,7 +649,7 @@ anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier (lints public API of changed crates and rev-deps).
 #
@@ -724,7 +724,7 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier. cargo-fmt is a rustup component. We invoke it via the
 # pinned nightly (see versions.just) because rustfmt.toml uses
@@ -764,7 +764,7 @@ anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
 [script("pwsh")]
@@ -784,7 +784,7 @@ anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereq
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. Runs on the pinned nightly toolchain: cargo-llvm-cov
 # only sets the `cfg(coverage_nightly)` that gates the workspace's
@@ -941,7 +941,7 @@ anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-pre
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. `loom` is a permutation-based concurrency model
 # checker: a crate exercises it through a dedicated `[[test]]` target
@@ -1057,7 +1057,7 @@ anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Race coverage rotates the miri-many-seeds window daily by
 # day-of-month: day N -> seeds [2N-1, 2N+1) (2 seeds/day,
@@ -1089,7 +1089,7 @@ anvil-miri-race-coverage-validate-prereqs: anvil-component-nightly-miri-validate
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 [script("pwsh")]
 anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs
@@ -1111,7 +1111,7 @@ anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-vali
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Stricter miri profiles. Each runs miri over the full workspace
 # with a profile-specific MIRIFLAGS plus a profile-specific
@@ -1149,7 +1149,7 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Nightly checks always run full-workspace; impact env vars aren't set
 # by the scheduled workflow, so the affected-tier default (--workspace)
@@ -1199,7 +1199,7 @@ anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. cargo-mutants does its own diff-scoping via --in-diff;
 # the affected-tier guard is the wiring-layer's coarse filter (if no
@@ -1250,7 +1250,7 @@ anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Unscoped. Scheduled-exhaustive deliberately runs over the whole
 # workspace regardless of diff.
@@ -1273,7 +1273,7 @@ anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Unscoped (PR title is not source-related).
 #
@@ -1309,7 +1309,7 @@ anvil-pr-title-validate-prereqs: anvil-tool-pwsh-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
 #
@@ -1422,7 +1422,7 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier (compares changed crates' current API against the PR
 # target branch baseline; only changed crates' surface is at risk).
@@ -1614,7 +1614,7 @@ anvil-semver-check-validate-prereqs: anvil-tool-cargo-semver-checks-validate-pre
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
 #
@@ -1669,7 +1669,7 @@ anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Required tier. cargo-udeps detects unused dependencies by resolving
 # the full crate graph and seeing which deps are referenced; that's
@@ -1711,7 +1711,7 @@ anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-too
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 [group("anvil")]
 anvil-pr-fast: anvil-pr-fast-validate-prereqs \
@@ -1780,7 +1780,7 @@ anvil-pr-fast-validate-prereqs: \
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 [group("anvil")]
 anvil-pr-mutants: anvil-pr-mutants-validate-prereqs anvil-mutants-diff
@@ -1795,7 +1795,7 @@ anvil-pr-mutants-validate-prereqs: anvil-mutants-diff-validate-prereqs
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 [group("anvil")]
 anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
@@ -1822,7 +1822,7 @@ anvil-pr-runtime-analysis-validate-prereqs: \
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # pr-slow is the single PR-tier group for everything that takes more
 # than ~30s per crate (tests, stricter runtimes, mutation testing).
@@ -1860,7 +1860,7 @@ anvil-pr-slow-validate-prereqs: \
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 [group("anvil")]
 anvil-pr-test: anvil-pr-test-validate-prereqs \
@@ -1884,7 +1884,7 @@ anvil-pr-test-validate-prereqs: \
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 [group("anvil")]
 anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
@@ -1911,7 +1911,7 @@ anvil-scheduled-advisories-validate-prereqs: \
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 [group("anvil")]
 anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
@@ -1935,7 +1935,7 @@ anvil-scheduled-exhaustive-validate-prereqs: \
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # scheduled-runtime-analysis is the full-workspace counterpart of
 # pr-runtime-analysis: it re-runs miri unscoped (PR-tier miri is
@@ -1967,7 +1967,7 @@ anvil-scheduled-runtime-analysis-validate-prereqs: \
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Scheduled groups
 
@@ -1993,7 +1993,7 @@ anvil-scheduled-test-validate-prereqs: \
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../docs/design/checks.md for the catalog and rationale.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 #
 # Each check belongs to one of four buckets, which determines how it
@@ -2301,7 +2301,7 @@ alias anvil := anvil-pr
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../docs/design/checks.md for the tier structure.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # PR tier: every check that should run on every pull request, split
 # into two groups so the fast checks aren't blocked behind the slow
@@ -2396,7 +2396,7 @@ anvil-validate-prereqs: anvil-full-validate-prereqs anvil-tool-cargo-delta-valid
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../docs/design/local.md for the policy.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/local.md
 
 # ============================================================================
 # System-level prerequisites (libclang, etc.)

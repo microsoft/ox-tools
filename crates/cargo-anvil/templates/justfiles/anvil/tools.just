@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../docs/design/local.md for the policy.
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/local.md
 
 # ============================================================================
 # System-level prerequisites (libclang, etc.)
