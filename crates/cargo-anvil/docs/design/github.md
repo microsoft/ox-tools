@@ -685,7 +685,7 @@ Recipes that surface non-blocking findings exit 0 and write a markdown body to
 `target/anvil/comments/<NAME>.md` (see [checks.md §6](./checks.md#6-advisory-pr-comments)
 for the cross-backend convention). The GitHub backend turns presence/absence of those
 files into upserts/deletions of a sticky PR comment via
-[`marocchino/sticky-pull-request-comment@v3`](https://github.com/marocchino/sticky-pull-request-comment).
+[`marocchino/sticky-pull-request-comment`](https://github.com/marocchino/sticky-pull-request-comment).
 
 The wiring lives in the `pr-fast` job of `anvil-pr-impl.yml` (the only group whose
 recipes emit comments today). Two steps run after the composite that executes the
@@ -696,7 +696,7 @@ recipes emit comments today). Two steps run after the composite that executes th
   if: always() && github.event_name == 'pull_request' && matrix.os == 'linux'
       && github.event.pull_request.head.repo.full_name == github.repository
       && hashFiles('target/anvil/comments/semver.md') != ''
-  uses: marocchino/sticky-pull-request-comment@v3
+  uses: marocchino/sticky-pull-request-comment
   with:
     header: anvil-semver
     path: target/anvil/comments/semver.md
@@ -704,7 +704,7 @@ recipes emit comments today). Two steps run after the composite that executes th
   if: always() && github.event_name == 'pull_request' && matrix.os == 'linux'
       && github.event.pull_request.head.repo.full_name == github.repository
       && hashFiles('target/anvil/comments/semver.md') == ''
-  uses: marocchino/sticky-pull-request-comment@v3
+  uses: marocchino/sticky-pull-request-comment
   with:
     header: anvil-semver
     delete: true
