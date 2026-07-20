@@ -302,7 +302,7 @@ jobs:
       include_affected: ${{ steps.delta.outputs.include_affected }}
       include_required: ${{ steps.delta.outputs.include_required }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout
         with: { fetch-depth: 0 }
       - id: delta
         uses: ./.github/actions/anvil-impact
@@ -318,7 +318,7 @@ jobs:
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout
         with: { fetch-depth: 0 }  # semver-check needs origin/<base> resolvable for --baseline-rev
       - uses: ./.github/actions/anvil-pr-fast
         with:
@@ -341,7 +341,7 @@ jobs:
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout
       - uses: ./.github/actions/anvil-pr-test
         with:
           include_modified: ${{ needs.impact.outputs.include_modified }}
@@ -401,7 +401,7 @@ jobs:
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
-    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/anvil-scheduled-test } ]
+    steps: [ { uses: actions/checkout }, { uses: ./.github/actions/anvil-scheduled-test } ]
   scheduled-advisories:
     strategy:
       fail-fast: false
@@ -411,7 +411,7 @@ jobs:
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
-    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/anvil-scheduled-advisories } ]
+    steps: [ { uses: actions/checkout }, { uses: ./.github/actions/anvil-scheduled-advisories } ]
   scheduled-exhaustive:
     # x86_64 only -- cargo-mutants constraint.
     strategy:
@@ -419,7 +419,7 @@ jobs:
       matrix:
         os: [linux, windows]
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}
-    steps: [ { uses: actions/checkout@v4 }, { uses: ./.github/actions/anvil-scheduled-exhaustive } ]
+    steps: [ { uses: actions/checkout }, { uses: ./.github/actions/anvil-scheduled-exhaustive } ]
 ```
 
 Scheduled composite actions don't receive any `include_*` inputs at all — their inputs
