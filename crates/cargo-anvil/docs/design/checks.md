@@ -6,7 +6,7 @@ canonical source for "what does anvil actually run?"
 
 See also:
 
-- [design.md](./design.md) for the overall principles and CLI shape.
+- [README.md](./README.md) for the overall principles and CLI shape.
 - [local.md](./local.md) for how the catalog is exposed as `just` recipes.
 - [github.md](./github.md) / [ado.md](./ado.md) for how groups map to cloud-workflow building blocks.
 
@@ -139,7 +139,7 @@ the per-leg runner-label inputs and forking the workflow when the matrix shape i
 needs to change, [ado.md §4](./ado.md#4-owned-stages-templates) for
 `linuxPool`/`windowsPool`).
 Locally there is no OS matrix; `just anvil-pr-slow` (the umbrella recipe) runs the three sub-recipes in sequence against whatever OS the
-developer is on. See [design.md §8.3](./design.md#83-cross-os-test-matrices) for the
+developer is on. See [README.md §8.3](./README.md#83-cross-os-test-matrices) for the
 overall rationale.
 
 The `scheduled-exhaustive` group's checks are independent and could in principle live in
@@ -166,7 +166,7 @@ that provided the strongest version of the check.
 | `doc-build`                    | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps` | oxidizer-github |
 | `readme-check`                 | `cargo doc2readme --check` for each crate that opts in (presence of a `[package.metadata.doc2readme]` table) | oxidizer-github |
 | `spellcheck`                   | `cargo spellcheck check --code 1`                         | oxidizer-github |
-| `pr-title`                     | Conventional-Commits regex applied to the title in the `PR_TITLE` env var. Skipped silently only when the env var is **unset** (intermediate local runs, scheduled-tier builds); a non-empty-but-invalid value fails loudly (a misconfigured cloud variable is a real error, not a skip). Written as a `[script("pwsh")]` recipe (the one check that needs scripting; see [design.md §8.3](./design.md#83-cross-os-test-matrices)). cloud-workflow wiring: GitHub's per-group composite action reads `${{ inputs.pr_title }}` populated from `${{ github.event.pull_request.title }}` in the reusable PR workflow; ADO has **no** PR-title predefined variable (`System.PullRequest.Title` does not exist), so `group.yml` resolves the title from the REST API on PR builds and publishes it as `PR_TITLE` (empty on non-PR / fork / API failure, where the recipe no-ops). | oxidizer-github |
+| `pr-title`                     | Conventional-Commits regex applied to the title in the `PR_TITLE` env var. Skipped silently only when the env var is **unset** (intermediate local runs, scheduled-tier builds); a non-empty-but-invalid value fails loudly (a misconfigured cloud variable is a real error, not a skip). Written as a `[script("pwsh")]` recipe (the one check that needs scripting; see [README.md §8.3](./README.md#83-cross-os-test-matrices)). cloud-workflow wiring: GitHub's per-group composite action reads `${{ inputs.pr_title }}` populated from `${{ github.event.pull_request.title }}` in the reusable PR workflow; ADO has **no** PR-title predefined variable (`System.PullRequest.Title` does not exist), so `group.yml` resolves the title from the REST API on PR builds and publishes it as `PR_TITLE` (empty on non-PR / fork / API failure, where the recipe no-ops). | oxidizer-github |
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
 | `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` run **twice** — once with default targets (lib + bins) and once with `--all-targets`. cargo-udeps only analyzes the targets it's told to, and each run catches a variant the other masks: the default-targets run surfaces a dep in `[dependencies]` referenced only by tests/benches/examples (it should be a dev-dep; `--all-targets` would see it as "used"), while the `--all-targets` run surfaces unused `[dev-dependencies]` (never compiled by the default-targets run). Together they cover unused deps, unused dev-deps, and deps that should be dev-deps. | oxidizer, oxidizer-github |

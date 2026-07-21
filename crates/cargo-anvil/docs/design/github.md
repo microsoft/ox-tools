@@ -20,7 +20,7 @@ need to change:
 
 See also:
 
-- [design.md §6](./design.md#6-repo-layout) for the file-category model.
+- [README.md §6](./README.md#6-repo-layout) for the file-category model.
 - [checks.md](./checks.md) for what each group runs.
 - [local.md](./local.md) for the `just` recipes the composite actions invoke.
 - [ado.md](./ado.md) for the ADO counterpart.

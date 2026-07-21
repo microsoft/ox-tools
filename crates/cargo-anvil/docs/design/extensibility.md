@@ -5,7 +5,7 @@
 > reusing the same anvil engine (decision table, region splicing, manifest tracking, backend
 > resolution, dry-run, summary).
 
-This is a companion to the top-level [design.md](./design.md). It assumes familiarity with the
+This is a companion to the top-level [README.md](./README.md). It assumes familiarity with the
 core concepts defined there and in [checks.md](./checks.md), [local.md](./local.md), and
 [updates.md](./updates.md).
 
@@ -330,7 +330,7 @@ OwnedFileSpec {
 }
 ```
 
-Selection is unchanged from [design.md §5.2](./design.md): the engine resolves a backend set from
+Selection is unchanged from [README.md §5.2](./README.md): the engine resolves a backend set from
 explicit `--backend` flags or autodetection over the *fixed* `{github, ado}`, and only emits an
 owned file whose `gate` is `None` or names a selected backend. Each built-in backend file is
 exposed as a public artifact (§4.1), and a fork manipulates them — and adds new ones — with the
@@ -529,7 +529,7 @@ ancestors defined seamlessly, as one tool managing one namespace.
   sentinels, `justfiles/anvil/`, or the `anvil-` recipe prefix. Those belong to the engine.
 - **Runtime plugins / dynamic loading.** A catalog is Rust code compiled into the downstream
   binary, not a config file discovered at runtime. This keeps the "writes files, then exits"
-  stance ([design.md §3](./design.md)) and avoids a plugin ABI.
+  stance ([README.md §3](./README.md)) and avoids a plugin ABI.
 - **Fork-authored backends.** The backend set is closed (`github`, `ado`); a fork cannot add a
   backend (§4.3). It can override, drop, or add individual files gated on an *existing* backend,
   but the `Backend` enum and backend selection/autodetection are engine-owned.

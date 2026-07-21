@@ -6,7 +6,7 @@ don't — that's the design).
 
 See also:
 
-- [design.md](./design.md) for the overall principles.
+- [README.md](./README.md) for the overall principles.
 - [checks.md](./checks.md) for the catalog the recipes implement.
 - [updates.md](./updates.md) for how these files are tracked / regenerated.
 
@@ -495,7 +495,7 @@ tools.
 
 ## 7. Customization at the recipe level
 
-Per the four customization tiers in [design.md §7](./design.md#7-customization):
+Per the four customization tiers in [README.md §7](./README.md#7-customization):
 
 - **Add your own recipes** to the top-level `Justfile` outside the managed region. The
   Justfile's managed region only contains `import` lines and an alias — your recipes never
