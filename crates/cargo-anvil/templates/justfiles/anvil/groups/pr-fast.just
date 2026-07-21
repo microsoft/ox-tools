@@ -3,6 +3,7 @@
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
+# Run the fast pull request checks.
 [group("anvil")]
 anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-fmt \
@@ -28,6 +29,7 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
 # from checks.just. Setup recipes accept `installer="install"|"binstall"`;
 # validate-prereqs recipes take no parameters.
 
+# Install prerequisites for the `anvil-pr-fast` recipe.
 [group("anvil-setup")]
 anvil-pr-fast-setup installer="install": \
     (anvil-fmt-setup installer) \
@@ -47,6 +49,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-external-types-setup installer) \
     (anvil-aprz-setup installer)
 
+# Validate prerequisites for the `anvil-pr-fast` recipe.
 [group("anvil-setup")]
 anvil-pr-fast-validate-prereqs: \
     anvil-fmt-validate-prereqs \

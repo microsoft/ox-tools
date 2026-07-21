@@ -16,6 +16,8 @@
 # pointing at it never fails on a missing file -- if `.spelling` is
 # absent we emit an empty dictionary (count `0`, no words) rather than
 # leaving the path dangling.
+
+# Check spelling in source comments and documentation.
 [script("pwsh")]
 anvil-spellcheck: anvil-spellcheck-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -46,8 +48,11 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
 # cargo-spellcheck has a build-time libclang dependency; the system
 # deps check runs first so adopters get a clear hint instead of a
 # cryptic clang-sys build error mid-install.
+
+# Install prerequisites for the `anvil-spellcheck` recipe.
 [group("anvil-setup")]
 anvil-spellcheck-setup installer="install": anvil-system-deps-check (anvil-tool-cargo-spellcheck-install installer)
 
+# Validate prerequisites for the `anvil-spellcheck` recipe.
 [group("anvil-setup")]
 anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs

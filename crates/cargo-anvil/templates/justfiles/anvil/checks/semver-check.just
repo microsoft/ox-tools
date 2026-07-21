@@ -39,6 +39,8 @@
 # selective error tolerance for renamed crates ("package `<name>` not
 # found in ...") and bin->bin+lib transitions ("no library targets
 # found").
+
+# Check affected crates for semantic versioning violations.
 [script("pwsh")]
 anvil-semver-check: anvil-semver-check-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -183,8 +185,10 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
     # Advisory: always exit 0. cloud-workflow wiring posts/clears the PR comment.
     exit 0
 
+# Install prerequisites for the `anvil-semver-check` recipe.
 [group("anvil-setup")]
 anvil-semver-check-setup installer="install": (anvil-tool-cargo-semver-checks-install installer)
 
+# Validate prerequisites for the `anvil-semver-check` recipe.
 [group("anvil-setup")]
 anvil-semver-check-validate-prereqs: anvil-tool-cargo-semver-checks-validate-prereqs

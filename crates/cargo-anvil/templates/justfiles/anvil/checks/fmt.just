@@ -9,6 +9,8 @@
 # format_code_in_doc_comments). Floating nightly would mean
 # format-drift breaking cloud workflows on rustup updates — the same trap we
 # explicitly avoid for udeps/miri/careful/external-types.
+
+# Check Rust source formatting.
 [script("pwsh")]
 anvil-fmt: anvil-fmt-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -31,8 +33,10 @@ anvil-fmt: anvil-fmt-validate-prereqs
 
 # --- pr-fast members ---
 
+# Install prerequisites for the `anvil-fmt` recipe.
 [group("anvil-setup")]
 anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install
 
+# Validate prerequisites for the `anvil-fmt` recipe.
 [group("anvil-setup")]
 anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs

@@ -8,6 +8,8 @@
 # impact-scoped, so crates untouched by a PR never get miri coverage)
 # and adds the three stricter miri profiles (tree-borrows, strict-
 # provenance, race-coverage) which are too expensive for PR.
+
+# Run the scheduled runtime analysis.
 [group("anvil")]
 anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prereqs \
     anvil-miri \
@@ -15,6 +17,7 @@ anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prer
     anvil-miri-strict-provenance \
     anvil-miri-race-coverage
 
+# Install prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
 [group("anvil-setup")]
 anvil-scheduled-runtime-analysis-setup installer="install": \
     (anvil-miri-setup installer) \
@@ -22,6 +25,7 @@ anvil-scheduled-runtime-analysis-setup installer="install": \
     (anvil-miri-strict-provenance-setup installer) \
     (anvil-miri-race-coverage-setup installer)
 
+# Validate prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
 [group("anvil-setup")]
 anvil-scheduled-runtime-analysis-validate-prereqs: \
     anvil-miri-validate-prereqs \

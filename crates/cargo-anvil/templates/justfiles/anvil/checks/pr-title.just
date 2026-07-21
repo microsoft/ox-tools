@@ -14,6 +14,8 @@
 # It does NOT tolerate a non-empty-but-wrong value: a misconfigured cloud
 # variable (e.g. an unexpanded pipeline macro) is a real error and fails
 # the check loudly rather than silently passing.
+
+# Validate the pull request title.
 [script("pwsh")]
 anvil-pr-title: anvil-pr-title-validate-prereqs
     $title = $env:PR_TITLE
@@ -27,8 +29,11 @@ anvil-pr-title: anvil-pr-title-validate-prereqs
     }
 
 # pr-title is a pwsh script; no cargo tool to install.
+
+# Prepare the PowerShell prerequisite for pull request title validation.
 [group("anvil-setup")]
 anvil-pr-title-setup installer="install": anvil-tool-pwsh-validate-prereqs
 
+# Validate prerequisites for the `anvil-pr-title` recipe.
 [group("anvil-setup")]
 anvil-pr-title-validate-prereqs: anvil-tool-pwsh-validate-prereqs

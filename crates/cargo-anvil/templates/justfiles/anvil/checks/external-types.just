@@ -15,6 +15,8 @@
 # build a name->manifest map from cargo metadata, filter to lib crates,
 # intersect with ANVIL_INCLUDE_AFFECTED, and call the tool once per
 # crate. Hard-fails on errors (no tolerance, unlike semver-check).
+
+# Check public APIs for unapproved external types.
 [script("pwsh")]
 anvil-external-types: anvil-external-types-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -66,8 +68,10 @@ anvil-external-types: anvil-external-types-validate-prereqs
     }
     if ($failed) { exit 1 }
 
+# Install prerequisites for the `anvil-external-types` recipe.
 [group("anvil-setup")]
 anvil-external-types-setup installer="install": anvil-toolchain-nightly-external-types-install (anvil-tool-cargo-check-external-types-install installer)
 
+# Validate prerequisites for the `anvil-external-types` recipe.
 [group("anvil-setup")]
 anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-validate-prereqs anvil-tool-cargo-check-external-types-validate-prereqs

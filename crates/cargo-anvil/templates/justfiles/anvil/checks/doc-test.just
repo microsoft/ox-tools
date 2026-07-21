@@ -9,6 +9,8 @@
 # doctests that only compile when those features are off. The
 # duplication is cheap because doctests are already a small fraction
 # of total compile/test time.
+
+# Run documentation tests for affected workspace packages.
 [script("pwsh")]
 anvil-doc-test: anvil-doc-test-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -19,8 +21,10 @@ anvil-doc-test: anvil-doc-test-validate-prereqs
     & cargo test --doc @pkg --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]
 anvil-doc-test-setup installer="install": anvil-tool-rustc-validate-prereqs
 
+# Validate prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]
 anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs

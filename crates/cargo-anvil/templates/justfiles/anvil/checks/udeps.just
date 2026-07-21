@@ -20,6 +20,8 @@
 #      surfaces those.
 # A genuinely-unused dep is caught by both; the two together cover all
 # of {unused dep, unused dev-dep, dep that should be a dev-dep}.
+
+# Check required workspace packages for unused dependencies.
 [script("pwsh")]
 anvil-udeps: anvil-udeps-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -33,8 +35,10 @@ anvil-udeps: anvil-udeps-validate-prereqs
     & cargo '+{{ rust_nightly }}' udeps @pkg --all-features --all-targets
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-udeps` recipe.
 [group("anvil-setup")]
 anvil-udeps-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-udeps-install installer)
 
+# Validate prerequisites for the `anvil-udeps` recipe.
 [group("anvil-setup")]
 anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-udeps-validate-prereqs

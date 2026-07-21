@@ -42,6 +42,8 @@
 # (layout-agnostic; works for any `members` glob). RUSTFLAGS goes via
 # $env: rather than --config so it propagates to cargo's child rustc
 # invocations cleanly on both pwsh/bash.
+
+# Run Loom concurrency tests for affected workspace packages.
 [script("pwsh")]
 anvil-loom: anvil-loom-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -107,8 +109,11 @@ anvil-loom: anvil-loom-validate-prereqs
 # loom is a regular cargo-test invocation with RUSTFLAGS=--cfg loom;
 # no dedicated tool to install. The rust toolchain (rustc + cargo)
 # is the only prerequisite.
+
+# Install prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]
 anvil-loom-setup installer="install": anvil-tool-rustc-validate-prereqs
 
+# Validate prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]
 anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs

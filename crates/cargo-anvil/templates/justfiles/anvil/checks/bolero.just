@@ -24,6 +24,8 @@
 # campaigns wire a separate scheduled job; anvil deliberately does
 # not ship a long-form fuzz tier (the failure surface is too
 # repo-specific to standardize).
+
+# Run Bolero tests for affected workspace packages.
 [script("pwsh")]
 anvil-bolero: anvil-bolero-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -71,8 +73,11 @@ anvil-bolero: anvil-bolero-validate-prereqs
 
 # bolero needs cargo-bolero plus the pinned nightly toolchain
 # (libfuzzer engine requires nightly rustc features).
+
+# Install prerequisites for the `anvil-bolero` recipe.
 [group("anvil-setup")]
 anvil-bolero-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-bolero-install installer)
 
+# Validate prerequisites for the `anvil-bolero` recipe.
 [group("anvil-setup")]
 anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-bolero-validate-prereqs

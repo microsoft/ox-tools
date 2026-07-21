@@ -7,6 +7,7 @@
 # by the scheduled workflow, so the affected-tier default (--workspace)
 # applies. Skip guards are still included for local diff-scoped runs.
 
+# Run Miri tests for affected workspace packages.
 [script("pwsh")]
 anvil-miri: anvil-miri-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -41,8 +42,10 @@ anvil-miri: anvil-miri-validate-prereqs
 
 # --- pr-runtime-analysis members ---
 
+# Install prerequisites for the `anvil-miri` recipe.
 [group("anvil-setup")]
 anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
 
+# Validate prerequisites for the `anvil-miri` recipe.
 [group("anvil-setup")]
 anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs

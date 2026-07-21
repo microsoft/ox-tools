@@ -4,6 +4,8 @@
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
+
+# Check source files for required license headers.
 [script("pwsh")]
 anvil-license-headers: anvil-license-headers-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -11,8 +13,10 @@ anvil-license-headers: anvil-license-headers-validate-prereqs
     cargo heather
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-license-headers` recipe.
 [group("anvil-setup")]
 anvil-license-headers-setup installer="install": (anvil-tool-cargo-heather-install installer)
 
+# Validate prerequisites for the `anvil-license-headers` recipe.
 [group("anvil-setup")]
 anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereqs

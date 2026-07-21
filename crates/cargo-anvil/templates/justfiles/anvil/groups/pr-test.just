@@ -3,18 +3,21 @@
 # Owned by cargo-anvil; edit via `cargo anvil`.
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
+# Run the pull request tests.
 [group("anvil")]
 anvil-pr-test: anvil-pr-test-validate-prereqs \
     anvil-llvm-cov \
     anvil-doc-test \
     anvil-examples
 
+# Install prerequisites for the `anvil-pr-test` recipe.
 [group("anvil-setup")]
 anvil-pr-test-setup installer="install": \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
     (anvil-examples-setup installer)
 
+# Validate prerequisites for the `anvil-pr-test` recipe.
 [group("anvil-setup")]
 anvil-pr-test-validate-prereqs: \
     anvil-llvm-cov-validate-prereqs \

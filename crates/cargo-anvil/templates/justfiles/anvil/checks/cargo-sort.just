@@ -16,6 +16,8 @@
 # (e.g. blank-line-separated dependency blocks) intact, matching
 # oxidizer-github's convention; without it cargo-sort would flag those
 # blank lines as a formatting diff and fail the check.
+
+# Check that Cargo.toml dependency tables are sorted.
 [script("pwsh")]
 anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -23,8 +25,10 @@ anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
     cargo sort --workspace --grouped --check --check-format
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-cargo-sort` recipe.
 [group("anvil-setup")]
 anvil-cargo-sort-setup installer="install": (anvil-tool-cargo-sort-install installer)
 
+# Validate prerequisites for the `anvil-cargo-sort` recipe.
 [group("anvil-setup")]
 anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs

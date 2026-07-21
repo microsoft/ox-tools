@@ -4,6 +4,8 @@
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier.
+
+# Build all workspace benchmarks.
 [script("pwsh")]
 anvil-bench: anvil-bench-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -13,8 +15,11 @@ anvil-bench: anvil-bench-validate-prereqs
 
 # bench uses cargo-built-ins (cargo bench --no-run + plain bench runs);
 # no extra tool install needed beyond the rust toolchain.
+
+# Install prerequisites for the `anvil-bench` recipe.
 [group("anvil-setup")]
 anvil-bench-setup installer="install": anvil-tool-rustc-validate-prereqs
 
+# Validate prerequisites for the `anvil-bench` recipe.
 [group("anvil-setup")]
 anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs

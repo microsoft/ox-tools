@@ -20,15 +20,19 @@
 #   $ just anvil-pr-test   # tests + coverage only
 #   $ just anvil-pr-runtime-analysis   # miri + careful only
 #   $ just anvil-pr-mutants   # mutants only
+
+# Run the slow pull request checks.
 [group("anvil")]
 anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants
 
+# Install prerequisites for the `anvil-pr-slow` recipe.
 [group("anvil-setup")]
 anvil-pr-slow-setup installer="install": \
     (anvil-pr-test-setup installer) \
     (anvil-pr-runtime-analysis-setup installer) \
     (anvil-pr-mutants-setup installer)
 
+# Validate prerequisites for the `anvil-pr-slow` recipe.
 [group("anvil-setup")]
 anvil-pr-slow-validate-prereqs: \
     anvil-pr-test-validate-prereqs \
