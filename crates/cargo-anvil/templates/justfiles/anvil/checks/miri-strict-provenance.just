@@ -3,6 +3,7 @@
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run Miri tests with strict provenance checks.

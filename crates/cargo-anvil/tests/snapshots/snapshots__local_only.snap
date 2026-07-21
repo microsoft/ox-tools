@@ -213,6 +213,7 @@ unknown-git = "deny"
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # cargo-aprz queries the GitHub advisory API. Unauthenticated access is
@@ -260,6 +261,7 @@ anvil-aprz-validate-prereqs: anvil-tool-cargo-aprz-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Unscoped (consults external advisory DB; reads Cargo.lock).
@@ -285,6 +287,7 @@ anvil-audit-validate-prereqs: anvil-tool-cargo-audit-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier.
@@ -314,6 +317,7 @@ anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. Smoke-only fuzz pass via [bolero](https://crates.io/crates/bolero):
@@ -401,6 +405,7 @@ anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-to
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run tests with cargo-careful for affected workspace packages.
@@ -468,6 +473,7 @@ anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereq
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Required tier. cargo-hack's feature powerset cascades through dep
@@ -496,6 +502,7 @@ anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
@@ -534,6 +541,7 @@ anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. Per project policy, clippy runs on the affected set
@@ -565,6 +573,7 @@ anvil-clippy-validate-prereqs: anvil-component-default-clippy-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Unscoped (consults external advisory DB; reads Cargo.lock, not
@@ -592,6 +601,7 @@ anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Required tier. cargo doc resolves intra-doc links through the dep
@@ -625,6 +635,7 @@ anvil-doc-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. Two cargo-test invocations cover both feature
@@ -659,6 +670,7 @@ anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
@@ -685,6 +697,7 @@ anvil-ensure-no-cyclic-deps-validate-prereqs: anvil-tool-cargo-ensure-no-cyclic-
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
@@ -711,6 +724,7 @@ anvil-ensure-no-default-features-validate-prereqs: anvil-tool-cargo-ensure-no-de
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier.
@@ -737,6 +751,7 @@ anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier (lints public API of changed crates and rev-deps).
@@ -818,6 +833,7 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier. cargo-fmt is a rustup component. We invoke it via the
@@ -864,6 +880,7 @@ anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
@@ -890,6 +907,7 @@ anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereq
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. Runs on the pinned nightly toolchain: cargo-llvm-cov
@@ -1053,6 +1071,7 @@ anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-pre
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. `loom` is a permutation-based concurrency model
@@ -1176,6 +1195,7 @@ anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Race coverage rotates the miri-many-seeds window daily by
@@ -1214,6 +1234,7 @@ anvil-miri-race-coverage-validate-prereqs: anvil-component-nightly-miri-validate
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run Miri tests with strict provenance checks.
@@ -1241,6 +1262,7 @@ anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-vali
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Stricter miri profiles. Each runs miri over the full workspace
@@ -1286,6 +1308,7 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Nightly checks always run full-workspace; impact env vars aren't set
@@ -1341,6 +1364,7 @@ anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. cargo-mutants does its own diff-scoping via --in-diff;
@@ -1398,6 +1422,7 @@ anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Unscoped. Scheduled-exhaustive deliberately runs over the whole
@@ -1427,6 +1452,7 @@ anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Unscoped (PR title is not source-related).
@@ -1590,6 +1616,7 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier (compares changed crates' current API against the PR
@@ -1788,6 +1815,7 @@ anvil-semver-check-validate-prereqs: anvil-tool-cargo-semver-checks-validate-pre
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
@@ -1850,6 +1878,7 @@ anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Required tier. cargo-udeps detects unused dependencies by resolving
@@ -1898,6 +1927,7 @@ anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-too
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run the fast pull request checks.
@@ -1972,6 +2002,7 @@ anvil-pr-fast-validate-prereqs: \
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run the pull request mutation tests.
@@ -1992,6 +2023,7 @@ anvil-pr-mutants-validate-prereqs: anvil-mutants-diff-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run the pull request runtime analysis.
@@ -2024,6 +2056,7 @@ anvil-pr-runtime-analysis-validate-prereqs: \
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # pr-slow is the single PR-tier group for everything that takes more
@@ -2068,6 +2101,7 @@ anvil-pr-slow-validate-prereqs: \
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run the pull request tests.
@@ -2097,6 +2131,7 @@ anvil-pr-test-validate-prereqs: \
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run the scheduled advisory checks.
@@ -2129,6 +2164,7 @@ anvil-scheduled-advisories-validate-prereqs: \
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run the scheduled exhaustive checks.
@@ -2158,6 +2194,7 @@ anvil-scheduled-exhaustive-validate-prereqs: \
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # scheduled-runtime-analysis is the full-workspace counterpart of
@@ -2196,6 +2233,7 @@ anvil-scheduled-runtime-analysis-validate-prereqs: \
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Scheduled groups
@@ -2227,6 +2265,7 @@ anvil-scheduled-test-validate-prereqs: \
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 #
@@ -2539,6 +2578,7 @@ alias anvil := anvil-pr
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # PR tier: every check that should run on every pull request, split
