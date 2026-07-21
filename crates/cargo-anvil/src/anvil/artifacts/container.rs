@@ -248,6 +248,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
     fn image_id_hashes_auth_source_but_not_execution_only_files() {
         let tmp = TempDir::new().expect("temporary repository must be creatable");
         let root = tmp.path();
@@ -286,6 +287,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
     fn image_id_helpers_match_when_pwsh_is_available() {
         if Command::new("pwsh").arg("-Version").output().is_err() {
             return;
