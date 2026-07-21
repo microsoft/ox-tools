@@ -113,7 +113,7 @@
 //! ```powershell
 //! podman machine init   # once
 //! podman machine start
-//! ``` 
+//! ```
 //!
 //! ### Run a recipe
 //!
