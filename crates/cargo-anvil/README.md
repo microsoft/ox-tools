@@ -97,13 +97,16 @@ and run each check only over the affected packages, whereas a local
 ### Containerized local checks
 
 Anvil can run any generated recipe in a content-addressed Linux container.
-This is useful for Linux-on-Windows checks and for matching a pinned CI
-distribution without installing the full Rust/tool catalog on the host.
+The image installs the Rust toolchains and Cargo tools pinned by the
+repository’s generated Anvil configuration, providing a repeatable Linux
+environment without installing those tools directly on the host.
 
 #### Prerequisites
 
 * Podman 4.3 or newer.
 * `git`, `just`, and `PowerShell` Core (`pwsh`) on the host.
+* `[script]` support enabled in the root `Justfile` (`set unstable` when
+  required by the installed `just` version).
 * A repository-owned `rust-toolchain.toml`.
 * On Windows, a running Podman machine:
 
@@ -120,14 +123,15 @@ just anvil-container anvil-pr
 just anvil-container
 ```
 
-The no-argument form opens an interactive shell. The first invocation builds
-the matching image locally; later invocations reuse it. Changes to the Rust
-toolchain, generated Anvil files, Containerfile, or downstream build helpers
-produce a different image tag and trigger a new build.
+The no-argument form opens an interactive shell. Anvil builds an image the
+first time it encounters a content hash and reuses it on later runs. Changes
+to the Rust toolchain, generated Anvil files, Containerfile, or downstream
+build helpers select a new tag and build a new image. Images for earlier
+hashes remain available to older branches.
 
 Cargo registry, Cargo Git, and `target/` data use named Podman volumes. The
-repository is mounted at `/workspace`, while build output stays off the
-Windows bind-mount hot path.
+repository is mounted at `/workspace`; keeping build output in a named
+volume avoids slow host bind-mount I/O, particularly on Windows.
 
 #### Make tiers use the container
 
@@ -151,10 +155,10 @@ A one-off override is also supported:
 just anvil_runner=container anvil-pr
 ```
 
-To make containers the project default, change the generated
-`anvil-runner` region in the repository `Justfile` from `"native"` to
-`"container"` and commit that user-owned policy change. Set
-`ANVIL_RUNNER=native` to override it for one shell.
+To make containers the project default, edit `<repository-root>/Justfile`
+and change the default value in the `anvil-runner` region from `"native"`
+to `"container"`. Commit `<repository-root>/Justfile` with that policy
+change. Set `ANVIL_RUNNER=native` to override it for one shell.
 
 #### Controls
 
@@ -402,7 +406,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG6Rtmurx_w8HG0B1_J-ckZgNG0XyM_2Uw6dUG_3ttMj0FUGgYWSBg2tjYXJnby1hbnZpbGUwLjIuMWtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG9mmIR0QDwwyG2rIQbMRZMR8G6dunQGOial-G2Re5pHypSY4YWSBg2tjYXJnby1hbnZpbGUwLjIuMWtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

@@ -26,7 +26,9 @@ use tempfile::TempDir;
 const EXTRA_FILE: &str = "justfiles/anvil/demoforge.just";
 const METADATA_REGION: &str = "demoforge-metadata";
 const CONTAINER_JUST: &str = "justfiles/anvil/container/container.just";
+const CONTAINERFILE: &str = "justfiles/anvil/container/Containerfile";
 const CONTAINER_RUNNER: &str = "justfiles/anvil/container/run-in-container.ps1";
+const CONTAINER_AUTH: &str = "justfiles/anvil/container/auth.ps1";
 
 /// The example downstream catalog: anvil's, customized four ways.
 fn demoforge() -> Catalog {
@@ -161,21 +163,33 @@ fn public_container_artifacts_can_be_specialized_by_downstream_catalogs() {
         base.path().join(CONTAINER_RUNNER).is_file(),
         "base catalog must emit its public runner"
     );
+    let base_runner = std::fs::read_to_string(base.path().join(CONTAINER_RUNNER)).unwrap();
+    assert!(
+        !base.path().join(CONTAINER_AUTH).exists(),
+        "base catalog must not emit an environment-specific auth hook"
+    );
 
     let configured = workspace();
     run_update(&containerforge(), &local(false), configured.path()).unwrap();
-    let configured_containerfile = std::fs::read_to_string(configured.path().join("justfiles/anvil/container/Containerfile")).unwrap();
-    assert!(
-        configured_containerfile.contains("internal.example/base"),
-        "downstream catalog must replace the environment-specific Containerfile"
+    let configured_container = std::fs::read_to_string(configured.path().join(CONTAINER_JUST)).unwrap();
+    assert_eq!(
+        configured_container, base_container,
+        "downstream catalog must inherit the public container command unchanged"
     );
-    assert!(
-        configured.path().join(CONTAINER_RUNNER).is_file(),
-        "downstream catalog inherits the public runner"
+    let configured_containerfile = std::fs::read_to_string(configured.path().join(CONTAINERFILE)).unwrap();
+    assert_eq!(
+        configured_containerfile, "FROM internal.example/base\n",
+        "downstream catalog must replace the public Containerfile"
     );
-    assert!(
-        configured.path().join("justfiles/anvil/container/auth.ps1").is_file(),
-        "downstream catalog must be able to add its auth hook"
+    let configured_runner = std::fs::read_to_string(configured.path().join(CONTAINER_RUNNER)).unwrap();
+    assert_eq!(
+        configured_runner, base_runner,
+        "downstream catalog must inherit the public runner unchanged"
+    );
+    let configured_auth = std::fs::read_to_string(configured.path().join(CONTAINER_AUTH)).unwrap();
+    assert_eq!(
+        configured_auth, "# internal auth\n",
+        "downstream catalog must be able to add its environment-specific auth hook"
     );
 }
 

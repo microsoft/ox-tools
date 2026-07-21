@@ -154,10 +154,10 @@
 //! just anvil_runner=container anvil-pr
 //! ```
 //!
-//! To make containers the project default, change the generated
-//! `anvil-runner` region in the repository `Justfile` from `"native"` to
-//! `"container"` and commit that user-owned policy change. Set
-//! `ANVIL_RUNNER=native` to override it for one shell.
+//! To make containers the project default, edit `<repository-root>/Justfile`
+//! and change the default value in the `anvil-runner` region from `"native"`
+//! to `"container"`. Commit `<repository-root>/Justfile` with that policy
+//! change. Set `ANVIL_RUNNER=native` to override it for one shell.
 //!
 //! ### Controls
 //!
