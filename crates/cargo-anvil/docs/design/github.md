@@ -641,7 +641,7 @@ The cache covers:
 
 ## 9. Security
 
-The setup action uses `sudo rm -rf` only when `free_disk_space` is explicitly enabled
+The setup action uses `sudo rm -rf` only when `free-disk-space` is explicitly enabled
 and the runner reports `runner.environment == 'github-hosted'`. It never performs disk
 cleanup on self-hosted runners. Other composite-action steps install tools and invoke
 `just`. The reusable workflow propagates only what the root workflow passes (and only
