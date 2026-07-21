@@ -44,8 +44,9 @@ It inherits the engine's stance verbatim and adds three constraints:
   ([design.md §5.2][design]). The container files are emitted like any other owned artifact; whether
   to *use* them is a pure runtime choice (run the wrapper recipe, or don't). Nothing enters
   `.anvil.lock` semantics, the decision table, or the cloud-workflow YAML.
-- **Local-only, Linux-only (initially).** The container runs `x86_64-unknown-linux-gnu`. It gives
-  Linux parity; Windows-specific checks and any Windows cloud-workflow leg still run natively.
+- **Local-only, Linux-only (initially).** The container runs `x86_64-unknown-linux-gnu`. Drivers
+  request `linux/amd64` explicitly, so ARM hosts require Podman emulation support. Windows-specific
+  checks and any Windows cloud-workflow leg still run natively.
 
 ## 3. The whole picture
 
@@ -211,9 +212,11 @@ This is the design's keystone and an advantage unique to anvil:
   expect*, by construction. (Contrast COSMICRust, which must re-parse a separate
   `cargo-tools.yml`.)
 - **Content-addressed tag → automatic rebuild.** The driver tags the image
-  `anvil-dev:<sha>` where `<sha> = sha256(versions.just ‖ tools.just ‖ rust-toolchain.toml ‖
-  Containerfile)`. Bump a pin and re-run `cargo anvil`, and the next `just anvil-container` rebuilds
-  automatically — the same mechanism that keeps the recipes current keeps the image current.
+  `anvil-dev:<sha>` where `<sha>` covers `rust-toolchain.toml`, the generated `.just` recipe tree,
+  the Containerfile, and other build inputs in `justfiles/anvil/container/`, including optional auth
+  hook source. Bump a pin or change non-secret hook-defined build customization, and the next
+  `just anvil-container` rebuilds automatically — the same mechanism that keeps the recipes current
+  keeps the image current.
 
 The **engine default base** uses public `rustup` + crates.io, consistent with anvil's zero-internal-
 dependencies stance ([design.md §2 goal 8][design]). A fork overrides `BASE_IMAGE` (and the toolchain
@@ -248,8 +251,9 @@ logic lives here.
 For checks such as `anvil-aprz`, the driver uses an existing host `GITHUB_TOKEN`
 or obtains one non-interactively from the authenticated host `gh` CLI. It writes
 the token to a user-only temporary file, mounts that file read-only for the
-container command, and removes it on exit. The token is not stored in the image
-or passed through the OCI environment. If an interactive host has `gh`
+isolated `anvil-aprz` container invocation, then runs the remaining requested
+checks without the token and removes it on exit. The token is not stored in the
+image or passed through the OCI environment. If an interactive host has `gh`
 installed but is not authenticated, the driver explains why authentication is
 needed, waits while the user runs `gh auth login` in another terminal, and
 retries after the user presses Enter. Non-interactive runs fail before image
@@ -261,6 +265,10 @@ The engine driver needs no credentials (crates.io is public). Some downstream ca
 populate registry/toolchain tokens (e.g. as a BuildKit `--secret` at build time and an `--env-file`
 at run time). The engine ships no `auth.*`; a fork supplies it via the catalog (§8). This keeps the
 hard, environment-specific credential dance out of the open-source engine.
+
+Auth-hook source is hashed as a non-secret build-configuration fingerprint. Hooks must obtain secret
+values at runtime rather than embedding them; token values and temporary secret-file contents are not
+part of the image identity.
 
 ## 7. Relationship to CI
 

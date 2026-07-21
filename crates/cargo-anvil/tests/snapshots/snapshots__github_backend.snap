@@ -1306,6 +1306,10 @@ unknown-git = "deny"
 [script("pwsh")]
 anvil-aprz: anvil-aprz-validate-prereqs
     $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_APRZ_ALREADY_RAN -eq '1') {
+        Write-Host 'anvil-aprz: already completed in an isolated authenticated container'
+        exit 0
+    }
     if (-not $env:GITHUB_TOKEN) {
         $tok = $null
         $containerTokenFile = '/run/secrets/anvil-github-token'
@@ -2880,6 +2884,8 @@ The final command opens an interactive shell.
 
 - Podman 4.3 or newer.
 - `pwsh`, `git`, and `just` on the host.
+- An x86-64 host or Podman configuration capable of running `linux/amd64`
+  images.
 - A repository-owned `rust-toolchain.toml`.
 - On Windows, initialize and start a Podman machine through Podman Desktop or
   `podman machine init` / `podman machine start`.
@@ -2912,7 +2918,7 @@ change the default value in the `anvil-runner` region from `"native"` to
 ## Behavior
 
 - The image tag is derived from `rust-toolchain.toml`, the generated Anvil
-  recipe tree, and the Containerfile.
+  recipe tree, the Containerfile, and optional auth-hook source.
 - A changed input produces a new image and triggers a local rebuild.
 - Cargo registry, Cargo Git, and target output use named Podman volumes.
 - The repository is mounted read/write at `/workspace`.
@@ -2926,8 +2932,9 @@ change the default value in the `anvil-runner` region from `"native"` to
 
 For GitHub API checks, the driver automatically uses an existing host
 `GITHUB_TOKEN` or the token from an authenticated host `gh` CLI session. It
-mounts the token read-only for the command and removes the temporary file
-afterward. If `gh` is installed but not authenticated, an interactive run
+mounts the token read-only only while running `anvil-aprz`, then runs the
+remaining requested checks without the token and removes the temporary file.
+If `gh` is installed but not authenticated, an interactive run
 pauses before building the image, explains the unauthenticated API limit, and
 continues after the user completes `gh auth login` and presses Enter.
 
@@ -2941,6 +2948,8 @@ continues after the user completes `gh auth login` and presses Enter.
 - Rerun `cargo anvil` to update generated files; do not edit this directory.
 
 Downstream catalogs can provide `auth.sh` and/or `auth.ps1` beside these files.
+Hook source is part of the image hash because it can define non-secret build
+customization. Runtime tokens and secret-file contents are not hashed.
 They may populate `ANVIL_CONTAINER_BUILD_ARGS` / `AnvilContainerBuildArgs`,
 `ANVIL_CONTAINER_PREPARE_ARGS` / `AnvilContainerPrepareArgs`,
 `ANVIL_CONTAINER_PREPARE_COMMAND` / `AnvilContainerPrepareCommand`,
@@ -3027,17 +3036,17 @@ if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
 }
 $inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File -Filter '*.just' |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
-$runtimeOnly = @(
-    'auth.ps1',
-    'auth.sh',
+$executionOnly = @(
     'container.just',
     'image-id.ps1',
     'README.md',
     'run-in-container.ps1',
     'run-in-container.sh'
 )
+# Auth hooks are intentionally hashed: their source defines non-secret build
+# customization. Runtime tokens and secret-file contents are never read here.
 $inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil/container') -File |
-    Where-Object { $_.Name -notin $runtimeOnly } |
+    Where-Object { $_.Name -notin $executionOnly } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
 $inputs = $inputs | Sort-Object -Unique
 
@@ -3069,7 +3078,22 @@ param(
 $ErrorActionPreference = 'Stop'
 
 function ConvertTo-PosixShellArg([string]$Value) {
-    "'" + $Value.Replace("'", "'`"`"'`"'") + "'"
+    $singleQuote = [string][char]39
+    $doubleQuote = [string][char]34
+    $escape = $singleQuote + $doubleQuote + $singleQuote + $doubleQuote + $singleQuote
+    $singleQuote + $Value.Replace($singleQuote, $escape) + $singleQuote
+}
+
+function ConvertTo-AnvilVersion([string]$Value) {
+    $match = [regex]::Match($Value, '^(\d+)\.(\d+)(?:\.(\d+))?')
+    if (-not $match.Success) {
+        throw "anvil-container: could not parse Podman version '$Value'."
+    }
+    [version]::new(
+        [int]$match.Groups[1].Value,
+        [int]$match.Groups[2].Value,
+        $(if ($match.Groups[3].Success) { [int]$match.Groups[3].Value } else { 0 })
+    )
 }
 
 function Test-AnvilRecipeNeedsGitHubToken([string]$Name) {
@@ -3116,7 +3140,7 @@ if (-not (Get-Command podman -ErrorAction SilentlyContinue)) {
 
 $versionText = (podman version --format '{{.Client.Version}}' 2>$null)
 if (-not $versionText) { $versionText = (podman --version) -replace '^podman version ', '' }
-if ([version]$versionText -lt [version]'4.3.0') {
+if ((ConvertTo-AnvilVersion $versionText) -lt [version]'4.3.0') {
     throw "anvil-container: Podman 4.3.0 or newer is required (found $versionText)."
 }
 
@@ -3140,6 +3164,7 @@ foreach ($name in $Recipe) {
         break
     }
 }
+$runsOnlyGitHubCheck = $Recipe.Count -eq 1 -and $Recipe[0] -eq 'anvil-aprz'
 $githubToken = if ($needsGitHubToken) { Get-AnvilGitHubToken } else { $null }
 if ($needsGitHubToken -and -not $githubToken) {
     if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
@@ -3180,6 +3205,7 @@ try {
             $machineRepo = (wsl -e wslpath -a $repoRoot).Trim()
             $buildArgs = @(
                 'podman', 'build',
+                '--platform', 'linux/amd64',
                 '--tag', $image,
                 '--file', 'justfiles/anvil/container/Containerfile',
                 '--ignorefile', 'justfiles/anvil/container/container.ignore',
@@ -3192,6 +3218,7 @@ try {
             & podman machine ssh -- $command
         } else {
             & podman build `
+                --platform linux/amd64 `
                 --tag $image `
                 --file (Join-Path $scriptDir 'Containerfile') `
                 --ignorefile (Join-Path $scriptDir 'container.ignore') `
@@ -3206,6 +3233,7 @@ try {
 
     $runArgs = @(
         'run', '--rm', '--pull=never',
+        '--platform', 'linux/amd64',
         '--userns', 'keep-id',
         '--env', 'ANVIL_IN_CONTAINER=1',
         '--env', 'HOME=/tmp/anvil-user',
@@ -3248,10 +3276,20 @@ try {
             throw 'anvil-container: failed to restrict permissions on the temporary GitHub token file.'
         }
         $githubToken = $null
-        $runArgs += @(
+        $githubRunArgs = @($runArgs)
+        $githubRunArgs += @(
             '--mount',
             "type=bind,src=$githubTokenFile,dst=/run/secrets/anvil-github-token,readonly"
         )
+        if ($runsOnlyGitHubCheck) {
+            $runArgs = $githubRunArgs
+        } else {
+            & podman @githubRunArgs $image just anvil-aprz
+            if ($LASTEXITCODE -ne 0) {
+                throw "anvil-container: isolated anvil-aprz failed with exit code $LASTEXITCODE."
+            }
+            $runArgs += @('--env', 'ANVIL_APRZ_ALREADY_RAN=1')
+        }
     }
 
     if ($Recipe.Count -eq 0) {
@@ -3291,6 +3329,28 @@ anvil_recipe_needs_github_token() {
     esac
 }
 
+version_at_least() {
+    local found="${1%%[-+]*}"
+    local required="${2%%[-+]*}"
+    local found_major found_minor found_patch found_extra
+    local required_major required_minor required_patch required_extra
+    IFS=. read -r found_major found_minor found_patch found_extra <<<"$found"
+    IFS=. read -r required_major required_minor required_patch required_extra <<<"$required"
+    found_patch="${found_patch:-0}"
+    required_patch="${required_patch:-0}"
+    for component in \
+        "$found_major" "$found_minor" "$found_patch" \
+        "$required_major" "$required_minor" "$required_patch"
+    do
+        case "$component" in
+            '' | *[!0-9]*) return 2 ;;
+        esac
+    done
+    if ((found_major != required_major)); then ((found_major > required_major)); return; fi
+    if ((found_minor != required_minor)); then ((found_minor > required_minor)); return; fi
+    ((found_patch >= required_patch))
+}
+
 command -v podman >/dev/null 2>&1 || {
     echo "anvil-container: Podman is required. See justfiles/anvil/container/README.md." >&2
     exit 1
@@ -3298,7 +3358,7 @@ command -v podman >/dev/null 2>&1 || {
 
 version="$(podman version --format '{{.Client.Version}}' 2>/dev/null || podman --version | awk '{print $3}')"
 minimum="4.3.0"
-if [[ "$(printf '%s\n%s\n' "$minimum" "$version" | sort -V | head -n1)" != "$minimum" ]]; then
+if ! version_at_least "$version" "$minimum"; then
     echo "anvil-container: Podman $minimum or newer is required (found $version)." >&2
     exit 1
 fi
@@ -3308,7 +3368,14 @@ script_dir="$repo_root/justfiles/anvil/container"
 image_id="$(pwsh -NoProfile -File "$script_dir/image-id.ps1")"
 image_base="${ANVIL_CONTAINER_IMAGE:-anvil-dev}"
 image="${image_base}:${image_id}"
-repo_id="$(printf '%s' "$repo_root" | sha256sum | cut -c1-12)"
+if command -v sha256sum >/dev/null 2>&1; then
+    repo_id="$(printf '%s' "$repo_root" | sha256sum | cut -c1-12)"
+elif command -v shasum >/dev/null 2>&1; then
+    repo_id="$(printf '%s' "$repo_root" | shasum -a 256 | cut -c1-12)"
+else
+    echo 'anvil-container: sha256sum or shasum is required.' >&2
+    exit 1
+fi
 target_volume="anvil-target-${repo_id}-${image_id:0:12}"
 
 needs_github_token=false
@@ -3318,6 +3385,10 @@ for recipe in "$@"; do
         break
     fi
 done
+runs_only_github_check=false
+if (($# == 1)) && [[ "$1" == "anvil-aprz" ]]; then
+    runs_only_github_check=true
+fi
 github_token=""
 if "$needs_github_token"; then
     gh_command=""
@@ -3372,6 +3443,7 @@ if ! podman image exists "$image"; then
         exit 1
     else
         podman build \
+            --platform linux/amd64 \
             --tag "$image" \
             --file "$script_dir/Containerfile" \
             --ignorefile "$script_dir/container.ignore" \
@@ -3383,6 +3455,7 @@ fi
 
 run_args=(
     run --rm --pull=never
+    --platform linux/amd64
     --userns keep-id
     --env ANVIL_IN_CONTAINER=1
     --env HOME=/tmp/anvil-user
@@ -3395,7 +3468,7 @@ run_args=(
 prepare_run_args=("${run_args[@]}")
 run_args+=("${ANVIL_CONTAINER_RUN_ARGS[@]}")
 for name in PR_TITLE BASE_REF ANVIL_INCLUDE_MODIFIED ANVIL_INCLUDE_AFFECTED ANVIL_INCLUDE_REQUIRED GITHUB_BASE_REF SYSTEM_PULLREQUEST_TARGETBRANCH; do
-    if [[ -v "$name" ]]; then run_args+=(--env "$name"); fi
+    if declare -p "$name" >/dev/null 2>&1; then run_args+=(--env "$name"); fi
 done
 if ((${#ANVIL_CONTAINER_PREPARE_COMMAND[@]} > 0)); then
     podman "${prepare_run_args[@]}" \
@@ -3409,7 +3482,13 @@ if [[ -n "$github_token" ]]; then
     chmod 600 "$github_token_file"
     printf '%s' "$github_token" > "$github_token_file"
     unset github_token
-    run_args+=(--volume "$github_token_file:/run/secrets/anvil-github-token:ro,Z")
+    github_run_args=("${run_args[@]}" --volume "$github_token_file:/run/secrets/anvil-github-token:ro,Z")
+    if "$runs_only_github_check"; then
+        run_args=("${github_run_args[@]}")
+    else
+        podman "${github_run_args[@]}" "$image" just anvil-aprz
+        run_args+=(--env ANVIL_APRZ_ALREADY_RAN=1)
+    fi
 fi
 
 if (($# == 0)); then

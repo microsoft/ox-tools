@@ -16,6 +16,10 @@
 [script("pwsh")]
 anvil-aprz: anvil-aprz-validate-prereqs
     $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_APRZ_ALREADY_RAN -eq '1') {
+        Write-Host 'anvil-aprz: already completed in an isolated authenticated container'
+        exit 0
+    }
     if (-not $env:GITHUB_TOKEN) {
         $tok = $null
         $containerTokenFile = '/run/secrets/anvil-github-token'

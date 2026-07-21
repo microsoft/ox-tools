@@ -78,6 +78,7 @@ fn aprz_uses_the_container_secret_and_fails_fast_without_it() {
         .find_map(|(path, body)| path.ends_with("/aprz.just").then_some(*body))
         .expect("aprz.just is registered in CHECK_FILES below");
     assert!(aprz.contains("if ($env:ANVIL_IN_CONTAINER)"));
+    assert!(aprz.contains("ANVIL_APRZ_ALREADY_RAN"));
     assert!(aprz.contains("/run/secrets/anvil-github-token"));
     assert!(aprz.contains("Run `gh auth login` on the host"));
 }
