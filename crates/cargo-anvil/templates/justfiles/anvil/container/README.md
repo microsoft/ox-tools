@@ -13,7 +13,8 @@ The final command opens an interactive shell.
 ## Prerequisites
 
 - Podman 4.3 or newer.
-- `pwsh`, `git`, and `just` on the host.
+- `git` and `just` on the host.
+- Bash on Linux, WSL, and macOS; PowerShell Core (`pwsh`) on Windows.
 - An x86-64 host or Podman configuration capable of running `linux/amd64`
   images.
 - A repository-owned `rust-toolchain.toml`.

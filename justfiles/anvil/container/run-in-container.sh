@@ -53,9 +53,12 @@ if ! version_at_least "$version" "$minimum"; then
     exit 1
 fi
 
-repo_root="$(git rev-parse --show-toplevel)"
+if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    echo 'anvil-container must run from a Git repository.' >&2
+    exit 1
+fi
 script_dir="$repo_root/justfiles/anvil/container"
-image_id="$(pwsh -NoProfile -File "$script_dir/image-id.ps1")"
+image_id="$(bash "$script_dir/image-id.sh")"
 image_base="${ANVIL_CONTAINER_IMAGE:-anvil-dev}"
 image="${image_base}:${image_id}"
 if command -v sha256sum >/dev/null 2>&1; then

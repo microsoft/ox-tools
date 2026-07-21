@@ -96,9 +96,16 @@ A single owned recipe in `container/container.just`, imported by `mod.just`:
 #   just anvil-container anvil-clippy    # a single check
 #   just anvil-container                 # interactive shell in the image
 [group("anvil-container")]
+[windows]
+[script("pwsh")]
 anvil-container *recipe:
-    {{ if os() == "windows" { "pwsh -NoProfile -File" } else { "bash" } }} \
-        justfiles/anvil/container/run-in-container.{{ if os() == "windows" { "ps1" } else { "sh" } }} {{ recipe }}
+    # invoke run-in-container.ps1
+
+[group("anvil-container")]
+[unix]
+[script("bash")]
+anvil-container *recipe:
+    # invoke run-in-container.sh
 ```
 
 - It accepts **any** recipe name (check, group, or tier), so the full `anvil-*` surface is reachable

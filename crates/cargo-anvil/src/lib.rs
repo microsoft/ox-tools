@@ -103,7 +103,8 @@
 //! ### Prerequisites
 //!
 //! - Podman 4.3 or newer.
-//! - `git`, `just`, and `PowerShell` Core (`pwsh`) on the host.
+//! - `git` and `just` on the host.
+//! - Bash on Linux, WSL, and macOS; `PowerShell` Core (`pwsh`) on Windows.
 //! - `[script]` support enabled in the root `Justfile` (`set unstable` when
 //!   required by the installed `just` version).
 //! - A repository-owned `rust-toolchain.toml`.

@@ -3066,7 +3066,8 @@ The final command opens an interactive shell.
 ## Prerequisites
 
 - Podman 4.3 or newer.
-- `pwsh`, `git`, and `just` on the host.
+- `git` and `just` on the host.
+- Bash on Linux, WSL, and macOS; PowerShell Core (`pwsh`) on Windows.
 - An x86-64 host or Podman configuration capable of running `linux/amd64`
   images.
 - A repository-owned `rust-toolchain.toml`.
@@ -3160,16 +3161,24 @@ Podman build secrets must be resolved through the WSL-backed Podman machine.
 
 # Run any Anvil recipe in the pinned local Linux container. With no recipe,
 # open an interactive shell.
+[windows]
 [group("anvil-container")]
 [script("pwsh")]
 anvil-container *recipe:
     $requested = @('{{recipe}}' -split '\s+' | Where-Object { $_ })
-    if ($IsWindows) {
-        & 'justfiles/anvil/container/run-in-container.ps1' @requested
-    } else {
-        & bash 'justfiles/anvil/container/run-in-container.sh' @requested
-    }
+    & 'justfiles/anvil/container/run-in-container.ps1' @requested
     exit $LASTEXITCODE
+
+[unix]
+[group("anvil-container")]
+[script("bash")]
+anvil-container *recipe:
+    requested={{ quote(recipe) }}
+    if [[ -z "$requested" ]]; then
+        exec bash 'justfiles/anvil/container/run-in-container.sh'
+    fi
+    read -r -a requested_args <<<"$requested"
+    exec bash 'justfiles/anvil/container/run-in-container.sh' "${requested_args[@]}"
 
 === justfiles/anvil/container/entrypoint.sh ===
 #!/bin/sh
@@ -3222,6 +3231,7 @@ $inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File 
 $executionOnly = @(
     'container.just',
     'image-id.ps1',
+    'image-id.sh',
     'README.md',
     'run-in-container.ps1',
     'run-in-container.sh'
@@ -3231,7 +3241,12 @@ $executionOnly = @(
 $inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil/container') -File |
     Where-Object { $_.Name -notin $executionOnly } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
-$inputs = $inputs | Sort-Object -Unique
+$uniqueInputs = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($inputPath in $inputs) {
+    [void]$uniqueInputs.Add($inputPath)
+}
+$inputs = [string[]]$uniqueInputs
+[Array]::Sort($inputs, [StringComparer]::Ordinal)
 
 $payload = [Text.StringBuilder]::new()
 foreach ($relative in $inputs) {
@@ -3246,6 +3261,80 @@ foreach ($relative in $inputs) {
 $bytes = [Text.Encoding]::UTF8.GetBytes($payload.ToString())
 $hash = [Security.Cryptography.SHA256]::HashData($bytes)
 Write-Output ([Convert]::ToHexString($hash).ToLowerInvariant())
+
+=== justfiles/anvil/container/image-id.sh ===
+#!/usr/bin/env bash
+set -euo pipefail
+
+if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    echo 'anvil-container must run from a Git repository.' >&2
+    exit 1
+fi
+
+toolchain_path="$repo_root/rust-toolchain.toml"
+if [[ ! -f "$toolchain_path" ]]; then
+    echo 'anvil-container requires a repository-owned rust-toolchain.toml.' >&2
+    exit 1
+fi
+
+inputs=(rust-toolchain.toml)
+while IFS= read -r path; do
+    inputs+=("${path#"$repo_root"/}")
+done < <(find "$repo_root/justfiles/anvil" -type f -name '*.just' -print)
+
+container_dir="$repo_root/justfiles/anvil/container"
+for path in "$container_dir"/*; do
+    [[ -f "$path" ]] || continue
+    case "${path##*/}" in
+        container.just | image-id.ps1 | image-id.sh | README.md \
+            | run-in-container.ps1 | run-in-container.sh) continue ;;
+    esac
+    inputs+=("${path#"$repo_root"/}")
+done
+
+if command -v sha256sum >/dev/null 2>&1; then
+    hash_command=(sha256sum)
+elif command -v shasum >/dev/null 2>&1; then
+    hash_command=(shasum -a 256)
+else
+    echo 'anvil-container: sha256sum or shasum is required.' >&2
+    exit 1
+fi
+
+write_normalized_file() {
+    local path="$1"
+    local line status
+    while true; do
+        line=""
+        if IFS= read -r line <&3; then
+            status=0
+        else
+            status=$?
+        fi
+        if ((status != 0)) && [[ -z "$line" ]]; then
+            break
+        fi
+        printf '%s' "${line%$'\r'}"
+        if ((status == 0)); then
+            printf '\n'
+        else
+            break
+        fi
+    done 3<"$path"
+}
+
+while IFS= read -r relative; do
+    path="$repo_root/$relative"
+    if [[ ! -f "$path" ]]; then
+        echo "Container image input is missing: $relative" >&2
+        exit 1
+    fi
+    printf '%s\n' "$relative"
+    write_normalized_file "$path"
+    printf '\n'
+done < <(printf '%s\n' "${inputs[@]}" | LC_ALL=C sort -u) \
+    | "${hash_command[@]}" \
+    | awk '{print $1}'
 
 === justfiles/anvil/container/run-in-container.ps1 ===
 # Copyright (c) Microsoft Corporation.
@@ -3546,9 +3635,12 @@ if ! version_at_least "$version" "$minimum"; then
     exit 1
 fi
 
-repo_root="$(git rev-parse --show-toplevel)"
+if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+    echo 'anvil-container must run from a Git repository.' >&2
+    exit 1
+fi
 script_dir="$repo_root/justfiles/anvil/container"
-image_id="$(pwsh -NoProfile -File "$script_dir/image-id.ps1")"
+image_id="$(bash "$script_dir/image-id.sh")"
 image_base="${ANVIL_CONTAINER_IMAGE:-anvil-dev}"
 image="${image_base}:${image_id}"
 if command -v sha256sum >/dev/null 2>&1; then

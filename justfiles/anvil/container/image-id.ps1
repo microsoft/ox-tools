@@ -24,6 +24,7 @@ $inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File 
 $executionOnly = @(
     'container.just',
     'image-id.ps1',
+    'image-id.sh',
     'README.md',
     'run-in-container.ps1',
     'run-in-container.sh'
@@ -33,7 +34,12 @@ $executionOnly = @(
 $inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil/container') -File |
     Where-Object { $_.Name -notin $executionOnly } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
-$inputs = $inputs | Sort-Object -Unique
+$uniqueInputs = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($inputPath in $inputs) {
+    [void]$uniqueInputs.Add($inputPath)
+}
+$inputs = [string[]]$uniqueInputs
+[Array]::Sort($inputs, [StringComparer]::Ordinal)
 
 $payload = [Text.StringBuilder]::new()
 foreach ($relative in $inputs) {

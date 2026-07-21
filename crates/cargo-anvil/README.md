@@ -104,7 +104,8 @@ environment without installing those tools directly on the host.
 #### Prerequisites
 
 * Podman 4.3 or newer.
-* `git`, `just`, and `PowerShell` Core (`pwsh`) on the host.
+* `git` and `just` on the host.
+* Bash on Linux, WSL, and macOS; `PowerShell` Core (`pwsh`) on Windows.
 * `[script]` support enabled in the root `Justfile` (`set unstable` when
   required by the installed `just` version).
 * A repository-owned `rust-toolchain.toml`.
@@ -406,7 +407,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG9mmIR0QDwwyG2rIQbMRZMR8G6dunQGOial-G2Re5pHypSY4YWSBg2tjYXJnby1hbnZpbGUwLjIuMWtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG2WZ5NFGEO94G2zGLcKBP42nG5Z9D7_nTkvKG7rEcqKMASoZYWSBg2tjYXJnby1hbnZpbGUwLjIuMWtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

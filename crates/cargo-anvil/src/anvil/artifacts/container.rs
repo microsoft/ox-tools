@@ -14,6 +14,7 @@ const CONTAINERFILE: &str = include_str!("../../../templates/justfiles/anvil/con
 const IGNORE: &str = include_str!("../../../templates/justfiles/anvil/container/container.ignore");
 const ENTRYPOINT: &str = include_str!("../../../templates/justfiles/anvil/container/entrypoint.sh");
 const IMAGE_ID: &str = include_str!("../../../templates/justfiles/anvil/container/image-id.ps1");
+const SHELL_IMAGE_ID: &str = include_str!("../../../templates/justfiles/anvil/container/image-id.sh");
 const SHELL_DRIVER: &str = include_str!("../../../templates/justfiles/anvil/container/run-in-container.sh");
 const POWERSHELL_DRIVER: &str = include_str!("../../../templates/justfiles/anvil/container/run-in-container.ps1");
 const README: &str = include_str!("../../../templates/justfiles/anvil/container/README.md");
@@ -23,6 +24,7 @@ const CONTAINERFILE_PATH: &str = "justfiles/anvil/container/Containerfile";
 const IGNORE_PATH: &str = "justfiles/anvil/container/container.ignore";
 const ENTRYPOINT_PATH: &str = "justfiles/anvil/container/entrypoint.sh";
 const IMAGE_ID_PATH: &str = "justfiles/anvil/container/image-id.ps1";
+const SHELL_IMAGE_ID_PATH: &str = "justfiles/anvil/container/image-id.sh";
 const SHELL_DRIVER_PATH: &str = "justfiles/anvil/container/run-in-container.sh";
 const POWERSHELL_DRIVER_PATH: &str = "justfiles/anvil/container/run-in-container.ps1";
 const README_PATH: &str = "justfiles/anvil/container/README.md";
@@ -38,6 +40,7 @@ pub fn all() -> Vec<Artifact> {
         ignore_file(),
         entrypoint(),
         image_id(),
+        shell_image_id(),
         shell_driver(),
         powershell_driver(),
         readme(),
@@ -72,6 +75,12 @@ pub fn entrypoint() -> Artifact {
 #[must_use]
 pub fn image_id() -> Artifact {
     Artifact::owned_file(IMAGE_ID_PATH, IMAGE_ID)
+}
+
+/// The Bash content-addressed image-id helper.
+#[must_use]
+pub fn shell_image_id() -> Artifact {
+    Artifact::owned_file(SHELL_IMAGE_ID_PATH, SHELL_IMAGE_ID)
 }
 
 /// The Linux/WSL Podman driver.
@@ -121,18 +130,36 @@ mod tests {
         std::fs::write(path, body).expect("test file must be writable");
     }
 
-    fn run_image_id(repo: &Path) -> String {
-        let output = Command::new("pwsh")
-            .args(["-NoProfile", "-File", "justfiles/anvil/container/image-id.ps1"])
+    fn run_image_id_command(repo: &Path, command: &str, args: &[&str]) -> String {
+        let output = Command::new(command)
+            .args(args)
             .current_dir(repo)
             .output()
-            .expect("pwsh must be available for the container image-id helper");
+            .expect("native shell must be available for the container image-id helper");
         assert!(
             output.status.success(),
-            "image-id.ps1 failed: {}",
+            "image-id helper failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8(output.stdout).expect("image ID must be UTF-8").trim().to_owned()
+    }
+
+    #[cfg(windows)]
+    fn run_image_id(repo: &Path) -> String {
+        run_image_id_command(repo, "pwsh", &["-NoProfile", "-File", "justfiles/anvil/container/image-id.ps1"])
+    }
+
+    #[cfg(unix)]
+    fn run_image_id(repo: &Path) -> String {
+        run_image_id_command(repo, "bash", &["justfiles/anvil/container/image-id.sh"])
+    }
+
+    fn write_image_id_fixture(root: &Path) {
+        write(&root.join("rust-toolchain.toml"), "channel = \"1.93\"\n");
+        write(&root.join("justfiles/anvil/versions.just"), "tool_version := \"1\"\n");
+        write(&root.join(CONTAINERFILE_PATH), "FROM example.invalid/base\n");
+        write(&root.join(IMAGE_ID_PATH), IMAGE_ID);
+        write(&root.join(SHELL_IMAGE_ID_PATH), SHELL_IMAGE_ID);
     }
 
     #[test]
@@ -152,6 +179,7 @@ mod tests {
                 IGNORE_PATH,
                 ENTRYPOINT_PATH,
                 IMAGE_ID_PATH,
+                SHELL_IMAGE_ID_PATH,
                 SHELL_DRIVER_PATH,
                 POWERSHELL_DRIVER_PATH,
                 README_PATH
@@ -174,7 +202,6 @@ mod tests {
     fn drivers_use_podman_and_content_addressing() {
         for driver in [SHELL_DRIVER, POWERSHELL_DRIVER] {
             assert!(driver.contains("podman"));
-            assert!(driver.contains("image-id.ps1"));
             assert!(driver.contains("ANVIL_CONTAINER_NO_REBUILD"));
             assert!(driver.contains("ANVIL_CONTAINER_IMAGE"));
             assert!(driver.contains("ANVIL_IN_CONTAINER"));
@@ -200,6 +227,8 @@ mod tests {
             );
         }
         assert!(POWERSHELL_DRIVER.contains("AnvilContainerBuildInMachine"));
+        assert!(POWERSHELL_DRIVER.contains("image-id.ps1"));
+        assert!(IMAGE_ID.contains("[StringComparer]::Ordinal"));
         assert!(POWERSHELL_DRIVER.contains("AnvilContainerPrepareCommand"));
         assert!(POWERSHELL_DRIVER.contains("podman machine ssh"));
         assert!(POWERSHELL_DRIVER.contains("foreach ($name in $Recipe)"));
@@ -209,6 +238,9 @@ mod tests {
         assert!(POWERSHELL_DRIVER.contains("ConvertTo-AnvilVersion"));
         assert!(POWERSHELL_DRIVER.contains("isolated anvil-aprz"));
         assert!(SHELL_DRIVER.contains("for recipe in \"$@\""));
+        assert!(SHELL_DRIVER.contains("image-id.sh"));
+        assert!(!SHELL_DRIVER.contains("pwsh"));
+        assert!(SHELL_DRIVER.contains("anvil-container must run from a Git repository"));
         assert!(SHELL_DRIVER.contains("[[ ! -t 0 ]]"));
         assert!(SHELL_DRIVER.contains("read -r -p"));
         assert!(SHELL_DRIVER.contains("github_run_args"));
@@ -225,10 +257,7 @@ mod tests {
             .status()
             .expect("git must be available for the image-id helper");
         assert!(status.success(), "temporary Git repository must initialize");
-        write(&root.join("rust-toolchain.toml"), "channel = \"1.93\"\n");
-        write(&root.join("justfiles/anvil/versions.just"), "tool_version := \"1\"\n");
-        write(&root.join(CONTAINERFILE_PATH), "FROM example.invalid/base\n");
-        write(&root.join(IMAGE_ID_PATH), IMAGE_ID);
+        write_image_id_fixture(root);
 
         let base = run_image_id(root);
         let auth_path = root.join(AUTH_SHELL_PATH);
@@ -256,6 +285,32 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn image_id_helpers_match_when_pwsh_is_available() {
+        if Command::new("pwsh").arg("-Version").output().is_err() {
+            return;
+        }
+
+        let tmp = TempDir::new().expect("temporary repository must be creatable");
+        let root = tmp.path();
+        let status = Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(root)
+            .status()
+            .expect("git must be available for the image-id helpers");
+        assert!(status.success(), "temporary Git repository must initialize");
+        write_image_id_fixture(root);
+        write(
+            &root.join("justfiles/anvil/container/custom.just"),
+            "custom-recipe:\n    @echo custom\n",
+        );
+
+        let shell = run_image_id_command(root, "bash", &["justfiles/anvil/container/image-id.sh"]);
+        let powershell = run_image_id_command(root, "pwsh", &["-NoProfile", "-File", "justfiles/anvil/container/image-id.ps1"]);
+        assert_eq!(shell, powershell);
+    }
+
+    #[test]
     fn shell_driver_avoids_macos_incompatible_constructs() {
         assert!(!SHELL_DRIVER.contains("sort -V"));
         assert!(!SHELL_DRIVER.contains("[[ -v"));
@@ -263,6 +318,18 @@ mod tests {
         assert!(SHELL_DRIVER.contains("if command -v sha256sum"));
         assert!(SHELL_DRIVER.contains("shasum -a 256"));
         assert!(SHELL_DRIVER.contains("declare -p"));
+        assert!(SHELL_IMAGE_ID.contains("shasum -a 256"));
+        assert!(SHELL_IMAGE_ID.contains("LC_ALL=C sort -u"));
+        assert!(!SHELL_IMAGE_ID.contains("pwsh"));
+    }
+
+    #[test]
+    fn recipe_uses_native_host_interpreters() {
+        assert!(RECIPE.contains("[windows]"));
+        assert!(RECIPE.contains("[script(\"pwsh\")]"));
+        assert!(RECIPE.contains("[unix]"));
+        assert!(RECIPE.contains("[script(\"bash\")]"));
+        assert!(!RECIPE.contains("$IsWindows"));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.2.1"
-catalog_checksum = "sha256:ce338849b77864287d4ecb3dbbd4fa964034ad4cc8c40c506bbe3d441f17350a"
+catalog_checksum = "sha256:01e60afe93d3d26a9f84f7f2580299a6cb6913b27963fcd5bb7ab5172e11e812"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"
@@ -185,7 +185,7 @@ checksum = "sha256:e12900ea70cd6cb2e69f477e16c50b408fcfed28f3f0e83628b3b29efc5b3
 
 [[file]]
 path = "justfiles/anvil/container/README.md"
-checksum = "sha256:53ec72ad1303158b7b77380b4efc9bf97284ea98acf1816543674bbe1bd230a5"
+checksum = "sha256:6fff218f4acb798f9f363f177f68593eba731c0f1b9e016754829e0a0c5ab64f"
 
 [[file]]
 path = "justfiles/anvil/container/container.ignore"
@@ -193,7 +193,7 @@ checksum = "sha256:18db525a056e1f20c2e35791c167ac20f0da0c653465839ba60bb0605996c
 
 [[file]]
 path = "justfiles/anvil/container/container.just"
-checksum = "sha256:a4ea7113ad3c71f367c9dba8bd041cbdd54933a2cdf12f88557c520b8d91865f"
+checksum = "sha256:4341010ffb8457946248f9eb9622e681959728474ac68421f7dbf67fdd7e5ebb"
 
 [[file]]
 path = "justfiles/anvil/container/entrypoint.sh"
@@ -201,7 +201,11 @@ checksum = "sha256:ae694eb90b8a3cdf24ae7d14c5b2df0b11471f52edf354ca9ff5ddab33a02
 
 [[file]]
 path = "justfiles/anvil/container/image-id.ps1"
-checksum = "sha256:199fde8bf7db79bb0e7bc4a0ad2960e2e75e07d48dcbe793b19130bb88b07010"
+checksum = "sha256:1896309cf781c415e074daac8bdab147dde19c818b1f658d858efb4412660df8"
+
+[[file]]
+path = "justfiles/anvil/container/image-id.sh"
+checksum = "sha256:2f2097c16c22ae31dad92ef5befe796b72f8611b5c7d9958e72db2531e652355"
 
 [[file]]
 path = "justfiles/anvil/container/run-in-container.ps1"
@@ -209,7 +213,7 @@ checksum = "sha256:c3e9612734354ec1d1a48b3a193ea551e35bd5d0294005ce7c0b8c55e44bb
 
 [[file]]
 path = "justfiles/anvil/container/run-in-container.sh"
-checksum = "sha256:274015c8a9762483e82582b31418d65a5be03bf8eaba54633cdb2aa89591aeac"
+checksum = "sha256:4d1bf23955b7d67e498294bed3c966cc185076995381ca0e436615ccb7dae253"
 
 [[file]]
 path = "justfiles/anvil/groups/pr-fast.just"
