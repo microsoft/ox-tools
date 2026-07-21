@@ -176,12 +176,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: pr-fast
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-pr-fast
       shell: bash
       env:
@@ -228,12 +233,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: pr-mutants
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-pr-mutants
       shell: bash
       env:
@@ -280,12 +290,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: pr-runtime-analysis
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-pr-runtime-analysis
       shell: bash
       env:
@@ -332,12 +347,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: pr-test
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-pr-test
       shell: bash
       env:
@@ -384,12 +404,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: scheduled-advisories
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-scheduled-advisories
       shell: bash
       env:
@@ -436,12 +461,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: scheduled-exhaustive
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-scheduled-exhaustive
       shell: bash
       env:
@@ -488,12 +518,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: scheduled-runtime-analysis
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-scheduled-runtime-analysis
       shell: bash
       env:
@@ -540,12 +575,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: scheduled-test
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-scheduled-test
       shell: bash
       env:
@@ -582,9 +622,55 @@ inputs:
           `just anvil-<group>-setup`.
     default: ""
     required: false
+  free-disk-space:
+    description: >-
+      Remove unused pre-installed toolchains from GitHub-hosted Linux and
+      Windows runners before setup. Reclaims approximately 18 GB on Linux and
+      17 GB on Windows. No-op on macOS and self-hosted runners.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
+    # Standard GitHub-hosted runners guarantee only 14 GB of SSD space. Heavy
+    # build and test jobs can exceed that with target artifacts alone, so this
+    # opt-in cleanup removes toolchains unused by anvil's Rust checks.
+    # See https://github.com/microsoft/oxidizer/pull/583.
+    - name: Free disk space (Linux)
+      if: inputs.free-disk-space == 'true' && runner.environment == 'github-hosted' && runner.os == 'Linux'
+      shell: bash
+      run: |
+        echo "Disk before cleanup:"
+        df -h /
+        # Android ~10 GB, Haskell ~4 GB, Swift ~3 GB, browser drivers ~1 GB.
+        sudo rm -rf -- /usr/local/lib/android
+        sudo rm -rf -- /opt/ghc /usr/local/.ghcup
+        sudo rm -rf -- /usr/share/swift
+        sudo rm -rf -- /usr/local/share/chromium /usr/local/share/edge_driver
+        echo "Disk after cleanup:"
+        df -h /
+
+    - name: Free disk space (Windows)
+      if: inputs.free-disk-space == 'true' && runner.environment == 'github-hosted' && runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        function Get-FreeDiskGiB {
+          [math]::Round((Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'").FreeSpace / 1GB, 1)
+        }
+
+        "Free before cleanup (GiB): $(Get-FreeDiskGiB)"
+        $paths = @(
+          'C:\Program Files (x86)\Android'
+          'C:\Android'
+          'C:\ghcup'
+        )
+        foreach ($path in $paths) {
+          if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Recurse -Force
+          }
+        }
+        "Free after cleanup (GiB): $(Get-FreeDiskGiB)"
+
     - id: rustc-version
       shell: bash
       run: echo "version=$(rustc --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
@@ -880,6 +966,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/anvil-pr-test
         with:
+          free-disk-space: true
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
@@ -1035,6 +1122,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/anvil-scheduled-test
+        with:
+          free-disk-space: true
       - name: Upload coverage to Codecov
         # Upload from every leg except windows-11-arm (see the matching
         # comment in pr-impl-workflow.yml for the rationale).
@@ -2573,6 +2662,7 @@ anvil-pr-title-validate-prereqs: anvil-tool-pwsh-validate-prereqs
 # Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
 # crate unless the change is repository-specific.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.

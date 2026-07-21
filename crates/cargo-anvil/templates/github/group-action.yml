@@ -30,12 +30,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: __GROUP__
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-__GROUP__
       shell: bash
       env:

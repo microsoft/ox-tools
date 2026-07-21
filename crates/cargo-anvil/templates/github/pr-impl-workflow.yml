@@ -151,6 +151,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/anvil-pr-test
         with:
+          free-disk-space: true
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}

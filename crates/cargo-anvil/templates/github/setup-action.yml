@@ -20,9 +20,55 @@ inputs:
           `just anvil-<group>-setup`.
     default: ""
     required: false
+  free-disk-space:
+    description: >-
+      Remove unused pre-installed toolchains from GitHub-hosted Linux and
+      Windows runners before setup. Reclaims approximately 18 GB on Linux and
+      17 GB on Windows. No-op on macOS and self-hosted runners.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
+    # Standard GitHub-hosted runners guarantee only 14 GB of SSD space. Heavy
+    # build and test jobs can exceed that with target artifacts alone, so this
+    # opt-in cleanup removes toolchains unused by anvil's Rust checks.
+    # See https://github.com/microsoft/oxidizer/pull/583.
+    - name: Free disk space (Linux)
+      if: inputs.free-disk-space == 'true' && runner.environment == 'github-hosted' && runner.os == 'Linux'
+      shell: bash
+      run: |
+        echo "Disk before cleanup:"
+        df -h /
+        # Android ~10 GB, Haskell ~4 GB, Swift ~3 GB, browser drivers ~1 GB.
+        sudo rm -rf -- /usr/local/lib/android
+        sudo rm -rf -- /opt/ghc /usr/local/.ghcup
+        sudo rm -rf -- /usr/share/swift
+        sudo rm -rf -- /usr/local/share/chromium /usr/local/share/edge_driver
+        echo "Disk after cleanup:"
+        df -h /
+
+    - name: Free disk space (Windows)
+      if: inputs.free-disk-space == 'true' && runner.environment == 'github-hosted' && runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        function Get-FreeDiskGiB {
+          [math]::Round((Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'").FreeSpace / 1GB, 1)
+        }
+
+        "Free before cleanup (GiB): $(Get-FreeDiskGiB)"
+        $paths = @(
+          'C:\Program Files (x86)\Android'
+          'C:\Android'
+          'C:\ghcup'
+        )
+        foreach ($path in $paths) {
+          if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Recurse -Force
+          }
+        }
+        "Free after cleanup (GiB): $(Get-FreeDiskGiB)"
+
     - id: rustc-version
       shell: bash
       run: echo "version=$(rustc --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"

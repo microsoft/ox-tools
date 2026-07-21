@@ -344,6 +344,7 @@ jobs:
       - uses: actions/checkout
       - uses: ./.github/actions/anvil-pr-test
         with:
+          free-disk-space: true
           include_modified: ${{ needs.impact.outputs.include_modified }}
           include_affected: ${{ needs.impact.outputs.include_affected }}
           include_required: ${{ needs.impact.outputs.include_required }}
@@ -458,10 +459,10 @@ per-job runner overrides) lives in the user's own workflow, which can compose it
 ## 5. Per-group composite actions
 
 Each per-group composite action has the **same** uniform input surface — the three
-impact-include variables plus a per-action handful of PR-context strings. This means
-the reusable workflow doesn't need to know which include vars a group's checks consume;
-it threads all three to every action. Moving a check between groups (or between
-buckets) is a pure catalog change.
+impact-include variables, the disk-cleanup switch, plus a per-action handful of
+PR-context strings. This means the reusable workflow doesn't need to know which include
+vars a group's checks consume; it threads all three to every action. Moving a check
+between groups (or between buckets) is a pure catalog change.
 
 ```yaml
 # .github/actions/anvil-pr-fast/action.yml  (owned)
@@ -487,10 +488,16 @@ inputs:
     description: Same shape as include_modified, for the required tier.
     required: false
     default: ""
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    required: false
+    default: "false"
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
+      with:
+        free-disk-space: ${{ inputs.free-disk-space }}
     - shell: bash
       env:
         PR_TITLE: ${{ inputs.pr_title }}
@@ -502,11 +509,12 @@ runs:
 
 Uniform input set on every per-group composite action:
 
-| Input              | Default | Notes                                                                                                                                  |
-|--------------------|---------|----------------------------------------------------------------------------------------------------------------------------------------|
-| `include_modified` | `""`    | Forwarded as `ANVIL_INCLUDE_MODIFIED`. `--skip` → recipe exits 0. Empty → recipe defaults to `--workspace`.                          |
-| `include_affected` | `""`    | Forwarded as `ANVIL_INCLUDE_AFFECTED`. Same semantics.                                                                              |
-| `include_required` | `""`    | Forwarded as `ANVIL_INCLUDE_REQUIRED`. Same semantics.                                                                              |
+| Input              | Default   | Notes                                                                                                                                  |
+|--------------------|-----------|----------------------------------------------------------------------------------------------------------------------------------------|
+| `include_modified` | `""`      | Forwarded as `ANVIL_INCLUDE_MODIFIED`. `--skip` → recipe exits 0. Empty → recipe defaults to `--workspace`.                          |
+| `include_affected` | `""`      | Forwarded as `ANVIL_INCLUDE_AFFECTED`. Same semantics.                                                                              |
+| `include_required` | `""`      | Forwarded as `ANVIL_INCLUDE_REQUIRED`. Same semantics.                                                                              |
+| `free-disk-space`  | `"false"` | Forwarded to `anvil-setup`; ignored on macOS and self-hosted runners.                                                               |
 
 Per-action additions (only where the action consumes PR-context strings the recipe needs):
 
@@ -528,8 +536,8 @@ plug individual groups into an unrelated workflow can `uses:` them directly.
 ### `anvil-setup`
 
 `anvil-setup` is a composite action that installs `just`
-(`cargo install just --locked`) and then invokes the catalog setup recipes. It
-takes a single `group` input that controls which recipes run:
+(`cargo install just --locked`) and then invokes the catalog setup recipes. Its
+`group` input controls which recipes run:
 
 - empty (default): runs `just anvil-setup binstall` -- the full catalog. Use
   for local "give me everything" flows.
@@ -543,6 +551,15 @@ takes a single `group` input that controls which recipes run:
 
 The action does not install Rust; it expects `cargo` on PATH (see §7).
 `anvil-impact` is described in §6 below.
+
+Its optional `free-disk-space` input defaults to `false`. When enabled on a
+GitHub-hosted runner, it removes pre-installed toolchains that anvil's Rust checks do
+not use: Android, Haskell/GHC, Swift and browser drivers on Linux; Android and
+Haskell/GHC on Windows. This reclaims approximately 18 GB on Linux and 17 GB on
+Windows. It is a no-op on macOS and self-hosted runners. The generated reusable 
+workflows explicitly enable this input only for `pr-test` and `scheduled-test`, 
+mirroring the testing-job integration in [microsoft/oxidizer#583](https://github.com/microsoft/oxidizer/pull/583).
+Other groups retain the action's disabled default.
 
 ## 6. Impact scoping
 
@@ -624,9 +641,11 @@ The cache covers:
 
 ## 9. Security
 
-The composite actions do nothing privileged on their own — they just install tools and
-invoke `just`. The reusable workflow propagates only what the root workflow passes (and
-only the inputs explicitly declared).
+The setup action uses `sudo rm -rf` only when `free_disk_space` is explicitly enabled
+and the runner reports `runner.environment == 'github-hosted'`. It never performs disk
+cleanup on self-hosted runners. Other composite-action steps install tools and invoke
+`just`. The reusable workflow propagates only what the root workflow passes (and only
+the inputs explicitly declared).
 
 Recommended root workflow shape:
 
