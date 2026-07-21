@@ -96,20 +96,23 @@
 //! ## Containerized local checks
 //!
 //! Anvil can run any generated recipe in a content-addressed Linux container.
-//! This is useful for Linux-on-Windows checks and for matching a pinned CI
-//! distribution without installing the full Rust/tool catalog on the host.
+//! The image installs the Rust toolchains and Cargo tools pinned by the
+//! repository's generated Anvil configuration, providing a repeatable Linux
+//! environment without installing those tools directly on the host.
 //!
 //! ### Prerequisites
 //!
 //! - Podman 4.3 or newer.
 //! - `git`, `just`, and `PowerShell` Core (`pwsh`) on the host.
+//! - `[script]` support enabled in the root `Justfile` (`set unstable` when
+//!   required by the installed `just` version).
 //! - A repository-owned `rust-toolchain.toml`.
 //! - On Windows, a running Podman machine:
 //!
 //! ```powershell
 //! podman machine init   # once
 //! podman machine start
-//! ```
+//! ``` 
 //!
 //! ### Run a recipe
 //!
@@ -119,14 +122,15 @@
 //! just anvil-container
 //! ```
 //!
-//! The no-argument form opens an interactive shell. The first invocation builds
-//! the matching image locally; later invocations reuse it. Changes to the Rust
-//! toolchain, generated Anvil files, Containerfile, or downstream build helpers
-//! produce a different image tag and trigger a new build.
+//! The no-argument form opens an interactive shell. Anvil builds an image the
+//! first time it encounters a content hash and reuses it on later runs. Changes
+//! to the Rust toolchain, generated Anvil files, Containerfile, or downstream
+//! build helpers select a new tag and build a new image. Images for earlier
+//! hashes remain available to older branches.
 //!
 //! Cargo registry, Cargo Git, and `target/` data use named Podman volumes. The
-//! repository is mounted at `/workspace`, while build output stays off the
-//! Windows bind-mount hot path.
+//! repository is mounted at `/workspace`; keeping build output in a named
+//! volume avoids slow host bind-mount I/O, particularly on Windows.
 //!
 //! ### Make tiers use the container
 //!
