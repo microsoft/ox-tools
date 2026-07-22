@@ -25,7 +25,9 @@ root-files = [
 === .github/actions/anvil-impact/action.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 name: anvil-impact
 description: |
   Compute the cargo-delta impact set for this PR and emit per-tier
@@ -145,7 +147,9 @@ runs:
 === .github/actions/anvil-pr-fast/action.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token pr-fast is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 name: anvil-pr-fast
@@ -173,12 +177,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: pr-fast
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-pr-fast
       shell: bash
       env:
@@ -195,7 +204,9 @@ runs:
 === .github/actions/anvil-pr-mutants/action.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token pr-mutants is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 name: anvil-pr-mutants
@@ -223,12 +234,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: pr-mutants
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-pr-mutants
       shell: bash
       env:
@@ -245,7 +261,9 @@ runs:
 === .github/actions/anvil-pr-runtime-analysis/action.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token pr-runtime-analysis is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 name: anvil-pr-runtime-analysis
@@ -273,12 +291,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: pr-runtime-analysis
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-pr-runtime-analysis
       shell: bash
       env:
@@ -295,7 +318,9 @@ runs:
 === .github/actions/anvil-pr-test/action.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token pr-test is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 name: anvil-pr-test
@@ -323,12 +348,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: pr-test
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-pr-test
       shell: bash
       env:
@@ -345,7 +375,9 @@ runs:
 === .github/actions/anvil-scheduled-advisories/action.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token scheduled-advisories is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 name: anvil-scheduled-advisories
@@ -373,12 +405,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: scheduled-advisories
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-scheduled-advisories
       shell: bash
       env:
@@ -395,7 +432,9 @@ runs:
 === .github/actions/anvil-scheduled-exhaustive/action.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token scheduled-exhaustive is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 name: anvil-scheduled-exhaustive
@@ -423,12 +462,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: scheduled-exhaustive
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-scheduled-exhaustive
       shell: bash
       env:
@@ -445,7 +489,9 @@ runs:
 === .github/actions/anvil-scheduled-runtime-analysis/action.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token scheduled-runtime-analysis is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 name: anvil-scheduled-runtime-analysis
@@ -473,12 +519,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: scheduled-runtime-analysis
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-scheduled-runtime-analysis
       shell: bash
       env:
@@ -495,7 +546,9 @@ runs:
 === .github/actions/anvil-scheduled-test/action.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token scheduled-test is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 name: anvil-scheduled-test
@@ -523,12 +576,17 @@ inputs:
       (affected ∪ workspace-internal transitive deps).
     default: ""
     required: false
+  free-disk-space:
+    description: Remove unused toolchains from GitHub-hosted runners before setup.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
     - uses: ./.github/actions/anvil-setup
       with:
         group: scheduled-test
+        free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-scheduled-test
       shell: bash
       env:
@@ -545,7 +603,9 @@ runs:
 === .github/actions/anvil-setup/action.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 name: anvil-setup
 description: Install `just` and the anvil tools/components needed by a specific group (or everything if omitted).
 inputs:
@@ -563,15 +623,61 @@ inputs:
           `just anvil-<group>-setup`.
     default: ""
     required: false
+  free-disk-space:
+    description: >-
+      Remove unused pre-installed toolchains from GitHub-hosted Linux and
+      Windows runners before setup. Reclaims approximately 18 GB on Linux and
+      17 GB on Windows. No-op on macOS and self-hosted runners.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
+    # Standard GitHub-hosted runners guarantee only 14 GB of SSD space. Heavy
+    # build and test jobs can exceed that with target artifacts alone, so this
+    # opt-in cleanup removes toolchains unused by anvil's Rust checks.
+    # See https://github.com/microsoft/oxidizer/pull/583.
+    - name: Free disk space (Linux)
+      if: inputs.free-disk-space == 'true' && runner.environment == 'github-hosted' && runner.os == 'Linux'
+      shell: bash
+      run: |
+        echo "Disk before cleanup:"
+        df -h /
+        # Android ~10 GB, Haskell ~4 GB, Swift ~3 GB, browser drivers ~1 GB.
+        sudo rm -rf -- /usr/local/lib/android
+        sudo rm -rf -- /opt/ghc /usr/local/.ghcup
+        sudo rm -rf -- /usr/share/swift
+        sudo rm -rf -- /usr/local/share/chromium /usr/local/share/edge_driver
+        echo "Disk after cleanup:"
+        df -h /
+
+    - name: Free disk space (Windows)
+      if: inputs.free-disk-space == 'true' && runner.environment == 'github-hosted' && runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        function Get-FreeDiskGiB {
+          [math]::Round((Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'").FreeSpace / 1GB, 1)
+        }
+
+        "Free before cleanup (GiB): $(Get-FreeDiskGiB)"
+        $paths = @(
+          'C:\Program Files (x86)\Android'
+          'C:\Android'
+          'C:\ghcup'
+        )
+        foreach ($path in $paths) {
+          if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Recurse -Force
+          }
+        }
+        "Free after cleanup (GiB): $(Get-FreeDiskGiB)"
+
     - id: rustc-version
       shell: bash
       run: echo "version=$(rustc --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
     - name: Restore cargo cache
       id: cargo-cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         # Key on OS + arch + rustc version + lockfile hashes + catalog
         # hash so a Rust toolchain bump, a cross-arch matrix leg, or a
@@ -649,7 +755,7 @@ runs:
     # downloads the release binary from cargo-bins/cargo-binstall, so
     # the bootstrap branch in `tools.just` becomes a no-op on GH.
     - name: Install cargo-binstall
-      uses: cargo-bins/cargo-binstall@main
+      uses: cargo-bins/cargo-binstall@ead08b90bd7b2e6d81963fb9cf0b7239f66d5db4 # v1.21.0
 
     - name: Install just
       shell: bash
@@ -680,11 +786,11 @@ runs:
         esac
 
     # Save the cache as the LAST step of setup, regardless of whether
-    # any earlier install step partially failed. `actions/cache@v4`
+    # any earlier install step partially failed. `actions/cache`
     # used to support this via `save-always: true`, but that knob is
     # deprecated as of 2025 with the explicit message "does not work
     # as intended" — failing runs simply don't save. The supported
-    # replacement is to call `actions/cache/save@v4` directly as its
+    # replacement is to call `actions/cache/save` directly as its
     # own step with `if: always()`.
     #
     # Without this, a single catalog issue that fails the install
@@ -696,7 +802,7 @@ runs:
     # until the catalog is complete.
     - name: Save cargo cache
       if: always() && steps.cargo-cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
         path: |
@@ -710,7 +816,9 @@ runs:
 === .github/workflows/anvil-pr-impl.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 name: anvil-pr-impl
 
 on:
@@ -765,7 +873,7 @@ jobs:
       include_affected: ${{ steps.delta.outputs.include_affected }}
       include_required: ${{ steps.delta.outputs.include_required }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - id: delta
@@ -778,7 +886,7 @@ jobs:
       include_affected: ${{ steps.delta.outputs.include_affected }}
       include_required: ${{ steps.delta.outputs.include_required }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - id: delta
@@ -799,7 +907,7 @@ jobs:
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # anvil-semver-check compares the affected crates' current API
           # against the PR's target branch (origin/<base>) via
@@ -829,13 +937,13 @@ jobs:
       # write tokens).
       - name: Upsert anvil-semver advisory
         if: always() && github.event_name == 'pull_request' && matrix.os == 'linux' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('target/anvil/comments/semver.md') != ''
-        uses: marocchino/sticky-pull-request-comment@v3
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
         with:
           header: anvil-semver
           path: target/anvil/comments/semver.md
       - name: Clear anvil-semver advisory
         if: always() && github.event_name == 'pull_request' && matrix.os == 'linux' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('target/anvil/comments/semver.md') == ''
-        uses: marocchino/sticky-pull-request-comment@v3
+        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
         with:
           header: anvil-semver
           delete: true
@@ -856,9 +964,10 @@ jobs:
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/anvil-pr-test
         with:
+          free-disk-space: true
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
@@ -878,7 +987,7 @@ jobs:
         # empty the recipe no-ops and there is no file to upload, so we gate
         # on the impact output. Codecov coalesces the two per-config files.
         if: matrix.os != 'windows-arm' && ((startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected != '--skip') || (matrix.os == 'windows' && needs.impact-windows.outputs.include_affected != '--skip'))
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
           flags: ${{ matrix.os }}
@@ -900,7 +1009,7 @@ jobs:
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/anvil-pr-runtime-analysis
         with:
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
@@ -923,7 +1032,7 @@ jobs:
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - uses: ./.github/actions/anvil-pr-mutants
@@ -937,7 +1046,9 @@ jobs:
 === .github/workflows/anvil-pr.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 name: anvil-pr
 
 on:
@@ -965,7 +1076,9 @@ jobs:
 === .github/workflows/anvil-scheduled-impl.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 name: anvil-scheduled-impl
 
 on:
@@ -1008,8 +1121,10 @@ jobs:
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/anvil-scheduled-test
+        with:
+          free-disk-space: true
       - name: Upload coverage to Codecov
         # Upload from every leg except windows-11-arm (see the matching
         # comment in pr-impl-workflow.yml for the rationale).
@@ -1017,7 +1132,7 @@ jobs:
         # the Codecov UI can distinguish PR-tier uploads from scheduled
         # uploads while still tracking each platform separately.
         if: matrix.os != 'windows-arm'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
           flags: scheduled,${{ matrix.os }}
@@ -1037,7 +1152,7 @@ jobs:
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/anvil-scheduled-advisories
 
   scheduled-runtime-analysis:
@@ -1060,7 +1175,7 @@ jobs:
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/anvil-scheduled-runtime-analysis
 
   scheduled-exhaustive:
@@ -1073,13 +1188,15 @@ jobs:
         os: [linux, windows]
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/anvil-scheduled-exhaustive
 
 === .github/workflows/anvil-scheduled.yml ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 name: anvil-scheduled
 
 on:
@@ -1290,8 +1407,11 @@ unknown-git = "deny"
 === justfiles/anvil/checks/aprz.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # cargo-aprz queries the GitHub advisory API. Unauthenticated access is
 # capped at 60 requests/hour and fails on a full run; an authenticated
@@ -1303,6 +1423,8 @@ unknown-git = "deny"
 # before cargo-aprz can exhaust the unauthenticated rate limit.
 #
 # Unscoped (consults external risk DB).
+
+# Analyze dependency features and version requirements with cargo-aprz.
 [script("pwsh")]
 anvil-aprz: anvil-aprz-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1332,38 +1454,52 @@ anvil-aprz: anvil-aprz-validate-prereqs
     cargo aprz deps --error-if-high-risk --console appraisal
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-aprz` recipe.
 [group("anvil-setup")]
 anvil-aprz-setup installer="install": (anvil-tool-cargo-aprz-install installer)
 
+# Validate prerequisites for the `anvil-aprz` recipe.
 [group("anvil-setup")]
 anvil-aprz-validate-prereqs: anvil-tool-cargo-aprz-validate-prereqs
 
 === justfiles/anvil/checks/audit.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Unscoped (consults external advisory DB; reads Cargo.lock).
+
+# Audit dependencies for known security vulnerabilities.
 [script("pwsh")]
 anvil-audit: anvil-audit-validate-prereqs
     $ErrorActionPreference = 'Stop'
     & cargo audit
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-audit` recipe.
 [group("anvil-setup")]
 anvil-audit-setup installer="install": (anvil-tool-cargo-audit-install installer)
 
+# Validate prerequisites for the `anvil-audit` recipe.
 [group("anvil-setup")]
 anvil-audit-validate-prereqs: anvil-tool-cargo-audit-validate-prereqs
 
 === justfiles/anvil/checks/bench.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier.
+
+# Build all workspace benchmarks.
 [script("pwsh")]
 anvil-bench: anvil-bench-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1373,17 +1509,23 @@ anvil-bench: anvil-bench-validate-prereqs
 
 # bench uses cargo-built-ins (cargo bench --no-run + plain bench runs);
 # no extra tool install needed beyond the rust toolchain.
+
+# Install prerequisites for the `anvil-bench` recipe.
 [group("anvil-setup")]
 anvil-bench-setup installer="install": anvil-tool-rustc-validate-prereqs
 
+# Validate prerequisites for the `anvil-bench` recipe.
 [group("anvil-setup")]
 anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
 
 === justfiles/anvil/checks/bolero.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. Smoke-only fuzz pass via [bolero](https://crates.io/crates/bolero):
 # each fuzz target gets a 60-second libfuzzer run, just enough to
@@ -1406,6 +1548,8 @@ anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # campaigns wire a separate scheduled job; anvil deliberately does
 # not ship a long-form fuzz tier (the failure surface is too
 # repo-specific to standardize).
+
+# Run Bolero tests for affected workspace packages.
 [script("pwsh")]
 anvil-bolero: anvil-bolero-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1453,18 +1597,25 @@ anvil-bolero: anvil-bolero-validate-prereqs
 
 # bolero needs cargo-bolero plus the pinned nightly toolchain
 # (libfuzzer engine requires nightly rustc features).
+
+# Install prerequisites for the `anvil-bolero` recipe.
 [group("anvil-setup")]
 anvil-bolero-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-bolero-install installer)
 
+# Validate prerequisites for the `anvil-bolero` recipe.
 [group("anvil-setup")]
 anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-bolero-validate-prereqs
 
 === justfiles/anvil/checks/careful.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+
+# Run tests with cargo-careful for affected workspace packages.
 [script("pwsh")]
 anvil-careful: anvil-careful-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1515,21 +1666,28 @@ anvil-careful: anvil-careful-validate-prereqs
     & cargo '+{{ rust_nightly }}' careful test @pkg --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-careful` recipe.
 [group("anvil-setup")]
 anvil-careful-setup installer="install": anvil-component-nightly-rust-src-install (anvil-tool-cargo-careful-install installer)
 
+# Validate prerequisites for the `anvil-careful` recipe.
 [group("anvil-setup")]
 anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereqs anvil-tool-cargo-careful-validate-prereqs
 
 === justfiles/anvil/checks/cargo-hack.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Required tier. cargo-hack's feature powerset cascades through dep
 # features, so the required set (workspace-internal transitive deps)
 # is the right scope.
+
+# Check feature combinations for required workspace packages.
 [script("pwsh")]
 anvil-cargo-hack: anvil-cargo-hack-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1537,17 +1695,22 @@ anvil-cargo-hack: anvil-cargo-hack-validate-prereqs
     & cargo hack @(if ($env:ANVIL_INCLUDE_REQUIRED) { -split $env:ANVIL_INCLUDE_REQUIRED } else { '--workspace' }) --feature-powerset --depth 2 check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-cargo-hack` recipe.
 [group("anvil-setup")]
 anvil-cargo-hack-setup installer="install": (anvil-tool-cargo-hack-install installer)
 
+# Validate prerequisites for the `anvil-cargo-hack` recipe.
 [group("anvil-setup")]
 anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
 
 === justfiles/anvil/checks/cargo-sort.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
 #
@@ -1562,6 +1725,8 @@ anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
 # (e.g. blank-line-separated dependency blocks) intact, matching
 # oxidizer-github's convention; without it cargo-sort would flag those
 # blank lines as a formatting diff and fail the check.
+
+# Check that Cargo.toml dependency tables are sorted.
 [script("pwsh")]
 anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1569,17 +1734,22 @@ anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
     cargo sort --workspace --grouped --check --check-format
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-cargo-sort` recipe.
 [group("anvil-setup")]
 anvil-cargo-sort-setup installer="install": (anvil-tool-cargo-sort-install installer)
 
+# Validate prerequisites for the `anvil-cargo-sort` recipe.
 [group("anvil-setup")]
 anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs
 
 === justfiles/anvil/checks/clippy.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. Per project policy, clippy runs on the affected set
 # rather than the modified set: a change in a crate can introduce a
@@ -1587,6 +1757,8 @@ anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs
 # obviously-truthy-condition lints that key off the changed type), so
 # we want downstream rev-deps to lint as well. cargo-clippy is a
 # rustup component; same reasoning as fmt for the require.
+
+# Lint affected workspace packages with Clippy.
 [script("pwsh")]
 anvil-clippy: anvil-clippy-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1594,42 +1766,56 @@ anvil-clippy: anvil-clippy-validate-prereqs
     & cargo clippy @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' }) --all-targets --all-features --locked "--" '-D' 'warnings'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-clippy` recipe.
 [group("anvil-setup")]
 anvil-clippy-setup installer="install": anvil-component-default-clippy-install
 
+# Validate prerequisites for the `anvil-clippy` recipe.
 [group("anvil-setup")]
 anvil-clippy-validate-prereqs: anvil-component-default-clippy-validate-prereqs
 
 === justfiles/anvil/checks/deny.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Unscoped (consults external advisory DB; reads Cargo.lock, not
 # workspace members). Single command, but run under pwsh so it does not
 # depend on the adopter's default shell (absent/varying on Windows).
+
+# Check dependency licenses, bans, sources, and advisories.
 [script("pwsh")]
 anvil-deny: anvil-deny-validate-prereqs
     $ErrorActionPreference = 'Stop'
     & cargo deny check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-deny` recipe.
 [group("anvil-setup")]
 anvil-deny-setup installer="install": (anvil-tool-cargo-deny-install installer)
 
+# Validate prerequisites for the `anvil-deny` recipe.
 [group("anvil-setup")]
 anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs
 
 === justfiles/anvil/checks/doc-build.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Required tier. cargo doc resolves intra-doc links through the dep
 # graph, so a dep changing its public API can break doc-build in a
 # crate that wasn't itself modified.
+
+# Build documentation for required workspace packages.
 [script("pwsh")]
 anvil-doc-build: anvil-doc-build-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1641,17 +1827,23 @@ anvil-doc-build: anvil-doc-build-validate-prereqs
 # doc-build, examples and doc-test are pure cargo built-ins; the rust
 # toolchain (rustc + cargo) is the only prerequisite, and we already
 # rely on it being present everywhere anvil runs.
+
+# Install prerequisites for the `anvil-doc-build` recipe.
 [group("anvil-setup")]
 anvil-doc-build-setup installer="install": anvil-tool-rustc-validate-prereqs
 
+# Validate prerequisites for the `anvil-doc-build` recipe.
 [group("anvil-setup")]
 anvil-doc-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
 
 === justfiles/anvil/checks/doc-test.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. Two cargo-test invocations cover both feature
 # configurations: --all-features catches doctests that only compile
@@ -1659,6 +1851,8 @@ anvil-doc-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # doctests that only compile when those features are off. The
 # duplication is cheap because doctests are already a small fraction
 # of total compile/test time.
+
+# Run documentation tests for affected workspace packages.
 [script("pwsh")]
 anvil-doc-test: anvil-doc-test-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1669,19 +1863,26 @@ anvil-doc-test: anvil-doc-test-validate-prereqs
     & cargo test --doc @pkg --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]
 anvil-doc-test-setup installer="install": anvil-tool-rustc-validate-prereqs
 
+# Validate prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]
 anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs
 
 === justfiles/anvil/checks/ensure-no-cyclic-deps.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
+
+# Check that workspace dependencies contain no cycles.
 [script("pwsh")]
 anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1689,19 +1890,26 @@ anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs
     cargo ensure-no-cyclic-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-ensure-no-cyclic-deps` recipe.
 [group("anvil-setup")]
 anvil-ensure-no-cyclic-deps-setup installer="install": (anvil-tool-cargo-ensure-no-cyclic-deps-install installer)
 
+# Validate prerequisites for the `anvil-ensure-no-cyclic-deps` recipe.
 [group("anvil-setup")]
 anvil-ensure-no-cyclic-deps-validate-prereqs: anvil-tool-cargo-ensure-no-cyclic-deps-validate-prereqs
 
 === justfiles/anvil/checks/ensure-no-default-features.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
+
+# Check that workspace packages compile without default features.
 [script("pwsh")]
 anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1709,19 +1917,26 @@ anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prer
     cargo ensure-no-default-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-ensure-no-default-features` recipe.
 [group("anvil-setup")]
 anvil-ensure-no-default-features-setup installer="install": (anvil-tool-cargo-ensure-no-default-features-install installer)
 
+# Validate prerequisites for the `anvil-ensure-no-default-features` recipe.
 [group("anvil-setup")]
 anvil-ensure-no-default-features-validate-prereqs: anvil-tool-cargo-ensure-no-default-features-validate-prereqs
 
 === justfiles/anvil/checks/examples.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier.
+
+# Build all workspace examples.
 [script("pwsh")]
 anvil-examples: anvil-examples-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1729,17 +1944,22 @@ anvil-examples: anvil-examples-validate-prereqs
     & cargo build @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' }) --examples --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-examples` recipe.
 [group("anvil-setup")]
 anvil-examples-setup installer="install": anvil-tool-rustc-validate-prereqs
 
+# Validate prerequisites for the `anvil-examples` recipe.
 [group("anvil-setup")]
 anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs
 
 === justfiles/anvil/checks/external-types.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier (lints public API of changed crates and rev-deps).
 #
@@ -1753,6 +1973,8 @@ anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # build a name->manifest map from cargo metadata, filter to lib crates,
 # intersect with ANVIL_INCLUDE_AFFECTED, and call the tool once per
 # crate. Hard-fails on errors (no tolerance, unlike semver-check).
+
+# Check public APIs for unapproved external types.
 [script("pwsh")]
 anvil-external-types: anvil-external-types-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1804,17 +2026,22 @@ anvil-external-types: anvil-external-types-validate-prereqs
     }
     if ($failed) { exit 1 }
 
+# Install prerequisites for the `anvil-external-types` recipe.
 [group("anvil-setup")]
 anvil-external-types-setup installer="install": anvil-toolchain-nightly-external-types-install (anvil-tool-cargo-check-external-types-install installer)
 
+# Validate prerequisites for the `anvil-external-types` recipe.
 [group("anvil-setup")]
 anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-validate-prereqs anvil-tool-cargo-check-external-types-validate-prereqs
 
 === justfiles/anvil/checks/fmt.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier. cargo-fmt is a rustup component. We invoke it via the
 # pinned nightly (see versions.just) because rustfmt.toml uses
@@ -1822,6 +2049,8 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 # format_code_in_doc_comments). Floating nightly would mean
 # format-drift breaking cloud workflows on rustup updates — the same trap we
 # explicitly avoid for udeps/miri/careful/external-types.
+
+# Check Rust source formatting.
 [script("pwsh")]
 anvil-fmt: anvil-fmt-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1844,19 +2073,26 @@ anvil-fmt: anvil-fmt-validate-prereqs
 
 # --- pr-fast members ---
 
+# Install prerequisites for the `anvil-fmt` recipe.
 [group("anvil-setup")]
 anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install
 
+# Validate prerequisites for the `anvil-fmt` recipe.
 [group("anvil-setup")]
 anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs
 
 === justfiles/anvil/checks/license-headers.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
+
+# Check source files for required license headers.
 [script("pwsh")]
 anvil-license-headers: anvil-license-headers-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -1864,17 +2100,22 @@ anvil-license-headers: anvil-license-headers-validate-prereqs
     cargo heather
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-license-headers` recipe.
 [group("anvil-setup")]
 anvil-license-headers-setup installer="install": (anvil-tool-cargo-heather-install installer)
 
+# Validate prerequisites for the `anvil-license-headers` recipe.
 [group("anvil-setup")]
 anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereqs
 
 === justfiles/anvil/checks/llvm-cov.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. Runs on the pinned nightly toolchain: cargo-llvm-cov
 # only sets the `cfg(coverage_nightly)` that gates the workspace's
@@ -1883,6 +2124,8 @@ anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereq
 # untestable code (process-shelling error paths, script-only crates,
 # etc.) wrongly counts against coverage. This matches the repo's own
 # `coverage-measure` recipe, which also runs on nightly.
+
+# Measure test coverage and enforce the coverage gate.
 [script("pwsh")]
 anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2021,17 +2264,22 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
 
 # --- pr-test members (shared with scheduled-test) ---
 
+# Install prerequisites for the `anvil-llvm-cov` recipe.
 [group("anvil-setup")]
 anvil-llvm-cov-setup installer="install": anvil-component-nightly-llvm-tools-install (anvil-tool-cargo-llvm-cov-install installer) (anvil-tool-cargo-nextest-install installer) (anvil-tool-cargo-coverage-gate-install installer)
 
+# Validate prerequisites for the `anvil-llvm-cov` recipe.
 [group("anvil-setup")]
 anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-prereqs anvil-tool-cargo-llvm-cov-validate-prereqs anvil-tool-cargo-nextest-validate-prereqs anvil-tool-cargo-coverage-gate-validate-prereqs
 
 === justfiles/anvil/checks/loom.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. `loom` is a permutation-based concurrency model
 # checker: a crate exercises it through a dedicated `[[test]]` target
@@ -2072,6 +2320,8 @@ anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-pre
 # (layout-agnostic; works for any `members` glob). RUSTFLAGS goes via
 # $env: rather than --config so it propagates to cargo's child rustc
 # invocations cleanly on both pwsh/bash.
+
+# Run Loom concurrency tests for affected workspace packages.
 [script("pwsh")]
 anvil-loom: anvil-loom-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2137,17 +2387,23 @@ anvil-loom: anvil-loom-validate-prereqs
 # loom is a regular cargo-test invocation with RUSTFLAGS=--cfg loom;
 # no dedicated tool to install. The rust toolchain (rustc + cargo)
 # is the only prerequisite.
+
+# Install prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]
 anvil-loom-setup installer="install": anvil-tool-rustc-validate-prereqs
 
+# Validate prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]
 anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs
 
 === justfiles/anvil/checks/miri-race-coverage.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Race coverage rotates the miri-many-seeds window daily by
 # day-of-month: day N -> seeds [2N-1, 2N+1) (2 seeds/day,
@@ -2155,6 +2411,8 @@ anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # schedule rather than retesting the same seeds every night; race
 # conditions surface as inter-seed nondeterminism rather than
 # per-seed crashes, so coverage matters more than depth-per-seed.
+
+# Run Miri tests with race coverage tracking.
 [script("pwsh")]
 anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2169,18 +2427,24 @@ anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs
     & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-miri-race-coverage` recipe.
 [group("anvil-setup")]
 anvil-miri-race-coverage-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
 
+# Validate prerequisites for the `anvil-miri-race-coverage` recipe.
 [group("anvil-setup")]
 anvil-miri-race-coverage-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs
 
 === justfiles/anvil/checks/miri-strict-provenance.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+
+# Run Miri tests with strict provenance checks.
 [script("pwsh")]
 anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2191,17 +2455,22 @@ anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs
     & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-miri-strict-provenance` recipe.
 [group("anvil-setup")]
 anvil-miri-strict-provenance-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
 
+# Validate prerequisites for the `anvil-miri-strict-provenance` recipe.
 [group("anvil-setup")]
 anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs
 
 === justfiles/anvil/checks/miri-tree-borrows.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Stricter miri profiles. Each runs miri over the full workspace
 # with a profile-specific MIRIFLAGS plus a profile-specific
@@ -2215,6 +2484,8 @@ anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-vali
 # does not set ANVIL_INCLUDE_AFFECTED); the --skip / affected guards
 # below only apply if an adopter invokes them locally with the env
 # vars set.
+
+# Run Miri tests with the Tree Borrows model.
 [script("pwsh")]
 anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2229,22 +2500,29 @@ anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs
 # as anvil-miri; they only differ in the MIRIFLAGS / RUSTFLAGS the
 # recipe sets. Separate setup recipes keep the per-check fan-out
 # regular (groups.just can iterate without special-casing).
+
+# Install prerequisites for the `anvil-miri-tree-borrows` recipe.
 [group("anvil-setup")]
 anvil-miri-tree-borrows-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
 
+# Validate prerequisites for the `anvil-miri-tree-borrows` recipe.
 [group("anvil-setup")]
 anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs
 
 === justfiles/anvil/checks/miri.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Nightly checks always run full-workspace; impact env vars aren't set
 # by the scheduled workflow, so the affected-tier default (--workspace)
 # applies. Skip guards are still included for local diff-scoped runs.
 
+# Run Miri tests for affected workspace packages.
 [script("pwsh")]
 anvil-miri: anvil-miri-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2279,17 +2557,22 @@ anvil-miri: anvil-miri-validate-prereqs
 
 # --- pr-runtime-analysis members ---
 
+# Install prerequisites for the `anvil-miri` recipe.
 [group("anvil-setup")]
 anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil-component-nightly-rust-src-install
 
+# Validate prerequisites for the `anvil-miri` recipe.
 [group("anvil-setup")]
 anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs
 
 === justfiles/anvil/checks/mutants-diff.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier. cargo-mutants does its own diff-scoping via --in-diff;
 # the affected-tier guard is the wiring-layer's coarse filter (if no
@@ -2300,6 +2583,8 @@ anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil
 # would fail. The merged pr-slow group runs on all four OS legs; mutants
 # is the only sub-recipe that can't follow, so it bails out early on the
 # affected leg. Coverage on the other three legs is unchanged.
+
+# Run mutation testing for changes relative to the base branch.
 [script("pwsh")]
 anvil-mutants-diff: anvil-mutants-diff-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2330,20 +2615,27 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs
 
 # --- pr-mutants members ---
 
+# Install prerequisites for the `anvil-mutants-diff` recipe.
 [group("anvil-setup")]
 anvil-mutants-diff-setup installer="install": (anvil-tool-cargo-mutants-install installer)
 
+# Validate prerequisites for the `anvil-mutants-diff` recipe.
 [group("anvil-setup")]
 anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
 
 === justfiles/anvil/checks/mutants-full.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Unscoped. Scheduled-exhaustive deliberately runs over the whole
 # workspace regardless of diff.
+
+# Run exhaustive mutation testing across the workspace.
 [script("pwsh")]
 anvil-mutants-full: anvil-mutants-full-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2353,17 +2645,22 @@ anvil-mutants-full: anvil-mutants-full-validate-prereqs
 # --- scheduled-exhaustive members (mutants-full reuses cargo-mutants;
 #     cargo-hack and bench are dedicated tools) ---
 
+# Install prerequisites for the `anvil-mutants-full` recipe.
 [group("anvil-setup")]
 anvil-mutants-full-setup installer="install": (anvil-tool-cargo-mutants-install installer)
 
+# Validate prerequisites for the `anvil-mutants-full` recipe.
 [group("anvil-setup")]
 anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
 
 === justfiles/anvil/checks/pr-title.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Unscoped (PR title is not source-related).
 #
@@ -2376,6 +2673,8 @@ anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
 # It does NOT tolerate a non-empty-but-wrong value: a misconfigured cloud
 # variable (e.g. an unexpanded pipeline macro) is a real error and fails
 # the check loudly rather than silently passing.
+
+# Validate the pull request title.
 [script("pwsh")]
 anvil-pr-title: anvil-pr-title-validate-prereqs
     $title = $env:PR_TITLE
@@ -2389,17 +2688,23 @@ anvil-pr-title: anvil-pr-title-validate-prereqs
     }
 
 # pr-title is a pwsh script; no cargo tool to install.
+
+# Prepare the PowerShell prerequisite for pull request title validation.
 [group("anvil-setup")]
 anvil-pr-title-setup installer="install": anvil-tool-pwsh-validate-prereqs
 
+# Validate prerequisites for the `anvil-pr-title` recipe.
 [group("anvil-setup")]
 anvil-pr-title-validate-prereqs: anvil-tool-pwsh-validate-prereqs
 
 === justfiles/anvil/checks/readme-check.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
 #
@@ -2423,6 +2728,8 @@ anvil-pr-title-validate-prereqs: anvil-tool-pwsh-validate-prereqs
 # rather than --manifest-path-driven), and per-crate template-path
 # resolution. The ANVIL_INCLUDE_MODIFIED value would still need to
 # be intersected with the lib-crate set rather than splatted into cargo.
+
+# Check that crate README files are up to date.
 [script("pwsh")]
 anvil-readme-check: anvil-readme-check-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2502,17 +2809,22 @@ anvil-readme-check: anvil-readme-check-validate-prereqs
     }
     if ($hadFailure) { exit 1 }
 
+# Install prerequisites for the `anvil-readme-check` recipe.
 [group("anvil-setup")]
 anvil-readme-check-setup installer="install": (anvil-tool-cargo-doc2readme-install installer)
 
+# Validate prerequisites for the `anvil-readme-check` recipe.
 [group("anvil-setup")]
 anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereqs
 
 === justfiles/anvil/checks/semver-check.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Affected tier (compares changed crates' current API against the PR
 # target branch baseline; only changed crates' surface is at risk).
@@ -2550,6 +2862,8 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 # selective error tolerance for renamed crates ("package `<name>` not
 # found in ...") and bin->bin+lib transitions ("no library targets
 # found").
+
+# Check affected crates for semantic versioning violations.
 [script("pwsh")]
 anvil-semver-check: anvil-semver-check-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2694,17 +3008,22 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
     # Advisory: always exit 0. cloud-workflow wiring posts/clears the PR comment.
     exit 0
 
+# Install prerequisites for the `anvil-semver-check` recipe.
 [group("anvil-setup")]
 anvil-semver-check-setup installer="install": (anvil-tool-cargo-semver-checks-install installer)
 
+# Validate prerequisites for the `anvil-semver-check` recipe.
 [group("anvil-setup")]
 anvil-semver-check-validate-prereqs: anvil-tool-cargo-semver-checks-validate-prereqs
 
 === justfiles/anvil/checks/spellcheck.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Modified tier.
 #
@@ -2719,6 +3038,8 @@ anvil-semver-check-validate-prereqs: anvil-tool-cargo-semver-checks-validate-pre
 # pointing at it never fails on a missing file -- if `.spelling` is
 # absent we emit an empty dictionary (count `0`, no words) rather than
 # leaving the path dangling.
+
+# Check spelling in source comments and documentation.
 [script("pwsh")]
 anvil-spellcheck: anvil-spellcheck-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2749,17 +3070,23 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
 # cargo-spellcheck has a build-time libclang dependency; the system
 # deps check runs first so adopters get a clear hint instead of a
 # cryptic clang-sys build error mid-install.
+
+# Install prerequisites for the `anvil-spellcheck` recipe.
 [group("anvil-setup")]
 anvil-spellcheck-setup installer="install": anvil-system-deps-check (anvil-tool-cargo-spellcheck-install installer)
 
+# Validate prerequisites for the `anvil-spellcheck` recipe.
 [group("anvil-setup")]
 anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs
 
 === justfiles/anvil/checks/udeps.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Required tier. cargo-udeps detects unused dependencies by resolving
 # the full crate graph and seeing which deps are referenced; that's
@@ -2778,6 +3105,8 @@ anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs
 #      surfaces those.
 # A genuinely-unused dep is caught by both; the two together cover all
 # of {unused dep, unused dev-dep, dep that should be a dev-dep}.
+
+# Check required workspace packages for unused dependencies.
 [script("pwsh")]
 anvil-udeps: anvil-udeps-validate-prereqs
     $ErrorActionPreference = 'Stop'
@@ -2791,9 +3120,11 @@ anvil-udeps: anvil-udeps-validate-prereqs
     & cargo '+{{ rust_nightly }}' udeps @pkg --all-features --all-targets
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+# Install prerequisites for the `anvil-udeps` recipe.
 [group("anvil-setup")]
 anvil-udeps-setup installer="install": anvil-toolchain-nightly-install (anvil-tool-cargo-udeps-install installer)
 
+# Validate prerequisites for the `anvil-udeps` recipe.
 [group("anvil-setup")]
 anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-udeps-validate-prereqs
 
@@ -3592,9 +3923,13 @@ podman "${run_args[@]}" "$image" just "$@"
 === justfiles/anvil/groups/pr-fast.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+
+# Run the fast pull request checks.
 [group("anvil")]
 anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-fmt \
@@ -3620,6 +3955,7 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
 # from checks.just. Setup recipes accept `installer="install"|"binstall"`;
 # validate-prereqs recipes take no parameters.
 
+# Install prerequisites for the `anvil-pr-fast` recipe.
 [group("anvil-setup")]
 anvil-pr-fast-setup installer="install": \
     (anvil-fmt-setup installer) \
@@ -3639,6 +3975,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-external-types-setup installer) \
     (anvil-aprz-setup installer)
 
+# Validate prerequisites for the `anvil-pr-fast` recipe.
 [group("anvil-setup")]
 anvil-pr-fast-validate-prereqs: \
     anvil-fmt-validate-prereqs \
@@ -3661,24 +3998,34 @@ anvil-pr-fast-validate-prereqs: \
 === justfiles/anvil/groups/pr-mutants.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+
+# Run the pull request mutation tests.
 [group("anvil")]
 anvil-pr-mutants: anvil-pr-mutants-validate-prereqs anvil-mutants-diff
 
+# Install prerequisites for the `anvil-pr-mutants` recipe.
 [group("anvil-setup")]
 anvil-pr-mutants-setup installer="install": (anvil-mutants-diff-setup installer)
 
+# Validate prerequisites for the `anvil-pr-mutants` recipe.
 [group("anvil-setup")]
 anvil-pr-mutants-validate-prereqs: anvil-mutants-diff-validate-prereqs
 
 === justfiles/anvil/groups/pr-runtime-analysis.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+
+# Run the pull request runtime analysis.
 [group("anvil")]
 anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
     anvil-miri \
@@ -3686,6 +4033,7 @@ anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
     anvil-loom \
     anvil-bolero
 
+# Install prerequisites for the `anvil-pr-runtime-analysis` recipe.
 [group("anvil-setup")]
 anvil-pr-runtime-analysis-setup installer="install": \
     (anvil-miri-setup installer) \
@@ -3693,6 +4041,7 @@ anvil-pr-runtime-analysis-setup installer="install": \
     (anvil-loom-setup installer) \
     (anvil-bolero-setup installer)
 
+# Validate prerequisites for the `anvil-pr-runtime-analysis` recipe.
 [group("anvil-setup")]
 anvil-pr-runtime-analysis-validate-prereqs: \
     anvil-miri-validate-prereqs \
@@ -3703,8 +4052,11 @@ anvil-pr-runtime-analysis-validate-prereqs: \
 === justfiles/anvil/groups/pr-slow.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # pr-slow is the single PR-tier group for everything that takes more
 # than ~30s per crate (tests, stricter runtimes, mutation testing).
@@ -3723,15 +4075,19 @@ anvil-pr-runtime-analysis-validate-prereqs: \
 #   $ just anvil-pr-test   # tests + coverage only
 #   $ just anvil-pr-runtime-analysis   # miri + careful only
 #   $ just anvil-pr-mutants   # mutants only
+
+# Run the slow pull request checks.
 [group("anvil")]
 anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants
 
+# Install prerequisites for the `anvil-pr-slow` recipe.
 [group("anvil-setup")]
 anvil-pr-slow-setup installer="install": \
     (anvil-pr-test-setup installer) \
     (anvil-pr-runtime-analysis-setup installer) \
     (anvil-pr-mutants-setup installer)
 
+# Validate prerequisites for the `anvil-pr-slow` recipe.
 [group("anvil-setup")]
 anvil-pr-slow-validate-prereqs: \
     anvil-pr-test-validate-prereqs \
@@ -3741,21 +4097,27 @@ anvil-pr-slow-validate-prereqs: \
 === justfiles/anvil/groups/pr-test.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+
+# Run the pull request tests.
 [group("anvil")]
 anvil-pr-test: anvil-pr-test-validate-prereqs \
     anvil-llvm-cov \
     anvil-doc-test \
     anvil-examples
 
+# Install prerequisites for the `anvil-pr-test` recipe.
 [group("anvil-setup")]
 anvil-pr-test-setup installer="install": \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
     (anvil-examples-setup installer)
 
+# Validate prerequisites for the `anvil-pr-test` recipe.
 [group("anvil-setup")]
 anvil-pr-test-validate-prereqs: \
     anvil-llvm-cov-validate-prereqs \
@@ -3765,9 +4127,13 @@ anvil-pr-test-validate-prereqs: \
 === justfiles/anvil/groups/scheduled-advisories.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+
+# Run the scheduled advisory checks.
 [group("anvil")]
 anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
     anvil-deny \
@@ -3775,6 +4141,7 @@ anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
     anvil-aprz \
     anvil-clippy
 
+# Install prerequisites for the `anvil-scheduled-advisories` recipe.
 [group("anvil-setup")]
 anvil-scheduled-advisories-setup installer="install": \
     (anvil-deny-setup installer) \
@@ -3782,6 +4149,7 @@ anvil-scheduled-advisories-setup installer="install": \
     (anvil-aprz-setup installer) \
     (anvil-clippy-setup installer)
 
+# Validate prerequisites for the `anvil-scheduled-advisories` recipe.
 [group("anvil-setup")]
 anvil-scheduled-advisories-validate-prereqs: \
     anvil-deny-validate-prereqs \
@@ -3792,21 +4160,27 @@ anvil-scheduled-advisories-validate-prereqs: \
 === justfiles/anvil/groups/scheduled-exhaustive.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+
+# Run the scheduled exhaustive checks.
 [group("anvil")]
 anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
     anvil-mutants-full \
     anvil-cargo-hack \
     anvil-bench
 
+# Install prerequisites for the `anvil-scheduled-exhaustive` recipe.
 [group("anvil-setup")]
 anvil-scheduled-exhaustive-setup installer="install": \
     (anvil-mutants-full-setup installer) \
     (anvil-cargo-hack-setup installer) \
     (anvil-bench-setup installer)
 
+# Validate prerequisites for the `anvil-scheduled-exhaustive` recipe.
 [group("anvil-setup")]
 anvil-scheduled-exhaustive-validate-prereqs: \
     anvil-mutants-full-validate-prereqs \
@@ -3816,14 +4190,19 @@ anvil-scheduled-exhaustive-validate-prereqs: \
 === justfiles/anvil/groups/scheduled-runtime-analysis.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # scheduled-runtime-analysis is the full-workspace counterpart of
 # pr-runtime-analysis: it re-runs miri unscoped (PR-tier miri is
 # impact-scoped, so crates untouched by a PR never get miri coverage)
 # and adds the three stricter miri profiles (tree-borrows, strict-
 # provenance, race-coverage) which are too expensive for PR.
+
+# Run the scheduled runtime analysis.
 [group("anvil")]
 anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prereqs \
     anvil-miri \
@@ -3831,6 +4210,7 @@ anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prer
     anvil-miri-strict-provenance \
     anvil-miri-race-coverage
 
+# Install prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
 [group("anvil-setup")]
 anvil-scheduled-runtime-analysis-setup installer="install": \
     (anvil-miri-setup installer) \
@@ -3838,6 +4218,7 @@ anvil-scheduled-runtime-analysis-setup installer="install": \
     (anvil-miri-strict-provenance-setup installer) \
     (anvil-miri-race-coverage-setup installer)
 
+# Validate prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
 [group("anvil-setup")]
 anvil-scheduled-runtime-analysis-validate-prereqs: \
     anvil-miri-validate-prereqs \
@@ -3848,23 +4229,29 @@ anvil-scheduled-runtime-analysis-validate-prereqs: \
 === justfiles/anvil/groups/scheduled-test.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Scheduled groups
 
+# Run the scheduled tests.
 [group("anvil")]
 anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
     anvil-llvm-cov \
     anvil-doc-test \
     anvil-examples
 
+# Install prerequisites for the `anvil-scheduled-test` recipe.
 [group("anvil-setup")]
 anvil-scheduled-test-setup installer="install": \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
     (anvil-examples-setup installer)
 
+# Validate prerequisites for the `anvil-scheduled-test` recipe.
 [group("anvil-setup")]
 anvil-scheduled-test-validate-prereqs: \
     anvil-llvm-cov-validate-prereqs \
@@ -3874,8 +4261,11 @@ anvil-scheduled-test-validate-prereqs: \
 === justfiles/anvil/helpers.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../docs/design/checks.md for the catalog and rationale.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 #
 # Each check belongs to one of four buckets, which determines how it
@@ -4099,7 +4489,9 @@ _anvil-impact-format tier impactJson:
 === justfiles/anvil/mod.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # Entry point for the anvil just recipe tree. The user's root Justfile
 # imports this single file; everything else lives in sibling .just files
 # pulled in here.
@@ -4127,10 +4519,10 @@ _anvil-impact-format tier impactJson:
 # recipes that inherit the adopter's default shell — they're
 # shell-agnostic.
 #
-# IMPORTANT: [script(...)] requires `set unstable`. The adopter's
-# root justfile must declare it (typically as a top-level line).
-# anvil's mod.just does NOT redeclare it, to avoid conflicting
-# with adopters who already have it.
+# IMPORTANT: [script(...)] requires `set unstable` with just versions
+# earlier than 1.44. The adopter's root justfile must declare it
+# (typically as a top-level line). anvil's mod.just does NOT redeclare
+# it, to avoid conflicting with adopters who already have it.
 
 import 'helpers.just'
 import 'checks/aprz.just'
@@ -4205,12 +4597,17 @@ _anvil-run tier runner:
 === justfiles/anvil/tiers.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../docs/design/checks.md for the tier structure.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # PR tier: every check that should run on every pull request, split
 # into two groups so the fast checks aren't blocked behind the slow
 # ones in cloud workflows.
+
+# Run all pull request checks.
 [group("anvil")]
 anvil-pr: (_anvil-run "pr" anvil_runner)
 
@@ -4223,6 +4620,8 @@ _anvil-pr: anvil-pr-validate-prereqs \
 # without a commit (advisories, flakes) + the truly expensive
 # exhaustive checks that don't fit in a PR budget. Runs on a schedule
 # against `main`, not on PRs.
+
+# Run all scheduled checks.
 [group("anvil")]
 anvil-scheduled: (_anvil-run "scheduled" anvil_runner)
 
@@ -4254,16 +4653,19 @@ _anvil-full: anvil-full-validate-prereqs \
 # `anvil-pr-fast-setup` rather than the global `anvil-setup`).
 # Local users who want "install everything" run `just anvil-setup`.
 
+# Install prerequisites for the `anvil-pr` recipe.
 [group("anvil-setup")]
 anvil-pr-setup installer="install": \
     (anvil-pr-fast-setup installer) \
     (anvil-pr-slow-setup installer)
 
+# Validate prerequisites for the `anvil-pr` recipe.
 [group("anvil-setup")]
 anvil-pr-validate-prereqs: \
     anvil-pr-fast-validate-prereqs \
     anvil-pr-slow-validate-prereqs
 
+# Install prerequisites for the `anvil-scheduled` recipe.
 [group("anvil-setup")]
 anvil-scheduled-setup installer="install": \
     (anvil-scheduled-test-setup installer) \
@@ -4271,6 +4673,7 @@ anvil-scheduled-setup installer="install": \
     (anvil-scheduled-runtime-analysis-setup installer) \
     (anvil-scheduled-exhaustive-setup installer)
 
+# Validate prerequisites for the `anvil-scheduled` recipe.
 [group("anvil-setup")]
 anvil-scheduled-validate-prereqs: \
     anvil-scheduled-test-validate-prereqs \
@@ -4278,11 +4681,13 @@ anvil-scheduled-validate-prereqs: \
     anvil-scheduled-runtime-analysis-validate-prereqs \
     anvil-scheduled-exhaustive-validate-prereqs
 
+# Install prerequisites for the `anvil-full` recipe.
 [group("anvil-setup")]
 anvil-full-setup installer="install": \
     (anvil-pr-setup installer) \
     (anvil-scheduled-setup installer)
 
+# Validate prerequisites for the `anvil-full` recipe.
 [group("anvil-setup")]
 anvil-full-validate-prereqs: \
     anvil-pr-validate-prereqs \
@@ -4300,17 +4705,22 @@ anvil-full-validate-prereqs: \
 # `anvil-setup` is "install everything the catalog knows about", so it
 # includes cargo-delta too (a local `just anvil-setup` then provisions a
 # complete environment, impact tool included).
+
+# Install every tool and component in the anvil catalog.
 [group("anvil-setup")]
 anvil-setup installer="install": (anvil-full-setup installer) (anvil-tool-cargo-delta-install installer)
 
+# Validate every tool and component in the anvil catalog.
 [group("anvil-setup")]
 anvil-validate-prereqs: anvil-full-validate-prereqs anvil-tool-cargo-delta-validate-prereqs
 
 === justfiles/anvil/tools.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
-# See ../../docs/design/local.md for the policy.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/local.md
 
 # ============================================================================
 # System-level prerequisites (libclang, etc.)
@@ -4341,6 +4751,8 @@ anvil-validate-prereqs: anvil-full-validate-prereqs anvil-tool-cargo-delta-valid
 # On missing deps the recipe prints copy-paste install hints per OS /
 # package manager and exits non-zero. No auto-install: admin / sudo and
 # package-manager choice stay with the user.
+
+# Check system-level build prerequisites for catalog tools.
 [group("anvil-setup")]
 [script("pwsh")]
 anvil-system-deps-check:
@@ -4442,6 +4854,7 @@ anvil-system-deps-check:
 # machine running anvil; the validate recipes just surface a friendly
 # error if not.
 
+# Validate that rustc is available.
 [group("anvil-setup")]
 [script("pwsh")]
 anvil-tool-rustc-validate-prereqs:
@@ -4450,6 +4863,7 @@ anvil-tool-rustc-validate-prereqs:
         exit 1
     }
 
+# Validate that PowerShell Core is available.
 [group("anvil-setup")]
 [script("pwsh")]
 anvil-tool-pwsh-validate-prereqs:
@@ -4727,15 +5141,19 @@ _check-component toolchain component:
 # Rustup toolchains
 # ============================================================================
 
+# Install the pinned nightly Rust toolchain.
 [group("anvil-setup")]
 anvil-toolchain-nightly-install: (_install-toolchain rust_nightly)
 
+# Validate that the pinned nightly Rust toolchain is available.
 [group("anvil-setup")]
 anvil-toolchain-nightly-validate-prereqs: (_check-toolchain rust_nightly)
 
+# Install the pinned nightly Rust toolchain for external-type checks.
 [group("anvil-setup")]
 anvil-toolchain-nightly-external-types-install: (_install-toolchain rust_nightly_external_types)
 
+# Validate that the pinned nightly Rust toolchain for external-type checks is available.
 [group("anvil-setup")]
 anvil-toolchain-nightly-external-types-validate-prereqs: (_check-toolchain rust_nightly_external_types)
 
@@ -4748,33 +5166,43 @@ anvil-toolchain-nightly-external-types-validate-prereqs: (_check-toolchain rust_
 # being installed first (via the relevant anvil-<toolchain>-install
 # recipe) and then add the component.
 
+# Install the pinned `clippy` component for the default toolchain.
 [group("anvil-setup")]
 anvil-component-default-clippy-install: (_install-component "default" "clippy")
 
+# Validate that the pinned `clippy` component is available for the default toolchain.
 [group("anvil-setup")]
 anvil-component-default-clippy-validate-prereqs: (_check-component "default" "clippy")
 
+# Install the pinned `rustfmt` component for the default toolchain.
 [group("anvil-setup")]
 anvil-component-default-rustfmt-install: (_install-component "default" "rustfmt")
 
+# Validate that the pinned `rustfmt` component is available for the default toolchain.
 [group("anvil-setup")]
 anvil-component-default-rustfmt-validate-prereqs: (_check-component "default" "rustfmt")
 
+# Install the pinned `rustfmt` component for the nightly toolchain.
 [group("anvil-setup")]
 anvil-component-nightly-rustfmt-install: anvil-toolchain-nightly-install (_install-component rust_nightly "rustfmt")
 
+# Validate that the pinned `rustfmt` component is available for the nightly toolchain.
 [group("anvil-setup")]
 anvil-component-nightly-rustfmt-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "rustfmt")
 
+# Install the pinned `miri` component for the nightly toolchain.
 [group("anvil-setup")]
 anvil-component-nightly-miri-install: anvil-toolchain-nightly-install (_install-component rust_nightly "miri")
 
+# Validate that the pinned `miri` component is available for the nightly toolchain.
 [group("anvil-setup")]
 anvil-component-nightly-miri-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "miri")
 
+# Install the pinned `rust-src` component for the nightly toolchain.
 [group("anvil-setup")]
 anvil-component-nightly-rust-src-install: anvil-toolchain-nightly-install (_install-component rust_nightly "rust-src")
 
+# Validate that the pinned `rust-src` component is available for the nightly toolchain.
 [group("anvil-setup")]
 anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "rust-src")
 
@@ -4787,9 +5215,12 @@ anvil-component-nightly-rust-src-validate-prereqs: anvil-toolchain-nightly-valid
 # alias). Detection probes the sysroot for the `llvm-profdata` binary
 # (see `_check-component`), so the component name only matters for the
 # `rustup component add` install path.
+
+# Install the pinned `llvm-tools` component for the nightly toolchain.
 [group("anvil-setup")]
 anvil-component-nightly-llvm-tools-install: anvil-toolchain-nightly-install (_install-component rust_nightly "llvm-tools")
 
+# Validate that the pinned `llvm-tools` component is available for the nightly toolchain.
 [group("anvil-setup")]
 anvil-component-nightly-llvm-tools-validate-prereqs: anvil-toolchain-nightly-validate-prereqs (_check-component rust_nightly "llvm-tools")
 
@@ -4802,15 +5233,19 @@ anvil-component-nightly-llvm-tools-validate-prereqs: anvil-toolchain-nightly-val
 # per tool). The install recipes accept an `installer="install"|"binstall"`
 # parameter; the validate-prereqs recipes do not (they only read state).
 
+# Install the pinned `cargo-aprz` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-aprz-install installer="install": (_install-tool "cargo-aprz" cargo_aprz_version installer)
 
+# Validate that the pinned `cargo-aprz` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-aprz-validate-prereqs: (_check-tool "cargo-aprz" cargo_aprz_version)
 
+# Install the pinned `cargo-audit` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-audit-install installer="install": (_install-tool "cargo-audit" cargo_audit_version installer)
 
+# Validate that the pinned `cargo-audit` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_version)
 
@@ -4824,6 +5259,8 @@ anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_
 # aarch64-pc-windows-msvc), and the anvil-bolero check self-skips on
 # the same hosts. The pr-runtime-analysis Windows/ARM legs therefore
 # treat bolero as a no-op rather than a setup failure.
+
+# Install the pinned `cargo-bolero` tool.
 [group("anvil-setup")]
 [script("pwsh")]
 anvil-tool-cargo-bolero-install installer="install":
@@ -4834,6 +5271,7 @@ anvil-tool-cargo-bolero-install installer="install":
     & just _install-tool cargo-bolero {{cargo_bolero_version}} {{installer}}
     exit $LASTEXITCODE
 
+# Validate that the pinned `cargo-bolero` tool is available.
 [group("anvil-setup")]
 [script("pwsh")]
 anvil-tool-cargo-bolero-validate-prereqs:
@@ -4844,69 +5282,91 @@ anvil-tool-cargo-bolero-validate-prereqs:
     & just _check-tool cargo-bolero {{cargo_bolero_version}}
     exit $LASTEXITCODE
 
+# Install the pinned `cargo-careful` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-careful-install installer="install": (_install-tool "cargo-careful" cargo_careful_version installer)
 
+# Validate that the pinned `cargo-careful` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-careful-validate-prereqs: (_check-tool "cargo-careful" cargo_careful_version)
 
+# Install the pinned `cargo-check-external-types` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-check-external-types-install installer="install": (_install-tool "cargo-check-external-types" cargo_check_external_types_version installer)
 
+# Validate that the pinned `cargo-check-external-types` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-check-external-types-validate-prereqs: (_check-tool "cargo-check-external-types" cargo_check_external_types_version)
 
+# Install the pinned `cargo-coverage-gate` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-coverage-gate-install installer="install": (_install-tool "cargo-coverage-gate" cargo_coverage_gate_version installer)
 
+# Validate that the pinned `cargo-coverage-gate` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-coverage-gate-validate-prereqs: (_check-tool "cargo-coverage-gate" cargo_coverage_gate_version)
 
+# Install the pinned `cargo-delta` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-delta-install installer="install": (_install-tool "cargo-delta" cargo_delta_version installer)
 
+# Validate that the pinned `cargo-delta` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-delta-validate-prereqs: (_check-tool "cargo-delta" cargo_delta_version)
 
+# Install the pinned `cargo-deny` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-deny-install installer="install": (_install-tool "cargo-deny" cargo_deny_version installer)
 
+# Validate that the pinned `cargo-deny` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-deny-validate-prereqs: (_check-tool "cargo-deny" cargo_deny_version)
 
+# Install the pinned `cargo-doc2readme` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-doc2readme-install installer="install": (_install-tool "cargo-doc2readme" cargo_doc2readme_version installer)
 
+# Validate that the pinned `cargo-doc2readme` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-doc2readme-validate-prereqs: (_check-tool "cargo-doc2readme" cargo_doc2readme_version)
 
+# Install the pinned `cargo-ensure-no-cyclic-deps` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-ensure-no-cyclic-deps-install installer="install": (_install-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version installer)
 
+# Validate that the pinned `cargo-ensure-no-cyclic-deps` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-ensure-no-cyclic-deps-validate-prereqs: (_check-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version)
 
+# Install the pinned `cargo-ensure-no-default-features` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-ensure-no-default-features-install installer="install": (_install-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version installer)
 
+# Validate that the pinned `cargo-ensure-no-default-features` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-ensure-no-default-features-validate-prereqs: (_check-tool "cargo-ensure-no-default-features" cargo_ensure_no_default_features_version)
 
+# Install the pinned `cargo-hack` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-hack-install installer="install": (_install-tool "cargo-hack" cargo_hack_version installer)
 
+# Validate that the pinned `cargo-hack` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-hack-validate-prereqs: (_check-tool "cargo-hack" cargo_hack_version)
 
+# Install the pinned `cargo-heather` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-heather-install installer="install": (_install-tool "cargo-heather" cargo_heather_version installer)
 
+# Validate that the pinned `cargo-heather` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-heather-validate-prereqs: (_check-tool "cargo-heather" cargo_heather_version)
 
+# Install the pinned `cargo-llvm-cov` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-llvm-cov-install installer="install": (_install-tool "cargo-llvm-cov" cargo_llvm_cov_version installer)
 
+# Validate that the pinned `cargo-llvm-cov` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_llvm_cov_version)
 
@@ -4916,6 +5376,8 @@ anvil-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_
 # scheduled-exhaustive-setup) don't fail on that platform. The
 # mutants-diff / mutants-full check recipes also self-skip on the same
 # target, so the check is effectively a no-op end-to-end there.
+
+# Install the pinned `cargo-mutants` tool.
 [group("anvil-setup")]
 [script("pwsh")]
 anvil-tool-cargo-mutants-install installer="install":
@@ -4926,6 +5388,7 @@ anvil-tool-cargo-mutants-install installer="install":
     & just _install-tool cargo-mutants {{cargo_mutants_version}} {{installer}}
     exit $LASTEXITCODE
 
+# Validate that the pinned `cargo-mutants` tool is available.
 [group("anvil-setup")]
 [script("pwsh")]
 anvil-tool-cargo-mutants-validate-prereqs:
@@ -4936,40 +5399,52 @@ anvil-tool-cargo-mutants-validate-prereqs:
     & just _check-tool cargo-mutants {{cargo_mutants_version}}
     exit $LASTEXITCODE
 
+# Install the pinned `cargo-nextest` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-nextest-install installer="install": (_install-tool "cargo-nextest" cargo_nextest_version installer)
 
+# Validate that the pinned `cargo-nextest` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-nextest-validate-prereqs: (_check-tool "cargo-nextest" cargo_nextest_version)
 
+# Install the pinned `cargo-semver-checks` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-semver-checks-install installer="install": (_install-tool "cargo-semver-checks" cargo_semver_checks_version installer)
 
+# Validate that the pinned `cargo-semver-checks` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-semver-checks-validate-prereqs: (_check-tool "cargo-semver-checks" cargo_semver_checks_version)
 
+# Install the pinned `cargo-sort` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-sort-install installer="install": (_install-tool "cargo-sort" cargo_sort_version installer)
 
+# Validate that the pinned `cargo-sort` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_version)
 
+# Install the pinned `cargo-spellcheck` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer)
 
+# Validate that the pinned `cargo-spellcheck` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-spellcheck-validate-prereqs: (_check-tool "cargo-spellcheck" cargo_spellcheck_version)
 
+# Install the pinned `cargo-udeps` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-udeps-install installer="install": (_install-tool "cargo-udeps" cargo_udeps_version installer)
 
+# Validate that the pinned `cargo-udeps` tool is available.
 [group("anvil-setup")]
 anvil-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_version)
 
 === justfiles/anvil/versions.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Owned by cargo-anvil; edit via `cargo anvil`.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 #
 # Pinned versions used by the anvil check tree.
 #

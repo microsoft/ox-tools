@@ -413,7 +413,7 @@ convention:
 
 Backend wiring:
 
-- **GitHub Actions** — [`marocchino/sticky-pull-request-comment@v3`](https://github.com/marocchino/sticky-pull-request-comment)
+- **GitHub Actions** — [`marocchino/sticky-pull-request-comment`](https://github.com/marocchino/sticky-pull-request-comment)
   is invoked twice: with `path:` to upsert when the file exists, and with `delete: true`
   to clear when it does not. The workflow's reusable job declares
   `permissions: pull-requests: write`. Fork PRs are skipped via a

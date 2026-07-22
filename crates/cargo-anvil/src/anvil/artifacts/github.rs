@@ -160,10 +160,19 @@ mod tests {
     }
 
     #[test]
+    fn setup_action_can_reclaim_github_hosted_runner_disk_space() {
+        assert!(SETUP_ACTION.contains("free-disk-space:"));
+        assert!(SETUP_ACTION.contains("runner.environment == 'github-hosted'"));
+        assert!(SETUP_ACTION.contains("/usr/local/lib/android"));
+        assert!(SETUP_ACTION.contains(r"C:\Program Files (x86)\Android"));
+    }
+
+    #[test]
     fn group_action_passes_group_to_setup() {
         let body = render_group_action("pr-fast");
         assert!(body.contains("uses: ./.github/actions/anvil-setup"));
         assert!(body.contains("group: pr-fast"));
+        assert!(body.contains("free-disk-space: ${{ inputs.free-disk-space }}"));
     }
 
     #[test]
@@ -221,6 +230,11 @@ mod tests {
         );
         assert!(PR_IMPL_WORKFLOW.contains("matrix.os != 'windows-arm'"));
         assert!(PR_IMPL_WORKFLOW.contains("flags: ${{ matrix.os }}"));
+        assert_eq!(
+            PR_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
+            1,
+            "disk cleanup should be enabled for the PR test group"
+        );
     }
 
     #[test]
@@ -237,6 +251,11 @@ mod tests {
             );
         }
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("codecov/codecov-action"));
+        assert_eq!(
+            SCHEDULED_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
+            1,
+            "disk cleanup should be enabled for the scheduled test group"
+        );
     }
 
     #[test]
