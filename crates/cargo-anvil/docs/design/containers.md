@@ -34,12 +34,6 @@ It inherits the engine's stance verbatim and adds three constraints:
 - **The recipes do not change.** `just anvil-pr` is byte-identical whether run natively or in the
   container. The container is a transparent *execution environment*, selected by an explicit entry
   point — never by rewriting recipe bodies.
-- **No transparent PATH shim.** We deliberately do **not** ship a `just` wrapper that shadows the
-  real `just` on `PATH` (the pattern COSMICRust uses). Shadowing `just` is surprising — a binary on
-  your `PATH` would silently behave differently depending on the current directory — and it adds a
-  recursion sentinel, per-shell `activate` scripts, and a "why is my `just` magic" support burden.
-  anvil's audience already has a toolchain; the container is an *occasional* opt-in, so the entry
-  point must be **explicit and greppable** (§4), leaving the native `just` untouched.
 - **Opt-in with no new engine state.** anvil is one idempotent command with no persisted flags
   ([design.md §5.2][design]). The container files are emitted like any other owned artifact; whether
   to *use* them is a pure runtime choice (run the wrapper recipe, or don't). Nothing enters
@@ -123,9 +117,8 @@ magic — see §4.1.
 ### 4.1 Making the container the default (per-project or per-person)
 
 The goal: after a one-time, *owned* gesture, `just anvil-pr` runs in the container instead of
-natively — without a PATH shim, without conditionals in every recipe, and without breaking the
-"recipes are byte-identical native vs container" property. The design separates **policy** (which
-runner — a user choice) from **mechanism** (how a tier executes — tool-owned).
+natively while preserving the same generated recipe definitions. The design separates **policy**
+(which runner — a user choice) from **mechanism** (how a tier executes — tool-owned).
 
 **Mechanism — a one-hop execution seam (tool-owned).** The public tier recipes delegate to a
 `_anvil-run` seam; the real dependency chains move to private `_anvil-<tier>` aggregators (their
@@ -191,12 +184,8 @@ policy choice, while the mechanism above stays tool-owned and keeps receiving up
   `just anvil_runner=container anvil-pr`. No file edit, nothing committed; the env var always wins
   over the committed default because the region reads it via `env_var_or_default`.
 
-**Why not the alternatives.** A per-recipe `if` would touch every check/group and break the
-byte-identical property; redefining `anvil-pr` in the user's own `Justfile` (relying on just's
-import-override) is fragile and copies the whole tier body; the PATH shim is rejected in §2. The
-one cost of the seam is the universal one-hop indirection (sub-second, behavior-neutral). A catalog
-that wants the OSS core indirection-free can instead have the container group `replace_artifact`
-`tiers.just` itself (two small copies to maintain) — the user-facing toggle is identical either way.
+The seam adds one behavior-neutral dispatch hop while keeping the tier dependency graph in one
+tool-owned location.
 
 ## 5. Image identity — built from anvil's own pins
 
@@ -216,8 +205,7 @@ This is the design's keystone and an advantage unique to anvil:
 - **Zero tool-list duplication.** anvil already owns `tools.just` (install recipes) and
   `versions.just` (pins) as the single source of truth ([local.md §3][local]). The image is just
   "base distro + `just anvil-setup`", so the in-container toolset is *the same set the recipes
-  expect*, by construction. (Contrast COSMICRust, which must re-parse a separate
-  `cargo-tools.yml`.)
+  expect*, by construction.
 - **Content-addressed tag → automatic rebuild.** The driver tags the image
   `anvil-dev:<sha>` where `<sha>` covers `rust-toolchain.toml`, the generated `.just` recipe tree,
   the Containerfile, and other build inputs in `justfiles/anvil/container/`, including optional auth
@@ -304,8 +292,7 @@ base and the credential hook.
 
 - **Host prerequisite:** developers must install Podman (Podman Desktop on Windows). Opt-in cost.
 - **Maintenance surface:** ~5 platform files (two drivers, the Containerfile, the recipe, a README)
-  shipped as templates the engine must keep working across consumers. Dropping the COSMICRust-style
-  shim/`activate` machinery removes the most error-prone part of that surface.
+  shipped as templates the engine must keep working across consumers.
 - **Coverage:** Linux-only and local-only; Windows-specific checks and CI are unaffected.
 - **First-run latency:** the initial image build takes minutes; subsequent runs reuse the image and
   the persistent caches at near-native speed.
@@ -313,8 +300,8 @@ base and the credential hook.
 ## 10. Verification
 
 - **Catalog unit tests:** the container group is present (or, for a fork that drops it, absent); the
-  Containerfile builds the toolset via `just anvil-setup`; the `anvil-container` recipe carries the
-  recursion guard and no PATH-shim text.
+  Containerfile builds the toolset via `just anvil-setup`; the `anvil-container` recipe dispatches
+  explicitly to the platform driver.
 - **Fixture/golden test:** the emitted `container/` tree is snapshotted like the rest of the catalog.
 - **Smoke (manual / opt-in CI):** on a Podman-equipped agent, `just anvil-container anvil-clippy`
   builds the image once and runs the check green.
@@ -324,8 +311,6 @@ base and the credential hook.
 - `cargo-anvil` overall design — [`design.md`][design]
 - `cargo-anvil` local recipe surface — [`local.md`][local]
 - `cargo-anvil` extensibility — [`extensibility.md`][ext]
-- Prior art (local inner-loop container, transparent-shim flavor we deliberately do **not** copy):
-  COSMICRust `.devcontainer/`.
 
 [design]: ./design.md
 [local]: ./local.md

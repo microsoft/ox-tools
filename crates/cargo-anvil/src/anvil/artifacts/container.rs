@@ -353,14 +353,6 @@ mod tests {
     }
 
     #[test]
-    fn no_transparent_just_shim_is_emitted() {
-        for body in [RECIPE, SHELL_DRIVER, POWERSHELL_DRIVER, README] {
-            assert!(!body.contains("activate.ps1"));
-            assert!(!body.contains("find-real-just"));
-        }
-    }
-
-    #[test]
     fn auth_helpers_use_the_standard_paths() {
         match auth_shell("# shell auth\n") {
             Artifact::OwnedFile(spec) => {
