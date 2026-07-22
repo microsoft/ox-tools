@@ -12,12 +12,12 @@ if [[ ! -f "$toolchain_path" ]]; then
     exit 1
 fi
 
+container_dir="$repo_root/justfiles/anvil/container"
 inputs=(rust-toolchain.toml)
 while IFS= read -r path; do
     inputs+=("${path#"$repo_root"/}")
-done < <(find "$repo_root/justfiles/anvil" -type f -name '*.just' -print)
+done < <(find "$repo_root/justfiles/anvil" -type f -name '*.just' ! -path "$container_dir/*" -print)
 
-container_dir="$repo_root/justfiles/anvil/container"
 for path in "$container_dir"/*; do
     [[ -f "$path" ]] || continue
     case "${path##*/}" in

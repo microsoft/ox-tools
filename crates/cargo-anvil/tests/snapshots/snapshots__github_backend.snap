@@ -3374,7 +3374,9 @@ $toolchainPath = Join-Path $repoRoot 'rust-toolchain.toml'
 if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
     throw 'anvil-container requires a repository-owned rust-toolchain.toml.'
 }
+$containerPath = Join-Path $repoRoot 'justfiles/anvil/container'
 $inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File -Filter '*.just' |
+    Where-Object { $_.DirectoryName -ne $containerPath } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
 $executionOnly = @(
     'container.just',
@@ -3386,7 +3388,7 @@ $executionOnly = @(
 )
 # Auth hooks are intentionally hashed: their source defines non-secret build
 # customization. Runtime tokens and secret-file contents are never read here.
-$inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil/container') -File |
+$inputs += Get-ChildItem $containerPath -File |
     Where-Object { $_.Name -notin $executionOnly } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
 $uniqueInputs = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
@@ -3425,12 +3427,12 @@ if [[ ! -f "$toolchain_path" ]]; then
     exit 1
 fi
 
+container_dir="$repo_root/justfiles/anvil/container"
 inputs=(rust-toolchain.toml)
 while IFS= read -r path; do
     inputs+=("${path#"$repo_root"/}")
-done < <(find "$repo_root/justfiles/anvil" -type f -name '*.just' -print)
+done < <(find "$repo_root/justfiles/anvil" -type f -name '*.just' ! -path "$container_dir/*" -print)
 
-container_dir="$repo_root/justfiles/anvil/container"
 for path in "$container_dir"/*; do
     [[ -f "$path" ]] || continue
     case "${path##*/}" in
@@ -3901,7 +3903,7 @@ if ((${#ANVIL_CONTAINER_PREPARE_COMMAND[@]} > 0)); then
 fi
 
 if [[ -n "$github_token" ]]; then
-    github_token_file="$(mktemp)"
+    github_token_file="$(mktemp "${TMPDIR:-/tmp}/anvil-github-token.XXXXXXXX")"
     chmod 600 "$github_token_file"
     printf '%s' "$github_token" > "$github_token_file"
     unset github_token
@@ -4581,6 +4583,7 @@ alias anvil := anvil-pr
 # Route public tier entry points through the configured execution environment.
 # ANVIL_IN_CONTAINER always wins to prevent recursive container launches.
 [private]
+[windows]
 [script("pwsh")]
 _anvil-run tier runner:
     $just = '{{just_executable()}}'
@@ -4593,6 +4596,22 @@ _anvil-run tier runner:
         & $just $nativeTier
     }
     exit $LASTEXITCODE
+
+[private]
+[unix]
+[script("bash")]
+_anvil-run tier runner:
+    just_path={{ quote(just_executable()) }}
+    tier={{ quote(tier) }}
+    runner={{ quote(runner) }}
+    native_tier="_anvil-$tier"
+    if [[ -n "${ANVIL_IN_CONTAINER:-}" ]]; then
+        exec "$just_path" "$native_tier"
+    elif [[ "$runner" == "container" ]]; then
+        exec "$just_path" anvil-container "$native_tier"
+    else
+        exec "$just_path" "$native_tier"
+    fi
 
 === justfiles/anvil/tiers.just ===
 # Copyright (c) Microsoft Corporation.

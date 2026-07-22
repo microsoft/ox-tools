@@ -171,7 +171,7 @@ if ((${#ANVIL_CONTAINER_PREPARE_COMMAND[@]} > 0)); then
 fi
 
 if [[ -n "$github_token" ]]; then
-    github_token_file="$(mktemp)"
+    github_token_file="$(mktemp "${TMPDIR:-/tmp}/anvil-github-token.XXXXXXXX")"
     chmod 600 "$github_token_file"
     printf '%s' "$github_token" > "$github_token_file"
     unset github_token

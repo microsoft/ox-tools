@@ -277,6 +277,13 @@ mod tests {
             "execution-only documentation must not affect the image ID"
         );
 
+        write(&root.join(RECIPE_PATH), "execution-only recipe change\n");
+        assert_eq!(
+            auth_crlf,
+            run_image_id(root),
+            "the container entry recipe must not affect the image ID"
+        );
+
         write(&auth_path, "# different build configuration\n");
         assert_ne!(
             auth_crlf,

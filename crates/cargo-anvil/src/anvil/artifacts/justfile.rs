@@ -66,9 +66,15 @@ macro_rules! split_recipe_files {
 
 #[test]
 fn runner_routes_tiers_and_guards_recursion() {
-    assert!(RUNNER_JUST.contains("ANVIL_IN_CONTAINER"));
+    assert!(RUNNER_JUST.contains("[windows]"));
+    assert!(RUNNER_JUST.contains("[script(\"pwsh\")]"));
+    assert!(RUNNER_JUST.contains("[unix]"));
+    assert!(RUNNER_JUST.contains("[script(\"bash\")]"));
+    assert!(RUNNER_JUST.contains("if ($env:ANVIL_IN_CONTAINER)"));
+    assert!(RUNNER_JUST.contains("if [[ -n \"${ANVIL_IN_CONTAINER:-}\" ]]"));
     assert!(RUNNER_JUST.contains("'{{runner}}' -eq 'container'"));
     assert!(RUNNER_JUST.contains("& $just anvil-container $nativeTier"));
+    assert!(RUNNER_JUST.contains("exec \"$just_path\" anvil-container \"$native_tier\""));
 }
 
 #[test]

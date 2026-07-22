@@ -19,7 +19,9 @@ $toolchainPath = Join-Path $repoRoot 'rust-toolchain.toml'
 if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
     throw 'anvil-container requires a repository-owned rust-toolchain.toml.'
 }
+$containerPath = Join-Path $repoRoot 'justfiles/anvil/container'
 $inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File -Filter '*.just' |
+    Where-Object { $_.DirectoryName -ne $containerPath } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
 $executionOnly = @(
     'container.just',
@@ -31,7 +33,7 @@ $executionOnly = @(
 )
 # Auth hooks are intentionally hashed: their source defines non-secret build
 # customization. Runtime tokens and secret-file contents are never read here.
-$inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil/container') -File |
+$inputs += Get-ChildItem $containerPath -File |
     Where-Object { $_.Name -notin $executionOnly } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
 $uniqueInputs = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
