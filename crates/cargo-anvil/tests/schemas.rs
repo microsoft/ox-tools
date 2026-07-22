@@ -127,11 +127,28 @@ fn just_lists_emitted_recipes() {
         String::from_utf8_lossy(&out.stderr)
     );
     let listing = String::from_utf8_lossy(&out.stdout);
-    for expected in ["anvil", "anvil-pr", "anvil-pr-fast", "anvil-scheduled", "anvil-clippy"] {
-        assert!(
-            listing.contains(expected),
-            "`just --list` did not contain recipe '{expected}':\n{listing}"
-        );
+    for (recipe, summary) in [
+        (
+            "anvil-full",
+            "# Full tier: PR + scheduled, end-to-end. Useful before tagging a release.",
+        ),
+        ("anvil-pr", "# Run all pull request checks."),
+        ("anvil-pr-fast", "# Run the fast pull request checks."),
+        ("anvil-pr-mutants", "# Run the pull request mutation tests."),
+        ("anvil-pr-runtime-analysis", "# Run the pull request runtime analysis."),
+        ("anvil-pr-slow", "# Run the slow pull request checks."),
+        ("anvil-pr-test", "# Run the pull request tests."),
+        ("anvil-scheduled", "# Run all scheduled checks."),
+        ("anvil-scheduled-advisories", "# Run the scheduled advisory checks."),
+        ("anvil-scheduled-exhaustive", "# Run the scheduled exhaustive checks."),
+        ("anvil-scheduled-runtime-analysis", "# Run the scheduled runtime analysis."),
+        ("anvil-scheduled-test", "# Run the scheduled tests."),
+    ] {
+        let found = listing.lines().any(|line| {
+            let line = line.trim();
+            line.starts_with(recipe) && line.contains(summary)
+        });
+        assert!(found, "`just --list` did not contain '{recipe}\\s+{summary}':\n{listing}");
     }
 }
 
