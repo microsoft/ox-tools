@@ -448,3 +448,12 @@ READMEs
 RUSTSEC
 UB
 subdirectory
+dep
+io
+deps
+fmt
+justfile
+readme
+templating
+udeps
+unscoped
