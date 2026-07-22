@@ -1,261 +1,211 @@
-# cargo-anvil — Container Backend (opt-in)
+# cargo-anvil container backend
 
-This document describes the **optional, local-only container backend**: a way to run any
-`anvil-*` recipe inside a pinned Linux container instead of against the host toolchain. It is
-**opt-in** and additive — it changes nothing about how the existing recipes, the cloud-workflow
-backends, or the update algorithm behave.
+This document defines the optional local container backend emitted by
+`cargo-anvil`. The backend runs generated Anvil recipes in a content-addressed
+Linux container while preserving native execution as the default.
 
-See also:
+The intended audience is `cargo-anvil` maintainers and downstream catalog
+authors.
 
-- [design.md](./design.md) for the overall principles (esp. §4 "writes files / `just` runs them").
-- [local.md](./local.md) for the `justfiles/anvil/` recipe surface this backend wraps.
-- [extensibility.md](./extensibility.md) for the catalog seam a downstream fork uses to supply
-  its own image + auth.
+## Scope
 
-## 1. Problem
+- Local developer execution only. CI workflows continue to run Anvil recipes
+  natively.
+- Linux containers only. Drivers request `linux/amd64`; ARM hosts require
+  Podman emulation support.
+- Explicit and opt-in. Existing `just anvil-*` commands remain native unless a
+  user or repository selects the container runner.
+- Local image builds only. Remote image publication and registry integration
+  are not part of this backend.
+- No persisted engine setting. Container selection is runtime policy and does
+  not change `.anvil.lock` semantics.
 
-The local layer assumes a usable host toolchain ([design.md §3 non-goals][design]: "the user owns
-it locally"). Two situations break that assumption:
+## Generated artifacts
 
-1. **Linux-on-Windows parity.** A developer on Windows cannot reproduce a Linux-only check failure
-   (a `cfg(unix)` path, a Linux-specific clippy lint, an `mmap`-shaped test) without a Linux box.
-2. **Distro drift.** Even on Linux, the host distro/toolchain can differ from the one CI uses, so a
-   green local run is not predictive of CI.
+The public catalog emits:
 
-Both are solved the same way: run the recipe in a container whose distro and toolchain are pinned
-to match CI. This is a **convenience for the inner loop**, not a new way to run CI — see §7.
+| Path | Purpose |
+|---|---|
+| `justfiles/anvil/container/container.just` | Public `anvil-container` recipe |
+| `justfiles/anvil/container/Containerfile` | Generic Linux image definition |
+| `justfiles/anvil/container/container.ignore` | Restricted build context |
+| `justfiles/anvil/container/entrypoint.sh` | Non-root runtime initialization |
+| `justfiles/anvil/container/image-id.ps1` | Windows image-ID helper |
+| `justfiles/anvil/container/image-id.sh` | Unix image-ID helper |
+| `justfiles/anvil/container/run-in-container.ps1` | Windows Podman driver |
+| `justfiles/anvil/container/run-in-container.sh` | Linux, WSL, and macOS Podman driver |
+| `justfiles/anvil/container/README.md` | User instructions and troubleshooting |
 
-## 2. Design principles
+The catalog also emits `justfiles/anvil/runner.just` and an `anvil-runner`
+region in the repository-root `Justfile` for optional tier routing.
 
-It inherits the engine's stance verbatim and adds three constraints:
+## Execution
 
-- **`cargo-anvil` still only writes files.** The container backend is a handful of additional
-  *owned files* under `justfiles/anvil/container/`. The engine is not on the build hot path.
-- **The recipes do not change.** `just anvil-pr` is byte-identical whether run natively or in the
-  container. The container is a transparent *execution environment*, selected by an explicit entry
-  point — never by rewriting recipe bodies.
-- **Opt-in with no new engine state.** anvil is one idempotent command with no persisted flags
-  ([design.md §5.2][design]). The container files are emitted like any other owned artifact; whether
-  to *use* them is a pure runtime choice (run the wrapper recipe, or don't). Nothing enters
-  `.anvil.lock` semantics, the decision table, or the cloud-workflow YAML.
-- **Local-only, Linux-only (initially).** The container runs `x86_64-unknown-linux-gnu`. Drivers
-  request `linux/amd64` explicitly, so ARM hosts require Podman emulation support. Windows-specific
-  checks and any Windows cloud-workflow leg still run natively.
-
-## 3. The whole picture
+Run a specific recipe:
 
 ```text
-repo/
-├── Justfile                                    managed regions: anvil-imports, + optional anvil-runner (§4.1)
-└── justfiles/anvil/
-    ├── mod.just                                imports container.just (when the backend is present)
-    ├── checks.just / groups.just               (unchanged — run natively *inside* the container)
-    ├── tiers.just                              public tiers delegate one hop to the runner seam (§4.1)
-    ├── runner.just                             the `_anvil-run` execution seam (core: native; container group: routes) (§4.1)
-    ├── tools.just / versions.just              ← image is built by running these (§5)
-    └── container/                              ← the entire container backend (owned files)
-        ├── container.just        the `anvil-container` entry-point recipe (§4)
-        ├── Containerfile         generic skeleton: FROM ${BASE_IMAGE} + `RUN just anvil-setup` (§5)
-        ├── run-in-container.sh   driver (Unix / WSL): ensure image, podman run (§6)
-        ├── run-in-container.ps1  driver (native Windows + Podman Desktop) (§6)
-        ├── auth.sh / auth.ps1    OPTIONAL credential hook, sourced if present (§6.3)
-        └── README.md             prerequisites, opt-out, troubleshooting
+just anvil-container anvil-clippy
 ```
 
-The flow for `just anvil-container anvil-pr`:
+Run a tier:
 
-```
+```text
 just anvil-container anvil-pr
-        │  (container.just dispatches to the OS-appropriate driver)
-        ▼
-run-in-container.{sh,ps1}
-        ├─ compute image tag = sha256(versions.just + tools.just + rust-toolchain.toml + Containerfile)
-        ├─ if image missing/stale → podman build (sources auth.* hook if present)
-        └─ podman run --rm \
-               -v <repo>:/workspace \
-               -v anvil-cargo-registry:/…/registry  -v anvil-target:/workspace/target  (named volumes)
-               <image>  just anvil-pr           ← same recipe, ANVIL_IN_CONTAINER=1 inside
 ```
 
-Key property: the image is *defined by the same files that define the recipes*, so it can never
-drift from them (§5).
+Open an interactive shell:
 
-## 4. Entry point — explicit, not a shim
-
-A single owned recipe in `container/container.just`, imported by `mod.just`:
-
-```just
-# Run any anvil recipe inside the pinned Linux container (opt-in).
-#   just anvil-container anvil-pr        # the whole PR tier, in Linux
-#   just anvil-container anvil-clippy    # a single check
-#   just anvil-container                 # interactive shell in the image
-[group("anvil-container")]
-[windows]
-[script("pwsh")]
-anvil-container *recipe:
-    # invoke run-in-container.ps1
-
-[group("anvil-container")]
-[unix]
-[script("bash")]
-anvil-container *recipe:
-    # invoke run-in-container.sh
+```text
+just anvil-container
 ```
 
-- It accepts **any** recipe name (check, group, or tier), so the full `anvil-*` surface is reachable
-  without enumerating it.
-- It shows up in `just --list` under its own `anvil-container` group, so it is discoverable rather
-  than hidden behind PATH magic.
-- It guards against recursion via `ANVIL_IN_CONTAINER` (set inside the image): if the recipe is ever
-  invoked *inside* the container, the wrapper is a no-op pass-through to native `just`.
+The public recipe selects the PowerShell driver on Windows and the Bash driver
+on Unix hosts.
 
-By default, `just anvil-pr` (and the other tiers) still run **natively** — the container is reached
-only through this explicit `anvil-container` recipe. A repo or a developer can flip that default so
-the bare tiers route through the container; that is a deliberate, owned policy toggle, not silent
-magic — see §4.1.
-
-### 4.1 Default tier execution
-
-Native execution remains the default. Container execution can be selected:
+Native tier execution remains the default. Container tier execution can be
+selected:
 
 - for one command: `just anvil_runner=container anvil-pr`;
 - for the current shell: set `ANVIL_RUNNER=container`;
-- for the project: change the default in the `anvil-runner` region of
+- for the repository: change the default in the `anvil-runner` region of
   `<repository-root>/Justfile` and commit it.
 
-`ANVIL_RUNNER=native` overrides a project container default for the current shell.
+`ANVIL_RUNNER=native` overrides a repository container default for the current
+shell.
 
-The public tier recipes route through a small tool-owned dispatch recipe. Inside the image,
-`ANVIL_IN_CONTAINER=1` forces native execution and prevents recursive container launches. Ad-hoc
-checks remain explicit, for example `just anvil-container anvil-clippy`.
+Tier recipes route through a tool-owned dispatch recipe. The image sets
+`ANVIL_IN_CONTAINER=1`, which forces native execution inside the container and
+prevents recursive container launches.
 
-## 5. Image identity — built from anvil's own pins
+## Image construction and identity
 
-The Containerfile is a thin, generic skeleton:
+The public `Containerfile`:
 
-```dockerfile
-ARG BASE_IMAGE                       # the engine default is a rustup + crates.io base
-FROM ${BASE_IMAGE}
-# install `just`, copy the repo's anvil tree, then install the EXACT catalog toolset
-COPY rust-toolchain.toml justfiles/ /build/
-RUN just anvil-setup                 # ← installs every pinned tool from tools.just/versions.just
-WORKDIR /workspace
-```
+1. starts from a pinned public Linux base image;
+2. installs `just`, `rustup`, and PowerShell;
+3. copies the generated Anvil files and `rust-toolchain.toml`;
+4. runs `just anvil-setup`.
 
-This is the design's keystone and an advantage unique to anvil:
+The image therefore installs the same pinned tool catalog that the generated
+recipes validate and invoke.
 
-- **Zero tool-list duplication.** anvil already owns `tools.just` (install recipes) and
-  `versions.just` (pins) as the single source of truth ([local.md §3][local]). The image is just
-  "base distro + `just anvil-setup`", so the in-container toolset is *the same set the recipes
-  expect*, by construction.
-- **Content-addressed tag → automatic rebuild.** The driver tags the image
-  `anvil-dev:<sha>` where `<sha>` covers `rust-toolchain.toml`, the generated `.just` recipe tree,
-  the Containerfile, and other build inputs in `justfiles/anvil/container/`, including optional auth
-  hook source. Bump a pin or change non-secret hook-defined build customization, and the next
-  `just anvil-container` rebuilds automatically — the same mechanism that keeps the recipes current
-  keeps the image current.
+The image tag is a SHA-256 hash of build-relevant repository content:
 
-The **engine default base** uses public `rustup` + crates.io, consistent with anvil's zero-internal-
-dependencies stance ([design.md §2 goal 8][design]). A fork overrides `BASE_IMAGE` (and the toolchain
-installer / auth) via the catalog — see §8.
+- `rust-toolchain.toml`;
+- generated `justfiles/anvil/**/*.just` files;
+- the `Containerfile`, entrypoint, ignore file, and other build inputs under
+  `justfiles/anvil/container/`;
+- optional downstream authentication-hook source.
 
-The backend requires a repository-owned `rust-toolchain.toml`. It does not use
-floating `stable` as a fallback because that would allow identical image tags
-to resolve to different compiler versions over time.
+The public entry recipe, image-ID helpers, runtime drivers, and documentation
+are excluded. CRLF and LF input is normalized, and both image-ID helpers use
+the same ordinal, deduplicated input order.
 
-## 6. Drivers
+A changed input selects a new immutable tag and triggers a local build. Images
+for earlier hashes remain available for older branches. The runtime driver uses
+`--pull=never` and never substitutes `latest` for the computed tag.
 
-Two scripts implement one contract: *ensure the image, then `podman run <args>` against the tree*.
-They are parameterized over image name, mount layout, and cache-volume names — no environment-specific
-logic lives here.
+The backend requires a repository-owned `rust-toolchain.toml`; it does not fall
+back to a floating toolchain channel.
 
-### 6.1 Mounts and caches
-- The repo is bind-mounted at `/workspace`.
-- `target/` and the cargo registry/git caches live in **named volumes**
-  (`anvil-target`, `anvil-cargo-registry`, `anvil-cargo-git`), so the hot write path never crosses a
-  slow host↔VM boundary (critical on native Windows) and the host `target/` is never touched.
-- On Unix, rootless `--userns keep-id` keeps files you create owned by you; on native Windows,
-  ownership follows the Windows mount.
+## Runtime contract
 
-### 6.2 Driver knobs (env vars — driver-scoped only)
+- Podman runs the image with `--platform linux/amd64`.
+- The repository is bind-mounted read/write at `/workspace`.
+- Cargo registry data and Cargo Git data use shared named volumes.
+- `target/` uses a repository- and image-specific named volume mounted over
+  `/workspace/target`; container builds do not use the host `target/`.
+- Both drivers pass `--userns keep-id` to preserve the invoking user identity.
+- The entrypoint creates a writable per-user Cargo home and copies Cargo
+  install metadata so `cargo install --list` can find image-installed tools.
+- The entrypoint links the shared Cargo registry and Git caches into the
+  per-user Cargo home.
+
+## Authentication
+
+### GitHub API
+
+The public `anvil-aprz` recipe and public aggregate tiers that invoke it require
+authenticated GitHub API access. The drivers recognize those public recipe
+names and obtain a token from host `GITHUB_TOKEN` or an authenticated host `gh`
+session. A downstream catalog that adds another token-requiring entry point
+must extend that recognition.
+
+For aggregate tiers, the token is mounted read-only for a separate
+`anvil-aprz` container invocation. The remaining checks run without the token
+mount. The temporary token file is restricted to the current user and removed
+on exit.
+
+Interactive runs can pause for `gh auth login` when authentication is missing.
+Non-interactive runs fail with an actionable error before building the image.
+
+### Downstream hooks
+
+A downstream catalog may add `auth.sh` and `auth.ps1`. Drivers source the
+platform-appropriate hook before build and runtime preparation.
+
+Hooks may configure:
+
+- build arguments and BuildKit secret mounts;
+- a short-lived dependency-preparation command;
+- runtime arguments;
+- cleanup behavior;
+- Windows Podman-machine builds when secret paths must be resolved inside the
+  machine.
+
+Hook source is included in the image hash because it can define non-secret
+build behavior. Runtime token values and temporary secret-file contents are
+never hashed or stored in image layers.
+
+## Extensibility
+
+The backend is a normal catalog artifact group. Downstream catalogs can:
+
+- replace the `Containerfile` or entrypoint;
+- add authentication hooks and supporting files;
+- inherit the public recipe, drivers, image-ID helpers, cache layout, and
+  runtime contract;
+- remove the container artifact group when the backend is not supported.
+
+See [extensibility.md](./extensibility.md) for the catalog builder API.
+
+## Requirements and controls
+
+Host requirements:
+
+- Podman 4.3 or newer;
+- `git` and `just`;
+- Bash on Linux, WSL, and macOS;
+- PowerShell Core (`pwsh`) on Windows;
+- a running Podman machine on Windows and macOS;
+- `linux/amd64` execution support.
+
+Runtime controls:
+
 | Variable | Effect |
 |---|---|
-| `ANVIL_CONTAINER_IMAGE` | Override the image name (default `anvil-dev`). |
-| `ANVIL_CONTAINER_NO_REBUILD=1` | Fail instead of auto-building a missing/stale image. |
-| `ANVIL_IN_CONTAINER` | Set *by* the image; the wrapper recipe uses it to avoid recursion (§4). |
+| `ANVIL_CONTAINER_IMAGE` | Override the local image name; the content hash remains the tag |
+| `ANVIL_CONTAINER_NO_REBUILD=1` | Fail when the matching image is absent |
+| `ANVIL_RUNNER` | Select `native` or `container` tier execution |
+| `ANVIL_IN_CONTAINER` | Internal recursion guard set by the image |
 
-### 6.3 GitHub authentication
-For checks such as `anvil-aprz`, the driver uses an existing host `GITHUB_TOKEN`
-or obtains one non-interactively from the authenticated host `gh` CLI. It writes
-the token to a user-only temporary file, mounts that file read-only for the
-isolated `anvil-aprz` container invocation, then runs the remaining requested
-checks without the token and removes it on exit. The token is not stored in the
-image or passed through the OCI environment. If an interactive host has `gh`
-installed but is not authenticated, the driver explains why authentication is
-needed, waits while the user runs `gh auth login` in another terminal, and
-retries after the user presses Enter. Non-interactive runs fail before image
-building with the same remediation.
+The first image build installs the pinned tool catalog and can take several
+minutes. Later runs with the same image ID reuse the image and target volume.
+Cargo registry and Git cache volumes are reused across image IDs.
 
-### 6.4 Auth hook (the catalog seam)
-The engine driver needs no credentials (crates.io is public). Some downstream catalogs do. The driver therefore
-**sources `container/auth.sh` / `auth.ps1` if it exists**, before `podman build`/`podman run`, to
-populate registry/toolchain tokens (e.g. as a BuildKit `--secret` at build time and an `--env-file`
-at run time). The engine ships no `auth.*`; a fork supplies it via the catalog (§8). This keeps the
-hard, environment-specific credential dance out of the open-source engine.
+## Verification
 
-Auth-hook source is hashed as a non-secret build-configuration fingerprint. Hooks must obtain secret
-values at runtime rather than embedding them; token values and temporary secret-file contents are not
-part of the image identity.
+The implementation is covered by:
 
-## 7. Relationship to CI
+- catalog tests for artifact registration, platform dispatch, image identity,
+  non-root initialization, authentication isolation, and downstream hooks;
+- snapshot tests for local, GitHub, and Azure DevOps catalog output;
+- schema and Just parsing tests for generated files;
+- generator dry-run checks for repository convergence;
+- local Windows and WSL Podman smoke tests.
 
-This backend is **local-only**. CI continues to run the recipes natively on its own pool
-(see [ado.md][ado] / [github.md][github]). The container image is
-*pinned to match* CI's distro, giving local↔CI parity, but it is a separate image, not the CI
-environment itself. Running the *CI* jobs inside the same image (for bit-for-bit parity) is possible
-but is gated by each backend's constraints (for example, setup tasks may expect to own the toolchain) and
-is left as future work, not part of this opt-in.
+## References
 
-## 8. Extensibility — how a fork supplies image + auth
-
-The container backend is an ordinary catalog artifact group, so a fork customizes it with the same
-`replace_artifact` / `without_artifact` levers as any other artifact ([extensibility.md][ext]):
-
-- **`replace_artifact`** the `Containerfile` to change `BASE_IMAGE` and the toolchain installer
-  (for example, an organization-specific distro and toolchain source).
-- **`with_artifact`** an `auth.sh` / `auth.ps1` to inject private-registry credentials (§6.3).
-- **`without_artifact`** the whole group to ship a catalog with no container backend at all.
-
-The driver scripts, the `anvil-container` recipe, and the image-tagging logic are inherited
-unchanged, so a fork writes only the two things that are genuinely environment-specific: the image
-base and the credential hook.
-
-## 9. Costs and trade-offs (honest accounting)
-
-- **Host prerequisite:** developers must install Podman (Podman Desktop on Windows). Opt-in cost.
-- **Maintenance surface:** ~5 platform files (two drivers, the Containerfile, the recipe, a README)
-  shipped as templates the engine must keep working across consumers.
-- **Coverage:** Linux-only and local-only; Windows-specific checks and CI are unaffected.
-- **First-run latency:** the initial image build takes minutes; subsequent runs reuse the image and
-  the persistent caches at near-native speed.
-
-## 10. Verification
-
-- **Catalog unit tests:** the container group is present (or, for a fork that drops it, absent); the
-  Containerfile builds the toolset via `just anvil-setup`; the `anvil-container` recipe dispatches
-  explicitly to the platform driver.
-- **Fixture/golden test:** the emitted `container/` tree is snapshotted like the rest of the catalog.
-- **Smoke (manual / opt-in CI):** on a Podman-equipped agent, `just anvil-container anvil-clippy`
-  builds the image once and runs the check green.
-
-## 11. References
-
-- `cargo-anvil` overall design — [`design.md`][design]
-- `cargo-anvil` local recipe surface — [`local.md`][local]
-- `cargo-anvil` extensibility — [`extensibility.md`][ext]
-
-[design]: ./design.md
-[local]: ./local.md
-[ext]: ./extensibility.md
-[ado]: ./ado.md
-[github]: ./github.md
+- [Overall cargo-anvil design](./design.md)
+- [Local recipe design](./local.md)
+- [Catalog extensibility](./extensibility.md)
