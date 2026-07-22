@@ -25,7 +25,7 @@ it locally"). Two situations break that assumption:
 Both are solved the same way: run the recipe in a container whose distro and toolchain are pinned
 to match CI. This is a **convenience for the inner loop**, not a new way to run CI — see §7.
 
-## 2. Principles (what this backend is, and is not)
+## 2. Design principles
 
 It inherits the engine's stance verbatim and adds three constraints:
 
