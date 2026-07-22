@@ -114,78 +114,20 @@ only through this explicit `anvil-container` recipe. A repo or a developer can f
 the bare tiers route through the container; that is a deliberate, owned policy toggle, not silent
 magic — see §4.1.
 
-### 4.1 Making the container the default (per-project or per-person)
+### 4.1 Default tier execution
 
-The goal: after a one-time, *owned* gesture, `just anvil-pr` runs in the container instead of
-natively while preserving the same generated recipe definitions. The design separates **policy**
-(which runner — a user choice) from **mechanism** (how a tier executes — tool-owned).
+Native execution remains the default. Container execution can be selected:
 
-**Mechanism — a one-hop execution seam (tool-owned).** The public tier recipes delegate to a
-`_anvil-run` seam; the real dependency chains move to private `_anvil-<tier>` aggregators (their
-bodies unchanged):
+- for one command: `just anvil_runner=container anvil-pr`;
+- for the current shell: set `ANVIL_RUNNER=container`;
+- for the project: change the default in the `anvil-runner` region of
+  `<repository-root>/Justfile` and commit it.
 
-```just
-# tiers.just — public entry points delegate to the runner seam
-anvil-pr:        ; @just _anvil-run pr
-anvil-scheduled: ; @just _anvil-run scheduled
-anvil-full:      ; @just _anvil-run full
+`ANVIL_RUNNER=native` overrides a project container default for the current shell.
 
-_anvil-pr: anvil-pr-validate-prereqs anvil-pr-fast anvil-pr-slow      # was `anvil-pr`, now private
-_anvil-scheduled: anvil-scheduled-validate-prereqs anvil-scheduled-test …
-_anvil-full: _anvil-pr _anvil-scheduled
-```
-
-The **core** `runner.just` is a native-only default (one extra sub-second `just` spawn; zero
-behavior change for consumers who never enable the container backend):
-
-```just
-# runner.just (core default): execution is "native"
-_anvil-run tier: ; @just _anvil-{{ tier }}
-```
-
-When the container backend is present, it **`replace_artifact`s `runner.just`** with a routing
-version that consults the toggle and guards against recursion:
-
-```just
-# runner.just (container-group override): route per the toggle
-_anvil-run tier:
-    {{ if env_var_or_default("ANVIL_IN_CONTAINER","") != "" { "@just _anvil-" + tier } \
-       else if anvil_runner == "container" { "@just anvil-container _anvil-" + tier } \
-       else { "@just _anvil-" + tier } }}
-```
-
-Inside the image, `anvil-container` invokes `just _anvil-<tier>` (the private *native* aggregator)
-and `ANVIL_IN_CONTAINER=1` is set, so the seam forces native — no recursion, and the actual check
-recipes run identically to a native run. Only the three tier entry points route (one `podman run`
-per tier — the efficient unit); ad-hoc single checks stay explicit via `just anvil-container
-anvil-clippy`.
-
-**Policy — a one-line toggle the user owns (user-co-owned region).** The container backend adds a
-second managed region to the repo `Justfile`, beside `anvil-imports`:
-
-```just
-# >>> anvil-managed: anvil-runner
-anvil_runner := env_var_or_default("ANVIL_RUNNER", "native")
-# <<< anvil-managed: anvil-runner
-```
-
-This sits in user-co-owned space (the `Justfile`) because "how I want to run things" is a user
-policy choice, while the mechanism above stays tool-owned and keeps receiving updates.
-
-**The two opt-in axes** map directly onto anvil's ownership/drift model ([updates.md §5][updates]):
-
-- **Whole project → default to containers.** Edit the `anvil-runner` region, change `"native"` to
-  `"container"`, and **commit it**. That is a managed-region edit, so the dirty-region flow
-  (`D≠L, T==L` → leave alone, **no proposal**, zero noise) preserves it forever while every other
-  anvil file still updates. From then on `just anvil-pr` runs in the container for everyone on the
-  repo.
-- **One person / one shell, either direction.** Set `ANVIL_RUNNER=container` (or `=native` to opt
-  back out of a committed project default) in your environment, or one-off
-  `just anvil_runner=container anvil-pr`. No file edit, nothing committed; the env var always wins
-  over the committed default because the region reads it via `env_var_or_default`.
-
-The seam adds one behavior-neutral dispatch hop while keeping the tier dependency graph in one
-tool-owned location.
+The public tier recipes route through a small tool-owned dispatch recipe. Inside the image,
+`ANVIL_IN_CONTAINER=1` forces native execution and prevents recursive container launches. Ad-hoc
+checks remain explicit, for example `just anvil-container anvil-clippy`.
 
 ## 5. Image identity — built from anvil's own pins
 
@@ -314,7 +256,6 @@ base and the credential hook.
 
 [design]: ./design.md
 [local]: ./local.md
-[updates]: ./updates.md
 [ext]: ./extensibility.md
 [ado]: ./ado.md
 [github]: ./github.md
