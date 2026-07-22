@@ -14,15 +14,17 @@
 # The cfg names are declared in the workspace check-cfg list
 # (regions/cargo-lints-body.toml) so non-miri builds don't warn.
 #
-# These profiles always run full-workspace (scheduled-runtime-analysis
-# does not set ANVIL_INCLUDE_AFFECTED); the --skip / affected guards
-# below only apply if an adopter invokes them locally with the env
-# vars set.
+# Under scheduled-runtime-analysis these profiles run full-workspace:
+# that tier sets ANVIL_IMPACT=off, so the self-populated
+# ANVIL_INCLUDE_AFFECTED resolves to --workspace. A direct local
+# invocation is impact-scoped like any other affected-tier check --
+# it self-populates from the anvil-impact cache and honors --skip.
 
 # Run Miri tests with the Tree Borrows model.
 [script("pwsh")]
-anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs
+anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    if (-not $env:ANVIL_INCLUDE_AFFECTED) { $env:ANVIL_INCLUDE_AFFECTED = (& "{{ just_executable() }}" _anvil-impact-include affected) }
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
     $env:MIRIFLAGS = "-Zmiri-tree-borrows $($env:MIRIFLAGS)".Trim()

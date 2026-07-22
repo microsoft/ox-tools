@@ -5,16 +5,12 @@
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token __GROUP__ is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
-parameters:
-  - name: include_modified
-    type: string
-    default: ''
-  - name: include_affected
-    type: string
-    default: ''
-  - name: include_required
-    type: string
-    default: ''
+#
+# No impact parameters: a PR group job downloads the `anvil-impact-<os>`
+# artifact into target/anvil/impact/ (via job.yml's inputArtifacts) and the
+# scoped checks read that cache via their `anvil-impact` dependency -- the same
+# code path as a local run. Scheduled group jobs download nothing and run
+# full-workspace (see the bash step).
 steps:
   - template: setup.yml
     parameters:
@@ -47,12 +43,20 @@ steps:
     displayName: anvil-__GROUP__ (resolve PR title)
     env:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
-  - bash: just anvil-__GROUP__
+  - bash: |
+      set -euo pipefail
+      # If no impact cache was downloaded (e.g. the scheduled tier, which runs
+      # full-workspace), disable scoping so the `anvil-impact` dependency of
+      # each check no-ops without cargo-delta and every tier defaults to
+      # --workspace. On a PR group job the target/anvil/impact artifact has
+      # been downloaded (job.yml inputArtifacts) and the checks read it -- the
+      # same code path as a local run.
+      if [ ! -f target/anvil/impact/impact.state ]; then
+        export ANVIL_IMPACT=off
+      fi
+      just anvil-__GROUP__
     displayName: anvil-__GROUP__
     env:
       # Resolved by the preceding step (empty on non-PR / fork / API
       # failure, in which case anvil-pr-title skips).
       PR_TITLE: $(PR_TITLE)
-      ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
-      ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
-      ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}

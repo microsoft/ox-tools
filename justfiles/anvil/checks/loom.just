@@ -48,8 +48,9 @@
 
 # Run Loom concurrency tests for affected workspace packages.
 [script("pwsh")]
-anvil-loom: anvil-loom-validate-prereqs
+anvil-loom: anvil-loom-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    if (-not $env:ANVIL_INCLUDE_AFFECTED) { $env:ANVIL_INCLUDE_AFFECTED = (& "{{ just_executable() }}" _anvil-impact-include affected) }
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
         Write-Host 'anvil-loom: no affected packages; skipping'
         exit 0

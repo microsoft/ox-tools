@@ -10,8 +10,9 @@
 
 # Check source files for required license headers.
 [script("pwsh")]
-anvil-license-headers: anvil-license-headers-validate-prereqs
+anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    if (-not $env:ANVIL_INCLUDE_MODIFIED) { $env:ANVIL_INCLUDE_MODIFIED = (& "{{ just_executable() }}" _anvil-impact-include modified) }
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
     cargo heather
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

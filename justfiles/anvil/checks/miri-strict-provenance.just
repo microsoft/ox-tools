@@ -8,8 +8,9 @@
 
 # Run Miri tests with strict provenance checks.
 [script("pwsh")]
-anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs
+anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    if (-not $env:ANVIL_INCLUDE_AFFECTED) { $env:ANVIL_INCLUDE_AFFECTED = (& "{{ just_executable() }}" _anvil-impact-include affected) }
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
     $env:MIRIFLAGS = "-Zmiri-strict-provenance $($env:MIRIFLAGS)".Trim()

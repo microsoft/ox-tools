@@ -12,8 +12,9 @@
 
 # Run Miri tests for affected workspace packages.
 [script("pwsh")]
-anvil-miri: anvil-miri-validate-prereqs
+anvil-miri: anvil-miri-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    if (-not $env:ANVIL_INCLUDE_AFFECTED) { $env:ANVIL_INCLUDE_AFFECTED = (& "{{ just_executable() }}" _anvil-impact-include affected) }
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     # Run miri via libtest (`cargo miri test`), NOT `cargo miri nextest
     # run`. nextest uses a process-per-test model; under miri every

@@ -22,7 +22,7 @@ anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prer
 
 # Install prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
 [group("anvil-setup")]
-anvil-scheduled-runtime-analysis-setup installer="install": \
+anvil-scheduled-runtime-analysis-setup installer="install": (anvil-tool-cargo-delta-install installer) \
     (anvil-miri-setup installer) \
     (anvil-miri-tree-borrows-setup installer) \
     (anvil-miri-strict-provenance-setup installer) \
@@ -30,7 +30,7 @@ anvil-scheduled-runtime-analysis-setup installer="install": \
 
 # Validate prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
 [group("anvil-setup")]
-anvil-scheduled-runtime-analysis-validate-prereqs: \
+anvil-scheduled-runtime-analysis-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs \
     anvil-miri-validate-prereqs \
     anvil-miri-tree-borrows-validate-prereqs \
     anvil-miri-strict-provenance-validate-prereqs \

@@ -45,8 +45,9 @@
 
 # Check affected crates for semantic versioning violations.
 [script("pwsh")]
-anvil-semver-check: anvil-semver-check-validate-prereqs
+anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    if (-not $env:ANVIL_INCLUDE_AFFECTED) { $env:ANVIL_INCLUDE_AFFECTED = (& "{{ just_executable() }}" _anvil-impact-include affected) }
     $commentFile = 'target/anvil/comments/semver.md'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
         Write-Host 'anvil-semver-check: no affected packages; skipping'

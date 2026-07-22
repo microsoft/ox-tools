@@ -17,6 +17,15 @@
 #   - name      (string)   Job name; ADO derives the display name from it.
 #   - pool      (object)   Pool block, passed verbatim to ADO's `pool:` key.
 #   - steps     (stepList) Body of the job. Templated step lists are fine.
+#   - inputArtifacts (object) Optional list of pipeline artifacts to download
+#                          BEFORE the steps run. Each item: { name, path }.
+#                          The default wrapper prepends one
+#                          DownloadPipelineArtifact@2 task per entry; 1ESPT
+#                          wrappers translate these into their own download
+#                          mechanism (e.g. templateContext.inputs). The impact
+#                          set is shared this way -- a group job downloads the
+#                          `anvil-impact-<os>` artifact into target/anvil/impact
+#                          and its checks read the cache exactly as a local run.
 #   - artifacts (object)   Optional list of pipeline artifacts to publish.
 #                          Each item: { name: string, path: string }.
 #                          The default wrapper appends one
@@ -33,6 +42,9 @@ parameters:
     type: object
   - name: steps
     type: stepList
+  - name: inputArtifacts
+    type: object
+    default: []
   - name: artifacts
     type: object
     default: []
@@ -41,6 +53,12 @@ jobs:
   - job: ${{ parameters.name }}
     pool: ${{ parameters.pool }}
     steps:
+      - ${{ each artifact in parameters.inputArtifacts }}:
+          - task: DownloadPipelineArtifact@2
+            displayName: Download ${{ artifact.name }}
+            inputs:
+              artifact: ${{ artifact.name }}
+              path: ${{ artifact.path }}
       - ${{ each step in parameters.steps }}:
           - ${{ step }}
       - ${{ each artifact in parameters.artifacts }}:

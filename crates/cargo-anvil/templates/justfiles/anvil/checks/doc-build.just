@@ -12,8 +12,9 @@
 
 # Build documentation for required workspace packages.
 [script("pwsh")]
-anvil-doc-build: anvil-doc-build-validate-prereqs
+anvil-doc-build: anvil-doc-build-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    if (-not $env:ANVIL_INCLUDE_REQUIRED) { $env:ANVIL_INCLUDE_REQUIRED = (& "{{ just_executable() }}" _anvil-impact-include required) }
     if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
     $env:RUSTDOCFLAGS = '-D warnings'
     & cargo doc @(if ($env:ANVIL_INCLUDE_REQUIRED) { -split $env:ANVIL_INCLUDE_REQUIRED } else { '--workspace' }) --all-features --no-deps

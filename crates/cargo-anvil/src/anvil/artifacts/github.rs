@@ -149,6 +149,11 @@ mod tests {
         assert!(SETUP_ACTION.contains("name: anvil-setup"));
         assert!(IMPACT_ACTION.contains("name: anvil-impact"));
         assert!(IMPACT_ACTION.contains("cargo-delta"));
+        // Impact runs the shared recipe and publishes its target/anvil/impact
+        // cache as a per-OS artifact (the group jobs download it).
+        assert!(IMPACT_ACTION.contains("just anvil-impact"));
+        assert!(IMPACT_ACTION.contains("actions/upload-artifact"));
+        assert!(IMPACT_ACTION.contains("anvil-impact-${{ runner.os }}"));
     }
 
     #[test]
@@ -186,17 +191,27 @@ mod tests {
         let body = render_group_action("pr-fast");
         assert!(body.contains("name: anvil-pr-fast"));
         assert!(body.contains("just anvil-pr-fast"));
-        assert!(body.contains("ANVIL_INCLUDE_MODIFIED"));
-        assert!(body.contains("ANVIL_INCLUDE_AFFECTED"));
-        assert!(body.contains("ANVIL_INCLUDE_REQUIRED"));
+        // Impact is consumed from the downloaded target/anvil/impact cache,
+        // not threaded via env vars. When no cache is present (scheduled tier),
+        // the action disables scoping so anvil-impact no-ops without cargo-delta.
+        assert!(
+            !body.contains("ANVIL_INCLUDE_"),
+            "group action must not thread ANVIL_INCLUDE_* env vars"
+        );
+        assert!(body.contains("ANVIL_IMPACT=off"));
+        assert!(body.contains("target/anvil/impact/impact.state"));
     }
 
     #[test]
-    fn group_actions_declare_include_inputs() {
+    fn group_actions_do_not_thread_impact_inputs() {
         let body = render_group_action("scheduled-test");
-        assert!(body.contains("include_modified:"));
-        assert!(body.contains("include_affected:"));
-        assert!(body.contains("include_required:"));
+        // The impact set is shared as a downloaded artifact, so the group
+        // action declares no include_* inputs and threads no env vars.
+        assert!(!body.contains("include_modified:"));
+        assert!(!body.contains("include_affected:"));
+        assert!(!body.contains("include_required:"));
+        // A scheduled group has no impact artifact -> full workspace.
+        assert!(body.contains("ANVIL_IMPACT=off"));
     }
 
     #[test]
@@ -235,6 +250,17 @@ mod tests {
             1,
             "disk cleanup should be enabled for the PR test group"
         );
+    }
+
+    #[test]
+    fn pr_impl_workflow_shares_impact_via_artifact_download() {
+        // Group jobs consume the impact set by DOWNLOADING the per-OS artifact
+        // the impact jobs uploaded -- not via job outputs / env vars.
+        assert!(PR_IMPL_WORKFLOW.contains("actions/download-artifact"));
+        assert!(PR_IMPL_WORKFLOW.contains("anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}"));
+        assert!(!PR_IMPL_WORKFLOW.contains("needs.impact-linux.outputs"));
+        assert!(!PR_IMPL_WORKFLOW.contains("needs.impact-windows.outputs"));
+        assert!(!PR_IMPL_WORKFLOW.contains("include_modified:"));
     }
 
     #[test]

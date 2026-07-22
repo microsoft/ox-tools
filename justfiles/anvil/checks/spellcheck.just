@@ -22,8 +22,9 @@
 
 # Check spelling in source comments and documentation.
 [script("pwsh")]
-anvil-spellcheck: anvil-spellcheck-validate-prereqs
+anvil-spellcheck: anvil-spellcheck-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    if (-not $env:ANVIL_INCLUDE_MODIFIED) { $env:ANVIL_INCLUDE_MODIFIED = (& "{{ just_executable() }}" _anvil-impact-include modified) }
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {
         Write-Host 'anvil-spellcheck: no modified packages; skipping'
         exit 0

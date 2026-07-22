@@ -36,6 +36,7 @@
 # it, to avoid conflicting with adopters who already have it.
 
 import 'helpers.just'
+import 'impact.just'
 import 'checks/aprz.just'
 import 'checks/audit.just'
 import 'checks/bench.just'

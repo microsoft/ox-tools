@@ -191,7 +191,10 @@ mod tests {
     fn setup_and_impact_step_templates_are_non_empty() {
         assert!(SETUP_STEP.contains("just anvil-setup"));
         assert!(IMPACT_STEP.contains("cargo-delta"));
-        assert!(IMPACT_STEP.contains("##vso[task.setvariable"));
+        // Impact runs the shared recipe; the compute job publishes its
+        // target/anvil/impact cache as an artifact (see pr-stages.yml).
+        assert!(IMPACT_STEP.contains("just anvil-impact"));
+        assert!(!IMPACT_STEP.contains("##vso[task.setvariable"));
     }
 
     #[test]
@@ -257,6 +260,8 @@ mod tests {
             "name: pool",
             "name: steps",
             "type: stepList",
+            "name: inputArtifacts",
+            "DownloadPipelineArtifact@2",
             "name: artifacts",
             "PublishPipelineArtifact@1",
         ] {
@@ -265,16 +270,19 @@ mod tests {
     }
 
     #[test]
-    fn render_group_step_has_include_inputs_and_env() {
+    fn render_group_step_shares_impact_via_cache_not_env() {
         let body = render_group_step("pr-fast");
-        assert!(body.contains("parameters:"));
-        assert!(body.contains("name: include_modified"));
-        assert!(body.contains("name: include_affected"));
-        assert!(body.contains("name: include_required"));
         assert!(body.contains("just anvil-pr-fast"));
-        assert!(body.contains("ANVIL_INCLUDE_MODIFIED"));
-        assert!(body.contains("ANVIL_INCLUDE_AFFECTED"));
-        assert!(body.contains("ANVIL_INCLUDE_REQUIRED"));
+        // The impact set is shared as a downloaded artifact, so the group step
+        // declares no include_* params and threads no ANVIL_INCLUDE_* env vars.
+        assert!(!body.contains("name: include_modified"));
+        assert!(
+            !body.contains("ANVIL_INCLUDE_"),
+            "group step must not thread ANVIL_INCLUDE_* env vars"
+        );
+        // No impact cache present (scheduled tier) -> full workspace.
+        assert!(body.contains("ANVIL_IMPACT=off"));
+        assert!(body.contains("target/anvil/impact/impact.state"));
         // PR_TITLE is resolved from the REST API (ADO has no PR-title
         // predefined variable) and threaded via the PR_TITLE pipeline var.
         assert!(body.contains("PR_TITLE: $(PR_TITLE)"));
@@ -315,9 +323,14 @@ mod tests {
         // Two per-OS jobs in the single impact stage.
         assert!(PR_STAGES.contains("name: compute_linux"));
         assert!(PR_STAGES.contains("name: compute_windows"));
-        // Downstream stages consume the per-OS job outputs from the one stage.
-        assert!(PR_STAGES.contains("stageDependencies.impact.compute_linux.outputs"));
-        assert!(PR_STAGES.contains("stageDependencies.impact.compute_windows.outputs"));
+        // The impact set propagates as a per-OS pipeline ARTIFACT (published by
+        // the compute jobs, downloaded by each group job) -- not stage-output
+        // variables.
+        assert!(PR_STAGES.contains("name: anvil-impact-linux"));
+        assert!(PR_STAGES.contains("name: anvil-impact-windows"));
+        assert!(PR_STAGES.contains("inputArtifacts:"));
+        assert!(!PR_STAGES.contains("stageDependencies.impact"));
+        assert!(!PR_STAGES.contains("include_modified"));
         assert!(PR_STAGES.contains("- template: steps/job.yml"));
         assert!(
             !PR_STAGES.contains("\n      - job: "),

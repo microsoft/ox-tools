@@ -31,8 +31,9 @@
 
 # Check that crate README files are up to date.
 [script("pwsh")]
-anvil-readme-check: anvil-readme-check-validate-prereqs
+anvil-readme-check: anvil-readme-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    if (-not $env:ANVIL_INCLUDE_MODIFIED) { $env:ANVIL_INCLUDE_MODIFIED = (& "{{ just_executable() }}" _anvil-impact-include modified) }
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {
         Write-Host 'anvil-readme-check: no modified packages; skipping'
         exit 0

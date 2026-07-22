@@ -65,7 +65,7 @@ flowchart LR
     publish_coverage["PublishCodeCoverageResults@2"]:::external
     fast_just["just anvil-pr-fast"]:::recipe
     fast_setup_just["just anvil-setup"]:::recipe
-    impact_just["cargo delta"]:::recipe
+    impact_just["just anvil-impact"]:::recipe
     impact_setup_just["just anvil-setup"]:::recipe
     test_just["just anvil-pr-test"]:::recipe
     test_setup_just["just anvil-setup"]:::recipe
@@ -179,7 +179,7 @@ flowchart LR
     classDef recipe fill:#f3e8ff,stroke:#6f42c1,stroke-width:1px;
 ```
 
-Every PR-tier group stage declares `dependsOn: [impact_linux, impact_windows]` so it can read the cargo-delta output variables. That fan-in is elided from the diagram to keep it readable.
+Every PR-tier group stage declares `dependsOn: [impact_linux, impact_windows]` so it can download the per-OS impact artifact. That fan-in is elided from the diagram to keep it readable.
 
 Note the ADO topology differs from GitHub Actions in two places:
 1. **No reusable workflow indirection**: ADO `extends:` is one-shot; the root pipeline extends a single template. We compensate by putting all stages in `pr.yml` / `scheduled.yml` as direct templates.
@@ -202,7 +202,7 @@ Note the ADO topology differs from GitHub Actions in two places:
     │                                    scheduled-tier stages here)
     └── steps/
         ├── setup.yml               owned   (install just + catalog tools)
-        ├── impact.yml              owned   (cargo-delta impact step; omitted if .delta.toml disabled)
+        ├── impact.yml              owned   (runs `just anvil-impact`; omitted if .delta.toml disabled)
         ├── job.yml                 owned-but-user-customizable
         │                                   (per-job wrapper; takes `name`,
         │                                    `pool`, `steps`, `artifacts`;
@@ -347,11 +347,11 @@ The catalog and recipes are identical across backends — the asymmetry is purel
 wiring layer's default OS matrix. See
 [checks.md §1](./checks.md#1-groups-and-tiers) for the per-group OS scope tables.
 
-The `pr.yml` stages template is where the wiring lives. Every per-group step template
-takes the same three impact-include parameters unconditionally; which ones a group's
-checks actually consume is the catalog's concern, not the wiring layer's. This means
-moving a check between groups (e.g. `clippy` from `pr-fast` to `scheduled-advisories`)
-never changes the stages template.
+The `pr.yml` stages template is where the wiring lives. Every per-group job downloads the
+per-OS impact artifact into `target/anvil/impact/` before running its step template;
+which tiers a group's checks consume from that cache is the catalog's concern, not the
+wiring layer's. This means moving a check between groups (e.g. `clippy` from `pr-fast` to
+`scheduled-advisories`) never changes the stages template.
 
 ### 4.1 Per-job wrapper (`steps/job.yml`) — the 1ESPT extensibility point
 
@@ -461,45 +461,92 @@ stages:
   - stage: impact
     displayName: anvil impact
     jobs:
+      # Two per-OS jobs in ONE impact stage (parallel). Each runs
+      # `just anvil-impact` via impact.yml and PUBLISHES its
+      # target/anvil/impact cache as the `anvil-impact-<os>` artifact (through
+      # job.yml's `artifacts:` param); downstream stages download it.
       - template: steps/job.yml
         parameters:
-          name: compute
+          name: compute_linux
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/impact.yml
+          artifacts:
+            - name: anvil-impact-linux
+              path: target/anvil/impact
+      - template: steps/job.yml
+        parameters:
+          name: compute_windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/impact.yml
+          artifacts:
+            - name: anvil-impact-windows
+              path: target/anvil/impact
 
   - stage: pr_fast
     displayName: anvil pr-fast
-    dependsOn: impact
+    dependsOn: [impact]
     # Gate on impact via the default succeeded() condition (no explicit
     # `condition:`). A failed impact stage skips pr-* and fails the pipeline,
-    # rather than leaving it green with a lone red impact stage.
-    variables:
-      include_modified: $[ stageDependencies.impact.compute.outputs['compute.include_modified'] ]
-      include_affected: $[ stageDependencies.impact.compute.outputs['compute.include_affected'] ]
-      include_required: $[ stageDependencies.impact.compute.outputs['compute.include_required'] ]
+    # rather than leaving it green with a lone red impact stage. Each job
+    # DOWNLOADS its OS's impact artifact into target/anvil/impact/ (job.yml's
+    # `inputArtifacts:`), and the group's checks read that cache -- no stage
+    # output variables are threaded.
     jobs:
       - template: steps/job.yml
         parameters:
           name: linux
           pool: ${{ parameters.linuxPool }}
+          inputArtifacts:
+            - name: anvil-impact-linux
+              path: target/anvil/impact
           steps:
             - template: steps/pr-fast.yml
-              parameters:
-                include_modified: $(include_modified)
-                include_affected: $(include_affected)
-                include_required: $(include_required)
       - template: steps/job.yml
         parameters:
           name: windows
           pool: ${{ parameters.windowsPool }}
+          inputArtifacts:
+            - name: anvil-impact-windows
+              path: target/anvil/impact
           steps:
             - template: steps/pr-fast.yml
-              parameters: { ...same... }
 
   # pr_test, pr_runtime_analysis, and pr_mutants each follow the same shape and
   # run as independent parallel stages.
 ```
+
+### 4.3 How the impact result propagates between stages
+
+The impact set propagates as a **published pipeline artifact** — the entire
+`target/anvil/impact/` cache — not as stage output variables. Each group stage
+**downloads** it and its scoped checks read the cache directly, exactly as a local run
+does (`anvil-impact` → `include_<tier>.txt` → `_anvil-impact-include`). This is the
+whole point: CI and local execution take the identical code path rather than CI
+threading pre-formatted strings the local run never produces. The chain:
+
+1. **The `impact` stage** runs two per-OS jobs, `compute_linux` and `compute_windows`,
+   each executing `just anvil-impact` (via `steps/impact.yml`) and publishing its
+   `target/anvil/impact/` cache as the `anvil-impact-<os>` artifact via `job.yml`'s
+   `artifacts:` param (a `PublishPipelineArtifact@1` task, or the 1ESPT
+   `templateContext.outputs` equivalent). Impact is computed per OS because an
+   OS-conditional dependency (`[target.'cfg(target_os = …)'.dependencies]`) changes the
+   reverse-dep set only in that host's `cargo metadata` graph.
+2. **Each pr-* stage** declares `dependsOn: [impact]` and each of its jobs downloads the
+   matching `anvil-impact-<os>` artifact into `target/anvil/impact/` via `job.yml`'s
+   `inputArtifacts:` param (a `DownloadPipelineArtifact@2` task by default, overridable
+   by a 1ESPT `job.yml`).
+3. **The group step template** runs `just anvil-<group>`. It threads no impact params or
+   env vars: when a check's `anvil-impact` dependency runs, it finds the downloaded
+   cache already fresh (`snapshots up to date` → `cache hit`) and **needs neither
+   cargo-delta nor the base ref** — the recipe short-circuits on a present, matching
+   cache. Each scoped check self-populates `ANVIL_INCLUDE_<TIER>` from the cache file
+   via `_anvil-impact-include`.
+4. **Scheduled stages download nothing** (they run full-workspace). The group step
+   detects the absent cache (`target/anvil/impact/impact.state` missing) and exports
+   `ANVIL_IMPACT=off`, so `anvil-impact` no-ops without cargo-delta and every tier
+   defaults to `--workspace`.
 
 The pr-* stages gate on the impact stage *succeeding* (the default `succeeded()`
 condition on their `dependsOn: impact`): if impact fails, pr-* are skipped and the
@@ -509,13 +556,13 @@ stage and misleading reviewers into investigating a "failure" while every actual
 check is green. Treating impact as a gate turns a broken impact into an unambiguous,
 blocking failure.
 
-The wiring never branches on impact's *output values*, though. When impact succeeds,
+The wiring never branches on impact's *result*, though. When impact succeeds,
 each group always runs; recipes inside the group decide whether a given check no-ops
 by testing for the literal sentinel `--skip` in the relevant include var. This matters
 because unscoped checks (`fmt`, `deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
 must run on every PR. See
-[local.md §4](./local.md#4-impact-scoping-pass-through-env-vars) for the recipe-side
-contract.
+[local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe) for the
+recipe-side contract.
 
 ADO's `strategy.matrix` doesn't compose with stage-output expressions cleanly (the
 expansion happens at compile time but the values aren't available until impact has
@@ -536,24 +583,15 @@ or empty.
 
 ## 5. Per-group step templates
 
-Each per-group step template has the **same** uniform parameter surface — the three
-impact-include variables plus a per-template handful of PR-context strings. This means
-the stages template doesn't need to know which include vars a group's checks consume;
-it just threads all three to every group. Moving a check between groups (or between
-buckets) is a pure catalog change.
+Each per-group step template takes **no impact parameters**. The impact set is shared as
+a downloaded artifact (§4.3): each pr-* job downloads `anvil-impact-<os>` into
+`target/anvil/impact/` (via `job.yml`'s `inputArtifacts:`) before the group step runs,
+and the group's scoped checks read that cache directly via their `anvil-impact`
+dependency — the same code path as a local run. Moving a check between groups is a pure
+catalog change.
 
 ```yaml
 # .pipelines/anvil/steps/pr-fast.yml  (owned by cargo-anvil)
-parameters:
-- name: includeModified
-  type: string
-  default: ""
-- name: includeAffected
-  type: string
-  default: ""
-- name: includeRequired
-  type: string
-  default: ""
 steps:
 - template: setup.yml
 # ADO has no PR-title predefined variable (System.PullRequest.Title does
@@ -572,22 +610,15 @@ steps:
   displayName: anvil pr-fast
   env:
     PR_TITLE: $(PR_TITLE)
-    ANVIL_INCLUDE_MODIFIED: ${{ parameters.includeModified }}
-    ANVIL_INCLUDE_AFFECTED: ${{ parameters.includeAffected }}
-    ANVIL_INCLUDE_REQUIRED: ${{ parameters.includeRequired }}
+    # No ANVIL_INCLUDE_* threading: on a PR job the target/anvil/impact
+    # artifact is downloaded and the checks read it; a scheduled job (no
+    # artifact) exports ANVIL_IMPACT=off in a preceding line so anvil-impact
+    # no-ops and tiers default to --workspace.
 ```
 
-Uniform parameter set on every per-group template:
+The only per-group parameters are the PR-context strings a group's checks consume:
 
-| Parameter         | Default | Notes                                                                                                              |
-|-------------------|---------|--------------------------------------------------------------------------------------------------------------------|
-| `includeModified` | `""`    | Forwarded as `ANVIL_INCLUDE_MODIFIED`. `--skip` → recipe exits 0. Empty → recipe defaults to `--workspace`.     |
-| `includeAffected` | `""`    | Forwarded as `ANVIL_INCLUDE_AFFECTED`. Same semantics.                                                          |
-| `includeRequired` | `""`    | Forwarded as `ANVIL_INCLUDE_REQUIRED`. Same semantics.                                                          |
-
-Per-group additions (only where the group consumes PR-context strings the recipe needs):
-
-| Template                  | Extra parameters                                                        |
+| Template                  | Parameters                                                             |
 |---------------------------|-------------------------------------------------------------------------|
 | `pr-fast.yml`             | `prTitle` (resolved from the REST API; ADO has no PR-title variable)     |
 | `pr-mutants.yml`            | `prBaseRef` (default `$(System.PullRequest.TargetBranch)`)              |
@@ -629,24 +660,22 @@ user's msrustup step in 1ESPT pipelines or by a previous step in OSS pipelines
 `cargo-binstall` has unresolved compliance issues for internal ADO pipelines.
 
 `impact.yml` invokes `setup.yml` with `group: none`, then installs `cargo-delta`
-via `anvil-tool-cargo-delta-install` and runs
-`cargo delta impact --format json` against `$(System.PullRequest.TargetBranch)`
-(or `$BASE_REF` if set), formatting each tier into a pre-built `--package …`
-string or the sentinel `--skip`. The three results are exported as ADO output
-variables via `##vso[task.setvariable variable=…;isOutput=true]`:
+via `anvil-tool-cargo-delta-install` and runs the shared **`just anvil-impact`**
+recipe — the same building block adopters run locally. The recipe resolves the base
+ref (`_anvil-base-ref`, which reads `$(System.PullRequest.TargetBranch)` or `$BASE_REF`),
+snapshots the base merge target + the current tree, runs `cargo delta impact`, and
+writes the cache under `target/anvil/impact/` (the per-tier `include_<tier>.txt` lists,
+`impact.json`, and the `snapshots/`). The `compute_<os>` job then publishes that whole
+directory as the `anvil-impact-<os>` pipeline artifact (via `job.yml`'s `artifacts:`
+param). This is the only job that installs cargo-delta.
 
-- `compute.include_modified`
-- `compute.include_affected`
-- `compute.include_required`
-
-Downstream jobs reference them via `dependencies.impact.outputs['compute.<name>']`
-inside the runtime macro `$[ … ]` (rather than the compile-time `${{ … }}` macro)
-because output variables aren't resolved until the producing job has finished. The
-stages template handles all that — users don't write it.
+Downstream stages download that artifact into `target/anvil/impact/` (via `job.yml`'s
+`inputArtifacts:` param) and their checks read the cache directly — no ADO output
+variables are threaded. The stages template handles all that — users don't write it.
 
 The check → bucket mapping is in
 [checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping). The recipe-side
-mechanics are in [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars).
+mechanics are in [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe).
 
 ## 6. Rust toolchain
 
@@ -737,10 +766,10 @@ instrumented test run.
 
 ```yaml
 - task: PublishCodeCoverageResults@2
-  condition: and(succeededOrFailed(), ne(variables.include_affected_linux, '--skip'))
+  condition: succeededOrFailed()
   displayName: Publish coverage (linux)
   inputs:
-    summaryFileLocation: target/coverage/cobertura.xml
+    summaryFileLocation: target/coverage/cobertura-*.xml
     failIfCoverageEmpty: false
 ```
 
@@ -748,11 +777,10 @@ Both the Linux and Windows jobs publish so that OS-gated code is fully represent
 the resulting coverage report -- a single-leg publish would systematically under-report
 the coverage of `cfg(target_os = ...)` branches. ADO's `PublishCodeCoverageResults@2`
 coalesces multiple publishes against the same build into one combined report.
-The `condition: ne(variables.include_affected_*, '--skip')` skips the upload when impact
-scoping decided no tests needed to run; `failIfCoverageEmpty: false` keeps the step from
-failing the build
-when the upstream cobertura file is missing (e.g. a tooling issue or a skip outcome that
-didn't get caught by the condition).
+`failIfCoverageEmpty: false` keeps the step from failing the build when no cobertura
+file exists -- which is exactly the "nothing impacted" case (the `anvil-llvm-cov` recipe
+no-ops when its tier is `--skip`, producing no file), as well as a tooling issue. No
+impact value is threaded into the condition; the presence of the file is the signal.
 
 The data appears in the ADO build page's "Code Coverage" tab natively — totals, file
 tree, and a per-file annotation view. ADO does not natively compute diff coverage

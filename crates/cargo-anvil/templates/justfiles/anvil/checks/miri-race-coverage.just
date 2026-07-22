@@ -15,8 +15,9 @@
 
 # Run Miri tests with race coverage tracking.
 [script("pwsh")]
-anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs
+anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    if (-not $env:ANVIL_INCLUDE_AFFECTED) { $env:ANVIL_INCLUDE_AFFECTED = (& "{{ just_executable() }}" _anvil-impact-include affected) }
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
     $day = (Get-Date).Day

@@ -321,18 +321,26 @@ workflow/pipeline file alongside the anvil composite actions / step templates.
 ## 5. Impact-scoping check → env-var mapping
 
 The tool uses [`cargo-delta`](https://crates.io/crates/cargo-delta) to skip checks for
-unaffected workspace members on PR runs. cargo-delta computes three concentric impact tiers
-(`required ⊇ affected ⊇ modified`) and emits each as a list of crate names. The
-`anvil-impact` building block formats each tier into a pre-built `--package X@ver --package Y@ver`
-string (or the literal sentinel `--skip` when the tier is empty), publishes the result as
-`ANVIL_INCLUDE_MODIFIED`, `ANVIL_INCLUDE_AFFECTED`, and `ANVIL_INCLUDE_REQUIRED`
-env vars, and the recipes in `checks.just` consume them. Each package is a version-qualified
-cargo spec (`name@version`) so `-p` resolves uniquely to the workspace member even when a
-like-named crate is also pulled in as a different-versioned transitive dependency.
+unaffected workspace members. cargo-delta computes three concentric impact tiers
+(`required ⊇ affected ⊇ modified`) from the committed diff against the base ref. The
+shared `anvil-impact` recipe (see [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe))
+runs cargo-delta once, writes `target/anvil/impact/`, and projects each tier — via the
+`_anvil-impact-format` helper — into a pre-built `--package X@ver --package Y@ver` string
+(or the literal sentinel `--skip` when the tier is empty). Each package is a
+version-qualified cargo spec (`name@version`) so `-p` resolves uniquely to the workspace
+member even when a like-named crate is also pulled in as a different-versioned transitive
+dependency.
+
+Every per-crate check depends on `anvil-impact` and self-populates its tier's
+`ANVIL_INCLUDE_<TIER>` env var from that cache when it isn't already set, then consumes it.
+The **same** env-var contract is used in cloud workflows, where the impact job threads the
+values into each group job's environment (the self-populate guard then defers to them). So
+scoping is on by default both locally and in CI; it is disabled only by `ANVIL_IMPACT=off`
+(the scheduled/full tiers), which makes every tier resolve to its full-workspace default.
 
 Each catalog check is tagged with one of four buckets:
 
-| Bucket    | Env var consumed              | Behavior in cloud workflows                                                              | Behavior locally (env unset)        |
+| Bucket    | Env var consumed              | Behavior when a tier value is present                                        | Behavior when unscoped (`ANVIL_IMPACT=off` / no cache) |
 |-----------|-------------------------------|-----------------------------------------------------------------------------|--------------------------------------|
 | modified  | `ANVIL_INCLUDE_MODIFIED`   | If `--skip`: exit 0. Otherwise run unconditionally (tool is workspace-wide). | Run unconditionally.                 |
 | affected  | `ANVIL_INCLUDE_AFFECTED`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
@@ -370,7 +378,7 @@ is no collision with real package names. Recipes test for it with
 nothing in that tier needed to run.
 
 The recipe-side mechanics are in
-[local.md §4](./local.md#4-impact-scoping-pass-through-env-vars). the cloud workflow-side wiring (the
+[local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe). the cloud workflow-side wiring (the
 `anvil-impact` building block, how downstream jobs consume the include vars) is in
 [github.md](./github.md#impact-scoping) and [ado.md](./ado.md#impact-scoping).
 
