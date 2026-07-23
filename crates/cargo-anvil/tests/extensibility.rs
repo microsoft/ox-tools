@@ -28,7 +28,7 @@ const METADATA_REGION: &str = "demoforge-metadata";
 const CONTAINER_JUST: &str = "justfiles/anvil/container/container.just";
 const CONTAINERFILE: &str = "justfiles/anvil/container/Containerfile";
 const CONTAINER_RUNNER: &str = "justfiles/anvil/container/run-in-container.ps1";
-const CONTAINER_AUTH: &str = "justfiles/anvil/container/auth.ps1";
+const CONTAINER_CUSTOMIZE: &str = "justfiles/anvil/container/customize.ps1";
 
 /// The example downstream catalog: anvil's, customized four ways.
 fn demoforge() -> Catalog {
@@ -55,8 +55,8 @@ fn containerforge() -> Catalog {
         .subcommand("containerforge")
         .about("ContainerForge: an anvil container catalog for tests")
         .version("9.9.9")
-        .replace_artifact(artifacts::container::containerfile().with_body("FROM internal.example/base\n"))
-        .with_artifact(artifacts::container::auth_powershell("# internal auth\n"))
+        .replace_artifact(artifacts::container::containerfile().with_body("FROM example.invalid/base\n"))
+        .with_artifact(artifacts::container::customize_powershell("# test customization\n"))
         .build()
         .unwrap()
 }
@@ -165,8 +165,8 @@ fn public_container_artifacts_can_be_specialized_by_downstream_catalogs() {
     );
     let base_runner = std::fs::read_to_string(base.path().join(CONTAINER_RUNNER)).unwrap();
     assert!(
-        !base.path().join(CONTAINER_AUTH).exists(),
-        "base catalog must not emit an environment-specific auth hook"
+        !base.path().join(CONTAINER_CUSTOMIZE).exists(),
+        "base catalog must not emit a customization file by default"
     );
 
     let configured = workspace();
@@ -178,7 +178,7 @@ fn public_container_artifacts_can_be_specialized_by_downstream_catalogs() {
     );
     let configured_containerfile = std::fs::read_to_string(configured.path().join(CONTAINERFILE)).unwrap();
     assert_eq!(
-        configured_containerfile, "FROM internal.example/base\n",
+        configured_containerfile, "FROM example.invalid/base\n",
         "downstream catalog must replace the public Containerfile"
     );
     let configured_runner = std::fs::read_to_string(configured.path().join(CONTAINER_RUNNER)).unwrap();
@@ -186,10 +186,39 @@ fn public_container_artifacts_can_be_specialized_by_downstream_catalogs() {
         configured_runner, base_runner,
         "downstream catalog must inherit the public runner unchanged"
     );
-    let configured_auth = std::fs::read_to_string(configured.path().join(CONTAINER_AUTH)).unwrap();
+    let configured_customize = std::fs::read_to_string(configured.path().join(CONTAINER_CUSTOMIZE)).unwrap();
     assert_eq!(
-        configured_auth, "# internal auth\n",
-        "downstream catalog must be able to add its environment-specific auth hook"
+        configured_customize, "# test customization\n",
+        "downstream catalog must be able to add its own customization file"
+    );
+}
+
+#[test]
+fn a_regular_repository_can_add_customization_files_without_a_derived_catalog() {
+    // A repository maintainer can commit customize.sh/customize.ps1 directly
+    // beside the generated files, without forking anvil into a derived
+    // catalog. The public generator neither creates nor manages them, and
+    // must not disturb them on a later re-run.
+    let tmp = workspace();
+    run_update(&Catalog::anvil(), &local(false), tmp.path()).unwrap();
+    let shell_customize = tmp.path().join("justfiles/anvil/container/customize.sh");
+    let powershell_customize = tmp.path().join(CONTAINER_CUSTOMIZE);
+    assert!(!shell_customize.exists(), "the public catalog must not emit customize.sh");
+    assert!(!powershell_customize.exists(), "the public catalog must not emit customize.ps1");
+
+    write(&shell_customize, "# repository-owned shell customization\n");
+    write(&powershell_customize, "# repository-owned PowerShell customization\n");
+
+    // Re-running the public generator must leave repository-owned
+    // customization files untouched.
+    run_update(&Catalog::anvil(), &local(false), tmp.path()).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&shell_customize).unwrap(),
+        "# repository-owned shell customization\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&powershell_customize).unwrap(),
+        "# repository-owned PowerShell customization\n"
     );
 }
 

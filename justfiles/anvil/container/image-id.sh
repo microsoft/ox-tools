@@ -22,7 +22,8 @@ for path in "$container_dir"/*; do
     [[ -f "$path" ]] || continue
     case "${path##*/}" in
         container.just | image-id.ps1 | image-id.sh | README.md \
-            | run-in-container.ps1 | run-in-container.sh) continue ;;
+            | run-in-container.ps1 | run-in-container.sh \
+            | customize.sh | customize.ps1) continue ;;
     esac
     inputs+=("${path#"$repo_root"/}")
 done

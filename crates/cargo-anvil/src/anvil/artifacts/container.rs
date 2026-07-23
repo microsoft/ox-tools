@@ -5,7 +5,7 @@
 //!
 //! The base catalog emits a public Podman implementation. Downstream catalogs
 //! replace only environment-specific artifacts such as the Containerfile and
-//! add optional auth hooks.
+//! add an optional `customize.sh`/`customize.ps1` runtime customization file.
 
 use crate::catalog::Artifact;
 
@@ -28,8 +28,8 @@ const SHELL_IMAGE_ID_PATH: &str = "justfiles/anvil/container/image-id.sh";
 const SHELL_DRIVER_PATH: &str = "justfiles/anvil/container/run-in-container.sh";
 const POWERSHELL_DRIVER_PATH: &str = "justfiles/anvil/container/run-in-container.ps1";
 const README_PATH: &str = "justfiles/anvil/container/README.md";
-const AUTH_SHELL_PATH: &str = "justfiles/anvil/container/auth.sh";
-const AUTH_POWERSHELL_PATH: &str = "justfiles/anvil/container/auth.ps1";
+const CUSTOMIZE_SHELL_PATH: &str = "justfiles/anvil/container/customize.sh";
+const CUSTOMIZE_POWERSHELL_PATH: &str = "justfiles/anvil/container/customize.ps1";
 
 /// The full public container artifact group.
 #[must_use]
@@ -101,16 +101,26 @@ pub fn readme() -> Artifact {
     Artifact::owned_file(README_PATH, README)
 }
 
-/// Add a downstream shell authentication hook.
+/// Add a downstream shell customization file (`customize.sh`).
+///
+/// The public catalog does not emit this file. A regular repository can add
+/// the standard path directly; a derived distribution can package the same
+/// file through this constructor. The driver loads it whenever present,
+/// regardless of provenance. See
+/// [the container customization contract](../../../docs/design/containers.md)
+/// for the versioned runtime interface.
 #[must_use]
-pub fn auth_shell(body: impl Into<String>) -> Artifact {
-    Artifact::owned_file(AUTH_SHELL_PATH, body)
+pub fn customize_shell(body: impl Into<String>) -> Artifact {
+    Artifact::owned_file(CUSTOMIZE_SHELL_PATH, body)
 }
 
-/// Add a downstream `PowerShell` authentication hook.
+/// Add a downstream `PowerShell` customization file (`customize.ps1`).
+///
+/// See [`customize_shell`] for the shared contract and provenance-neutral
+/// loading behavior.
 #[must_use]
-pub fn auth_powershell(body: impl Into<String>) -> Artifact {
-    Artifact::owned_file(AUTH_POWERSHELL_PATH, body)
+pub fn customize_powershell(body: impl Into<String>) -> Artifact {
+    Artifact::owned_file(CUSTOMIZE_POWERSHELL_PATH, body)
 }
 
 #[cfg(test)]
@@ -199,6 +209,34 @@ mod tests {
     }
 
     #[test]
+    fn ignore_file_excludes_customize_source_from_the_build_context() {
+        // Customization is trusted host orchestration, not image content: it
+        // must never reach the build context, even though the broader
+        // container directory is included above.
+        let include_position = IGNORE
+            .find("!justfiles/anvil/container/*")
+            .expect("the container directory inclusion is asserted above");
+        let shell_exclude_position = IGNORE
+            .find("justfiles/anvil/container/customize.sh")
+            .expect("customize.sh must be excluded from the build context");
+        let powershell_exclude_position = IGNORE
+            .find("justfiles/anvil/container/customize.ps1")
+            .expect("customize.ps1 must be excluded from the build context");
+        assert!(
+            !IGNORE[shell_exclude_position..].starts_with('!'),
+            "customize.sh must be a re-exclusion, not an inclusion"
+        );
+        assert!(
+            !IGNORE[powershell_exclude_position..].starts_with('!'),
+            "customize.ps1 must be a re-exclusion, not an inclusion"
+        );
+        assert!(
+            include_position < shell_exclude_position && include_position < powershell_exclude_position,
+            "the re-exclusion must come after the broad directory inclusion so it wins"
+        );
+    }
+
+    #[test]
     fn drivers_use_podman_and_content_addressing() {
         for driver in [SHELL_DRIVER, POWERSHELL_DRIVER] {
             assert!(driver.contains("podman"));
@@ -248,8 +286,78 @@ mod tests {
     }
 
     #[test]
+    fn drivers_implement_the_versioned_customization_contract() {
+        assert!(SHELL_DRIVER.contains("customize.sh"));
+        assert!(!SHELL_DRIVER.contains("auth.sh"));
+        assert!(POWERSHELL_DRIVER.contains("customize.ps1"));
+        assert!(!POWERSHELL_DRIVER.contains("auth.ps1"));
+
+        for (driver, api_version, image_exists, requested_recipes) in [
+            (
+                SHELL_DRIVER,
+                "ANVIL_CONTAINER_CUSTOMIZATION_API_VERSION=1",
+                "ANVIL_CONTAINER_IMAGE_EXISTS",
+                "ANVIL_CONTAINER_REQUESTED_RECIPES",
+            ),
+            (
+                POWERSHELL_DRIVER,
+                "AnvilContainerCustomizationApiVersion -Value 1",
+                "AnvilContainerImageExists",
+                "AnvilContainerRequestedRecipes",
+            ),
+        ] {
+            assert!(driver.contains(api_version), "{api_version} must be present");
+            assert!(driver.contains("ANVIL_CONTAINER_REPO_ROOT") || driver.contains("AnvilContainerRepoRoot"));
+            assert!(driver.contains("ANVIL_CONTAINER_DIR") || driver.contains("AnvilContainerDir"));
+            assert!(driver.contains("ANVIL_CONTAINER_RESOLVED_IMAGE") || driver.contains("AnvilContainerResolvedImage"));
+            assert!(driver.contains(image_exists));
+            assert!(driver.contains(requested_recipes));
+
+            // The image-exists check must be resolved before the
+            // customization file is sourced, so warm-run state is available
+            // to it.
+            let image_exists_position = driver
+                .find(image_exists)
+                .unwrap_or_else(|| panic!("{image_exists} is asserted present above"));
+            let source_position = driver
+                .find("customize.sh")
+                .or_else(|| driver.find("customize.ps1"))
+                .expect("customize.* sourcing is asserted present above");
+            assert!(
+                image_exists_position < source_position,
+                "image existence must be resolved before customization is sourced"
+            );
+        }
+
+        assert!(POWERSHELL_DRIVER.contains("AnvilContainerHostIsWindows"));
+        assert!(!SHELL_DRIVER.contains("ANVIL_CONTAINER_HOST_IS_WINDOWS"));
+
+        // Preparation arguments without a preparation command must fail
+        // validation before Podman build/run.
+        assert!(SHELL_DRIVER.contains("ANVIL_CONTAINER_PREPARE_ARGS requires ANVIL_CONTAINER_PREPARE_COMMAND"));
+        assert!(POWERSHELL_DRIVER.contains("$AnvilContainerPrepareArgs requires $AnvilContainerPrepareCommand"));
+
+        // Cleanup callback shape is validated.
+        assert!(SHELL_DRIVER.contains("must name a callable function"));
+        assert!(POWERSHELL_DRIVER.contains("must be a script block"));
+
+        // Output arrays are validated before Podman is invoked.
+        for driver in [SHELL_DRIVER, POWERSHELL_DRIVER] {
+            let validate_position = driver
+                .find("must be a string array")
+                .or_else(|| driver.find("anvil_container_validate_array"))
+                .expect("output validation is present");
+            let build_position = driver.find("podman build").expect("build invocation is present");
+            assert!(
+                validate_position < build_position,
+                "output validation must occur before Podman build"
+            );
+        }
+    }
+
+    #[test]
     #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
-    fn image_id_hashes_auth_source_but_not_execution_only_files() {
+    fn image_id_excludes_customize_source_but_hashes_static_container_files() {
         let tmp = TempDir::new().expect("temporary repository must be creatable");
         let root = tmp.path();
         let status = Command::new("git")
@@ -261,34 +369,41 @@ mod tests {
         write_image_id_fixture(root);
 
         let base = run_image_id(root);
-        let auth_path = root.join(AUTH_SHELL_PATH);
-        write(&auth_path, "# build configuration\n");
-        let auth_lf = run_image_id(root);
-        assert_ne!(base, auth_lf, "auth-hook source must affect the image ID");
 
-        write(&auth_path, b"# build configuration\r\n");
-        let auth_crlf = run_image_id(root);
-        assert_eq!(auth_lf, auth_crlf, "line endings must not affect the image ID");
+        // Customization source is runtime orchestration, not image content: it
+        // must never affect the image ID, in either host-shell form.
+        let customize_sh = root.join(CUSTOMIZE_SHELL_PATH);
+        write(&customize_sh, "# customization\n");
+        assert_eq!(base, run_image_id(root), "customize.sh source must not affect the image ID");
+
+        let customize_ps1 = root.join(CUSTOMIZE_POWERSHELL_PATH);
+        write(&customize_ps1, "# customization\n");
+        assert_eq!(base, run_image_id(root), "customize.ps1 source must not affect the image ID");
+
+        write(&customize_sh, "# different customization\n");
+        write(&customize_ps1, "# different customization\n");
+        assert_eq!(
+            base,
+            run_image_id(root),
+            "changed customization source must still not affect the image ID"
+        );
 
         write(&root.join(README_PATH), "runtime documentation change\n");
         assert_eq!(
-            auth_crlf,
+            base,
             run_image_id(root),
             "execution-only documentation must not affect the image ID"
         );
 
         write(&root.join(RECIPE_PATH), "execution-only recipe change\n");
-        assert_eq!(
-            auth_crlf,
-            run_image_id(root),
-            "the container entry recipe must not affect the image ID"
-        );
+        assert_eq!(base, run_image_id(root), "the container entry recipe must not affect the image ID");
 
-        write(&auth_path, "# different build configuration\n");
+        // Static, hashed image content must still affect the image ID.
+        write(&root.join(CONTAINERFILE_PATH), "FROM example.invalid/different-base\n");
         assert_ne!(
-            auth_crlf,
+            base,
             run_image_id(root),
-            "changed auth-hook build configuration must affect the image ID"
+            "changed static Containerfile content must affect the image ID"
         );
     }
 
@@ -330,6 +445,35 @@ mod tests {
         assert!(SHELL_IMAGE_ID.contains("shasum -a 256"));
         assert!(SHELL_IMAGE_ID.contains("LC_ALL=C sort -u"));
         assert!(!SHELL_IMAGE_ID.contains("pwsh"));
+
+        // Namerefs (`local -n`/`declare -n`) require Bash 4.3+; macOS's system
+        // Bash is 3.2. Array-name validation must pass elements positionally
+        // instead.
+        assert!(!SHELL_DRIVER.contains("local -n"), "namerefs are unsupported on Bash 3.2");
+        assert!(!SHELL_DRIVER.contains("declare -n"), "namerefs are unsupported on Bash 3.2");
+
+        // Every possibly-empty customization-output array must be expanded
+        // with the `${arr[@]+"${arr[@]}"}` idiom, not a bare `"${arr[@]}"`:
+        // under `set -u`, Bash versions before 4.4 raise "unbound variable"
+        // when a declared-but-empty array is expanded bare. The guarded
+        // idiom necessarily contains the bare form as a substring, so pin
+        // safety by asserting every bare occurrence is part of a guarded
+        // one (equal counts) rather than absent outright.
+        for array in [
+            "ANVIL_CONTAINER_BUILD_ARGS",
+            "ANVIL_CONTAINER_PREPARE_ARGS",
+            "ANVIL_CONTAINER_RUN_ARGS",
+        ] {
+            let guarded = format!("${{{array}[@]+\"${{{array}[@]}}\"}}");
+            let bare = format!("\"${{{array}[@]}}\"");
+            let guarded_count = SHELL_DRIVER.matches(&guarded).count();
+            let bare_count = SHELL_DRIVER.matches(&bare).count();
+            assert!(guarded_count > 0, "{array} must use the nounset-safe empty-array idiom: {guarded}");
+            assert_eq!(
+                guarded_count, bare_count,
+                "{array} must never be expanded bare outside the nounset-safe idiom (unsafe under `set -u` on Bash <4.4)"
+            );
+        }
     }
 
     #[test]
@@ -360,20 +504,20 @@ mod tests {
     }
 
     #[test]
-    fn auth_helpers_use_the_standard_paths() {
-        match auth_shell("# shell auth\n") {
+    fn customize_helpers_use_the_standard_paths() {
+        match customize_shell("# shell customization\n") {
             Artifact::OwnedFile(spec) => {
-                assert_eq!(spec.path, AUTH_SHELL_PATH);
-                assert_eq!(spec.body, "# shell auth\n");
+                assert_eq!(spec.path, CUSTOMIZE_SHELL_PATH);
+                assert_eq!(spec.body, "# shell customization\n");
             }
-            Artifact::Region(_) => panic!("auth hook must be an owned file"),
+            Artifact::Region(_) => panic!("customization file must be an owned file"),
         }
-        match auth_powershell("# PowerShell auth\n") {
+        match customize_powershell("# PowerShell customization\n") {
             Artifact::OwnedFile(spec) => {
-                assert_eq!(spec.path, AUTH_POWERSHELL_PATH);
-                assert_eq!(spec.body, "# PowerShell auth\n");
+                assert_eq!(spec.path, CUSTOMIZE_POWERSHELL_PATH);
+                assert_eq!(spec.body, "# PowerShell customization\n");
             }
-            Artifact::Region(_) => panic!("auth hook must be an owned file"),
+            Artifact::Region(_) => panic!("customization file must be an owned file"),
         }
     }
 }

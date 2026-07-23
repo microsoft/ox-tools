@@ -29,6 +29,18 @@ function ConvertTo-AnvilVersion([string]$Value) {
     )
 }
 
+function Test-AnvilContainerStringArray([string]$Name, $Value) {
+    if ($null -eq $Value) { return }
+    if ($Value -isnot [array]) {
+        throw "anvil-container: `$$Name must be a string array."
+    }
+    foreach ($item in $Value) {
+        if ($item -isnot [string] -or [string]::IsNullOrEmpty($item)) {
+            throw "anvil-container: `$$Name entries must be non-empty strings."
+        }
+    }
+}
+
 function Test-AnvilRecipeNeedsGitHubToken([string]$Name) {
     $Name -in @(
         'anvil-aprz',
@@ -114,6 +126,22 @@ if ($needsGitHubToken -and -not $githubToken) {
     }
 }
 
+# Versioned customization contract: check warm/cold state before sourcing so
+# customization needed only for image construction can be skipped on a warm
+# run, then expose read-only inputs. See docs/design/containers.md.
+& podman image exists $image
+$imageExists = $LASTEXITCODE -eq 0
+
+New-Variable -Name AnvilContainerCustomizationApiVersion -Value 1 -Option ReadOnly
+New-Variable -Name AnvilContainerRepoRoot -Value $repoRoot -Option ReadOnly
+New-Variable -Name AnvilContainerDir -Value $scriptDir -Option ReadOnly
+New-Variable -Name AnvilContainerResolvedImage -Value $image -Option ReadOnly
+New-Variable -Name AnvilContainerImageExists -Value $imageExists -Option ReadOnly
+New-Variable -Name AnvilContainerRequestedRecipes -Value $Recipe -Option ReadOnly
+New-Variable -Name AnvilContainerHostIsWindows -Value ([bool]$IsWindows) -Option ReadOnly
+
+# Customization outputs, initialized before sourcing so a missing customize.ps1
+# leaves every phase a documented no-op.
 $AnvilContainerBuildArgs = @()
 $AnvilContainerPrepareArgs = @()
 $AnvilContainerPrepareCommand = @()
@@ -122,15 +150,28 @@ $AnvilContainerBuildInMachine = $false
 $AnvilContainerCleanup = $null
 $githubTokenFile = $null
 $exitCode = 0
-$authScript = Join-Path $scriptDir 'auth.ps1'
+$customizeScript = Join-Path $scriptDir 'customize.ps1'
 
 try {
-    if (Test-Path -LiteralPath $authScript -PathType Leaf) {
-        . $authScript
+    if (Test-Path -LiteralPath $customizeScript -PathType Leaf) {
+        . $customizeScript
     }
 
-    & podman image exists $image
-    if ($LASTEXITCODE -ne 0) {
+    Test-AnvilContainerStringArray 'AnvilContainerBuildArgs' $AnvilContainerBuildArgs
+    Test-AnvilContainerStringArray 'AnvilContainerPrepareArgs' $AnvilContainerPrepareArgs
+    Test-AnvilContainerStringArray 'AnvilContainerPrepareCommand' $AnvilContainerPrepareCommand
+    Test-AnvilContainerStringArray 'AnvilContainerRunArgs' $AnvilContainerRunArgs
+    if ($AnvilContainerPrepareArgs.Count -gt 0 -and $AnvilContainerPrepareCommand.Count -eq 0) {
+        throw 'anvil-container: $AnvilContainerPrepareArgs requires $AnvilContainerPrepareCommand.'
+    }
+    if ($AnvilContainerCleanup -and $AnvilContainerCleanup -isnot [scriptblock]) {
+        throw 'anvil-container: $AnvilContainerCleanup must be a script block.'
+    }
+    if ($AnvilContainerBuildInMachine -isnot [bool]) {
+        throw 'anvil-container: $AnvilContainerBuildInMachine must be a Boolean.'
+    }
+
+    if (-not $imageExists) {
         if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {
             throw "anvil-container: image $image is missing and ANVIL_CONTAINER_NO_REBUILD=1."
         }

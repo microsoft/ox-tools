@@ -29,10 +29,13 @@ $executionOnly = @(
     'image-id.sh',
     'README.md',
     'run-in-container.ps1',
-    'run-in-container.sh'
+    'run-in-container.sh',
+    'customize.sh',
+    'customize.ps1'
 )
-# Auth hooks are intentionally hashed: their source defines non-secret build
-# customization. Runtime tokens and secret-file contents are never read here.
+# customize.sh/customize.ps1 are trusted runtime orchestration, not image
+# content: their source must never affect the image ID or build context.
+# Static, non-secret build customization belongs in a hashed artifact instead.
 $inputs += Get-ChildItem $containerPath -File |
     Where-Object { $_.Name -notin $executionOnly } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }

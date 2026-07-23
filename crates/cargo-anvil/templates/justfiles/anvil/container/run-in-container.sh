@@ -113,6 +113,25 @@ if "$needs_github_token"; then
     fi
 fi
 
+# Versioned customization contract: check warm/cold state before sourcing so
+# customization needed only for image construction can be skipped on a warm
+# run, then expose read-only inputs. See docs/design/containers.md.
+if podman image exists "$image"; then
+    image_exists=true
+else
+    image_exists=false
+fi
+
+readonly ANVIL_CONTAINER_CUSTOMIZATION_API_VERSION=1
+readonly ANVIL_CONTAINER_REPO_ROOT="$repo_root"
+readonly ANVIL_CONTAINER_DIR="$script_dir"
+readonly ANVIL_CONTAINER_RESOLVED_IMAGE="$image"
+readonly ANVIL_CONTAINER_IMAGE_EXISTS="$image_exists"
+declare -a ANVIL_CONTAINER_REQUESTED_RECIPES=("$@")
+readonly ANVIL_CONTAINER_REQUESTED_RECIPES
+
+# Customization outputs, initialized before sourcing so a missing customize.sh
+# leaves every phase a documented no-op.
 ANVIL_CONTAINER_BUILD_ARGS=()
 ANVIL_CONTAINER_PREPARE_ARGS=()
 ANVIL_CONTAINER_PREPARE_COMMAND=()
@@ -125,12 +144,44 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ -f "$script_dir/auth.sh" ]]; then
+if [[ -f "$script_dir/customize.sh" ]]; then
     # shellcheck source=/dev/null
-    source "$script_dir/auth.sh"
+    source "$script_dir/customize.sh"
 fi
 
-if ! podman image exists "$image"; then
+# Bash 3.2 (macOS's system Bash) has neither namerefs (the nameref flag on
+# `local`/`declare`, Bash 4.3+) nor safe `set -u` expansion of empty-but-
+# declared arrays (fixed in Bash 4.4). Elements are passed positionally
+# instead of by nameref, and every expansion of a possibly-empty array uses
+# the `${arr[@]+"${arr[@]}"}` idiom: unset/empty-under-old-Bash arrays vanish
+# entirely instead of raising "unbound variable", while non-empty arrays
+# still expand element-for-element.
+anvil_container_validate_array() {
+    local name="$1"
+    shift
+    local value
+    for value in "$@"; do
+        if [[ -z "$value" ]]; then
+            echo "anvil-container: $name entries must be non-empty strings." >&2
+            exit 1
+        fi
+    done
+}
+anvil_container_validate_array ANVIL_CONTAINER_BUILD_ARGS ${ANVIL_CONTAINER_BUILD_ARGS[@]+"${ANVIL_CONTAINER_BUILD_ARGS[@]}"}
+anvil_container_validate_array ANVIL_CONTAINER_PREPARE_ARGS ${ANVIL_CONTAINER_PREPARE_ARGS[@]+"${ANVIL_CONTAINER_PREPARE_ARGS[@]}"}
+anvil_container_validate_array ANVIL_CONTAINER_PREPARE_COMMAND ${ANVIL_CONTAINER_PREPARE_COMMAND[@]+"${ANVIL_CONTAINER_PREPARE_COMMAND[@]}"}
+anvil_container_validate_array ANVIL_CONTAINER_RUN_ARGS ${ANVIL_CONTAINER_RUN_ARGS[@]+"${ANVIL_CONTAINER_RUN_ARGS[@]}"}
+if ((${#ANVIL_CONTAINER_PREPARE_ARGS[@]} > 0)) && ((${#ANVIL_CONTAINER_PREPARE_COMMAND[@]} == 0)); then
+    echo 'anvil-container: ANVIL_CONTAINER_PREPARE_ARGS requires ANVIL_CONTAINER_PREPARE_COMMAND.' >&2
+    exit 1
+fi
+cleanup_kind="$(type -t "$ANVIL_CONTAINER_CLEANUP" 2>/dev/null || true)"
+if [[ "$cleanup_kind" != "function" && "$cleanup_kind" != "builtin" ]]; then
+    echo "anvil-container: ANVIL_CONTAINER_CLEANUP must name a callable function (got '$ANVIL_CONTAINER_CLEANUP')." >&2
+    exit 1
+fi
+
+if ! "$image_exists"; then
     if [[ "${ANVIL_CONTAINER_NO_REBUILD:-}" == "1" ]]; then
         echo "anvil-container: image $image is missing and ANVIL_CONTAINER_NO_REBUILD=1." >&2
         exit 1
@@ -141,7 +192,7 @@ if ! podman image exists "$image"; then
             --file "$script_dir/Containerfile" \
             --ignorefile "$script_dir/container.ignore" \
             --build-arg "ANVIL_IMAGE_ID=$image_id" \
-            "${ANVIL_CONTAINER_BUILD_ARGS[@]}" \
+            ${ANVIL_CONTAINER_BUILD_ARGS[@]+"${ANVIL_CONTAINER_BUILD_ARGS[@]}"} \
             "$repo_root"
     fi
 fi
@@ -159,13 +210,13 @@ run_args=(
     --workdir /workspace
 )
 prepare_run_args=("${run_args[@]}")
-run_args+=("${ANVIL_CONTAINER_RUN_ARGS[@]}")
+run_args+=(${ANVIL_CONTAINER_RUN_ARGS[@]+"${ANVIL_CONTAINER_RUN_ARGS[@]}"})
 for name in PR_TITLE BASE_REF ANVIL_INCLUDE_MODIFIED ANVIL_INCLUDE_AFFECTED ANVIL_INCLUDE_REQUIRED GITHUB_BASE_REF SYSTEM_PULLREQUEST_TARGETBRANCH; do
     if declare -p "$name" >/dev/null 2>&1; then run_args+=(--env "$name"); fi
 done
 if ((${#ANVIL_CONTAINER_PREPARE_COMMAND[@]} > 0)); then
     podman "${prepare_run_args[@]}" \
-        "${ANVIL_CONTAINER_PREPARE_ARGS[@]}" \
+        ${ANVIL_CONTAINER_PREPARE_ARGS[@]+"${ANVIL_CONTAINER_PREPARE_ARGS[@]}"} \
         "$image" \
         "${ANVIL_CONTAINER_PREPARE_COMMAND[@]}"
 fi
