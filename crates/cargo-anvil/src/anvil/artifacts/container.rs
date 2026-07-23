@@ -269,13 +269,15 @@ mod tests {
         assert!(IMAGE_ID.contains("[StringComparer]::Ordinal"));
         assert!(POWERSHELL_DRIVER.contains("AnvilContainerPrepareCommand"));
         assert!(POWERSHELL_DRIVER.contains("podman machine ssh"));
-        assert!(POWERSHELL_DRIVER.contains("foreach ($name in $Recipe)"));
+        assert!(POWERSHELL_DRIVER.contains("Test-AnvilRecipeNeedsGitHubToken $Recipe[0]"));
+        assert!(!POWERSHELL_DRIVER.contains("foreach ($name in $Recipe)"));
         assert!(POWERSHELL_DRIVER.contains("[Console]::IsInputRedirected"));
         assert!(POWERSHELL_DRIVER.contains("Read-Host"));
         assert!(POWERSHELL_DRIVER.contains("$singleQuote + $doubleQuote"));
         assert!(POWERSHELL_DRIVER.contains("ConvertTo-AnvilVersion"));
         assert!(POWERSHELL_DRIVER.contains("isolated anvil-aprz"));
-        assert!(SHELL_DRIVER.contains("for recipe in \"$@\""));
+        assert!(SHELL_DRIVER.contains("anvil_recipe_needs_github_token \"$1\""));
+        assert!(!SHELL_DRIVER.contains("for recipe in \"$@\""));
         assert!(SHELL_DRIVER.contains("image-id.sh"));
         assert!(!SHELL_DRIVER.contains("pwsh"));
         assert!(SHELL_DRIVER.contains("anvil-container must run from a Git repository"));

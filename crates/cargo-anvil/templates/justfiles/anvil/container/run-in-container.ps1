@@ -101,13 +101,7 @@ $repoBytes = [Text.Encoding]::UTF8.GetBytes($repoRoot.ToLowerInvariant())
 $repoHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($repoBytes)).ToLowerInvariant()
 $targetVolume = "anvil-target-$($repoHash.Substring(0, 12))-$($imageId.Substring(0, 12))"
 
-$needsGitHubToken = $false
-foreach ($name in $Recipe) {
-    if (Test-AnvilRecipeNeedsGitHubToken $name) {
-        $needsGitHubToken = $true
-        break
-    }
-}
+$needsGitHubToken = $Recipe.Count -gt 0 -and (Test-AnvilRecipeNeedsGitHubToken $Recipe[0])
 $runsOnlyGitHubCheck = $Recipe.Count -eq 1 -and $Recipe[0] -eq 'anvil-aprz'
 $githubToken = if ($needsGitHubToken) { Get-AnvilGitHubToken } else { $null }
 if ($needsGitHubToken -and -not $githubToken) {

@@ -72,12 +72,9 @@ fi
 target_volume="anvil-target-${repo_id}-${image_id:0:12}"
 
 needs_github_token=false
-for recipe in "$@"; do
-    if anvil_recipe_needs_github_token "$recipe"; then
-        needs_github_token=true
-        break
-    fi
-done
+if (($# > 0)) && anvil_recipe_needs_github_token "$1"; then
+    needs_github_token=true
+fi
 runs_only_github_check=false
 if (($# == 1)) && [[ "$1" == "anvil-aprz" ]]; then
     runs_only_github_check=true

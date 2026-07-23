@@ -132,6 +132,10 @@ struct DriverRun {
 /// Runs the real generated `run-in-container.sh` against the fake `podman`,
 /// with `customize.sh` written from `customize_sh_body` beforehand.
 fn run_driver(root: &Path, customize_sh_body: &str, recipe: &str, env: &[(&str, &str)]) -> DriverRun {
+    run_driver_args(root, customize_sh_body, &[recipe], env)
+}
+
+fn run_driver_args(root: &Path, customize_sh_body: &str, recipe_args: &[&str], env: &[(&str, &str)]) -> DriverRun {
     let container_dir = root.join("justfiles/anvil/container");
     write(&container_dir.join("customize.sh"), customize_sh_body);
 
@@ -144,7 +148,8 @@ fn run_driver(root: &Path, customize_sh_body: &str, recipe: &str, env: &[(&str, 
 
     let mut command = Command::new("bash");
     command
-        .args(["justfiles/anvil/container/run-in-container.sh", recipe])
+        .arg("justfiles/anvil/container/run-in-container.sh")
+        .args(recipe_args)
         .current_dir(root)
         .env("PATH", path)
         .env("FAKE_PODMAN_LOG", &podman_log)
@@ -163,6 +168,33 @@ fn run_driver(root: &Path, customize_sh_body: &str, recipe: &str, env: &[(&str, 
         podman_log: std::fs::read_to_string(&podman_log).unwrap_or_default(),
         test_log: std::fs::read_to_string(&test_log).unwrap_or_default(),
     }
+}
+
+#[test]
+fn forwarded_parameter_does_not_trigger_github_authentication() {
+    let tmp = repo_with_container();
+    let run = run_driver_args(
+        tmp.path(),
+        "",
+        &["anvil-clippy", "anvil-aprz"],
+        &[("FAKE_PODMAN_IMAGE_EXISTS", "1")],
+    );
+
+    assert!(
+        run.status.success(),
+        "a forwarded parameter must not trigger GitHub authentication: {}",
+        run.stderr
+    );
+    assert!(
+        run.podman_log.lines().any(|line| line.contains("just anvil-clippy anvil-aprz")),
+        "all arguments must still be forwarded to the requested recipe: {}",
+        run.podman_log
+    );
+    assert_eq!(
+        run.podman_log.lines().filter(|line| line.starts_with("run ")).count(),
+        1,
+        "a forwarded parameter must not cause an isolated anvil-aprz invocation"
+    );
 }
 
 #[test]

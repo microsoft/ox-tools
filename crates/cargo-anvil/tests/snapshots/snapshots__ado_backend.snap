@@ -1,6 +1,5 @@
 ---
 source: crates/cargo-anvil/tests/snapshots.rs
-assertion_line: 136
 expression: render_tree(tmp.path())
 ---
 === .delta.toml ===
@@ -3788,13 +3787,7 @@ $repoBytes = [Text.Encoding]::UTF8.GetBytes($repoRoot.ToLowerInvariant())
 $repoHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($repoBytes)).ToLowerInvariant()
 $targetVolume = "anvil-target-$($repoHash.Substring(0, 12))-$($imageId.Substring(0, 12))"
 
-$needsGitHubToken = $false
-foreach ($name in $Recipe) {
-    if (Test-AnvilRecipeNeedsGitHubToken $name) {
-        $needsGitHubToken = $true
-        break
-    }
-}
+$needsGitHubToken = $Recipe.Count -gt 0 -and (Test-AnvilRecipeNeedsGitHubToken $Recipe[0])
 $runsOnlyGitHubCheck = $Recipe.Count -eq 1 -and $Recipe[0] -eq 'anvil-aprz'
 $githubToken = if ($needsGitHubToken) { Get-AnvilGitHubToken } else { $null }
 if ($needsGitHubToken -and -not $githubToken) {
@@ -4042,12 +4035,9 @@ fi
 target_volume="anvil-target-${repo_id}-${image_id:0:12}"
 
 needs_github_token=false
-for recipe in "$@"; do
-    if anvil_recipe_needs_github_token "$recipe"; then
-        needs_github_token=true
-        break
-    fi
-done
+if (($# > 0)) && anvil_recipe_needs_github_token "$1"; then
+    needs_github_token=true
+fi
 runs_only_github_check=false
 if (($# == 1)) && [[ "$1" == "anvil-aprz" ]]; then
     runs_only_github_check=true
