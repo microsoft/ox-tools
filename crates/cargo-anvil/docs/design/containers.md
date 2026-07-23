@@ -203,14 +203,6 @@ An interactive invocation can pause while the user completes `gh auth login`.
 A non-interactive invocation fails with an actionable error before building the
 image when authentication is unavailable.
 
-### 7.2 Downstream and repository customization
-
-Section 8 defines the full customization contract. In summary, the driver
-sources a repository-owned `customize.sh` or `customize.ps1` before image
-construction and runtime preparation, whenever the standard path is present —
-regardless of whether a repository committed it directly or a derived
-`cargo-anvil` distribution generated it.
-
 ## 8. Container customization
 
 Repositories and derived `cargo-anvil` distributions can customize image
@@ -224,15 +216,10 @@ justfiles/anvil/container/customize.ps1
 The public catalog does not generate these files. A repository can commit them
 directly, or a derived distribution can add them through the artifact API in
 [extensibility.md](./extensibility.md). The driver treats both sources
-identically.
+identically. These files are trusted host code, sourced with the developer's
+permissions outside the container sandbox.
 
-Customization files are trusted host code: the driver sources them with the
-developer's permissions, outside the container sandbox. Users must trust their
-source.
-
-### 8.1 Contract
-
-The interface version is `1`. The driver provides these read-only inputs:
+The version `1` interface provides these read-only inputs:
 
 | Purpose | Bash | PowerShell | Type |
 |---|---|---|---|
@@ -260,8 +247,6 @@ outputs before invoking Podman, then runs the build, optional preparation,
 requested recipe, and cleanup phases in order. Failures stop the invocation and
 run registered cleanup.
 
-### 8.2 Phase and security rules
-
 - Build arguments apply only when constructing a missing image. Use BuildKit
   secret mounts, not secret-bearing `--build-arg` values.
 - Preparation runs in a separate short-lived container with the standard
@@ -271,23 +256,19 @@ run registered cleanup.
   or preparation.
 - Cleanup runs after ordinary success, failure, or interactive-shell exit. It
   cannot run after forcible process termination or machine failure.
-- `$AnvilContainerBuildInMachine` runs a Windows-hosted build through `podman
-  machine ssh` when secret paths must be resolved inside the Podman machine.
 
 Customization authors are responsible for least-privilege credentials,
 user-restricted temporary files, read-only secret mounts, immediate cleanup
 registration, and equivalent Bash and PowerShell behavior. The driver cannot
 prevent trusted customization from exposing or persisting secrets.
 
-### 8.3 Image identity and compatibility
-
 `customize.*` is excluded from both image identity and the build context.
 Non-secret behavior that changes image contents belongs in hashed static files
 such as the `Containerfile`, entrypoint, or supporting build scripts.
 
-The paths, API version, documented inputs and outputs, phase isolation, cleanup
-behavior, and image-identity treatment form the compatibility contract.
-Customizations must not depend on other driver internals.
+The documented paths, variables, lifecycle, and image-identity behavior form
+the compatibility contract. Customizations must not depend on other driver
+internals.
 
 ## 9. Downstream extensibility
 
