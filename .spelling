@@ -26,6 +26,7 @@ AppError
 aprz
 args
 argv
+auth
 AspNet
 async
 auditable
@@ -185,6 +186,7 @@ interoperate
 invariants
 IOCP
 IP
+io
 jitter
 JSON
 JSON's
@@ -448,3 +450,6 @@ READMEs
 RUSTSEC
 UB
 subdirectory
+Containerfile
+Podman
+WSL

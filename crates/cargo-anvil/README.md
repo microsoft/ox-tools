@@ -94,6 +94,104 @@ runs perform impact analysis (via [`cargo-delta`][__link0])
 and run each check only over the affected packages, whereas a local
 `just anvil-pr` runs every check over the whole workspace.
 
+### Containerized local checks
+
+Anvil can run any generated recipe in a content-addressed Linux container.
+The image installs the Rust toolchains and Cargo tools pinned by the
+repository’s generated Anvil configuration, providing a repeatable Linux
+environment without installing those tools directly on the host.
+
+#### Prerequisites
+
+* Podman 4.3 or newer.
+* `git` and `just` on the host.
+* Bash on Linux, WSL, and macOS; `PowerShell` Core (`pwsh`) on Windows.
+* `[script]` support enabled in the root `Justfile` (`set unstable` when
+  required by the installed `just` version).
+* A repository-owned `rust-toolchain.toml`.
+* On Windows, a running Podman machine:
+
+```powershell
+podman machine init   # once
+podman machine start
+```
+
+#### Run a recipe
+
+```text
+just anvil-container anvil-clippy
+just anvil-container anvil-pr
+just anvil-container
+```
+
+The no-argument form opens an interactive shell. Anvil builds an image the
+first time it encounters a content hash and reuses it on later runs. Changes
+to the Rust toolchain, generated Anvil files, Containerfile, or other static
+image inputs select a new tag and build a new image. Images for earlier
+hashes remain available to older branches. Runtime `customize.*` files do not
+affect image identity.
+
+Cargo registry, Cargo Git, and `target/` data use named Podman volumes. The
+repository is mounted at `/workspace`; keeping build output in a named
+volume avoids slow host bind-mount I/O, particularly on Windows.
+
+#### Make tiers use the container
+
+Native execution remains the default. Enable container execution for the
+current shell:
+
+```powershell
+$env:ANVIL_RUNNER = "container"
+just anvil-pr
+```
+
+On Unix:
+
+```sh
+ANVIL_RUNNER=container just anvil-pr
+```
+
+A one-off override is also supported:
+
+```text
+just anvil_runner=container anvil-pr
+```
+
+To make containers the project default, edit `<repository-root>/Justfile`
+and change the default value in the `anvil-runner` region from `"native"`
+to `"container"`. Commit `<repository-root>/Justfile` with that policy
+change. Set `ANVIL_RUNNER=native` to override it for one shell.
+
+#### Controls
+
+|Variable|Effect|
+|--------|------|
+|`ANVIL_CONTAINER_IMAGE`|Override the local image name. The content hash remains the tag.|
+|`ANVIL_CONTAINER_NO_REBUILD=1`|Fail when the matching image is missing instead of building it.|
+
+The public driver never pulls `ANVIL_CONTAINER_IMAGE` remotely. Repositories
+and derived catalogs can add trusted `customize.sh` and
+`customize.ps1` files for image-build secrets, dependency preparation,
+runtime arguments, and cleanup through the documented compatibility version
+without changing the public command surface.
+For GitHub API checks, the driver automatically uses an existing host
+`GITHUB_TOKEN` or the token from an authenticated host `gh` CLI session. It
+mounts the token read-only for the command and removes the temporary file
+afterward. If `gh` is installed but not authenticated, an interactive run
+pauses before building the image, explains the unauthenticated API limit,
+and continues after the user completes `gh auth login` and presses Enter.
+
+#### Troubleshooting
+
+* A first-run image build is expected and may take several minutes.
+* `podman images anvil-dev` lists locally cached Anvil images.
+* `ANVIL_CONTAINER_NO_REBUILD=1` distinguishes a cache miss from a build
+  failure.
+* Non-interactive runs cannot pause for login. Authenticate `gh` or set host
+  `GITHUB_TOKEN` before starting them.
+* Regenerate managed files with `cargo anvil`; do not hand-edit
+  `justfiles/anvil/container/`.
+
 ### Checks and tiers
 
 Checks are grouped into **tiers** (`anvil-pr`, `anvil-scheduled`) that
@@ -312,7 +410,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbI_VKBuSOMRUbfx_41ISPNUAbU-pof2TAXRkbObPMDStfcEhhZIGDa2NhcmdvLWFudmlsZTAuMy4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG9Q9feJiiZWjGw__5pm8s72PGzBtV7_wUrbqG1C12c60XwCrYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

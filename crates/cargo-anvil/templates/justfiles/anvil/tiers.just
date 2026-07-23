@@ -12,7 +12,10 @@
 
 # Run all pull request checks.
 [group("anvil")]
-anvil-pr: anvil-pr-validate-prereqs \
+anvil-pr: (_anvil-run "pr" anvil_runner)
+
+[private]
+_anvil-pr: anvil-pr-validate-prereqs \
     anvil-pr-fast \
     anvil-pr-slow
 
@@ -23,7 +26,10 @@ anvil-pr: anvil-pr-validate-prereqs \
 
 # Run all scheduled checks.
 [group("anvil")]
-anvil-scheduled: anvil-scheduled-validate-prereqs \
+anvil-scheduled: (_anvil-run "scheduled" anvil_runner)
+
+[private]
+_anvil-scheduled: anvil-scheduled-validate-prereqs \
     anvil-scheduled-test \
     anvil-scheduled-advisories \
     anvil-scheduled-runtime-analysis \
@@ -31,9 +37,12 @@ anvil-scheduled: anvil-scheduled-validate-prereqs \
 
 # Full tier: PR + scheduled, end-to-end. Useful before tagging a release.
 [group("anvil")]
-anvil-full: anvil-full-validate-prereqs \
-    anvil-pr \
-    anvil-scheduled
+anvil-full: (_anvil-run "full" anvil_runner)
+
+[private]
+_anvil-full: anvil-full-validate-prereqs \
+    _anvil-pr \
+    _anvil-scheduled
 
 # Tier-level + global setup + validate-prereqs
 # ===========================================================================

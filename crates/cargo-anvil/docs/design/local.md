@@ -62,6 +62,12 @@ in `tools.just` (and the per-check/group/tier setup recipes colocated in the sam
 files) are annotated with `[group("anvil-setup")]`. `just --groups` therefore shows
 two clean clusters: one for "run checks", one for "install prereqs".
 
+> **Optional container backend.** When a catalog includes the opt-in container backend, an
+> additional `justfiles/anvil/container/` subtree adds one more recipe — `anvil-container <recipe>`
+> — that runs any of the recipes below inside a pinned Linux image (Linux-on-Windows parity, distro
+> pinning) instead of against the host toolchain. The recipe bodies are unchanged; see
+> [containers.md](./containers.md).
+
 ## 2. Recipe layers
 
 `justfiles/anvil/` is structured to make all three levels (check, group, tier) addressable
