@@ -2626,7 +2626,7 @@ try {
 
     if ($githubToken) {
         $githubTokenFile = Join-Path ([IO.Path]::GetTempPath()) "anvil-github-token-$PID-$([guid]::NewGuid().ToString('N'))"
-        [IO.File]::WriteAllText($githubTokenFile, $githubToken, [Text.Encoding]::ASCII)
+        [IO.File]::Create($githubTokenFile).Dispose()
         if ($IsWindows) {
             $userSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
             & icacls.exe $githubTokenFile '/inheritance:r' '/grant:r' "*$($userSid):(F)" | Out-Null
@@ -2636,6 +2636,7 @@ try {
         if ($LASTEXITCODE -ne 0) {
             throw 'anvil-container: failed to restrict permissions on the temporary GitHub token file.'
         }
+        [IO.File]::WriteAllText($githubTokenFile, $githubToken, [Text.Encoding]::ASCII)
         $githubToken = $null
         $githubRunArgs = @($runArgs)
         $githubRunArgs += @(

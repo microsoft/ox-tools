@@ -278,6 +278,25 @@ mod tests {
         assert!(POWERSHELL_DRIVER.contains("$singleQuote + $doubleQuote"));
         assert!(POWERSHELL_DRIVER.contains("ConvertTo-AnvilVersion"));
         assert!(POWERSHELL_DRIVER.contains("isolated anvil-aprz"));
+        let token_file_create_position = POWERSHELL_DRIVER
+            .find("[IO.File]::Create($githubTokenFile).Dispose()")
+            .expect("the temporary GitHub token file must be created before permissions are restricted");
+        let token_file_windows_restrict_position = POWERSHELL_DRIVER
+            .find("& icacls.exe $githubTokenFile")
+            .expect("the temporary GitHub token file must have a restricted Windows ACL");
+        let token_file_unix_restrict_position = POWERSHELL_DRIVER
+            .find("& chmod 600 $githubTokenFile")
+            .expect("the temporary GitHub token file must have restricted Unix permissions");
+        let token_file_write_position = POWERSHELL_DRIVER
+            .find("[IO.File]::WriteAllText($githubTokenFile")
+            .expect("the GitHub token must be written to the restricted temporary file");
+        assert!(
+            token_file_create_position < token_file_windows_restrict_position
+                && token_file_create_position < token_file_unix_restrict_position
+                && token_file_windows_restrict_position < token_file_write_position
+                && token_file_unix_restrict_position < token_file_write_position,
+            "the temporary GitHub token file must be restricted before the token is written"
+        );
         assert!(SHELL_DRIVER.contains("anvil_recipe_needs_github_token \"$1\""));
         assert!(!SHELL_DRIVER.contains("for recipe in \"$@\""));
         assert!(SHELL_DRIVER.contains("image-id.sh"));
