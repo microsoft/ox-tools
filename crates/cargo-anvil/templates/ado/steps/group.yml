@@ -6,11 +6,12 @@
 # The token __GROUP__ is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 #
-# No impact parameters: a PR group job downloads the `anvil-impact-<os>`
-# artifact into target/anvil/impact/ (via job.yml's inputArtifacts) and the
-# scoped checks read that cache via their `anvil-impact` dependency -- the same
-# code path as a local run. Scheduled group jobs download nothing and run
-# full-workspace (see the bash step).
+# The impact set reaches this group as the downloaded target/anvil/impact/
+# cache. A PR group job downloads the `anvil-impact-<os>` artifact into
+# target/anvil/impact/ (via job.yml's inputArtifacts) and the scoped checks
+# read that cache via their `anvil-impact` dependency -- the same code path as
+# a local run. Scheduled group jobs download nothing and run full-workspace
+# (see the bash step).
 steps:
   - template: setup.yml
     parameters:

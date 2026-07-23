@@ -541,8 +541,8 @@ threading pre-formatted strings the local run never produces. The chain:
    env vars: when a check's `anvil-impact` dependency runs, it finds the downloaded
    cache already fresh (`snapshots up to date` → `cache hit`) and **needs neither
    cargo-delta nor the base ref** — the recipe short-circuits on a present, matching
-   cache. Each scoped check self-populates `ANVIL_INCLUDE_<TIER>` from the cache file
-   via `_anvil-impact-include`.
+   cache. Each scoped check reads its tier's scope from the cache file via
+   `_anvil-impact-include` (into a local `$include` variable).
 4. **Scheduled stages download nothing** (they run full-workspace). The group step
    detects the absent cache (`target/anvil/impact/impact.state` missing) and exports
    `ANVIL_IMPACT=off`, so `anvil-impact` no-ops without cargo-delta and every tier
@@ -610,8 +610,8 @@ steps:
   displayName: anvil pr-fast
   env:
     PR_TITLE: $(PR_TITLE)
-    # No ANVIL_INCLUDE_* threading: on a PR job the target/anvil/impact
-    # artifact is downloaded and the checks read it; a scheduled job (no
+    # Scope comes from the downloaded target/anvil/impact cache: on a PR job
+    # the artifact is downloaded and the checks read it; a scheduled job (no
     # artifact) exports ANVIL_IMPACT=off in a preceding line so anvil-impact
     # no-ops and tiers default to --workspace.
 ```

@@ -7,12 +7,12 @@
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
 name: anvil-pr-test
 description: Run the pr-test check group.
-# No impact inputs: a PR group job downloads the `anvil-impact-<runner.os>`
-# artifact into target/anvil/impact/ BEFORE this action runs, and the scoped
-# checks read that cache directly (exactly like a local run) via their
-# `anvil-impact` dependency -- no include lists are threaded through inputs or
-# environment variables. Scheduled group jobs download nothing and run
-# full-workspace (see the run step).
+# The impact set reaches this action as the downloaded target/anvil/impact/
+# cache. A PR group job downloads the `anvil-impact-<runner.os>` artifact into
+# target/anvil/impact/ before this action runs, and the scoped checks read
+# that cache via their `anvil-impact` dependency -- the same code path as a
+# local run. Scheduled group jobs download nothing and run full-workspace
+# (see the run step).
 inputs:
   free-disk-space:
     description: Remove unused toolchains from GitHub-hosted runners before setup.

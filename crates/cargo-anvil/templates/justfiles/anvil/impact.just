@@ -32,6 +32,8 @@
 #     worktree is only recreated when the base actually moves.
 #   * current.json   -- snapshot of the working tree. Cheap. Keyed on
 #     <HEAD sha + working-tree-diff hash> (current.state).
+
+# Snapshot the base ref and working tree for impact analysis.
 [script("pwsh")]
 _anvil-impact-snapshot:
     $ErrorActionPreference = 'Stop'
@@ -197,6 +199,8 @@ _anvil-impact-snapshot:
 # helper, written to include_<tier>.txt. Per-crate checks depend on this
 # recipe and read those files via _anvil-impact-include. Cache-aware: no-ops
 # when the snapshots haven't changed.
+
+# Compute the impact set and write the target/anvil/impact cache.
 [group("anvil")]
 [script("pwsh")]
 anvil-impact: _anvil-impact-snapshot
@@ -291,9 +295,11 @@ anvil-impact: _anvil-impact-snapshot
 #   2. include_<tier>.txt present  -> its contents (a --package list or --skip).
 #   3. otherwise                   -> tier default.
 # Tier default: --workspace for affected/required; empty (run) for modified.
-# Scoped checks call this to self-populate ANVIL_INCLUDE_<TIER> for local
-# runs; in cloud workflows the impact step already threads that env var, so
-# the check's `if (-not $env:ANVIL_INCLUDE_<TIER>)` guard leaves it untouched.
+# Each scoped check calls this directly (into a local $include variable) to
+# read its tier's scope from the target/anvil/impact cache -- the same cache
+# both locally and in cloud workflows (where the group job downloaded it).
+
+# Resolve a tier's package scope from the impact cache.
 [script("pwsh")]
 _anvil-impact-include tier:
     $ErrorActionPreference = 'Stop'

@@ -594,9 +594,9 @@ threading pre-formatted strings that local runs never see. The chain in
    takes no impact inputs and threads no env vars; when a check's `anvil-impact`
    dependency runs, it finds the downloaded cache already fresh (`snapshots up to
    date` → `cache hit`) and **does not need cargo-delta or the base ref** — the recipe
-   short-circuits on a present, matching cache. Each scoped check then self-populates
-   `ANVIL_INCLUDE_<TIER>` from `target/anvil/impact/include_<tier>.txt` via
-   `_anvil-impact-include`.
+   short-circuits on a present, matching cache. Each scoped check then reads its tier's
+   scope from `target/anvil/impact/include_<tier>.txt` via `_anvil-impact-include` (into a
+   local `$include` variable).
 4. **Scheduled group jobs download nothing** (the scheduled tier runs full-workspace).
    The group action detects the absent cache (`target/anvil/impact/impact.state`
    missing) and exports `ANVIL_IMPACT=off`, so `anvil-impact` no-ops without cargo-delta

@@ -419,46 +419,47 @@ same way a PR does — not un-committed working-tree edits.
 
 ### 4.1 How checks consume it
 
-Every per-crate check depends on `anvil-impact` and, at the top of its body,
-self-populates its tier's pass-through env var from the cache when it isn't already set:
+Every per-crate check depends on `anvil-impact` and, at the top of its body, resolves its
+tier's scope into a local `$include` variable by calling `_anvil-impact-include`:
 
 ```just
 [script("pwsh")]
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if (-not $env:ANVIL_INCLUDE_AFFECTED) { $env:ANVIL_INCLUDE_AFFECTED = (& "{{ just_executable() }}" _anvil-impact-include affected) }
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    & cargo clippy @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' }) --all-targets --all-features --locked "--" '-D' 'warnings'
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    & cargo clippy @(if ($include) { -split $include } else { '--workspace' }) --all-targets --all-features --locked "--" '-D' 'warnings'
 ```
 
-The check body reads `ANVIL_INCLUDE_<TIER>` exactly as before — the self-populate line is
-the only addition. This one env-var contract serves both worlds:
+`_anvil-impact-include` reads `target/anvil/impact/` — the cache produced by the
+`: anvil-impact` dependency (which just ran with a cache hit). This one code path serves
+both worlds:
 
-* **Local** — the var is unset, so the check populates it from `target/anvil/impact/`
-  (produced by the `: anvil-impact` dependency, which just ran with a cache hit). Scoping
-  is therefore **on by default** for `just anvil-pr`.
-* **Cloud** — the impact job already threaded `ANVIL_INCLUDE_<TIER>` into the group job's
-  environment, so the `if (-not …)` guard leaves it untouched and no local recompute
-  happens.
+* **Local** — the check reads the cache the local `anvil-impact` run produced. Scoping is
+  therefore **on by default** for `just anvil-pr`.
+* **Cloud** — the group job downloaded the `target/anvil/impact/` artifact the impact job
+  uploaded, so the *same* `_anvil-impact-include` call reads the *same* cache — no scoping
+  is threaded between jobs via environment variables.
 
-There are three such env vars, one per cargo-delta tier:
+`$include` holds one of three shapes, per cargo-delta tier:
 
-| Env var                      | Bucket    | What recipes do with it                                                                       |
+| `$include` value             | Bucket    | What recipes do with it                                                                       |
 |------------------------------|-----------|------------------------------------------------------------------------------------------------|
-| `ANVIL_INCLUDE_MODIFIED`  | modified  | `--skip` → recipe exits 0. Otherwise: run unconditionally (modified-tier tools are workspace-wide). |
-| `ANVIL_INCLUDE_AFFECTED`  | affected  | `--skip` → recipe exits 0. Otherwise: splice the value into the cargo invocation, defaulting to `--workspace` when unset. |
-| `ANVIL_INCLUDE_REQUIRED`  | required  | Same semantics as `ANVIL_INCLUDE_AFFECTED`, but consumed by recipes that need transitive dep graph in scope (doc-build, cargo-hack, udeps). |
+| modified tier                | modified  | `--skip` → recipe exits 0. Otherwise: run unconditionally (modified-tier tools are workspace-wide). |
+| affected tier                | affected  | `--skip` → recipe exits 0. Otherwise: splice the value into the cargo invocation, defaulting to `--workspace` when empty. |
+| required tier                | required  | Same semantics as affected, but consumed by recipes that need the transitive dep graph in scope (doc-build, cargo-hack, udeps). |
 
-Each var holds either the literal sentinel `--skip` (the tier is empty), or a pre-built
+`$include` is either the literal sentinel `--skip` (the tier is empty), a pre-built
 argument string like `--package alpha@1.0.0 --package beta@0.2.0` (version-qualified cargo
-specs, so `-p` resolves uniquely even against a like-named transitive dependency). Both
-the local cache files and the cloud-threaded values use this same shape, because both are
-produced by the shared `_anvil-impact-format` helper.
+specs, so `-p` resolves uniquely even against a like-named transitive dependency), or a
+full-workspace default (`--workspace` for affected/required, empty for modified) when the
+tier is unscoped. Every value comes from the shared `_anvil-impact-format` helper via the
+cache.
 
 The mapping from check to bucket is fixed in the catalog (see
 [checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)). Unscoped checks
 (`pr-title`, `deny`, `audit`, `aprz`, `mutants-full`) take no `anvil-impact` dependency
-and ignore the vars entirely — they always run. Group recipes do not interpolate the vars
+and never resolve a scope — they always run. Group recipes do not resolve scope
 themselves; each underlying check reads what it needs.
 
 ### 4.2 The `--skip` sentinel

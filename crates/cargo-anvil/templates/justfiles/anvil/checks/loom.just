@@ -50,8 +50,8 @@
 [script("pwsh")]
 anvil-loom: anvil-loom-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if (-not $env:ANVIL_INCLUDE_AFFECTED) { $env:ANVIL_INCLUDE_AFFECTED = (& "{{ just_executable() }}" _anvil-impact-include affected) }
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($include -eq '--skip') {
         Write-Host 'anvil-loom: no affected packages; skipping'
         exit 0
     }
@@ -61,8 +61,8 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
     # Optional impact-scoping: recover bare package names from the
     # impact step's version-qualified `--package name@version` pairs.
     $affected = $null
-    if ($env:ANVIL_INCLUDE_AFFECTED) {
-        $tokens = @(-split $env:ANVIL_INCLUDE_AFFECTED)
+    if ($include) {
+        $tokens = @(-split $include)
         $affected = @()
         for ($i = 0; $i -lt $tokens.Count; $i++) {
             if ($tokens[$i] -eq '--package' -and ($i + 1) -lt $tokens.Count) {

@@ -112,7 +112,7 @@ flowchart LR
 |--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `semver-check`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
 | `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `llvm-cov` (instrumented `nextest`), `doc-test`, `examples`. Coverage is uploaded once from the canonical x86_64 Linux leg. |
-| `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped via `ANVIL_INCLUDE_AFFECTED` so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
+| `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped to the affected set so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
 | `pr-mutants`         | Linux x86_64 + Windows x86_64 + Linux aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | Diff-scoped mutation testing (`mutants --in-diff`). The recipe self-skips on `aarch64-pc-windows-msvc` (cargo-mutants doesn't build there), so the GH windows-arm leg is a no-op rather than a job failure. |
 
 The three `pr-slow*` groups are independent: failures in `pr-test` don't block `pr-runtime-analysis` or `pr-mutants` from running, and overall PR wall-clock is `max(pr-test, pr-runtime-analysis, pr-mutants)` per leg rather than the sum. Locally, `just anvil-pr-slow` is an umbrella recipe that runs all three sub-recipes sequentially so adopters who want "run everything slow" don't have to type three commands.
@@ -331,20 +331,21 @@ version-qualified cargo spec (`name@version`) so `-p` resolves uniquely to the w
 member even when a like-named crate is also pulled in as a different-versioned transitive
 dependency.
 
-Every per-crate check depends on `anvil-impact` and self-populates its tier's
-`ANVIL_INCLUDE_<TIER>` env var from that cache when it isn't already set, then consumes it.
-The **same** env-var contract is used in cloud workflows, where the impact job threads the
-values into each group job's environment (the self-populate guard then defers to them). So
-scoping is on by default both locally and in CI; it is disabled only by `ANVIL_IMPACT=off`
-(the scheduled/full tiers), which makes every tier resolve to its full-workspace default.
+Every per-crate check depends on `anvil-impact` and resolves its tier's scope by calling
+`_anvil-impact-include <tier>` into a local `$include` variable, then consumes it. The
+**same** cache is read in cloud workflows — the impact job uploads `target/anvil/impact/`
+as an artifact and each group job downloads it — so the identical code path runs locally
+and in CI, with no scoping threaded through environment variables. Scoping is on by
+default both locally and in CI; it is disabled only by `ANVIL_IMPACT=off` (the
+scheduled/full tiers), which makes every tier resolve to its full-workspace default.
 
 Each catalog check is tagged with one of four buckets:
 
-| Bucket    | Env var consumed              | Behavior when a tier value is present                                        | Behavior when unscoped (`ANVIL_IMPACT=off` / no cache) |
+| Bucket    | `$include` tier               | Behavior when a tier value is present                                        | Behavior when unscoped (`ANVIL_IMPACT=off` / no cache) |
 |-----------|-------------------------------|-----------------------------------------------------------------------------|--------------------------------------|
-| modified  | `ANVIL_INCLUDE_MODIFIED`   | If `--skip`: exit 0. Otherwise run unconditionally (tool is workspace-wide). | Run unconditionally.                 |
-| affected  | `ANVIL_INCLUDE_AFFECTED`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
-| required  | `ANVIL_INCLUDE_REQUIRED`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
+| modified  | `_anvil-impact-include modified`   | If `--skip`: exit 0. Otherwise run unconditionally (tool is workspace-wide). | Run unconditionally.                 |
+| affected  | `_anvil-impact-include affected`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
+| required  | `_anvil-impact-include required`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
 | unscoped  | *(none)*                       | Always run.                                                                  | Always run.                          |
 
 Bucket assignments per check:

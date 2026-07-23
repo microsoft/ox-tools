@@ -15,18 +15,18 @@
 # (regions/cargo-lints-body.toml) so non-miri builds don't warn.
 #
 # Under scheduled-runtime-analysis these profiles run full-workspace:
-# that tier sets ANVIL_IMPACT=off, so the self-populated
-# ANVIL_INCLUDE_AFFECTED resolves to --workspace. A direct local
-# invocation is impact-scoped like any other affected-tier check --
-# it self-populates from the anvil-impact cache and honors --skip.
+# that tier sets ANVIL_IMPACT=off, so _anvil-impact-include resolves
+# to --workspace. A direct local invocation is impact-scoped like any
+# other affected-tier check -- it reads the anvil-impact cache and
+# honors --skip.
 
 # Run Miri tests with the Tree Borrows model.
 [script("pwsh")]
 anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if (-not $env:ANVIL_INCLUDE_AFFECTED) { $env:ANVIL_INCLUDE_AFFECTED = (& "{{ just_executable() }}" _anvil-impact-include affected) }
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    $pkg = @(if ($include) { -split $include } else { '--workspace' })
     $env:MIRIFLAGS = "-Zmiri-tree-borrows $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_tree_borrows $($env:RUSTFLAGS)".Trim()
     & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg

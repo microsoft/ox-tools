@@ -272,23 +272,28 @@ mod tests {
 
     #[test]
     fn every_scoped_check_depends_on_and_reads_the_impact_cache() {
-        // A check is "scoped" iff its body references an ANVIL_INCLUDE_* var.
-        // Every such check must (a) depend on `anvil-impact` so the cache is
-        // fresh before it runs, and (b) self-populate its tier var from the
-        // cache via `_anvil-impact-include` for local runs.
+        // A check is "scoped" iff it resolves its package set from the impact
+        // cache via `_anvil-impact-include`. Every such check must depend on
+        // `anvil-impact` so the cache is fresh before it runs.
         let mut scoped = 0;
         for (path, body) in CHECK_FILES {
-            if !body.contains("ANVIL_INCLUDE_") {
+            if !body.contains("_anvil-impact-include") {
                 continue;
             }
             scoped += 1;
             assert!(
                 body.contains("-validate-prereqs anvil-impact"),
-                "{path} references ANVIL_INCLUDE_ but does not depend on anvil-impact"
+                "{path} reads the impact cache but does not depend on anvil-impact"
+            );
+            // The scope is captured into a local variable and consumed
+            // directly -- no ANVIL_INCLUDE_* env-var indirection.
+            assert!(
+                body.contains("$include = (& \"{{ just_executable() }}\" _anvil-impact-include"),
+                "{path} must capture _anvil-impact-include into a local $include variable"
             );
             assert!(
-                body.contains("_anvil-impact-include"),
-                "{path} references ANVIL_INCLUDE_ but never self-populates from the cache"
+                !body.contains("ANVIL_INCLUDE_"),
+                "{path} must not reference the removed ANVIL_INCLUDE_* env vars"
             );
         }
         assert_eq!(scoped, 25, "expected 25 scoped checks wired to anvil-impact");

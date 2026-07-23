@@ -14,9 +14,9 @@
 [script("pwsh")]
 anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if (-not $env:ANVIL_INCLUDE_REQUIRED) { $env:ANVIL_INCLUDE_REQUIRED = (& "{{ just_executable() }}" _anvil-impact-include required) }
-    if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
-    & cargo hack @(if ($env:ANVIL_INCLUDE_REQUIRED) { -split $env:ANVIL_INCLUDE_REQUIRED } else { '--workspace' }) --feature-powerset --depth 2 check
+    $include = (& "{{ just_executable() }}" _anvil-impact-include required)
+    if ($include -eq '--skip') { exit 0 }
+    & cargo hack @(if ($include) { -split $include } else { '--workspace' }) --feature-powerset --depth 2 check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-cargo-hack` recipe.
