@@ -678,13 +678,17 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # If no impact cache was downloaded (e.g. the scheduled tier, which runs
-      # full-workspace), disable scoping so the `anvil-impact` dependency of
-      # each check no-ops without cargo-delta and every tier defaults to
-      # --workspace. On a PR group job the target/anvil/impact artifact has
-      # been downloaded (job.yml inputArtifacts) and the checks read it -- the
-      # same code path as a local run.
-      if [ ! -f target/anvil/impact/impact.state ]; then
+      # Impact scoping mode for this group's checks:
+      #   * cache present (a PR group job downloaded the target/anvil/impact
+      #     artifact via job.yml inputArtifacts) -> "consume": the checks'
+      #     anvil-impact dependency trusts the downloaded cache verbatim -- no
+      #     snapshot, no cargo-delta, no base ref (none of which a group job
+      #     has).
+      #   * no cache (e.g. the scheduled tier, which runs full-workspace) ->
+      #     "off": anvil-impact no-ops and every tier defaults to --workspace.
+      if [ -f target/anvil/impact/impact.state ]; then
+        export ANVIL_IMPACT=consume
+      else
         export ANVIL_IMPACT=off
       fi
       just anvil-pr-fast
@@ -743,13 +747,17 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # If no impact cache was downloaded (e.g. the scheduled tier, which runs
-      # full-workspace), disable scoping so the `anvil-impact` dependency of
-      # each check no-ops without cargo-delta and every tier defaults to
-      # --workspace. On a PR group job the target/anvil/impact artifact has
-      # been downloaded (job.yml inputArtifacts) and the checks read it -- the
-      # same code path as a local run.
-      if [ ! -f target/anvil/impact/impact.state ]; then
+      # Impact scoping mode for this group's checks:
+      #   * cache present (a PR group job downloaded the target/anvil/impact
+      #     artifact via job.yml inputArtifacts) -> "consume": the checks'
+      #     anvil-impact dependency trusts the downloaded cache verbatim -- no
+      #     snapshot, no cargo-delta, no base ref (none of which a group job
+      #     has).
+      #   * no cache (e.g. the scheduled tier, which runs full-workspace) ->
+      #     "off": anvil-impact no-ops and every tier defaults to --workspace.
+      if [ -f target/anvil/impact/impact.state ]; then
+        export ANVIL_IMPACT=consume
+      else
         export ANVIL_IMPACT=off
       fi
       just anvil-pr-mutants
@@ -808,13 +816,17 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # If no impact cache was downloaded (e.g. the scheduled tier, which runs
-      # full-workspace), disable scoping so the `anvil-impact` dependency of
-      # each check no-ops without cargo-delta and every tier defaults to
-      # --workspace. On a PR group job the target/anvil/impact artifact has
-      # been downloaded (job.yml inputArtifacts) and the checks read it -- the
-      # same code path as a local run.
-      if [ ! -f target/anvil/impact/impact.state ]; then
+      # Impact scoping mode for this group's checks:
+      #   * cache present (a PR group job downloaded the target/anvil/impact
+      #     artifact via job.yml inputArtifacts) -> "consume": the checks'
+      #     anvil-impact dependency trusts the downloaded cache verbatim -- no
+      #     snapshot, no cargo-delta, no base ref (none of which a group job
+      #     has).
+      #   * no cache (e.g. the scheduled tier, which runs full-workspace) ->
+      #     "off": anvil-impact no-ops and every tier defaults to --workspace.
+      if [ -f target/anvil/impact/impact.state ]; then
+        export ANVIL_IMPACT=consume
+      else
         export ANVIL_IMPACT=off
       fi
       just anvil-pr-runtime-analysis
@@ -873,13 +885,17 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # If no impact cache was downloaded (e.g. the scheduled tier, which runs
-      # full-workspace), disable scoping so the `anvil-impact` dependency of
-      # each check no-ops without cargo-delta and every tier defaults to
-      # --workspace. On a PR group job the target/anvil/impact artifact has
-      # been downloaded (job.yml inputArtifacts) and the checks read it -- the
-      # same code path as a local run.
-      if [ ! -f target/anvil/impact/impact.state ]; then
+      # Impact scoping mode for this group's checks:
+      #   * cache present (a PR group job downloaded the target/anvil/impact
+      #     artifact via job.yml inputArtifacts) -> "consume": the checks'
+      #     anvil-impact dependency trusts the downloaded cache verbatim -- no
+      #     snapshot, no cargo-delta, no base ref (none of which a group job
+      #     has).
+      #   * no cache (e.g. the scheduled tier, which runs full-workspace) ->
+      #     "off": anvil-impact no-ops and every tier defaults to --workspace.
+      if [ -f target/anvil/impact/impact.state ]; then
+        export ANVIL_IMPACT=consume
+      else
         export ANVIL_IMPACT=off
       fi
       just anvil-pr-test
@@ -938,13 +954,17 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # If no impact cache was downloaded (e.g. the scheduled tier, which runs
-      # full-workspace), disable scoping so the `anvil-impact` dependency of
-      # each check no-ops without cargo-delta and every tier defaults to
-      # --workspace. On a PR group job the target/anvil/impact artifact has
-      # been downloaded (job.yml inputArtifacts) and the checks read it -- the
-      # same code path as a local run.
-      if [ ! -f target/anvil/impact/impact.state ]; then
+      # Impact scoping mode for this group's checks:
+      #   * cache present (a PR group job downloaded the target/anvil/impact
+      #     artifact via job.yml inputArtifacts) -> "consume": the checks'
+      #     anvil-impact dependency trusts the downloaded cache verbatim -- no
+      #     snapshot, no cargo-delta, no base ref (none of which a group job
+      #     has).
+      #   * no cache (e.g. the scheduled tier, which runs full-workspace) ->
+      #     "off": anvil-impact no-ops and every tier defaults to --workspace.
+      if [ -f target/anvil/impact/impact.state ]; then
+        export ANVIL_IMPACT=consume
+      else
         export ANVIL_IMPACT=off
       fi
       just anvil-scheduled-advisories
@@ -1003,13 +1023,17 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # If no impact cache was downloaded (e.g. the scheduled tier, which runs
-      # full-workspace), disable scoping so the `anvil-impact` dependency of
-      # each check no-ops without cargo-delta and every tier defaults to
-      # --workspace. On a PR group job the target/anvil/impact artifact has
-      # been downloaded (job.yml inputArtifacts) and the checks read it -- the
-      # same code path as a local run.
-      if [ ! -f target/anvil/impact/impact.state ]; then
+      # Impact scoping mode for this group's checks:
+      #   * cache present (a PR group job downloaded the target/anvil/impact
+      #     artifact via job.yml inputArtifacts) -> "consume": the checks'
+      #     anvil-impact dependency trusts the downloaded cache verbatim -- no
+      #     snapshot, no cargo-delta, no base ref (none of which a group job
+      #     has).
+      #   * no cache (e.g. the scheduled tier, which runs full-workspace) ->
+      #     "off": anvil-impact no-ops and every tier defaults to --workspace.
+      if [ -f target/anvil/impact/impact.state ]; then
+        export ANVIL_IMPACT=consume
+      else
         export ANVIL_IMPACT=off
       fi
       just anvil-scheduled-exhaustive
@@ -1068,13 +1092,17 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # If no impact cache was downloaded (e.g. the scheduled tier, which runs
-      # full-workspace), disable scoping so the `anvil-impact` dependency of
-      # each check no-ops without cargo-delta and every tier defaults to
-      # --workspace. On a PR group job the target/anvil/impact artifact has
-      # been downloaded (job.yml inputArtifacts) and the checks read it -- the
-      # same code path as a local run.
-      if [ ! -f target/anvil/impact/impact.state ]; then
+      # Impact scoping mode for this group's checks:
+      #   * cache present (a PR group job downloaded the target/anvil/impact
+      #     artifact via job.yml inputArtifacts) -> "consume": the checks'
+      #     anvil-impact dependency trusts the downloaded cache verbatim -- no
+      #     snapshot, no cargo-delta, no base ref (none of which a group job
+      #     has).
+      #   * no cache (e.g. the scheduled tier, which runs full-workspace) ->
+      #     "off": anvil-impact no-ops and every tier defaults to --workspace.
+      if [ -f target/anvil/impact/impact.state ]; then
+        export ANVIL_IMPACT=consume
+      else
         export ANVIL_IMPACT=off
       fi
       just anvil-scheduled-runtime-analysis
@@ -1133,13 +1161,17 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # If no impact cache was downloaded (e.g. the scheduled tier, which runs
-      # full-workspace), disable scoping so the `anvil-impact` dependency of
-      # each check no-ops without cargo-delta and every tier defaults to
-      # --workspace. On a PR group job the target/anvil/impact artifact has
-      # been downloaded (job.yml inputArtifacts) and the checks read it -- the
-      # same code path as a local run.
-      if [ ! -f target/anvil/impact/impact.state ]; then
+      # Impact scoping mode for this group's checks:
+      #   * cache present (a PR group job downloaded the target/anvil/impact
+      #     artifact via job.yml inputArtifacts) -> "consume": the checks'
+      #     anvil-impact dependency trusts the downloaded cache verbatim -- no
+      #     snapshot, no cargo-delta, no base ref (none of which a group job
+      #     has).
+      #   * no cache (e.g. the scheduled tier, which runs full-workspace) ->
+      #     "off": anvil-impact no-ops and every tier defaults to --workspace.
+      if [ -f target/anvil/impact/impact.state ]; then
+        export ANVIL_IMPACT=consume
+      else
         export ANVIL_IMPACT=off
       fi
       just anvil-scheduled-test
@@ -3791,6 +3823,13 @@ _anvil-impact-format tier impactJson:
 # `just` runs dependencies in that same environment, the guard is honored
 # even when these recipes run as a `: anvil-impact` dependency of a check.
 # This is how the scheduled tier stays full-workspace.
+#
+# Set ANVIL_IMPACT=consume when an authoritative target/anvil/impact cache is
+# already present and must be trusted verbatim -- e.g. a cloud-workflow group
+# job that downloaded the impact artifact the impact job produced. In that
+# mode anvil-impact is a pure no-op: it neither snapshots nor recomputes (so
+# it needs neither cargo-delta nor a fetched base ref, which group jobs lack),
+# and the checks read the downloaded include_<tier>.txt files directly.
 
 # Private. Produces the two cargo-delta snapshots under
 # target/anvil/impact/snapshots/ with two independent cache keys:
@@ -3804,7 +3843,7 @@ _anvil-impact-format tier impactJson:
 [script("pwsh")]
 _anvil-impact-snapshot:
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_IMPACT -eq 'off') { exit 0 }
+    if ($env:ANVIL_IMPACT -eq 'off' -or $env:ANVIL_IMPACT -eq 'consume') { exit 0 }
 
     $impactDir = 'target/anvil/impact'
     $snapDir = Join-Path $impactDir 'snapshots'
@@ -3972,7 +4011,7 @@ _anvil-impact-snapshot:
 [script("pwsh")]
 anvil-impact: _anvil-impact-snapshot
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_IMPACT -eq 'off') { exit 0 }
+    if ($env:ANVIL_IMPACT -eq 'off' -or $env:ANVIL_IMPACT -eq 'consume') { exit 0 }
 
     $impactDir = 'target/anvil/impact'
     $snapDir = Join-Path $impactDir 'snapshots'

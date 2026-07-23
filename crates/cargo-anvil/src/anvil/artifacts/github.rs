@@ -198,6 +198,7 @@ mod tests {
             !body.contains("ANVIL_INCLUDE_"),
             "group action must not thread ANVIL_INCLUDE_* env vars"
         );
+        assert!(body.contains("ANVIL_IMPACT=consume"));
         assert!(body.contains("ANVIL_IMPACT=off"));
         assert!(body.contains("target/anvil/impact/impact.state"));
     }
@@ -211,6 +212,7 @@ mod tests {
         assert!(!body.contains("include_affected:"));
         assert!(!body.contains("include_required:"));
         // A scheduled group has no impact artifact -> full workspace.
+        assert!(body.contains("ANVIL_IMPACT=consume"));
         assert!(body.contains("ANVIL_IMPACT=off"));
     }
 

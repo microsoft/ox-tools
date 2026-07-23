@@ -35,13 +35,16 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # If no impact cache is present (no artifact was downloaded -- e.g. the
-        # scheduled tier, which runs full-workspace), disable scoping so the
-        # `anvil-impact` dependency of each check no-ops without needing
-        # cargo-delta and every tier defaults to --workspace. When a PR group
-        # job HAS downloaded the target/anvil/impact artifact, the cache is
-        # present and the checks read it -- the same code path as a local run.
-        if [ ! -f target/anvil/impact/impact.state ]; then
+        # Impact scoping mode for this group's checks:
+        #   * cache present (a PR group job downloaded the target/anvil/impact
+        #     artifact) -> "consume": the checks' anvil-impact dependency trusts
+        #     the downloaded cache verbatim -- no snapshot, no cargo-delta, no
+        #     base ref (none of which a group job has).
+        #   * no cache (e.g. the scheduled tier, which runs full-workspace) ->
+        #     "off": anvil-impact no-ops and every tier defaults to --workspace.
+        if [ -f target/anvil/impact/impact.state ]; then
+          export ANVIL_IMPACT=consume
+        else
           export ANVIL_IMPACT=off
         fi
         just anvil-pr-mutants

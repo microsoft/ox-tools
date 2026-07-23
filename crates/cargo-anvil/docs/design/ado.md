@@ -537,16 +537,15 @@ threading pre-formatted strings the local run never produces. The chain:
    matching `anvil-impact-<os>` artifact into `target/anvil/impact/` via `job.yml`'s
    `inputArtifacts:` param (a `DownloadPipelineArtifact@2` task by default, overridable
    by a 1ESPT `job.yml`).
-3. **The group step template** runs `just anvil-<group>`. It threads no impact params or
-   env vars: when a check's `anvil-impact` dependency runs, it finds the downloaded
-   cache already fresh (`snapshots up to date` → `cache hit`) and **needs neither
-   cargo-delta nor the base ref** — the recipe short-circuits on a present, matching
-   cache. Each scoped check reads its tier's scope from the cache file via
-   `_anvil-impact-include` (into a local `$include` variable).
-4. **Scheduled stages download nothing** (they run full-workspace). The group step
-   detects the absent cache (`target/anvil/impact/impact.state` missing) and exports
-   `ANVIL_IMPACT=off`, so `anvil-impact` no-ops without cargo-delta and every tier
-   defaults to `--workspace`.
+3. **The group step template** runs `just anvil-<group>` with `ANVIL_IMPACT=consume` (it
+   sees the downloaded cache's `impact.state`). In consume mode `anvil-impact` is a pure
+   no-op — it trusts the downloaded cache verbatim and **neither snapshots nor
+   recomputes**, so it needs neither cargo-delta nor a fetched base ref. Each scoped
+   check reads its tier's scope from the cache file via `_anvil-impact-include` (into a
+   local `$include` variable).
+4. **Scheduled stages download nothing** (they run full-workspace). The group step sees
+   no `target/anvil/impact/impact.state` and instead exports `ANVIL_IMPACT=off`, so
+   `anvil-impact` no-ops and every tier defaults to `--workspace`.
 
 The pr-* stages gate on the impact stage *succeeding* (the default `succeeded()`
 condition on their `dependsOn: impact`): if impact fails, pr-* are skipped and the
@@ -610,10 +609,10 @@ steps:
   displayName: anvil pr-fast
   env:
     PR_TITLE: $(PR_TITLE)
-    # Scope comes from the downloaded target/anvil/impact cache: on a PR job
-    # the artifact is downloaded and the checks read it; a scheduled job (no
-    # artifact) exports ANVIL_IMPACT=off in a preceding line so anvil-impact
-    # no-ops and tiers default to --workspace.
+    # Scope comes from the downloaded target/anvil/impact cache: a PR job sets
+    # ANVIL_IMPACT=consume (trust the downloaded cache; no snapshot/cargo-delta/
+    # base ref) in a preceding line, and a scheduled job (no artifact) sets
+    # ANVIL_IMPACT=off so anvil-impact no-ops and tiers default to --workspace.
 ```
 
 The only per-group parameters are the PR-context strings a group's checks consume:

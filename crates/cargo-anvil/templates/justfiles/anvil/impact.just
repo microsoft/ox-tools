@@ -24,6 +24,13 @@
 # `just` runs dependencies in that same environment, the guard is honored
 # even when these recipes run as a `: anvil-impact` dependency of a check.
 # This is how the scheduled tier stays full-workspace.
+#
+# Set ANVIL_IMPACT=consume when an authoritative target/anvil/impact cache is
+# already present and must be trusted verbatim -- e.g. a cloud-workflow group
+# job that downloaded the impact artifact the impact job produced. In that
+# mode anvil-impact is a pure no-op: it neither snapshots nor recomputes (so
+# it needs neither cargo-delta nor a fetched base ref, which group jobs lack),
+# and the checks read the downloaded include_<tier>.txt files directly.
 
 # Private. Produces the two cargo-delta snapshots under
 # target/anvil/impact/snapshots/ with two independent cache keys:
@@ -37,7 +44,7 @@
 [script("pwsh")]
 _anvil-impact-snapshot:
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_IMPACT -eq 'off') { exit 0 }
+    if ($env:ANVIL_IMPACT -eq 'off' -or $env:ANVIL_IMPACT -eq 'consume') { exit 0 }
 
     $impactDir = 'target/anvil/impact'
     $snapDir = Join-Path $impactDir 'snapshots'
@@ -205,7 +212,7 @@ _anvil-impact-snapshot:
 [script("pwsh")]
 anvil-impact: _anvil-impact-snapshot
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_IMPACT -eq 'off') { exit 0 }
+    if ($env:ANVIL_IMPACT -eq 'off' -or $env:ANVIL_IMPACT -eq 'consume') { exit 0 }
 
     $impactDir = 'target/anvil/impact'
     $snapDir = Join-Path $impactDir 'snapshots'

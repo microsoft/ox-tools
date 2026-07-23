@@ -496,11 +496,13 @@ runs:
       env:
         PR_TITLE: ${{ inputs.pr_title }}
       run: |
-        # If no impact cache was downloaded (e.g. the scheduled tier, which
-        # runs full-workspace), disable scoping so anvil-impact no-ops without
-        # cargo-delta and tiers default to --workspace. On a PR group job the
-        # target/anvil/impact artifact is present and the checks read it.
-        if [ ! -f target/anvil/impact/impact.state ]; then
+        # consume: a PR group job downloaded the impact cache -> trust it
+        # verbatim (no snapshot, no cargo-delta, no base ref). off: no cache
+        # (scheduled tier) -> anvil-impact no-ops and tiers default to
+        # --workspace.
+        if [ -f target/anvil/impact/impact.state ]; then
+          export ANVIL_IMPACT=consume
+        else
           export ANVIL_IMPACT=off
         fi
         just anvil-pr-fast
@@ -590,17 +592,18 @@ threading pre-formatted strings that local runs never see. The chain in
    checkout, downloads the matching leg's artifact into `target/anvil/impact/`,
    selecting by matrix OS — e.g.
    `name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}`.
-3. **The group composite action** (`group-action.yml`) runs `just anvil-<group>`. It
-   takes no impact inputs and threads no env vars; when a check's `anvil-impact`
-   dependency runs, it finds the downloaded cache already fresh (`snapshots up to
-   date` → `cache hit`) and **does not need cargo-delta or the base ref** — the recipe
-   short-circuits on a present, matching cache. Each scoped check then reads its tier's
-   scope from `target/anvil/impact/include_<tier>.txt` via `_anvil-impact-include` (into a
-   local `$include` variable).
+3. **The group composite action** (`group-action.yml`) runs `just anvil-<group>` with
+   `ANVIL_IMPACT=consume` (it sees the downloaded cache's `impact.state`). In consume
+   mode `anvil-impact` is a pure no-op — it trusts the downloaded cache verbatim and
+   **neither snapshots nor recomputes**, so it needs neither cargo-delta nor a fetched
+   base ref (a group job installs the former and shallow-checks-out without the latter).
+   Each scoped check then reads its tier's scope from
+   `target/anvil/impact/include_<tier>.txt` via `_anvil-impact-include` (into a local
+   `$include` variable). This is why the group jobs stay lean and can't be tripped up by
+   an environmental difference from the impact job.
 4. **Scheduled group jobs download nothing** (the scheduled tier runs full-workspace).
-   The group action detects the absent cache (`target/anvil/impact/impact.state`
-   missing) and exports `ANVIL_IMPACT=off`, so `anvil-impact` no-ops without cargo-delta
-   and every tier defaults to `--workspace`.
+   The group action sees no `target/anvil/impact/impact.state` and instead exports
+   `ANVIL_IMPACT=off`, so `anvil-impact` no-ops and every tier defaults to `--workspace`.
 
 The wiring never gates jobs on the impact result — every job runs regardless of `--skip`
 status. This is intentional: unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,

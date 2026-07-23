@@ -316,6 +316,53 @@ fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
 }
 
 #[test]
+fn impact_consume_mode_trusts_cache_without_recompute() {
+    if !tools_available() {
+        return;
+    }
+    // A cloud-workflow group job downloads the impact artifact, then runs its
+    // checks with ANVIL_IMPACT=consume. anvil-impact must be a pure no-op that
+    // trusts the present cache -- even when the fast path would NOT apply
+    // (working tree changed since the cache was produced) and the base ref is
+    // unresolvable and cargo-delta is unavailable, none of which a group job
+    // can satisfy.
+    let tmp = workspace();
+    let root = tmp.path();
+    run_impact(root); // the "impact job" produces the cache
+    let expected = std::fs::read_to_string(root.join("target/anvil/impact/include_affected.txt"))
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    // Perturb the tree so the fast path's current.state would NOT match.
+    write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn later() {}\n");
+
+    let out = Command::new("just")
+        .args(["--justfile", "Justfile", "anvil-impact"])
+        .env("ANVIL_IMPACT", "consume")
+        .env("BASE_REF", "refs/heads/anvil-does-not-exist")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "consume run failed:\n{combined}");
+    assert!(
+        !combined.contains("napshotting"),
+        "consume must not (re)snapshot -- cargo-delta must not be needed:\n{combined}"
+    );
+
+    // A scoped check resolves its tier scope from the downloaded cache.
+    let inc = Command::new("just")
+        .args(["--justfile", "Justfile", "_anvil-impact-include", "affected"])
+        .env("ANVIL_IMPACT", "consume")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(inc.status.success());
+    assert_eq!(String::from_utf8_lossy(&inc.stdout).trim(), expected);
+}
+
+#[test]
 fn impact_consumer_reuses_cache_with_unresolvable_base() {
     if !tools_available() {
         return;

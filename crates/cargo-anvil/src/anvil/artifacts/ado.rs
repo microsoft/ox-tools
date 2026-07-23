@@ -281,6 +281,7 @@ mod tests {
             "group step must not thread ANVIL_INCLUDE_* env vars"
         );
         // No impact cache present (scheduled tier) -> full workspace.
+        assert!(body.contains("ANVIL_IMPACT=consume"));
         assert!(body.contains("ANVIL_IMPACT=off"));
         assert!(body.contains("target/anvil/impact/impact.state"));
         // PR_TITLE is resolved from the REST API (ADO has no PR-title
