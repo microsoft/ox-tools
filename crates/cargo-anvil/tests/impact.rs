@@ -133,21 +133,36 @@ fn workspace() -> TempDir {
     tmp
 }
 
-/// Run `just anvil-impact` and return combined stdout+stderr. Asserts success.
+/// A `just <args>` Command rooted in the test workspace with every
+/// CI-injected environment influence that would otherwise leak into the
+/// recipe scrubbed:
 ///
-/// Clears `ANVIL_IMPACT` so the recipe exercises its default compute path even
-/// when the surrounding job exported a mode (a cloud group job runs its checks
-/// under `ANVIL_IMPACT=consume`/`off`, and one of those checks -- the coverage
-/// suite -- is what drives these tests; without this the spawned recipe would
-/// inherit that mode and no-op). Tests that want a specific mode set it on
-/// their own `Command`.
-fn run_impact(root: &Path) -> String {
-    let out = Command::new("just")
-        .args(["--justfile", "Justfile", "anvil-impact"])
+/// - `ANVIL_IMPACT`: a cloud group job runs its checks under `consume`/`off`,
+///   and one of those checks (the coverage/mutants suite) is what drives these
+///   tests; inherited, the temp-repo recipe would no-op instead of computing.
+/// - `BASE_REF` / `GITHUB_BASE_REF` / `SYSTEM_PULLREQUEST_TARGETBRANCH`: on a
+///   PR build these point at the *outer* repo's base (e.g.
+///   `GITHUB_BASE_REF=main`); inherited, `_anvil-base-ref` would resolve
+///   `origin/main`, which does not exist in the temp repo (whose base is
+///   `origin/master`), and the snapshot would fail base-ref resolution.
+///
+/// Tests that need a specific mode or base set the var back on the returned
+/// Command.
+fn just_cmd(root: &Path, args: &[&str]) -> Command {
+    let mut cmd = Command::new("just");
+    cmd.args(["--justfile", "Justfile"])
+        .args(args)
         .env_remove("ANVIL_IMPACT")
-        .current_dir(root)
-        .output()
-        .unwrap();
+        .env_remove("BASE_REF")
+        .env_remove("GITHUB_BASE_REF")
+        .env_remove("SYSTEM_PULLREQUEST_TARGETBRANCH")
+        .current_dir(root);
+    cmd
+}
+
+/// Run `just anvil-impact` and return combined stdout+stderr. Asserts success.
+fn run_impact(root: &Path) -> String {
+    let out = just_cmd(root, &["anvil-impact"]).output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "just anvil-impact failed:\n{combined}");
     combined
@@ -247,10 +262,8 @@ fn impact_off_short_circuits_without_computing() {
     let tmp = workspace();
     let root = tmp.path();
 
-    let out = Command::new("just")
-        .args(["--justfile", "Justfile", "anvil-impact"])
+    let out = just_cmd(root, &["anvil-impact"])
         .env("ANVIL_IMPACT", "off")
-        .current_dir(root)
         .output()
         .unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -345,11 +358,9 @@ fn impact_consume_mode_trusts_cache_without_recompute() {
     // Perturb the tree so the fast path's current.state would NOT match.
     write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn later() {}\n");
 
-    let out = Command::new("just")
-        .args(["--justfile", "Justfile", "anvil-impact"])
+    let out = just_cmd(root, &["anvil-impact"])
         .env("ANVIL_IMPACT", "consume")
         .env("BASE_REF", "refs/heads/anvil-does-not-exist")
-        .current_dir(root)
         .output()
         .unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -360,10 +371,8 @@ fn impact_consume_mode_trusts_cache_without_recompute() {
     );
 
     // A scoped check resolves its tier scope from the downloaded cache.
-    let inc = Command::new("just")
-        .args(["--justfile", "Justfile", "_anvil-impact-include", "affected"])
+    let inc = just_cmd(root, &["_anvil-impact-include", "affected"])
         .env("ANVIL_IMPACT", "consume")
-        .current_dir(root)
         .output()
         .unwrap();
     assert!(inc.status.success());
@@ -386,11 +395,8 @@ fn impact_consumer_reuses_cache_with_unresolvable_base() {
 
     // BASE_REF points at a ref that does not exist locally, standing in for a
     // shallow consumer checkout where origin/<base> was never fetched.
-    let out = Command::new("just")
-        .args(["--justfile", "Justfile", "anvil-impact"])
-        .env_remove("ANVIL_IMPACT")
+    let out = just_cmd(root, &["anvil-impact"])
         .env("BASE_REF", "refs/heads/anvil-does-not-exist")
-        .current_dir(root)
         .output()
         .unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
