@@ -2,12 +2,7 @@
 // Licensed under the MIT License.
 
 #![cfg(not(miri))] // miri can't sandbox the git/cargo/just subprocesses these tests drive.
-#![expect(
-    clippy::unwrap_used,
-    clippy::panic,
-    clippy::expect_used,
-    reason = "integration tests favor concise assertions over Result plumbing"
-)]
+#![expect(clippy::unwrap_used, reason = "integration tests favor concise assertions over Result plumbing")]
 
 //! Behavioral tests for the `anvil-impact` recipe's two-key cache.
 //!
