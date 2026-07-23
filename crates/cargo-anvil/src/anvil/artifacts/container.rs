@@ -269,6 +269,8 @@ mod tests {
         assert!(IMAGE_ID.contains("[StringComparer]::Ordinal"));
         assert!(POWERSHELL_DRIVER.contains("AnvilContainerPrepareCommand"));
         assert!(POWERSHELL_DRIVER.contains("podman machine ssh"));
+        assert!(POWERSHELL_DRIVER.contains("git rev-parse --show-toplevel 2>$null"));
+        assert!(IMAGE_ID.contains("git rev-parse --show-toplevel 2>$null"));
         assert!(POWERSHELL_DRIVER.contains("Test-AnvilRecipeNeedsGitHubToken $Recipe[0]"));
         assert!(!POWERSHELL_DRIVER.contains("foreach ($name in $Recipe)"));
         assert!(POWERSHELL_DRIVER.contains("[Console]::IsInputRedirected"));

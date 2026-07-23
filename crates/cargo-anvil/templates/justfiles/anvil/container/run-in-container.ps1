@@ -88,7 +88,7 @@ if ((ConvertTo-AnvilVersion $versionText) -lt [version]'4.3.0') {
     throw "anvil-container: Podman 4.3.0 or newer is required (found $versionText)."
 }
 
-$repoRoot = (git rev-parse --show-toplevel).Trim()
+$repoRoot = (git rev-parse --show-toplevel 2>$null).Trim()
 if ($LASTEXITCODE -ne 0 -or -not $repoRoot) {
     throw 'anvil-container must run from a Git repository.'
 }
