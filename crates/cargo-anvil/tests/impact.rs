@@ -134,9 +134,17 @@ fn workspace() -> TempDir {
 }
 
 /// Run `just anvil-impact` and return combined stdout+stderr. Asserts success.
+///
+/// Clears `ANVIL_IMPACT` so the recipe exercises its default compute path even
+/// when the surrounding job exported a mode (a cloud group job runs its checks
+/// under `ANVIL_IMPACT=consume`/`off`, and one of those checks -- the coverage
+/// suite -- is what drives these tests; without this the spawned recipe would
+/// inherit that mode and no-op). Tests that want a specific mode set it on
+/// their own `Command`.
 fn run_impact(root: &Path) -> String {
     let out = Command::new("just")
         .args(["--justfile", "Justfile", "anvil-impact"])
+        .env_remove("ANVIL_IMPACT")
         .current_dir(root)
         .output()
         .unwrap();
@@ -380,6 +388,7 @@ fn impact_consumer_reuses_cache_with_unresolvable_base() {
     // shallow consumer checkout where origin/<base> was never fetched.
     let out = Command::new("just")
         .args(["--justfile", "Justfile", "anvil-impact"])
+        .env_remove("ANVIL_IMPACT")
         .env("BASE_REF", "refs/heads/anvil-does-not-exist")
         .current_dir(root)
         .output()
