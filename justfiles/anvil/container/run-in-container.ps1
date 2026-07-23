@@ -30,7 +30,6 @@ function ConvertTo-AnvilVersion([string]$Value) {
 }
 
 function Test-AnvilContainerStringArray([string]$Name, $Value) {
-    if ($null -eq $Value) { return }
     if ($Value -isnot [array]) {
         throw "anvil-container: `$$Name must be a string array."
     }

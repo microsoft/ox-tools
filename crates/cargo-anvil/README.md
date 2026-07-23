@@ -170,9 +170,10 @@ change. Set `ANVIL_RUNNER=native` to override it for one shell.
 |`ANVIL_CONTAINER_NO_REBUILD=1`|Fail when the matching image is missing instead of building it.|
 
 The public driver never pulls `ANVIL_CONTAINER_IMAGE` remotely. Repositories
-and derived catalogs can add trusted, versioned `customize.sh` and
+and derived catalogs can add trusted `customize.sh` and
 `customize.ps1` files for image-build secrets, dependency preparation,
-runtime arguments, and cleanup without changing the public command surface.
+runtime arguments, and cleanup through the documented compatibility version
+without changing the public command surface.
 For GitHub API checks, the driver automatically uses an existing host
 `GITHUB_TOKEN` or the token from an authenticated host `gh` CLI session. It
 mounts the token read-only for the command and removes the temporary file
@@ -409,7 +410,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEGxLtBBCiL8sxG2whPjHRuUEvG1p_5w9m6Y7kG__Bw70tYKJRYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG9Q9feJiiZWjGw__5pm8s72PGzBtV7_wUrbqG1C12c60XwCrYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

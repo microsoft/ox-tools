@@ -108,7 +108,7 @@ pub fn readme() -> Artifact {
 /// file through this constructor. The driver loads it whenever present,
 /// regardless of provenance. See
 /// [the container customization contract](../../../docs/design/containers.md)
-/// for the versioned runtime interface.
+/// for the runtime interface and its compatibility version.
 #[must_use]
 pub fn customize_shell(body: impl Into<String>) -> Artifact {
     Artifact::owned_file(CUSTOMIZE_SHELL_PATH, body)

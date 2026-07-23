@@ -7,11 +7,15 @@
     clippy::unwrap_used,
     reason = "panic-on-failure idioms are appropriate in tests"
 )]
+#![expect(
+    clippy::literal_string_with_formatting_args,
+    reason = "the Bash fixture intentionally contains shell parameter expansions"
+)]
 
 //! Driver-level verification of the `customize.sh` runtime contract from
 //! [`containers.md`](../docs/design/containers.md#8-container-customization).
 //!
-//! This is the Bash mirror of `container_customization.rs`'s PowerShell
+//! This is the Bash mirror of `container_customization.rs`'s `PowerShell`
 //! driver tests. It generates the real `justfiles/anvil/container/` tree
 //! with [`cargo_anvil::test_support::run_update`], then runs the generated
 //! `run-in-container.sh` against a fake `podman` on `PATH` so the driver's
@@ -238,9 +242,9 @@ printf 'exists=%s\n' "$ANVIL_CONTAINER_IMAGE_EXISTS" >> "$FAKE_TEST_LOG"
 fn prepare_args_without_a_prepare_command_are_rejected_before_podman_runs() {
     let tmp = repo_with_container();
     let root = tmp.path();
-    let customize = r#"
+    let customize = r"
 ANVIL_CONTAINER_PREPARE_ARGS=(--label 'prepare-marker=1')
-"#;
+";
     let run = run_driver(root, customize, "anvil-clippy", &[]);
 
     assert!(!run.status.success(), "prepare args without a prepare command must fail validation");
@@ -291,10 +295,10 @@ ANVIL_CONTAINER_CLEANUP=anvil_test_cleanup
 fn build_and_run_phase_arguments_stay_isolated() {
     let tmp = repo_with_container();
     let root = tmp.path();
-    let customize = r#"
+    let customize = r"
 ANVIL_CONTAINER_BUILD_ARGS=(--label 'build-marker=1')
 ANVIL_CONTAINER_RUN_ARGS=(--label 'run-marker=1')
-"#;
+";
     let run = run_driver(root, customize, "anvil-clippy", &[]);
 
     assert!(

@@ -169,9 +169,10 @@
 //! | `ANVIL_CONTAINER_NO_REBUILD=1` | Fail when the matching image is missing instead of building it. |
 //!
 //! The public driver never pulls `ANVIL_CONTAINER_IMAGE` remotely. Repositories
-//! and derived catalogs can add trusted, versioned `customize.sh` and
+//! and derived catalogs can add trusted `customize.sh` and
 //! `customize.ps1` files for image-build secrets, dependency preparation,
-//! runtime arguments, and cleanup without changing the public command surface.
+//! runtime arguments, and cleanup through the documented compatibility version
+//! without changing the public command surface.
 //! For GitHub API checks, the driver automatically uses an existing host
 //! `GITHUB_TOKEN` or the token from an authenticated host `gh` CLI session. It
 //! mounts the token read-only for the command and removes the temporary file
