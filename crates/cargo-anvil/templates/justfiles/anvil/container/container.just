@@ -8,7 +8,7 @@
 [group("anvil-container")]
 [script("pwsh")]
 anvil-container *recipe:
-    $requested = @('{{recipe}}' -split '\s+' | Where-Object { $_ })
+    $requested = @('{{ replace(recipe, "'", "''") }}' -split '\s+' | Where-Object { $_ })
     & 'justfiles/anvil/container/run-in-container.ps1' @requested
     exit $LASTEXITCODE
 

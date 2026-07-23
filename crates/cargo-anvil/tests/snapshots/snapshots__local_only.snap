@@ -2214,7 +2214,7 @@ justfiles/anvil/container/customize.ps1
 [group("anvil-container")]
 [script("pwsh")]
 anvil-container *recipe:
-    $requested = @('{{recipe}}' -split '\s+' | Where-Object { $_ })
+    $requested = @('{{ replace(recipe, "'", "''") }}' -split '\s+' | Where-Object { $_ })
     & 'justfiles/anvil/container/run-in-container.ps1' @requested
     exit $LASTEXITCODE
 
@@ -2276,8 +2276,10 @@ if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
     throw 'anvil-container requires a repository-owned rust-toolchain.toml.'
 }
 $containerPath = Join-Path $repoRoot 'justfiles/anvil/container'
+$containerPrefix = $containerPath + [IO.Path]::DirectorySeparatorChar
+$pathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
 $inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File -Filter '*.just' |
-    Where-Object { $_.DirectoryName -ne $containerPath } |
+    Where-Object { -not $_.FullName.StartsWith($containerPrefix, $pathComparison) } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
 $executionOnly = @(
     'container.just',
@@ -3574,11 +3576,11 @@ alias anvil := anvil-pr
 [windows]
 [script("pwsh")]
 _anvil-run tier runner:
-    $just = '{{just_executable()}}'
-    $nativeTier = '_anvil-{{tier}}'
+    $just = '{{ replace(just_executable(), "'", "''") }}'
+    $nativeTier = '_anvil-{{ replace(tier, "'", "''") }}'
     if ($env:ANVIL_IN_CONTAINER) {
         & $just $nativeTier
-    } elseif ('{{runner}}' -eq 'container') {
+    } elseif ('{{ replace(runner, "'", "''") }}' -eq 'container') {
         & $just anvil-container $nativeTier
     } else {
         & $just $nativeTier

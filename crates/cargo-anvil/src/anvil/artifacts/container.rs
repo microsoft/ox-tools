@@ -238,6 +238,7 @@ mod tests {
 
     #[test]
     fn drivers_use_podman_and_content_addressing() {
+        assert!(RECIPE.contains("replace(recipe, \"'\", \"''\")"));
         for driver in [SHELL_DRIVER, POWERSHELL_DRIVER] {
             assert!(driver.contains("podman"));
             assert!(driver.contains("ANVIL_CONTAINER_NO_REBUILD"));
@@ -421,6 +422,12 @@ mod tests {
         write(&root.join(RECIPE_PATH), "execution-only recipe change\n");
         assert_eq!(base, run_image_id(root), "the container entry recipe must not affect the image ID");
 
+        write(
+            &root.join("justfiles/anvil/container/nested/custom.just"),
+            "nested-execution-only:\n    @echo nested\n",
+        );
+        assert_eq!(base, run_image_id(root), "nested container recipes must not affect the image ID");
+
         // Static, hashed image content must still affect the image ID.
         write(&root.join(CONTAINERFILE_PATH), "FROM example.invalid/different-base\n");
         assert_ne!(
@@ -448,8 +455,8 @@ mod tests {
         assert!(status.success(), "temporary Git repository must initialize");
         write_image_id_fixture(root);
         write(
-            &root.join("justfiles/anvil/container/custom.just"),
-            "custom-recipe:\n    @echo custom\n",
+            &root.join("justfiles/anvil/container/nested/custom.just"),
+            "nested-custom-recipe:\n    @echo custom\n",
         );
 
         let shell = run_image_id_command(root, "bash", &["justfiles/anvil/container/image-id.sh"]);

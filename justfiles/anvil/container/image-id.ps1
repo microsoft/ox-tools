@@ -20,8 +20,10 @@ if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
     throw 'anvil-container requires a repository-owned rust-toolchain.toml.'
 }
 $containerPath = Join-Path $repoRoot 'justfiles/anvil/container'
+$containerPrefix = $containerPath + [IO.Path]::DirectorySeparatorChar
+$pathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
 $inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File -Filter '*.just' |
-    Where-Object { $_.DirectoryName -ne $containerPath } |
+    Where-Object { -not $_.FullName.StartsWith($containerPrefix, $pathComparison) } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
 $executionOnly = @(
     'container.just',

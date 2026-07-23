@@ -193,6 +193,44 @@ fn forwarded_parameter_does_not_trigger_github_authentication() {
 }
 
 #[test]
+fn powershell_just_dispatch_treats_interpolated_values_as_data() {
+    let tmp = repo_with_container();
+    let root = tmp.path();
+
+    let runner_output = Command::new("just")
+        .args(["_anvil-run", "missing", "x') { Write-Output RUNNER_INJECTED } elseif ('a"])
+        .current_dir(root)
+        .output()
+        .expect("just must be available");
+    assert!(!runner_output.status.success(), "the missing native tier must fail");
+    assert!(
+        !String::from_utf8_lossy(&runner_output.stdout).contains("RUNNER_INJECTED"),
+        "the runner parameter must not execute as PowerShell source"
+    );
+
+    write(
+        &root.join("justfiles/anvil/container/run-in-container.ps1"),
+        "param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Recipe)\nWrite-Output 'DRIVER_OK'\n",
+    );
+    let recipe_output = Command::new("just")
+        .args(["anvil-container", "x'); Write-Output RECIPE_INJECTED; @('a"])
+        .current_dir(root)
+        .output()
+        .expect("just must be available");
+    assert!(
+        recipe_output.status.success(),
+        "the escaped container recipe must reach the driver: {}",
+        String::from_utf8_lossy(&recipe_output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&recipe_output.stdout);
+    assert!(stdout.contains("DRIVER_OK"), "the container driver must run");
+    assert!(
+        !stdout.contains("RECIPE_INJECTED"),
+        "the recipe parameter must not execute as PowerShell source"
+    );
+}
+
+#[test]
 fn cold_run_exposes_contract_inputs_scopes_phases_and_runs_cleanup() {
     let tmp = repo_with_container();
     let root = tmp.path();

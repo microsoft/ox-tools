@@ -8,11 +8,11 @@
 [windows]
 [script("pwsh")]
 _anvil-run tier runner:
-    $just = '{{just_executable()}}'
-    $nativeTier = '_anvil-{{tier}}'
+    $just = '{{ replace(just_executable(), "'", "''") }}'
+    $nativeTier = '_anvil-{{ replace(tier, "'", "''") }}'
     if ($env:ANVIL_IN_CONTAINER) {
         & $just $nativeTier
-    } elseif ('{{runner}}' -eq 'container') {
+    } elseif ('{{ replace(runner, "'", "''") }}' -eq 'container') {
         & $just anvil-container $nativeTier
     } else {
         & $just $nativeTier
