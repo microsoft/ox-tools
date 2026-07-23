@@ -262,10 +262,7 @@ fn impact_off_short_circuits_without_computing() {
     let tmp = workspace();
     let root = tmp.path();
 
-    let out = just_cmd(root, &["anvil-impact"])
-        .env("ANVIL_IMPACT", "off")
-        .output()
-        .unwrap();
+    let out = just_cmd(root, &["anvil-impact"]).env("ANVIL_IMPACT", "off").output().unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "ANVIL_IMPACT=off run failed:\n{combined}");
     // No snapshotting, no projection, and -- crucially -- no artifacts written.
