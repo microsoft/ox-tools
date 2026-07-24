@@ -35,16 +35,9 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # Impact scoping mode for this group's checks:
-        #   * cache present (a PR group job downloaded the target/anvil/impact
-        #     artifact) -> "consume": the checks' anvil-impact dependency trusts
-        #     the downloaded cache verbatim -- no snapshot, no cargo-delta, no
-        #     base ref (none of which a group job has).
-        #   * no cache (e.g. the scheduled tier, which runs full-workspace) ->
-        #     "off": anvil-impact no-ops and every tier defaults to --workspace.
-        if [ -f target/anvil/impact/impact.state ]; then
-          export ANVIL_IMPACT=consume
-        else
-          export ANVIL_IMPACT=off
-        fi
+        # Scheduled tier always validates the FULL workspace: force off
+        # (anvil-impact no-ops, every tier -> --workspace). Unconditional on
+        # purpose -- anvil-setup restores target/ from cache and a stale
+        # impact.state must NOT flip this job into impact scoping.
+        export ANVIL_IMPACT=off
         just anvil-scheduled-runtime-analysis

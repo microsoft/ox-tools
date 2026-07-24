@@ -496,10 +496,10 @@ runs:
       env:
         PR_TITLE: ${{ inputs.pr_title }}
       run: |
-        # consume: a PR group job downloaded the impact cache -> trust it
-        # verbatim (no snapshot, no cargo-delta, no base ref). off: no cache
-        # (scheduled tier) -> anvil-impact no-ops and tiers default to
-        # --workspace.
+        # PR group job: it downloaded the impact cache -> trust it verbatim
+        # (consume: no snapshot, no cargo-delta, no base ref). Falls back to
+        # off if the artifact is somehow absent. (Scheduled group actions
+        # instead force ANVIL_IMPACT=off unconditionally -- see §6.1.)
         if [ -f target/anvil/impact/impact.state ]; then
           export ANVIL_IMPACT=consume
         else
@@ -601,9 +601,13 @@ threading pre-formatted strings that local runs never see. The chain in
    `target/anvil/impact/include_<tier>.txt` via `_anvil-impact-include` (into a local
    `$include` variable). This is why the group jobs stay lean and can't be tripped up by
    an environmental difference from the impact job.
-4. **Scheduled group jobs download nothing** (the scheduled tier runs full-workspace).
-   The group action sees no `target/anvil/impact/impact.state` and instead exports
-   `ANVIL_IMPACT=off`, so `anvil-impact` no-ops and every tier defaults to `--workspace`.
+4. **Scheduled group jobs download nothing** and always validate the full workspace, so
+   their group action exports `ANVIL_IMPACT=off` **unconditionally**. It deliberately does
+   *not* gate on `target/anvil/impact/impact.state`: `anvil-setup` restores `target/`
+   (including any `impact.state`) from cache, so a stale marker left by a prior run could
+   otherwise flip a scheduled job into impact scoping and silently skip the full-workspace
+   backstop. Only PR group actions — which genuinely download the artifact — gate on
+   `impact.state` (→ `consume`, falling back to `off` if it is somehow absent).
 
 The wiring never gates jobs on the impact result — every job runs regardless of `--skip`
 status. This is intentional: unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,

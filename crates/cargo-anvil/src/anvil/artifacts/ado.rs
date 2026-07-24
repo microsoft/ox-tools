@@ -63,10 +63,32 @@ const GROUP_STEP_TEMPLATE: &str = include_str!("../../../templates/ado/steps/gro
 /// Placeholder token the per-group template uses for the group name.
 const GROUP_PLACEHOLDER: &str = "__GROUP__";
 
+/// Placeholder token the per-group template uses for the impact-mode selection.
+const IMPACT_MODE_PLACEHOLDER: &str = "__IMPACT_MODE__";
+
+/// Impact-mode selection for a PR group job. It downloaded the
+/// `target/anvil/impact` artifact (via the job wrapper), so it consumes that
+/// cache verbatim (falling back to full-workspace only if it is absent).
+const IMPACT_MODE_PR: &str = "      # This PR group job downloaded the target/anvil/impact artifact, so\n      # trust it: \"consume\" makes anvil-impact use the cache verbatim (no\n      # snapshot / cargo-delta / base ref). Fall back to \"off\" if absent.\n      if [ -f target/anvil/impact/impact.state ]; then\n        export ANVIL_IMPACT=consume\n      else\n        export ANVIL_IMPACT=off\n      fi";
+
+/// Impact-mode selection for a scheduled group job. The scheduled tier always
+/// validates the full workspace, so it is forced off UNCONDITIONALLY -- it must
+/// not key off `target/anvil/impact/impact.state`, which `setup.yml` can restore
+/// stale from the `target/` cache and would otherwise wrongly enable impact
+/// scoping (skipping the full-workspace backstop).
+const IMPACT_MODE_SCHEDULED: &str = "      # Scheduled tier always validates the FULL workspace: force off\n      # (anvil-impact no-ops, every tier -> --workspace). Unconditional on\n      # purpose -- setup.yml restores target/ from cache and a stale\n      # impact.state must NOT flip this job into impact scoping.\n      export ANVIL_IMPACT=off";
+
 /// Render the step template for one group.
 #[must_use]
 fn render_group_step(group: &str) -> String {
-    GROUP_STEP_TEMPLATE.replace(GROUP_PLACEHOLDER, group)
+    let impact_mode = if group.starts_with("scheduled-") {
+        IMPACT_MODE_SCHEDULED
+    } else {
+        IMPACT_MODE_PR
+    };
+    GROUP_STEP_TEMPLATE
+        .replace(GROUP_PLACEHOLDER, group)
+        .replace(IMPACT_MODE_PLACEHOLDER, impact_mode)
 }
 
 /// Repo-root-relative path for one group's step template.
@@ -280,7 +302,8 @@ mod tests {
             !body.contains("ANVIL_INCLUDE_"),
             "group step must not thread ANVIL_INCLUDE_* env vars"
         );
-        // No impact cache present (scheduled tier) -> full workspace.
+        // A PR group downloads the artifact, so it consumes it (falling back to
+        // off only if the artifact is somehow absent).
         assert!(body.contains("ANVIL_IMPACT=consume"));
         assert!(body.contains("ANVIL_IMPACT=off"));
         assert!(body.contains("target/anvil/impact/impact.state"));
@@ -289,6 +312,25 @@ mod tests {
         assert!(body.contains("PR_TITLE: $(PR_TITLE)"));
         assert!(body.contains("setvariable variable=PR_TITLE"));
         assert!(!body.contains("PR_TITLE: $(System.PullRequest.Title)"));
+    }
+
+    #[test]
+    fn scheduled_group_step_forces_impact_off_unconditionally() {
+        // The scheduled tier always validates the full workspace. It must NOT
+        // key its impact mode off target/anvil/impact/impact.state: setup.yml
+        // restores target/ from cache and could carry a stale impact.state,
+        // which would wrongly enable scoping and skip the full-workspace
+        // backstop. So a scheduled group forces off unconditionally.
+        let body = render_group_step("scheduled-test");
+        assert!(body.contains("export ANVIL_IMPACT=off"));
+        assert!(
+            !body.contains("ANVIL_IMPACT=consume"),
+            "scheduled group must never consume the impact cache"
+        );
+        assert!(
+            !body.contains("[ -f target/anvil/impact/impact.state ]"),
+            "scheduled group must not gate its mode on the (cacheable) impact.state file"
+        );
     }
 
     #[test]

@@ -543,9 +543,13 @@ threading pre-formatted strings the local run never produces. The chain:
    recomputes**, so it needs neither cargo-delta nor a fetched base ref. Each scoped
    check reads its tier's scope from the cache file via `_anvil-impact-include` (into a
    local `$include` variable).
-4. **Scheduled stages download nothing** (they run full-workspace). The group step sees
-   no `target/anvil/impact/impact.state` and instead exports `ANVIL_IMPACT=off`, so
-   `anvil-impact` no-ops and every tier defaults to `--workspace`.
+4. **Scheduled stages download nothing** and always validate the full workspace, so the
+   group step exports `ANVIL_IMPACT=off` **unconditionally**. It deliberately does *not*
+   gate on `target/anvil/impact/impact.state`: `setup.yml` restores `target/` (including
+   any `impact.state`) from cache, so a stale marker left by a prior run could otherwise
+   flip a scheduled stage into impact scoping and silently skip the full-workspace
+   backstop. Only PR group steps — which genuinely download the artifact — gate on
+   `impact.state` (→ `consume`, falling back to `off` if it is somehow absent).
 
 The pr-* stages gate on the impact stage *succeeding* (the default `succeeded()`
 condition on their `dependsOn: impact`): if impact fails, pr-* are skipped and the
@@ -611,8 +615,10 @@ steps:
     PR_TITLE: $(PR_TITLE)
     # Scope comes from the downloaded target/anvil/impact cache: a PR job sets
     # ANVIL_IMPACT=consume (trust the downloaded cache; no snapshot/cargo-delta/
-    # base ref) in a preceding line, and a scheduled job (no artifact) sets
-    # ANVIL_IMPACT=off so anvil-impact no-ops and tiers default to --workspace.
+    # base ref) when it sees the downloaded impact.state, whereas a scheduled
+    # job forces ANVIL_IMPACT=off UNCONDITIONALLY (it never downloads an
+    # artifact, and must not trust a stale cache-restored impact.state) so
+    # anvil-impact no-ops and tiers default to --workspace. See §4.3.
 ```
 
 The only per-group parameters are the PR-context strings a group's checks consume:
