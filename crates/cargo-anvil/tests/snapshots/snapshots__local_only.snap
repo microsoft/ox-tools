@@ -2602,10 +2602,15 @@ _anvil-impact-snapshot:
     # --- (Re)compute path: this is the only path that needs cargo-delta and a
     # resolvable base ref (the impact job in cloud workflows, or a local first
     # run / cache miss). ---
-    # cargo-delta is validated here (after the fast path) rather than as a
-    # `just` dependency so that an ANVIL_IMPACT=off run -- e.g. the scheduled
-    # tier, whose jobs never install cargo-delta -- can fire `anvil-impact`
-    # as a check dependency and cleanly no-op without the tool present.
+    # cargo-delta is validated here -- inside the recompute path, after the
+    # off/consume guard and the fast path -- rather than as a hard `just`
+    # dependency of `anvil-impact`. Only recompute needs the tool; the paths
+    # that skip it (ANVIL_IMPACT=off/consume, or a cache hit) must be able to
+    # no-op without it. Groups that can actually reach recompute declare
+    # cargo-delta as their own setup prereq (see groups/*.just), so a local
+    # `just anvil-<group>` still fails fast if it is missing; keeping it off
+    # anvil-impact's dependency line is what lets the no-op paths stay
+    # tool-agnostic.
     & "{{ just_executable() }}" anvil-tool-cargo-delta-validate-prereqs
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     [System.IO.Directory]::CreateDirectory($snapDir) | Out-Null

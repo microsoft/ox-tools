@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.3.0"
-catalog_checksum = "sha256:1760fb1997d3e38593a2323edf93588f0dfb99a2cc63cd406d9127feb0431ae4"
+catalog_checksum = "sha256:c6de3b17853839d00917df97500433479399f2c498006871b3f04c8988640155"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"
@@ -221,7 +221,7 @@ checksum = "sha256:3a1f6e2469109cd6006a9fea85099badda9f3d3ba33235628d6a784365eee
 
 [[file]]
 path = "justfiles/anvil/impact.just"
-checksum = "sha256:1e666a8cdd837a626439bf6ac847c6ac87b701b4a73383854f2168e08de09151"
+checksum = "sha256:52cbca45f36c589ab65f6bdabf962cc7683a10c1417f157b5234cddc61fa3772"
 
 [[file]]
 path = "justfiles/anvil/mod.just"
