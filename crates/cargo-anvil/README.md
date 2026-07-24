@@ -296,7 +296,7 @@ See `docs/design/extensibility.md`.
 
 See `docs/design/` for the full architecture:
 
-* `design.md` — overall principles and CLI shape.
+* `README.md` — overall principles and CLI shape.
 * `checks.md` — the opinionated check catalog.
 * `local.md` — the `justfiles/anvil/` tree.
 * `updates.md` — the drift-detection algorithm.
@@ -312,7 +312,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbI_VKBuSOMRUbfx_41ISPNUAbU-pof2TAXRkbObPMDStfcEhhZIGDa2NhcmdvLWFudmlsZTAuMy4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG0A0CAgK-7JhG3kcsE0K8nZGG9CCeHb5HZ-zG1w2gtfKsIP6YWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

@@ -296,7 +296,7 @@
 //!
 //! See `docs/design/` for the full architecture:
 //!
-//! - `design.md` — overall principles and CLI shape.
+//! - `README.md` — overall principles and CLI shape.
 //! - `checks.md` — the opinionated check catalog.
 //! - `local.md` — the `justfiles/anvil/` tree.
 //! - `updates.md` — the drift-detection algorithm.

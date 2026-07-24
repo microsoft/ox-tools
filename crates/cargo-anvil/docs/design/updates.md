@@ -7,7 +7,7 @@ its content again on subsequent runs.
 
 See also:
 
-- [design.md](./design.md) for the overall principles and the CLI shape.
+- [README.md](./README.md) for the overall principles and the CLI shape.
 - [local.md](./local.md) for the just-recipe files this algorithm manages.
 - [github.md](./github.md) / [ado.md](./ado.md) for the cloud workflow building-block files.
 
@@ -143,7 +143,7 @@ Its purpose is to disambiguate **builds that report the same `tool_version` but 
 catalogs** — not a normal situation in released usage, but routine during development, where two
 locally-built binaries can both say `0.0.0` while their templates differ. Recording the catalog
 checksum in the lock makes "which build last wrote this" answerable, and `--version` prints the
-current build's value (see [design.md §5.2](./design.md#52-the-single-command)) so it can be
+current build's value (see [README.md §5.2](./README.md#52-the-single-command)) so it can be
 compared against the lock.
 
 The checksum is **provenance and diagnostics, not a gate**: a differing `catalog_checksum` is

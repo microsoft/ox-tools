@@ -9,7 +9,7 @@
 //! directory by walking up from a starting path, then enumerates the
 //! workspace members so emitters can write per-crate managed regions.
 //!
-//! See [`design.md §6`](../../docs/design/design.md) for the file layout.
+//! See [`README.md §6`](../../docs/design/README.md) for the file layout.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -26,12 +26,12 @@ pub struct Workspace {
     pub members: Vec<WorkspaceMember>,
     /// Whether the root `Cargo.toml` carries a `[workspace]` table.
     ///
-    /// Used by the emitter for [`design.md §6`]: multi-crate workspaces get
+    /// Used by the emitter for [`README.md §6`]: multi-crate workspaces get
     /// `[workspace.lints]` with the catalog plus `[lints] workspace = true`
     /// in each member; single-crate repos get the catalog directly in
     /// `[lints]`.
     ///
-    /// [`design.md §6`]: ../../docs/design/design.md
+    /// [`README.md §6`]: ../../docs/design/README.md
     pub has_workspace_table: bool,
 }
 
