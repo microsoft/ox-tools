@@ -212,36 +212,41 @@ fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
     );
     assert!(noop.contains("cache hit"), "no-op run should report an impact cache hit:\n{noop}");
 
-    // --- 3. Working tree changes: only `current.json` is regenerated. ---
+    // --- 3. HEAD moves (a new commit): only `current.json` is regenerated. ---
+    // A committed change advances HEAD without moving the base ref
+    // (origin/master), so current.state changes while the baseline key does
+    // not. The tree stays clean, so scoping is NOT widened.
     write(&root.join("crates/alpha/src/lib.rs"), "pub fn a() {}\npub fn a2() {}\n");
+    git(root, &["add", "crates/alpha/src/lib.rs"]);
+    git(root, &["commit", "-q", "-m", "edit alpha"]);
     let edited = run_impact(root);
     assert!(
+        !edited.contains("widening"),
+        "a committed change keeps the tree clean, so scoping must not widen:\n{edited}"
+    );
+    assert!(
         edited.contains("baseline snapshot up to date"),
-        "an uncommitted edit must not move the base, so baseline is reused:\n{edited}"
+        "a new commit must not move the base, so baseline is reused:\n{edited}"
     );
     assert!(
         edited.contains("snapshotting working tree"),
-        "an uncommitted edit must regenerate the current snapshot:\n{edited}"
+        "a new commit moves HEAD, so the current snapshot is regenerated:\n{edited}"
     );
 
     // --- 4. Base ref moves: only `baseline.json` is regenerated. ---
-    // Advance origin/master to a NEW commit without moving HEAD: commit on a
-    // throwaway branch, repoint origin/master, then restore the
-    // working tree to its prior (edited) state so `current` is unaffected.
-    let edited_lib = std::fs::read_to_string(root.join("crates/alpha/src/lib.rs")).unwrap();
+    // Advance origin/master to a NEW commit without moving HEAD (commit on a
+    // throwaway branch, repoint the ref, return to main). The tree stays
+    // clean, so `current` is untouched and only the baseline regenerates.
     let head_before = git_stdout(root, &["rev-parse", "HEAD"]);
-    git(root, &["stash", "push", "-q", "--include-untracked"]);
     git(root, &["checkout", "-q", "-b", "base-advance"]);
     write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn b2() {}\n");
-    git(root, &["add", "-A"]);
+    git(root, &["add", "crates/beta/src/lib.rs"]);
     git(root, &["commit", "-q", "-m", "advance base"]);
     let advanced = git_stdout(root, &["rev-parse", "HEAD"]);
     git(root, &["update-ref", "refs/remotes/origin/master", &advanced]);
     git(root, &["checkout", "-q", "main"]);
-    git(root, &["stash", "pop", "-q"]);
-    // Sanity: HEAD is unchanged; the working-tree edit is restored.
+    // Sanity: HEAD is unchanged and the tree is clean.
     assert_eq!(git_stdout(root, &["rev-parse", "HEAD"]), head_before);
-    assert_eq!(std::fs::read_to_string(root.join("crates/alpha/src/lib.rs")).unwrap(), edited_lib);
 
     let base_moved = run_impact(root);
     assert!(
@@ -330,6 +335,51 @@ fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
     assert!(
         !recommitted.contains("widening"),
         "committing the WIP must restore scoping:\n{recommitted}"
+    );
+}
+
+#[test]
+fn impact_dirty_tree_widens_without_needing_a_resolvable_base() {
+    if !tools_available() {
+        return;
+    }
+    // Regression: the dirty-tree safety net must win even when the recompute
+    // path could NOT run. A first-time / local WIP checkout can have a dirty
+    // tree AND an unresolvable base ref (origin/<base> never fetched);
+    // _anvil-impact-snapshot must short-circuit on the dirty tree rather than
+    // fail base-ref resolution before anvil-impact's widen runs.
+    let tmp = workspace();
+    let root = tmp.path();
+
+    // Uncommitted edit -> dirty tree.
+    write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn wip() {}\n");
+
+    // BASE_REF points at a ref that does not exist, so the recompute path
+    // would hard-fail base-ref resolution. The dirty short-circuit must make
+    // that unreachable.
+    let out = just_cmd(root, &["anvil-impact"])
+        .env("BASE_REF", "refs/heads/anvil-does-not-exist")
+        .output()
+        .unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "dirty run with an unresolvable base must still succeed:\n{combined}"
+    );
+    assert!(
+        combined.contains("widening all tiers to --workspace"),
+        "a dirty tree must widen even when the base ref is unresolvable:\n{combined}"
+    );
+    // The snapshot short-circuited -> cargo-delta / base ref were never needed.
+    assert!(
+        !combined.contains("napshotting"),
+        "dirty tree must short-circuit the snapshot before recompute:\n{combined}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("target/anvil/impact/include_affected.txt"))
+            .unwrap()
+            .trim(),
+        "--workspace"
     );
 }
 

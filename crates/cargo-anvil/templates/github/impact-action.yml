@@ -40,11 +40,13 @@ runs:
       # adopters run locally. It resolves the base ref (_anvil-base-ref),
       # snapshots the base merge target in a throwaway worktree + the current
       # tree, runs `cargo delta impact`, and writes the cache under
-      # target/anvil/impact/. This is the only job that needs cargo-delta; the
-      # group jobs just download the artifact this produces.
+      # target/anvil/impact/. This is the only job that RUNS cargo-delta to
+      # compute the impact set; group jobs install it as a setup prereq (for
+      # local recompute-capable runs) but consume the downloaded artifact
+      # instead of recomputing.
       run: just anvil-impact
     - name: Upload impact artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
       with:
         # Per-OS name so a downstream leg downloads the impact set computed on
         # its own host (Linux / Windows). The two arm legs reuse their OS

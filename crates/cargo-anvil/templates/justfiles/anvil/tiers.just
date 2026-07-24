@@ -45,7 +45,6 @@ _anvil-scheduled-impl: anvil-scheduled-validate-prereqs \
     anvil-scheduled-runtime-analysis \
     anvil-scheduled-exhaustive
 
-# Full tier: PR + scheduled, end-to-end. Useful before tagging a release.
 # Runs everything full-workspace (ANVIL_IMPACT=off), same wrapper shape
 # as anvil-scheduled.
 

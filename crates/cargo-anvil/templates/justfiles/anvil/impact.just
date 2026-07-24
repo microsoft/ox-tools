@@ -46,6 +46,18 @@ _anvil-impact-snapshot:
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_IMPACT -eq 'off' -or $env:ANVIL_IMPACT -eq 'consume') { exit 0 }
 
+    # Short-circuit on a dirty working tree, BEFORE the expensive recompute
+    # below. anvil-impact widens every tier to --workspace when the tree is
+    # dirty (see its safety net) and never reads these snapshots, so computing
+    # them would be wasted work -- and the recompute path needs cargo-delta +
+    # a resolvable, non-shallow base ref, which a first-time / local WIP
+    # checkout may lack. Without this, a dirty run that could not recompute
+    # would hard-fail here instead of gracefully widening. Same probe as
+    # anvil-impact (excluding target/, which holds our own cache artifacts).
+    if (@(git status --porcelain | Where-Object { $_ -and ($_.Substring(3) -notmatch '^"?target/') }).Count -gt 0) {
+        exit 0
+    }
+
     $impactDir = 'target/anvil/impact'
     $snapDir = Join-Path $impactDir 'snapshots'
     $baselineJson = Join-Path $snapDir 'baseline.json'
@@ -244,6 +256,7 @@ anvil-impact: _anvil-impact-snapshot
     $dirty = @(git status --porcelain | Where-Object { $_ -and ($_.Substring(3) -notmatch '^"?target/') })
     if ($dirty.Count -gt 0) {
         Write-Host "anvil-impact: warning: $($dirty.Count) uncommitted change(s) in the working tree are invisible to cargo-delta (it scopes on the committed diff vs the base ref); widening all tiers to --workspace so nothing you are editing is skipped -- commit to scope by impact, or set ANVIL_IMPACT=off to disable scoping." -ForegroundColor Yellow
+        [System.IO.Directory]::CreateDirectory($impactDir) | Out-Null
         Set-Content -LiteralPath (Join-Path $impactDir 'include_modified.txt') -Value '' -Encoding UTF8 -NoNewline
         Set-Content -LiteralPath (Join-Path $impactDir 'include_affected.txt') -Value '--workspace' -Encoding UTF8 -NoNewline
         Set-Content -LiteralPath (Join-Path $impactDir 'include_required.txt') -Value '--workspace' -Encoding UTF8 -NoNewline
