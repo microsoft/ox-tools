@@ -524,7 +524,8 @@ runs:
         # tool-versions update all invalidate the cache cleanly.
         # runner.arch resolves to X64 / ARM64 / X86, which keeps the
         # x86_64 and aarch64 legs of the same OS from colliding on
-        # arch-incompatible cached binaries in ~/.cargo/bin.
+        # arch-incompatible cached binaries in ~/.cargo/bin and the
+        # arch-specific compiled artifacts under target/.
         #
         # ${{ github.job }} discriminates by workflow-job-id (`pr-fast`,
         # `pr-test`, `pr-slow`, etc.) so concurrent matrix legs that
@@ -553,6 +554,20 @@ runs:
           ~/.cargo/bin/
           ~/.cargo/.crates.toml
           ~/.cargo/.crates2.json
+          # Cache the dependency build products (compiled deps, build-script
+          # outputs, fingerprints) for each tool target-dir. We list concrete
+          # subpaths on purpose: this skips target/debug/incremental (large,
+          # first-party-only, low CI value) and NEVER caches target/anvil/impact
+          # -- the downloaded impact artifact must not be clobbered by a cache
+          # restore. careful-sysroot.id rides along so the careful check can
+          # still detect a nightly/std change across cached runs.
+          target/debug/deps
+          target/debug/build
+          target/debug/.fingerprint
+          target/miri
+          target/llvm-cov-target
+          target/semver-checks
+          target/anvil/careful-sysroot.id
 
     # System dependencies for the catalog's source builds.
     #
@@ -650,6 +665,15 @@ runs:
           ~/.cargo/bin/
           ~/.cargo/.crates.toml
           ~/.cargo/.crates2.json
+          # Mirror the restore paths above (dependency build products, minus
+          # incremental and target/anvil/impact).
+          target/debug/deps
+          target/debug/build
+          target/debug/.fingerprint
+          target/miri
+          target/llvm-cov-target
+          target/semver-checks
+          target/anvil/careful-sysroot.id
 
 === .github/workflows/anvil-pr-impl.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -693,6 +717,14 @@ on:
 # matrices were rejected because they added a silent failure mode
 # (mis-formatted inputs produced empty matrices) without meaningfully
 # expanding what adopters could customize.
+
+# Disable cargo incremental compilation for every job/step in this
+# workflow (including the composite actions, which inherit the runner
+# env). Incremental adds compile overhead and produces the multi-GB
+# target/debug/incremental/ dir, which anvil-setup deliberately does
+# not cache -- so on CI it is pure cost with no cross-run benefit.
+env:
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   # cargo-delta impact runs per OS so that downstream legs consume an
@@ -947,6 +979,12 @@ on:
 
 # Note on matrices: see pr-impl-workflow.yml for the rationale. OS
 # matrices are hardcoded; per-leg runner labels are inputs.
+
+# Disable cargo incremental compilation for every job/step (see
+# pr-impl-workflow.yml for the rationale): the incremental dir is not
+# cached, so on CI it is pure cost.
+env:
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   scheduled-test:

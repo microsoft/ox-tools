@@ -547,10 +547,11 @@ threading pre-formatted strings the local run never produces. The chain:
 4. **Scheduled stages download nothing** and always validate the full workspace, so the
    group step exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by tier at
    emit time and is **not** derived from `target/anvil/impact/impact.state`: the mode is a
-   property of the tier, not something probed at runtime. (`setup.yml` no longer caches
-   `target/` at all, so the durable `impact.state` never travels through the build cache;
-   the tier-fixed mode also means no leftover on-disk state could ever flip a scheduled
-   stage into impact scoping and skip the full-workspace backstop.)
+   property of the tier, not something probed at runtime. (`setup.yml` caches only the
+   compiled-dependency dirs under `target/`, never `target/anvil/impact/`, so the durable
+   `impact.state` never travels through the build cache; the tier-fixed mode also means no
+   leftover on-disk state could ever flip a scheduled stage into impact scoping and skip
+   the full-workspace backstop.)
 
 The pr-* stages gate on the impact stage *succeeding* (the default `succeeded()`
 condition on their `dependsOn: impact`): if impact fails, pr-* are skipped and the
@@ -719,13 +720,22 @@ The cache covers:
 
 - The `cargo install`-ed tools installed by the catalog setup recipes and the
   downloaded crate registry, both under `CARGO_HOME`.
+- The compiled-dependency build products under `target/`: `target/debug/{deps,build,.fingerprint}`
+  and the tool target-dirs (`target/miri`, `target/llvm-cov-target`, `target/semver-checks`),
+  plus `target/anvil/careful-sysroot.id`. `Cache@2` does not support wildcards, so these
+  are listed as concrete literal paths.
 
-The `target/` build directory is deliberately **not** cached: large per-OS/arch `target/`
-snapshots dwarf the high-value tool cache and add only modest dependency-recompile savings
-once the tools are cached. Excluding it also guarantees the impact stage's downloaded
-`target/anvil/impact/` artifact survives the cache restore unclobbered — so `job.yml`'s
-`inputArtifacts` download can stay its overridable, 1ESPT-friendly contract point without
-being reordered after `setup.yml`.
+`target/` as a whole is deliberately **not** cached — only the dependency build products
+above. Two things are excluded on purpose: `target/debug/incremental/` (large,
+first-party-only, negligible cross-run CI value — and disabled outright via
+`CARGO_INCREMENTAL=0` on the compile steps, see `steps/group.yml`), and
+`target/anvil/impact/` (the impact stage's downloaded artifact). Excluding the impact dir
+by omission matters more on this backend than on GitHub: `Cache@2` saves at **post-job**
+(after the impact download exists) and the key has no per-job discriminator, so a later run
+could otherwise restore a stale impact scope over the fresh download. Because the cached
+paths and `target/anvil/impact/` are disjoint, the download always survives unclobbered —
+so `job.yml`'s `inputArtifacts` download can stay its overridable, 1ESPT-friendly contract
+point without being reordered after `setup.yml`.
 
 Cache scoping inside 1ESPT-compliant pipelines is bounded by the template's allowed cache
 namespaces; the emitted cache step uses the project-scoped namespace by default and the

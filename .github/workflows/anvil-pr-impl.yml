@@ -40,6 +40,14 @@ on:
 # (mis-formatted inputs produced empty matrices) without meaningfully
 # expanding what adopters could customize.
 
+# Disable cargo incremental compilation for every job/step in this
+# workflow (including the composite actions, which inherit the runner
+# env). Incremental adds compile overhead and produces the multi-GB
+# target/debug/incremental/ dir, which anvil-setup deliberately does
+# not cache -- so on CI it is pure cost with no cross-run benefit.
+env:
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   # cargo-delta impact runs per OS so that downstream legs consume an
   # impact set computed against THEIR host's cargo-metadata depgraph.

@@ -30,11 +30,28 @@ steps:
       restoreKeys: |
         anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(anvil_rustc_version)
         anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)"
+      # Cache the dependency build products (compiled deps, build-script
+      # outputs, fingerprints) for each tool target-dir. Concrete subpaths
+      # skip target/debug/incremental (large, first-party-only, low CI value)
+      # and NEVER cache target/anvil/impact -- the downloaded impact artifact
+      # must not be clobbered when Cache@2 restores at job start. Cache@2 saves
+      # at post-job (after the impact dir exists), so omitting it here is what
+      # keeps the durable impact scope out of the build cache. careful-sysroot.id
+      # rides along so the careful check can still detect a nightly/std change
+      # across cached runs. (Cache@2 has no @actions/glob, so no '#' comments or
+      # wildcards may appear inside the path block below.)
       path: |
         $(HOME)/.cargo/registry/cache/
         $(HOME)/.cargo/registry/index/
         $(HOME)/.cargo/bin/
-    displayName: anvil setup (cache cargo home)
+        target/debug/deps
+        target/debug/build
+        target/debug/.fingerprint
+        target/miri
+        target/llvm-cov-target
+        target/semver-checks
+        target/anvil/careful-sysroot.id
+    displayName: anvil setup (cache cargo home + build deps)
 
   # System dependencies for catalog source builds. See the GitHub
   # composite setup-action.yml for the rationale — same pattern.

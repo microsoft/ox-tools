@@ -601,11 +601,11 @@ threading pre-formatted strings that local runs never see. The chain in
 4. **Scheduled group jobs download nothing** and always validate the full workspace, so
    their group action exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by
    tier at emit time and is **not** derived from `target/anvil/impact/impact.state`: the
-   mode is a property of the tier, not something probed at runtime. (`anvil-setup` no
-   longer caches `target/` at all — see §setup — so the durable `impact.state` never
-   travels through the build cache; the tier-fixed mode also means no leftover on-disk
-   state could ever flip a scheduled job into impact scoping and skip the full-workspace
-   backstop.)
+   mode is a property of the tier, not something probed at runtime. (`anvil-setup` caches
+   only the compiled-dependency dirs under `target/`, never `target/anvil/impact/` — see
+   §setup — so the durable `impact.state` never travels through the build cache; the
+   tier-fixed mode also means no leftover on-disk state could ever flip a scheduled job
+   into impact scoping and skip the full-workspace backstop.)
 
 The wiring never gates jobs on the impact result — every job runs regardless of `--skip`
 status. This is intentional: unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,
@@ -664,13 +664,23 @@ The cache covers:
   plus the `.crates.toml` / `.crates2.json` install ledgers) and the downloaded crate
   registry (`~/.cargo/registry/`). The key includes `${{ github.job }}`, so a `pr-test`
   cache hit doesn't have to wait on a `pr-fast` cache miss.
+- The compiled-dependency build products under `target/`: `target/debug/{deps,build,.fingerprint}`
+  and the tool target-dirs (`target/miri`, `target/llvm-cov-target`, `target/semver-checks`).
+  These are listed as concrete subpaths so the cache captures the expensive
+  dependency-recompile savings while deliberately **excluding** two things:
+  `target/debug/incremental/` (large, first-party-only, negligible cross-run CI value) and
+  `target/anvil/impact/` (the impact stage's downloaded artifact, which must never be
+  clobbered by a cache restore). `careful-sysroot.id` is cached too so the careful check
+  can still detect a nightly/std change across cached runs.
 
-The `target/` build directory is deliberately **not** cached. A per-job, per-OS, per-arch
-`target/` is large, and the many multi-GB entries would evict the high-value tool caches
-under the Actions 10 GB per-repo cache limit (LRU) — so caching it is a net loss here,
-with only modest dependency-recompile savings on top of the already-cached tools. Keeping
-`target/` out of the cache also means the impact stage's downloaded `target/anvil/impact/`
-artifact can never be clobbered by a `target/` cache restore.
+`target/` as a whole is **not** cached — only the dependency build products above. This
+keeps the cached footprint modest (avoiding eviction of the high-value tool caches under
+the Actions 10 GB per-repo cache limit) while restoring the wall-clock benefit of not
+recompiling dependencies. Because `target/anvil/impact/` is excluded by omission, the
+impact stage's downloaded artifact can never be clobbered by a cache restore, on this
+backend and on ADO alike. The impl workflows set `CARGO_INCREMENTAL=0` (workflow-level
+`env:`) so cargo skips generating `target/debug/incremental/` in CI, where it adds compile
+overhead with no cross-run benefit (the dir is not cached anyway).
 
 ## 9. Security
 

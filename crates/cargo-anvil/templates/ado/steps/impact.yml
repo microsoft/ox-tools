@@ -27,3 +27,6 @@ steps:
     # target/anvil/impact/. This is the only job that needs cargo-delta; the
     # group stages just download the artifact it produces.
     displayName: anvil impact (cargo-delta)
+    env:
+      # Match the group jobs (group.yml): no cargo incremental dir in CI.
+      CARGO_INCREMENTAL: "0"

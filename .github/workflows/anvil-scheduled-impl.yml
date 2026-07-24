@@ -34,6 +34,12 @@ on:
 # Note on matrices: see pr-impl-workflow.yml for the rationale. OS
 # matrices are hardcoded; per-leg runner labels are inputs.
 
+# Disable cargo incremental compilation for every job/step (see
+# pr-impl-workflow.yml for the rationale): the incremental dir is not
+# cached, so on CI it is pure cost.
+env:
+  CARGO_INCREMENTAL: "0"
+
 jobs:
   scheduled-test:
     strategy:
