@@ -35,12 +35,9 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # This PR group job downloaded the target/anvil/impact artifact, so
-        # trust it: "consume" makes anvil-impact use the cache verbatim (no
-        # snapshot / cargo-delta / base ref). Fall back to "off" if absent.
-        if [ -f target/anvil/impact/impact.state ]; then
-          export ANVIL_IMPACT=consume
-        else
-          export ANVIL_IMPACT=off
-        fi
+        # This PR group job downloaded the target/anvil/impact artifact, so it
+        # trusts that cache verbatim: "consume" makes anvil-impact a no-op (no
+        # snapshot / cargo-delta / base ref). The mode is fixed by tier here,
+        # not probed from a cacheable file (see the scheduled variant).
+        export ANVIL_IMPACT=consume
         just anvil-pr-test

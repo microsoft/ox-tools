@@ -57,10 +57,12 @@ const GROUP_PLACEHOLDER: &str = "__GROUP__";
 /// Placeholder token the per-group template uses for the impact-mode selection.
 const IMPACT_MODE_PLACEHOLDER: &str = "__IMPACT_MODE__";
 
-/// Impact-mode selection for a PR group job. It downloaded the
-/// `target/anvil/impact` artifact, so it consumes that cache verbatim (falling
-/// back to full-workspace only if the artifact is somehow absent).
-const IMPACT_MODE_PR: &str = "        # This PR group job downloaded the target/anvil/impact artifact, so\n        # trust it: \"consume\" makes anvil-impact use the cache verbatim (no\n        # snapshot / cargo-delta / base ref). Fall back to \"off\" if absent.\n        if [ -f target/anvil/impact/impact.state ]; then\n          export ANVIL_IMPACT=consume\n        else\n          export ANVIL_IMPACT=off\n        fi";
+/// Impact-mode selection for a PR group job. A PR group always downloads the
+/// `target/anvil/impact` artifact (a required step, gated by `needs: impact`),
+/// so it trusts that cache verbatim. The mode is chosen by tier here, at emit
+/// time -- never by probing `impact.state`, which `anvil-setup` can restore
+/// stale from the `target/` cache (see [`IMPACT_MODE_SCHEDULED`]).
+const IMPACT_MODE_PR: &str = "        # This PR group job downloaded the target/anvil/impact artifact, so it\n        # trusts that cache verbatim: \"consume\" makes anvil-impact a no-op (no\n        # snapshot / cargo-delta / base ref). The mode is fixed by tier here,\n        # not probed from a cacheable file (see the scheduled variant).\n        export ANVIL_IMPACT=consume";
 
 /// Impact-mode selection for a scheduled group job. The scheduled tier always
 /// validates the full workspace, so it is forced off UNCONDITIONALLY -- it must
@@ -219,11 +221,17 @@ mod tests {
             !body.contains("ANVIL_INCLUDE_"),
             "group action must not thread ANVIL_INCLUDE_* env vars"
         );
-        // A PR group downloads the artifact, so it consumes it (falling back to
-        // off only if the artifact is somehow absent).
-        assert!(body.contains("ANVIL_IMPACT=consume"));
-        assert!(body.contains("ANVIL_IMPACT=off"));
-        assert!(body.contains("target/anvil/impact/impact.state"));
+        // A PR group always downloads the artifact, so it consumes it. The mode
+        // is fixed by tier -- not probed from the cacheable impact.state file.
+        assert!(body.contains("export ANVIL_IMPACT=consume"));
+        assert!(
+            !body.contains("ANVIL_IMPACT=off"),
+            "a PR group must not fall back to off (it always has the artifact)"
+        );
+        assert!(
+            !body.contains("[ -f target/anvil/impact/impact.state ]"),
+            "PR group must not gate its mode on the (cacheable) impact.state file"
+        );
     }
 
     #[test]

@@ -537,19 +537,19 @@ threading pre-formatted strings the local run never produces. The chain:
    matching `anvil-impact-<os>` artifact into `target/anvil/impact/` via `job.yml`'s
    `inputArtifacts:` param (a `DownloadPipelineArtifact@2` task by default, overridable
    by a 1ESPT `job.yml`).
-3. **The group step template** runs `just anvil-<group>` with `ANVIL_IMPACT=consume` (it
-   sees the downloaded cache's `impact.state`). In consume mode `anvil-impact` is a pure
+3. **The group step template** runs `just anvil-<group>` with an impact mode fixed **by
+   tier at emit time** (never probed from a file). PR groups — which always download the
+   artifact — export `ANVIL_IMPACT=consume`. In consume mode `anvil-impact` is a pure
    no-op — it trusts the downloaded cache verbatim and **neither snapshots nor
    recomputes**, so it needs neither cargo-delta nor a fetched base ref. Each scoped
    check reads its tier's scope from the cache file via `_anvil-impact-include` (into a
    local `$include` variable).
 4. **Scheduled stages download nothing** and always validate the full workspace, so the
-   group step exports `ANVIL_IMPACT=off` **unconditionally**. It deliberately does *not*
-   gate on `target/anvil/impact/impact.state`: `setup.yml` restores `target/` (including
-   any `impact.state`) from cache, so a stale marker left by a prior run could otherwise
-   flip a scheduled stage into impact scoping and silently skip the full-workspace
-   backstop. Only PR group steps — which genuinely download the artifact — gate on
-   `impact.state` (→ `consume`, falling back to `off` if it is somehow absent).
+   group step exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by tier and
+   is **not** derived from `target/anvil/impact/impact.state`: `setup.yml` restores
+   `target/` (including any `impact.state`) from cache, so gating on that cacheable marker
+   could let a stale directory from a prior run flip a scheduled stage into impact scoping
+   and silently skip the full-workspace backstop.
 
 The pr-* stages gate on the impact stage *succeeding* (the default `succeeded()`
 condition on their `dependsOn: impact`): if impact fails, pr-* are skipped and the
@@ -613,12 +613,11 @@ steps:
   displayName: anvil pr-fast
   env:
     PR_TITLE: $(PR_TITLE)
-    # Scope comes from the downloaded target/anvil/impact cache: a PR job sets
-    # ANVIL_IMPACT=consume (trust the downloaded cache; no snapshot/cargo-delta/
-    # base ref) when it sees the downloaded impact.state, whereas a scheduled
-    # job forces ANVIL_IMPACT=off UNCONDITIONALLY (it never downloads an
-    # artifact, and must not trust a stale cache-restored impact.state) so
-    # anvil-impact no-ops and tiers default to --workspace. See §4.3.
+    # Scope comes from the downloaded target/anvil/impact cache: a PR group
+    # always downloads the artifact, so it exports ANVIL_IMPACT=consume (trust
+    # the cache; no snapshot/cargo-delta/base ref), whereas a scheduled group
+    # exports ANVIL_IMPACT=off. The mode is fixed by tier at emit time -- never
+    # probed from the cacheable impact.state marker. See §4.3.
 ```
 
 The only per-group parameters are the PR-context strings a group's checks consume:
