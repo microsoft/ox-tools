@@ -17,14 +17,14 @@ anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
 
 # Install prerequisites for the `anvil-scheduled-test` recipe.
 [group("anvil-setup")]
-anvil-scheduled-test-setup installer="install": \
+anvil-scheduled-test-setup installer="install": (anvil-tool-cargo-delta-install installer) \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
     (anvil-examples-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-test` recipe.
 [group("anvil-setup")]
-anvil-scheduled-test-validate-prereqs: \
+anvil-scheduled-test-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \
     anvil-doc-test-validate-prereqs \
     anvil-examples-validate-prereqs

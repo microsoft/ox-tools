@@ -8,10 +8,11 @@
 
 # Run tests with cargo-careful for affected workspace packages.
 [script("pwsh")]
-anvil-careful: anvil-careful-validate-prereqs
+anvil-careful: anvil-careful-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($include -eq '--skip') { exit 0 }
+    $pkg = @(if ($include) { -split $include } else { '--workspace' })
     # Guard against cargo-careful's stale-sysroot hazard. cargo-careful
     # builds a custom std ("careful sysroot": debug-assertions + extra UB
     # checks) into a STABLE cache path -- ProjectDirs(de.ralfj.cargo-careful),
@@ -28,7 +29,7 @@ anvil-careful: anvil-careful-validate-prereqs
     # (the nightly rustc -- commit hash et al. -- plus the careful tool
     # version) and `cargo clean` when it changes, forcing the workspace to be
     # rebuilt against the freshly-built std. The marker lives under target/,
-    # so it is wiped by the clean and travels with any target/ cache.
+    # so `cargo clean` wipes it together with the artifacts it guards.
     $rustcVV = (& rustc '+{{ rust_nightly }}' -vV | Out-String)
     if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-careful: could not query nightly rustc version'; exit 1 }
     $idSource = $rustcVV.Trim() + "`ncargo-careful {{ cargo_careful_version }}"

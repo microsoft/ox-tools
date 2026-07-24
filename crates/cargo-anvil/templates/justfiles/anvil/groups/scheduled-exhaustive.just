@@ -15,14 +15,14 @@ anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
 
 # Install prerequisites for the `anvil-scheduled-exhaustive` recipe.
 [group("anvil-setup")]
-anvil-scheduled-exhaustive-setup installer="install": \
+anvil-scheduled-exhaustive-setup installer="install": (anvil-tool-cargo-delta-install installer) \
     (anvil-mutants-full-setup installer) \
     (anvil-cargo-hack-setup installer) \
     (anvil-bench-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-exhaustive` recipe.
 [group("anvil-setup")]
-anvil-scheduled-exhaustive-validate-prereqs: \
+anvil-scheduled-exhaustive-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs \
     anvil-mutants-full-validate-prereqs \
     anvil-cargo-hack-validate-prereqs \
     anvil-bench-validate-prereqs

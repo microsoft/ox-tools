@@ -112,7 +112,7 @@ flowchart LR
 |--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `semver-check`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
 | `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `llvm-cov` (instrumented `nextest`), `doc-test`, `examples`. Coverage is uploaded once from the canonical x86_64 Linux leg. |
-| `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped via `ANVIL_INCLUDE_AFFECTED` so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
+| `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped to the affected set so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
 | `pr-mutants`         | Linux x86_64 + Windows x86_64 + Linux aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | Diff-scoped mutation testing (`mutants --in-diff`). The recipe self-skips on `aarch64-pc-windows-msvc` (cargo-mutants doesn't build there), so the GH windows-arm leg is a no-op rather than a job failure. |
 
 The three `pr-slow*` groups are independent: failures in `pr-test` don't block `pr-runtime-analysis` or `pr-mutants` from running, and overall PR wall-clock is `max(pr-test, pr-runtime-analysis, pr-mutants)` per leg rather than the sum. Locally, `just anvil-pr-slow` is an umbrella recipe that runs all three sub-recipes sequentially so adopters who want "run everything slow" don't have to type three commands.
@@ -321,22 +321,31 @@ workflow/pipeline file alongside the anvil composite actions / step templates.
 ## 5. Impact-scoping check → env-var mapping
 
 The tool uses [`cargo-delta`](https://crates.io/crates/cargo-delta) to skip checks for
-unaffected workspace members on PR runs. cargo-delta computes three concentric impact tiers
-(`required ⊇ affected ⊇ modified`) and emits each as a list of crate names. The
-`anvil-impact` building block formats each tier into a pre-built `--package X@ver --package Y@ver`
-string (or the literal sentinel `--skip` when the tier is empty), publishes the result as
-`ANVIL_INCLUDE_MODIFIED`, `ANVIL_INCLUDE_AFFECTED`, and `ANVIL_INCLUDE_REQUIRED`
-env vars, and the recipes in `checks.just` consume them. Each package is a version-qualified
-cargo spec (`name@version`) so `-p` resolves uniquely to the workspace member even when a
-like-named crate is also pulled in as a different-versioned transitive dependency.
+unaffected workspace members. cargo-delta computes three concentric impact tiers
+(`required ⊇ affected ⊇ modified`) from the committed diff against the base ref. The
+shared `anvil-impact` recipe (see [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe))
+runs cargo-delta once, writes `target/anvil/impact/`, and projects each tier — via the
+`_anvil-impact-format` helper — into a pre-built `--package X@ver --package Y@ver` string
+(or the literal sentinel `--skip` when the tier is empty). Each package is a
+version-qualified cargo spec (`name@version`) so `-p` resolves uniquely to the workspace
+member even when a like-named crate is also pulled in as a different-versioned transitive
+dependency.
+
+Every per-crate check depends on `anvil-impact` and resolves its tier's scope by calling
+`_anvil-impact-include <tier>` into a local `$include` variable, then consumes it. The
+**same** cache is read in cloud workflows — the impact job uploads `target/anvil/impact/`
+as an artifact and each group job downloads it — so the identical code path runs locally
+and in CI, with no scoping threaded through environment variables. Scoping is on by
+default both locally and in CI; it is disabled only by `ANVIL_IMPACT=off` (the
+scheduled/full tiers), which makes every tier resolve to its full-workspace default.
 
 Each catalog check is tagged with one of four buckets:
 
-| Bucket    | Env var consumed              | Behavior in cloud workflows                                                              | Behavior locally (env unset)        |
+| Bucket    | `$include` tier               | Behavior when a tier value is present                                        | Behavior when unscoped (`ANVIL_IMPACT=off` / no cache) |
 |-----------|-------------------------------|-----------------------------------------------------------------------------|--------------------------------------|
-| modified  | `ANVIL_INCLUDE_MODIFIED`   | If `--skip`: exit 0. Otherwise run unconditionally (tool is workspace-wide). | Run unconditionally.                 |
-| affected  | `ANVIL_INCLUDE_AFFECTED`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
-| required  | `ANVIL_INCLUDE_REQUIRED`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
+| modified  | `_anvil-impact-include modified`   | If `--skip`: exit 0. Otherwise run unconditionally (tool is workspace-wide). | Run unconditionally.                 |
+| affected  | `_anvil-impact-include affected`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
+| required  | `_anvil-impact-include required`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
 | unscoped  | *(none)*                       | Always run.                                                                  | Always run.                          |
 
 Bucket assignments per check:
@@ -370,7 +379,7 @@ is no collision with real package names. Recipes test for it with
 nothing in that tier needed to run.
 
 The recipe-side mechanics are in
-[local.md §4](./local.md#4-impact-scoping-pass-through-env-vars). the cloud workflow-side wiring (the
+[local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe). the cloud workflow-side wiring (the
 `anvil-impact` building block, how downstream jobs consume the include vars) is in
 [github.md](./github.md#impact-scoping) and [ado.md](./ado.md#impact-scoping).
 

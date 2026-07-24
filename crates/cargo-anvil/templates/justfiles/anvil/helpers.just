@@ -7,67 +7,55 @@
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 #
-# Each check belongs to one of four buckets, which determines how it
-# interprets the impact env vars emitted by the cargo-delta impact step
-# in cloud workflows:
+# Each check belongs to one of four buckets, which determines how it scopes
+# its work to the packages impacted by a change:
 #
-#   - "modified": only run when at least one package's source files
-#     changed in the diff. The check's underlying tool is workspace-wide
-#     or directory-scoped (cargo fmt --all, cargo heather, cargo
-#     spellcheck), so it doesn't take --package; we short-circuit on
-#     the ANVIL_INCLUDE_MODIFIED == "--skip" sentinel.
+#   - "modified": only run when at least one package's source files changed
+#     in the diff. The check's underlying tool is workspace-wide or
+#     directory-scoped (cargo fmt --all, cargo spellcheck), so it doesn't take
+#     --package; it short-circuits on the "--skip" sentinel.
 #
-#   - "affected": run on the affected set (modified ∪ reverse-deps
-#     within the workspace). The check's underlying tool takes
-#     --package; we splice ANVIL_INCLUDE_AFFECTED into the cargo
-#     invocation, defaulting to --workspace for local invocations where
-#     no env var is set.
+#   - "affected": run on the affected set (modified U reverse-deps within the
+#     workspace). The tool takes --package; the recipe splices the resolved
+#     package list into the cargo invocation, defaulting to --workspace when
+#     the tier is unscoped.
 #
-#   - "required": run on the required set (affected ∪ workspace-internal
-#     transitive deps). Same splice/default pattern as affected, but
-#     keyed on ANVIL_INCLUDE_REQUIRED. Used for checks whose tool
-#     resolves through the dep graph (cargo doc → intra-doc links;
-#     cargo hack → feature powerset; cargo udeps → unused-deps).
+#   - "required": run on the required set (affected U workspace-internal
+#     transitive deps). Same splice/default as affected, for checks whose tool
+#     resolves through the dep graph (cargo doc -> intra-doc links; cargo hack
+#     -> feature powerset; cargo udeps -> unused-deps).
 #
-#   - "unscoped": always run, no env var reference. External-input
-#     checks (deny, audit, aprz) and PR-context checks (pr-title) live
-#     here. Scheduled-exhaustive recipes (mutants-full) are also unscoped
-#     by design.
+#   - "unscoped": always run. External-input checks (deny, audit, aprz) and
+#     PR-context checks (pr-title) live here; scheduled-exhaustive recipes
+#     (mutants-full) are unscoped by design.
 #
-# Local invocation (no impact wiring): all three env vars are unset or
-# empty (recipes fall back to "--workspace" via the truthiness check
-# below); modified-tier recipes simply skip the splice and run their
-# workspace-wide tool; affected/required-tier recipes splat
-# "--workspace" when the env var is empty or unset.
+# Each scoped check depends on `anvil-impact` (which produces the
+# target/anvil/impact cache) and captures its tier's scope into a local
+# variable by calling the shared resolver:
 #
-# Preparation contract: when a recipe reaches the cargo call, the
-# env var is one of:
+#   $include = (& {{just_executable()}} _anvil-impact-include <tier>)
 #
-#   * unset or ""                 - local run, or a cloud workflow (e.g.
-#                                    scheduled) that leaves the tier
-#                                    unscoped; the recipe substitutes
-#                                    "--workspace". An empty string is
-#                                    NOT $null, so we test truthiness
-#                                    rather than `?? "--workspace"`
-#                                    (which would only catch $null and
-#                                    splat an empty arg cargo rejects).
-#   * "--package A@v --package B@v"  - emitted by the cloud-workflow impact step
-#                                    when the tier has members. Packages are
-#                                    version-qualified cargo specs so they
-#                                    resolve uniquely even when a like-named
-#                                    crate is also a transitive dependency.
-#   * "--skip"                    - emitted by the cloud-workflow impact step when
-#                                    the tier is empty (recipe exits 0)
+# _anvil-impact-include reads that cache both locally and in cloud workflows
+# (where the group job downloaded the target/anvil/impact artifact), so the
+# same code path runs everywhere -- no scoping is threaded between jobs via
+# environment variables. `$include` is one of:
 #
-# This lets the simple recipes splat the var directly with
-#   & cargo X @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' }) ...
-# and reduces the per-recipe boilerplate to a single one-line skip
-# guard plus the cargo invocation.
+#   * "--workspace" (affected/required) or "" (modified) - the tier is
+#     unscoped: ANVIL_IMPACT=off, or no impact cache is present. Recipes splat
+#     "--workspace" (an empty string is NOT $null, so recipes test truthiness
+#     rather than `?? "--workspace"`, which would splat an empty arg cargo
+#     rejects).
+#   * "--package A@v --package B@v" - the tier has members. Packages are
+#     version-qualified cargo specs so they resolve uniquely even when a
+#     like-named crate is also a transitive dependency.
+#   * "--skip" - the tier is empty for this change (recipe exits 0).
 #
-# Modified-tier recipes never splice the env var into cargo (their
-# tools are workspace-wide); they only check the skip sentinel.
+# This keeps the per-recipe boilerplate to a single capture, a one-line skip
+# guard, and the cargo invocation. Modified-tier recipes never splice
+# `$include` into cargo (their tools are workspace-wide); they only check the
+# skip sentinel.
 #
-# Every recipe whose body uses multi-line conditionals or env-var
+# Every recipe whose body uses multi-line conditionals or array-splat
 # splicing is annotated with [script("pwsh")]. pwsh is preinstalled on
 # Windows (since Windows 10), on GH/ADO hosted Linux + Windows
 # runners, and installable on macOS via Homebrew or the upstream
