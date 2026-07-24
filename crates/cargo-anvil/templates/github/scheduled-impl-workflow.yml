@@ -88,8 +88,8 @@ jobs:
     # miri profiles (base miri + the three stricter ones) sequentially
     # within the leg. Parallelism is across OS legs, not across profiles:
     # running the profiles sequentially lets them share toolchain setup
-    # and the target/ cache, which is the right trade given each profile
-    # already costs hours.
+    # and the compiled target/ artifacts within the leg, which is the
+    # right trade given each profile already costs hours.
     strategy:
       fail-fast: false
       matrix:

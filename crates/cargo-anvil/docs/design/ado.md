@@ -545,11 +545,12 @@ threading pre-formatted strings the local run never produces. The chain:
    check reads its tier's scope from the cache file via `_anvil-impact-include` (into a
    local `$include` variable).
 4. **Scheduled stages download nothing** and always validate the full workspace, so the
-   group step exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by tier and
-   is **not** derived from `target/anvil/impact/impact.state`: `setup.yml` restores
-   `target/` (including any `impact.state`) from cache, so gating on that cacheable marker
-   could let a stale directory from a prior run flip a scheduled stage into impact scoping
-   and silently skip the full-workspace backstop.
+   group step exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by tier at
+   emit time and is **not** derived from `target/anvil/impact/impact.state`: the mode is a
+   property of the tier, not something probed at runtime. (`setup.yml` no longer caches
+   `target/` at all, so the durable `impact.state` never travels through the build cache;
+   the tier-fixed mode also means no leftover on-disk state could ever flip a scheduled
+   stage into impact scoping and skip the full-workspace backstop.)
 
 The pr-* stages gate on the impact stage *succeeding* (the default `succeeded()`
 condition on their `dependsOn: impact`): if impact fails, pr-* are skipped and the
@@ -716,9 +717,15 @@ workspace-scratch location to keep cache scoping predictable.
 
 The cache covers:
 
-- The `cargo install`-ed tools installed by the catalog setup recipes.
-- The `target/` directory (per anvil recipe; a per-recipe cache scope means a `pr-test`
-  cache hit doesn't have to wait on a `pr-fast` cache miss).
+- The `cargo install`-ed tools installed by the catalog setup recipes and the
+  downloaded crate registry, both under `CARGO_HOME`.
+
+The `target/` build directory is deliberately **not** cached: large per-OS/arch `target/`
+snapshots dwarf the high-value tool cache and add only modest dependency-recompile savings
+once the tools are cached. Excluding it also guarantees the impact stage's downloaded
+`target/anvil/impact/` artifact survives the cache restore unclobbered — so `job.yml`'s
+`inputArtifacts` download can stay its overridable, 1ESPT-friendly contract point without
+being reordered after `setup.yml`.
 
 Cache scoping inside 1ESPT-compliant pipelines is bounded by the template's allowed cache
 namespaces; the emitted cache step uses the project-scoped namespace by default and the

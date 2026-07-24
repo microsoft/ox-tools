@@ -36,8 +36,8 @@ runs:
       run: |
         set -euo pipefail
         # Scheduled tier always validates the FULL workspace: force off
-        # (anvil-impact no-ops, every tier -> --workspace). Unconditional on
-        # purpose -- anvil-setup restores target/ from cache and a stale
-        # impact.state must NOT flip this job into impact scoping.
+        # (anvil-impact no-ops, every tier -> --workspace). Fixed by tier at
+        # emit time, never probed at runtime, so no leftover state on the
+        # runner can flip this job into impact scoping.
         export ANVIL_IMPACT=off
         just anvil-scheduled-exhaustive

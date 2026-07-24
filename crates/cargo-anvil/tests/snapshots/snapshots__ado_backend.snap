@@ -679,7 +679,7 @@ steps:
       # This PR group job downloaded the target/anvil/impact artifact, so it
       # trusts that cache verbatim: "consume" makes anvil-impact a no-op (no
       # snapshot / cargo-delta / base ref). The mode is fixed by tier here,
-      # not probed from a cacheable file (see the scheduled variant).
+      # not probed at runtime (see the scheduled variant).
       export ANVIL_IMPACT=consume
       just anvil-pr-fast
     displayName: anvil-pr-fast
@@ -740,7 +740,7 @@ steps:
       # This PR group job downloaded the target/anvil/impact artifact, so it
       # trusts that cache verbatim: "consume" makes anvil-impact a no-op (no
       # snapshot / cargo-delta / base ref). The mode is fixed by tier here,
-      # not probed from a cacheable file (see the scheduled variant).
+      # not probed at runtime (see the scheduled variant).
       export ANVIL_IMPACT=consume
       just anvil-pr-mutants
     displayName: anvil-pr-mutants
@@ -801,7 +801,7 @@ steps:
       # This PR group job downloaded the target/anvil/impact artifact, so it
       # trusts that cache verbatim: "consume" makes anvil-impact a no-op (no
       # snapshot / cargo-delta / base ref). The mode is fixed by tier here,
-      # not probed from a cacheable file (see the scheduled variant).
+      # not probed at runtime (see the scheduled variant).
       export ANVIL_IMPACT=consume
       just anvil-pr-runtime-analysis
     displayName: anvil-pr-runtime-analysis
@@ -862,7 +862,7 @@ steps:
       # This PR group job downloaded the target/anvil/impact artifact, so it
       # trusts that cache verbatim: "consume" makes anvil-impact a no-op (no
       # snapshot / cargo-delta / base ref). The mode is fixed by tier here,
-      # not probed from a cacheable file (see the scheduled variant).
+      # not probed at runtime (see the scheduled variant).
       export ANVIL_IMPACT=consume
       just anvil-pr-test
     displayName: anvil-pr-test
@@ -921,9 +921,9 @@ steps:
   - bash: |
       set -euo pipefail
       # Scheduled tier always validates the FULL workspace: force off
-      # (anvil-impact no-ops, every tier -> --workspace). Unconditional on
-      # purpose -- setup.yml restores target/ from cache and a stale
-      # impact.state must NOT flip this job into impact scoping.
+      # (anvil-impact no-ops, every tier -> --workspace). Fixed by tier at
+      # emit time, never probed at runtime, so no leftover state on the
+      # agent can flip this job into impact scoping.
       export ANVIL_IMPACT=off
       just anvil-scheduled-advisories
     displayName: anvil-scheduled-advisories
@@ -982,9 +982,9 @@ steps:
   - bash: |
       set -euo pipefail
       # Scheduled tier always validates the FULL workspace: force off
-      # (anvil-impact no-ops, every tier -> --workspace). Unconditional on
-      # purpose -- setup.yml restores target/ from cache and a stale
-      # impact.state must NOT flip this job into impact scoping.
+      # (anvil-impact no-ops, every tier -> --workspace). Fixed by tier at
+      # emit time, never probed at runtime, so no leftover state on the
+      # agent can flip this job into impact scoping.
       export ANVIL_IMPACT=off
       just anvil-scheduled-exhaustive
     displayName: anvil-scheduled-exhaustive
@@ -1043,9 +1043,9 @@ steps:
   - bash: |
       set -euo pipefail
       # Scheduled tier always validates the FULL workspace: force off
-      # (anvil-impact no-ops, every tier -> --workspace). Unconditional on
-      # purpose -- setup.yml restores target/ from cache and a stale
-      # impact.state must NOT flip this job into impact scoping.
+      # (anvil-impact no-ops, every tier -> --workspace). Fixed by tier at
+      # emit time, never probed at runtime, so no leftover state on the
+      # agent can flip this job into impact scoping.
       export ANVIL_IMPACT=off
       just anvil-scheduled-runtime-analysis
     displayName: anvil-scheduled-runtime-analysis
@@ -1104,9 +1104,9 @@ steps:
   - bash: |
       set -euo pipefail
       # Scheduled tier always validates the FULL workspace: force off
-      # (anvil-impact no-ops, every tier -> --workspace). Unconditional on
-      # purpose -- setup.yml restores target/ from cache and a stale
-      # impact.state must NOT flip this job into impact scoping.
+      # (anvil-impact no-ops, every tier -> --workspace). Fixed by tier at
+      # emit time, never probed at runtime, so no leftover state on the
+      # agent can flip this job into impact scoping.
       export ANVIL_IMPACT=off
       just anvil-scheduled-test
     displayName: anvil-scheduled-test
@@ -1152,8 +1152,7 @@ steps:
         $(HOME)/.cargo/registry/cache/
         $(HOME)/.cargo/registry/index/
         $(HOME)/.cargo/bin/
-        target/
-    displayName: anvil setup (cache cargo home and target)
+    displayName: anvil setup (cache cargo home)
 
   # System dependencies for catalog source builds. See the GitHub
   # composite setup-action.yml for the rationale — same pattern.
@@ -1662,7 +1661,7 @@ anvil-careful: anvil-careful-validate-prereqs anvil-impact
     # (the nightly rustc -- commit hash et al. -- plus the careful tool
     # version) and `cargo clean` when it changes, forcing the workspace to be
     # rebuilt against the freshly-built std. The marker lives under target/,
-    # so it is wiped by the clean and travels with any target/ cache.
+    # so `cargo clean` wipes it together with the artifacts it guards.
     $rustcVV = (& rustc '+{{ rust_nightly }}' -vV | Out-String)
     if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-careful: could not query nightly rustc version'; exit 1 }
     $idSource = $rustcVV.Trim() + "`ncargo-careful {{ cargo_careful_version }}"

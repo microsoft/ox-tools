@@ -38,6 +38,6 @@ runs:
         # This PR group job downloaded the target/anvil/impact artifact, so it
         # trusts that cache verbatim: "consume" makes anvil-impact a no-op (no
         # snapshot / cargo-delta / base ref). The mode is fixed by tier here,
-        # not probed from a cacheable file (see the scheduled variant).
+        # not probed at runtime (see the scheduled variant).
         export ANVIL_IMPACT=consume
         just anvil-pr-fast

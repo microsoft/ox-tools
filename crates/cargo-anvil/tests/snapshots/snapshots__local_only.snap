@@ -433,7 +433,7 @@ anvil-careful: anvil-careful-validate-prereqs anvil-impact
     # (the nightly rustc -- commit hash et al. -- plus the careful tool
     # version) and `cargo clean` when it changes, forcing the workspace to be
     # rebuilt against the freshly-built std. The marker lives under target/,
-    # so it is wiped by the clean and travels with any target/ cache.
+    # so `cargo clean` wipes it together with the artifacts it guards.
     $rustcVV = (& rustc '+{{ rust_nightly }}' -vV | Out-String)
     if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-careful: could not query nightly rustc version'; exit 1 }
     $idSource = $rustcVV.Trim() + "`ncargo-careful {{ cargo_careful_version }}"

@@ -600,10 +600,12 @@ threading pre-formatted strings that local runs never see. The chain in
    an environmental difference from the impact job.
 4. **Scheduled group jobs download nothing** and always validate the full workspace, so
    their group action exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by
-   tier and is **not** derived from `target/anvil/impact/impact.state`: `anvil-setup`
-   restores `target/` (including any `impact.state`) from cache, so gating on that
-   cacheable marker could let a stale directory from a prior run flip a scheduled job into
-   impact scoping and silently skip the full-workspace backstop.
+   tier at emit time and is **not** derived from `target/anvil/impact/impact.state`: the
+   mode is a property of the tier, not something probed at runtime. (`anvil-setup` no
+   longer caches `target/` at all — see §setup — so the durable `impact.state` never
+   travels through the build cache; the tier-fixed mode also means no leftover on-disk
+   state could ever flip a scheduled job into impact scoping and skip the full-workspace
+   backstop.)
 
 The wiring never gates jobs on the impact result — every job runs regardless of `--skip`
 status. This is intentional: unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,
@@ -625,7 +627,7 @@ triggers `rustup` to download the pinned toolchain. For a published stable chann
 typically takes 10–30 seconds on Linux (somewhat longer on Windows and longer still for
 nightly with components). The auto-install runs once per job and is not cached across
 jobs by anvil — `~/.rustup` has high invalidation churn and the install cost is small
-relative to the cached cargo registry / `target/` paths (§8). Repos that want to skip
+relative to the cached cargo registry / tool paths (§8). Repos that want to skip
 even this per-job overhead can add their own toolchain-install step (e.g.
 `dtolnay/rust-toolchain@stable`) before the anvil composite action runs.
 
@@ -658,9 +660,17 @@ scoping predictable.
 
 The cache covers:
 
-- The `cargo install`-ed tools installed by the catalog setup recipes.
-- The `target/` directory (per anvil recipe; a per-recipe cache scope means a `pr-test`
-  cache hit doesn't have to wait on a `pr-fast` cache miss).
+- The `cargo install`-ed tools installed by the catalog setup recipes (`~/.cargo/bin/`
+  plus the `.crates.toml` / `.crates2.json` install ledgers) and the downloaded crate
+  registry (`~/.cargo/registry/`). The key includes `${{ github.job }}`, so a `pr-test`
+  cache hit doesn't have to wait on a `pr-fast` cache miss.
+
+The `target/` build directory is deliberately **not** cached. A per-job, per-OS, per-arch
+`target/` is large, and the many multi-GB entries would evict the high-value tool caches
+under the Actions 10 GB per-repo cache limit (LRU) — so caching it is a net loss here,
+with only modest dependency-recompile savings on top of the already-cached tools. Keeping
+`target/` out of the cache also means the impact stage's downloaded `target/anvil/impact/`
+artifact can never be clobbered by a `target/` cache restore.
 
 ## 9. Security
 
