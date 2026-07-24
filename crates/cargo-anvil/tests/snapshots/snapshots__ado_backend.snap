@@ -1186,10 +1186,16 @@ steps:
       # Same key shape as the GitHub side: OS + arch + rustc version +
       # lockfile hashes + catalog hash. Including arch keeps any
       # future ARM pool an adopter adds from colliding with x86_64 on
-      # the same OS namespace.
-      key: 'anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(anvil_rustc_version) | Cargo.lock | .cargo/config.toml | rust-toolchain.toml | justfiles/anvil/versions.just'
+      # the same OS namespace. The `anvil-v2` prefix versions the cache
+      # *shape*: bump it whenever the cached `path:` set changes (v2 added
+      # the compiled dependency dirs under target/), so a run can't keep
+      # hitting the older-shape cache under the unchanged key. The trailing
+      # `anvil-v1` restoreKey lets the first v2 run still reuse the previous
+      # tool/registry cache (only target/ recompiles once).
+      key: 'anvil-v2 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(anvil_rustc_version) | Cargo.lock | .cargo/config.toml | rust-toolchain.toml | justfiles/anvil/versions.just'
       restoreKeys: |
-        anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(anvil_rustc_version)
+        anvil-v2 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(anvil_rustc_version)
+        anvil-v2 | "$(Agent.OS)" | "$(Agent.OSArchitecture)"
         anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)"
       # Cache the dependency build products (compiled deps, build-script
       # outputs, fingerprints) for each tool target-dir. Concrete subpaths

@@ -536,10 +536,19 @@ runs:
         # the save -- leaving the cache empty forever. The restore-keys
         # fall back across jobs so the install work is still shared
         # across sibling legs on subsequent runs.
-        key: anvil-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/anvil/versions.just') }}-${{ github.job }}
+        #
+        # The `anvil-v2` prefix versions the cache *shape*: bump it
+        # whenever the cached `path:` set changes (v2 added the compiled
+        # dependency dirs under target/). Without a bump, a run would keep
+        # hitting the older-shape cache under the unchanged key and never
+        # save the new one. The trailing `anvil-v1-<os>-<arch>-` fallback
+        # lets the first v2 run still restore the previous tool/registry
+        # cache (only target/ recompiles once) for a graceful transition.
+        key: anvil-v2-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/anvil/versions.just') }}-${{ github.job }}
         restore-keys: |
-          anvil-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/anvil/versions.just') }}-
-          anvil-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-
+          anvil-v2-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/anvil/versions.just') }}-
+          anvil-v2-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-
+          anvil-v2-${{ runner.os }}-${{ runner.arch }}-
           anvil-v1-${{ runner.os }}-${{ runner.arch }}-
         # `.crates.toml` and `.crates2.json` track which cargo-installed
         # tools and versions live in ~/.cargo/bin/. Without them in the
