@@ -42,7 +42,7 @@ pub(crate) struct EachArgs {
     pub(crate) workspace: bool,
 
     /// Exclude a member from the selection (requires --workspace). Repeatable.
-    #[arg(long, value_name = "SPEC")]
+    #[arg(long, value_name = "SPEC", requires = "workspace")]
     pub(crate) exclude: Vec<String>,
 
     /// Explicitly select zero members (a no-op, exit 0). Replaces the CI

@@ -90,9 +90,9 @@ fn execute(plan: &Plan, keep_going: bool) -> Result<ExitCode, AppError> {
         let status = command.status().into_app_err(format!("failed to spawn `{program}`"))?;
         if !status.success() {
             if !keep_going {
-                // Fail-fast: propagate the failing child's own exit code.
-                let code = u8::try_from(status.code().unwrap_or(1)).unwrap_or(1);
-                return Ok(ExitCode::from(code));
+                // Fail-fast: propagate the failing child's own exit code,
+                // reduced to the u8 `ExitCode` can carry (see `exit_byte`).
+                return Ok(ExitCode::from(exit_byte(status.code())));
             }
             any_failed = true;
         }
@@ -116,4 +116,53 @@ fn shell_join(argv: &[String]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// Reduce a raw process exit code to the `u8` that [`ExitCode`] can carry.
+///
+/// `ExitCode` is a `u8`, but process exit codes are wider: `None` means the
+/// child was terminated by a signal (Unix) and non-`None` codes are a full
+/// `i32` on Windows. We reduce a code to its low byte, which is a closer
+/// approximation of the child's code than collapsing everything to `1`. Two
+/// cases still map to `1`: a signal-terminated child (no numeric code), and a
+/// non-zero code whose low byte is `0` (e.g. `256`) — which would otherwise be
+/// indistinguishable from success. This function is only called on the
+/// fail-fast path, where the child has already failed, so `1` is always a
+/// correct non-zero fallback.
+fn exit_byte(raw: Option<i32>) -> u8 {
+    let Some(raw) = raw else { return 1 };
+    let byte = u8::try_from(raw & 0xFF).expect("`raw & 0xFF` masks to the low byte, always within 0..=255");
+    if byte == 0 { 1 } else { byte }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::exit_byte;
+
+    #[test]
+    fn signal_terminated_child_maps_to_one() {
+        assert_eq!(exit_byte(None), 1);
+    }
+
+    #[test]
+    fn in_range_codes_pass_through() {
+        assert_eq!(exit_byte(Some(1)), 1);
+        assert_eq!(exit_byte(Some(2)), 2);
+        assert_eq!(exit_byte(Some(255)), 255);
+    }
+
+    #[test]
+    fn wide_codes_reduce_to_low_byte() {
+        // 259 = 0x103 -> low byte 3 (a common Windows code).
+        assert_eq!(exit_byte(Some(259)), 3);
+        assert_eq!(exit_byte(Some(257)), 1);
+    }
+
+    #[test]
+    fn nonzero_code_with_zero_low_byte_maps_to_one() {
+        // 256 = 0x100 -> low byte 0, which would look like success; map to 1.
+        assert_eq!(exit_byte(Some(256)), 1);
+        assert_eq!(exit_byte(Some(512)), 1);
+    }
 }

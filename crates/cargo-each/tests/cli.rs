@@ -135,6 +135,30 @@ fn exclude_filter_metadata_drops_matching_member() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
+fn exclude_requires_workspace() {
+    // `--exclude` is documented as requiring `--workspace`; clap enforces it,
+    // so `--exclude` with an implicit / `-p` selection is a usage error (2).
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args(["-p", "alpha", "--exclude", "beta", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .failure()
+        .code(2);
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn exclude_with_workspace_removes_member() {
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args(["--workspace", "--exclude", "beta", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("echo alpha").and(predicate::str::contains("echo beta").not()));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
 fn chdir_shows_crate_root_in_dry_run() {
     let (_tmp, manifest) = fixture();
     each(&manifest)
