@@ -467,7 +467,7 @@ engine internals or the template format.
 ### 6.1 Optional container runner
 
 The public base catalog emits `justfiles/anvil/container/`: an explicit
-`anvil-container` recipe, generic Containerfile, Podman drivers,
+`anvil-container` recipe, generic Containerfile, Docker Engine drivers,
 content-address helper, and README. Native `just anvil-*` execution remains the
 default.
 

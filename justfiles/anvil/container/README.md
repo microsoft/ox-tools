@@ -10,7 +10,7 @@ dependency caches, and compilation output.
 
 ## Quick start
 
-Ensure Podman is running, then run:
+Ensure Docker Engine is running, then run:
 
 ```text
 just anvil-container anvil-clippy
@@ -20,24 +20,26 @@ The first run builds the matching image and can take several minutes.
 
 ## Prerequisites
 
-- [Podman](https://podman.io/docs/installation) 4.3 or newer.
+- [Docker Engine](https://docs.docker.com/engine/install/) 23.0 or newer,
+  installed directly in Linux or WSL and usable by the current user.
 - `git` and `just` on the host.
-- Bash on Linux, WSL, and macOS; PowerShell Core (`pwsh`) on Windows.
+- Bash on Linux and WSL; PowerShell Core (`pwsh`) and WSL 2 on Windows.
 - `[script]` support enabled in the root `Justfile`. Add `set unstable` when
   required by the installed `just` version.
 - A `rust-toolchain.toml` in the repository root.
-- An x86-64 host or Podman configuration capable of running `linux/amd64`
-  images.
+- An x86-64 Linux or WSL environment capable of running `linux/amd64` images.
 
-On Windows and macOS, initialize and start a Podman machine:
+On Windows, install Docker Engine inside the default WSL distribution rather
+than relying on Docker Desktop. Verify the engine from PowerShell:
 
 ```text
-podman machine init
-podman machine start
+wsl -e docker version
 ```
 
-Run `podman machine init` only once. Run `podman machine start` whenever the
-machine is stopped.
+The Windows driver invokes that WSL Docker Engine directly. Start the Docker
+service inside WSL when it is stopped and add the WSL user to the `docker`
+group when non-root access is not already configured. Docker Desktop is not
+required.
 
 ## Common workflows
 
@@ -140,16 +142,18 @@ The public driver builds images locally and does not pull
 
 | Problem | Resolution |
 |---|---|
-| Podman is not found | Install Podman 4.3 or newer and ensure `podman` is on `PATH` |
-| Podman cannot connect | Run `podman machine start` on Windows or macOS |
-| `linux/amd64` cannot run | Enable Podman emulation or use an x86-64 host |
+| Docker is not found on Linux or WSL | Install Docker Engine 23.0 or newer inside that environment |
+| Docker is unavailable from Windows | Run `wsl -e docker version`; install or start Docker Engine in the default WSL distribution |
+| Docker requires elevated access | Add the Linux/WSL user to the `docker` group, then start a new shell |
+| `linux/amd64` cannot run | Use an x86-64 Linux or WSL environment |
 | `[script]` recipes are unavailable | Enable `[script]` support; older `just` versions require `set unstable` |
 | `rust-toolchain.toml` is missing | Add the repository-owned toolchain file at the repository root |
 | GitHub authentication is unavailable | Run `gh auth login --hostname github.com` or set host `GITHUB_TOKEN` |
 | A matching image is missing with `ANVIL_CONTAINER_NO_REBUILD=1` | Unset the variable to allow the local image build |
 | The first run is slow | The initial image build installs the pinned tool catalog; later runs reuse it |
 
-Use `podman images anvil-dev` to list locally cached default Anvil images.
+Use `docker images anvil-dev` inside Linux or WSL to list locally cached
+default Anvil images.
 
 ## Managed files
 
@@ -169,7 +173,7 @@ justfiles/anvil/container/customize.ps1
 The driver sources the matching file as host code before image construction and
 recipe execution. Customization API version 1 provides documented inputs and
 validated outputs for build secrets, dependency preparation, runtime arguments,
-cleanup, and Windows Podman-machine builds.
+and cleanup.
 
 Customization source is excluded from image identity and the build context.
 Non-secret image behavior must be represented by hashed static files such as

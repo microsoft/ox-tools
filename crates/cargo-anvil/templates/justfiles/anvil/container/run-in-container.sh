@@ -41,15 +41,18 @@ version_at_least() {
     ((found_patch >= required_patch))
 }
 
-command -v podman >/dev/null 2>&1 || {
-    echo "anvil-container: Podman is required. See justfiles/anvil/container/README.md." >&2
+command -v docker >/dev/null 2>&1 || {
+    echo "anvil-container: Docker Engine is required. See justfiles/anvil/container/README.md." >&2
     exit 1
 }
 
-version="$(podman version --format '{{.Client.Version}}' 2>/dev/null || podman --version | awk '{print $3}')"
-minimum="4.3.0"
+version="$(docker version --format '{{.Server.Version}}' 2>/dev/null)" || {
+    echo "anvil-container: Docker Engine is unavailable. Start the Docker service and ensure the current user can access it." >&2
+    exit 1
+}
+minimum="23.0.0"
 if ! version_at_least "$version" "$minimum"; then
-    echo "anvil-container: Podman $minimum or newer is required (found $version)." >&2
+    echo "anvil-container: Docker Engine $minimum or newer is required (found $version)." >&2
     exit 1
 fi
 
@@ -113,7 +116,7 @@ fi
 # Versioned customization contract: check warm/cold state before sourcing so
 # customization needed only for image construction can be skipped on a warm
 # run, then expose read-only inputs. See docs/design/containers.md.
-if podman image exists "$image"; then
+if docker image inspect "$image" >/dev/null 2>&1; then
     image_exists=true
 else
     image_exists=false
@@ -146,8 +149,8 @@ if [[ -f "$script_dir/customize.sh" ]]; then
     source "$script_dir/customize.sh"
 fi
 
-# Bash 3.2 (macOS's system Bash) has neither namerefs (the nameref flag on
-# `local`/`declare`, Bash 4.3+) nor safe `set -u` expansion of empty-but-
+# Bash 3.2 has neither namerefs (the nameref flag on `local`/`declare`, Bash
+# 4.3+) nor safe `set -u` expansion of empty-but-
 # declared arrays (fixed in Bash 4.4). Elements are passed positionally
 # instead of by nameref, and every expansion of a possibly-empty array uses
 # the `${arr[@]+"${arr[@]}"}` idiom: unset/empty-under-old-Bash arrays vanish
@@ -183,36 +186,52 @@ if ! "$image_exists"; then
         echo "anvil-container: image $image is missing and ANVIL_CONTAINER_NO_REBUILD=1." >&2
         exit 1
     else
-        podman build \
+        docker build \
             --platform linux/amd64 \
             --tag "$image" \
             --file "$script_dir/Containerfile" \
-            --ignorefile "$script_dir/container.ignore" \
             --build-arg "ANVIL_IMAGE_ID=$image_id" \
             ${ANVIL_CONTAINER_BUILD_ARGS[@]+"${ANVIL_CONTAINER_BUILD_ARGS[@]}"} \
             "$repo_root"
     fi
 fi
 
+container_uid="$(id -u)"
+container_gid="$(id -g)"
+registry_volume="anvil-cargo-registry"
+git_volume="anvil-cargo-git"
+for volume in "$registry_volume" "$git_volume" "$target_volume"; do
+    docker volume create "$volume" >/dev/null
+done
+mount_args=(
+    --mount "type=bind,source=$repo_root,target=/workspace"
+    --mount "type=volume,source=$registry_volume,target=/usr/local/cargo/registry"
+    --mount "type=volume,source=$git_volume,target=/usr/local/cargo/git"
+    --mount "type=volume,source=$target_volume,target=/workspace/target"
+)
+docker run --rm --pull=never \
+    --platform linux/amd64 \
+    --user 0:0 \
+    "${mount_args[@]}" \
+    "$image" sh -c \
+    "chown $container_uid:$container_gid /usr/local/cargo/registry /usr/local/cargo/git /workspace/target"
+
 run_args=(
     run --rm --pull=never
     --platform linux/amd64
-    --userns keep-id
+    --user "$container_uid:$container_gid"
     --env ANVIL_IN_CONTAINER=1
     --env HOME=/tmp/anvil-user
-    --volume "$repo_root:/workspace:Z"
-    --volume "anvil-cargo-registry:/usr/local/cargo/registry:U"
-    --volume "anvil-cargo-git:/usr/local/cargo/git:U"
-    --volume "$target_volume:/workspace/target:U"
+    "${mount_args[@]}"
     --workdir /workspace
 )
 prepare_run_args=("${run_args[@]}")
 run_args+=(${ANVIL_CONTAINER_RUN_ARGS[@]+"${ANVIL_CONTAINER_RUN_ARGS[@]}"})
 for name in PR_TITLE BASE_REF ANVIL_INCLUDE_MODIFIED ANVIL_INCLUDE_AFFECTED ANVIL_INCLUDE_REQUIRED GITHUB_BASE_REF SYSTEM_PULLREQUEST_TARGETBRANCH; do
-    if declare -p "$name" >/dev/null 2>&1; then run_args+=(--env "$name"); fi
+    if value="$(printenv "$name")"; then run_args+=(--env "$name=$value"); fi
 done
 if ((${#ANVIL_CONTAINER_PREPARE_COMMAND[@]} > 0)); then
-    podman "${prepare_run_args[@]}" \
+    docker "${prepare_run_args[@]}" \
         ${ANVIL_CONTAINER_PREPARE_ARGS[@]+"${ANVIL_CONTAINER_PREPARE_ARGS[@]}"} \
         "$image" \
         "${ANVIL_CONTAINER_PREPARE_COMMAND[@]}"
@@ -223,17 +242,20 @@ if [[ -n "$github_token" ]]; then
     chmod 600 "$github_token_file"
     printf '%s' "$github_token" > "$github_token_file"
     unset github_token
-    github_run_args=("${run_args[@]}" --volume "$github_token_file:/run/secrets/anvil-github-token:ro,Z")
+    github_run_args=(
+        "${run_args[@]}"
+        --mount "type=bind,source=$github_token_file,target=/run/secrets/anvil-github-token,readonly"
+    )
     if "$runs_only_github_check"; then
         run_args=("${github_run_args[@]}")
     else
-        podman "${github_run_args[@]}" "$image" just anvil-aprz
+        docker "${github_run_args[@]}" "$image" just anvil-aprz
         run_args+=(--env ANVIL_APRZ_ALREADY_RAN=1)
     fi
 fi
 
 if (($# == 0)); then
-    podman "${run_args[@]}" --interactive --tty "$image" bash
+    docker "${run_args[@]}" --interactive --tty "$image" bash
     exit $?
 fi
-podman "${run_args[@]}" "$image" just "$@"
+docker "${run_args[@]}" "$image" just "$@"

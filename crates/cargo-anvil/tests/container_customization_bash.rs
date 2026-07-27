@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-#![cfg(all(unix, not(miri)))] // exercises the real Bash driver against a fake `podman`; miri can't sandbox this.
+#![cfg(all(unix, not(miri)))] // exercises the real Bash driver against a fake `docker`; miri can't sandbox this.
 #![allow(
     clippy::expect_used,
     clippy::unwrap_used,
@@ -18,7 +18,7 @@
 //! This is the Bash mirror of `container_customization.rs`'s `PowerShell`
 //! driver tests. It generates the real `justfiles/anvil/container/` tree
 //! with [`cargo_anvil::test_support::run_update`], then runs the generated
-//! `run-in-container.sh` against a fake `podman` on `PATH` so the driver's
+//! `run-in-container.sh` against a fake `docker` on `PATH` so the driver's
 //! own process, argument construction, and validation execute for real —
 //! including with the default (customize.sh-empty) arrays, which is the
 //! condition that regressed under Bash 3.2 / Bash <4.4 `set -u` semantics.
@@ -86,30 +86,33 @@ fn repo_with_container() -> TempDir {
     tmp
 }
 
-/// Installs a fake `podman` on `PATH` so the real driver runs against
+/// Installs a fake `docker` on `PATH` so the real driver runs against
 /// controllable, observable behavior instead of a real container engine.
-fn install_fake_podman(bin_dir: &Path) {
+fn install_fake_docker(bin_dir: &Path) {
     write_executable(
-        &bin_dir.join("podman"),
+        &bin_dir.join("docker"),
         r#"#!/usr/bin/env bash
 set -euo pipefail
-if [[ -n "${FAKE_PODMAN_LOG:-}" ]]; then
-    printf '%s\n' "$*" >> "$FAKE_PODMAN_LOG"
+if [[ -n "${FAKE_DOCKER_LOG:-}" ]]; then
+    printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
 fi
 case "${1:-}" in
     version)
-        echo '5.0.0'
+        echo '26.1.5'
         exit 0
         ;;
     image)
-        if [[ "${FAKE_PODMAN_IMAGE_EXISTS:-}" == "1" ]]; then exit 0; else exit 1; fi
+        if [[ "${FAKE_DOCKER_IMAGE_EXISTS:-}" == "1" ]]; then exit 0; else exit 1; fi
         ;;
     build)
-        exit "${FAKE_PODMAN_BUILD_EXIT:-0}"
+        exit "${FAKE_DOCKER_BUILD_EXIT:-0}"
+        ;;
+    volume)
+        exit 0
         ;;
     run)
         joined="$*"
-        if [[ -n "${FAKE_PODMAN_FAIL_MARKER:-}" && "$joined" == *"$FAKE_PODMAN_FAIL_MARKER"* ]]; then
+        if [[ -n "${FAKE_DOCKER_FAIL_MARKER:-}" && "$joined" == *"$FAKE_DOCKER_FAIL_MARKER"* ]]; then
             exit 1
         fi
         exit 0
@@ -125,11 +128,11 @@ esac
 struct DriverRun {
     status: std::process::ExitStatus,
     stderr: String,
-    podman_log: String,
+    docker_log: String,
     test_log: String,
 }
 
-/// Runs the real generated `run-in-container.sh` against the fake `podman`,
+/// Runs the real generated `run-in-container.sh` against the fake `docker`,
 /// with `customize.sh` written from `customize_sh_body` beforehand.
 fn run_driver(root: &Path, customize_sh_body: &str, recipe: &str, env: &[(&str, &str)]) -> DriverRun {
     run_driver_args(root, customize_sh_body, &[recipe], env)
@@ -140,9 +143,9 @@ fn run_driver_args(root: &Path, customize_sh_body: &str, recipe_args: &[&str], e
     write(&container_dir.join("customize.sh"), customize_sh_body);
 
     let bin_dir = root.join("fake-bin");
-    install_fake_podman(&bin_dir);
+    install_fake_docker(&bin_dir);
 
-    let podman_log = root.join("podman.log");
+    let docker_log = root.join("docker.log");
     let test_log = root.join("test.log");
     let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default());
 
@@ -152,7 +155,7 @@ fn run_driver_args(root: &Path, customize_sh_body: &str, recipe_args: &[&str], e
         .args(recipe_args)
         .current_dir(root)
         .env("PATH", path)
-        .env("FAKE_PODMAN_LOG", &podman_log)
+        .env("FAKE_DOCKER_LOG", &docker_log)
         .env("FAKE_TEST_LOG", &test_log)
         .env_remove("GITHUB_TOKEN")
         .env_remove("ANVIL_CONTAINER_IMAGE")
@@ -165,7 +168,7 @@ fn run_driver_args(root: &Path, customize_sh_body: &str, recipe_args: &[&str], e
     DriverRun {
         status: output.status,
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        podman_log: std::fs::read_to_string(&podman_log).unwrap_or_default(),
+        docker_log: std::fs::read_to_string(&docker_log).unwrap_or_default(),
         test_log: std::fs::read_to_string(&test_log).unwrap_or_default(),
     }
 }
@@ -177,7 +180,7 @@ fn forwarded_parameter_does_not_trigger_github_authentication() {
         tmp.path(),
         "",
         &["anvil-clippy", "anvil-aprz"],
-        &[("FAKE_PODMAN_IMAGE_EXISTS", "1")],
+        &[("FAKE_DOCKER_IMAGE_EXISTS", "1")],
     );
 
     assert!(
@@ -186,12 +189,15 @@ fn forwarded_parameter_does_not_trigger_github_authentication() {
         run.stderr
     );
     assert!(
-        run.podman_log.lines().any(|line| line.contains("just anvil-clippy anvil-aprz")),
+        run.docker_log.lines().any(|line| line.contains("just anvil-clippy anvil-aprz")),
         "all arguments must still be forwarded to the requested recipe: {}",
-        run.podman_log
+        run.docker_log
     );
     assert_eq!(
-        run.podman_log.lines().filter(|line| line.starts_with("run ")).count(),
+        run.docker_log
+            .lines()
+            .filter(|line| line.starts_with("run ") && line.contains("just anvil-clippy anvil-aprz"))
+            .count(),
         1,
         "a forwarded parameter must not cause an isolated anvil-aprz invocation"
     );
@@ -220,25 +226,40 @@ ANVIL_CONTAINER_CLEANUP=anvil_test_cleanup
 
     assert!(
         run.status.success(),
-        "cold run with empty default arrays must succeed: stderr={}\npodman.log={}",
+        "cold run with empty default arrays must succeed: stderr={}\ndocker.log={}",
         run.stderr,
-        run.podman_log
+        run.docker_log
     );
     assert!(run.test_log.contains("exists=false"), "log: {}", run.test_log);
     assert!(run.test_log.contains("recipes=anvil-clippy"), "log: {}", run.test_log);
     assert!(run.test_log.contains("repo-is-dir=true"), "log: {}", run.test_log);
     assert!(run.test_log.contains("dir-is-container-dir=true"), "log: {}", run.test_log);
     assert!(
-        run.podman_log.lines().any(|line| line.starts_with("build ")),
-        "a cold run must invoke podman build: {}",
-        run.podman_log
+        run.docker_log.lines().any(|line| line.starts_with("build ")),
+        "a cold run must invoke docker build: {}",
+        run.docker_log
     );
     assert!(
-        run.podman_log
+        run.docker_log
             .lines()
             .any(|line| line.starts_with("run ") && line.contains("just anvil-clippy")),
-        "expected a podman run invocation, got: {}",
-        run.podman_log
+        "expected a docker run invocation, got: {}",
+        run.docker_log
+    );
+    assert_eq!(
+        run.docker_log.lines().filter(|line| line.starts_with("volume create ")).count(),
+        3,
+        "the driver must create all named cache volumes: {}",
+        run.docker_log
+    );
+    let recipe_line = run
+        .docker_log
+        .lines()
+        .find(|line| line.starts_with("run ") && line.contains("just anvil-clippy"))
+        .expect("the recipe run is asserted present above");
+    assert!(
+        recipe_line.contains("--user ") && !recipe_line.contains("--user 0:0"),
+        "recipe execution must use the WSL/Linux user identity: {recipe_line}"
     );
     assert!(
         run.test_log.contains("cleanup-ran"),
@@ -254,24 +275,24 @@ fn warm_run_skips_the_build_and_still_reports_image_exists() {
     let customize = r#"
 printf 'exists=%s\n' "$ANVIL_CONTAINER_IMAGE_EXISTS" >> "$FAKE_TEST_LOG"
 "#;
-    let run = run_driver(root, customize, "anvil-clippy", &[("FAKE_PODMAN_IMAGE_EXISTS", "1")]);
+    let run = run_driver(root, customize, "anvil-clippy", &[("FAKE_DOCKER_IMAGE_EXISTS", "1")]);
 
     assert!(
         run.status.success(),
-        "warm run must succeed: stderr={}\npodman.log={}",
+        "warm run must succeed: stderr={}\ndocker.log={}",
         run.stderr,
-        run.podman_log
+        run.docker_log
     );
     assert!(run.test_log.contains("exists=true"), "log: {}", run.test_log);
     assert!(
-        !run.podman_log.lines().any(|line| line.starts_with("build ")),
-        "a warm run (matching image already present) must not invoke podman build: {}",
-        run.podman_log
+        !run.docker_log.lines().any(|line| line.starts_with("build ")),
+        "a warm run (matching image already present) must not invoke docker build: {}",
+        run.docker_log
     );
 }
 
 #[test]
-fn prepare_args_without_a_prepare_command_are_rejected_before_podman_runs() {
+fn prepare_args_without_a_prepare_command_are_rejected_before_docker_runs() {
     let tmp = repo_with_container();
     let root = tmp.path();
     let customize = r"
@@ -287,12 +308,12 @@ ANVIL_CONTAINER_PREPARE_ARGS=(--label 'prepare-marker=1')
         run.stderr
     );
     assert!(
-        !run.podman_log
+        !run.docker_log
             .lines()
             .any(|line| line.starts_with("build ") || line.starts_with("run ")),
-        "validation must fail before any Podman build or run invocation \
+        "validation must fail before any Docker build or run invocation \
          (version/image-exists checks happen earlier and are expected): {}",
-        run.podman_log
+        run.docker_log
     );
 }
 
@@ -310,8 +331,8 @@ ANVIL_CONTAINER_CLEANUP=anvil_test_cleanup
         customize,
         "anvil-clippy",
         &[
-            ("FAKE_PODMAN_IMAGE_EXISTS", "1"), // warm run: only the main recipe container executes.
-            ("FAKE_PODMAN_FAIL_MARKER", "run-marker=1"),
+            ("FAKE_DOCKER_IMAGE_EXISTS", "1"), // warm run: only the main recipe container executes.
+            ("FAKE_DOCKER_FAIL_MARKER", "run-marker=1"),
         ],
     );
 
@@ -335,22 +356,22 @@ ANVIL_CONTAINER_RUN_ARGS=(--label 'run-marker=1')
 
     assert!(
         run.status.success(),
-        "cold run must succeed: stderr={}\npodman.log={}",
+        "cold run must succeed: stderr={}\ndocker.log={}",
         run.stderr,
-        run.podman_log
+        run.docker_log
     );
     let build_line = run
-        .podman_log
+        .docker_log
         .lines()
         .find(|line| line.starts_with("build "))
-        .unwrap_or_else(|| panic!("expected a podman build invocation, got: {}", run.podman_log));
+        .unwrap_or_else(|| panic!("expected a docker build invocation, got: {}", run.docker_log));
     assert!(build_line.contains("build-marker=1"), "line: {build_line}");
     assert!(!build_line.contains("run-marker=1"), "line: {build_line}");
     let run_line = run
-        .podman_log
+        .docker_log
         .lines()
         .find(|line| line.starts_with("run ") && line.contains("just anvil-clippy"))
-        .unwrap_or_else(|| panic!("expected a podman run invocation, got: {}", run.podman_log));
+        .unwrap_or_else(|| panic!("expected a docker run invocation, got: {}", run.docker_log));
     assert!(run_line.contains("run-marker=1"), "line: {run_line}");
     assert!(!run_line.contains("build-marker=1"), "line: {run_line}");
 }

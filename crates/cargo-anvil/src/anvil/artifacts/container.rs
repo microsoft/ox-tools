@@ -3,7 +3,7 @@
 
 //! The optional local container backend.
 //!
-//! The base catalog emits a public Podman implementation. Downstream catalogs
+//! The base catalog emits a public Docker Engine implementation. Downstream catalogs
 //! replace only environment-specific artifacts such as the Containerfile and
 //! add an optional `customize.sh`/`customize.ps1` runtime customization file.
 
@@ -11,7 +11,7 @@ use crate::catalog::Artifact;
 
 const RECIPE: &str = include_str!("../../../templates/justfiles/anvil/container/container.just");
 const CONTAINERFILE: &str = include_str!("../../../templates/justfiles/anvil/container/Containerfile");
-const IGNORE: &str = include_str!("../../../templates/justfiles/anvil/container/container.ignore");
+const IGNORE: &str = include_str!("../../../templates/justfiles/anvil/container/Containerfile.dockerignore");
 const ENTRYPOINT: &str = include_str!("../../../templates/justfiles/anvil/container/entrypoint.sh");
 const IMAGE_ID: &str = include_str!("../../../templates/justfiles/anvil/container/image-id.ps1");
 const SHELL_IMAGE_ID: &str = include_str!("../../../templates/justfiles/anvil/container/image-id.sh");
@@ -21,7 +21,7 @@ const README: &str = include_str!("../../../templates/justfiles/anvil/container/
 
 const RECIPE_PATH: &str = "justfiles/anvil/container/container.just";
 const CONTAINERFILE_PATH: &str = "justfiles/anvil/container/Containerfile";
-const IGNORE_PATH: &str = "justfiles/anvil/container/container.ignore";
+const IGNORE_PATH: &str = "justfiles/anvil/container/Containerfile.dockerignore";
 const ENTRYPOINT_PATH: &str = "justfiles/anvil/container/entrypoint.sh";
 const IMAGE_ID_PATH: &str = "justfiles/anvil/container/image-id.ps1";
 const SHELL_IMAGE_ID_PATH: &str = "justfiles/anvil/container/image-id.sh";
@@ -59,7 +59,7 @@ pub fn containerfile() -> Artifact {
     Artifact::owned_file(CONTAINERFILE_PATH, CONTAINERFILE)
 }
 
-/// The restricted Podman build-context ignore file.
+/// The restricted Docker build-context ignore file.
 #[must_use]
 pub fn ignore_file() -> Artifact {
     Artifact::owned_file(IGNORE_PATH, IGNORE)
@@ -83,13 +83,13 @@ pub fn shell_image_id() -> Artifact {
     Artifact::owned_file(SHELL_IMAGE_ID_PATH, SHELL_IMAGE_ID)
 }
 
-/// The Linux/WSL Podman driver.
+/// The Linux/WSL Docker Engine driver.
 #[must_use]
 pub fn shell_driver() -> Artifact {
     Artifact::owned_file(SHELL_DRIVER_PATH, SHELL_DRIVER)
 }
 
-/// The native-Windows Podman driver.
+/// The Windows-to-WSL Docker Engine driver.
 #[must_use]
 pub fn powershell_driver() -> Artifact {
     Artifact::owned_file(POWERSHELL_DRIVER_PATH, POWERSHELL_DRIVER)
@@ -237,10 +237,10 @@ mod tests {
     }
 
     #[test]
-    fn drivers_use_podman_and_content_addressing() {
+    fn drivers_use_docker_and_content_addressing() {
         assert!(RECIPE.contains("replace(recipe, \"'\", \"''\")"));
         for driver in [SHELL_DRIVER, POWERSHELL_DRIVER] {
-            assert!(driver.contains("podman"));
+            assert!(driver.contains("docker"));
             assert!(driver.contains("ANVIL_CONTAINER_NO_REBUILD"));
             assert!(driver.contains("ANVIL_CONTAINER_IMAGE"));
             assert!(driver.contains("ANVIL_IN_CONTAINER"));
@@ -258,27 +258,28 @@ mod tests {
                 .find("gh auth login --hostname github.com")
                 .expect("GitHub login command is asserted present above");
             let image_position = driver
-                .find("podman image exists")
-                .expect("Podman image check is asserted present above");
+                .find("docker image inspect")
+                .expect("Docker image check is asserted present above");
             assert!(
                 auth_position < image_position,
                 "GitHub authentication must be checked before image building"
             );
         }
-        assert!(POWERSHELL_DRIVER.contains("AnvilContainerBuildInMachine"));
         assert!(POWERSHELL_DRIVER.contains("image-id.ps1"));
         assert!(IMAGE_ID.contains("[StringComparer]::Ordinal"));
         assert!(POWERSHELL_DRIVER.contains("AnvilContainerPrepareCommand"));
-        assert!(POWERSHELL_DRIVER.contains("podman machine ssh"));
+        assert!(POWERSHELL_DRIVER.contains("wsl -e docker"));
+        assert!(!POWERSHELL_DRIVER.contains("BuildInMachine"));
         assert!(POWERSHELL_DRIVER.contains("git rev-parse --show-toplevel 2>$null"));
         assert!(IMAGE_ID.contains("git rev-parse --show-toplevel 2>$null"));
         assert!(POWERSHELL_DRIVER.contains("Test-AnvilRecipeNeedsGitHubToken $Recipe[0]"));
         assert!(!POWERSHELL_DRIVER.contains("foreach ($name in $Recipe)"));
         assert!(POWERSHELL_DRIVER.contains("[Console]::IsInputRedirected"));
         assert!(POWERSHELL_DRIVER.contains("Read-Host"));
-        assert!(POWERSHELL_DRIVER.contains("$singleQuote + $doubleQuote"));
         assert!(POWERSHELL_DRIVER.contains("ConvertTo-AnvilVersion"));
         assert!(POWERSHELL_DRIVER.contains("isolated anvil-aprz"));
+        assert!(POWERSHELL_DRIVER.contains("docker volume create"));
+        assert!(POWERSHELL_DRIVER.contains("--user', \"${containerUid}:${containerGid}\""));
         let token_file_create_position = POWERSHELL_DRIVER
             .find("[IO.File]::Create($githubTokenFile).Dispose()")
             .expect("the temporary GitHub token file must be created before permissions are restricted");
@@ -307,6 +308,8 @@ mod tests {
         assert!(SHELL_DRIVER.contains("read -r -p"));
         assert!(SHELL_DRIVER.contains("github_run_args"));
         assert!(SHELL_DRIVER.contains("just anvil-aprz"));
+        assert!(SHELL_DRIVER.contains("docker volume create"));
+        assert!(SHELL_DRIVER.contains("--user \"$container_uid:$container_gid\""));
     }
 
     #[test]
@@ -357,7 +360,7 @@ mod tests {
         assert!(!SHELL_DRIVER.contains("ANVIL_CONTAINER_HOST_IS_WINDOWS"));
 
         // Preparation arguments without a preparation command must fail
-        // validation before Podman build/run.
+        // validation before Docker build/run.
         assert!(SHELL_DRIVER.contains("ANVIL_CONTAINER_PREPARE_ARGS requires ANVIL_CONTAINER_PREPARE_COMMAND"));
         assert!(POWERSHELL_DRIVER.contains("$AnvilContainerPrepareArgs requires $AnvilContainerPrepareCommand"));
 
@@ -365,16 +368,16 @@ mod tests {
         assert!(SHELL_DRIVER.contains("must name a callable function"));
         assert!(POWERSHELL_DRIVER.contains("must be a script block"));
 
-        // Output arrays are validated before Podman is invoked.
+        // Output arrays are validated before Docker is invoked.
         for driver in [SHELL_DRIVER, POWERSHELL_DRIVER] {
             let validate_position = driver
                 .find("must be a string array")
                 .or_else(|| driver.find("anvil_container_validate_array"))
                 .expect("output validation is present");
-            let build_position = driver.find("podman build").expect("build invocation is present");
+            let build_position = driver.find("docker build").expect("build invocation is present");
             assert!(
                 validate_position < build_position,
-                "output validation must occur before Podman build"
+                "output validation must occur before Docker build"
             );
         }
     }
@@ -465,20 +468,20 @@ mod tests {
     }
 
     #[test]
-    fn shell_driver_avoids_macos_incompatible_constructs() {
+    fn shell_driver_supports_legacy_bash() {
         assert!(!SHELL_DRIVER.contains("sort -V"));
         assert!(!SHELL_DRIVER.contains("[[ -v"));
         assert!(SHELL_DRIVER.contains("version_at_least"));
         assert!(SHELL_DRIVER.contains("if command -v sha256sum"));
         assert!(SHELL_DRIVER.contains("shasum -a 256"));
-        assert!(SHELL_DRIVER.contains("declare -p"));
+        assert!(SHELL_DRIVER.contains("printenv"));
+        assert!(!SHELL_DRIVER.contains("declare -p"));
         assert!(SHELL_IMAGE_ID.contains("shasum -a 256"));
         assert!(SHELL_IMAGE_ID.contains("LC_ALL=C sort -u"));
         assert!(!SHELL_IMAGE_ID.contains("pwsh"));
 
-        // Namerefs (`local -n`/`declare -n`) require Bash 4.3+; macOS's system
-        // Bash is 3.2. Array-name validation must pass elements positionally
-        // instead.
+        // Namerefs (`local -n`/`declare -n`) require Bash 4.3+. Array-name
+        // validation must pass elements positionally instead.
         assert!(!SHELL_DRIVER.contains("local -n"), "namerefs are unsupported on Bash 3.2");
         assert!(!SHELL_DRIVER.contains("declare -n"), "namerefs are unsupported on Bash 3.2");
 
@@ -530,7 +533,7 @@ mod tests {
     fn drivers_support_interactive_shell_mode() {
         assert!(SHELL_DRIVER.contains("--interactive --tty"));
         assert!(SHELL_DRIVER.contains("\"$image\" bash"));
-        assert!(POWERSHELL_DRIVER.contains("@runArgs --interactive --tty $image bash"));
+        assert!(POWERSHELL_DRIVER.contains("wsl -e docker @runArgs --interactive --tty $image bash"));
     }
 
     #[test]

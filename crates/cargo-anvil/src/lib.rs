@@ -102,18 +102,21 @@
 //!
 //! ### Prerequisites
 //!
-//! - Podman 4.3 or newer.
+//! - Docker Engine 23.0 or newer, installed directly in Linux or WSL and
+//!   usable by the current user.
 //! - `git` and `just` on the host.
-//! - Bash on Linux, WSL, and macOS; `PowerShell` Core (`pwsh`) on Windows.
+//! - Bash on Linux and WSL; `PowerShell` Core (`pwsh`) and WSL 2 on Windows.
 //! - `[script]` support enabled in the root `Justfile` (`set unstable` when
 //!   required by the installed `just` version).
 //! - A repository-owned `rust-toolchain.toml`.
-//! - On Windows, a running Podman machine:
+//! - On Windows, Docker Engine running in the default WSL distribution:
 //!
 //! ```powershell
-//! podman machine init   # once
-//! podman machine start
+//! wsl -e docker version
 //! ```
+//!
+//! The Windows driver invokes Docker Engine in WSL directly. Docker Desktop is
+//! not required.
 //!
 //! ### Run a recipe
 //!
@@ -130,7 +133,7 @@
 //! hashes remain available to older branches. Runtime `customize.*` files do not
 //! affect image identity.
 //!
-//! Cargo registry, Cargo Git, and `target/` data use named Podman volumes. The
+//! Cargo registry, Cargo Git, and `target/` data use named Docker volumes. The
 //! repository is mounted at `/workspace`; keeping build output in a named
 //! volume avoids slow host bind-mount I/O, particularly on Windows.
 //!
@@ -183,7 +186,8 @@
 //! ### Troubleshooting
 //!
 //! - A first-run image build is expected and may take several minutes.
-//! - `podman images anvil-dev` lists locally cached Anvil images.
+//! - `wsl -e docker images anvil-dev` lists locally cached Anvil images from
+//!   Windows; use `docker images anvil-dev` inside Linux or WSL.
 //! - `ANVIL_CONTAINER_NO_REBUILD=1` distinguishes a cache miss from a build
 //!   failure.
 //! - Non-interactive runs cannot pause for login. Authenticate `gh` or set host

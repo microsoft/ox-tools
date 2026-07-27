@@ -13,7 +13,7 @@ authors. User setup and troubleshooting are documented in the generated
 Anvil recipes normally use the developer's host toolchain. That is the fastest
 inner loop, but it cannot always reproduce:
 
-- Linux-specific behavior from a Windows or macOS host;
+- Linux-specific behavior from a Windows host;
 - failures caused by differences between the host distribution and a pinned
   build environment;
 - the exact Rust toolchain and Cargo tools selected by the generated catalog;
@@ -79,8 +79,9 @@ Ad-hoc checks remain explicit through `anvil-container`.
 
 Container support consists of a generated artifact group under
 `justfiles/anvil/container/`. `container.just` selects the PowerShell driver on
-Windows and the Bash driver on Unix hosts. Both drivers implement the same
-lifecycle:
+Windows and the Bash driver on Linux or WSL. The PowerShell driver invokes
+Docker Engine in the default WSL distribution; the Bash driver invokes the
+local Docker Engine directly. Both implement the same lifecycle:
 
 ```mermaid
 flowchart TD
@@ -125,7 +126,8 @@ The local image tag is a SHA-256 hash of build-relevant repository content:
 
 - `rust-toolchain.toml`;
 - generated `justfiles/anvil/**/*.just` recipes;
-- the `Containerfile`, entrypoint, ignore file, and other static image inputs.
+- the `Containerfile`, `Containerfile.dockerignore`, entrypoint, and other
+  static image inputs.
 
 Execution-only drivers, image-ID helpers, the entry recipe, user
 documentation, and `customize.sh`/`customize.ps1` are excluded. Customization
@@ -164,8 +166,14 @@ flowchart LR
 - `target/` uses a repository- and image-specific named volume mounted over
   `/workspace/target`. Container builds therefore do not use the host
   `target/`.
-- Podman runs the image as `linux/amd64` with `--userns keep-id`.
+- Docker runs the image as `linux/amd64` with the invoking Linux/WSL user's
+  numeric user and group IDs.
 - The image sets `ANVIL_IN_CONTAINER=1` and uses `--pull=never`.
+
+The driver creates the named volumes explicitly, initializes their top-level
+ownership in a short-lived root container, and runs preparation and recipe
+containers as the non-root Linux/WSL user. The root container never runs
+repository recipes.
 
 The entrypoint creates a writable Cargo home for the invoking non-root user. It
 copies Cargo installation metadata so `cargo install --list` can discover tools
@@ -240,10 +248,9 @@ The driver initializes and validates these outputs:
 | Preparation command | `ANVIL_CONTAINER_PREPARE_COMMAND` | `$AnvilContainerPrepareCommand` | String array, empty |
 | Main runtime arguments | `ANVIL_CONTAINER_RUN_ARGS` | `$AnvilContainerRunArgs` | String array, empty |
 | Cleanup callback | `ANVIL_CONTAINER_CLEANUP` | `$AnvilContainerCleanup` | Function name or script block, no-op |
-| Build inside Podman machine | Not applicable | `$AnvilContainerBuildInMachine` | Boolean, false |
 
 The driver checks image availability before sourcing customization, validates
-outputs before invoking Podman, then runs the build, optional preparation,
+outputs before invoking Docker, then runs the build, optional preparation,
 requested recipe, and cleanup phases in order. Failures stop the invocation and
 run registered cleanup.
 
@@ -292,11 +299,13 @@ See [extensibility.md](./extensibility.md) for the catalog builder API.
 
 Host requirements:
 
-- Podman 4.3 or newer;
+- Docker Engine 23.0 or newer, installed directly in Linux or WSL and usable by
+  the current user;
 - `git` and `just`;
-- Bash on Linux, WSL, and macOS;
-- PowerShell Core (`pwsh`) on Windows;
-- a running Podman machine on Windows and macOS;
+- Bash on Linux and WSL;
+- PowerShell Core (`pwsh`) and WSL 2 on Windows;
+- Docker Engine running in the default WSL distribution when invoked from
+  Windows; Docker Desktop is not required;
 - `linux/amd64` execution support;
 - a repository-owned `rust-toolchain.toml`.
 
@@ -329,12 +338,12 @@ support.
 |---|---|
 | `container/container.just` | Public `anvil-container` entry recipe |
 | `container/Containerfile` | Generic Linux image definition |
-| `container/container.ignore` | Restricted image build context |
+| `container/Containerfile.dockerignore` | Restricted image build context |
 | `container/entrypoint.sh` | Non-root Cargo initialization |
 | `container/image-id.ps1` | Windows image-ID helper |
 | `container/image-id.sh` | Unix image-ID helper |
-| `container/run-in-container.ps1` | Windows Podman driver |
-| `container/run-in-container.sh` | Linux, WSL, and macOS Podman driver |
+| `container/run-in-container.ps1` | Windows driver for Docker Engine in WSL |
+| `container/run-in-container.sh` | Linux and WSL Docker Engine driver |
 | `container/customize.ps1` | Optional, not emitted by default; repository or derived-distribution Windows customization, see §8 |
 | `container/customize.sh` | Optional, not emitted by default; repository or derived-distribution Unix customization, see §8 |
 | `container/README.md` | Generated user instructions and troubleshooting |

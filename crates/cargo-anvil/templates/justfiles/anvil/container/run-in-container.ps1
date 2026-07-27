@@ -10,17 +10,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-function ConvertTo-PosixShellArg([string]$Value) {
-    $singleQuote = [string][char]39
-    $doubleQuote = [string][char]34
-    $escape = $singleQuote + $doubleQuote + $singleQuote + $doubleQuote + $singleQuote
-    $singleQuote + $Value.Replace($singleQuote, $escape) + $singleQuote
-}
-
 function ConvertTo-AnvilVersion([string]$Value) {
     $match = [regex]::Match($Value, '^(\d+)\.(\d+)(?:\.(\d+))?')
     if (-not $match.Success) {
-        throw "anvil-container: could not parse Podman version '$Value'."
+        throw "anvil-container: could not parse Docker Engine version '$Value'."
     }
     [version]::new(
         [int]$match.Groups[1].Value,
@@ -78,14 +71,17 @@ if ($Recipe.Count -gt 0 -and $Recipe[0] -notmatch '^_?anvil-[A-Za-z0-9-]+$') {
     throw "anvil-container: expected an anvil-* recipe, got '$($Recipe[0])'."
 }
 
-if (-not (Get-Command podman -ErrorAction SilentlyContinue)) {
-    throw 'anvil-container: Podman is required. See justfiles/anvil/container/README.md.'
+if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) {
+    throw 'anvil-container: WSL 2 is required. See justfiles/anvil/container/README.md.'
 }
 
-$versionText = (podman version --format '{{.Client.Version}}' 2>$null)
-if (-not $versionText) { $versionText = (podman --version) -replace '^podman version ', '' }
-if ((ConvertTo-AnvilVersion $versionText) -lt [version]'4.3.0') {
-    throw "anvil-container: Podman 4.3.0 or newer is required (found $versionText)."
+$versionText = (& wsl -e docker version --format '{{.Server.Version}}' 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not $versionText) {
+    throw 'anvil-container: Docker Engine is unavailable in the default WSL distribution. Install or start Docker Engine there and ensure the WSL user can access it.'
+}
+$versionText = $versionText.Trim()
+if ((ConvertTo-AnvilVersion $versionText) -lt [version]'23.0.0') {
+    throw "anvil-container: Docker Engine 23.0.0 or newer is required (found $versionText)."
 }
 
 $repoRoot = (git rev-parse --show-toplevel 2>$null).Trim()
@@ -94,10 +90,15 @@ if ($LASTEXITCODE -ne 0 -or -not $repoRoot) {
 }
 
 $scriptDir = Join-Path $repoRoot 'justfiles/anvil/container'
+$wslRepoRoot = (& wsl -e wslpath -a $repoRoot).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $wslRepoRoot) {
+    throw 'anvil-container: could not translate the repository path into the default WSL distribution.'
+}
+$wslScriptDir = "$wslRepoRoot/justfiles/anvil/container"
 $imageId = (& (Join-Path $scriptDir 'image-id.ps1')).Trim()
 $imageBase = if ($env:ANVIL_CONTAINER_IMAGE) { $env:ANVIL_CONTAINER_IMAGE } else { 'anvil-dev' }
 $image = "${imageBase}:$imageId"
-$repoBytes = [Text.Encoding]::UTF8.GetBytes($repoRoot.ToLowerInvariant())
+$repoBytes = [Text.Encoding]::UTF8.GetBytes($wslRepoRoot)
 $repoHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($repoBytes)).ToLowerInvariant()
 $targetVolume = "anvil-target-$($repoHash.Substring(0, 12))-$($imageId.Substring(0, 12))"
 
@@ -122,7 +123,7 @@ if ($needsGitHubToken -and -not $githubToken) {
 # Versioned customization contract: check warm/cold state before sourcing so
 # customization needed only for image construction can be skipped on a warm
 # run, then expose read-only inputs. See docs/design/containers.md.
-& podman image exists $image
+$null = & wsl -e docker image inspect $image 2>$null
 $imageExists = $LASTEXITCODE -eq 0
 
 New-Variable -Name AnvilContainerCustomizationApiVersion -Value 1 -Option ReadOnly
@@ -139,7 +140,6 @@ $AnvilContainerBuildArgs = @()
 $AnvilContainerPrepareArgs = @()
 $AnvilContainerPrepareCommand = @()
 $AnvilContainerRunArgs = @()
-$AnvilContainerBuildInMachine = $false
 $AnvilContainerCleanup = $null
 $githubTokenFile = $null
 $exitCode = 0
@@ -160,56 +160,59 @@ try {
     if ($AnvilContainerCleanup -and $AnvilContainerCleanup -isnot [scriptblock]) {
         throw 'anvil-container: $AnvilContainerCleanup must be a script block.'
     }
-    if ($AnvilContainerBuildInMachine -isnot [bool]) {
-        throw 'anvil-container: $AnvilContainerBuildInMachine must be a Boolean.'
-    }
-
     if (-not $imageExists) {
         if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {
             throw "anvil-container: image $image is missing and ANVIL_CONTAINER_NO_REBUILD=1."
         }
-        if ($AnvilContainerBuildInMachine) {
-            $machineRepo = (wsl -e wslpath -a $repoRoot).Trim()
-            $buildArgs = @(
-                'podman', 'build',
-                '--platform', 'linux/amd64',
-                '--tag', $image,
-                '--file', 'justfiles/anvil/container/Containerfile',
-                '--ignorefile', 'justfiles/anvil/container/container.ignore',
-                '--build-arg', "ANVIL_IMAGE_ID=$imageId"
-            )
-            $buildArgs += $AnvilContainerBuildArgs
-            $buildArgs += '.'
-            $buildCommand = ($buildArgs | ForEach-Object { ConvertTo-PosixShellArg $_ }) -join ' '
-            $command = "cd $(ConvertTo-PosixShellArg $machineRepo) && $buildCommand"
-            & podman machine ssh -- $command
-        } else {
-            & podman build `
-                --platform linux/amd64 `
-                --tag $image `
-                --file (Join-Path $scriptDir 'Containerfile') `
-                --ignorefile (Join-Path $scriptDir 'container.ignore') `
-                --build-arg "ANVIL_IMAGE_ID=$imageId" `
-                @AnvilContainerBuildArgs `
-                $repoRoot
-        }
+        & wsl -e docker build `
+            --platform linux/amd64 `
+            --tag $image `
+            --file "$wslScriptDir/Containerfile" `
+            --build-arg "ANVIL_IMAGE_ID=$imageId" `
+            @AnvilContainerBuildArgs `
+            $wslRepoRoot
         if ($LASTEXITCODE -ne 0) {
-            throw "anvil-container: Podman build failed with exit code $LASTEXITCODE."
+            throw "anvil-container: Docker build failed with exit code $LASTEXITCODE."
         }
+    }
+
+    $containerUid = (& wsl -e id -u).Trim()
+    $containerGid = (& wsl -e id -g).Trim()
+    if ($containerUid -notmatch '^\d+$' -or $containerGid -notmatch '^\d+$') {
+        throw 'anvil-container: could not determine the default WSL user identity.'
+    }
+    $registryVolume = 'anvil-cargo-registry'
+    $gitVolume = 'anvil-cargo-git'
+    foreach ($volume in @($registryVolume, $gitVolume, $targetVolume)) {
+        $null = & wsl -e docker volume create $volume
+        if ($LASTEXITCODE -ne 0) {
+            throw "anvil-container: Docker volume creation failed for '$volume' with exit code $LASTEXITCODE."
+        }
+    }
+    $mountArgs = @(
+        '--mount', "type=bind,source=$wslRepoRoot,target=/workspace",
+        '--mount', "type=volume,source=$registryVolume,target=/usr/local/cargo/registry",
+        '--mount', "type=volume,source=$gitVolume,target=/usr/local/cargo/git",
+        '--mount', "type=volume,source=$targetVolume,target=/workspace/target"
+    )
+    & wsl -e docker run --rm --pull=never `
+        --platform linux/amd64 `
+        --user 0:0 `
+        @mountArgs `
+        $image sh -c "chown ${containerUid}:${containerGid} /usr/local/cargo/registry /usr/local/cargo/git /workspace/target"
+    if ($LASTEXITCODE -ne 0) {
+        throw "anvil-container: Docker volume initialization failed with exit code $LASTEXITCODE."
     }
 
     $runArgs = @(
         'run', '--rm', '--pull=never',
         '--platform', 'linux/amd64',
-        '--userns', 'keep-id',
+        '--user', "${containerUid}:${containerGid}",
         '--env', 'ANVIL_IN_CONTAINER=1',
         '--env', 'HOME=/tmp/anvil-user',
-        '--volume', "${repoRoot}:/workspace:Z",
-        '--volume', 'anvil-cargo-registry:/usr/local/cargo/registry:U',
-        '--volume', 'anvil-cargo-git:/usr/local/cargo/git:U',
-        '--volume', "${targetVolume}:/workspace/target:U",
         '--workdir', '/workspace'
     )
+    $runArgs += $mountArgs
     $prepareRunArgs = @($runArgs)
     $runArgs += $AnvilContainerRunArgs
     foreach ($name in @(
@@ -221,10 +224,12 @@ try {
         'GITHUB_BASE_REF',
         'SYSTEM_PULLREQUEST_TARGETBRANCH'
     )) {
-        if (Test-Path "Env:$name") { $runArgs += @('--env', $name) }
+        if (Test-Path "Env:$name") {
+            $runArgs += @('--env', "$name=$((Get-Item "Env:$name").Value)")
+        }
     }
     if ($AnvilContainerPrepareCommand.Count -gt 0) {
-        & podman @prepareRunArgs @AnvilContainerPrepareArgs $image @AnvilContainerPrepareCommand
+        & wsl -e docker @prepareRunArgs @AnvilContainerPrepareArgs $image @AnvilContainerPrepareCommand
         if ($LASTEXITCODE -ne 0) {
             throw "anvil-container: preparation command failed with exit code $LASTEXITCODE."
         }
@@ -244,15 +249,19 @@ try {
         }
         [IO.File]::WriteAllText($githubTokenFile, $githubToken, [Text.Encoding]::ASCII)
         $githubToken = $null
+        $wslTokenFile = (& wsl -e wslpath -a $githubTokenFile).Trim()
+        if ($LASTEXITCODE -ne 0 -or -not $wslTokenFile) {
+            throw 'anvil-container: could not translate the temporary GitHub token path into WSL.'
+        }
         $githubRunArgs = @($runArgs)
         $githubRunArgs += @(
             '--mount',
-            "type=bind,src=$githubTokenFile,dst=/run/secrets/anvil-github-token,readonly"
+            "type=bind,source=$wslTokenFile,target=/run/secrets/anvil-github-token,readonly"
         )
         if ($runsOnlyGitHubCheck) {
             $runArgs = $githubRunArgs
         } else {
-            & podman @githubRunArgs $image just anvil-aprz
+            & wsl -e docker @githubRunArgs $image just anvil-aprz
             if ($LASTEXITCODE -ne 0) {
                 throw "anvil-container: isolated anvil-aprz failed with exit code $LASTEXITCODE."
             }
@@ -261,9 +270,9 @@ try {
     }
 
     if ($Recipe.Count -eq 0) {
-        & podman @runArgs --interactive --tty $image bash
+        & wsl -e docker @runArgs --interactive --tty $image bash
     } else {
-        & podman @runArgs $image just @Recipe
+        & wsl -e docker @runArgs $image just @Recipe
     }
     $exitCode = $LASTEXITCODE
 } finally {

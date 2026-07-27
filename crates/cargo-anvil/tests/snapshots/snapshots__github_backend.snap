@@ -3198,6 +3198,21 @@ WORKDIR /workspace
 ENTRYPOINT ["anvil-container-entrypoint"]
 CMD ["bash"]
 
+=== justfiles/anvil/container/Containerfile.dockerignore ===
+**
+!rust-toolchain.toml
+!justfiles
+!justfiles/anvil
+!justfiles/anvil/*.just
+!justfiles/anvil/checks
+!justfiles/anvil/checks/*.just
+!justfiles/anvil/container
+!justfiles/anvil/container/*
+justfiles/anvil/container/customize.sh
+justfiles/anvil/container/customize.ps1
+!justfiles/anvil/groups
+!justfiles/anvil/groups/*.just
+
 === justfiles/anvil/container/README.md ===
 # Run Anvil checks in a local container
 
@@ -3211,7 +3226,7 @@ dependency caches, and compilation output.
 
 ## Quick start
 
-Ensure Podman is running, then run:
+Ensure Docker Engine is running, then run:
 
 ```text
 just anvil-container anvil-clippy
@@ -3221,24 +3236,26 @@ The first run builds the matching image and can take several minutes.
 
 ## Prerequisites
 
-- [Podman](https://podman.io/docs/installation) 4.3 or newer.
+- [Docker Engine](https://docs.docker.com/engine/install/) 23.0 or newer,
+  installed directly in Linux or WSL and usable by the current user.
 - `git` and `just` on the host.
-- Bash on Linux, WSL, and macOS; PowerShell Core (`pwsh`) on Windows.
+- Bash on Linux and WSL; PowerShell Core (`pwsh`) and WSL 2 on Windows.
 - `[script]` support enabled in the root `Justfile`. Add `set unstable` when
   required by the installed `just` version.
 - A `rust-toolchain.toml` in the repository root.
-- An x86-64 host or Podman configuration capable of running `linux/amd64`
-  images.
+- An x86-64 Linux or WSL environment capable of running `linux/amd64` images.
 
-On Windows and macOS, initialize and start a Podman machine:
+On Windows, install Docker Engine inside the default WSL distribution rather
+than relying on Docker Desktop. Verify the engine from PowerShell:
 
 ```text
-podman machine init
-podman machine start
+wsl -e docker version
 ```
 
-Run `podman machine init` only once. Run `podman machine start` whenever the
-machine is stopped.
+The Windows driver invokes that WSL Docker Engine directly. Start the Docker
+service inside WSL when it is stopped and add the WSL user to the `docker`
+group when non-root access is not already configured. Docker Desktop is not
+required.
 
 ## Common workflows
 
@@ -3341,16 +3358,18 @@ The public driver builds images locally and does not pull
 
 | Problem | Resolution |
 |---|---|
-| Podman is not found | Install Podman 4.3 or newer and ensure `podman` is on `PATH` |
-| Podman cannot connect | Run `podman machine start` on Windows or macOS |
-| `linux/amd64` cannot run | Enable Podman emulation or use an x86-64 host |
+| Docker is not found on Linux or WSL | Install Docker Engine 23.0 or newer inside that environment |
+| Docker is unavailable from Windows | Run `wsl -e docker version`; install or start Docker Engine in the default WSL distribution |
+| Docker requires elevated access | Add the Linux/WSL user to the `docker` group, then start a new shell |
+| `linux/amd64` cannot run | Use an x86-64 Linux or WSL environment |
 | `[script]` recipes are unavailable | Enable `[script]` support; older `just` versions require `set unstable` |
 | `rust-toolchain.toml` is missing | Add the repository-owned toolchain file at the repository root |
 | GitHub authentication is unavailable | Run `gh auth login --hostname github.com` or set host `GITHUB_TOKEN` |
 | A matching image is missing with `ANVIL_CONTAINER_NO_REBUILD=1` | Unset the variable to allow the local image build |
 | The first run is slow | The initial image build installs the pinned tool catalog; later runs reuse it |
 
-Use `podman images anvil-dev` to list locally cached default Anvil images.
+Use `docker images anvil-dev` inside Linux or WSL to list locally cached
+default Anvil images.
 
 ## Managed files
 
@@ -3370,7 +3389,7 @@ justfiles/anvil/container/customize.ps1
 The driver sources the matching file as host code before image construction and
 recipe execution. Customization API version 1 provides documented inputs and
 validated outputs for build secrets, dependency preparation, runtime arguments,
-cleanup, and Windows Podman-machine builds.
+and cleanup.
 
 Customization source is excluded from image identity and the build context.
 Non-secret image behavior must be represented by hashed static files such as
@@ -3379,21 +3398,6 @@ the `Containerfile`, entrypoint, or supporting build scripts.
 Only run customization files from a repository or catalog you trust. See the
 [container customization contract](https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/containers.md#8-container-customization)
 for the complete versioned interface and security requirements.
-
-=== justfiles/anvil/container/container.ignore ===
-**
-!rust-toolchain.toml
-!justfiles
-!justfiles/anvil
-!justfiles/anvil/*.just
-!justfiles/anvil/checks
-!justfiles/anvil/checks/*.just
-!justfiles/anvil/container
-!justfiles/anvil/container/*
-justfiles/anvil/container/customize.sh
-justfiles/anvil/container/customize.ps1
-!justfiles/anvil/groups
-!justfiles/anvil/groups/*.just
 
 === justfiles/anvil/container/container.just ===
 # Copyright (c) Microsoft Corporation.
@@ -3598,17 +3602,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-function ConvertTo-PosixShellArg([string]$Value) {
-    $singleQuote = [string][char]39
-    $doubleQuote = [string][char]34
-    $escape = $singleQuote + $doubleQuote + $singleQuote + $doubleQuote + $singleQuote
-    $singleQuote + $Value.Replace($singleQuote, $escape) + $singleQuote
-}
-
 function ConvertTo-AnvilVersion([string]$Value) {
     $match = [regex]::Match($Value, '^(\d+)\.(\d+)(?:\.(\d+))?')
     if (-not $match.Success) {
-        throw "anvil-container: could not parse Podman version '$Value'."
+        throw "anvil-container: could not parse Docker Engine version '$Value'."
     }
     [version]::new(
         [int]$match.Groups[1].Value,
@@ -3666,14 +3663,17 @@ if ($Recipe.Count -gt 0 -and $Recipe[0] -notmatch '^_?anvil-[A-Za-z0-9-]+$') {
     throw "anvil-container: expected an anvil-* recipe, got '$($Recipe[0])'."
 }
 
-if (-not (Get-Command podman -ErrorAction SilentlyContinue)) {
-    throw 'anvil-container: Podman is required. See justfiles/anvil/container/README.md.'
+if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) {
+    throw 'anvil-container: WSL 2 is required. See justfiles/anvil/container/README.md.'
 }
 
-$versionText = (podman version --format '{{.Client.Version}}' 2>$null)
-if (-not $versionText) { $versionText = (podman --version) -replace '^podman version ', '' }
-if ((ConvertTo-AnvilVersion $versionText) -lt [version]'4.3.0') {
-    throw "anvil-container: Podman 4.3.0 or newer is required (found $versionText)."
+$versionText = (& wsl -e docker version --format '{{.Server.Version}}' 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not $versionText) {
+    throw 'anvil-container: Docker Engine is unavailable in the default WSL distribution. Install or start Docker Engine there and ensure the WSL user can access it.'
+}
+$versionText = $versionText.Trim()
+if ((ConvertTo-AnvilVersion $versionText) -lt [version]'23.0.0') {
+    throw "anvil-container: Docker Engine 23.0.0 or newer is required (found $versionText)."
 }
 
 $repoRoot = (git rev-parse --show-toplevel 2>$null).Trim()
@@ -3682,10 +3682,15 @@ if ($LASTEXITCODE -ne 0 -or -not $repoRoot) {
 }
 
 $scriptDir = Join-Path $repoRoot 'justfiles/anvil/container'
+$wslRepoRoot = (& wsl -e wslpath -a $repoRoot).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $wslRepoRoot) {
+    throw 'anvil-container: could not translate the repository path into the default WSL distribution.'
+}
+$wslScriptDir = "$wslRepoRoot/justfiles/anvil/container"
 $imageId = (& (Join-Path $scriptDir 'image-id.ps1')).Trim()
 $imageBase = if ($env:ANVIL_CONTAINER_IMAGE) { $env:ANVIL_CONTAINER_IMAGE } else { 'anvil-dev' }
 $image = "${imageBase}:$imageId"
-$repoBytes = [Text.Encoding]::UTF8.GetBytes($repoRoot.ToLowerInvariant())
+$repoBytes = [Text.Encoding]::UTF8.GetBytes($wslRepoRoot)
 $repoHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($repoBytes)).ToLowerInvariant()
 $targetVolume = "anvil-target-$($repoHash.Substring(0, 12))-$($imageId.Substring(0, 12))"
 
@@ -3710,7 +3715,7 @@ if ($needsGitHubToken -and -not $githubToken) {
 # Versioned customization contract: check warm/cold state before sourcing so
 # customization needed only for image construction can be skipped on a warm
 # run, then expose read-only inputs. See docs/design/containers.md.
-& podman image exists $image
+$null = & wsl -e docker image inspect $image 2>$null
 $imageExists = $LASTEXITCODE -eq 0
 
 New-Variable -Name AnvilContainerCustomizationApiVersion -Value 1 -Option ReadOnly
@@ -3727,7 +3732,6 @@ $AnvilContainerBuildArgs = @()
 $AnvilContainerPrepareArgs = @()
 $AnvilContainerPrepareCommand = @()
 $AnvilContainerRunArgs = @()
-$AnvilContainerBuildInMachine = $false
 $AnvilContainerCleanup = $null
 $githubTokenFile = $null
 $exitCode = 0
@@ -3748,56 +3752,59 @@ try {
     if ($AnvilContainerCleanup -and $AnvilContainerCleanup -isnot [scriptblock]) {
         throw 'anvil-container: $AnvilContainerCleanup must be a script block.'
     }
-    if ($AnvilContainerBuildInMachine -isnot [bool]) {
-        throw 'anvil-container: $AnvilContainerBuildInMachine must be a Boolean.'
-    }
-
     if (-not $imageExists) {
         if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {
             throw "anvil-container: image $image is missing and ANVIL_CONTAINER_NO_REBUILD=1."
         }
-        if ($AnvilContainerBuildInMachine) {
-            $machineRepo = (wsl -e wslpath -a $repoRoot).Trim()
-            $buildArgs = @(
-                'podman', 'build',
-                '--platform', 'linux/amd64',
-                '--tag', $image,
-                '--file', 'justfiles/anvil/container/Containerfile',
-                '--ignorefile', 'justfiles/anvil/container/container.ignore',
-                '--build-arg', "ANVIL_IMAGE_ID=$imageId"
-            )
-            $buildArgs += $AnvilContainerBuildArgs
-            $buildArgs += '.'
-            $buildCommand = ($buildArgs | ForEach-Object { ConvertTo-PosixShellArg $_ }) -join ' '
-            $command = "cd $(ConvertTo-PosixShellArg $machineRepo) && $buildCommand"
-            & podman machine ssh -- $command
-        } else {
-            & podman build `
-                --platform linux/amd64 `
-                --tag $image `
-                --file (Join-Path $scriptDir 'Containerfile') `
-                --ignorefile (Join-Path $scriptDir 'container.ignore') `
-                --build-arg "ANVIL_IMAGE_ID=$imageId" `
-                @AnvilContainerBuildArgs `
-                $repoRoot
-        }
+        & wsl -e docker build `
+            --platform linux/amd64 `
+            --tag $image `
+            --file "$wslScriptDir/Containerfile" `
+            --build-arg "ANVIL_IMAGE_ID=$imageId" `
+            @AnvilContainerBuildArgs `
+            $wslRepoRoot
         if ($LASTEXITCODE -ne 0) {
-            throw "anvil-container: Podman build failed with exit code $LASTEXITCODE."
+            throw "anvil-container: Docker build failed with exit code $LASTEXITCODE."
         }
+    }
+
+    $containerUid = (& wsl -e id -u).Trim()
+    $containerGid = (& wsl -e id -g).Trim()
+    if ($containerUid -notmatch '^\d+$' -or $containerGid -notmatch '^\d+$') {
+        throw 'anvil-container: could not determine the default WSL user identity.'
+    }
+    $registryVolume = 'anvil-cargo-registry'
+    $gitVolume = 'anvil-cargo-git'
+    foreach ($volume in @($registryVolume, $gitVolume, $targetVolume)) {
+        $null = & wsl -e docker volume create $volume
+        if ($LASTEXITCODE -ne 0) {
+            throw "anvil-container: Docker volume creation failed for '$volume' with exit code $LASTEXITCODE."
+        }
+    }
+    $mountArgs = @(
+        '--mount', "type=bind,source=$wslRepoRoot,target=/workspace",
+        '--mount', "type=volume,source=$registryVolume,target=/usr/local/cargo/registry",
+        '--mount', "type=volume,source=$gitVolume,target=/usr/local/cargo/git",
+        '--mount', "type=volume,source=$targetVolume,target=/workspace/target"
+    )
+    & wsl -e docker run --rm --pull=never `
+        --platform linux/amd64 `
+        --user 0:0 `
+        @mountArgs `
+        $image sh -c "chown ${containerUid}:${containerGid} /usr/local/cargo/registry /usr/local/cargo/git /workspace/target"
+    if ($LASTEXITCODE -ne 0) {
+        throw "anvil-container: Docker volume initialization failed with exit code $LASTEXITCODE."
     }
 
     $runArgs = @(
         'run', '--rm', '--pull=never',
         '--platform', 'linux/amd64',
-        '--userns', 'keep-id',
+        '--user', "${containerUid}:${containerGid}",
         '--env', 'ANVIL_IN_CONTAINER=1',
         '--env', 'HOME=/tmp/anvil-user',
-        '--volume', "${repoRoot}:/workspace:Z",
-        '--volume', 'anvil-cargo-registry:/usr/local/cargo/registry:U',
-        '--volume', 'anvil-cargo-git:/usr/local/cargo/git:U',
-        '--volume', "${targetVolume}:/workspace/target:U",
         '--workdir', '/workspace'
     )
+    $runArgs += $mountArgs
     $prepareRunArgs = @($runArgs)
     $runArgs += $AnvilContainerRunArgs
     foreach ($name in @(
@@ -3809,10 +3816,12 @@ try {
         'GITHUB_BASE_REF',
         'SYSTEM_PULLREQUEST_TARGETBRANCH'
     )) {
-        if (Test-Path "Env:$name") { $runArgs += @('--env', $name) }
+        if (Test-Path "Env:$name") {
+            $runArgs += @('--env', "$name=$((Get-Item "Env:$name").Value)")
+        }
     }
     if ($AnvilContainerPrepareCommand.Count -gt 0) {
-        & podman @prepareRunArgs @AnvilContainerPrepareArgs $image @AnvilContainerPrepareCommand
+        & wsl -e docker @prepareRunArgs @AnvilContainerPrepareArgs $image @AnvilContainerPrepareCommand
         if ($LASTEXITCODE -ne 0) {
             throw "anvil-container: preparation command failed with exit code $LASTEXITCODE."
         }
@@ -3832,15 +3841,19 @@ try {
         }
         [IO.File]::WriteAllText($githubTokenFile, $githubToken, [Text.Encoding]::ASCII)
         $githubToken = $null
+        $wslTokenFile = (& wsl -e wslpath -a $githubTokenFile).Trim()
+        if ($LASTEXITCODE -ne 0 -or -not $wslTokenFile) {
+            throw 'anvil-container: could not translate the temporary GitHub token path into WSL.'
+        }
         $githubRunArgs = @($runArgs)
         $githubRunArgs += @(
             '--mount',
-            "type=bind,src=$githubTokenFile,dst=/run/secrets/anvil-github-token,readonly"
+            "type=bind,source=$wslTokenFile,target=/run/secrets/anvil-github-token,readonly"
         )
         if ($runsOnlyGitHubCheck) {
             $runArgs = $githubRunArgs
         } else {
-            & podman @githubRunArgs $image just anvil-aprz
+            & wsl -e docker @githubRunArgs $image just anvil-aprz
             if ($LASTEXITCODE -ne 0) {
                 throw "anvil-container: isolated anvil-aprz failed with exit code $LASTEXITCODE."
             }
@@ -3849,9 +3862,9 @@ try {
     }
 
     if ($Recipe.Count -eq 0) {
-        & podman @runArgs --interactive --tty $image bash
+        & wsl -e docker @runArgs --interactive --tty $image bash
     } else {
-        & podman @runArgs $image just @Recipe
+        & wsl -e docker @runArgs $image just @Recipe
     }
     $exitCode = $LASTEXITCODE
 } finally {
@@ -3907,15 +3920,18 @@ version_at_least() {
     ((found_patch >= required_patch))
 }
 
-command -v podman >/dev/null 2>&1 || {
-    echo "anvil-container: Podman is required. See justfiles/anvil/container/README.md." >&2
+command -v docker >/dev/null 2>&1 || {
+    echo "anvil-container: Docker Engine is required. See justfiles/anvil/container/README.md." >&2
     exit 1
 }
 
-version="$(podman version --format '{{.Client.Version}}' 2>/dev/null || podman --version | awk '{print $3}')"
-minimum="4.3.0"
+version="$(docker version --format '{{.Server.Version}}' 2>/dev/null)" || {
+    echo "anvil-container: Docker Engine is unavailable. Start the Docker service and ensure the current user can access it." >&2
+    exit 1
+}
+minimum="23.0.0"
 if ! version_at_least "$version" "$minimum"; then
-    echo "anvil-container: Podman $minimum or newer is required (found $version)." >&2
+    echo "anvil-container: Docker Engine $minimum or newer is required (found $version)." >&2
     exit 1
 fi
 
@@ -3979,7 +3995,7 @@ fi
 # Versioned customization contract: check warm/cold state before sourcing so
 # customization needed only for image construction can be skipped on a warm
 # run, then expose read-only inputs. See docs/design/containers.md.
-if podman image exists "$image"; then
+if docker image inspect "$image" >/dev/null 2>&1; then
     image_exists=true
 else
     image_exists=false
@@ -4012,8 +4028,8 @@ if [[ -f "$script_dir/customize.sh" ]]; then
     source "$script_dir/customize.sh"
 fi
 
-# Bash 3.2 (macOS's system Bash) has neither namerefs (the nameref flag on
-# `local`/`declare`, Bash 4.3+) nor safe `set -u` expansion of empty-but-
+# Bash 3.2 has neither namerefs (the nameref flag on `local`/`declare`, Bash
+# 4.3+) nor safe `set -u` expansion of empty-but-
 # declared arrays (fixed in Bash 4.4). Elements are passed positionally
 # instead of by nameref, and every expansion of a possibly-empty array uses
 # the `${arr[@]+"${arr[@]}"}` idiom: unset/empty-under-old-Bash arrays vanish
@@ -4049,36 +4065,52 @@ if ! "$image_exists"; then
         echo "anvil-container: image $image is missing and ANVIL_CONTAINER_NO_REBUILD=1." >&2
         exit 1
     else
-        podman build \
+        docker build \
             --platform linux/amd64 \
             --tag "$image" \
             --file "$script_dir/Containerfile" \
-            --ignorefile "$script_dir/container.ignore" \
             --build-arg "ANVIL_IMAGE_ID=$image_id" \
             ${ANVIL_CONTAINER_BUILD_ARGS[@]+"${ANVIL_CONTAINER_BUILD_ARGS[@]}"} \
             "$repo_root"
     fi
 fi
 
+container_uid="$(id -u)"
+container_gid="$(id -g)"
+registry_volume="anvil-cargo-registry"
+git_volume="anvil-cargo-git"
+for volume in "$registry_volume" "$git_volume" "$target_volume"; do
+    docker volume create "$volume" >/dev/null
+done
+mount_args=(
+    --mount "type=bind,source=$repo_root,target=/workspace"
+    --mount "type=volume,source=$registry_volume,target=/usr/local/cargo/registry"
+    --mount "type=volume,source=$git_volume,target=/usr/local/cargo/git"
+    --mount "type=volume,source=$target_volume,target=/workspace/target"
+)
+docker run --rm --pull=never \
+    --platform linux/amd64 \
+    --user 0:0 \
+    "${mount_args[@]}" \
+    "$image" sh -c \
+    "chown $container_uid:$container_gid /usr/local/cargo/registry /usr/local/cargo/git /workspace/target"
+
 run_args=(
     run --rm --pull=never
     --platform linux/amd64
-    --userns keep-id
+    --user "$container_uid:$container_gid"
     --env ANVIL_IN_CONTAINER=1
     --env HOME=/tmp/anvil-user
-    --volume "$repo_root:/workspace:Z"
-    --volume "anvil-cargo-registry:/usr/local/cargo/registry:U"
-    --volume "anvil-cargo-git:/usr/local/cargo/git:U"
-    --volume "$target_volume:/workspace/target:U"
+    "${mount_args[@]}"
     --workdir /workspace
 )
 prepare_run_args=("${run_args[@]}")
 run_args+=(${ANVIL_CONTAINER_RUN_ARGS[@]+"${ANVIL_CONTAINER_RUN_ARGS[@]}"})
 for name in PR_TITLE BASE_REF ANVIL_INCLUDE_MODIFIED ANVIL_INCLUDE_AFFECTED ANVIL_INCLUDE_REQUIRED GITHUB_BASE_REF SYSTEM_PULLREQUEST_TARGETBRANCH; do
-    if declare -p "$name" >/dev/null 2>&1; then run_args+=(--env "$name"); fi
+    if value="$(printenv "$name")"; then run_args+=(--env "$name=$value"); fi
 done
 if ((${#ANVIL_CONTAINER_PREPARE_COMMAND[@]} > 0)); then
-    podman "${prepare_run_args[@]}" \
+    docker "${prepare_run_args[@]}" \
         ${ANVIL_CONTAINER_PREPARE_ARGS[@]+"${ANVIL_CONTAINER_PREPARE_ARGS[@]}"} \
         "$image" \
         "${ANVIL_CONTAINER_PREPARE_COMMAND[@]}"
@@ -4089,20 +4121,23 @@ if [[ -n "$github_token" ]]; then
     chmod 600 "$github_token_file"
     printf '%s' "$github_token" > "$github_token_file"
     unset github_token
-    github_run_args=("${run_args[@]}" --volume "$github_token_file:/run/secrets/anvil-github-token:ro,Z")
+    github_run_args=(
+        "${run_args[@]}"
+        --mount "type=bind,source=$github_token_file,target=/run/secrets/anvil-github-token,readonly"
+    )
     if "$runs_only_github_check"; then
         run_args=("${github_run_args[@]}")
     else
-        podman "${github_run_args[@]}" "$image" just anvil-aprz
+        docker "${github_run_args[@]}" "$image" just anvil-aprz
         run_args+=(--env ANVIL_APRZ_ALREADY_RAN=1)
     fi
 fi
 
 if (($# == 0)); then
-    podman "${run_args[@]}" --interactive --tty "$image" bash
+    docker "${run_args[@]}" --interactive --tty "$image" bash
     exit $?
 fi
-podman "${run_args[@]}" "$image" just "$@"
+docker "${run_args[@]}" "$image" just "$@"
 
 === justfiles/anvil/groups/pr-fast.just ===
 # Copyright (c) Microsoft Corporation.
