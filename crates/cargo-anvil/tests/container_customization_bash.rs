@@ -157,6 +157,7 @@ fn run_driver_args(root: &Path, customize_sh_body: &str, recipe_args: &[&str], e
         .env("PATH", path)
         .env("FAKE_DOCKER_LOG", &docker_log)
         .env("FAKE_TEST_LOG", &test_log)
+        .env_remove("ANVIL_IN_CONTAINER")
         .env_remove("GITHUB_TOKEN")
         .env_remove("ANVIL_CONTAINER_IMAGE")
         .env_remove("ANVIL_CONTAINER_NO_REBUILD");
