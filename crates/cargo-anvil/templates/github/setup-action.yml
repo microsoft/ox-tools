@@ -81,8 +81,7 @@ runs:
         # tool-versions update all invalidate the cache cleanly.
         # runner.arch resolves to X64 / ARM64 / X86, which keeps the
         # x86_64 and aarch64 legs of the same OS from colliding on
-        # arch-incompatible cached binaries in ~/.cargo/bin and the
-        # arch-specific compiled artifacts under target/.
+        # arch-incompatible cached binaries in ~/.cargo/bin.
         #
         # ${{ github.job }} discriminates by workflow-job-id (`pr-fast`,
         # `pr-test`, `pr-slow`, etc.) so concurrent matrix legs that
@@ -93,19 +92,10 @@ runs:
         # the save -- leaving the cache empty forever. The restore-keys
         # fall back across jobs so the install work is still shared
         # across sibling legs on subsequent runs.
-        #
-        # The `anvil-v2` prefix versions the cache *shape*: bump it
-        # whenever the cached `path:` set changes (v2 added the compiled
-        # dependency dirs under target/). Without a bump, a run would keep
-        # hitting the older-shape cache under the unchanged key and never
-        # save the new one. The trailing `anvil-v1-<os>-<arch>-` fallback
-        # lets the first v2 run still restore the previous tool/registry
-        # cache (only target/ recompiles once) for a graceful transition.
-        key: anvil-v2-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/anvil/versions.just') }}-${{ github.job }}
+        key: anvil-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/anvil/versions.just') }}-${{ github.job }}
         restore-keys: |
-          anvil-v2-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/anvil/versions.just') }}-
-          anvil-v2-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-
-          anvil-v2-${{ runner.os }}-${{ runner.arch }}-
+          anvil-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/anvil/versions.just') }}-
+          anvil-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-
           anvil-v1-${{ runner.os }}-${{ runner.arch }}-
         # `.crates.toml` and `.crates2.json` track which cargo-installed
         # tools and versions live in ~/.cargo/bin/. Without them in the
@@ -120,20 +110,6 @@ runs:
           ~/.cargo/bin/
           ~/.cargo/.crates.toml
           ~/.cargo/.crates2.json
-          # Cache the dependency build products (compiled deps, build-script
-          # outputs, fingerprints) for each tool target-dir. We list concrete
-          # subpaths on purpose: this skips target/debug/incremental (large,
-          # first-party-only, low CI value) and NEVER caches target/anvil/impact
-          # -- the downloaded impact artifact must not be clobbered by a cache
-          # restore. careful-sysroot.id rides along so the careful check can
-          # still detect a nightly/std change across cached runs.
-          target/debug/deps
-          target/debug/build
-          target/debug/.fingerprint
-          target/miri
-          target/llvm-cov-target
-          target/semver-checks
-          target/anvil/careful-sysroot.id
 
     # System dependencies for the catalog's source builds.
     #
@@ -231,12 +207,3 @@ runs:
           ~/.cargo/bin/
           ~/.cargo/.crates.toml
           ~/.cargo/.crates2.json
-          # Mirror the restore paths above (dependency build products, minus
-          # incremental and target/anvil/impact).
-          target/debug/deps
-          target/debug/build
-          target/debug/.fingerprint
-          target/miri
-          target/llvm-cov-target
-          target/semver-checks
-          target/anvil/careful-sysroot.id
