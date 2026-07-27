@@ -12,8 +12,8 @@
 #
 #   - "modified": only run when at least one package's source files changed
 #     in the diff. The check's underlying tool is workspace-wide or
-#     directory-scoped (cargo fmt --all, cargo spellcheck), so it doesn't take
-#     --package; it short-circuits on the "--skip" sentinel.
+#     directory-scoped (cargo fmt --all, cargo spellcheck, cargo heather), so
+#     it doesn't take --package; it short-circuits on the "--skip" sentinel.
 #
 #   - "affected": run on the affected set (modified U reverse-deps within the
 #     workspace). The tool takes --package; the recipe splices the resolved
