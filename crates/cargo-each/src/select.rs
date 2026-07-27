@@ -42,9 +42,14 @@ impl Selection {
     ///
     /// This is the condition under which the `{packages}` placeholder emits
     /// a bare `--workspace` rather than an explicit `--package` list.
+    ///
+    /// `-p` / `--package` selectors do **not** disqualify it: when `--all` is
+    /// set, [`resolve`](Self::resolve) ignores `packages` and returns the full
+    /// workspace (matching `cargo build`, where `--workspace` wins over `-p`),
+    /// so the resolved set is still the whole workspace.
     #[must_use]
     pub fn is_whole_workspace(&self) -> bool {
-        self.all && self.packages.is_empty() && self.exclude.is_empty() && !self.none
+        self.all && self.exclude.is_empty() && !self.none
     }
 
     /// Resolve this selection against `workspace`.
@@ -253,12 +258,27 @@ mod tests {
             ..Selection::default()
         };
         assert!(all.is_whole_workspace());
+        // `--all` combined with `-p` is still the whole workspace: resolve()
+        // ignores packages when all is set, so {packages} must emit --workspace.
+        let all_with_pkg = Selection {
+            all: true,
+            packages: vec!["alpha".to_owned()],
+            ..Selection::default()
+        };
+        assert!(all_with_pkg.is_whole_workspace());
         let narrowed = Selection {
             all: true,
             exclude: vec!["beta".to_owned()],
             ..Selection::default()
         };
         assert!(!narrowed.is_whole_workspace());
+        // --none is never the whole workspace even with --all.
+        let none = Selection {
+            all: true,
+            none: true,
+            ..Selection::default()
+        };
+        assert!(!none.is_whole_workspace());
     }
 
     #[test]
