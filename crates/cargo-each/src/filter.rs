@@ -76,16 +76,26 @@ impl Predicate {
 /// Parse the portion of a `metadata:` predicate after the prefix.
 fn parse_metadata(spec: &str, rest: &str) -> Result<Predicate, EachError> {
     if let Some((key, value)) = rest.split_once('=') {
-        if key.is_empty() {
-            return Err(invalid(spec, "empty metadata key"));
-        }
+        validate_key(spec, key)?;
         Ok(Predicate::MetadataEquals(key.to_owned(), value.to_owned()))
     } else {
-        if rest.is_empty() {
-            return Err(invalid(spec, "empty metadata key"));
-        }
+        validate_key(spec, rest)?;
         Ok(Predicate::MetadataPresent(rest.to_owned()))
     }
+}
+
+/// Reject metadata keys that are not a valid dotted path — empty, or with any
+/// empty segment (`a..b`, `.role`, `role.`). Such keys parse but can never
+/// match (`Value::get("")` is always `None`), so a typo would otherwise
+/// silently yield an empty result set instead of a loud usage error.
+fn validate_key(spec: &str, key: &str) -> Result<(), EachError> {
+    if key.is_empty() {
+        return Err(invalid(spec, "empty metadata key"));
+    }
+    if key.split('.').any(str::is_empty) {
+        return Err(invalid(spec, "metadata key must be a dotted path with non-empty segments"));
+    }
+    Ok(())
 }
 
 fn invalid(spec: &str, reason: &str) -> EachError {
@@ -172,6 +182,17 @@ mod tests {
         Predicate::parse("nonsense").expect_err("unknown predicate must error");
         Predicate::parse("dep:").expect_err("empty dependency name must error");
         Predicate::parse("metadata:").expect_err("empty metadata key must error");
+    }
+
+    #[test]
+    fn rejects_metadata_keys_with_empty_segments() {
+        // Keys with empty path segments parse but can never match, so they are
+        // a loud usage error rather than a silent empty result.
+        Predicate::parse("metadata:a..b").expect_err("double dot must error");
+        Predicate::parse("metadata:.role").expect_err("leading dot must error");
+        Predicate::parse("metadata:role.").expect_err("trailing dot must error");
+        Predicate::parse("metadata:a..b=1").expect_err("double dot with value must error");
+        Predicate::parse("metadata:.role=1").expect_err("leading dot with value must error");
     }
 
     #[test]

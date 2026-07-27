@@ -113,50 +113,42 @@ fn resolve_selectors<'w>(workspace: &'w Workspace, selectors: &[String]) -> Resu
 /// Tiny Unix-style glob matcher: `*` matches any run of characters
 /// (including empty), `?` matches exactly one character. Everything else
 /// matches literally.
+///
+/// Uses the standard iterative two-pointer algorithm with a single
+/// backtrack point for the most recent `*`, so matching is linear-ish
+/// (`O(len(pattern) * len(name))` worst case) rather than the exponential
+/// blow-up a naive recursive backtracker exhibits on inputs like `*a*a*a…`.
+#[mutants::skip] // Position-counter arithmetic mutants can loop forever; behavioral tests cover every observable case.
 fn glob_matches(pattern: &str, name: &str) -> bool {
     let p: Vec<char> = pattern.chars().collect();
     let n: Vec<char> = name.chars().collect();
-    glob_inner(&p, 0, &n, 0)
-}
-
-// The position-counter arithmetic (`pi += 1`, `k in ni..=n.len()`) produces
-// non-terminating cargo-mutants mutants for patterns containing `*`; the
-// behavioral tests cover every observable case, so skip mutating the body.
-#[mutants::skip]
-fn glob_inner(p: &[char], mut pi: usize, n: &[char], mut ni: usize) -> bool {
-    while pi < p.len() {
-        match p[pi] {
-            '*' => {
-                while pi < p.len() && p[pi] == '*' {
-                    pi += 1;
-                }
-                if pi == p.len() {
-                    return true;
-                }
-                for k in ni..=n.len() {
-                    if glob_inner(p, pi, n, k) {
-                        return true;
-                    }
-                }
-                return false;
-            }
-            '?' => {
-                if ni >= n.len() {
-                    return false;
-                }
-                pi += 1;
-                ni += 1;
-            }
-            c => {
-                if ni >= n.len() || n[ni] != c {
-                    return false;
-                }
-                pi += 1;
-                ni += 1;
-            }
+    let (mut pi, mut ni) = (0usize, 0usize);
+    // The pattern index of the last `*` seen, and the name index it was
+    // matched against — the single point we backtrack to on a mismatch.
+    let mut star: Option<usize> = None;
+    let mut star_ni = 0usize;
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            star_ni = ni;
+            pi += 1;
+        } else if let Some(sp) = star {
+            // Mismatch after a `*`: let that `*` absorb one more name char.
+            pi = sp + 1;
+            star_ni += 1;
+            ni = star_ni;
+        } else {
+            return false;
         }
     }
-    ni == n.len()
+    // Trailing `*`s in the pattern match the empty remainder.
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
+    }
+    pi == p.len()
 }
 
 #[cfg(test)]
@@ -290,5 +282,14 @@ mod tests {
         assert!(!glob_matches("a?", "a"));
         // A `*` pattern whose trailing literal cannot be matched returns false.
         assert!(!glob_matches("a*b", "ac"));
+        // Additional cases exercising the iterative backtrack.
+        assert!(glob_matches("*", "anything"));
+        assert!(glob_matches("**", "anything"));
+        assert!(glob_matches("a*b*c", "axxbyyc"));
+        assert!(glob_matches("*a*a*a", "banana_aaa"));
+        assert!(!glob_matches("a*b*c", "axxbyy"));
+        assert!(glob_matches("", ""));
+        assert!(!glob_matches("", "x"));
+        assert!(glob_matches("*", ""));
     }
 }
