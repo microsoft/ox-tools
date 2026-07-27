@@ -219,7 +219,8 @@ fn chdir_executes_from_crate_root() {
 #[test]
 fn keep_going_runs_all_members_then_fails() {
     // With --keep-going every member runs even though the command fails for
-    // each; the overall exit is non-zero.
+    // each; the overall exit is a flat 1 (the documented contract), not any
+    // individual child's exit code.
     let (_tmp, manifest) = fixture();
     each(&manifest)
         .args([
@@ -233,7 +234,8 @@ fn keep_going_runs_all_members_then_fails() {
             "this-subcommand-does-not-exist",
         ])
         .assert()
-        .failure();
+        .failure()
+        .code(1);
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]

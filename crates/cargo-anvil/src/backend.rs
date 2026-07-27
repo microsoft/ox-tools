@@ -10,7 +10,7 @@
 //! 2. Explicit `--no-backends` switch (yields the empty set).
 //! 3. Autodetection from the `origin` git remote URL.
 //!
-//! See [`README.md §5.2`](../../docs/design/README.md) for the resolution order.
+//! See the [design doc](../../docs/design/README.md) for the resolution order.
 
 use std::path::Path;
 use std::process::Command;

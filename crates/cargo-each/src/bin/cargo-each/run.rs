@@ -76,7 +76,7 @@ fn parse_predicates(specs: &[String]) -> Result<Vec<Predicate>, AppError> {
 
 /// Run each invocation, honoring the fail-fast / `--keep-going` policy.
 fn execute(plan: &Plan, keep_going: bool) -> Result<ExitCode, AppError> {
-    let mut first_failure: Option<u8> = None;
+    let mut any_failed = false;
     for inv in &plan.invocations {
         if let Some(label) = &inv.label {
             eprintln!("cargo each: {label}");
@@ -89,14 +89,18 @@ fn execute(plan: &Plan, keep_going: bool) -> Result<ExitCode, AppError> {
         }
         let status = command.status().into_app_err(format!("failed to spawn `{program}`"))?;
         if !status.success() {
-            let code = u8::try_from(status.code().unwrap_or(1)).unwrap_or(1);
             if !keep_going {
+                // Fail-fast: propagate the failing child's own exit code.
+                let code = u8::try_from(status.code().unwrap_or(1)).unwrap_or(1);
                 return Ok(ExitCode::from(code));
             }
-            first_failure.get_or_insert(code);
+            any_failed = true;
         }
     }
-    Ok(first_failure.map_or(ExitCode::SUCCESS, ExitCode::from))
+    // Under --keep-going the individual child codes may differ, so we cannot
+    // pick a single meaningful one; the documented contract is a flat `1` when
+    // any invocation failed.
+    Ok(if any_failed { ExitCode::from(1) } else { ExitCode::SUCCESS })
 }
 
 /// Render an argv for display (`--dry-run`). Best-effort quoting for

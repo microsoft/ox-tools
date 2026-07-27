@@ -46,8 +46,8 @@ impl Plan {
     /// Build the plan.
     ///
     /// `chdir` runs each per-package invocation from the member's crate root
-    /// (its `{manifest_dir}`); it is only valid in per-package mode — combined
-    /// with [`Mode::Once`] it is a usage error.
+    /// (the directory containing its `Cargo.toml`); it is only valid in
+    /// per-package mode — combined with [`Mode::Once`] it is a usage error.
     ///
     /// `whole_workspace` controls the `{packages}` expansion in once mode:
     /// when the resolved set is the entire workspace (see
