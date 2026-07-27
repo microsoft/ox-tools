@@ -33,7 +33,7 @@
 # target/anvil/impact cache) and captures its tier's scope into a local
 # variable by calling the shared resolver:
 #
-#   $include = (& {{just_executable()}} _anvil-impact-include <tier>)
+#   $include = (& "{{ just_executable() }}" _anvil-impact-include <tier>)
 #
 # _anvil-impact-include reads that cache both locally and in cloud workflows
 # (where the group job downloaded the target/anvil/impact artifact), so the
@@ -91,7 +91,7 @@
 #   3. GITHUB_BASE_REF -- GitHub PR builds. Unqualified target branch name.
 #   4. origin/main, then origin/master -- local / non-PR fallback.
 # Prints ONLY the resolved ref to stdout so callers can capture it:
-#   pwsh : $base = (& {{just_executable()}} _anvil-base-ref)
+#   pwsh : $base = (& "{{ just_executable() }}" _anvil-base-ref)
 #   bash : base="$(just _anvil-base-ref)"
 [script("pwsh")]
 _anvil-base-ref:
@@ -151,7 +151,7 @@ _anvil-base-ref:
 #
 # Usage:
 #   bash : val="$(just _anvil-impact-format affected "$impact_json")"
-#   pwsh : $val = (& {{just_executable()}} _anvil-impact-format affected $impactJson)
+#   pwsh : $val = (& "{{ just_executable() }}" _anvil-impact-format affected $impactJson)
 [script("pwsh")]
 _anvil-impact-format tier impactJson:
     $ErrorActionPreference = 'Stop'

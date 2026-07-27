@@ -559,7 +559,9 @@ Other groups retain the action's disabled default.
 1. `./.github/actions/anvil-setup` with `group: none` (bootstrap rust + just +
    cache; no catalog tools).
 2. `just anvil-tool-cargo-delta-install binstall` -- the only tool this composite
-   needs. **This is the only job in the whole workflow that installs cargo-delta.**
+   needs. **This is the only job that runs cargo-delta to compute the impact
+   set.** (Group setup jobs also install cargo-delta as a prerequisite, but in
+   `consume` mode they never run it -- they read the downloaded impact cache.)
 3. `just anvil-impact`, which resolves the base ref (`_anvil-base-ref`), snapshots the
    base merge target (in a throwaway worktree) and the current tree, runs
    `cargo delta impact`, and writes the durable cache under `target/anvil/impact/`:

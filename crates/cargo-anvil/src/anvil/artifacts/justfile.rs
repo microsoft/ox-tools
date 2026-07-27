@@ -379,12 +379,14 @@ mod tests {
         ] {
             assert!(
                 groups.contains(&format!(
-                    "anvil-{g}-setup installer=\"install\": (anvil-tool-cargo-delta-install installer)"
+                    "anvil-{g}-setup installer=\"install\": \\\n    (anvil-tool-cargo-delta-install installer)"
                 )),
                 "group {g} setup must install cargo-delta"
             );
             assert!(
-                groups.contains(&format!("anvil-{g}-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs")),
+                groups.contains(&format!(
+                    "anvil-{g}-validate-prereqs: \\\n    anvil-tool-cargo-delta-validate-prereqs"
+                )),
                 "group {g} validate-prereqs must verify cargo-delta"
             );
         }

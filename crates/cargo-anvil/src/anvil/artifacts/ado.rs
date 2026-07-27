@@ -71,14 +71,14 @@ const IMPACT_MODE_PLACEHOLDER: &str = "__IMPACT_MODE__";
 /// impact stage), so it trusts that cache verbatim. The mode is chosen by tier
 /// here, at emit time -- the tier fully determines intent, so there is no
 /// runtime probe of a marker file (see [`IMPACT_MODE_SCHEDULED`]).
-const IMPACT_MODE_PR: &str = "      # This PR group job downloaded the target/anvil/impact artifact, so it\n      # trusts that cache verbatim: \"consume\" makes anvil-impact a no-op (no\n      # snapshot / cargo-delta / base ref). The mode is fixed by tier here,\n      # not probed at runtime (see the scheduled variant).\n      export ANVIL_IMPACT=consume";
+const IMPACT_MODE_PR: &str = "# This PR group job downloaded the target/anvil/impact artifact, so it\n      # trusts that cache verbatim: \"consume\" makes anvil-impact a no-op (no\n      # snapshot / cargo-delta / base ref). The mode is fixed by tier here,\n      # not probed at runtime (see the scheduled variant).\n      export ANVIL_IMPACT=consume";
 
 /// Impact-mode selection for a scheduled group job. The scheduled tier always
 /// validates the full workspace, so it is forced off UNCONDITIONALLY. The mode
 /// is fixed by tier at emit time rather than probed from a marker file, so no
 /// leftover state on the agent can wrongly flip this job into impact scoping
 /// (skipping the full-workspace backstop).
-const IMPACT_MODE_SCHEDULED: &str = "      # Scheduled tier always validates the FULL workspace: force off\n      # (anvil-impact no-ops, every tier -> --workspace). Fixed by tier at\n      # emit time, never probed at runtime, so no leftover state on the\n      # agent can flip this job into impact scoping.\n      export ANVIL_IMPACT=off";
+const IMPACT_MODE_SCHEDULED: &str = "# Scheduled tier always validates the FULL workspace: force off\n      # (anvil-impact no-ops, every tier -> --workspace). Fixed by tier at\n      # emit time, never probed at runtime, so no leftover state on the\n      # agent can flip this job into impact scoping.\n      export ANVIL_IMPACT=off";
 
 /// Render the step template for one group.
 #[must_use]

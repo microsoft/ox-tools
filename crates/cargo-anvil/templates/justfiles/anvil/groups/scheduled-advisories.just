@@ -16,7 +16,8 @@ anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
 
 # Install prerequisites for the `anvil-scheduled-advisories` recipe.
 [group("anvil-setup")]
-anvil-scheduled-advisories-setup installer="install": (anvil-tool-cargo-delta-install installer) \
+anvil-scheduled-advisories-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-deny-setup installer) \
     (anvil-audit-setup installer) \
     (anvil-aprz-setup installer) \
@@ -24,7 +25,8 @@ anvil-scheduled-advisories-setup installer="install": (anvil-tool-cargo-delta-in
 
 # Validate prerequisites for the `anvil-scheduled-advisories` recipe.
 [group("anvil-setup")]
-anvil-scheduled-advisories-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs \
+anvil-scheduled-advisories-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-deny-validate-prereqs \
     anvil-audit-validate-prereqs \
     anvil-aprz-validate-prereqs \

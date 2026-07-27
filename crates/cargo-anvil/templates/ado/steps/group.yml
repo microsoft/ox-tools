@@ -46,7 +46,7 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-__IMPACT_MODE__
+      __IMPACT_MODE__
       just anvil-__GROUP__
     displayName: anvil-__GROUP__
     env:

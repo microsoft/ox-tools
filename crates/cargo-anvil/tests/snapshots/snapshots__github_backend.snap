@@ -2376,9 +2376,10 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Nightly checks always run full-workspace; impact env vars aren't set
-# by the scheduled workflow, so the affected-tier default (--workspace)
-# applies. Skip guards are still included for local diff-scoped runs.
+# Nightly checks always run full-workspace: the scheduled workflow forces
+# ANVIL_IMPACT=off, so anvil-impact no-ops and _anvil-impact-include returns
+# --workspace for every tier. Skip guards are still included for local
+# diff-scoped runs.
 
 # Run Miri tests for affected workspace packages.
 [script("pwsh")]
@@ -3029,7 +3030,8 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
 
 # Install prerequisites for the `anvil-pr-fast` recipe.
 [group("anvil-setup")]
-anvil-pr-fast-setup installer="install": (anvil-tool-cargo-delta-install installer) \
+anvil-pr-fast-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-fmt-setup installer) \
     (anvil-clippy-setup installer) \
     (anvil-cargo-sort-setup installer) \
@@ -3049,7 +3051,8 @@ anvil-pr-fast-setup installer="install": (anvil-tool-cargo-delta-install install
 
 # Validate prerequisites for the `anvil-pr-fast` recipe.
 [group("anvil-setup")]
-anvil-pr-fast-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs \
+anvil-pr-fast-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-fmt-validate-prereqs \
     anvil-clippy-validate-prereqs \
     anvil-cargo-sort-validate-prereqs \
@@ -3082,11 +3085,15 @@ anvil-pr-mutants: anvil-pr-mutants-validate-prereqs anvil-mutants-diff
 
 # Install prerequisites for the `anvil-pr-mutants` recipe.
 [group("anvil-setup")]
-anvil-pr-mutants-setup installer="install": (anvil-tool-cargo-delta-install installer) (anvil-mutants-diff-setup installer)
+anvil-pr-mutants-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
+    (anvil-mutants-diff-setup installer)
 
 # Validate prerequisites for the `anvil-pr-mutants` recipe.
 [group("anvil-setup")]
-anvil-pr-mutants-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs anvil-mutants-diff-validate-prereqs
+anvil-pr-mutants-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
+    anvil-mutants-diff-validate-prereqs
 
 === justfiles/anvil/groups/pr-runtime-analysis.just ===
 # Copyright (c) Microsoft Corporation.
@@ -3107,7 +3114,8 @@ anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs \
 
 # Install prerequisites for the `anvil-pr-runtime-analysis` recipe.
 [group("anvil-setup")]
-anvil-pr-runtime-analysis-setup installer="install": (anvil-tool-cargo-delta-install installer) \
+anvil-pr-runtime-analysis-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-miri-setup installer) \
     (anvil-careful-setup installer) \
     (anvil-loom-setup installer) \
@@ -3115,7 +3123,8 @@ anvil-pr-runtime-analysis-setup installer="install": (anvil-tool-cargo-delta-ins
 
 # Validate prerequisites for the `anvil-pr-runtime-analysis` recipe.
 [group("anvil-setup")]
-anvil-pr-runtime-analysis-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs \
+anvil-pr-runtime-analysis-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-miri-validate-prereqs \
     anvil-careful-validate-prereqs \
     anvil-loom-validate-prereqs \
@@ -3184,14 +3193,16 @@ anvil-pr-test: anvil-pr-test-validate-prereqs \
 
 # Install prerequisites for the `anvil-pr-test` recipe.
 [group("anvil-setup")]
-anvil-pr-test-setup installer="install": (anvil-tool-cargo-delta-install installer) \
+anvil-pr-test-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
     (anvil-examples-setup installer)
 
 # Validate prerequisites for the `anvil-pr-test` recipe.
 [group("anvil-setup")]
-anvil-pr-test-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs \
+anvil-pr-test-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \
     anvil-doc-test-validate-prereqs \
     anvil-examples-validate-prereqs
@@ -3215,7 +3226,8 @@ anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
 
 # Install prerequisites for the `anvil-scheduled-advisories` recipe.
 [group("anvil-setup")]
-anvil-scheduled-advisories-setup installer="install": (anvil-tool-cargo-delta-install installer) \
+anvil-scheduled-advisories-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-deny-setup installer) \
     (anvil-audit-setup installer) \
     (anvil-aprz-setup installer) \
@@ -3223,7 +3235,8 @@ anvil-scheduled-advisories-setup installer="install": (anvil-tool-cargo-delta-in
 
 # Validate prerequisites for the `anvil-scheduled-advisories` recipe.
 [group("anvil-setup")]
-anvil-scheduled-advisories-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs \
+anvil-scheduled-advisories-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-deny-validate-prereqs \
     anvil-audit-validate-prereqs \
     anvil-aprz-validate-prereqs \
@@ -3247,14 +3260,16 @@ anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
 
 # Install prerequisites for the `anvil-scheduled-exhaustive` recipe.
 [group("anvil-setup")]
-anvil-scheduled-exhaustive-setup installer="install": (anvil-tool-cargo-delta-install installer) \
+anvil-scheduled-exhaustive-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-mutants-full-setup installer) \
     (anvil-cargo-hack-setup installer) \
     (anvil-bench-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-exhaustive` recipe.
 [group("anvil-setup")]
-anvil-scheduled-exhaustive-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs \
+anvil-scheduled-exhaustive-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-mutants-full-validate-prereqs \
     anvil-cargo-hack-validate-prereqs \
     anvil-bench-validate-prereqs
@@ -3284,7 +3299,8 @@ anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prer
 
 # Install prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
 [group("anvil-setup")]
-anvil-scheduled-runtime-analysis-setup installer="install": (anvil-tool-cargo-delta-install installer) \
+anvil-scheduled-runtime-analysis-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-miri-setup installer) \
     (anvil-miri-tree-borrows-setup installer) \
     (anvil-miri-strict-provenance-setup installer) \
@@ -3292,7 +3308,8 @@ anvil-scheduled-runtime-analysis-setup installer="install": (anvil-tool-cargo-de
 
 # Validate prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
 [group("anvil-setup")]
-anvil-scheduled-runtime-analysis-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs \
+anvil-scheduled-runtime-analysis-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-miri-validate-prereqs \
     anvil-miri-tree-borrows-validate-prereqs \
     anvil-miri-strict-provenance-validate-prereqs \
@@ -3318,14 +3335,16 @@ anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
 
 # Install prerequisites for the `anvil-scheduled-test` recipe.
 [group("anvil-setup")]
-anvil-scheduled-test-setup installer="install": (anvil-tool-cargo-delta-install installer) \
+anvil-scheduled-test-setup installer="install": \
+    (anvil-tool-cargo-delta-install installer) \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
     (anvil-examples-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled-test` recipe.
 [group("anvil-setup")]
-anvil-scheduled-test-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs \
+anvil-scheduled-test-validate-prereqs: \
+    anvil-tool-cargo-delta-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \
     anvil-doc-test-validate-prereqs \
     anvil-examples-validate-prereqs
@@ -3366,7 +3385,7 @@ anvil-scheduled-test-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs \
 # target/anvil/impact cache) and captures its tier's scope into a local
 # variable by calling the shared resolver:
 #
-#   $include = (& {{just_executable()}} _anvil-impact-include <tier>)
+#   $include = (& "{{ just_executable() }}" _anvil-impact-include <tier>)
 #
 # _anvil-impact-include reads that cache both locally and in cloud workflows
 # (where the group job downloaded the target/anvil/impact artifact), so the
@@ -3424,7 +3443,7 @@ anvil-scheduled-test-validate-prereqs: anvil-tool-cargo-delta-validate-prereqs \
 #   3. GITHUB_BASE_REF -- GitHub PR builds. Unqualified target branch name.
 #   4. origin/main, then origin/master -- local / non-PR fallback.
 # Prints ONLY the resolved ref to stdout so callers can capture it:
-#   pwsh : $base = (& {{just_executable()}} _anvil-base-ref)
+#   pwsh : $base = (& "{{ just_executable() }}" _anvil-base-ref)
 #   bash : base="$(just _anvil-base-ref)"
 [script("pwsh")]
 _anvil-base-ref:
@@ -3484,7 +3503,7 @@ _anvil-base-ref:
 #
 # Usage:
 #   bash : val="$(just _anvil-impact-format affected "$impact_json")"
-#   pwsh : $val = (& {{just_executable()}} _anvil-impact-format affected $impactJson)
+#   pwsh : $val = (& "{{ just_executable() }}" _anvil-impact-format affected $impactJson)
 [script("pwsh")]
 _anvil-impact-format tier impactJson:
     $ErrorActionPreference = 'Stop'
@@ -3632,7 +3651,7 @@ _anvil-impact-snapshot:
 
     # Consumer fast path: reuse an already-present, matching snapshot set
     # WITHOUT cargo-delta or a fetched base ref. This is what lets a
-    # cloud-workflow group job -- which installs neither cargo-delta nor
+    # cloud-workflow group job -- which neither runs cargo-delta nor
     # fetches the base ref -- consume the target/anvil/impact artifact produced
     # by the impact job instead of recomputing it (and it also short-circuits
     # a local repeat run). We still detect a moved base ref when it is cheaply

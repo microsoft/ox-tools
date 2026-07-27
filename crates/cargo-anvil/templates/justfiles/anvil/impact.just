@@ -83,7 +83,7 @@ _anvil-impact-snapshot:
 
     # Consumer fast path: reuse an already-present, matching snapshot set
     # WITHOUT cargo-delta or a fetched base ref. This is what lets a
-    # cloud-workflow group job -- which installs neither cargo-delta nor
+    # cloud-workflow group job -- which neither runs cargo-delta nor
     # fetches the base ref -- consume the target/anvil/impact artifact produced
     # by the impact job instead of recomputing it (and it also short-circuits
     # a local repeat run). We still detect a moved base ref when it is cheaply

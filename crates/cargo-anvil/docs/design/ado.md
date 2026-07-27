@@ -672,7 +672,9 @@ snapshots the base merge target + the current tree, runs `cargo delta impact`, a
 writes the cache under `target/anvil/impact/` (the per-tier `include_<tier>.txt` lists,
 `impact.json`, and the `snapshots/`). The `compute_<os>` job then publishes that whole
 directory as the `anvil-impact-<os>` pipeline artifact (via `job.yml`'s `artifacts:`
-param). This is the only job that installs cargo-delta.
+param). This is the only job that runs cargo-delta to compute the impact set.
+(Group setup jobs also install cargo-delta as a prerequisite, but in `consume`
+mode they never run it -- they read the downloaded impact cache.)
 
 Downstream stages download that artifact into `target/anvil/impact/` (via `job.yml`'s
 `inputArtifacts:` param) and their checks read the cache directly — no ADO output
