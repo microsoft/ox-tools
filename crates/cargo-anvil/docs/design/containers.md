@@ -261,7 +261,7 @@ The driver initializes and validates these outputs:
 
 | Purpose | Bash | PowerShell | Type and default |
 |---|---|---|---|
-| Image-build invocation arguments | `ANVIL_CONTAINER_BUILD_ARGS` | `$AnvilContainerBuildArgs` | String array, empty |
+| BuildKit secret arguments | `ANVIL_CONTAINER_BUILD_ARGS` | `$AnvilContainerBuildArgs` | String array, empty |
 | Preparation arguments | `ANVIL_CONTAINER_PREPARE_ARGS` | `$AnvilContainerPrepareArgs` | String array, empty |
 | Preparation command | `ANVIL_CONTAINER_PREPARE_COMMAND` | `$AnvilContainerPrepareCommand` | String array, empty |
 | Main runtime arguments | `ANVIL_CONTAINER_RUN_ARGS` | `$AnvilContainerRunArgs` | String array, empty |
@@ -272,8 +272,10 @@ outputs, obtains any required GitHub token, then runs the build, optional
 preparation, requested recipes, and cleanup phases in order. Failures stop the
 invocation and run registered cleanup.
 
-- Build arguments apply only when constructing a missing image. Use BuildKit
-  secret mounts, not secret-bearing `--build-arg` values.
+- Build arguments apply only when constructing a missing image and accept only
+  BuildKit `--secret` options. Content-changing options such as `--build-arg`
+  are rejected because their values are not part of the content-addressed
+  image ID. Static build behavior belongs in hashed container files.
 - Preparation runs in a separate short-lived container with the standard
   repository and cache mounts, but without main runtime arguments.
 - Runtime arguments apply to the requested recipe and the isolated
@@ -306,9 +308,12 @@ Container support is a normal catalog artifact group. A downstream catalog can:
 - add an optional `customize.sh`/`customize.ps1` customization file and
   supporting files;
 - inherit the public recipe, drivers, image-ID helpers, cache layout, and
-  runtime contract unchanged;
-- remove the container artifact group when container execution is not
-  supported.
+  runtime contract unchanged.
+
+Container support is coupled to the generated imports, tier runner, and APRZ
+guard. Removing only `container::all()` is therefore unsupported; a derived
+catalog that does not expose container execution must replace that complete
+recipe surface rather than removing the container files in isolation.
 
 This keeps public behavior generic while allowing a downstream catalog to
 provide an internal base image, toolchain installer, registry configuration,

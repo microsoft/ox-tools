@@ -92,6 +92,9 @@ $command = $args[1]
 $commandArgs = @($args | Select-Object -Skip 2)
 switch ($command) {
     'wslpath' {
+        if ($env:FAKE_TOKEN_PATH_LOG -and $commandArgs[-1] -like '*anvil-github-token-*') {
+            Add-Content -LiteralPath $env:FAKE_TOKEN_PATH_LOG -Value $commandArgs[-1]
+        }
         Write-Output '/mnt/c/fake/path'
         exit 0
     }
@@ -133,6 +136,14 @@ struct DriverRun {
     stderr: String,
     docker_log: String,
     test_log: String,
+    token_paths: Vec<std::path::PathBuf>,
+}
+
+fn assert_token_files_removed(run: &DriverRun) {
+    assert!(!run.token_paths.is_empty(), "expected a GitHub token path");
+    for path in &run.token_paths {
+        assert!(!path.exists(), "temporary GitHub token file was not removed: {}", path.display());
+    }
 }
 
 /// Runs the real generated `run-in-container.ps1` against the fake `wsl`,
@@ -150,6 +161,7 @@ fn run_driver_args(root: &Path, customize_ps1_body: &str, recipe_args: &[&str], 
 
     let docker_log = root.join("docker.log");
     let test_log = root.join("test.log");
+    let token_path_log = root.join("token-path.log");
     let path = format!("{};{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default());
 
     let mut command = Command::new("pwsh");
@@ -160,6 +172,7 @@ fn run_driver_args(root: &Path, customize_ps1_body: &str, recipe_args: &[&str], 
         .env("PATH", path)
         .env("FAKE_DOCKER_LOG", &docker_log)
         .env("FAKE_TEST_LOG", &test_log)
+        .env("FAKE_TOKEN_PATH_LOG", &token_path_log)
         .env_remove("GITHUB_TOKEN")
         .env_remove("ANVIL_CONTAINER_IMAGE")
         .env_remove("ANVIL_CONTAINER_NO_REBUILD");
@@ -173,6 +186,11 @@ fn run_driver_args(root: &Path, customize_ps1_body: &str, recipe_args: &[&str], 
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         docker_log: std::fs::read_to_string(&docker_log).unwrap_or_default(),
         test_log: std::fs::read_to_string(&test_log).unwrap_or_default(),
+        token_paths: std::fs::read_to_string(&token_path_log)
+            .unwrap_or_default()
+            .lines()
+            .map(Into::into)
+            .collect(),
     }
 }
 
@@ -229,6 +247,67 @@ fn customization_can_provide_github_authentication() {
         "the customization-provided token must be mounted for APRZ: {}",
         run.docker_log
     );
+    assert_token_files_removed(&run);
+}
+
+#[test]
+fn aggregate_recipe_isolates_the_token_from_the_main_container() {
+    let tmp = repo_with_container();
+    let run = run_driver(
+        tmp.path(),
+        "",
+        "_anvil-pr",
+        &[("FAKE_DOCKER_IMAGE_EXISTS", "1"), ("GITHUB_TOKEN", "test-token")],
+    );
+
+    assert!(run.status.success(), "aggregate recipe failed: {}", run.stderr);
+    let aprz = run
+        .docker_log
+        .lines()
+        .find(|line| line.contains("just anvil-aprz"))
+        .expect("aggregate recipe must run isolated APRZ");
+    let main = run
+        .docker_log
+        .lines()
+        .find(|line| line.contains("just _anvil-pr"))
+        .expect("aggregate recipe must run its main container");
+    assert!(
+        aprz.contains("/run/secrets/anvil-github-token"),
+        "APRZ must receive the token mount: {aprz}"
+    );
+    assert!(
+        !main.contains("/run/secrets/anvil-github-token"),
+        "main container must not receive the token mount: {main}"
+    );
+    assert!(
+        main.contains("ANVIL_APRZ_ALREADY_RAN=1"),
+        "main container must skip the completed APRZ check: {main}"
+    );
+    assert!(
+        !run.docker_log.contains("--env GITHUB_TOKEN"),
+        "the token must never be passed through the environment"
+    );
+    assert_token_files_removed(&run);
+}
+
+#[test]
+fn token_file_is_removed_after_aprz_or_main_failure() {
+    for marker in ["just anvil-aprz", "just _anvil-pr"] {
+        let tmp = repo_with_container();
+        let run = run_driver(
+            tmp.path(),
+            "",
+            "_anvil-pr",
+            &[
+                ("FAKE_DOCKER_IMAGE_EXISTS", "1"),
+                ("GITHUB_TOKEN", "test-token"),
+                ("FAKE_DOCKER_FAIL_MARKER", marker),
+            ],
+        );
+
+        assert!(!run.status.success(), "failure marker must fail the driver: {marker}");
+        assert_token_files_removed(&run);
+    }
 }
 
 #[test]
@@ -286,7 +365,7 @@ Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "repo-is-dir=$(Test-Path -Lit
 Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "dir-is-container-dir=$($AnvilContainerDir -eq (Join-Path $AnvilContainerRepoRoot 'justfiles/anvil/container'))"
 Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "repo-wsl=$AnvilContainerRepoRootWsl"
 Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "dir-wsl=$AnvilContainerDirWsl"
-$AnvilContainerBuildArgs = @('--label', 'build-marker=1')
+$AnvilContainerBuildArgs = @('--secret', 'id=build-marker,src=fake')
 $AnvilContainerRunArgs = @('--label', 'run-marker=1')
 $AnvilContainerCleanup = { Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value 'cleanup-ran' }
 "#;
@@ -316,7 +395,7 @@ $AnvilContainerCleanup = { Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value 'c
         .lines()
         .find(|line| line.starts_with("build "))
         .unwrap_or_else(|| panic!("expected a docker build invocation, got: {}", run.docker_log));
-    assert!(build_line.contains("build-marker=1"), "line: {build_line}");
+    assert!(build_line.contains("id=build-marker,src=fake"), "line: {build_line}");
     assert!(!build_line.contains("run-marker=1"), "line: {build_line}");
     let run_line = run
         .docker_log
@@ -324,7 +403,7 @@ $AnvilContainerCleanup = { Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value 'c
         .find(|line| line.starts_with("run ") && line.contains("just anvil-clippy"))
         .unwrap_or_else(|| panic!("expected a docker run invocation, got: {}", run.docker_log));
     assert!(run_line.contains("run-marker=1"), "line: {run_line}");
-    assert!(!run_line.contains("build-marker=1"), "line: {run_line}");
+    assert!(!run_line.contains("id=build-marker,src=fake"), "line: {run_line}");
     assert!(
         run_line.contains("--user 1000:1000"),
         "recipe execution must use the WSL user: {run_line}"
@@ -415,6 +494,24 @@ $AnvilContainerRunArgs = $null
     );
 }
 
+#[test]
+fn content_changing_build_arguments_are_rejected() {
+    let tmp = repo_with_container();
+    let run = run_driver(
+        tmp.path(),
+        "$AnvilContainerBuildArgs = @('--build-arg', 'BASE_IMAGE=example.invalid/base')\n",
+        "anvil-clippy",
+        &[],
+    );
+
+    assert!(!run.status.success(), "content-changing build arguments must fail validation");
+    assert!(
+        run.stderr
+            .contains("AnvilContainerBuildArgs accepts only BuildKit --secret arguments"),
+        "stderr must explain the image-identity restriction: {}",
+        run.stderr
+    );
+}
 #[test]
 fn cleanup_still_runs_after_the_main_recipe_container_fails() {
     let tmp = repo_with_container();

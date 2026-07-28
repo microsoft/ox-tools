@@ -138,7 +138,12 @@ fi
 anvil_container_validate_array() {
     local name="$1"
     shift
-    local value
+    local declaration value
+    declaration="$(declare -p "$name" 2>/dev/null || true)"
+    if [[ ! "$declaration" =~ ^declare\ -[^[:space:]]*a[^[:space:]]*\  ]]; then
+        echo "anvil-container: $name must be a string array." >&2
+        exit 1
+    fi
     for value in "$@"; do
         if [[ -z "$value" ]]; then
             echo "anvil-container: $name entries must be non-empty strings." >&2
@@ -146,10 +151,32 @@ anvil_container_validate_array() {
         fi
     done
 }
+anvil_container_validate_build_args() {
+    local expect_secret_value=false value
+    for value in "$@"; do
+        if "$expect_secret_value"; then
+            expect_secret_value=false
+            continue
+        fi
+        case "$value" in
+            --secret) expect_secret_value=true ;;
+            --secret=*) ;;
+            *)
+                echo 'anvil-container: ANVIL_CONTAINER_BUILD_ARGS accepts only BuildKit --secret arguments; static build behavior must use hashed container files.' >&2
+                exit 1
+                ;;
+        esac
+    done
+    if "$expect_secret_value"; then
+        echo 'anvil-container: ANVIL_CONTAINER_BUILD_ARGS requires a value after --secret.' >&2
+        exit 1
+    fi
+}
 anvil_container_validate_array ANVIL_CONTAINER_BUILD_ARGS ${ANVIL_CONTAINER_BUILD_ARGS[@]+"${ANVIL_CONTAINER_BUILD_ARGS[@]}"}
 anvil_container_validate_array ANVIL_CONTAINER_PREPARE_ARGS ${ANVIL_CONTAINER_PREPARE_ARGS[@]+"${ANVIL_CONTAINER_PREPARE_ARGS[@]}"}
 anvil_container_validate_array ANVIL_CONTAINER_PREPARE_COMMAND ${ANVIL_CONTAINER_PREPARE_COMMAND[@]+"${ANVIL_CONTAINER_PREPARE_COMMAND[@]}"}
 anvil_container_validate_array ANVIL_CONTAINER_RUN_ARGS ${ANVIL_CONTAINER_RUN_ARGS[@]+"${ANVIL_CONTAINER_RUN_ARGS[@]}"}
+anvil_container_validate_build_args ${ANVIL_CONTAINER_BUILD_ARGS[@]+"${ANVIL_CONTAINER_BUILD_ARGS[@]}"}
 if ((${#ANVIL_CONTAINER_PREPARE_ARGS[@]} > 0)) && ((${#ANVIL_CONTAINER_PREPARE_COMMAND[@]} == 0)); then
     echo 'anvil-container: ANVIL_CONTAINER_PREPARE_ARGS requires ANVIL_CONTAINER_PREPARE_COMMAND.' >&2
     exit 1

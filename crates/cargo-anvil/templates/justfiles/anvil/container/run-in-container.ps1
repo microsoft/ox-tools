@@ -33,6 +33,20 @@ function Test-AnvilContainerStringArray([string]$Name, $Value) {
     }
 }
 
+function Test-AnvilContainerBuildArgs($Value) {
+    for ($index = 0; $index -lt $Value.Count; $index++) {
+        $item = $Value[$index]
+        if ($item -eq '--secret') {
+            $index++
+            if ($index -ge $Value.Count) {
+                throw 'anvil-container: $AnvilContainerBuildArgs requires a value after --secret.'
+            }
+        } elseif (-not $item.StartsWith('--secret=', [StringComparison]::Ordinal)) {
+            throw 'anvil-container: $AnvilContainerBuildArgs accepts only BuildKit --secret arguments; static build behavior must use hashed container files.'
+        }
+    }
+}
+
 function Test-AnvilRecipeNeedsGitHubToken([string]$Name) {
     $Name -in @(
         'anvil-aprz',
@@ -157,6 +171,7 @@ try {
     Test-AnvilContainerStringArray 'AnvilContainerPrepareArgs' $AnvilContainerPrepareArgs
     Test-AnvilContainerStringArray 'AnvilContainerPrepareCommand' $AnvilContainerPrepareCommand
     Test-AnvilContainerStringArray 'AnvilContainerRunArgs' $AnvilContainerRunArgs
+    Test-AnvilContainerBuildArgs $AnvilContainerBuildArgs
     if ($AnvilContainerPrepareArgs.Count -gt 0 -and $AnvilContainerPrepareCommand.Count -eq 0) {
         throw 'anvil-container: $AnvilContainerPrepareArgs requires $AnvilContainerPrepareCommand.'
     }

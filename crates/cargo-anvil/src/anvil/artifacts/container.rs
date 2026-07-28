@@ -126,18 +126,34 @@ pub fn customize_powershell(body: impl Into<String>) -> Artifact {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
     use std::path::Path;
     use std::process::Command;
 
     use tempfile::TempDir;
 
     use super::*;
+    use crate::anvil::artifacts::justfile::dependency_recipe_sources;
 
     fn write(path: &Path, body: impl AsRef<[u8]>) {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("test path parent must be creatable");
         }
         std::fs::write(path, body).expect("test file must be writable");
+    }
+
+    fn reaches_aprz(recipe: &str, graph: &BTreeMap<String, BTreeSet<String>>, visiting: &mut BTreeSet<String>) -> bool {
+        if recipe == "anvil-aprz" {
+            return true;
+        }
+        if !visiting.insert(recipe.to_owned()) {
+            return false;
+        }
+        let reaches = graph
+            .get(recipe)
+            .is_some_and(|dependencies| dependencies.iter().any(|dependency| reaches_aprz(dependency, graph, visiting)));
+        visiting.remove(recipe);
+        reaches
     }
 
     fn run_image_id_command(repo: &Path, command: &str, args: &[&str]) -> String {
@@ -320,6 +336,69 @@ mod tests {
     }
 
     #[test]
+    fn github_token_recipe_lists_match_the_generated_dependency_graph() {
+        fn anvil_recipe_tokens(text: &str) -> impl Iterator<Item = &str> {
+            text.split(|character: char| !(character.is_ascii_alphanumeric() || matches!(character, '_' | '-')))
+                .filter(|token| token.starts_with("anvil-") || token.starts_with("_anvil-"))
+        }
+
+        let mut graph = BTreeMap::<String, BTreeSet<String>>::new();
+
+        for source in dependency_recipe_sources() {
+            let mut current = None::<String>;
+            for line in source.lines() {
+                if !line.chars().next().is_some_and(char::is_whitespace) {
+                    current = line
+                        .split_once(':')
+                        .and_then(|(header, _)| header.split_whitespace().next())
+                        .filter(|name| name.starts_with("anvil-") || name.starts_with("_anvil-"))
+                        .map(str::to_owned);
+                }
+                let Some(recipe) = current.as_ref() else {
+                    continue;
+                };
+                let dependency_text = line.split_once(':').map_or(line, |(_, dependencies)| dependencies);
+                let dependencies = graph.entry(recipe.clone()).or_default();
+                dependencies.extend(
+                    anvil_recipe_tokens(dependency_text)
+                        .map(str::to_owned)
+                        .filter(|dependency| dependency != recipe),
+                );
+                if let Some((_, routed)) = dependency_text.split_once("_anvil-run \"")
+                    && let Some(tier) = routed.split('"').next()
+                {
+                    dependencies.insert(format!("_anvil-{tier}"));
+                }
+            }
+        }
+
+        let mut expected = BTreeSet::from(["anvil-aprz".to_owned()]);
+        expected.extend(
+            graph
+                .keys()
+                .filter(|recipe| reaches_aprz(recipe, &graph, &mut BTreeSet::new()))
+                .cloned(),
+        );
+
+        let driver_recipes = |driver: &str, start: &str, end: &str| {
+            let body = driver
+                .split_once(start)
+                .and_then(|(_, remainder)| remainder.split_once(end).map(|(body, _)| body))
+                .expect("driver token-classification function must have stable boundaries");
+            anvil_recipe_tokens(body).map(str::to_owned).collect::<BTreeSet<_>>()
+        };
+
+        let shell = driver_recipes(SHELL_DRIVER, "anvil_recipe_needs_github_token() {", "}\n\nversion_at_least");
+        let powershell = driver_recipes(
+            POWERSHELL_DRIVER,
+            "function Test-AnvilRecipeNeedsGitHubToken",
+            "\n}\n\nfunction Get-AnvilGitHubToken",
+        );
+        assert_eq!(shell, expected, "Bash token routing must match APRZ reachability");
+        assert_eq!(powershell, expected, "PowerShell token routing must match APRZ reachability");
+    }
+
+    #[test]
     fn drivers_implement_the_versioned_customization_contract() {
         assert!(SHELL_DRIVER.contains("customize.sh"));
         assert!(!SHELL_DRIVER.contains("auth.sh"));
@@ -482,7 +561,7 @@ mod tests {
         assert!(SHELL_DRIVER.contains("if command -v sha256sum"));
         assert!(SHELL_DRIVER.contains("shasum -a 256"));
         assert!(SHELL_DRIVER.contains("printenv"));
-        assert!(!SHELL_DRIVER.contains("declare -p"));
+        assert!(SHELL_DRIVER.contains("declare -p"));
         assert!(SHELL_IMAGE_ID.contains("shasum -a 256"));
         assert!(SHELL_IMAGE_ID.contains("LC_ALL=C sort -u"));
         assert!(!SHELL_IMAGE_ID.contains("pwsh"));
