@@ -149,10 +149,20 @@ fn member_version(member: &Member) -> Version {
 /// - Build metadata, when supplied, is an exact constraint (`1.2.3+a` matches
 ///   only `1.2.3+a`, not `1.2.3+b`); when omitted, the member's build metadata
 ///   is ignored.
+/// - Malformed qualifiers cargo rejects match nothing: an empty prerelease or
+///   build suffix (`1.2.3-`, `1.2.3+`) and leading-zero release components
+///   (`01.2.3`).
 fn version_matches(supplied: &str, actual: &Version) -> bool {
     // Split off build metadata, then the optional prerelease.
     let (rest, build) = supplied.split_once('+').map_or((supplied, None), |(r, b)| (r, Some(b)));
     let (release, pre) = rest.split_once('-').map_or((rest, None), |(r, p)| (r, Some(p)));
+
+    // Reject malformed suffixes cargo also rejects: an empty prerelease or
+    // build (`1.2.3-`, `1.2.3+`) so a typo fails loudly rather than matching a
+    // member's empty prerelease/build.
+    if pre == Some("") || build == Some("") {
+        return false;
+    }
 
     let components: Vec<&str> = release.split('.').collect();
     if components.is_empty() || components.len() > 3 {
@@ -164,6 +174,11 @@ fn version_matches(supplied: &str, actual: &Version) -> bool {
     }
     let actual_release = [actual.major, actual.minor, actual.patch];
     for (i, component) in components.iter().enumerate() {
+        // Reject leading-zero components (`01`), which cargo's grammar
+        // disallows; a lone `0` is fine.
+        if component.len() > 1 && component.starts_with('0') {
+            return false;
+        }
         if component.parse::<u64>() != Ok(actual_release[i]) {
             return false;
         }
@@ -348,6 +363,15 @@ mod tests {
         // partial-version guard (not a downstream mismatch) that rejects them.
         assert!(!version_matches("1.2-beta", &ver("1.2.0-beta"))); // partial + prerelease
         assert!(!version_matches("1.2+build", &ver("1.2.0+build"))); // partial + build metadata
+        // Malformed specs cargo rejects: empty prerelease/build suffix and
+        // leading-zero components.
+        assert!(!version_matches("1.2.3-", &ver("1.2.3"))); // empty prerelease
+        assert!(!version_matches("1.2.3+", &ver("1.2.3"))); // empty build
+        assert!(!version_matches("01.2.3", &ver("1.2.3"))); // leading zero (major)
+        assert!(!version_matches("1.02.3", &ver("1.2.3"))); // leading zero (minor)
+        // A lone `0` and multi-digit components without a leading zero are fine.
+        assert!(version_matches("0.1.0", &ver("0.1.0")));
+        assert!(version_matches("1.10", &ver("1.10.0")));
     }
 
     #[test]

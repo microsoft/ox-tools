@@ -14,7 +14,8 @@ use tempfile::TempDir;
 
 /// Write a fixture workspace with these members:
 /// - `alpha` (lib),
-/// - `beta` (bin only),
+/// - `beta` (bin only, with a path dev-dependency on `alpha` so `dep:alpha`
+///   selects it),
 /// - `gamma` (lib, carrying `[package.metadata.role] = "script-only"`),
 /// - `delta` (lib, versioned `1.2.3-beta.1+build` to exercise prerelease /
 ///   build-metadata version matching end-to-end),
@@ -30,11 +31,27 @@ fn fixture() -> (TempDir, PathBuf) {
     .expect("write workspace root");
 
     write_lib(root, "alpha", "0.1.0", "");
-    write_bin(root, "beta");
+    write_bin(root, "beta", "\n[dev-dependencies]\nalpha = { path = \"../alpha\" }\n");
     write_lib(root, "gamma", "0.1.0", "\n[package.metadata]\nrole = \"script-only\"\n");
     write_lib(root, "delta", "1.2.3-beta.1+build", "");
     write_lib_and_bin(root, "epsilon");
 
+    let manifest = root.join("Cargo.toml");
+    (tmp, manifest)
+}
+
+/// Write a two-member workspace whose `default-members` is just `alpha`, to
+/// exercise implicit default-member selection end-to-end.
+fn default_members_fixture() -> (TempDir, PathBuf) {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    fs::write(
+        root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\", \"beta\"]\ndefault-members = [\"alpha\"]\n",
+    )
+    .expect("write workspace root");
+    write_lib(root, "alpha", "0.1.0", "");
+    write_bin(root, "beta", "");
     let manifest = root.join("Cargo.toml");
     (tmp, manifest)
 }
@@ -50,12 +67,12 @@ fn write_lib(root: &Path, name: &str, version: &str, extra: &str) {
     fs::write(dir.join("src/lib.rs"), "// fixture\n").expect("write lib.rs");
 }
 
-fn write_bin(root: &Path, name: &str) {
+fn write_bin(root: &Path, name: &str, extra: &str) {
     let dir = root.join(name);
     fs::create_dir_all(dir.join("src")).expect("mkdir src");
     fs::write(
         dir.join("Cargo.toml"),
-        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{extra}"),
     )
     .expect("write member Cargo.toml");
     fs::write(dir.join("src/main.rs"), "fn main() {}\n").expect("write main.rs");
@@ -501,4 +518,35 @@ fn fail_fast_stops_before_running_later_members() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("cargo each: alpha").and(predicate::str::contains("cargo each: gamma").not()));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn dep_filter_selects_member_with_declared_dependency() {
+    // End-to-end over real `cargo metadata`: the `dep:` predicate is fed by the
+    // per-member dependency projection. Only `beta` declares `alpha` (as a path
+    // dev-dependency), so `--filter dep:alpha` must select it and nothing else.
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args(["--workspace", "--filter", "dep:alpha", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("echo beta")
+                .and(predicate::str::contains("echo alpha").not())
+                .and(predicate::str::contains("echo gamma").not()),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn bare_invocation_runs_only_default_members() {
+    // With no explicit selection, cargo-each falls back to the workspace's
+    // `default-members`, exercising the `default-members` projection end-to-end.
+    let (_tmp, manifest) = default_members_fixture();
+    each(&manifest)
+        .args(["--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("echo alpha").and(predicate::str::contains("echo beta").not()));
 }
