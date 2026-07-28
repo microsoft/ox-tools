@@ -122,7 +122,7 @@ fn resolve_selectors<'w>(workspace: &'w Workspace, selectors: &[String]) -> Resu
 /// following cargo's package-id-spec partial-version rule: the supplied
 /// version may be a leading, dot-separated *component* prefix of the actual
 /// version. `0.1` matches `0.1.0`; `0.30` does not match `0.3.0` (component
-/// `30` != `3`); a qualifier longer than the actual version never matches.
+/// `30` is not `3`); a qualifier longer than the actual version never matches.
 fn version_matches(supplied: &str, actual: &str) -> bool {
     let mut actual_components = actual.split('.');
     supplied.split('.').all(|component| actual_components.next() == Some(component))
