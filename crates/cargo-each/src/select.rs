@@ -97,9 +97,17 @@ impl Selection {
 fn resolve_selectors<'w>(workspace: &'w Workspace, selectors: &[String]) -> Result<Vec<&'w Member>, EachError> {
     let mut matched: HashSet<&str> = HashSet::new();
     for selector in selectors {
-        // A `name@version` spec matches on the name part only.
-        let name_pat = selector.split_once('@').map_or(selector.as_str(), |(n, _)| n);
-        let hits: Vec<&Member> = workspace.members.iter().filter(|m| glob_matches(name_pat, &m.name)).collect();
+        // A `name@version` spec matches on the name (glob) *and*, when a
+        // version is supplied, requires it to equal the member's version —
+        // matching cargo's package-id-spec, so `alpha@999` selects nothing
+        // (a loud error) rather than silently resolving to `alpha`. A bare
+        // name or glob matches any version.
+        let (name_pat, version) = selector.split_once('@').map_or((selector.as_str(), None), |(n, v)| (n, Some(v)));
+        let hits: Vec<&Member> = workspace
+            .members
+            .iter()
+            .filter(|m| glob_matches(name_pat, &m.name) && version.is_none_or(|v| m.version == v))
+            .collect();
         if hits.is_empty() {
             return Err(UnknownSelectorError::new(selector.clone()).into());
         }
@@ -219,6 +227,24 @@ mod tests {
             ..Selection::default()
         };
         assert_eq!(names(&sel.resolve(&ws).expect("resolve")), ["beta", "gamma"]);
+    }
+
+    #[test]
+    fn version_spec_must_match_member_version() {
+        let ws = workspace(&["alpha", "beta", "gamma"]);
+        // A wrong version selects nothing -> loud error (not a silent match).
+        let sel = Selection {
+            packages: vec!["beta@9.9.9".to_owned()],
+            ..Selection::default()
+        };
+        let err = sel.resolve(&ws).expect_err("wrong version must error");
+        assert!(err.to_string().contains("beta@9.9.9"));
+        // The correct version resolves the member.
+        let ok = Selection {
+            packages: vec!["beta@0.1.0".to_owned()],
+            ..Selection::default()
+        };
+        assert_eq!(names(&ok.resolve(&ws).expect("resolve")), ["beta"]);
     }
 
     #[test]

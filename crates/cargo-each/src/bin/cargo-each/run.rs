@@ -59,7 +59,12 @@ fn build_selection(args: &EachArgs) -> Selection {
 }
 
 /// Narrow `members` by the `--filter` (keep) and `--exclude-filter` (drop)
-/// predicates. Both are AND-combined; `--exclude-filter` wins on conflict.
+/// predicates. `--filter` predicates are AND-combined (a member is kept only
+/// if it matches *every* one); `--exclude-filter` predicates are OR-combined
+/// (a member is dropped if it matches *any* one). Exclusion wins over
+/// inclusion, so a member matching both a keep and a drop predicate is
+/// dropped. This is the natural set pairing: keep is an intersection, drop is
+/// a union.
 fn apply_filters(members: &mut Vec<&cargo_each::Member>, args: &EachArgs) -> Result<(), AppError> {
     let keep = parse_predicates(&args.filters)?;
     let drop = parse_predicates(&args.exclude_filters)?;

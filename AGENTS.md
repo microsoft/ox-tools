@@ -26,9 +26,15 @@ Do not manually edit `CHANGELOG.md` files. Changelogs are automatically updated 
 
 ## Design Docs Are Part of the Source
 
-Every crate captures its design under `crates/<crate>/docs/`, kept in
+Each crate's design is captured under `crates/<crate>/docs/`, kept in
 lockstep with the code (as pioneered by `cargo-anvil` and
 `cargo-coverage-gate`). Design is the contract; code is the realization.
+
+This is prospective, not a retroactive invariant: new crates land with a
+design doc (see [New features and new crates](#new-features-and-new-crates)),
+and pre-existing crates without one (e.g. `automation`, `cargo-heather`,
+`cargo_ensure_no_cyclic_deps`) are brought into compliance opportunistically
+when substantially changed — not in a single sweep.
 
 ### Layout
 
@@ -72,6 +78,11 @@ cite design sections from rustdoc, code comments, or other source
 blocks reorganizing the design without churning source. References flow
 one way — design docs may point at code, not the reverse. Link between
 design docs freely.
+
+The codebase is mid-migration to this rule: some existing rustdoc (notably
+under `crates/cargo-anvil/src/`) still carries section-anchored references
+(`§N`). Remove those anchors opportunistically when you touch nearby code —
+there is no need for a dedicated sweep.
 
 ### New features and new crates
 

@@ -115,8 +115,11 @@ A `-p` selector that matches no member is an error (same policy as
 ### 4.2 Filters
 
 `--filter <PRED>` keeps only members matching `PRED`; `--exclude-filter <PRED>`
-drops members matching `PRED`. Both are repeatable and AND-combined
-(`--exclude-filter` wins over `--filter` on conflict). Predicates:
+drops members matching `PRED`. Both are repeatable: `--filter` predicates are
+AND-combined (a member is kept only if it matches every one) and
+`--exclude-filter` predicates are OR-combined (a member is dropped if it
+matches any one). Exclusion wins over inclusion — the natural set pairing:
+keep is an intersection, drop is a union. Predicates:
 
 | Predicate | True when the member… |
 |-----------|-----------------------|
@@ -136,7 +139,7 @@ exits 0 (nothing to do), exactly like an empty selection.
 | *(default)* | **per-package**: run `<COMMAND>` once per selected member, in name order, with placeholders substituted. |
 | `--once` | **once**: run `<COMMAND>` exactly once when the set is non-empty (skip when empty). Use `{packages}` to inject the selection. |
 | `--keep-going` | Don't stop at the first failing command; run them all and exit non-zero if any failed. Default is fail-fast (exit with the first failure's code). |
-| `--chdir` | Run each per-package command from that member's crate root (its `{manifest_dir}`) instead of the caller's CWD. Per-package mode only — combined with `--once` it is a usage error (exit 2). Placeholders stay absolute, so only *relative* args in the command shift to the member dir. |
+| `--chdir` | Run each per-package command from that member's crate root (the directory containing its `Cargo.toml`) instead of the caller's CWD. Per-package mode only — combined with `--once` it is a usage error (exit 2). Placeholders stay absolute, so only *relative* args in the command shift to the member dir. |
 | `--manifest-path <PATH>` | Workspace root `Cargo.toml`. Defaults to auto-detection from CWD. |
 | `--dry-run` | Print the fully-substituted commands that *would* run, one per line, without executing. |
 

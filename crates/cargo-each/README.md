@@ -49,8 +49,10 @@ of its own.
 
 ### Filters
 
-`--filter <PRED>` keeps only members matching `PRED`; `--exclude-filter <PRED>` drops them. Both are repeatable and AND-combined
-(`--exclude-filter` wins on conflict). Predicates:
+`--filter <PRED>` keeps only members matching `PRED`; `--exclude-filter <PRED>` drops them. Both are repeatable: `--filter` predicates are
+AND-combined (kept only if a member matches every one) and
+`--exclude-filter` predicates are OR-combined (dropped if a member matches
+any one). Exclusion wins over inclusion. Predicates:
 
 * `lib` / `bin` — the member has a target of that kind.
 * `dep:<name>` — the member declares `<name>` as a dependency.
@@ -127,7 +129,7 @@ owns the reusable, testable spine:
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-each">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG9CUPcNa5oVYGxMUpErv_0qaG0i0nLqcHFV5G5CdBXlxkH8jYWSBg2pjYXJnby1lYWNoZTAuMS4wamNhcmdvX2VhY2g
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEGzerREaGyePYG7npuf8mPIFXG9gqGIw2rameG0gNVlLYVIpfYWSBg2pjYXJnby1lYWNoZTAuMS4wamNhcmdvX2VhY2g
  [__link0]: https://docs.rs/cargo-each/0.1.0/cargo_each/?search=Workspace
  [__link1]: https://docs.rs/cargo-each/0.1.0/cargo_each/?search=Member
  [__link2]: https://docs.rs/cargo-each/0.1.0/cargo_each/?search=Selection

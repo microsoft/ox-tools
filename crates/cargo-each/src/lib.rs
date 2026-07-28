@@ -38,8 +38,10 @@
 //! ## Filters
 //!
 //! `--filter <PRED>` keeps only members matching `PRED`; `--exclude-filter
-//! <PRED>` drops them. Both are repeatable and AND-combined
-//! (`--exclude-filter` wins on conflict). Predicates:
+//! <PRED>` drops them. Both are repeatable: `--filter` predicates are
+//! AND-combined (kept only if a member matches every one) and
+//! `--exclude-filter` predicates are OR-combined (dropped if a member matches
+//! any one). Exclusion wins over inclusion. Predicates:
 //!
 //! - `lib` / `bin` — the member has a target of that kind.
 //! - `dep:<name>` — the member declares `<name>` as a dependency.

@@ -51,13 +51,15 @@ pub(crate) struct EachArgs {
     pub(crate) none: bool,
 
     // --- filtering ---
-    /// Keep only members matching this predicate. Repeatable (AND).
+    /// Keep only members matching this predicate. Repeatable; AND-combined
+    /// (a member is kept only if it matches every --filter).
     /// Predicates: `lib`, `bin`, `dep:<name>`, `metadata:<key>[=<value>]`.
     #[arg(long = "filter", value_name = "PRED")]
     pub(crate) filters: Vec<String>,
 
-    /// Drop members matching this predicate. Repeatable. Same predicate
-    /// grammar as --filter; wins over --filter on conflict.
+    /// Drop members matching this predicate. Repeatable; OR-combined (a member
+    /// is dropped if it matches any --exclude-filter). Same predicate grammar
+    /// as --filter; exclusion wins over --filter on conflict.
     #[arg(long = "exclude-filter", value_name = "PRED")]
     pub(crate) exclude_filters: Vec<String>,
 
