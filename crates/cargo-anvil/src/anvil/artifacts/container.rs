@@ -239,7 +239,10 @@ mod tests {
     #[test]
     fn drivers_use_docker_and_content_addressing() {
         assert!(RECIPE.contains("replace(recipe, \"'\", \"''\")"));
-        for driver in [SHELL_DRIVER, POWERSHELL_DRIVER] {
+        for (driver, customization_source, build_command) in [
+            (SHELL_DRIVER, "source \"$script_dir/customize.sh\"", "docker build \\"),
+            (POWERSHELL_DRIVER, ". $customizeScript", "& wsl -e docker build"),
+        ] {
             assert!(driver.contains("docker"));
             assert!(driver.contains("ANVIL_CONTAINER_NO_REBUILD"));
             assert!(driver.contains("ANVIL_CONTAINER_IMAGE"));
@@ -260,9 +263,13 @@ mod tests {
             let image_position = driver
                 .find("docker image inspect")
                 .expect("Docker image check is asserted present above");
+            let customization_position = driver
+                .find(customization_source)
+                .expect("customization source command must be present");
+            let build_position = driver.find(build_command).expect("Docker build command must be present");
             assert!(
-                auth_position < image_position,
-                "GitHub authentication must be checked before image building"
+                image_position < customization_position && customization_position < auth_position && auth_position < build_position,
+                "customization must load before GitHub authentication, and authentication must finish before image building"
             );
         }
         assert!(POWERSHELL_DRIVER.contains("image-id.ps1"));
@@ -272,8 +279,8 @@ mod tests {
         assert!(!POWERSHELL_DRIVER.contains("BuildInMachine"));
         assert!(POWERSHELL_DRIVER.contains("git rev-parse --show-toplevel 2>$null"));
         assert!(IMAGE_ID.contains("git rev-parse --show-toplevel 2>$null"));
-        assert!(POWERSHELL_DRIVER.contains("Test-AnvilRecipeNeedsGitHubToken $Recipe[0]"));
-        assert!(!POWERSHELL_DRIVER.contains("foreach ($name in $Recipe)"));
+        assert!(POWERSHELL_DRIVER.contains("Test-AnvilRecipeNeedsGitHubToken $recipeArg"));
+        assert!(POWERSHELL_DRIVER.contains("foreach ($recipeArg in $Recipe)"));
         assert!(POWERSHELL_DRIVER.contains("[Console]::IsInputRedirected"));
         assert!(POWERSHELL_DRIVER.contains("Read-Host"));
         assert!(POWERSHELL_DRIVER.contains("ConvertTo-AnvilVersion"));
@@ -299,8 +306,8 @@ mod tests {
                 && token_file_unix_restrict_position < token_file_write_position,
             "the temporary GitHub token file must be restricted before the token is written"
         );
-        assert!(SHELL_DRIVER.contains("anvil_recipe_needs_github_token \"$1\""));
-        assert!(!SHELL_DRIVER.contains("for recipe in \"$@\""));
+        assert!(SHELL_DRIVER.contains("anvil_recipe_needs_github_token \"$recipe_arg\""));
+        assert!(SHELL_DRIVER.contains("for recipe_arg in \"$@\""));
         assert!(SHELL_DRIVER.contains("image-id.sh"));
         assert!(!SHELL_DRIVER.contains("pwsh"));
         assert!(SHELL_DRIVER.contains("anvil-container must run from a Git repository"));

@@ -115,8 +115,12 @@
 //! wsl -e docker version
 //! ```
 //!
-//! The Windows driver invokes Docker Engine in WSL directly. Docker Desktop is
-//! not required.
+//! The Windows driver invokes Docker in the default WSL distribution and does
+//! not call Windows `docker.exe`. Regardless of the installation, the command
+//! above must succeed. Docker Desktop is not required.
+//!
+//! On ARM64 hosts, Docker emulates the required `linux/amd64` environment, so
+//! image builds and checks can be substantially slower than on x86-64 hosts.
 //!
 //! ### Run a recipe
 //!
@@ -176,6 +180,11 @@
 //! `customize.ps1` files for image-build secrets, dependency preparation,
 //! runtime arguments, and cleanup through the documented compatibility version
 //! without changing the public command surface.
+//!
+//! Customization files execute on the host with the developer's permissions
+//! before container isolation. Only run them from a repository or catalog you
+//! trust.
+//!
 //! For GitHub API checks, the driver automatically uses an existing host
 //! `GITHUB_TOKEN` or the token from an authenticated host `gh` CLI session. It
 //! mounts the token read-only for the command and removes the temporary file

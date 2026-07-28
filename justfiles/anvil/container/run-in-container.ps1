@@ -77,11 +77,20 @@ if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) {
 
 $versionText = (& wsl -e docker version --format '{{.Server.Version}}' 2>$null)
 if ($LASTEXITCODE -ne 0 -or -not $versionText) {
-    throw 'anvil-container: Docker Engine is unavailable in the default WSL distribution. Install or start Docker Engine there and ensure the WSL user can access it.'
+    throw 'anvil-container: `wsl -e docker version` must succeed. Install or start Docker Engine in the default WSL distribution; this driver does not invoke Windows docker.exe.'
 }
 $versionText = $versionText.Trim()
 if ((ConvertTo-AnvilVersion $versionText) -lt [version]'23.0.0') {
     throw "anvil-container: Docker Engine 23.0.0 or newer is required (found $versionText)."
+}
+$wslArchitecture = (& wsl -e uname -m 2>$null)
+if ($LASTEXITCODE -eq 0 -and $wslArchitecture) {
+    $wslArchitecture = $wslArchitecture.Trim()
+    if ($wslArchitecture -notin @('x86_64', 'amd64')) {
+        [Console]::Error.WriteLine(
+            "anvil-container: warning: $wslArchitecture requires emulation for linux/amd64; builds and checks may be substantially slower."
+        )
+    }
 }
 
 $repoRoot = (git rev-parse --show-toplevel 2>$null).Trim()
@@ -102,23 +111,14 @@ $repoBytes = [Text.Encoding]::UTF8.GetBytes($wslRepoRoot)
 $repoHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($repoBytes)).ToLowerInvariant()
 $targetVolume = "anvil-target-$($repoHash.Substring(0, 12))-$($imageId.Substring(0, 12))"
 
-$needsGitHubToken = $Recipe.Count -gt 0 -and (Test-AnvilRecipeNeedsGitHubToken $Recipe[0])
-$runsOnlyGitHubCheck = $Recipe.Count -eq 1 -and $Recipe[0] -eq 'anvil-aprz'
-$githubToken = if ($needsGitHubToken) { Get-AnvilGitHubToken } else { $null }
-if ($needsGitHubToken -and -not $githubToken) {
-    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-        throw 'anvil-container: GitHub authentication is required for anvil-aprz. Install the GitHub CLI and run `gh auth login --hostname github.com`, or set GITHUB_TOKEN before rerunning.'
-    }
-    if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) {
-        throw 'anvil-container: GitHub authentication is required for anvil-aprz. Run `gh auth login --hostname github.com` or set GITHUB_TOKEN before rerunning.'
-    }
-    Write-Host 'anvil-container: anvil-aprz requires GitHub authentication to avoid the 60 requests/hour unauthenticated API limit.'
-    [void](Read-Host 'Run `gh auth login --hostname github.com` in another terminal, then press Enter to continue (Ctrl+C to cancel)')
-    $githubToken = Get-AnvilGitHubToken
-    if (-not $githubToken) {
-        throw 'anvil-container: GitHub authentication is still unavailable. Complete `gh auth login --hostname github.com`, then rerun.'
+$needsGitHubToken = $false
+foreach ($recipeArg in $Recipe) {
+    if (Test-AnvilRecipeNeedsGitHubToken $recipeArg) {
+        $needsGitHubToken = $true
+        break
     }
 }
+$runsOnlyGitHubCheck = $Recipe.Count -eq 1 -and $Recipe[0] -eq 'anvil-aprz'
 
 # Versioned customization contract: check warm/cold state before sourcing so
 # customization needed only for image construction can be skipped on a warm
@@ -129,6 +129,8 @@ $imageExists = $LASTEXITCODE -eq 0
 New-Variable -Name AnvilContainerCustomizationApiVersion -Value 1 -Option ReadOnly
 New-Variable -Name AnvilContainerRepoRoot -Value $repoRoot -Option ReadOnly
 New-Variable -Name AnvilContainerDir -Value $scriptDir -Option ReadOnly
+New-Variable -Name AnvilContainerRepoRootWsl -Value $wslRepoRoot -Option ReadOnly
+New-Variable -Name AnvilContainerDirWsl -Value $wslScriptDir -Option ReadOnly
 New-Variable -Name AnvilContainerResolvedImage -Value $image -Option ReadOnly
 New-Variable -Name AnvilContainerImageExists -Value $imageExists -Option ReadOnly
 New-Variable -Name AnvilContainerRequestedRecipes -Value $Recipe -Option ReadOnly
@@ -141,6 +143,7 @@ $AnvilContainerPrepareArgs = @()
 $AnvilContainerPrepareCommand = @()
 $AnvilContainerRunArgs = @()
 $AnvilContainerCleanup = $null
+$githubToken = $null
 $githubTokenFile = $null
 $exitCode = 0
 $customizeScript = Join-Path $scriptDir 'customize.ps1'
@@ -159,6 +162,21 @@ try {
     }
     if ($AnvilContainerCleanup -and $AnvilContainerCleanup -isnot [scriptblock]) {
         throw 'anvil-container: $AnvilContainerCleanup must be a script block.'
+    }
+    $githubToken = if ($needsGitHubToken) { Get-AnvilGitHubToken } else { $null }
+    if ($needsGitHubToken -and -not $githubToken) {
+        if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+            throw 'anvil-container: GitHub authentication is required for anvil-aprz. Install the GitHub CLI and run `gh auth login --hostname github.com`, or set GITHUB_TOKEN before rerunning.'
+        }
+        if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) {
+            throw 'anvil-container: GitHub authentication is required for anvil-aprz. Run `gh auth login --hostname github.com` or set GITHUB_TOKEN before rerunning.'
+        }
+        Write-Host 'anvil-container: anvil-aprz requires GitHub authentication to avoid the 60 requests/hour unauthenticated API limit.'
+        [void](Read-Host 'Run `gh auth login --hostname github.com` in another terminal, then press Enter to continue (Ctrl+C to cancel)')
+        $githubToken = Get-AnvilGitHubToken
+        if (-not $githubToken) {
+            throw 'anvil-container: GitHub authentication is still unavailable. Complete `gh auth login --hostname github.com`, then rerun.'
+        }
     }
     if (-not $imageExists) {
         if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {

@@ -55,6 +55,11 @@ if ! version_at_least "$version" "$minimum"; then
     echo "anvil-container: Docker Engine $minimum or newer is required (found $version)." >&2
     exit 1
 fi
+host_arch="$(uname -m 2>/dev/null || true)"
+case "$host_arch" in
+    x86_64 | amd64 | '') ;;
+    *) echo "anvil-container: warning: $host_arch requires emulation for linux/amd64; builds and checks may be substantially slower." >&2 ;;
+esac
 
 if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     echo 'anvil-container must run from a Git repository.' >&2
@@ -75,43 +80,17 @@ fi
 target_volume="anvil-target-${repo_id}-${image_id:0:12}"
 
 needs_github_token=false
-if (($# > 0)) && anvil_recipe_needs_github_token "$1"; then
-    needs_github_token=true
-fi
+for recipe_arg in "$@"; do
+    if anvil_recipe_needs_github_token "$recipe_arg"; then
+        needs_github_token=true
+        break
+    fi
+done
 runs_only_github_check=false
 if (($# == 1)) && [[ "$1" == "anvil-aprz" ]]; then
     runs_only_github_check=true
 fi
 github_token=""
-if "$needs_github_token"; then
-    gh_command=""
-    if command -v gh >/dev/null 2>&1; then
-        gh_command=gh
-    elif command -v gh.exe >/dev/null 2>&1; then
-        gh_command=gh.exe
-    fi
-    github_token="${GITHUB_TOKEN:-}"
-    if [[ -z "$github_token" && -n "$gh_command" ]]; then
-        github_token="$("$gh_command" auth token --hostname github.com 2>/dev/null | tr -d '\r' || true)"
-    fi
-    if [[ -z "$github_token" ]]; then
-        if [[ -z "$gh_command" ]]; then
-            echo 'anvil-container: GitHub authentication is required for anvil-aprz. Install the GitHub CLI and run `gh auth login --hostname github.com`, or set GITHUB_TOKEN before rerunning.' >&2
-            exit 1
-        fi
-        if [[ ! -t 0 ]]; then
-            echo 'anvil-container: GitHub authentication is required for anvil-aprz. Run `gh auth login --hostname github.com` or set GITHUB_TOKEN before rerunning.' >&2
-            exit 1
-        fi
-        echo 'anvil-container: anvil-aprz requires GitHub authentication to avoid the 60 requests/hour unauthenticated API limit.' >&2
-        read -r -p 'Run `gh auth login --hostname github.com` in another terminal, then press Enter to continue (Ctrl+C to cancel) '
-        github_token="$("$gh_command" auth token --hostname github.com 2>/dev/null | tr -d '\r' || true)"
-        if [[ -z "$github_token" ]]; then
-            echo 'anvil-container: GitHub authentication is still unavailable. Complete `gh auth login --hostname github.com`, then rerun.' >&2
-            exit 1
-        fi
-    fi
-fi
 
 # Versioned customization contract: check warm/cold state before sourcing so
 # customization needed only for image construction can be skipped on a warm
@@ -179,6 +158,36 @@ cleanup_kind="$(type -t "$ANVIL_CONTAINER_CLEANUP" 2>/dev/null || true)"
 if [[ "$cleanup_kind" != "function" && "$cleanup_kind" != "builtin" ]]; then
     echo "anvil-container: ANVIL_CONTAINER_CLEANUP must name a callable function (got '$ANVIL_CONTAINER_CLEANUP')." >&2
     exit 1
+fi
+
+if "$needs_github_token"; then
+    gh_command=""
+    if command -v gh >/dev/null 2>&1; then
+        gh_command=gh
+    elif command -v gh.exe >/dev/null 2>&1; then
+        gh_command=gh.exe
+    fi
+    github_token="${GITHUB_TOKEN:-}"
+    if [[ -z "$github_token" && -n "$gh_command" ]]; then
+        github_token="$("$gh_command" auth token --hostname github.com 2>/dev/null | tr -d '\r' || true)"
+    fi
+    if [[ -z "$github_token" ]]; then
+        if [[ -z "$gh_command" ]]; then
+            echo 'anvil-container: GitHub authentication is required for anvil-aprz. Install the GitHub CLI and run `gh auth login --hostname github.com`, or set GITHUB_TOKEN before rerunning.' >&2
+            exit 1
+        fi
+        if [[ ! -t 0 ]]; then
+            echo 'anvil-container: GitHub authentication is required for anvil-aprz. Run `gh auth login --hostname github.com` or set GITHUB_TOKEN before rerunning.' >&2
+            exit 1
+        fi
+        echo 'anvil-container: anvil-aprz requires GitHub authentication to avoid the 60 requests/hour unauthenticated API limit.' >&2
+        read -r -p 'Run `gh auth login --hostname github.com` in another terminal, then press Enter to continue (Ctrl+C to cancel) '
+        github_token="$("$gh_command" auth token --hostname github.com 2>/dev/null | tr -d '\r' || true)"
+        if [[ -z "$github_token" ]]; then
+            echo 'anvil-container: GitHub authentication is still unavailable. Complete `gh auth login --hostname github.com`, then rerun.' >&2
+            exit 1
+        fi
+    fi
 fi
 
 if ! "$image_exists"; then

@@ -116,8 +116,12 @@ environment without installing those tools directly on the host.
 wsl -e docker version
 ```
 
-The Windows driver invokes Docker Engine in WSL directly. Docker Desktop is
-not required.
+The Windows driver invokes Docker in the default WSL distribution and does
+not call Windows `docker.exe`. Regardless of the installation, the command
+above must succeed. Docker Desktop is not required.
+
+On ARM64 hosts, Docker emulates the required `linux/amd64` environment, so
+image builds and checks can be substantially slower than on x86-64 hosts.
 
 #### Run a recipe
 
@@ -177,6 +181,11 @@ and derived catalogs can add trusted `customize.sh` and
 `customize.ps1` files for image-build secrets, dependency preparation,
 runtime arguments, and cleanup through the documented compatibility version
 without changing the public command surface.
+
+Customization files execute on the host with the developer’s permissions
+before container isolation. Only run them from a repository or catalog you
+trust.
+
 For GitHub API checks, the driver automatically uses an existing host
 `GITHUB_TOKEN` or the token from an authenticated host `gh` CLI session. It
 mounts the token read-only for the command and removes the temporary file
@@ -414,7 +423,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEGyfsQTj_cPNMG-esK0h8vrfbG7vfHWwn6VfFG2PNZ4M4NKkLYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEGwapFbaRza5IG2K_BaCFrX_IG0_buu5rHDe0G88HWPjPxsF2YWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

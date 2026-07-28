@@ -175,18 +175,18 @@ fn run_driver_args(root: &Path, customize_sh_body: &str, recipe_args: &[&str], e
 }
 
 #[test]
-fn forwarded_parameter_does_not_trigger_github_authentication() {
+fn every_requested_recipe_is_checked_for_github_authentication() {
     let tmp = repo_with_container();
     let run = run_driver_args(
         tmp.path(),
         "",
         &["anvil-clippy", "anvil-aprz"],
-        &[("FAKE_DOCKER_IMAGE_EXISTS", "1")],
+        &[("FAKE_DOCKER_IMAGE_EXISTS", "1"), ("GITHUB_TOKEN", "test-token")],
     );
 
     assert!(
         run.status.success(),
-        "a forwarded parameter must not trigger GitHub authentication: {}",
+        "a later requested recipe must receive GitHub authentication: {}",
         run.stderr
     );
     assert!(
@@ -197,10 +197,35 @@ fn forwarded_parameter_does_not_trigger_github_authentication() {
     assert_eq!(
         run.docker_log
             .lines()
-            .filter(|line| line.starts_with("run ") && line.contains("just anvil-clippy anvil-aprz"))
+            .filter(|line| line.starts_with("run ") && line.contains("just anvil-aprz"))
             .count(),
         1,
-        "a forwarded parameter must not cause an isolated anvil-aprz invocation"
+        "a later token-requiring recipe must cause one isolated anvil-aprz invocation"
+    );
+    assert!(
+        run.docker_log
+            .lines()
+            .any(|line| line.contains("--env ANVIL_APRZ_ALREADY_RAN=1") && line.contains("just anvil-clippy anvil-aprz")),
+        "the requested recipes must run with APRZ marked complete: {}",
+        run.docker_log
+    );
+}
+
+#[test]
+fn customization_can_provide_github_authentication() {
+    let tmp = repo_with_container();
+    let run = run_driver(
+        tmp.path(),
+        "GITHUB_TOKEN=custom-token\n",
+        "anvil-aprz",
+        &[("FAKE_DOCKER_IMAGE_EXISTS", "1")],
+    );
+
+    assert!(run.status.success(), "custom authentication must be accepted: {}", run.stderr);
+    assert!(
+        run.docker_log.contains("/run/secrets/anvil-github-token"),
+        "the customization-provided token must be mounted for APRZ: {}",
+        run.docker_log
     );
 }
 

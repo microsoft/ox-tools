@@ -87,13 +87,15 @@ local Docker Engine directly. Both implement the same lifecycle:
 flowchart TD
     user["just anvil-container &lt;recipe&gt;"] --> dispatch["Select the host driver"]
     dispatch --> identity["Compute the content-based image ID"]
-    identity --> exists{"Matching local image exists?"}
+    identity --> customize["Inspect the local image<br/>and load trusted customization"]
+    customize --> github{"Does the request need GitHub access?"}
+    github -- Yes --> auth["Acquire host or customized credentials"]
+    github -- No --> exists
+    auth --> exists{"Matching local image exists?"}
     exists -- No --> build["Build the image<br/>and run just anvil-setup"]
     exists -- Yes --> prepare
     build --> prepare["Run optional dependency preparation"]
-    prepare --> github{"Does the request need GitHub access?"}
-    github -- Yes --> aprz["Run anvil-aprz with a temporary token mount"]
-    github -- No --> checks
+    prepare --> aprz["Run anvil-aprz with a temporary token mount when required"]
     aprz --> checks["Run the requested recipes without the token"]
     checks --> cleanup["Remove temporary credentials and containers"]
 ```
@@ -102,12 +104,13 @@ The driver:
 
 1. validates the host prerequisites and locates the Git repository root;
 2. computes the image ID from build-relevant generated content;
-3. builds the matching image when it is not already available;
-4. runs an optional downstream dependency-preparation command;
-5. prepares any credentials required by the requested recipe;
-6. starts a short-lived container with the repository and named caches mounted;
-7. invokes the requested recipe with `just`, or starts an interactive shell;
-8. removes temporary credential files on success or failure.
+3. checks image availability and loads and validates trusted customization;
+4. prepares any credentials required by the requested recipes;
+5. builds the matching image when it is not already available;
+6. runs an optional downstream dependency-preparation command;
+7. starts a short-lived container with the repository and named caches mounted;
+8. invokes the requested recipes with `just`, or starts an interactive shell;
+9. removes temporary credential files on success or failure.
 
 ## 5. Image construction and identity
 
@@ -198,6 +201,8 @@ Authentication has distinct public and downstream extension paths.
 The public `anvil-aprz` recipe requires authenticated GitHub API access. The
 drivers recognize `anvil-aprz` and aggregate tiers that invoke it, then obtain a
 token from the host `GITHUB_TOKEN` or an authenticated host `gh` session.
+Because customization loads first, trusted downstream customization can obtain
+a short-lived token and assign it to the process `GITHUB_TOKEN`.
 
 For an aggregate tier, the driver:
 
@@ -221,6 +226,11 @@ justfiles/anvil/container/customize.sh
 justfiles/anvil/container/customize.ps1
 ```
 
+> [!WARNING]
+> These files execute on the host with the developer's permissions before
+> container isolation. Checking out a branch that adds or changes one of them
+> and then running `just anvil-container` executes that code on the host.
+
 The public catalog does not generate these files. A repository can commit them
 directly, or a derived distribution can add them through the artifact API in
 [extensibility.md](./extensibility.md). The driver treats both sources
@@ -234,6 +244,8 @@ The version `1` interface provides these read-only inputs:
 | API version | `ANVIL_CONTAINER_CUSTOMIZATION_API_VERSION` | `$AnvilContainerCustomizationApiVersion` | Integer |
 | Repository root | `ANVIL_CONTAINER_REPO_ROOT` | `$AnvilContainerRepoRoot` | Absolute path |
 | Container directory | `ANVIL_CONTAINER_DIR` | `$AnvilContainerDir` | Absolute path |
+| WSL repository root | Not applicable | `$AnvilContainerRepoRootWsl` | Absolute WSL path for Docker arguments |
+| WSL container directory | Not applicable | `$AnvilContainerDirWsl` | Absolute WSL path for Docker arguments |
 | Resolved image | `ANVIL_CONTAINER_RESOLVED_IMAGE` | `$AnvilContainerResolvedImage` | Image name plus content tag |
 | Matching image exists | `ANVIL_CONTAINER_IMAGE_EXISTS` | `$AnvilContainerImageExists` | Boolean |
 | Requested recipes | `ANVIL_CONTAINER_REQUESTED_RECIPES` | `$AnvilContainerRequestedRecipes` | String array |
@@ -250,9 +262,9 @@ The driver initializes and validates these outputs:
 | Cleanup callback | `ANVIL_CONTAINER_CLEANUP` | `$AnvilContainerCleanup` | Function name or script block, no-op |
 
 The driver checks image availability before sourcing customization, validates
-outputs before invoking Docker, then runs the build, optional preparation,
-requested recipe, and cleanup phases in order. Failures stop the invocation and
-run registered cleanup.
+outputs, obtains any required GitHub token, then runs the build, optional
+preparation, requested recipes, and cleanup phases in order. Failures stop the
+invocation and run registered cleanup.
 
 - Build arguments apply only when constructing a missing image. Use BuildKit
   secret mounts, not secret-bearing `--build-arg` values.
@@ -261,6 +273,9 @@ run registered cleanup.
 - Runtime arguments apply to the requested recipe and the isolated
   `anvil-aprz` invocation. Do not forward credentials needed only during build
   or preparation.
+- Customization that provisions GitHub authentication can assign a short-lived
+  token to process `GITHUB_TOKEN`. Register cleanup immediately for any
+  supporting files or external credentials.
 - Cleanup runs after ordinary success, failure, or interactive-shell exit. It
   cannot run after forcible process termination or machine failure.
 
@@ -305,7 +320,8 @@ Host requirements:
 - Bash on Linux and WSL;
 - PowerShell Core (`pwsh`) and WSL 2 on Windows;
 - Docker Engine running in the default WSL distribution when invoked from
-  Windows; Docker Desktop is not required;
+  Windows; `wsl -e docker version` must succeed and the driver does not invoke
+  Windows `docker.exe`;
 - `linux/amd64` execution support;
 - a repository-owned `rust-toolchain.toml`.
 
@@ -321,6 +337,9 @@ Runtime controls:
 The initial image build installs the complete pinned tool catalog and can take
 several minutes. Later runs with the same image ID reuse the image and target
 volume; Cargo registry and Git caches are reused across image IDs.
+
+On ARM64 hosts, Docker emulates `linux/amd64`. The driver warns about this
+because image builds and checks can be substantially slower than on x86-64.
 
 The initial implementation is deliberately limited to:
 

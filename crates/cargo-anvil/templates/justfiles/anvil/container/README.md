@@ -29,17 +29,28 @@ The first run builds the matching image and can take several minutes.
 - A `rust-toolchain.toml` in the repository root.
 - An x86-64 Linux or WSL environment capable of running `linux/amd64` images.
 
-On Windows, install Docker Engine inside the default WSL distribution rather
-than relying on Docker Desktop. Verify the engine from PowerShell:
+On Windows, the driver invokes Docker from the default WSL distribution rather
+than calling Windows `docker.exe`. Regardless of how Docker is installed, this
+command must succeed from PowerShell:
 
 ```text
 wsl -e docker version
 ```
 
-The Windows driver invokes that WSL Docker Engine directly. Start the Docker
-service inside WSL when it is stopped and add the WSL user to the `docker`
-group when non-root access is not already configured. Docker Desktop is not
-required.
+Start the Docker service inside WSL when it is stopped and add the WSL user to
+the `docker` group when non-root access is not already configured. Docker
+Desktop is not required.
+
+On ARM64 hosts, Docker emulates the required `linux/amd64` environment. Image
+builds and checks can therefore be substantially slower than on x86-64 hosts.
+
+## Security boundary
+
+> [!WARNING]
+> `customize.sh` and `customize.ps1` execute on the host with the developer's
+> permissions before container isolation begins. Reviewing and trusting these
+> files is equivalent to reviewing and trusting any other host-executed script
+> in the checked-out branch.
 
 ## Common workflows
 
@@ -113,6 +124,9 @@ authentication. The driver uses either:
 - the host `GITHUB_TOKEN`; or
 - the token from an authenticated host `gh` session.
 
+Trusted customization can provision a short-lived token by setting
+`GITHUB_TOKEN`; the driver reads it after loading and validating customization.
+
 Authenticate the GitHub CLI with:
 
 ```text
@@ -145,7 +159,8 @@ The public driver builds images locally and does not pull
 | Docker is not found on Linux or WSL | Install Docker Engine 23.0 or newer inside that environment |
 | Docker is unavailable from Windows | Run `wsl -e docker version`; install or start Docker Engine in the default WSL distribution |
 | Docker requires elevated access | Add the Linux/WSL user to the `docker` group, then start a new shell |
-| `linux/amd64` cannot run | Use an x86-64 Linux or WSL environment |
+| ARM64 execution is slow | The current image is `linux/amd64` and runs through Docker emulation |
+| `linux/amd64` cannot run | Configure Docker to run `linux/amd64` images |
 | `[script]` recipes are unavailable | Enable `[script]` support; older `just` versions require `set unstable` |
 | `rust-toolchain.toml` is missing | Add the repository-owned toolchain file at the repository root |
 | GitHub authentication is unavailable | Run `gh auth login --hostname github.com` or set host `GITHUB_TOKEN` |
@@ -170,15 +185,14 @@ justfiles/anvil/container/customize.sh
 justfiles/anvil/container/customize.ps1
 ```
 
-The driver sources the matching file as host code before image construction and
-recipe execution. Customization API version 1 provides documented inputs and
-validated outputs for build secrets, dependency preparation, runtime arguments,
-and cleanup.
+The driver sources the matching file as trusted host code before authentication,
+image construction, and recipe execution. Customization API version 1 provides
+documented inputs and validated outputs for build secrets, dependency
+preparation, runtime arguments, and cleanup.
 
 Customization source is excluded from image identity and the build context.
 Non-secret image behavior must be represented by hashed static files such as
 the `Containerfile`, entrypoint, or supporting build scripts.
 
-Only run customization files from a repository or catalog you trust. See the
-[container customization contract](https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/containers.md#8-container-customization)
+See the [container customization contract](https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/containers.md#8-container-customization)
 for the complete versioned interface and security requirements.

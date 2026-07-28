@@ -3345,17 +3345,28 @@ The first run builds the matching image and can take several minutes.
 - A `rust-toolchain.toml` in the repository root.
 - An x86-64 Linux or WSL environment capable of running `linux/amd64` images.
 
-On Windows, install Docker Engine inside the default WSL distribution rather
-than relying on Docker Desktop. Verify the engine from PowerShell:
+On Windows, the driver invokes Docker from the default WSL distribution rather
+than calling Windows `docker.exe`. Regardless of how Docker is installed, this
+command must succeed from PowerShell:
 
 ```text
 wsl -e docker version
 ```
 
-The Windows driver invokes that WSL Docker Engine directly. Start the Docker
-service inside WSL when it is stopped and add the WSL user to the `docker`
-group when non-root access is not already configured. Docker Desktop is not
-required.
+Start the Docker service inside WSL when it is stopped and add the WSL user to
+the `docker` group when non-root access is not already configured. Docker
+Desktop is not required.
+
+On ARM64 hosts, Docker emulates the required `linux/amd64` environment. Image
+builds and checks can therefore be substantially slower than on x86-64 hosts.
+
+## Security boundary
+
+> [!WARNING]
+> `customize.sh` and `customize.ps1` execute on the host with the developer's
+> permissions before container isolation begins. Reviewing and trusting these
+> files is equivalent to reviewing and trusting any other host-executed script
+> in the checked-out branch.
 
 ## Common workflows
 
@@ -3429,6 +3440,9 @@ authentication. The driver uses either:
 - the host `GITHUB_TOKEN`; or
 - the token from an authenticated host `gh` session.
 
+Trusted customization can provision a short-lived token by setting
+`GITHUB_TOKEN`; the driver reads it after loading and validating customization.
+
 Authenticate the GitHub CLI with:
 
 ```text
@@ -3461,7 +3475,8 @@ The public driver builds images locally and does not pull
 | Docker is not found on Linux or WSL | Install Docker Engine 23.0 or newer inside that environment |
 | Docker is unavailable from Windows | Run `wsl -e docker version`; install or start Docker Engine in the default WSL distribution |
 | Docker requires elevated access | Add the Linux/WSL user to the `docker` group, then start a new shell |
-| `linux/amd64` cannot run | Use an x86-64 Linux or WSL environment |
+| ARM64 execution is slow | The current image is `linux/amd64` and runs through Docker emulation |
+| `linux/amd64` cannot run | Configure Docker to run `linux/amd64` images |
 | `[script]` recipes are unavailable | Enable `[script]` support; older `just` versions require `set unstable` |
 | `rust-toolchain.toml` is missing | Add the repository-owned toolchain file at the repository root |
 | GitHub authentication is unavailable | Run `gh auth login --hostname github.com` or set host `GITHUB_TOKEN` |
@@ -3486,17 +3501,16 @@ justfiles/anvil/container/customize.sh
 justfiles/anvil/container/customize.ps1
 ```
 
-The driver sources the matching file as host code before image construction and
-recipe execution. Customization API version 1 provides documented inputs and
-validated outputs for build secrets, dependency preparation, runtime arguments,
-and cleanup.
+The driver sources the matching file as trusted host code before authentication,
+image construction, and recipe execution. Customization API version 1 provides
+documented inputs and validated outputs for build secrets, dependency
+preparation, runtime arguments, and cleanup.
 
 Customization source is excluded from image identity and the build context.
 Non-secret image behavior must be represented by hashed static files such as
 the `Containerfile`, entrypoint, or supporting build scripts.
 
-Only run customization files from a repository or catalog you trust. See the
-[container customization contract](https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/containers.md#8-container-customization)
+See the [container customization contract](https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/containers.md#8-container-customization)
 for the complete versioned interface and security requirements.
 
 === justfiles/anvil/container/container.just ===
@@ -3769,11 +3783,20 @@ if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) {
 
 $versionText = (& wsl -e docker version --format '{{.Server.Version}}' 2>$null)
 if ($LASTEXITCODE -ne 0 -or -not $versionText) {
-    throw 'anvil-container: Docker Engine is unavailable in the default WSL distribution. Install or start Docker Engine there and ensure the WSL user can access it.'
+    throw 'anvil-container: `wsl -e docker version` must succeed. Install or start Docker Engine in the default WSL distribution; this driver does not invoke Windows docker.exe.'
 }
 $versionText = $versionText.Trim()
 if ((ConvertTo-AnvilVersion $versionText) -lt [version]'23.0.0') {
     throw "anvil-container: Docker Engine 23.0.0 or newer is required (found $versionText)."
+}
+$wslArchitecture = (& wsl -e uname -m 2>$null)
+if ($LASTEXITCODE -eq 0 -and $wslArchitecture) {
+    $wslArchitecture = $wslArchitecture.Trim()
+    if ($wslArchitecture -notin @('x86_64', 'amd64')) {
+        [Console]::Error.WriteLine(
+            "anvil-container: warning: $wslArchitecture requires emulation for linux/amd64; builds and checks may be substantially slower."
+        )
+    }
 }
 
 $repoRoot = (git rev-parse --show-toplevel 2>$null).Trim()
@@ -3794,23 +3817,14 @@ $repoBytes = [Text.Encoding]::UTF8.GetBytes($wslRepoRoot)
 $repoHash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($repoBytes)).ToLowerInvariant()
 $targetVolume = "anvil-target-$($repoHash.Substring(0, 12))-$($imageId.Substring(0, 12))"
 
-$needsGitHubToken = $Recipe.Count -gt 0 -and (Test-AnvilRecipeNeedsGitHubToken $Recipe[0])
-$runsOnlyGitHubCheck = $Recipe.Count -eq 1 -and $Recipe[0] -eq 'anvil-aprz'
-$githubToken = if ($needsGitHubToken) { Get-AnvilGitHubToken } else { $null }
-if ($needsGitHubToken -and -not $githubToken) {
-    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-        throw 'anvil-container: GitHub authentication is required for anvil-aprz. Install the GitHub CLI and run `gh auth login --hostname github.com`, or set GITHUB_TOKEN before rerunning.'
-    }
-    if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) {
-        throw 'anvil-container: GitHub authentication is required for anvil-aprz. Run `gh auth login --hostname github.com` or set GITHUB_TOKEN before rerunning.'
-    }
-    Write-Host 'anvil-container: anvil-aprz requires GitHub authentication to avoid the 60 requests/hour unauthenticated API limit.'
-    [void](Read-Host 'Run `gh auth login --hostname github.com` in another terminal, then press Enter to continue (Ctrl+C to cancel)')
-    $githubToken = Get-AnvilGitHubToken
-    if (-not $githubToken) {
-        throw 'anvil-container: GitHub authentication is still unavailable. Complete `gh auth login --hostname github.com`, then rerun.'
+$needsGitHubToken = $false
+foreach ($recipeArg in $Recipe) {
+    if (Test-AnvilRecipeNeedsGitHubToken $recipeArg) {
+        $needsGitHubToken = $true
+        break
     }
 }
+$runsOnlyGitHubCheck = $Recipe.Count -eq 1 -and $Recipe[0] -eq 'anvil-aprz'
 
 # Versioned customization contract: check warm/cold state before sourcing so
 # customization needed only for image construction can be skipped on a warm
@@ -3821,6 +3835,8 @@ $imageExists = $LASTEXITCODE -eq 0
 New-Variable -Name AnvilContainerCustomizationApiVersion -Value 1 -Option ReadOnly
 New-Variable -Name AnvilContainerRepoRoot -Value $repoRoot -Option ReadOnly
 New-Variable -Name AnvilContainerDir -Value $scriptDir -Option ReadOnly
+New-Variable -Name AnvilContainerRepoRootWsl -Value $wslRepoRoot -Option ReadOnly
+New-Variable -Name AnvilContainerDirWsl -Value $wslScriptDir -Option ReadOnly
 New-Variable -Name AnvilContainerResolvedImage -Value $image -Option ReadOnly
 New-Variable -Name AnvilContainerImageExists -Value $imageExists -Option ReadOnly
 New-Variable -Name AnvilContainerRequestedRecipes -Value $Recipe -Option ReadOnly
@@ -3833,6 +3849,7 @@ $AnvilContainerPrepareArgs = @()
 $AnvilContainerPrepareCommand = @()
 $AnvilContainerRunArgs = @()
 $AnvilContainerCleanup = $null
+$githubToken = $null
 $githubTokenFile = $null
 $exitCode = 0
 $customizeScript = Join-Path $scriptDir 'customize.ps1'
@@ -3851,6 +3868,21 @@ try {
     }
     if ($AnvilContainerCleanup -and $AnvilContainerCleanup -isnot [scriptblock]) {
         throw 'anvil-container: $AnvilContainerCleanup must be a script block.'
+    }
+    $githubToken = if ($needsGitHubToken) { Get-AnvilGitHubToken } else { $null }
+    if ($needsGitHubToken -and -not $githubToken) {
+        if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+            throw 'anvil-container: GitHub authentication is required for anvil-aprz. Install the GitHub CLI and run `gh auth login --hostname github.com`, or set GITHUB_TOKEN before rerunning.'
+        }
+        if (-not [Environment]::UserInteractive -or [Console]::IsInputRedirected) {
+            throw 'anvil-container: GitHub authentication is required for anvil-aprz. Run `gh auth login --hostname github.com` or set GITHUB_TOKEN before rerunning.'
+        }
+        Write-Host 'anvil-container: anvil-aprz requires GitHub authentication to avoid the 60 requests/hour unauthenticated API limit.'
+        [void](Read-Host 'Run `gh auth login --hostname github.com` in another terminal, then press Enter to continue (Ctrl+C to cancel)')
+        $githubToken = Get-AnvilGitHubToken
+        if (-not $githubToken) {
+            throw 'anvil-container: GitHub authentication is still unavailable. Complete `gh auth login --hostname github.com`, then rerun.'
+        }
     }
     if (-not $imageExists) {
         if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {
@@ -4034,6 +4066,11 @@ if ! version_at_least "$version" "$minimum"; then
     echo "anvil-container: Docker Engine $minimum or newer is required (found $version)." >&2
     exit 1
 fi
+host_arch="$(uname -m 2>/dev/null || true)"
+case "$host_arch" in
+    x86_64 | amd64 | '') ;;
+    *) echo "anvil-container: warning: $host_arch requires emulation for linux/amd64; builds and checks may be substantially slower." >&2 ;;
+esac
 
 if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     echo 'anvil-container must run from a Git repository.' >&2
@@ -4054,43 +4091,17 @@ fi
 target_volume="anvil-target-${repo_id}-${image_id:0:12}"
 
 needs_github_token=false
-if (($# > 0)) && anvil_recipe_needs_github_token "$1"; then
-    needs_github_token=true
-fi
+for recipe_arg in "$@"; do
+    if anvil_recipe_needs_github_token "$recipe_arg"; then
+        needs_github_token=true
+        break
+    fi
+done
 runs_only_github_check=false
 if (($# == 1)) && [[ "$1" == "anvil-aprz" ]]; then
     runs_only_github_check=true
 fi
 github_token=""
-if "$needs_github_token"; then
-    gh_command=""
-    if command -v gh >/dev/null 2>&1; then
-        gh_command=gh
-    elif command -v gh.exe >/dev/null 2>&1; then
-        gh_command=gh.exe
-    fi
-    github_token="${GITHUB_TOKEN:-}"
-    if [[ -z "$github_token" && -n "$gh_command" ]]; then
-        github_token="$("$gh_command" auth token --hostname github.com 2>/dev/null | tr -d '\r' || true)"
-    fi
-    if [[ -z "$github_token" ]]; then
-        if [[ -z "$gh_command" ]]; then
-            echo 'anvil-container: GitHub authentication is required for anvil-aprz. Install the GitHub CLI and run `gh auth login --hostname github.com`, or set GITHUB_TOKEN before rerunning.' >&2
-            exit 1
-        fi
-        if [[ ! -t 0 ]]; then
-            echo 'anvil-container: GitHub authentication is required for anvil-aprz. Run `gh auth login --hostname github.com` or set GITHUB_TOKEN before rerunning.' >&2
-            exit 1
-        fi
-        echo 'anvil-container: anvil-aprz requires GitHub authentication to avoid the 60 requests/hour unauthenticated API limit.' >&2
-        read -r -p 'Run `gh auth login --hostname github.com` in another terminal, then press Enter to continue (Ctrl+C to cancel) '
-        github_token="$("$gh_command" auth token --hostname github.com 2>/dev/null | tr -d '\r' || true)"
-        if [[ -z "$github_token" ]]; then
-            echo 'anvil-container: GitHub authentication is still unavailable. Complete `gh auth login --hostname github.com`, then rerun.' >&2
-            exit 1
-        fi
-    fi
-fi
 
 # Versioned customization contract: check warm/cold state before sourcing so
 # customization needed only for image construction can be skipped on a warm
@@ -4158,6 +4169,36 @@ cleanup_kind="$(type -t "$ANVIL_CONTAINER_CLEANUP" 2>/dev/null || true)"
 if [[ "$cleanup_kind" != "function" && "$cleanup_kind" != "builtin" ]]; then
     echo "anvil-container: ANVIL_CONTAINER_CLEANUP must name a callable function (got '$ANVIL_CONTAINER_CLEANUP')." >&2
     exit 1
+fi
+
+if "$needs_github_token"; then
+    gh_command=""
+    if command -v gh >/dev/null 2>&1; then
+        gh_command=gh
+    elif command -v gh.exe >/dev/null 2>&1; then
+        gh_command=gh.exe
+    fi
+    github_token="${GITHUB_TOKEN:-}"
+    if [[ -z "$github_token" && -n "$gh_command" ]]; then
+        github_token="$("$gh_command" auth token --hostname github.com 2>/dev/null | tr -d '\r' || true)"
+    fi
+    if [[ -z "$github_token" ]]; then
+        if [[ -z "$gh_command" ]]; then
+            echo 'anvil-container: GitHub authentication is required for anvil-aprz. Install the GitHub CLI and run `gh auth login --hostname github.com`, or set GITHUB_TOKEN before rerunning.' >&2
+            exit 1
+        fi
+        if [[ ! -t 0 ]]; then
+            echo 'anvil-container: GitHub authentication is required for anvil-aprz. Run `gh auth login --hostname github.com` or set GITHUB_TOKEN before rerunning.' >&2
+            exit 1
+        fi
+        echo 'anvil-container: anvil-aprz requires GitHub authentication to avoid the 60 requests/hour unauthenticated API limit.' >&2
+        read -r -p 'Run `gh auth login --hostname github.com` in another terminal, then press Enter to continue (Ctrl+C to cancel) '
+        github_token="$("$gh_command" auth token --hostname github.com 2>/dev/null | tr -d '\r' || true)"
+        if [[ -z "$github_token" ]]; then
+            echo 'anvil-container: GitHub authentication is still unavailable. Complete `gh auth login --hostname github.com`, then rerun.' >&2
+            exit 1
+        fi
+    fi
 fi
 
 if ! "$image_exists"; then
