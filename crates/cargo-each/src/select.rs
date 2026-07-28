@@ -16,6 +16,8 @@
 
 use std::collections::HashSet;
 
+use cargo_metadata::semver::Version;
+
 use crate::error::{EachError, UnknownSelectorError};
 use crate::workspace::{Member, Workspace};
 
@@ -106,7 +108,7 @@ fn resolve_selectors<'w>(workspace: &'w Workspace, selectors: &[String]) -> Resu
         let hits: Vec<&Member> = workspace
             .members
             .iter()
-            .filter(|m| glob_matches(name_pat, &m.name) && version.is_none_or(|v| version_matches(v, &m.version)))
+            .filter(|m| glob_matches(name_pat, &m.name) && version.is_none_or(|v| version_matches(v, &member_version(m))))
             .collect();
         if hits.is_empty() {
             return Err(UnknownSelectorError::new(selector.clone()).into());
@@ -118,14 +120,50 @@ fn resolve_selectors<'w>(workspace: &'w Workspace, selectors: &[String]) -> Resu
     Ok(workspace.members.iter().filter(|m| matched.contains(m.name.as_str())).collect())
 }
 
+/// Parse a member's version string into a [`Version`].
+///
+/// The string comes from `cargo metadata`, which only ever reports valid
+/// semver, so the parse cannot fail in practice.
+fn member_version(member: &Member) -> Version {
+    member
+        .version
+        .parse()
+        .expect("member versions come from cargo metadata and are always valid semver")
+}
+
 /// Whether a supplied `name@version` qualifier matches a member's version,
-/// following cargo's package-id-spec partial-version rule: the supplied
-/// version may be a leading, dot-separated *component* prefix of the actual
-/// version. `0.1` matches `0.1.0`; `0.30` does not match `0.3.0` (component
-/// `30` is not `3`); a qualifier longer than the actual version never matches.
-fn version_matches(supplied: &str, actual: &str) -> bool {
-    let mut actual_components = actual.split('.');
-    supplied.split('.').all(|component| actual_components.next() == Some(component))
+/// following cargo's package-id-spec `PartialVersion` semantics:
+///
+/// - The qualifier may omit trailing release components: `0.1` matches
+///   `0.1.z` for any patch `z`, and `1` matches `1.y.z`. `0.30` does not
+///   match `0.3.0` (component `30` is not `3`); more than three release
+///   components never matches.
+/// - Prerelease is significant: a qualifier without a prerelease matches only
+///   versions that have none (so `1.2.3` does not match `1.2.3-beta`), and a
+///   qualifier with a prerelease must match it exactly (`1.2.3-beta` does not
+///   match `1.2.3-beta.1`).
+/// - Build metadata is ignored on both sides, per semver.
+fn version_matches(supplied: &str, actual: &Version) -> bool {
+    // Strip build metadata (ignored), then split the optional prerelease.
+    let without_build = supplied.split('+').next().unwrap_or(supplied);
+    let (release, pre) = without_build.split_once('-').map_or((without_build, None), |(r, p)| (r, Some(p)));
+
+    let components: Vec<&str> = release.split('.').collect();
+    if components.is_empty() || components.len() > 3 {
+        return false;
+    }
+    let actual_release = [actual.major, actual.minor, actual.patch];
+    for (i, component) in components.iter().enumerate() {
+        if component.parse::<u64>() != Ok(actual_release[i]) {
+            return false;
+        }
+    }
+    // A supplied prerelease must match exactly; its absence requires the
+    // member to have no prerelease either.
+    match pre {
+        Some(pre) => actual.pre.as_str() == pre,
+        None => actual.pre.is_empty(),
+    }
 }
 
 /// Tiny Unix-style glob matcher: `*` matches any run of characters
@@ -264,13 +302,24 @@ mod tests {
     }
 
     #[test]
-    fn version_matches_follows_component_prefix_rule() {
-        assert!(version_matches("0.1.0", "0.1.0")); // exact
-        assert!(version_matches("0.1", "0.1.0")); // partial prefix
-        assert!(version_matches("0", "0.1.0")); // single component
-        assert!(!version_matches("0.30", "0.3.0")); // component 30 != 3
-        assert!(!version_matches("0.2", "0.1.0")); // mismatch
-        assert!(!version_matches("0.1.0.0", "0.1.0")); // longer than actual
+    fn version_matches_follows_cargo_partial_version_rule() {
+        fn ver(s: &str) -> Version {
+            s.parse().expect("valid semver")
+        }
+        // Exact and partial release matches on a plain version.
+        assert!(version_matches("0.1.0", &ver("0.1.0"))); // exact
+        assert!(version_matches("0.1", &ver("0.1.0"))); // partial prefix
+        assert!(version_matches("0", &ver("0.1.0"))); // single component
+        assert!(!version_matches("0.30", &ver("0.3.0"))); // component 30 is not 3
+        assert!(!version_matches("0.2", &ver("0.1.0"))); // mismatch
+        assert!(!version_matches("0.1.0.0", &ver("0.1.0"))); // too many components
+        assert!(!version_matches("1.x", &ver("1.0.0"))); // non-numeric component
+        // Prerelease is significant; build metadata is ignored.
+        assert!(version_matches("1.2.3-beta.1", &ver("1.2.3-beta.1+build"))); // exact pre, build ignored
+        assert!(!version_matches("1.2", &ver("1.2.3-beta.1"))); // partial does not match a prerelease
+        assert!(!version_matches("1.2.3-beta", &ver("1.2.3-beta.1"))); // prerelease must match exactly
+        assert!(!version_matches("1.2.3", &ver("1.2.3-beta"))); // no-pre qualifier rejects a prerelease
+        assert!(version_matches("1.2.3", &ver("1.2.3"))); // no-pre matches no-pre
     }
 
     #[test]

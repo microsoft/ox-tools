@@ -125,5 +125,5 @@ pub use error::EachError;
 pub use filter::Predicate;
 pub use plan::{Invocation, Mode, Plan};
 pub use select::Selection;
-pub use substitute::{Placeholders, substitute};
+pub use substitute::{Placeholders, substitute, validate_placeholders};
 pub use workspace::{Member, Workspace};

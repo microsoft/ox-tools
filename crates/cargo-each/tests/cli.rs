@@ -97,6 +97,20 @@ fn none_is_a_successful_noop() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
+fn none_with_misused_placeholder_is_a_usage_error() {
+    // Even with an empty selection, a per-package token under --once is a
+    // usage error (exit 2), not a silent no-op.
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args(["--none", "--once", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("{name}"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
 fn version_spec_partial_matches_over_metadata() {
     // End-to-end over real `cargo metadata`: a partial version qualifier
     // (cargo package-id-spec) resolves the member (fixtures are 0.1.0).

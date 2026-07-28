@@ -43,6 +43,41 @@ pub enum Placeholders {
     },
 }
 
+/// Validate that `args` only reference placeholders valid for the mode,
+/// without expanding them.
+///
+/// This is the mode-consistency check factored out of [`substitute`] so the
+/// contract can be enforced even when the selection resolves to no members
+/// (where `substitute` is never called) — a misused placeholder is then a
+/// usage error rather than a silent no-op.
+///
+/// # Errors
+///
+/// Returns [`EachError`] if a per-package token appears under `--once`
+/// (`once == true`), if `{packages}` appears outside `--once`, or if
+/// `{packages}` is embedded in a larger argument rather than standing alone.
+pub fn validate_placeholders(args: &[String], once: bool) -> Result<(), EachError> {
+    for arg in args {
+        if once {
+            if let Some(token) = PER_PACKAGE_TOKENS.iter().find(|t| arg.contains(**t)) {
+                return Err(
+                    PlaceholderMisuseError::new((*token).to_owned(), "per-package token is not valid in --once mode".to_owned()).into(),
+                );
+            }
+            if arg != PACKAGES_TOKEN && arg.contains(PACKAGES_TOKEN) {
+                return Err(PlaceholderMisuseError::new(
+                    PACKAGES_TOKEN.to_owned(),
+                    "must stand alone as a whole argument (it expands to multiple tokens)".to_owned(),
+                )
+                .into());
+            }
+        } else if arg.contains(PACKAGES_TOKEN) {
+            return Err(PlaceholderMisuseError::new(PACKAGES_TOKEN.to_owned(), "only valid in --once mode".to_owned()).into());
+        }
+    }
+    Ok(())
+}
+
 /// Substitute placeholders in `args` for one invocation.
 ///
 /// Returns the fully-expanded argument vector.
@@ -53,6 +88,7 @@ pub enum Placeholders {
 /// token under `--once`, or `{packages}` outside `--once`), or if `{packages}`
 /// is embedded in a larger argument rather than standing alone.
 pub fn substitute(args: &[String], placeholders: &Placeholders) -> Result<Vec<String>, EachError> {
+    validate_placeholders(args, matches!(placeholders, Placeholders::Once { .. }))?;
     let mut out = Vec::with_capacity(args.len());
     for arg in args {
         match placeholders {
@@ -62,9 +98,6 @@ pub fn substitute(args: &[String], placeholders: &Placeholders) -> Result<Vec<St
                 version,
                 manifest,
             } => {
-                if arg.contains(PACKAGES_TOKEN) {
-                    return Err(PlaceholderMisuseError::new(PACKAGES_TOKEN.to_owned(), "only valid in --once mode".to_owned()).into());
-                }
                 // The `{name}` / `{spec}` / … literals are cargo-each
                 // placeholder tokens, not Rust format-string arguments.
                 #[expect(
@@ -79,21 +112,10 @@ pub fn substitute(args: &[String], placeholders: &Placeholders) -> Result<Vec<St
                 out.push(replaced);
             }
             Placeholders::Once { packages } => {
-                if let Some(token) = PER_PACKAGE_TOKENS.iter().find(|t| arg.contains(**t)) {
-                    return Err(PlaceholderMisuseError::new(
-                        (*token).to_owned(),
-                        "per-package token is not valid in --once mode".to_owned(),
-                    )
-                    .into());
-                }
+                // Validation above guarantees each arg is either exactly
+                // `{packages}` or contains no placeholder token at all.
                 if arg == PACKAGES_TOKEN {
                     out.extend(packages.iter().cloned());
-                } else if arg.contains(PACKAGES_TOKEN) {
-                    return Err(PlaceholderMisuseError::new(
-                        PACKAGES_TOKEN.to_owned(),
-                        "must stand alone as a whole argument (it expands to multiple tokens)".to_owned(),
-                    )
-                    .into());
                 } else {
                     out.push(arg.clone());
                 }

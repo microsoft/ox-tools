@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use crate::error::{ChdirRequiresPerPackageError, EachError};
-use crate::substitute::{Placeholders, substitute};
+use crate::substitute::{Placeholders, substitute, validate_placeholders};
 use crate::workspace::Member;
 
 /// How the command is run over the selected set.
@@ -65,6 +65,11 @@ impl Plan {
         if chdir && mode == Mode::Once {
             return Err(ChdirRequiresPerPackageError::new().into());
         }
+        // Validate placeholder/mode consistency up front — before the
+        // empty-set short-circuit — so a misused template (e.g. `{name}` under
+        // `--once`) is a usage error even when the selection resolves to no
+        // members, rather than silently passing until some tier is non-empty.
+        validate_placeholders(command, mode == Mode::Once)?;
         if members.is_empty() {
             return Ok(Self { invocations: Vec::new() });
         }
@@ -143,6 +148,18 @@ mod tests {
     #[test]
     fn empty_set_yields_empty_plan() {
         let plan = Plan::build(&[], Mode::PerPackage, false, false, &cmd(&["cargo", "test"])).expect("build");
+        assert!(plan.invocations.is_empty());
+    }
+
+    #[test]
+    fn empty_set_still_validates_placeholders() {
+        // A per-package token under --once is a usage error even when the
+        // selection is empty (rather than a silent no-op).
+        let err =
+            Plan::build(&[], Mode::Once, false, false, &cmd(&["cargo", "test", "{name}"])).expect_err("misused placeholder must error");
+        assert!(err.to_string().contains("{name}"));
+        // A valid template over an empty set is still an empty plan.
+        let plan = Plan::build(&[], Mode::Once, false, false, &cmd(&["cargo", "test", "{packages}"])).expect("build");
         assert!(plan.invocations.is_empty());
     }
 
