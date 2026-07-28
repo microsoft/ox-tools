@@ -16,29 +16,32 @@ use tempfile::TempDir;
 /// - `alpha` (lib),
 /// - `beta` (bin only),
 /// - `gamma` (lib, carrying `[package.metadata.role] = "script-only"`).
+/// - `delta` (lib, versioned `1.2.3-beta.1+build` to exercise prerelease /
+///   build-metadata version matching end-to-end).
 fn fixture() -> (TempDir, PathBuf) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
     fs::write(
         root.join("Cargo.toml"),
-        "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\", \"beta\", \"gamma\"]\n",
+        "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\", \"beta\", \"gamma\", \"delta\"]\n",
     )
     .expect("write workspace root");
 
-    write_lib(root, "alpha", "");
+    write_lib(root, "alpha", "0.1.0", "");
     write_bin(root, "beta");
-    write_lib(root, "gamma", "\n[package.metadata]\nrole = \"script-only\"\n");
+    write_lib(root, "gamma", "0.1.0", "\n[package.metadata]\nrole = \"script-only\"\n");
+    write_lib(root, "delta", "1.2.3-beta.1+build", "");
 
     let manifest = root.join("Cargo.toml");
     (tmp, manifest)
 }
 
-fn write_lib(root: &Path, name: &str, extra: &str) {
+fn write_lib(root: &Path, name: &str, version: &str, extra: &str) {
     let dir = root.join(name);
     fs::create_dir_all(dir.join("src")).expect("mkdir src");
     fs::write(
         dir.join("Cargo.toml"),
-        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n{extra}"),
+        format!("[package]\nname = \"{name}\"\nversion = \"{version}\"\nedition = \"2021\"\n{extra}"),
     )
     .expect("write member Cargo.toml");
     fs::write(dir.join("src/lib.rs"), "// fixture\n").expect("write lib.rs");
@@ -130,6 +133,35 @@ fn version_spec_mismatch_is_a_usage_error_over_metadata() {
     let (_tmp, manifest) = fixture();
     each(&manifest)
         .args(["-p", "alpha@9.9.9", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("did not match"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn prerelease_version_spec_matches_exactly_over_metadata() {
+    // End-to-end over real `cargo metadata`, exercising the manifest ->
+    // metadata -> selector projection of the prerelease/build-metadata rules
+    // against the `delta` fixture member (version `1.2.3-beta.1+build`).
+    let (_tmp, manifest) = fixture();
+    // Exact prerelease matches; build metadata is ignored on the qualifier.
+    each(&manifest)
+        .args(["-p", "delta@1.2.3-beta.1", "--dry-run", "--", "echo", "{spec}"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("echo delta@1.2.3-beta.1+build"));
+    // A qualifier without a prerelease does not match a prerelease version.
+    each(&manifest)
+        .args(["-p", "delta@1.2.3", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("did not match"));
+    // A different (shorter) prerelease does not match.
+    each(&manifest)
+        .args(["-p", "delta@1.2.3-beta", "--dry-run", "--", "echo", "{name}"])
         .assert()
         .failure()
         .code(2)
