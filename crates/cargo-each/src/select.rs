@@ -343,9 +343,11 @@ mod tests {
         assert!(version_matches("1.2.3+build", &ver("1.2.3+build"))); // exact build match
         assert!(!version_matches("1.2.3+wrong", &ver("1.2.3+build"))); // build mismatch
         assert!(version_matches("1.2.3", &ver("1.2.3+build"))); // omitted build ignores member build
-        // Prerelease / build metadata are invalid on a partial version.
-        assert!(!version_matches("1.2-beta", &ver("1.2.0"))); // partial + prerelease
-        assert!(!version_matches("1.2+build", &ver("1.2.0"))); // partial + build metadata
+        // Prerelease / build metadata are invalid on a partial version. Use
+        // members whose prerelease/build would otherwise match, so it is the
+        // partial-version guard (not a downstream mismatch) that rejects them.
+        assert!(!version_matches("1.2-beta", &ver("1.2.0-beta"))); // partial + prerelease
+        assert!(!version_matches("1.2+build", &ver("1.2.0+build"))); // partial + build metadata
     }
 
     #[test]
