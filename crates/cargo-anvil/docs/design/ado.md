@@ -645,16 +645,20 @@ The only per-group parameters are the PR-context strings a group's checks consum
 `$(System.PullRequest.*)` are auto-populated by ADO on PR build-validation runs. No
 manual web-UI wiring is needed.
 
-The recipes themselves consume only the env vars they need; the catalog records the
-mapping (see [checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)).
-Threading all three to every template costs a few lines per step template but is the
-right separation: wiring is about "which jobs depend on impact and feed it forward", not
-about "which check needs which env var."
+The recipes read PR-context strings from the env vars a group sets (e.g. `PR_TITLE`),
+but impact **scope** is not threaded at all: each scoped check reads its tier from the
+downloaded `target/anvil/impact/` cache via `_anvil-impact-include <tier>` (the catalog
+records the check → tier mapping, see [checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)).
+A PR group job downloads the `anvil-impact-<os>` artifact and its checks read that cache
+directly, exactly as a local run — no `include_*` variables or template parameters carry
+the scope.
 
 These templates are consumed primarily by anvil's own stages template. Users who want to
-plug individual groups into an unrelated pipeline can `template:` them directly without
-passing any include parameters — they default to empty (recipes fall back to
-`--workspace`) — and only override what they want to scope.
+plug individual groups into an unrelated pipeline can `template:` them directly; the
+group's run step fixes the impact mode at emit time (`ANVIL_IMPACT=consume` for PR groups,
+`ANVIL_IMPACT=off` for scheduled). With no downloaded cache present the checks fall back to
+their `--workspace` defaults, so a direct consumer only needs to arrange the artifact
+download to get scoping.
 
 ### `setup.yml` and `impact.yml`
 
