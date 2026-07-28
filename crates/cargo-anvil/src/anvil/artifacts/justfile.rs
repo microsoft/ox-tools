@@ -70,13 +70,15 @@ fn runner_routes_tiers_and_guards_recursion() {
     assert!(RUNNER_JUST.contains("[script(\"pwsh\")]"));
     assert!(RUNNER_JUST.contains("[unix]"));
     assert!(RUNNER_JUST.contains("[script(\"bash\")]"));
+    assert_eq!(RUNNER_JUST.matches("[no-exit-message]").count(), 2);
     assert!(RUNNER_JUST.contains("if ($env:ANVIL_IN_CONTAINER)"));
     assert!(RUNNER_JUST.contains("if [[ -n \"${ANVIL_IN_CONTAINER:-}\" ]]"));
     assert!(RUNNER_JUST.contains("replace(just_executable(), \"'\", \"''\")"));
+    assert!(RUNNER_JUST.contains("replace(justfile(), \"'\", \"''\")"));
     assert!(RUNNER_JUST.contains("replace(tier, \"'\", \"''\")"));
     assert!(RUNNER_JUST.contains("replace(runner, \"'\", \"''\")"));
-    assert!(RUNNER_JUST.contains("& $just anvil-container $nativeTier"));
-    assert!(RUNNER_JUST.contains("exec \"$just_path\" anvil-container \"$native_tier\""));
+    assert!(RUNNER_JUST.contains("& $just --justfile $justfile anvil-container $nativeTier"));
+    assert!(RUNNER_JUST.contains("exec \"$just_path\" --justfile \"$justfile\" anvil-container \"$native_tier\""));
 }
 
 #[test]

@@ -75,6 +75,12 @@ The tier recipes delegate to a tool-owned `_anvil-run` seam. Inside the image,
 existing private tier runs without recursively launching another container.
 Ad-hoc checks remain explicit through `anvil-container`.
 
+`just` does not support conditional dependency lists, so `_anvil-run` starts a
+second `just` invocation for the selected private tier. It reuses the exact
+parsed Justfile and preserves ordinary native output and exit status. Global
+CLI options, variable assignments, dependency introspection, and `--dry-run`
+apply to the outer invocation and are not propagated to the selected tier.
+
 ## 4. Architecture
 
 Container support consists of a generated artifact group under
