@@ -12,18 +12,20 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::TempDir;
 
-/// Write a fixture workspace with three members:
+/// Write a fixture workspace with these members:
 /// - `alpha` (lib),
 /// - `beta` (bin only),
-/// - `gamma` (lib, carrying `[package.metadata.role] = "script-only"`).
+/// - `gamma` (lib, carrying `[package.metadata.role] = "script-only"`),
 /// - `delta` (lib, versioned `1.2.3-beta.1+build` to exercise prerelease /
-///   build-metadata version matching end-to-end).
+///   build-metadata version matching end-to-end),
+/// - `epsilon` (both a lib and a bin target, to exercise `--filter`
+///   intersection).
 fn fixture() -> (TempDir, PathBuf) {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = tmp.path();
     fs::write(
         root.join("Cargo.toml"),
-        "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\", \"beta\", \"gamma\", \"delta\"]\n",
+        "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\", \"beta\", \"gamma\", \"delta\", \"epsilon\"]\n",
     )
     .expect("write workspace root");
 
@@ -31,6 +33,7 @@ fn fixture() -> (TempDir, PathBuf) {
     write_bin(root, "beta");
     write_lib(root, "gamma", "0.1.0", "\n[package.metadata]\nrole = \"script-only\"\n");
     write_lib(root, "delta", "1.2.3-beta.1+build", "");
+    write_lib_and_bin(root, "epsilon");
 
     let manifest = root.join("Cargo.toml");
     (tmp, manifest)
@@ -55,6 +58,18 @@ fn write_bin(root: &Path, name: &str) {
         format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
     )
     .expect("write member Cargo.toml");
+    fs::write(dir.join("src/main.rs"), "fn main() {}\n").expect("write main.rs");
+}
+
+fn write_lib_and_bin(root: &Path, name: &str) {
+    let dir = root.join(name);
+    fs::create_dir_all(dir.join("src")).expect("mkdir src");
+    fs::write(
+        dir.join("Cargo.toml"),
+        format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n"),
+    )
+    .expect("write member Cargo.toml");
+    fs::write(dir.join("src/lib.rs"), "// fixture\n").expect("write lib.rs");
     fs::write(dir.join("src/main.rs"), "fn main() {}\n").expect("write main.rs");
 }
 
@@ -166,6 +181,73 @@ fn prerelease_version_spec_matches_exactly_over_metadata() {
         .failure()
         .code(2)
         .stderr(predicate::str::contains("did not match"));
+    // Build metadata, when supplied, is an exact constraint.
+    each(&manifest)
+        .args(["-p", "delta@1.2.3-beta.1+wrong", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("did not match"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn multiple_filters_intersect() {
+    // `--filter` is AND-combined: `lib` matches {alpha, gamma, delta, epsilon},
+    // `bin` matches {beta, epsilon}; the intersection is only `epsilon` (both a
+    // lib and a bin). A flip to `any()` would wrongly keep every member.
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--filter",
+            "lib",
+            "--filter",
+            "bin",
+            "--dry-run",
+            "--",
+            "echo",
+            "{name}",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("echo epsilon")
+                .and(predicate::str::contains("echo alpha").not())
+                .and(predicate::str::contains("echo beta").not())
+                .and(predicate::str::contains("echo gamma").not()),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn multiple_exclude_filters_union() {
+    // `--exclude-filter` is OR-combined: dropping `bin` removes {beta, epsilon}
+    // and dropping `metadata:role=script-only` removes {gamma}; their union
+    // leaves {alpha, delta}. A flip to `all()` would drop nothing (no member
+    // matches both exclusions).
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "--workspace",
+            "--exclude-filter",
+            "bin",
+            "--exclude-filter",
+            "metadata:role=script-only",
+            "--dry-run",
+            "--",
+            "echo",
+            "{name}",
+        ])
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("echo alpha")
+                .and(predicate::str::contains("echo delta"))
+                .and(predicate::str::contains("echo beta").not())
+                .and(predicate::str::contains("echo gamma").not())
+                .and(predicate::str::contains("echo epsilon").not()),
+        );
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]

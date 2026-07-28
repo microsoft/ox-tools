@@ -138,18 +138,28 @@ fn member_version(member: &Member) -> Version {
 ///   `0.1.z` for any patch `z`, and `1` matches `1.y.z`. `0.30` does not
 ///   match `0.3.0` (component `30` is not `3`); more than three release
 ///   components never matches.
+/// - A prerelease or build metadata is only valid on a *complete* version
+///   (all three release components present); on a partial version it makes
+///   the qualifier match nothing (e.g. `1.2-beta` and `1.2+build` never
+///   match), matching cargo's rejection of those forms.
 /// - Prerelease is significant: a qualifier without a prerelease matches only
 ///   versions that have none (so `1.2.3` does not match `1.2.3-beta`), and a
 ///   qualifier with a prerelease must match it exactly (`1.2.3-beta` does not
 ///   match `1.2.3-beta.1`).
-/// - Build metadata is ignored on both sides, per semver.
+/// - Build metadata, when supplied, is an exact constraint (`1.2.3+a` matches
+///   only `1.2.3+a`, not `1.2.3+b`); when omitted, the member's build metadata
+///   is ignored.
 fn version_matches(supplied: &str, actual: &Version) -> bool {
-    // Strip build metadata (ignored), then split the optional prerelease.
-    let without_build = supplied.split('+').next().unwrap_or(supplied);
-    let (release, pre) = without_build.split_once('-').map_or((without_build, None), |(r, p)| (r, Some(p)));
+    // Split off build metadata, then the optional prerelease.
+    let (rest, build) = supplied.split_once('+').map_or((supplied, None), |(r, b)| (r, Some(b)));
+    let (release, pre) = rest.split_once('-').map_or((rest, None), |(r, p)| (r, Some(p)));
 
     let components: Vec<&str> = release.split('.').collect();
     if components.is_empty() || components.len() > 3 {
+        return false;
+    }
+    // A prerelease or build metadata is only meaningful on a full version.
+    if (pre.is_some() || build.is_some()) && components.len() < 3 {
         return false;
     }
     let actual_release = [actual.major, actual.minor, actual.patch];
@@ -160,9 +170,18 @@ fn version_matches(supplied: &str, actual: &Version) -> bool {
     }
     // A supplied prerelease must match exactly; its absence requires the
     // member to have no prerelease either.
-    match pre {
+    let pre_ok = match pre {
         Some(pre) => actual.pre.as_str() == pre,
         None => actual.pre.is_empty(),
+    };
+    if !pre_ok {
+        return false;
+    }
+    // Supplied build metadata is an exact constraint; omitting it ignores the
+    // member's build metadata.
+    match build {
+        Some(build) => actual.build.as_str() == build,
+        None => true,
     }
 }
 
@@ -314,12 +333,19 @@ mod tests {
         assert!(!version_matches("0.2", &ver("0.1.0"))); // mismatch
         assert!(!version_matches("0.1.0.0", &ver("0.1.0"))); // too many components
         assert!(!version_matches("1.x", &ver("1.0.0"))); // non-numeric component
-        // Prerelease is significant; build metadata is ignored.
-        assert!(version_matches("1.2.3-beta.1", &ver("1.2.3-beta.1+build"))); // exact pre, build ignored
+        // Prerelease is significant; a supplied prerelease must match exactly.
+        assert!(version_matches("1.2.3-beta.1", &ver("1.2.3-beta.1+build"))); // exact pre, build not constrained
         assert!(!version_matches("1.2", &ver("1.2.3-beta.1"))); // partial does not match a prerelease
         assert!(!version_matches("1.2.3-beta", &ver("1.2.3-beta.1"))); // prerelease must match exactly
         assert!(!version_matches("1.2.3", &ver("1.2.3-beta"))); // no-pre qualifier rejects a prerelease
         assert!(version_matches("1.2.3", &ver("1.2.3"))); // no-pre matches no-pre
+        // Build metadata: exact constraint when supplied, ignored when omitted.
+        assert!(version_matches("1.2.3+build", &ver("1.2.3+build"))); // exact build match
+        assert!(!version_matches("1.2.3+wrong", &ver("1.2.3+build"))); // build mismatch
+        assert!(version_matches("1.2.3", &ver("1.2.3+build"))); // omitted build ignores member build
+        // Prerelease / build metadata are invalid on a partial version.
+        assert!(!version_matches("1.2-beta", &ver("1.2.0"))); // partial + prerelease
+        assert!(!version_matches("1.2+build", &ver("1.2.0"))); // partial + build metadata
     }
 
     #[test]
