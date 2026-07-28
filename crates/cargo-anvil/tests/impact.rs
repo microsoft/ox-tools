@@ -127,8 +127,10 @@ fn workspace_at_base() -> TempDir {
     tmp
 }
 
-/// Emit the local anvil tree into a fresh git workspace whose `origin/main`
-/// remote-tracking ref points at the initial commit.
+/// Emit the local anvil tree into a fresh git workspace whose `origin/master`
+/// remote-tracking ref (the base [`workspace_at_base`] sets up) points at the
+/// initial commit, then advance HEAD past it with a real change so the impact
+/// set is non-empty.
 fn workspace() -> TempDir {
     let tmp = workspace_at_base();
     let root = tmp.path();
