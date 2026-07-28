@@ -97,6 +97,33 @@ fn none_is_a_successful_noop() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
+fn version_spec_partial_matches_over_metadata() {
+    // End-to-end over real `cargo metadata`: a partial version qualifier
+    // (cargo package-id-spec) resolves the member (fixtures are 0.1.0).
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args(["-p", "alpha@0.1", "--dry-run", "--", "echo", "{spec}"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("echo alpha@0.1.0"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn version_spec_mismatch_is_a_usage_error_over_metadata() {
+    // A non-matching version fails loudly (exit 2) rather than silently
+    // selecting the name — the metadata -> selection -> exit-2 path.
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args(["-p", "alpha@9.9.9", "--dry-run", "--", "echo", "{name}"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("did not match"));
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
 fn filter_lib_drops_bin_only_member() {
     let (_tmp, manifest) = fixture();
     each(&manifest)

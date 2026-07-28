@@ -98,15 +98,15 @@ fn resolve_selectors<'w>(workspace: &'w Workspace, selectors: &[String]) -> Resu
     let mut matched: HashSet<&str> = HashSet::new();
     for selector in selectors {
         // A `name@version` spec matches on the name (glob) *and*, when a
-        // version is supplied, requires it to equal the member's version —
-        // matching cargo's package-id-spec, so `alpha@999` selects nothing
-        // (a loud error) rather than silently resolving to `alpha`. A bare
-        // name or glob matches any version.
+        // version is supplied, on the version per cargo's package-id-spec:
+        // the qualifier may be partial, so `alpha@0.1` matches member `0.1.0`
+        // but `alpha@9` does not (a loud error rather than silently resolving
+        // to `alpha`). A bare name or glob matches any version.
         let (name_pat, version) = selector.split_once('@').map_or((selector.as_str(), None), |(n, v)| (n, Some(v)));
         let hits: Vec<&Member> = workspace
             .members
             .iter()
-            .filter(|m| glob_matches(name_pat, &m.name) && version.is_none_or(|v| m.version == v))
+            .filter(|m| glob_matches(name_pat, &m.name) && version.is_none_or(|v| version_matches(v, &m.version)))
             .collect();
         if hits.is_empty() {
             return Err(UnknownSelectorError::new(selector.clone()).into());
@@ -116,6 +116,16 @@ fn resolve_selectors<'w>(workspace: &'w Workspace, selectors: &[String]) -> Resu
         }
     }
     Ok(workspace.members.iter().filter(|m| matched.contains(m.name.as_str())).collect())
+}
+
+/// Whether a supplied `name@version` qualifier matches a member's version,
+/// following cargo's package-id-spec partial-version rule: the supplied
+/// version may be a leading, dot-separated *component* prefix of the actual
+/// version. `0.1` matches `0.1.0`; `0.30` does not match `0.3.0` (component
+/// `30` != `3`); a qualifier longer than the actual version never matches.
+fn version_matches(supplied: &str, actual: &str) -> bool {
+    let mut actual_components = actual.split('.');
+    supplied.split('.').all(|component| actual_components.next() == Some(component))
 }
 
 /// Tiny Unix-style glob matcher: `*` matches any run of characters
@@ -239,12 +249,28 @@ mod tests {
         };
         let err = sel.resolve(&ws).expect_err("wrong version must error");
         assert!(err.to_string().contains("beta@9.9.9"));
-        // The correct version resolves the member.
+        // The correct full version resolves the member.
         let ok = Selection {
             packages: vec!["beta@0.1.0".to_owned()],
             ..Selection::default()
         };
         assert_eq!(names(&ok.resolve(&ws).expect("resolve")), ["beta"]);
+        // A partial version qualifier (cargo package-id-spec) also resolves.
+        let partial = Selection {
+            packages: vec!["beta@0.1".to_owned()],
+            ..Selection::default()
+        };
+        assert_eq!(names(&partial.resolve(&ws).expect("resolve")), ["beta"]);
+    }
+
+    #[test]
+    fn version_matches_follows_component_prefix_rule() {
+        assert!(version_matches("0.1.0", "0.1.0")); // exact
+        assert!(version_matches("0.1", "0.1.0")); // partial prefix
+        assert!(version_matches("0", "0.1.0")); // single component
+        assert!(!version_matches("0.30", "0.3.0")); // component 30 != 3
+        assert!(!version_matches("0.2", "0.1.0")); // mismatch
+        assert!(!version_matches("0.1.0.0", "0.1.0")); // longer than actual
     }
 
     #[test]
