@@ -303,13 +303,28 @@ fn executes_command_and_propagates_failure() {
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
 fn chdir_executes_from_crate_root() {
-    // Non-dry-run --chdir so the child's working directory is actually set.
-    // `cargo --version` succeeds regardless of directory.
+    // Observe that --chdir actually set the child's working directory:
+    // `cargo locate-project` resolves the closest Cargo.toml from the CWD, so
+    // it must report the *member's* manifest. A dropped or miswired
+    // `current_dir` would report a different manifest and fail this assertion.
     let (_tmp, manifest) = fixture();
+    // Match the `alpha/Cargo.toml` suffix rather than the full temp path, so
+    // the assertion is robust to any canonicalization of the parent dirs.
+    let member_suffix = format!("alpha{}Cargo.toml", std::path::MAIN_SEPARATOR);
     each(&manifest)
-        .args(["-p", "alpha", "--chdir", "--", "cargo", "--version"])
+        .args([
+            "-p",
+            "alpha",
+            "--chdir",
+            "--",
+            "cargo",
+            "locate-project",
+            "--message-format",
+            "plain",
+        ])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains(member_suffix));
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
