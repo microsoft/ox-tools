@@ -23,16 +23,19 @@ fn write(path: &Path, contents: &str) {
 fn fixture() -> TempDir {
     let tmp = TempDir::new().unwrap();
     write(&tmp.path().join("runner.just"), RUNNER);
-    let justfile = format!(
-        r#"
+    let justfile = r#"
 import 'runner.just'
 
 runner := env_var_or_default("ANVIL_RUNNER", "native")
 
 default: (_anvil-run "pr" runner)
+failure: (_anvil-run "fail" runner)
 
 [private]
 _anvil-pr: first second
+
+[private]
+_anvil-fail: first failing
 
 [windows]
 [script("pwsh")]
@@ -43,12 +46,17 @@ first:
 [script("pwsh")]
 second:
     Write-Output second
-    if ($env:FAIL_TIER) {{ exit 7 }}
+
+[windows]
+[script("pwsh")]
+failing:
+    Write-Output failing
+    exit 7
 
 [windows]
 [script("pwsh")]
 anvil-container *recipe:
-    Write-Output 'container:{{{{ recipe }}}}'
+    Write-Output 'container:{{ recipe }}'
 
 [unix]
 first:
@@ -57,15 +65,22 @@ first:
 [unix]
 second:
     @printf 'second\n'
-    @if [[ -n "${{FAIL_TIER:-}}" ]]; then exit 7; fi
+
+[unix]
+failing:
+    @printf 'failing\n'
+    @exit 7
 
 [unix]
 anvil-container *recipe:
-    @printf 'container:%s\n' '{{{{ recipe }}}}'
-"#
-    );
-    write(&tmp.path().join(JUSTFILE), &justfile);
+    @printf 'container:%s\n' '{{ recipe }}'
+"#;
+    write(&tmp.path().join(JUSTFILE), justfile);
     tmp
+}
+
+fn just_available() -> bool {
+    Command::new("just").arg("--version").output().is_ok()
 }
 
 fn run(root: &Path, recipes: &[&str], environment: &[(&str, &str)]) -> Output {
@@ -79,6 +94,9 @@ fn run(root: &Path, recipes: &[&str], environment: &[(&str, &str)]) -> Output {
 
 #[test]
 fn native_routing_preserves_output_and_exit_status() {
+    if !just_available() {
+        return;
+    }
     let tmp = fixture();
     let direct = run(tmp.path(), &["_anvil-pr"], &[]);
     let routed = run(tmp.path(), &["default"], &[]);
@@ -90,9 +108,12 @@ fn native_routing_preserves_output_and_exit_status() {
 
 #[test]
 fn native_routing_preserves_failure_output_and_exit_status() {
+    if !just_available() {
+        return;
+    }
     let tmp = fixture();
-    let direct = run(tmp.path(), &["_anvil-pr"], &[("FAIL_TIER", "1")]);
-    let routed = run(tmp.path(), &["default"], &[("FAIL_TIER", "1")]);
+    let direct = run(tmp.path(), &["_anvil-fail"], &[]);
+    let routed = run(tmp.path(), &["failure"], &[]);
 
     assert_eq!(direct.status.code(), Some(7));
     assert_eq!(routed.status.code(), direct.status.code());
@@ -102,6 +123,9 @@ fn native_routing_preserves_failure_output_and_exit_status() {
 
 #[test]
 fn configured_container_routing_uses_the_container_recipe() {
+    if !just_available() {
+        return;
+    }
     let tmp = fixture();
     let output = run(tmp.path(), &["default"], &[("ANVIL_RUNNER", "container")]);
 
@@ -115,6 +139,9 @@ fn configured_container_routing_uses_the_container_recipe() {
 
 #[test]
 fn in_container_forces_native_execution() {
+    if !just_available() {
+        return;
+    }
     let tmp = fixture();
     let output = run(
         tmp.path(),
