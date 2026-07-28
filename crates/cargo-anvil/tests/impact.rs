@@ -73,9 +73,11 @@ fn git_stdout(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
-/// Emit the local anvil tree into a fresh git workspace whose `origin/main`
-/// remote-tracking ref points at the initial commit.
-fn workspace() -> TempDir {
+/// Emit the local anvil tree into a fresh git workspace whose `origin/master`
+/// remote-tracking ref points at the initial commit, leaving HEAD *exactly at
+/// the base* (no post-base commit). The committed diff against the base is
+/// therefore empty — cargo-delta sees no change and emits no impact JSON.
+fn workspace_at_base() -> TempDir {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
 
@@ -104,8 +106,6 @@ fn workspace() -> TempDir {
     };
     run_update(&cargo_anvil::Catalog::anvil(), &args, root).unwrap();
 
-    // Initialize git and create the base ref the recipe resolves to
-    // (origin/main) as a remote-tracking ref pointing at the first commit.
     // Initialize git, commit the base, and record it as origin/master (the
     // base ref the recipe and cargo-delta both resolve to in this bare repo).
     git(root, &["init", "--initial-branch=main"]);
@@ -123,6 +123,15 @@ fn workspace() -> TempDir {
     // this bare test repo), and the recipe's base-ref resolution falls through
     // origin/main -> origin/master, so both agree on the same base.
     git(root, &["update-ref", "refs/remotes/origin/master", &base]);
+
+    tmp
+}
+
+/// Emit the local anvil tree into a fresh git workspace whose `origin/main`
+/// remote-tracking ref points at the initial commit.
+fn workspace() -> TempDir {
+    let tmp = workspace_at_base();
+    let root = tmp.path();
 
     // Advance HEAD past the base with a real change, so the impact set is
     // non-empty (cargo-delta emits no JSON when nothing changed).
@@ -256,6 +265,51 @@ fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
     assert!(
         base_moved.contains("current snapshot up to date"),
         "moving the base must not touch the (unchanged) working-tree snapshot:\n{base_moved}"
+    );
+}
+
+#[test]
+fn impact_empty_output_when_head_equals_base() {
+    if !tools_available() {
+        return;
+    }
+    // A clean checkout whose HEAD is exactly the base ref: cargo-delta sees no
+    // committed diff and emits no impact JSON. The recipe must still write a
+    // durable, EMPTY impact set -- `{}` to impact.json and the `--skip`
+    // sentinel for every tier -- and treat an unchanged repeat run as a cache
+    // hit. (The shared `workspace()` fixture always advances HEAD past the
+    // base, so this empty-output path is otherwise never exercised.)
+    let tmp = workspace_at_base();
+    let root = tmp.path();
+    let impact_dir = root.join("target/anvil/impact");
+
+    let first = run_impact(root);
+    // HEAD == base with a clean tree scopes by impact (empty), never widens.
+    assert!(!first.contains("widening"), "a clean HEAD==base tree must not widen:\n{first}");
+    assert_eq!(
+        std::fs::read_to_string(impact_dir.join("impact.json")).unwrap().trim(),
+        "{}",
+        "an empty diff must persist an empty impact object so impact.json always exists"
+    );
+    for tier in ["modified", "affected", "required"] {
+        assert_eq!(
+            std::fs::read_to_string(impact_dir.join(format!("include_{tier}.txt")))
+                .unwrap()
+                .trim(),
+            "--skip",
+            "an empty impact set must project tier '{tier}' to the --skip sentinel"
+        );
+    }
+
+    // Unchanged repeat run: both snapshots and the projection are a cache hit.
+    let noop = run_impact(root);
+    assert!(
+        noop.contains("snapshots up to date"),
+        "an unchanged HEAD==base rerun must reuse both snapshots via the fast path:\n{noop}"
+    );
+    assert!(
+        noop.contains("cache hit"),
+        "an unchanged rerun must report an impact cache hit:\n{noop}"
     );
 }
 
@@ -521,5 +575,106 @@ fn impact_falls_back_to_full_workspace_when_base_has_no_workspace() {
     assert_eq!(
         std::fs::read_to_string(impact_dir.join("include_required.txt")).unwrap().trim(),
         "--workspace"
+    );
+}
+
+/// Write a fake `cargo` into `dir` that appends its argv (one invocation per
+/// line) to `log` and exits 0, so a check recipe's tool invocation can be
+/// observed without running real cargo. `dir` is meant to be prepended to
+/// PATH via [`path_with_prefix`].
+fn fake_cargo(dir: &Path, log: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    #[cfg(windows)]
+    {
+        // `.cmd` so pwsh's `& cargo` resolves it via PATHEXT before any real
+        // `cargo.exe` on a later PATH entry.
+        let script = format!("@echo off\r\n>>\"{}\" echo %*\r\nexit /b 0\r\n", log.display());
+        std::fs::write(dir.join("cargo.cmd"), script).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n", log.display());
+        let path = dir.join("cargo");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+/// The process `PATH` with `dir` prepended, so an executable in `dir` shadows
+/// the same-named tool elsewhere on PATH.
+fn path_with_prefix(dir: &Path) -> std::ffi::OsString {
+    let mut paths = vec![dir.to_path_buf()];
+    if let Some(existing) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&existing));
+    }
+    std::env::join_paths(paths).unwrap()
+}
+
+#[test]
+fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
+    if !tools_available() {
+        return;
+    }
+    // End-to-end proof of the shared check contract that the 25 rewritten
+    // checks all use: a scoped check resolves its tier from the downloaded
+    // target/anvil/impact cache, splits the `--package name@version` list, and
+    // passes it to its cargo tool -- and short-circuits (never invoking the
+    // tool) on the `--skip` sentinel. `anvil-examples` stands in for the
+    // family; a fake `cargo` on PATH captures the argv the recipe builds. This
+    // guards the PowerShell capture/splitting/short-circuit path that static
+    // text-presence assertions on the emitted recipe cannot.
+    let tmp = workspace();
+    let root = tmp.path();
+    let impact_dir = root.join("target/anvil/impact");
+
+    // The "impact job" produces the cache; affected scopes to the committed crate.
+    run_impact(root);
+    let affected = std::fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
+    let affected = affected.trim().to_owned();
+    assert!(
+        affected.contains("--package alpha@"),
+        "precondition: the affected tier should be a scoped --package list, got: {affected}"
+    );
+
+    let bin = root.join(".fakebin");
+    let log = root.join("cargo-argv.log");
+    fake_cargo(&bin, &log);
+    let path = path_with_prefix(&bin);
+
+    // consume mode: anvil-impact no-ops (no snapshot / cargo-delta), so the
+    // ONLY cargo invocation is the recipe's own `cargo build` -- captured by
+    // the shim.
+    let out = just_cmd(root, &["anvil-examples"])
+        .env("ANVIL_IMPACT", "consume")
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "scoped anvil-examples run failed:\n{combined}");
+    let argv = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        argv.contains("build") && argv.contains(&affected) && argv.contains("--examples"),
+        "the cached --package list must reach the tool; captured argv:\n{argv}\nexpected to contain: build ... {affected} ... --examples"
+    );
+
+    // The `--skip` sentinel must short-circuit: the tool is never invoked.
+    std::fs::write(impact_dir.join("include_affected.txt"), "--skip").unwrap();
+    std::fs::write(&log, "").unwrap();
+    let skipped = just_cmd(root, &["anvil-examples"])
+        .env("ANVIL_IMPACT", "consume")
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    let skip_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&skipped.stdout),
+        String::from_utf8_lossy(&skipped.stderr)
+    );
+    assert!(skipped.status.success(), "skipped anvil-examples run failed:\n{skip_combined}");
+    let argv_skip = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !argv_skip.contains("build"),
+        "the --skip sentinel must short-circuit the tool (no cargo build); captured argv:\n{argv_skip}"
     );
 }

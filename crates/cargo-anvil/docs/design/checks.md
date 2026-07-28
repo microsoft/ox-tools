@@ -318,7 +318,7 @@ two different groups (one PR group, one scheduled group). Repos that want a
 belt-and-suspenders cron run of `just anvil-pr` on `main` can wire one up in their own
 workflow/pipeline file alongside the anvil composite actions / step templates.
 
-## 5. Impact-scoping check → env-var mapping
+## 5. Impact-scoping check → include mapping
 
 The tool uses [`cargo-delta`](https://crates.io/crates/cargo-delta) to skip checks for
 unaffected workspace members. cargo-delta computes three concentric impact tiers
@@ -371,16 +371,16 @@ deps), `cargo udeps` (unused-deps detection needs the resolved graph), `cargo ha
 
 `unscoped` is for checks that have nothing to do with workspace-member identity:
 `deny`/`audit` read `Cargo.lock`, `pr-title` reads PR metadata, `aprz` consults an
-external risk DB. These ignore the env vars and always run.
+external risk DB. These ignore impact scoping and always run.
 
 The sentinel `--skip` is a magic string that cannot be a valid cargo argument, so there
 is no collision with real package names. Recipes test for it with
-`[ "$VAR" = "--skip" ]` and exit 0 to keep the cloud-workflow job green while signalling that
+`$include -eq '--skip'` and exit 0 to keep the cloud-workflow job green while signalling that
 nothing in that tier needed to run.
 
 The recipe-side mechanics are in
 [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe). the cloud workflow-side wiring (the
-`anvil-impact` building block, how downstream jobs consume the include vars) is in
+`anvil-impact` building block, how downstream jobs consume the include files) is in
 [github.md](./github.md#impact-scoping) and [ado.md](./ado.md#impact-scoping).
 
 Trade-off acknowledged: the risk cargo-delta introduces is that a misconfigured analysis

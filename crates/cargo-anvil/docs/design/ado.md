@@ -370,20 +370,29 @@ The contract is intentionally small and stable:
 | `name`      | `string`   | yes      | Job name; ADO derives the display name from it.                                                                                                                                        |
 | `pool`      | `object`   | yes      | Pool block, passed verbatim to ADO's `pool:` key. `linuxPool` and `windowsPool` at the stage level are object parameters, so users can override their shape (e.g. `{ name, os, image }` for 1ESPT). |
 | `steps`     | `stepList` | yes      | Body of the job. Templated step lists are fine — the wrapper splices them in via `${{ each step in parameters.steps }}: - ${{ step }}`.                                                |
+| `inputArtifacts` | `object` | no  | List of pipeline artifacts to download *before* the steps run. Each item: `{ name: string, path: string }`. Default wrapper prepends one `DownloadPipelineArtifact@2` per entry; 1ESPT wrappers translate the same list into their own download mechanism (e.g. `templateContext.inputs`). This is how the impact set is shared — each PR group job downloads its OS's `anvil-impact-<os>` artifact into `target/anvil/impact` and its checks read the cache exactly as a local run. |
 | `artifacts` | `object`   | no       | List of pipeline artifacts to publish. Each item: `{ name: string, path: string }`. Default wrapper appends one `PublishPipelineArtifact@1` per entry; 1ESPT wrappers translate the same list into `templateContext.outputs.pipelineArtifact` blocks. The stages templates don't need to know which backend they're targeting. |
 
-The default wrapper anvil ships is six lines of logic:
+The default wrapper anvil ships downloads any `inputArtifacts`, splices in the
+`steps`, then publishes any `artifacts`:
 
 ```yaml
 parameters:
   - { name: name, type: string }
   - { name: pool, type: object }
   - { name: steps, type: stepList }
+  - { name: inputArtifacts, type: object, default: [] }
   - { name: artifacts, type: object, default: [] }
 jobs:
   - job: ${{ parameters.name }}
     pool: ${{ parameters.pool }}
     steps:
+      - ${{ each artifact in parameters.inputArtifacts }}:
+          - task: DownloadPipelineArtifact@2
+            displayName: Download ${{ artifact.name }}
+            inputs:
+              artifact: ${{ artifact.name }}
+              path: ${{ artifact.path }}
       - ${{ each step in parameters.steps }}:
           - ${{ step }}
       - ${{ each artifact in parameters.artifacts }}:
@@ -406,6 +415,10 @@ jobs:
         - input: checkout
           repository: self
           fetchDepth: 0
+        - ${{ each artifact in parameters.inputArtifacts }}:
+            - input: pipelineArtifact
+              artifactName: ${{ artifact.name }}
+              targetPath: ${{ artifact.path }}
       outputs:
         - ${{ each artifact in parameters.artifacts }}:
             - output: pipelineArtifact
@@ -633,7 +646,7 @@ The only per-group parameters are the PR-context strings a group's checks consum
 manual web-UI wiring is needed.
 
 The recipes themselves consume only the env vars they need; the catalog records the
-mapping (see [checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)).
+mapping (see [checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)).
 Threading all three to every template costs a few lines per step template but is the
 right separation: wiring is about "which jobs depend on impact and feed it forward", not
 about "which check needs which env var."
@@ -681,7 +694,7 @@ Downstream stages download that artifact into `target/anvil/impact/` (via `job.y
 variables are threaded. The stages template handles all that — users don't write it.
 
 The check → bucket mapping is in
-[checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping). The recipe-side
+[checks.md §5](./checks.md#5-impact-scoping-check--include-mapping). The recipe-side
 mechanics are in [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe).
 
 ## 6. Rust toolchain

@@ -386,8 +386,9 @@ must run on every PR, including docs-only PRs where every tier comes back `--ski
 contract.
 
 The scheduled reusable workflow is simpler — it omits the `impact` job and runs each group
-full-workspace. The include inputs default to empty strings, so recipes fall through to
-their local-default behavior (`--workspace`):
+full-workspace. Scheduled group jobs receive no `include_*` inputs at all; instead each
+scheduled composite action hardcodes `ANVIL_IMPACT=off` in its run step, so `anvil-impact`
+no-ops and every tier resolves to its full-workspace default (`--workspace`):
 
 ```yaml
 # .github/workflows/anvil-scheduled-impl.yml  (owned)
@@ -429,9 +430,9 @@ jobs:
     steps: [ { uses: actions/checkout }, { uses: ./.github/actions/anvil-scheduled-exhaustive } ]
 ```
 
-Scheduled composite actions don't receive any `include_*` inputs at all — their inputs
-default to empty strings (recipes default to `--workspace`) and the reusable workflow
-omits the passthrough. Threading them through is purely a PR-tier optimization;
+Scheduled composite actions don't receive any `include_*` inputs at all — instead each one
+exports `ANVIL_IMPACT=off` in its run step, which makes `anvil-impact` a no-op so every tier
+resolves to its `--workspace` default. Impact scoping is purely a PR-tier optimization;
 the scheduled tier never benefits.
 
 If `.delta.toml`'s managed region is emptied
@@ -516,7 +517,7 @@ every group action also takes `free-disk-space` (default `"false"`), forwarded t
 
 The recipes themselves consume the impact cache (via `_anvil-impact-include`) and only
 the PR-context env vars they need; the catalog records the tier mapping (see
-[checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)).
+[checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)).
 
 These actions are consumed primarily by anvil's own reusable workflow. Users who want to
 plug individual groups into an unrelated workflow can `uses:` them directly (downloading
@@ -618,7 +619,7 @@ output.
 
 
 The check → bucket mapping is in
-[checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping).
+[checks.md §5](./checks.md#5-impact-scoping-check--include-mapping).
 
 ## 7. Rust toolchain
 

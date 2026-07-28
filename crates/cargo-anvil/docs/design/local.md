@@ -457,7 +457,7 @@ tier is unscoped. Every value comes from the shared `_anvil-impact-format` helpe
 cache.
 
 The mapping from check to bucket is fixed in the catalog (see
-[checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)). Unscoped checks
+[checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)). Unscoped checks
 (`pr-title`, `deny`, `audit`, `aprz`, `mutants-full`) take no `anvil-impact` dependency
 and never resolve a scope — they always run. Group recipes do not resolve scope
 themselves; each underlying check reads what it needs.
