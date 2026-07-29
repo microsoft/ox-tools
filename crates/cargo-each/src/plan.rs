@@ -19,11 +19,27 @@ pub enum Mode {
     Once,
 }
 
+/// How the `{packages}` placeholder expands in [`Mode::Once`].
+///
+/// A dedicated two-variant type rather than a bare `bool` so the caller states
+/// its intent by name and it cannot be transposed with the adjacent `chdir`
+/// flag at the call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackagesExpansion {
+    /// The resolved set is the whole workspace with no narrowing: expand to a
+    /// bare `--workspace`.
+    Workspace,
+    /// A narrowed set: expand to an explicit `--package name@version` per
+    /// member.
+    Explicit,
+}
+
 /// One fully-resolved command invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invocation {
-    /// A short label for progress output (the member name in per-package
-    /// mode; `None` in once mode).
+    /// A short label for progress output.
+    ///
+    /// The member name in per-package mode; `None` in once mode.
     pub label: Option<String>,
     /// The program and arguments to spawn, placeholders already expanded.
     pub argv: Vec<String>,
@@ -49,11 +65,11 @@ impl Plan {
     /// (the directory containing its `Cargo.toml`); it is only valid in
     /// per-package mode — combined with [`Mode::Once`] it is a usage error.
     ///
-    /// `whole_workspace` controls the `{packages}` expansion in once mode:
-    /// when the resolved set is the entire workspace (see
-    /// [`Selection::is_whole_workspace`]), `{packages}` becomes
-    /// `--workspace`; otherwise it becomes an explicit `--package name@version`
-    /// list.
+    /// `packages` controls the `{packages}` expansion in once mode:
+    /// [`PackagesExpansion::Workspace`] (the resolved set is the entire
+    /// workspace — see [`Selection::is_whole_workspace`]) becomes `--workspace`;
+    /// [`PackagesExpansion::Explicit`] becomes an explicit
+    /// `--package name@version` list.
     ///
     /// [`Selection::is_whole_workspace`]: crate::Selection::is_whole_workspace
     ///
@@ -61,7 +77,7 @@ impl Plan {
     ///
     /// Returns [`EachError`] if `chdir` is combined with [`Mode::Once`], or if
     /// a placeholder in `command` is used in the wrong mode.
-    pub fn build(members: &[&Member], mode: Mode, chdir: bool, whole_workspace: bool, command: &[String]) -> Result<Self, EachError> {
+    pub fn build(members: &[&Member], mode: Mode, chdir: bool, packages: PackagesExpansion, command: &[String]) -> Result<Self, EachError> {
         if chdir && mode == Mode::Once {
             return Err(ChdirRequiresPerPackageError::new().into());
         }
@@ -92,7 +108,7 @@ impl Plan {
                 })
                 .collect::<Result<Vec<_>, EachError>>()?,
             Mode::Once => {
-                let packages = packages_flags(members, whole_workspace);
+                let packages = packages_flags(members, packages);
                 let placeholders = Placeholders::Once { packages };
                 vec![Invocation {
                     label: None,
@@ -108,8 +124,8 @@ impl Plan {
 
 /// The `{packages}` expansion: `--workspace` for the whole workspace, else an
 /// explicit `--package name@version` per member.
-fn packages_flags(members: &[&Member], whole_workspace: bool) -> Vec<String> {
-    if whole_workspace {
+fn packages_flags(members: &[&Member], packages: PackagesExpansion) -> Vec<String> {
+    if packages == PackagesExpansion::Workspace {
         return vec!["--workspace".to_owned()];
     }
     let mut flags = Vec::with_capacity(members.len() * 2);
@@ -147,7 +163,7 @@ mod tests {
 
     #[test]
     fn empty_set_yields_empty_plan() {
-        let plan = Plan::build(&[], Mode::PerPackage, false, false, &cmd(&["cargo", "test"])).expect("build");
+        let plan = Plan::build(&[], Mode::PerPackage, false, PackagesExpansion::Explicit, &cmd(&["cargo", "test"])).expect("build");
         assert!(plan.invocations.is_empty());
     }
 
@@ -155,11 +171,24 @@ mod tests {
     fn empty_set_still_validates_placeholders() {
         // A per-package token under --once is a usage error even when the
         // selection is empty (rather than a silent no-op).
-        let err =
-            Plan::build(&[], Mode::Once, false, false, &cmd(&["cargo", "test", "{name}"])).expect_err("misused placeholder must error");
+        let err = Plan::build(
+            &[],
+            Mode::Once,
+            false,
+            PackagesExpansion::Explicit,
+            &cmd(&["cargo", "test", "{name}"]),
+        )
+        .expect_err("misused placeholder must error");
         assert!(err.to_string().contains("{name}"));
         // A valid template over an empty set is still an empty plan.
-        let plan = Plan::build(&[], Mode::Once, false, false, &cmd(&["cargo", "test", "{packages}"])).expect("build");
+        let plan = Plan::build(
+            &[],
+            Mode::Once,
+            false,
+            PackagesExpansion::Explicit,
+            &cmd(&["cargo", "test", "{packages}"]),
+        )
+        .expect("build");
         assert!(plan.invocations.is_empty());
     }
 
@@ -171,7 +200,7 @@ mod tests {
             &[&a, &b],
             Mode::PerPackage,
             false,
-            false,
+            PackagesExpansion::Explicit,
             &cmd(&["cargo", "check-external-types", "--manifest-path", "{manifest}"]),
         )
         .expect("build");
@@ -188,14 +217,21 @@ mod tests {
     #[test]
     fn chdir_sets_work_dir_to_crate_root() {
         let a = member("alpha");
-        let plan = Plan::build(&[&a], Mode::PerPackage, true, false, &cmd(&["cargo", "fmt"])).expect("build");
+        let plan = Plan::build(&[&a], Mode::PerPackage, true, PackagesExpansion::Explicit, &cmd(&["cargo", "fmt"])).expect("build");
         assert_eq!(plan.invocations[0].work_dir.as_deref(), Some(PathBuf::from("/ws/alpha").as_path()));
     }
 
     #[test]
     fn chdir_with_once_is_a_usage_error() {
         let a = member("alpha");
-        let err = Plan::build(&[&a], Mode::Once, true, false, &cmd(&["cargo", "test", "{packages}"])).expect_err("chdir+once must error");
+        let err = Plan::build(
+            &[&a],
+            Mode::Once,
+            true,
+            PackagesExpansion::Explicit,
+            &cmd(&["cargo", "test", "{packages}"]),
+        )
+        .expect_err("chdir+once must error");
         let rendered = err.to_string();
         assert!(rendered.contains("--chdir"), "rendered: {rendered}");
         assert!(rendered.contains("--once"), "rendered: {rendered}");
@@ -204,7 +240,14 @@ mod tests {
     #[test]
     fn once_whole_workspace_uses_workspace_flag() {
         let a = member("alpha");
-        let plan = Plan::build(&[&a], Mode::Once, false, true, &cmd(&["cargo", "clippy", "{packages}"])).expect("build");
+        let plan = Plan::build(
+            &[&a],
+            Mode::Once,
+            false,
+            PackagesExpansion::Workspace,
+            &cmd(&["cargo", "clippy", "{packages}"]),
+        )
+        .expect("build");
         assert_eq!(plan.invocations.len(), 1);
         assert_eq!(plan.invocations[0].argv, ["cargo", "clippy", "--workspace"]);
     }
@@ -213,7 +256,14 @@ mod tests {
     fn once_subset_uses_explicit_package_flags() {
         let a = member("alpha");
         let b = member("beta");
-        let plan = Plan::build(&[&a, &b], Mode::Once, false, false, &cmd(&["cargo", "clippy", "{packages}"])).expect("build");
+        let plan = Plan::build(
+            &[&a, &b],
+            Mode::Once,
+            false,
+            PackagesExpansion::Explicit,
+            &cmd(&["cargo", "clippy", "{packages}"]),
+        )
+        .expect("build");
         assert_eq!(
             plan.invocations[0].argv,
             ["cargo", "clippy", "--package", "alpha@1.2.3", "--package", "beta@1.2.3"]

@@ -74,7 +74,10 @@
 //!   (`--workspace` for the whole workspace, else `--package name@version …`);
 //!   valid only in `--once` mode and only as a standalone argument.
 //!
-//! Using a placeholder in the wrong mode is a usage error.
+//! Using a placeholder in the wrong mode is a usage error. Only the tokens
+//! above are interpreted; any other `{…}` sequence (a typo, or a literal brace
+//! an argument needs) passes through verbatim to the spawned command — there is
+//! no brace-escape, so this passthrough is part of the contract.
 //!
 //! # Behavior
 //!
@@ -123,7 +126,7 @@ mod workspace;
 
 pub use error::EachError;
 pub use filter::Predicate;
-pub use plan::{Invocation, Mode, Plan};
+pub use plan::{Invocation, Mode, PackagesExpansion, Plan};
 pub use select::Selection;
-pub use substitute::{Placeholders, substitute, validate_placeholders};
+pub use substitute::{Placeholders, substitute};
 pub use workspace::{Member, Workspace};

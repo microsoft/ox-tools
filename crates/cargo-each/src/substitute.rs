@@ -13,6 +13,13 @@
 //!   which is several tokens.
 //!
 //! Using a token in the wrong mode is a usage error ([`PlaceholderMisuseError`]).
+//!
+//! Only the tokens above are interpreted. Any other `{…}` sequence — a typo
+//! like `{manfiest}`, a wrong-case `{Name}`, or a literal brace an argument
+//! genuinely needs — is passed through **verbatim** to the spawned command.
+//! There is no brace-escape mechanism, so this passthrough is a deliberate part
+//! of the contract (`cargo-each` never interprets the command beyond these
+//! fixed substitutions), not an oversight.
 
 use crate::error::{EachError, PlaceholderMisuseError};
 
@@ -43,20 +50,19 @@ pub enum Placeholders {
     },
 }
 
-/// Validate that `args` only reference placeholders valid for the mode,
-/// without expanding them.
+/// Validate that `args` only reference placeholders valid for the mode.
 ///
-/// This is the mode-consistency check factored out of [`substitute`] so the
-/// contract can be enforced even when the selection resolves to no members
-/// (where `substitute` is never called) — a misused placeholder is then a
-/// usage error rather than a silent no-op.
+/// Checks mode-consistency without expanding the tokens — the check factored
+/// out of [`substitute`] so the contract can be enforced even when the
+/// selection resolves to no members (where `substitute` is never called) — a
+/// misused placeholder is then a usage error rather than a silent no-op.
 ///
 /// # Errors
 ///
 /// Returns [`EachError`] if a per-package token appears under `--once`
 /// (`once == true`), if `{packages}` appears outside `--once`, or if
 /// `{packages}` is embedded in a larger argument rather than standing alone.
-pub fn validate_placeholders(args: &[String], once: bool) -> Result<(), EachError> {
+pub(crate) fn validate_placeholders(args: &[String], once: bool) -> Result<(), EachError> {
     for arg in args {
         if once {
             if let Some(token) = PER_PACKAGE_TOKENS.iter().find(|t| arg.contains(**t)) {

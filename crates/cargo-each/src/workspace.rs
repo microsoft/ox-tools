@@ -11,7 +11,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 
-use cargo_metadata::MetadataCommand;
+use cargo_metadata::{MetadataCommand, TargetKind};
 use serde_json::Value;
 
 use crate::error::{EachError, LoadMetadataError};
@@ -73,13 +73,16 @@ impl Member {
 }
 
 impl Workspace {
-    /// Load workspace metadata for the workspace enclosing `manifest_path`
-    /// (or the current directory when `None`).
+    /// Load the workspace enclosing `manifest_path` (or the current directory).
     ///
-    /// Runs `cargo metadata --no-deps`, which does not fetch or build
-    /// dependencies and is therefore fast and side-effect-free. The
-    /// `--no-deps` mode still reports each member's *declared* dependencies,
-    /// which is what the `dep:` predicate needs.
+    /// Discovery is side-effect-free: it performs no network access and builds
+    /// nothing, yet still reports each member's *declared* dependencies (what
+    /// the `dep:` filter needs) alongside its targets and `package.metadata`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`EachError`] when the workspace cannot be enumerated — for
+    /// example a missing or invalid manifest.
     #[ohno::enrich_err("failed to load cargo workspace metadata")]
     pub fn load(manifest_path: Option<&Path>) -> Result<Self, EachError> {
         let mut cmd = MetadataCommand::new();
@@ -93,8 +96,8 @@ impl Workspace {
             .workspace_packages()
             .iter()
             .map(|pkg| {
-                let has_lib = pkg.targets.iter().any(|t| target_is(t, "lib"));
-                let has_bin = pkg.targets.iter().any(|t| target_is(t, "bin"));
+                let has_lib = pkg.targets.iter().any(is_lib_target);
+                let has_bin = pkg.targets.iter().any(is_bin_target);
                 let dependencies = pkg.dependencies.iter().map(|d| d.name.clone()).collect();
                 Member {
                     name: pkg.name.to_string(),
@@ -122,10 +125,17 @@ impl Workspace {
     }
 }
 
-/// Whether a target has the given kind (e.g. `"lib"`, `"bin"`).
+/// Whether a target is a plain Rust library (`lib`).
 ///
-/// `cargo_metadata` models target kinds as a typed enum; compare via its
-/// `Display` form so this stays robust to the exact variant spelling.
-fn target_is(target: &cargo_metadata::Target, kind: &str) -> bool {
-    target.kind.iter().any(|k| k.to_string() == kind)
+/// Matches the typed target-kind enum directly rather than its `Display`
+/// string — no per-target allocation and no spelling-drift risk. Proc-macro,
+/// `cdylib`, and `staticlib` library kinds are deliberately *not* counted:
+/// the `lib` filter means the plain `lib` kind only (see the design doc).
+fn is_lib_target(target: &cargo_metadata::Target) -> bool {
+    target.kind.iter().any(|k| matches!(k, TargetKind::Lib))
+}
+
+/// Whether a target is a binary (`bin`).
+fn is_bin_target(target: &cargo_metadata::Target) -> bool {
+    target.kind.iter().any(|k| matches!(k, TargetKind::Bin))
 }

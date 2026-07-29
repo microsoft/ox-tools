@@ -85,7 +85,10 @@ Substituted inside each command argument:
   (`--workspace` for the whole workspace, else `--package name@version …`);
   valid only in `--once` mode and only as a standalone argument.
 
-Using a placeholder in the wrong mode is a usage error.
+Using a placeholder in the wrong mode is a usage error. Only the tokens
+above are interpreted; any other `{…}` sequence (a typo, or a literal brace
+an argument needs) passes through verbatim to the spawned command — there is
+no brace-escape, so this passthrough is part of the contract.
 
 ## Behavior
 
@@ -129,7 +132,7 @@ owns the reusable, testable spine:
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-each">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEGzerREaGyePYG7npuf8mPIFXG9gqGIw2rameG0gNVlLYVIpfYWSBg2pjYXJnby1lYWNoZTAuMS4wamNhcmdvX2VhY2g
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG7uvzgCyhv5UGz7WCGuT6m1fGwmaPBtD0Qb0G25-WjgY5u-DYWSBg2pjYXJnby1lYWNoZTAuMS4wamNhcmdvX2VhY2g
  [__link0]: https://docs.rs/cargo-each/0.1.0/cargo_each/?search=Workspace
  [__link1]: https://docs.rs/cargo-each/0.1.0/cargo_each/?search=Member
  [__link2]: https://docs.rs/cargo-each/0.1.0/cargo_each/?search=Selection

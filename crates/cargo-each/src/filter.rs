@@ -30,7 +30,12 @@ pub enum Predicate {
     /// `metadata:<dotted.key>`: the metadata key is present.
     MetadataPresent(String),
     /// `metadata:<dotted.key>=<value>`: the metadata key equals `<value>`.
-    MetadataEquals(String, String),
+    MetadataEquals {
+        /// The dotted metadata key path.
+        key: String,
+        /// The expected value.
+        value: String,
+    },
 }
 
 impl Predicate {
@@ -68,7 +73,7 @@ impl Predicate {
             Self::HasBin => member.has_bin,
             Self::DependsOn(name) => member.dependencies.contains(name),
             Self::MetadataPresent(key) => lookup(&member.metadata, key).is_some(),
-            Self::MetadataEquals(key, expected) => lookup(&member.metadata, key).is_some_and(|v| value_equals(v, expected)),
+            Self::MetadataEquals { key, value } => lookup(&member.metadata, key).is_some_and(|v| value_equals(v, value)),
         }
     }
 }
@@ -77,7 +82,10 @@ impl Predicate {
 fn parse_metadata(spec: &str, rest: &str) -> Result<Predicate, EachError> {
     if let Some((key, value)) = rest.split_once('=') {
         validate_key(spec, key)?;
-        Ok(Predicate::MetadataEquals(key.to_owned(), value.to_owned()))
+        Ok(Predicate::MetadataEquals {
+            key: key.to_owned(),
+            value: value.to_owned(),
+        })
     } else {
         validate_key(spec, rest)?;
         Ok(Predicate::MetadataPresent(rest.to_owned()))
@@ -123,11 +131,13 @@ fn value_equals(node: &Value, expected: &str) -> bool {
         _ => return false,
     };
     match (rendered.parse::<f64>(), expected.parse::<f64>()) {
-        // Exact equality is intended: both sides are short decimal literals
-        // (metadata values and the user's expected string), so `0` matches
-        // `0.0` without any epsilon fuzz being meaningful here.
+        // Both sides are numbers: compare numerically so `0` matches `0.0`. The
+        // string-equality fallback also covers a literal `NaN`, which never
+        // compares equal to itself numerically (so `metadata:key=NaN` still
+        // matches a `"NaN"` value). Exact equality is intended — both sides are
+        // short decimal literals, so no epsilon fuzz is meaningful here.
         #[expect(clippy::float_cmp, reason = "comparing exact parsed values of short decimal literals")]
-        (Ok(a), Ok(b)) => a == b,
+        (Ok(a), Ok(b)) => a == b || rendered == expected,
         _ => rendered == expected,
     }
 }
@@ -173,7 +183,10 @@ mod tests {
         );
         assert_eq!(
             Predicate::parse("metadata:coverage-gate.min-lines-percent=0").expect("equals"),
-            Predicate::MetadataEquals("coverage-gate.min-lines-percent".to_owned(), "0".to_owned())
+            Predicate::MetadataEquals {
+                key: "coverage-gate.min-lines-percent".to_owned(),
+                value: "0".to_owned()
+            }
         );
     }
 
@@ -237,6 +250,15 @@ mod tests {
         let m = member_with(&[], json!({ "role": "script-only" }), true, false);
         assert!(Predicate::parse("metadata:role=script-only").expect("p").matches(&m));
         assert!(!Predicate::parse("metadata:role=library").expect("p").matches(&m));
+    }
+
+    #[test]
+    fn metadata_nan_uses_string_equality() {
+        // Both sides parse as `f64::NAN`, and `NaN == NaN` is false; the string
+        // fallback must still match a literal `"NaN"` metadata value.
+        let m = member_with(&[], json!({ "marker": "NaN" }), true, false);
+        assert!(Predicate::parse("metadata:marker=NaN").expect("p").matches(&m));
+        assert!(!Predicate::parse("metadata:marker=nan").expect("p").matches(&m));
     }
 
     #[test]

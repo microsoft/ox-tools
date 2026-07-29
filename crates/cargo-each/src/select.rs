@@ -39,11 +39,11 @@ pub struct Selection {
 }
 
 impl Selection {
-    /// Whether the resolved set is the *entire* workspace, selected via
-    /// `--workspace` / `--all` with no narrowing excludes.
+    /// Whether the resolved set is the whole workspace with no narrowing.
     ///
-    /// This is the condition under which the `{packages}` placeholder emits
-    /// a bare `--workspace` rather than an explicit `--package` list.
+    /// True when selected via `--workspace` / `--all` with no narrowing
+    /// excludes. This is the condition under which the `{packages}` placeholder
+    /// emits a bare `--workspace` rather than an explicit `--package` list.
     ///
     /// `-p` / `--package` selectors do **not** disqualify it: when `--all` is
     /// set, [`resolve`](Self::resolve) ignores `packages` and returns the full
@@ -165,6 +165,8 @@ fn version_matches(supplied: &str, actual: &Version) -> bool {
     }
 
     let components: Vec<&str> = release.split('.').collect();
+    // `str::split('.')` always yields ≥1 element, so `is_empty` is defensive;
+    // the `> 3` bound is the real guard and also keeps `i` (below) in bounds.
     if components.is_empty() || components.len() > 3 {
         return false;
     }
@@ -174,6 +176,9 @@ fn version_matches(supplied: &str, actual: &Version) -> bool {
     }
     let actual_release = [actual.major, actual.minor, actual.patch];
     for (i, component) in components.iter().enumerate() {
+        // i < components.len() ≤ 3 (guarded above) == actual_release.len(), so
+        // this index is always in bounds. A future relaxation of the `> 3`
+        // guard must revisit this.
         // Reject leading-zero components (`01`), which cargo's grammar
         // disallows; a lone `0` is fine.
         if component.len() > 1 && component.starts_with('0') {

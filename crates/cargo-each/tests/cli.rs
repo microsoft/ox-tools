@@ -310,12 +310,15 @@ fn exclude_filter_metadata_drops_matching_member() {
 fn exclude_requires_workspace() {
     // `--exclude` is documented as requiring `--workspace`; clap enforces it,
     // so `--exclude` with an implicit / `-p` selection is a usage error (2).
+    // Assert the message names `--workspace` so the test is tied to *this*
+    // constraint, not any incidental exit-2 parse error.
     let (_tmp, manifest) = fixture();
     each(&manifest)
         .args(["-p", "alpha", "--exclude", "beta", "--dry-run", "--", "echo", "{name}"])
         .assert()
         .failure()
-        .code(2);
+        .code(2)
+        .stderr(predicate::str::contains("--workspace"));
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
@@ -391,7 +394,11 @@ fn executes_command_and_propagates_success() {
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
 fn executes_command_and_propagates_failure() {
-    // A failing child command's exit code propagates (fail-fast).
+    // A failing child command's exit code propagates (fail-fast). The exact
+    // code is intentionally left unspecified here: it is cargo's
+    // no-such-subcommand code, which is not a stable contract we want to pin.
+    // The `exit_byte` unit tests cover the low-byte reduction arithmetic
+    // directly.
     let (_tmp, manifest) = fixture();
     each(&manifest)
         .args(["-p", "alpha", "--", "cargo", "this-subcommand-does-not-exist"])
@@ -447,6 +454,50 @@ fn keep_going_runs_all_members_then_fails() {
         .assert()
         .failure()
         .code(1);
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn keep_going_treats_spawn_failure_as_invocation_failure() {
+    // A program that cannot be spawned at all (the binary does not exist) is a
+    // failed invocation under --keep-going, not an abort: every member is still
+    // attempted and the exit is a flat 1 — not the exit-2 usage code the
+    // fail-fast path returns for a spawn failure.
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args([
+            "-p",
+            "alpha",
+            "-p",
+            "gamma",
+            "--keep-going",
+            "--",
+            "cargo-each-no-such-program-xyz",
+            "{name}",
+        ])
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(
+            predicate::str::contains("cargo each: alpha")
+                .and(predicate::str::contains("cargo each: gamma"))
+                .and(predicate::str::contains("failed to spawn")),
+        );
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
+fn spawn_failure_without_keep_going_is_a_usage_error() {
+    // Without --keep-going, an un-spawnable program aborts as a cargo-each
+    // failure (exit 2 via main.rs), distinct from a child that spawned and then
+    // exited non-zero (which propagates its own code).
+    let (_tmp, manifest) = fixture();
+    each(&manifest)
+        .args(["-p", "alpha", "--", "cargo-each-no-such-program-xyz"])
+        .assert()
+        .failure()
+        .code(2)
+        .stderr(predicate::str::contains("failed to spawn"));
 }
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]

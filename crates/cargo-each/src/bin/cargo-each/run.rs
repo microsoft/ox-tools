@@ -6,7 +6,7 @@
 
 use std::process::{Command, ExitCode};
 
-use cargo_each::{Mode, Plan, Predicate, Selection, Workspace};
+use cargo_each::{Mode, PackagesExpansion, Plan, Predicate, Selection, Workspace};
 use ohno::{AppError, IntoAppError};
 
 use crate::cli::EachArgs;
@@ -20,10 +20,14 @@ pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
 
     // The `{packages}` pass-through only applies when the resolved set is the
     // untouched whole workspace: no per-package narrowing and no filters.
-    let whole_workspace = selection.is_whole_workspace() && args.filters.is_empty() && args.exclude_filters.is_empty();
+    let packages = if selection.is_whole_workspace() && args.filters.is_empty() && args.exclude_filters.is_empty() {
+        PackagesExpansion::Workspace
+    } else {
+        PackagesExpansion::Explicit
+    };
 
     let mode = if args.once { Mode::Once } else { Mode::PerPackage };
-    let plan = Plan::build(&members, mode, args.chdir, whole_workspace, &args.command).into_app_err("failed to build command plan")?;
+    let plan = Plan::build(&members, mode, args.chdir, packages, &args.command).into_app_err("failed to build command plan")?;
 
     if plan.invocations.is_empty() {
         eprintln!("cargo each: selection resolved to no packages; nothing to do");
@@ -80,6 +84,12 @@ fn parse_predicates(specs: &[String]) -> Result<Vec<Predicate>, AppError> {
 }
 
 /// Run each invocation, honoring the fail-fast / `--keep-going` policy.
+///
+/// A spawn failure (the child could not be launched at all) is treated the
+/// same as a non-zero child exit: under `--keep-going` it is logged, counted
+/// as a failure, and the run continues (final exit `1`); under fail-fast it
+/// aborts. This keeps the documented "run them all" contract intact even when
+/// one invocation cannot start.
 fn execute(plan: &Plan, keep_going: bool) -> Result<ExitCode, AppError> {
     let mut any_failed = false;
     for inv in &plan.invocations {
@@ -92,7 +102,19 @@ fn execute(plan: &Plan, keep_going: bool) -> Result<ExitCode, AppError> {
         if let Some(dir) = &inv.work_dir {
             command.current_dir(dir);
         }
-        let status = command.status().into_app_err(format!("failed to spawn `{program}`"))?;
+        let status = match command.status() {
+            Ok(status) => status,
+            // A spawn failure under --keep-going is a failed invocation, not an
+            // abort: log it, mark the run failed, and move on so the remaining
+            // members still run (contract: exit 1 when any invocation failed).
+            Err(err) if keep_going => {
+                eprintln!("cargo each: failed to spawn `{program}`: {err}");
+                any_failed = true;
+                continue;
+            }
+            // Fail-fast: a spawn failure is a hard error (exit 2 via main.rs).
+            other => other.into_app_err(format!("failed to spawn `{program}`"))?,
+        };
         if !status.success() {
             if !keep_going {
                 // Fail-fast: propagate the failing child's own exit code,

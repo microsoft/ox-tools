@@ -123,7 +123,7 @@ keep is an intersection, drop is a union. Predicates:
 
 | Predicate | True when the member… |
 |-----------|-----------------------|
-| `lib` | has a `lib` target. |
+| `lib` | has a plain `lib` target. Proc-macro, `cdylib`, and `staticlib` crates are **not** matched — the predicate means the plain `lib` target kind only. |
 | `bin` | has a `bin` target. |
 | `dep:<name>` | lists `<name>` among its dependencies (any kind). |
 | `metadata:<dotted.key>` | has `package.metadata.<dotted.key>` present. |
@@ -153,7 +153,7 @@ Substituted inside each `ARG` of the command template:
 | `{spec}` | `name@version` | per-package |
 | `{version}` | package version | per-package |
 | `{manifest}` | absolute path to the member's `Cargo.toml` | per-package |
-| `{packages}` | the cargo selection flags for the resolved set: `--workspace` when the whole workspace was selected via `--workspace`/`--all` with no excludes, else `--package name@version …` (one pair per member). Only valid as a standalone `ARG`; it expands to multiple tokens. | once |
+| `{packages}` | the cargo selection flags for the resolved set: `--workspace` when the whole workspace was selected via `--workspace`/`--all` with no excludes **and no `--filter`/`--exclude-filter` applied**, else `--package name@version …` (one pair per member). Only valid as a standalone `ARG`; it expands to multiple tokens. | once |
 
 Using a per-package token in `--once` mode, or `{packages}` outside `--once`, is
 a usage error.

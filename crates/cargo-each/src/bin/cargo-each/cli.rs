@@ -45,8 +45,7 @@ pub(crate) struct EachArgs {
     #[arg(long, value_name = "SPEC", requires = "workspace")]
     pub(crate) exclude: Vec<String>,
 
-    /// Explicitly select zero members (a no-op, exit 0). Replaces the CI
-    /// `--skip` sentinel for empty impact tiers.
+    /// Explicitly select zero members (a no-op that exits 0).
     #[arg(long)]
     pub(crate) none: bool,
 
