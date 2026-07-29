@@ -107,12 +107,15 @@
 //! # Library
 //!
 //! The binary (`src/bin/cargo-each`) is a thin shell over this library, which
-//! owns the reusable, testable spine:
+//! owns the reusable, testable spine. The library is **consumed as tooling**
+//! (build a plan, run it), not as a `match`-on-error API: [`EachError`] is an
+//! intentionally opaque application-style umbrella (see its module docs), and
+//! only the types the binary drives are public — placeholder expansion is an
+//! internal detail of [`Plan`].
 //!
 //! - [`Workspace`] / [`Member`] — `cargo metadata` discovery.
 //! - [`Selection`] — parse selectors and resolve them against a workspace.
 //! - [`Predicate`] — the `--filter` / `--exclude-filter` metadata language.
-//! - [`substitute`] — placeholder expansion for the command template.
 //! - [`Plan`] — the resolved list of command invocations to run.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
@@ -128,5 +131,4 @@ pub use error::EachError;
 pub use filter::Predicate;
 pub use plan::{Invocation, Mode, PackagesExpansion, Plan};
 pub use select::Selection;
-pub use substitute::{Placeholders, substitute};
 pub use workspace::{Member, Workspace};

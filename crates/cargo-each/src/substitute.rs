@@ -22,6 +22,7 @@
 //! fixed substitutions), not an oversight.
 
 use crate::error::{EachError, PlaceholderMisuseError};
+use crate::plan::Mode;
 
 /// Per-package placeholder tokens.
 const PER_PACKAGE_TOKENS: [&str; 4] = ["{name}", "{spec}", "{version}", "{manifest}"];
@@ -30,7 +31,7 @@ const PACKAGES_TOKEN: &str = "{packages}";
 
 /// The substitution context for one command invocation.
 #[derive(Debug, Clone)]
-pub enum Placeholders {
+pub(crate) enum Placeholders {
     /// Per-package mode: substitute the member's facts into each argument.
     Package {
         /// `{name}` — bare package name.
@@ -59,12 +60,12 @@ pub enum Placeholders {
 ///
 /// # Errors
 ///
-/// Returns [`EachError`] if a per-package token appears under `--once`
-/// (`once == true`), if `{packages}` appears outside `--once`, or if
-/// `{packages}` is embedded in a larger argument rather than standing alone.
-pub(crate) fn validate_placeholders(args: &[String], once: bool) -> Result<(), EachError> {
+/// Returns [`EachError`] if a per-package token appears under [`Mode::Once`],
+/// if `{packages}` appears outside [`Mode::Once`], or if `{packages}` is
+/// embedded in a larger argument rather than standing alone.
+pub(crate) fn validate_placeholders(args: &[String], mode: Mode) -> Result<(), EachError> {
     for arg in args {
-        if once {
+        if mode == Mode::Once {
             if let Some(token) = PER_PACKAGE_TOKENS.iter().find(|t| arg.contains(**t)) {
                 return Err(
                     PlaceholderMisuseError::new((*token).to_owned(), "per-package token is not valid in --once mode".to_owned()).into(),
@@ -93,8 +94,13 @@ pub(crate) fn validate_placeholders(args: &[String], once: bool) -> Result<(), E
 /// Returns [`EachError`] if a token is used in the wrong mode (a per-package
 /// token under `--once`, or `{packages}` outside `--once`), or if `{packages}`
 /// is embedded in a larger argument rather than standing alone.
-pub fn substitute(args: &[String], placeholders: &Placeholders) -> Result<Vec<String>, EachError> {
-    validate_placeholders(args, matches!(placeholders, Placeholders::Once { .. }))?;
+pub(crate) fn substitute(args: &[String], placeholders: &Placeholders) -> Result<Vec<String>, EachError> {
+    let mode = if matches!(placeholders, Placeholders::Once { .. }) {
+        Mode::Once
+    } else {
+        Mode::PerPackage
+    };
+    validate_placeholders(args, mode)?;
     let mut out = Vec::with_capacity(args.len());
     for arg in args {
         match placeholders {

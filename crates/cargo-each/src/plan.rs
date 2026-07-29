@@ -85,7 +85,7 @@ impl Plan {
         // empty-set short-circuit — so a misused template (e.g. `{name}` under
         // `--once`) is a usage error even when the selection resolves to no
         // members, rather than silently passing until some tier is non-empty.
-        validate_placeholders(command, mode == Mode::Once)?;
+        validate_placeholders(command, mode)?;
         if members.is_empty() {
             return Ok(Self { invocations: Vec::new() });
         }
