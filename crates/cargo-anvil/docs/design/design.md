@@ -237,7 +237,7 @@ repo/
 ├── crates/<member>/Cargo.toml                     managed-region: anvil-lints (one per workspace member)
 ├── deny.toml                                      managed-regions: anvil-deny-{advisories,licenses,bans,sources}
 ├── rustfmt.toml                                   managed-region: anvil-rustfmt (opt out with empty stub)
-├── .delta.toml                                    managed-region: anvil-delta (opt out disables impact scoping)
+├── .delta.toml                                    managed-region: anvil-delta (points to owned cloud config)
 ├── .gitattributes                                 managed-region: anvil-gitattributes (pins *.rs to LF)
 ├── rust-toolchain.toml                            user-authored (read only)
 ├── .cargo/config.toml                             user-authored (read only)
@@ -281,9 +281,10 @@ Detail on each host:
 - **`rustfmt.toml`** — created with the opinionated baseline if absent; managed region at the
   end of the file. The most contested opinion in the catalog; users who want to keep their own
   formatting opt the file out via the empty-stub mechanism in [updates.md](./updates.md).
-- **`.delta.toml`** — cargo-delta configuration that drives impact-scoped cloud-workflow runs. Created if
-  absent. Region at the end of the file. Disabling the region opts the repo out of impact
-  scoping entirely. See [checks.md](./checks.md#impact-scoping) and the per-backend wiring in
+- **`.delta.toml`** — a notice that cargo-anvil's cloud workflows load the owned
+  `justfiles/anvil/delta.toml`. Repository-specific local cargo-delta settings remain
+  user-owned outside the region. Disabling the notice does not alter cloud impact
+  scoping. See [checks.md](./checks.md#impact-scoping) and the per-backend wiring in
   [github.md](./github.md) / [ado.md](./ado.md).
 - **`.gitattributes`** — managed region pinning `*.rs text eol=lf` so Rust sources keep LF
   line endings on every platform (rustfmt and other tools assume LF). Created if absent;
@@ -429,4 +430,3 @@ from that repo) and from crates.io. The binary contains:
 There is no overlay system, no internal-only check, and no proprietary content. ADO
 templates are plain ADO templates — they happen to be shaped to compose cleanly with
 SubstratePT/1ESPT, but they are freely usable in any ADO environment.
-

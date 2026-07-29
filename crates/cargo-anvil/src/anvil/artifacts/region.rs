@@ -378,9 +378,9 @@ mod tests {
     }
 
     #[test]
-    fn delta_body_has_root_files() {
-        assert!(DELTA_BODY.contains("root-files"));
-        assert!(DELTA_BODY.contains("Cargo.lock"));
+    fn delta_body_points_to_owned_cloud_config() {
+        assert!(DELTA_BODY.contains("justfiles/anvil/delta.toml"));
+        assert!(DELTA_BODY.contains("additional local settings"));
     }
 
     #[test]

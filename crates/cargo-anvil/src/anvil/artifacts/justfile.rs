@@ -43,6 +43,12 @@ const HELPERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/help
 /// Repo-root-relative path of the shared-helpers recipe file.
 const HELPERS_JUST_PATH: &str = "justfiles/anvil/helpers.just";
 
+/// cargo-delta configuration loaded by cloud impact analysis.
+const DELTA_TOML: &str = include_str!("../../../templates/justfiles/anvil/delta.toml");
+
+/// Repo-root-relative path of cargo-anvil's cargo-delta configuration.
+const DELTA_TOML_PATH: &str = "justfiles/anvil/delta.toml";
+
 /// Emits `(path, include_str!)` pairs for a set of split recipe files that
 /// live under a subdirectory of `justfiles/anvil/`. Each file is one owned
 /// artifact, so the recipe tree is one file per check / per group rather
@@ -157,6 +163,12 @@ pub fn helpers() -> Artifact {
     Artifact::owned_file(HELPERS_JUST_PATH, HELPERS_JUST)
 }
 
+/// `justfiles/anvil/delta.toml` — conservative cloud impact configuration.
+#[must_use]
+pub fn delta_config() -> Artifact {
+    Artifact::owned_file(DELTA_TOML_PATH, DELTA_TOML)
+}
+
 /// The `justfiles/anvil/checks/<check>.just` files — one owned artifact
 /// per catalog check.
 #[must_use]
@@ -191,6 +203,13 @@ mod tests {
         assert!(TOOLS_JUST.contains("anvil-toolchain-nightly-install"));
     }
 
+    #[test]
+    fn delta_config_uses_cargo_delta_schema() {
+        assert!(DELTA_TOML.contains("trip_wire_patterns"));
+        assert!(DELTA_TOML.contains("\"Cargo.lock\""));
+        assert!(!DELTA_TOML.contains("[delta]"));
+    }
+
     /// All `checks/*.just` bodies concatenated, for content assertions.
     fn all_check_bodies() -> String {
         CHECK_FILES.iter().map(|(_, b)| *b).collect::<Vec<_>>().join("\n")
@@ -218,6 +237,37 @@ mod tests {
         ] {
             assert!(checks.contains(needle), "checks tree missing recipe '{needle}'");
         }
+    }
+
+    #[test]
+    fn checks_fail_closed_and_preserve_opted_out_tests() {
+        let checks = all_check_bodies();
+        for needle in [
+            "anvil-bolero: target discovery failed",
+            "anvil-readme-check: cargo metadata failed",
+            "running tests without coverage for opted-out packages",
+            "all affected packages opted out of coverage",
+            "could not query the executed cargo-careful version",
+            "anvil-mutants-full: aarch64-pc-windows-msvc",
+            "cargo-semver-checks exit 101",
+            "unexpected cargo-semver-checks exit code",
+        ] {
+            assert!(checks.contains(needle), "checks tree missing safety behavior '{needle}'");
+        }
+        assert!(!checks.contains("bolero list failed; assuming no targets"));
+    }
+
+    #[test]
+    fn spellcheck_checks_source_prerequisites_only_on_source_install() {
+        assert!(
+            TOOLS_JUST.contains("_install-tool \"cargo-spellcheck\" cargo_spellcheck_version installer \"anvil-system-deps-check\""),
+            "spellcheck installer must defer libclang validation to source installation"
+        );
+        let checks = all_check_bodies();
+        assert!(
+            !checks.contains("anvil-spellcheck-setup installer=\"install\": anvil-system-deps-check"),
+            "spellcheck setup must not require libclang before binstall"
+        );
     }
 
     #[test]

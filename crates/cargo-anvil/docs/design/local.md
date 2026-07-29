@@ -28,6 +28,8 @@ repo/
     ├── helpers.just        shared helper recipes (_anvil-base-ref,
     │                       _anvil-impact-format) and the impact env-var contract
     │                       that the per-check recipes rely on.
+    ├── delta.toml          owned cargo-delta configuration used by cloud impact
+    │                       snapshots and changed-file detection.
     ├── checks/             one file per check: checks/<check>.just holds the
     │                       `anvil-<check>` recipe plus its paired `*-setup` and
     │                       `*-validate-prereqs` recipes (anvil-fmt, anvil-clippy,
@@ -41,10 +43,9 @@ repo/
     ├── tiers.just          tier aggregators (anvil-pr, anvil-scheduled, anvil-full).
     ├── tools.just          tool/component/toolchain install + validate-prereqs recipes,
     │                       plus anvil-system-deps-check and anvil-validate-prereqs.
-    └── versions.just       pinned nightly toolchains and pinned cargo-subcommand versions
+    └── versions.just       catalog nightly toolchains and cargo-subcommand minimum versions
                             as plain just variables (rust_nightly, cargo_nextest_version, …).
-                            Read by recipes via `{{ var }}` interpolation.
-                            Single source of truth for all version pins. See §3.
+                            Read by recipes via `{{ var }}` interpolation. See §3.
 ```
 
 The Justfile region is the only file anvil adds to that the user co-owns, and it's
@@ -112,11 +113,13 @@ anvil-pr-fast: anvil-fmt anvil-clippy anvil-cargo-sort anvil-license-headers \
 
 anvil-pr-slow: anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants
 anvil-pr-test: anvil-llvm-cov anvil-doc-test anvil-examples
-anvil-pr-runtime-analysis: anvil-miri anvil-careful
+anvil-pr-runtime-analysis: anvil-miri anvil-careful anvil-loom anvil-bolero
 anvil-pr-mutants: anvil-mutants-diff
 
 anvil-scheduled-test: anvil-llvm-cov anvil-doc-test anvil-examples
 anvil-scheduled-advisories: anvil-deny anvil-audit anvil-aprz anvil-clippy
+anvil-scheduled-runtime-analysis: anvil-miri anvil-miri-tree-borrows \
+                                  anvil-miri-strict-provenance anvil-miri-race-coverage
 anvil-scheduled-exhaustive: anvil-mutants-full anvil-cargo-hack anvil-bench
 ```
 
@@ -127,8 +130,9 @@ in a deterministic order:
 
 ```just
 anvil-pr: anvil-pr-validate-prereqs anvil-pr-fast anvil-pr-slow
-anvil-scheduled: anvil-scheduled-validate-prereqs anvil-scheduled-test anvil-scheduled-advisories \
-               anvil-scheduled-exhaustive
+anvil-scheduled: anvil-scheduled-validate-prereqs anvil-scheduled-test \
+                 anvil-scheduled-advisories anvil-scheduled-runtime-analysis \
+                 anvil-scheduled-exhaustive
 anvil-full: anvil-pr anvil-scheduled
 ```
 
@@ -167,8 +171,8 @@ The full tool-version policy these recipes implement is detailed in §3 below.
 
 ### 3.1 Policy
 
-The catalog records, for each cargo subcommand, a **pinned version** (e.g.
-`cargo_nextest_version := "0.9.122"`). The pin is used two different ways:
+The catalog records, for each cargo subcommand, a **catalog version** (e.g.
+`cargo_nextest_version := "0.9.137"`). The pin is used two different ways:
 
 - **On install** (`anvil-tool-<bin>-install` writing into `~/.cargo/bin`): the recipe
   installs *exactly* that version (`--version '={{ pin }}'`), never `>=`. Pulling
@@ -187,6 +191,13 @@ This asymmetry -- "install exact, accept newer if already present" -- gives clou
 reproducibility *and* leaves the user in control. Bumping a pin is a deliberate
 catalog edit (changing a variable in `versions.just`), not an upstream-release-triggered
 surprise.
+
+`cargo-binstall` and `just` are bootstrap utilities rather than catalog checks.
+When absent, setup installs the latest compatible release available at that time;
+when present, setup accepts it. They are intentionally outside the catalog's exact
+installation guarantee so the bootstrap does not recursively require a versioned
+installer. Their versions can therefore vary across cold environments, while every
+tool that determines a catalog check's verdict remains catalog-controlled.
 
 ### 3.2 Detecting installed versions
 
@@ -455,8 +466,9 @@ Not the default. To preview what cloud workflows would skip, run cargo-delta man
 env vars:
 
 ```sh
-# Compute the affected-tier include list (--package … form) against origin/main.
-export ANVIL_INCLUDE_AFFECTED="$(cargo delta impact --base origin/main --format cargo-args --affected)"
+# Use the same configured snapshot flow as the cloud impact action, then format
+# its affected tier with `just _anvil-impact-format`.
+export ANVIL_INCLUDE_AFFECTED="$(just _anvil-impact-format affected /tmp/anvil-impact.json)"
 just anvil-pr-test
 ```
 

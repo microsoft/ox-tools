@@ -165,6 +165,7 @@ mod tests {
         assert!(SETUP_ACTION.contains("runner.environment == 'github-hosted'"));
         assert!(SETUP_ACTION.contains("/usr/local/lib/android"));
         assert!(SETUP_ACTION.contains(r"C:\Program Files (x86)\Android"));
+        assert!(!SETUP_ACTION.contains("Install libclang"));
     }
 
     #[test]
@@ -179,6 +180,15 @@ mod tests {
     fn impact_action_uses_group_none_and_installs_only_cargo_delta() {
         assert!(IMPACT_ACTION.contains("group: none"));
         assert!(IMPACT_ACTION.contains("anvil-tool-cargo-delta-install"));
+        assert!(IMPACT_ACTION.contains("cp justfiles/anvil/delta.toml"));
+        assert!(IMPACT_ACTION.contains("remote_branch = \"%s\""));
+        assert_eq!(
+            IMPACT_ACTION.matches("--config \"$delta_config\"").count(),
+            3,
+            "current snapshot, baseline snapshot, and impact must share the resolved config"
+        );
+        assert!(IMPACT_ACTION.contains("cargo delta --config \"$delta_config\" snapshot"));
+        assert!(IMPACT_ACTION.contains("cargo delta --config \"$delta_config\" impact"));
     }
 
     #[test]

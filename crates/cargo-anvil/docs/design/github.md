@@ -185,7 +185,7 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 .github/
 ├── actions/
 │   ├── anvil-setup/action.yml         owned   (install just + group-scoped catalog tools)
-│   ├── anvil-impact/action.yml        owned   (cargo-delta; omitted if .delta.toml disabled)
+│   ├── anvil-impact/action.yml        owned   (cargo-delta impact computation)
 │   ├── anvil-pr-fast/action.yml       owned   (one composite action per group)
 │   ├── anvil-pr-test/action.yml      owned
 │   ├── anvil-pr-runtime-analysis/action.yml      owned
@@ -428,12 +428,9 @@ default to empty strings (recipes default to `--workspace`) and the reusable wor
 omits the passthrough. Threading them through is purely a PR-tier optimization;
 the scheduled tier never benefits.
 
-If `.delta.toml`'s managed region is emptied
-([updates.md §opt-out](./updates.md#6-opting-out-in-file-stubs)),
-`cargo delta impact` runs with its own defaults — the file is optional configuration, not
-a feature gate — and the `impact` job still emits include lists that recipes interpret
-normally. The user has opted out of *anvil's curated cargo-delta config*, not out of
-impact scoping itself.
+Cloud impact always loads the owned `justfiles/anvil/delta.toml`. The managed
+`.delta.toml` region only points local users at that file; emptying the region does
+not alter cloud impact behavior.
 
 The reusable workflow declares a small input set so the root workflow can pass overrides:
 
@@ -459,8 +456,8 @@ per-job runner overrides) lives in the user's own workflow, which can compose it
 ## 5. Per-group composite actions
 
 Each per-group composite action has the **same** uniform input surface — the three
-impact-include variables, the disk-cleanup switch, plus a per-action handful of
-PR-context strings. This means the reusable workflow doesn't need to know which include
+impact-include variables and the disk-cleanup switch. PR context is passed as environment
+variables by the reusable workflow. This means the reusable workflow doesn't need to know which include
 vars a group's checks consume; it threads all three to every action. Moving a check
 between groups (or between buckets) is a pure catalog change.
 
@@ -469,10 +466,6 @@ between groups (or between buckets) is a pure catalog change.
 name: anvil-pr-fast
 description: anvil PR fast group
 inputs:
-  pr_title:
-    description: PR title for the pr-title check.
-    required: false
-    default: ""
   include_modified:
     description: |
       Pre-formatted --package args from anvil-impact for the modified
@@ -500,7 +493,6 @@ runs:
         free-disk-space: ${{ inputs.free-disk-space }}
     - shell: bash
       env:
-        PR_TITLE: ${{ inputs.pr_title }}
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
         ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
         ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
@@ -516,13 +508,9 @@ Uniform input set on every per-group composite action:
 | `include_required` | `""`      | Forwarded as `ANVIL_INCLUDE_REQUIRED`. Same semantics.                                                                              |
 | `free-disk-space`  | `"false"` | Forwarded to `anvil-setup`; ignored on macOS and self-hosted runners.                                                               |
 
-Per-action additions (only where the action consumes PR-context strings the recipe needs):
-
-| Action                       | Extra inputs                                                            |
-|------------------------------|-------------------------------------------------------------------------|
-| `anvil-pr-fast`              | `pr_title`                                                              |
-| `anvil-pr-mutants`             | `base_ref`                                                              |
-| `anvil-pr-test`, `anvil-pr-runtime-analysis`, `anvil-scheduled-*` | —                                                                       |
+The reusable workflow sets `PR_TITLE` on the `anvil-pr-fast` action step and
+`BASE_REF` on the `anvil-pr-mutants` step. They are environment variables rather
+than action inputs because only the recipes consume them.
 
 The recipes themselves consume only the env vars they need; the catalog records the
 mapping (see [checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)).
@@ -563,16 +551,20 @@ Other groups retain the action's disabled default.
 
 ## 6. Impact scoping
 
-`.github/actions/anvil-impact/action.yml` is a composite action with input `base_ref`. It
-runs:
+`.github/actions/anvil-impact/action.yml` is a composite action with no branch input.
+It resolves the target through `_anvil-base-ref` from `BASE_REF` or the GitHub PR
+environment, then runs:
 
 1. `./.github/actions/anvil-setup` with `group: none` (bootstrap rust + just +
    cache; no catalog tools).
 2. `just anvil-tool-cargo-delta-install binstall` -- only tool this composite
    needs.
-3. `cargo delta impact --base $base_ref --format json` once, capturing the JSON tier
-   sets in a single invocation.
-4. For each of the three tiers (`modified`, `affected`, `required`), format the crate
+3. Resolve the PR target with `_anvil-base-ref`, copy the owned
+   `justfiles/anvil/delta.toml` to a temporary config, and append that resolved
+   target as `[git].remote_branch`.
+4. Run configured snapshots for the target worktree and current checkout, then
+   compare them with configured `cargo delta impact`.
+5. For each of the three tiers (`modified`, `affected`, `required`), format the crate
    list into a pre-built `--package X@ver --package Y@ver …` string (version-qualified
    cargo specs, so `-p` resolves uniquely even when a like-named transitive dependency
    exists), or emit the sentinel `--skip` when the tier is empty.
@@ -627,15 +619,16 @@ below-minimum `rustc` produces a clean failure message.
 
 ## 8. Caching
 
-The `anvil-setup` composite action computes a cache key from: OS, rustc version (read
-from `rust-toolchain.toml`), `Cargo.lock`, `.cargo/config.toml`, and `versions.just`
-(the single source of truth for catalog tool/toolchain pins). Uses `actions/cache`
-natively. `CARGO_HOME` is pinned to a workspace-scratch location to keep cache
-scoping predictable.
+The `anvil-setup` composite action computes a cache key from runner OS and
+architecture, the actual `rustc --version`, hashes of `Cargo.lock`,
+`.cargo/config.toml`, `rust-toolchain.toml`, and `versions.just`, plus the workflow
+job ID. Job discrimination prevents concurrent jobs from racing to save one key;
+prefix restore keys still share prior installs across jobs.
 
 The cache covers:
 
-- The `cargo install`-ed tools installed by the catalog setup recipes.
+- The cargo registry, installed binaries, and Cargo's `.crates.toml` /
+  `.crates2.json` install metadata.
 - The `target/` directory (per anvil recipe; a per-recipe cache scope means a `pr-test`
   cache hit doesn't have to wait on a `pr-fast` cache miss).
 

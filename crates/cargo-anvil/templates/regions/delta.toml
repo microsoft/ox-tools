@@ -1,8 +1,2 @@
-[delta]
-# Include the workspace root files that should invalidate every member's
-# impact analysis when changed (lockfile, root manifest, toolchain).
-root-files = [
-    "Cargo.lock",
-    "Cargo.toml",
-    "rust-toolchain.toml",
-]
+# cargo-anvil's cloud workflows explicitly load justfiles/anvil/delta.toml.
+# This repository-level file remains available for additional local settings.
