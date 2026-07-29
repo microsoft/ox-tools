@@ -255,8 +255,8 @@ mod tests {
             assert!(checks.contains(needle), "checks tree missing safety behavior '{needle}'");
         }
         assert!(
-            checks.contains("bolero list --package $packageName"),
-            "bolero discovery must invoke cargo-bolero once per affected package"
+            checks.contains("bolero list --profile release --package $packageName"),
+            "bolero discovery must use the execution profile once per affected package"
         );
         assert!(
             !checks.contains("bolero list @bareArgs"),

@@ -20,7 +20,7 @@
 # exercised as ordinary tests by anvil-llvm-cov on every leg; the
 # libfuzzer campaign is the Linux-only extra.
 #
-# Target discovery is `cargo +<nightly> bolero list` over the affected packages.
+# Target discovery is `cargo +<nightly> bolero list --profile release` over the affected packages.
 # Crates with no bolero harness print zero targets and the recipe
 # no-ops. The libfuzzer engine requires nightly, so the test
 # invocation uses the pinned rust_nightly. Adopters who want longer
@@ -75,7 +75,7 @@ anvil-bolero: anvil-bolero-validate-prereqs
     # separately and combine the emitted JSON target objects.
     $targets = [System.Collections.Generic.List[object]]::new()
     foreach ($packageName in $packageNames) {
-        $targetsJson = & cargo '+{{ rust_nightly }}' bolero list --package $packageName
+        $targetsJson = & cargo '+{{ rust_nightly }}' bolero list --profile release --package $packageName
         if ($LASTEXITCODE -ne 0) {
             Write-Error "anvil-bolero: target discovery failed for package '$packageName'"
             exit $LASTEXITCODE
