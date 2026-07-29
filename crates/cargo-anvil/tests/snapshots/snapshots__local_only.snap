@@ -348,32 +348,54 @@ anvil-bolero: anvil-bolero-validate-prereqs
         Write-Host 'anvil-bolero: no affected packages; skipping'
         exit 0
     }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
-    # Impact emits version-qualified specs (name@version); strip the
-    # @version qualifier -- cargo-bolero resolves over workspace members
-    # only, so bare names suffice and avoid any spec-parsing surprises.
-    $bareArgs = [System.Collections.Generic.List[string]]::new()
-    for ($i = 0; $i -lt $pkg.Count; $i++) {
-        if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
-            $bareArgs.Add('--package')
-            $bareArgs.Add(($pkg[$i + 1] -split '@', 2)[0])
-            $i++
-            continue
+    $packageNames = [System.Collections.Generic.List[string]]::new()
+    if ($env:ANVIL_INCLUDE_AFFECTED) {
+        $pkgArgs = @(-split $env:ANVIL_INCLUDE_AFFECTED)
+        for ($i = 0; $i -lt $pkgArgs.Count; $i++) {
+            if ($pkgArgs[$i] -ne '--package' -or ($i + 1) -ge $pkgArgs.Count) {
+                Write-Error "anvil-bolero: unsupported affected-package arguments: $env:ANVIL_INCLUDE_AFFECTED"
+                exit 1
+            }
+            # Impact emits version-qualified specs (name@version); cargo-bolero
+            # resolves workspace members by bare package name.
+            $packageNames.Add(($pkgArgs[++$i] -split '@', 2)[0])
         }
-        $bareArgs.Add($pkg[$i])
+    } else {
+        $metadataJson = & cargo metadata --no-deps --format-version 1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error 'anvil-bolero: cargo metadata failed'
+            exit $LASTEXITCODE
+        }
+        try {
+            $metadata = $metadataJson | ConvertFrom-Json
+            foreach ($package in $metadata.packages) {
+                if ($metadata.workspace_members -contains $package.id) {
+                    $packageNames.Add($package.name)
+                }
+            }
+        } catch {
+            Write-Error "anvil-bolero: could not parse cargo metadata output: $_"
+            exit 1
+        }
     }
-    # `cargo bolero list` emits one JSON object per target on stdout;
-    # we want the set of (package, test) pairs over the affected set.
-    $targetsJson = & cargo '+{{ rust_nightly }}' bolero list @bareArgs
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error 'anvil-bolero: target discovery failed'
-        exit $LASTEXITCODE
-    }
-    try {
-        $targets = @($targetsJson | Where-Object { $_ -match '^\{' } | ForEach-Object { ConvertFrom-Json $_ })
-    } catch {
-        Write-Error "anvil-bolero: could not parse target discovery output: $_"
-        exit 1
+
+    # cargo-bolero accepts only one --package, so discover each package
+    # separately and combine the emitted JSON target objects.
+    $targets = [System.Collections.Generic.List[object]]::new()
+    foreach ($packageName in $packageNames) {
+        $targetsJson = & cargo '+{{ rust_nightly }}' bolero list --package $packageName
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "anvil-bolero: target discovery failed for package '$packageName'"
+            exit $LASTEXITCODE
+        }
+        try {
+            foreach ($targetJson in ($targetsJson | Where-Object { $_ -match '^\{' })) {
+                $targets.Add(($targetJson | ConvertFrom-Json))
+            }
+        } catch {
+            Write-Error "anvil-bolero: could not parse target discovery output for package '$packageName': $_"
+            exit 1
+        }
     }
     if ($targets.Count -eq 0) {
         Write-Host 'anvil-bolero: no fuzz targets in affected packages; skipping'

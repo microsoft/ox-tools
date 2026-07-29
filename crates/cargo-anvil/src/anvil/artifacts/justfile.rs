@@ -254,6 +254,14 @@ mod tests {
         ] {
             assert!(checks.contains(needle), "checks tree missing safety behavior '{needle}'");
         }
+        assert!(
+            checks.contains("bolero list --package $packageName"),
+            "bolero discovery must invoke cargo-bolero once per affected package"
+        );
+        assert!(
+            !checks.contains("bolero list @bareArgs"),
+            "bolero discovery must not pass repeated --package arguments"
+        );
         assert!(!checks.contains("bolero list failed; assuming no targets"));
     }
 
