@@ -5,10 +5,12 @@ if [[ -n "${ANVIL_IN_CONTAINER:-}" ]]; then
     if (($# == 0)); then exec bash; else exec just "$@"; fi
 fi
 
-if (($# > 0)) && [[ ! "$1" =~ ^_?anvil-[A-Za-z0-9-]+$ ]]; then
-    echo "anvil-container: expected an anvil-* recipe, got '$1'." >&2
-    exit 2
-fi
+for recipe_arg in "$@"; do
+    if [[ ! "$recipe_arg" =~ ^_?anvil-[A-Za-z0-9-]+$ ]]; then
+        echo "anvil-container: expected each argument to be an anvil-* recipe, got '$recipe_arg'." >&2
+        exit 2
+    fi
+done
 
 anvil_recipe_needs_github_token() {
     case "$1" in
@@ -66,6 +68,16 @@ if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     exit 1
 fi
 script_dir="$repo_root/justfiles/anvil/container"
+default_base_image="$(sed -n 's/^ARG BASE_IMAGE=//p' "$script_dir/Containerfile" | head -n 1)"
+if [[ -z "$default_base_image" ]]; then
+    echo 'anvil-container: Containerfile must define ARG BASE_IMAGE=<digest-pinned-image>.' >&2
+    exit 1
+fi
+base_image="${ANVIL_CONTAINER_BASE_IMAGE:-$default_base_image}"
+if [[ ! "$base_image" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
+    echo 'anvil-container: ANVIL_CONTAINER_BASE_IMAGE must be pinned by sha256 digest (image@sha256:<64 hex characters>).' >&2
+    exit 1
+fi
 image_id="$(bash "$script_dir/image-id.sh")"
 image_base="${ANVIL_CONTAINER_IMAGE:-anvil-dev}"
 image="${image_base}:${image_id}"
@@ -92,7 +104,7 @@ if (($# == 1)) && [[ "$1" == "anvil-aprz" ]]; then
 fi
 github_token=""
 
-# Versioned customization contract: check warm/cold state before sourcing so
+# Customization contract: check warm/cold state before sourcing so
 # customization needed only for image construction can be skipped on a warm
 # run, then expose read-only inputs. See docs/design/containers.md.
 if docker image inspect "$image" >/dev/null 2>&1; then
@@ -101,7 +113,6 @@ else
     image_exists=false
 fi
 
-readonly ANVIL_CONTAINER_CUSTOMIZATION_API_VERSION=1
 readonly ANVIL_CONTAINER_REPO_ROOT="$repo_root"
 readonly ANVIL_CONTAINER_DIR="$script_dir"
 readonly ANVIL_CONTAINER_RESOLVED_IMAGE="$image"
@@ -115,6 +126,7 @@ ANVIL_CONTAINER_BUILD_ARGS=()
 ANVIL_CONTAINER_PREPARE_ARGS=()
 ANVIL_CONTAINER_PREPARE_COMMAND=()
 ANVIL_CONTAINER_RUN_ARGS=()
+ANVIL_CONTAINER_NEEDS_GITHUB_TOKEN="$needs_github_token"
 ANVIL_CONTAINER_CLEANUP=:
 github_token_file=""
 cleanup() {
@@ -177,6 +189,14 @@ anvil_container_validate_array ANVIL_CONTAINER_PREPARE_ARGS ${ANVIL_CONTAINER_PR
 anvil_container_validate_array ANVIL_CONTAINER_PREPARE_COMMAND ${ANVIL_CONTAINER_PREPARE_COMMAND[@]+"${ANVIL_CONTAINER_PREPARE_COMMAND[@]}"}
 anvil_container_validate_array ANVIL_CONTAINER_RUN_ARGS ${ANVIL_CONTAINER_RUN_ARGS[@]+"${ANVIL_CONTAINER_RUN_ARGS[@]}"}
 anvil_container_validate_build_args ${ANVIL_CONTAINER_BUILD_ARGS[@]+"${ANVIL_CONTAINER_BUILD_ARGS[@]}"}
+case "$ANVIL_CONTAINER_NEEDS_GITHUB_TOKEN" in
+    true) needs_github_token=true ;;
+    false) ;;
+    *)
+        echo 'anvil-container: ANVIL_CONTAINER_NEEDS_GITHUB_TOKEN must be true or false.' >&2
+        exit 1
+        ;;
+esac
 if ((${#ANVIL_CONTAINER_PREPARE_ARGS[@]} > 0)) && ((${#ANVIL_CONTAINER_PREPARE_COMMAND[@]} == 0)); then
     echo 'anvil-container: ANVIL_CONTAINER_PREPARE_ARGS requires ANVIL_CONTAINER_PREPARE_COMMAND.' >&2
     exit 1
@@ -227,6 +247,7 @@ if ! "$image_exists"; then
             --tag "$image" \
             --file "$script_dir/Containerfile" \
             --build-arg "ANVIL_IMAGE_ID=$image_id" \
+            --build-arg "BASE_IMAGE=$base_image" \
             ${ANVIL_CONTAINER_BUILD_ARGS[@]+"${ANVIL_CONTAINER_BUILD_ARGS[@]}"} \
             "$repo_root"
     fi
@@ -234,8 +255,8 @@ fi
 
 container_uid="$(id -u)"
 container_gid="$(id -g)"
-registry_volume="anvil-cargo-registry"
-git_volume="anvil-cargo-git"
+registry_volume="anvil-cargo-registry-${repo_id}"
+git_volume="anvil-cargo-git-${repo_id}"
 for volume in "$registry_volume" "$git_volume" "$target_volume"; do
     docker volume create "$volume" >/dev/null
 done

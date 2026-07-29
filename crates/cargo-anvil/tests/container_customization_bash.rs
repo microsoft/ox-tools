@@ -182,6 +182,7 @@ fn run_driver_args(root: &Path, customize_sh_body: &str, recipe_args: &[&str], e
         .env("FAKE_TEST_LOG", &test_log)
         .env_remove("ANVIL_IN_CONTAINER")
         .env_remove("GITHUB_TOKEN")
+        .env_remove("ANVIL_CONTAINER_BASE_IMAGE")
         .env_remove("ANVIL_CONTAINER_IMAGE")
         .env_remove("ANVIL_CONTAINER_NO_REBUILD");
     for (key, value) in env {
@@ -250,7 +251,84 @@ fn customization_can_provide_github_authentication() {
         "the customization-provided token must be mounted for APRZ: {}",
         run.docker_log
     );
+    assert_eq!(
+        run.docker_log
+            .lines()
+            .filter(|line| line.starts_with("run ") && line.contains("just anvil-aprz"))
+            .count(),
+        1,
+        "direct anvil-aprz must run exactly one recipe container: {}",
+        run.docker_log
+    );
     assert_token_files_removed(&run);
+}
+
+#[test]
+fn customization_can_extend_aprz_classification() {
+    let tmp = repo_with_container();
+    let run = run_driver(
+        tmp.path(),
+        "ANVIL_CONTAINER_NEEDS_GITHUB_TOKEN=true\n",
+        "anvil-clippy",
+        &[("FAKE_DOCKER_IMAGE_EXISTS", "1"), ("GITHUB_TOKEN", "test-token")],
+    );
+
+    assert!(run.status.success(), "custom APRZ classification failed: {}", run.stderr);
+    assert!(
+        run.docker_log.lines().any(|line| line.contains("just anvil-aprz")),
+        "custom classification must trigger isolated APRZ: {}",
+        run.docker_log
+    );
+    assert!(
+        run.docker_log
+            .lines()
+            .any(|line| line.contains("ANVIL_APRZ_ALREADY_RAN=1") && line.contains("just anvil-clippy")),
+        "the requested recipe must run after APRZ completion: {}",
+        run.docker_log
+    );
+}
+
+#[test]
+fn every_requested_argument_must_be_an_anvil_recipe() {
+    let tmp = repo_with_container();
+    let run = run_driver_args(tmp.path(), "", &["anvil-clippy", "not-anvil"], &[]);
+
+    assert!(!run.status.success(), "invalid later recipe must fail");
+    assert!(
+        run.stderr.contains("expected each argument to be an anvil-* recipe"),
+        "stderr must explain the command contract: {}",
+        run.stderr
+    );
+    assert!(
+        run.docker_log.is_empty(),
+        "validation must happen before Docker: {}",
+        run.docker_log
+    );
+}
+
+#[test]
+fn base_image_override_is_digest_pinned_and_passed_to_build() {
+    let tmp = repo_with_container();
+    let base_image = "example.invalid/bullseye@sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    let run = run_driver(tmp.path(), "", "anvil-clippy", &[("ANVIL_CONTAINER_BASE_IMAGE", base_image)]);
+
+    assert!(run.status.success(), "digest-pinned override failed: {}", run.stderr);
+    assert!(
+        run.docker_log
+            .lines()
+            .any(|line| line.starts_with("build ") && line.contains(&format!("BASE_IMAGE={base_image}"))),
+        "Docker build must receive the selected base image: {}",
+        run.docker_log
+    );
+
+    let invalid = run_driver(
+        tmp.path(),
+        "",
+        "anvil-clippy",
+        &[("ANVIL_CONTAINER_BASE_IMAGE", "debian:bullseye-slim")],
+    );
+    assert!(!invalid.status.success(), "an unpinned base image must fail");
+    assert!(invalid.stderr.contains("must be pinned by sha256 digest"));
 }
 
 #[test]
@@ -321,10 +399,6 @@ fn cold_run_with_empty_default_arrays_exposes_contract_inputs_scopes_phases_and_
     // at their script-provided empty defaults, which is exactly the state
     // that broke under Bash 3.2 / Bash <4.4 `set -u` semantics.
     let customize = r#"
-if [[ "$ANVIL_CONTAINER_CUSTOMIZATION_API_VERSION" != "1" ]]; then
-    echo "unsupported customization API version" >&2
-    exit 1
-fi
 printf 'exists=%s\n' "$ANVIL_CONTAINER_IMAGE_EXISTS" >> "$FAKE_TEST_LOG"
 printf 'recipes=%s\n' "${ANVIL_CONTAINER_REQUESTED_RECIPES[*]}" >> "$FAKE_TEST_LOG"
 printf 'repo-is-dir=%s\n' "$([[ -d "$ANVIL_CONTAINER_REPO_ROOT" ]] && echo true || echo false)" >> "$FAKE_TEST_LOG"
@@ -360,6 +434,11 @@ ANVIL_CONTAINER_CLEANUP=anvil_test_cleanup
         run.docker_log.lines().filter(|line| line.starts_with("volume create ")).count(),
         3,
         "the driver must create all named cache volumes: {}",
+        run.docker_log
+    );
+    assert!(
+        run.docker_log.contains("volume create anvil-cargo-registry-") && run.docker_log.contains("volume create anvil-cargo-git-"),
+        "Cargo caches must be repository-scoped: {}",
         run.docker_log
     );
     let recipe_line = run

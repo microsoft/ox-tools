@@ -14,10 +14,13 @@ _anvil-run tier runner:
     $nativeTier = '_anvil-{{ replace(tier, "'", "''") }}'
     if ($env:ANVIL_IN_CONTAINER) {
         & $just --justfile $justfile $nativeTier
-    } elseif ('{{ replace(runner, "'", "''") }}' -eq 'container') {
+    } elseif ('{{ replace(runner, "'", "''") }}' -ceq 'container') {
         & $just --justfile $justfile anvil-container $nativeTier
-    } else {
+    } elseif ('{{ replace(runner, "'", "''") }}' -ceq 'native') {
         & $just --justfile $justfile $nativeTier
+    } else {
+        [Console]::Error.WriteLine("anvil-runner: expected 'native' or 'container', got '{{ replace(runner, "'", "''") }}'.")
+        exit 2
     }
     exit $LASTEXITCODE
 
@@ -35,6 +38,9 @@ _anvil-run tier runner:
         exec "$just_path" --justfile "$justfile" "$native_tier"
     elif [[ "$runner" == "container" ]]; then
         exec "$just_path" --justfile "$justfile" anvil-container "$native_tier"
-    else
+    elif [[ "$runner" == "native" ]]; then
         exec "$just_path" --justfile "$justfile" "$native_tier"
+    else
+        echo "anvil-runner: expected 'native' or 'container', got '$runner'." >&2
+        exit 2
     fi

@@ -27,7 +27,8 @@ The first run builds the matching image and can take several minutes.
 - `[script]` support enabled in the root `Justfile`. Add `set unstable` when
   required by the installed `just` version.
 - A `rust-toolchain.toml` in the repository root.
-- An x86-64 Linux or WSL environment capable of running `linux/amd64` images.
+- A Linux or WSL environment capable of running `linux/amd64` images, either
+  natively on x86-64 or through Docker emulation on ARM64.
 
 On Windows, the driver invokes Docker from the default WSL distribution rather
 than calling Windows `docker.exe`. Regardless of how Docker is installed, this
@@ -66,6 +67,9 @@ Run the complete pull-request tier:
 just anvil-container anvil-pr
 ```
 
+Every argument is treated as a recipe name and must match `anvil-*` or
+`_anvil-*`. Recipe parameters are not supported by this command surface.
+
 Open an interactive Bash shell in the image:
 
 ```text
@@ -99,6 +103,11 @@ in the `anvil-runner` region of the repository-root `Justfile` from `"native"`
 to `"container"` and commit that policy. Set `ANVIL_RUNNER=native` to override
 the repository default for the current shell.
 
+Tier routing starts a nested `just` invocation. Output and exit status are
+preserved, but outer `--dry-run`, dependency introspection, global options, and
+CLI variable assignments are not propagated to the selected private tier.
+Values other than `native` and `container` are rejected.
+
 ## Images and caches
 
 The image name includes a content-based tag derived from the repository's Rust
@@ -109,7 +118,7 @@ using their matching images.
 The following data is reused between runs:
 
 - the matching container image;
-- Cargo registry and Cargo Git caches;
+- repository-scoped Cargo registry and Cargo Git caches;
 - compilation output in a repository- and image-specific `target` volume.
 
 The repository is mounted read/write at `/workspace`. Build output remains in a
@@ -146,11 +155,23 @@ invocation fails with instructions when authentication is unavailable.
 | Variable | Effect |
 |---|---|
 | `ANVIL_RUNNER` | Selects `native` or `container` execution for tier commands |
+| `ANVIL_CONTAINER_BASE_IMAGE` | Selects a digest-pinned compatible Linux base image and changes the content-based tag |
 | `ANVIL_CONTAINER_IMAGE` | Changes the local image name; the content-based tag is retained |
 | `ANVIL_CONTAINER_NO_REBUILD=1` | Fails instead of building when the matching image is absent |
 
 The public driver builds images locally and does not pull
 `ANVIL_CONTAINER_IMAGE` from a registry.
+
+The default base is digest-pinned Debian Bookworm. Set
+`ANVIL_CONTAINER_BASE_IMAGE` to another image compatible with the generated
+Debian-based `Containerfile` when a lower glibc baseline is required. A
+different package ecosystem such as Azure Linux requires a derived
+`Containerfile`. The value must use `image@sha256:<digest>` form so the
+selected base remains part of the content-addressed image identity.
+
+Two simultaneous cold invocations can both build the same missing image. This
+is accepted for local development: the content-addressed tag converges on the
+same inputs, at the cost of duplicate work.
 
 ## Troubleshooting
 
@@ -186,13 +207,13 @@ justfiles/anvil/container/customize.ps1
 ```
 
 The driver sources the matching file as trusted host code before authentication,
-image construction, and recipe execution. Customization API version 1 provides
-documented inputs and validated outputs for build secrets, dependency
-preparation, runtime arguments, and cleanup.
+image construction, and recipe execution. The documented customization
+contract provides inputs and validated outputs for APRZ classification, build
+secrets, dependency preparation, runtime arguments, and cleanup.
 
 Customization source is excluded from image identity and the build context.
 Non-secret image behavior must be represented by hashed static files such as
 the `Containerfile`, entrypoint, or supporting build scripts.
 
 See the [container customization contract](https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/containers.md#8-container-customization)
-for the complete versioned interface and security requirements.
+for the complete interface and security requirements.

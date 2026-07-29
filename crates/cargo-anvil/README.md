@@ -137,8 +137,11 @@ to the Rust toolchain, generated Anvil files, Containerfile, or other static
 image inputs select a new tag and build a new image. Images for earlier
 hashes remain available to older branches. Runtime `customize.*` files do not
 affect image identity.
+Every argument is a recipe name; recipe parameters are not supported by
+this command surface.
 
-Cargo registry, Cargo Git, and `target/` data use named Docker volumes. The
+Cargo registry and Cargo Git caches use repository-scoped named volumes;
+`target/` is additionally scoped by image ID. The
 repository is mounted at `/workspace`; keeping build output in a named
 volume avoids slow host bind-mount I/O, particularly on Windows.
 
@@ -173,14 +176,15 @@ change. Set `ANVIL_RUNNER=native` to override it for one shell.
 
 |Variable|Effect|
 |--------|------|
+|`ANVIL_CONTAINER_BASE_IMAGE`|Select a compatible digest-pinned Linux base image; the value is included in the content hash.|
 |`ANVIL_CONTAINER_IMAGE`|Override the local image name. The content hash remains the tag.|
 |`ANVIL_CONTAINER_NO_REBUILD=1`|Fail when the matching image is missing instead of building it.|
 
 The public driver never pulls `ANVIL_CONTAINER_IMAGE` remotely. Repositories
 and derived catalogs can add trusted `customize.sh` and
 `customize.ps1` files for image-build secrets, dependency preparation,
-runtime arguments, and cleanup through the documented compatibility version
-without changing the public command surface.
+APRZ classification, runtime arguments, and cleanup through the documented
+customization contract without changing the public command surface.
 
 Customization files execute on the host with the developer’s permissions
 before container isolation. Only run them from a repository or catalog you
@@ -423,7 +427,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEGwapFbaRza5IG2K_BaCFrX_IG0_buu5rHDe0G88HWPjPxsF2YWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG8IClfb3FngIG0c-Tn2_v-TEG1d9Eu4BnA6-G2mR9EiV4EXgYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

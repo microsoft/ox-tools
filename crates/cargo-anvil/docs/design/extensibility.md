@@ -477,7 +477,7 @@ A downstream catalog replaces only environment-specific artifacts such as
 `artifacts::container::customize_powershell(...)` files. The public drivers,
 image selection, caches, repository mounts, and recipe forwarding remain
 unchanged. Static image behavior stays in hashed artifacts; `customize.*`
-provides versioned runtime orchestration.
+provides documented runtime orchestration.
 
 `customize.sh`/`customize.ps1` are trusted host code: the driver sources them
 directly into its process before image construction and recipe execution, so
@@ -485,7 +485,7 @@ they run with the invoking developer's permissions and outside the container
 sandbox. The runtime contract is file-based and ownership-neutral — a regular
 repository can commit the standard paths directly, without a derived catalog,
 with identical driver behavior. See the [container customization
-contract](./containers.md#8-container-customization) for the full versioned
+contract](./containers.md#8-container-customization) for the full
 interface, trust boundary, and security responsibilities.
 
 The public engine contains no environment-specific image, registry, cloud, or

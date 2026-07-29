@@ -108,7 +108,7 @@ pub fn readme() -> Artifact {
 /// file through this constructor. The driver loads it whenever present,
 /// regardless of provenance. See
 /// [the container customization contract](../../../docs/design/containers.md)
-/// for the runtime interface and its compatibility version.
+/// for the runtime interface.
 #[must_use]
 pub fn customize_shell(body: impl Into<String>) -> Artifact {
     Artifact::owned_file(CUSTOMIZE_SHELL_PATH, body)
@@ -157,9 +157,16 @@ mod tests {
     }
 
     fn run_image_id_command(repo: &Path, command: &str, args: &[&str]) -> String {
-        let output = Command::new(command)
-            .args(args)
-            .current_dir(repo)
+        run_image_id_command_with_base(repo, command, args, None)
+    }
+
+    fn run_image_id_command_with_base(repo: &Path, command: &str, args: &[&str], base_image: Option<&str>) -> String {
+        let mut command = Command::new(command);
+        command.args(args).current_dir(repo).env_remove("ANVIL_CONTAINER_BASE_IMAGE");
+        if let Some(base_image) = base_image {
+            command.env("ANVIL_CONTAINER_BASE_IMAGE", base_image);
+        }
+        let output = command
             .output()
             .expect("native shell must be available for the container image-id helper");
         assert!(
@@ -183,7 +190,10 @@ mod tests {
     fn write_image_id_fixture(root: &Path) {
         write(&root.join("rust-toolchain.toml"), "channel = \"1.93\"\n");
         write(&root.join("justfiles/anvil/versions.just"), "tool_version := \"1\"\n");
-        write(&root.join(CONTAINERFILE_PATH), "FROM example.invalid/base\n");
+        write(
+            &root.join(CONTAINERFILE_PATH),
+            "ARG BASE_IMAGE=example.invalid/base@sha256:0000000000000000000000000000000000000000000000000000000000000000\nFROM ${BASE_IMAGE}\n",
+        );
         write(&root.join(IMAGE_ID_PATH), IMAGE_ID);
         write(&root.join(SHELL_IMAGE_ID_PATH), SHELL_IMAGE_ID);
     }
@@ -261,6 +271,7 @@ mod tests {
         ] {
             assert!(driver.contains("docker"));
             assert!(driver.contains("ANVIL_CONTAINER_NO_REBUILD"));
+            assert!(driver.contains("ANVIL_CONTAINER_BASE_IMAGE"));
             assert!(driver.contains("ANVIL_CONTAINER_IMAGE"));
             assert!(driver.contains("ANVIL_IN_CONTAINER"));
             assert!(driver.contains("auth token --hostname github.com"));
@@ -399,32 +410,34 @@ mod tests {
     }
 
     #[test]
-    fn drivers_implement_the_versioned_customization_contract() {
+    fn drivers_implement_the_customization_contract() {
         assert!(SHELL_DRIVER.contains("customize.sh"));
         assert!(!SHELL_DRIVER.contains("auth.sh"));
+        assert!(!SHELL_DRIVER.contains("CUSTOMIZATION_API_VERSION"));
         assert!(POWERSHELL_DRIVER.contains("customize.ps1"));
         assert!(!POWERSHELL_DRIVER.contains("auth.ps1"));
+        assert!(!POWERSHELL_DRIVER.contains("CustomizationApiVersion"));
 
-        for (driver, api_version, image_exists, requested_recipes) in [
+        for (driver, image_exists, requested_recipes, needs_github_token) in [
             (
                 SHELL_DRIVER,
-                "ANVIL_CONTAINER_CUSTOMIZATION_API_VERSION=1",
                 "ANVIL_CONTAINER_IMAGE_EXISTS",
                 "ANVIL_CONTAINER_REQUESTED_RECIPES",
+                "ANVIL_CONTAINER_NEEDS_GITHUB_TOKEN",
             ),
             (
                 POWERSHELL_DRIVER,
-                "AnvilContainerCustomizationApiVersion -Value 1",
                 "AnvilContainerImageExists",
                 "AnvilContainerRequestedRecipes",
+                "AnvilContainerNeedsGitHubToken",
             ),
         ] {
-            assert!(driver.contains(api_version), "{api_version} must be present");
             assert!(driver.contains("ANVIL_CONTAINER_REPO_ROOT") || driver.contains("AnvilContainerRepoRoot"));
             assert!(driver.contains("ANVIL_CONTAINER_DIR") || driver.contains("AnvilContainerDir"));
             assert!(driver.contains("ANVIL_CONTAINER_RESOLVED_IMAGE") || driver.contains("AnvilContainerResolvedImage"));
             assert!(driver.contains(image_exists));
             assert!(driver.contains(requested_recipes));
+            assert!(driver.contains(needs_github_token));
 
             // The image-exists check must be resolved before the
             // customization file is sourced, so warm-run state is available
@@ -511,6 +524,18 @@ mod tests {
         write(&root.join(RECIPE_PATH), "execution-only recipe change\n");
         assert_eq!(base, run_image_id(root), "the container entry recipe must not affect the image ID");
 
+        let override_image = "example.invalid/bullseye@sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        #[cfg(windows)]
+        let overridden = run_image_id_command_with_base(
+            root,
+            "pwsh",
+            &["-NoProfile", "-File", "justfiles/anvil/container/image-id.ps1"],
+            Some(override_image),
+        );
+        #[cfg(unix)]
+        let overridden = run_image_id_command_with_base(root, "bash", &["justfiles/anvil/container/image-id.sh"], Some(override_image));
+        assert_ne!(base, overridden, "the selected base image must affect the image ID");
+
         write(
             &root.join("justfiles/anvil/container/nested/custom.just"),
             "nested-execution-only:\n    @echo nested\n",
@@ -518,7 +543,10 @@ mod tests {
         assert_eq!(base, run_image_id(root), "nested container recipes must not affect the image ID");
 
         // Static, hashed image content must still affect the image ID.
-        write(&root.join(CONTAINERFILE_PATH), "FROM example.invalid/different-base\n");
+        write(
+            &root.join(CONTAINERFILE_PATH),
+            "ARG BASE_IMAGE=example.invalid/base@sha256:0000000000000000000000000000000000000000000000000000000000000000\nFROM ${BASE_IMAGE}\nRUN echo changed\n",
+        );
         assert_ne!(
             base,
             run_image_id(root),

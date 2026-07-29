@@ -16,6 +16,7 @@ inner loop, but it cannot always reproduce:
 - Linux-specific behavior from a Windows host;
 - failures caused by differences between the host distribution and a pinned
   build environment;
+- Linux binaries that require a newer glibc than their deployment environment;
 - the exact Rust toolchain and Cargo tools selected by the generated catalog;
 - fast repeated container runs without reinstalling tools or rebuilding
   unchanged dependencies.
@@ -52,6 +53,9 @@ Run any generated Anvil recipe in the container:
 just anvil-container anvil-clippy
 just anvil-container anvil-pr
 ```
+
+Every positional argument is a recipe name and must match `anvil-*` or
+`_anvil-*`. Recipe parameters are not part of this command surface.
 
 With no recipe, the command opens an interactive shell:
 
@@ -137,6 +141,8 @@ The local image tag is a SHA-256 hash of build-relevant repository content:
 - generated `justfiles/anvil/**/*.just` recipes;
 - the `Containerfile`, `Containerfile.dockerignore`, entrypoint, and other
   static image inputs.
+- the selected digest-pinned base image from `ANVIL_CONTAINER_BASE_IMAGE`, or
+  the `Containerfile` default when the variable is absent.
 
 Execution-only drivers, image-ID helpers, the entry recipe, user
 documentation, and `customize.sh`/`customize.ps1` are excluded. Customization
@@ -155,6 +161,13 @@ available. Runtime execution uses `--pull=never` and never substitutes
 Container execution requires a `rust-toolchain.toml` in the repository root. It
 does not choose a default Rust channel when that file is absent.
 
+The public default is digest-pinned Debian Bookworm. A user or automation can
+select another image compatible with the generated Debian-based
+`Containerfile` through `ANVIL_CONTAINER_BASE_IMAGE`. This supports a lower
+glibc baseline such as Debian Bullseye without replacing the generated file.
+A distribution with a different package ecosystem requires a derived
+`Containerfile`. Unpinned tags are rejected.
+
 ## 6. Runtime and cache model
 
 Each invocation uses a short-lived container and persistent named volumes:
@@ -163,15 +176,16 @@ Each invocation uses a short-lived container and persistent named volumes:
 flowchart LR
     repo["Host repository"] -->|read/write bind mount| workspace["/workspace"]
     token["Temporary token file"] -.->|read-only when required| runtime["Anvil container"]
-    registry[("Shared Cargo registry volume")] --> cargo["Per-user Cargo home"]
-    git[("Shared Cargo Git volume")] --> cargo
+    registry[("Repository-scoped Cargo registry volume")] --> cargo["Per-user Cargo home"]
+    git[("Repository-scoped Cargo Git volume")] --> cargo
     target[("Repository- and image-specific target volume")] --> workspace
     workspace --> runtime
     cargo --> runtime
 ```
 
 - The repository is bind-mounted read/write at `/workspace`.
-- Cargo registry and Cargo Git data use named volumes shared across image IDs.
+- Cargo registry and Cargo Git data use repository-specific named volumes
+  shared across branches and image IDs of that repository.
 - `target/` uses a repository- and image-specific named volume mounted over
   `/workspace/target`. Container builds therefore do not use the host
   `target/`.
@@ -243,11 +257,10 @@ directly, or a derived distribution can add them through the artifact API in
 identically. These files are trusted host code, sourced with the developer's
 permissions outside the container sandbox.
 
-The version `1` interface provides these read-only inputs:
+The customization interface provides these read-only inputs:
 
 | Purpose | Bash | PowerShell | Type |
 |---|---|---|---|
-| API version | `ANVIL_CONTAINER_CUSTOMIZATION_API_VERSION` | `$AnvilContainerCustomizationApiVersion` | Integer |
 | Repository root | `ANVIL_CONTAINER_REPO_ROOT` | `$AnvilContainerRepoRoot` | Absolute path |
 | Container directory | `ANVIL_CONTAINER_DIR` | `$AnvilContainerDir` | Absolute path |
 | WSL repository root | Not applicable | `$AnvilContainerRepoRootWsl` | Absolute WSL path for Docker arguments |
@@ -265,6 +278,7 @@ The driver initializes and validates these outputs:
 | Preparation arguments | `ANVIL_CONTAINER_PREPARE_ARGS` | `$AnvilContainerPrepareArgs` | String array, empty |
 | Preparation command | `ANVIL_CONTAINER_PREPARE_COMMAND` | `$AnvilContainerPrepareCommand` | String array, empty |
 | Main runtime arguments | `ANVIL_CONTAINER_RUN_ARGS` | `$AnvilContainerRunArgs` | String array, empty |
+| Requested recipes include APRZ | `ANVIL_CONTAINER_NEEDS_GITHUB_TOKEN` | `$AnvilContainerNeedsGitHubToken` | Boolean, derived from public recipes; customization can elevate to true |
 | Cleanup callback | `ANVIL_CONTAINER_CLEANUP` | `$AnvilContainerCleanup` | Function name or script block, no-op |
 
 The driver checks image availability before sourcing customization, validates
@@ -284,6 +298,9 @@ invocation and run registered cleanup.
 - Customization that provisions GitHub authentication can assign a short-lived
   token to process `GITHUB_TOKEN`. Register cleanup immediately for any
   supporting files or external credentials.
+- A downstream catalog whose additional aggregate recipe invokes
+  `anvil-aprz` can set the APRZ-classification output to true. The driver then
+  performs the same isolated authenticated APRZ phase used by public tiers.
 - Cleanup runs after ordinary success, failure, or interactive-shell exit. It
   cannot run after forcible process termination or machine failure.
 
@@ -340,6 +357,7 @@ Runtime controls:
 
 | Variable | Effect |
 |---|---|
+| `ANVIL_CONTAINER_BASE_IMAGE` | Selects a compatible digest-pinned Linux base image; included in the image ID |
 | `ANVIL_CONTAINER_IMAGE` | Overrides the local image name; the content hash remains the tag |
 | `ANVIL_CONTAINER_NO_REBUILD=1` | Fails when the matching image is absent |
 | `ANVIL_RUNNER` | Selects `native` or `container` tier execution |
@@ -348,6 +366,13 @@ Runtime controls:
 The initial image build installs the complete pinned tool catalog and can take
 several minutes. Later runs with the same image ID reuse the image and target
 volume; Cargo registry and Git caches are reused across image IDs.
+
+Two concurrent cold invocations can both observe that an image is absent and
+build the same content-addressed tag. The local backend accepts this redundant
+work instead of introducing cross-platform lock ownership and stale-lock
+recovery. Both invocations use the same hashed static inputs and selected base
+image. Build secrets are intentionally excluded from identity and must provide
+equivalent authenticated access rather than select different image content.
 
 On ARM64 hosts, Docker emulates `linux/amd64`. The driver warns about this
 because image builds and checks can be substantially slower than on x86-64.
@@ -362,7 +387,28 @@ CI container jobs, remote image publication, registry consumption, and Windows
 containers are separate concerns and are not part of this local container
 support.
 
-## 11. Generated artifact reference
+## 11. Alternatives considered
+
+- **Native `just anvil-setup` only.** This remains the default and fastest
+  inner loop, but it cannot provide a pinned Linux distribution or glibc
+  baseline from Windows and other hosts.
+- **VS Code Dev Containers.** They provide a full editor environment, but
+  require a specific development workflow and do not provide a lightweight
+  command surface for terminals, agents, or existing editors.
+- **A plain `docker run -v` wrapper.** This is simpler initially, but leaves
+  image construction, tool installation, cache ownership, content identity,
+  GitHub-secret isolation, and downstream preparation to every repository.
+- **Published prebuilt images.** They improve cold-start time but introduce a
+  registry lifecycle, access policy, retention, and synchronization problem.
+  Local content-addressed builds keep the initial public feature independent
+  of registry infrastructure.
+- **One fixed deployment distribution.** A Debian-compatible lower-glibc base
+  can be selected through the base-image override. Azure Linux or another
+  package ecosystem uses a derived `Containerfile`. The public default remains
+  broadly available Debian rather than coupling the open-source catalog to one
+  internal deployment target.
+
+## 12. Generated artifact reference
 
 | Path | Purpose |
 |---|---|
@@ -382,7 +428,7 @@ support.
 The paths above are relative to `justfiles/anvil/`. The catalog also emits the
 user-owned `anvil-runner` region in the repository-root `Justfile`.
 
-## 12. References
+## 13. References
 
 - [Overall cargo-anvil design](./design.md)
 - [Local recipe design](./local.md)

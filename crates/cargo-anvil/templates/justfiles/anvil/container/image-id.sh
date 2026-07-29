@@ -13,6 +13,16 @@ if [[ ! -f "$toolchain_path" ]]; then
 fi
 
 container_dir="$repo_root/justfiles/anvil/container"
+default_base_image="$(sed -n 's/^ARG BASE_IMAGE=//p' "$container_dir/Containerfile" | head -n 1)"
+if [[ -z "$default_base_image" ]]; then
+    echo 'anvil-container: Containerfile must define ARG BASE_IMAGE=<digest-pinned-image>.' >&2
+    exit 1
+fi
+base_image="${ANVIL_CONTAINER_BASE_IMAGE:-$default_base_image}"
+if [[ ! "$base_image" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
+    echo 'anvil-container: ANVIL_CONTAINER_BASE_IMAGE must be pinned by sha256 digest (image@sha256:<64 hex characters>).' >&2
+    exit 1
+fi
 inputs=(rust-toolchain.toml)
 while IFS= read -r path; do
     inputs+=("${path#"$repo_root"/}")
@@ -59,15 +69,16 @@ write_normalized_file() {
     done 3<"$path"
 }
 
-while IFS= read -r relative; do
-    path="$repo_root/$relative"
-    if [[ ! -f "$path" ]]; then
-        echo "Container image input is missing: $relative" >&2
-        exit 1
-    fi
-    printf '%s\n' "$relative"
-    write_normalized_file "$path"
-    printf '\n'
-done < <(printf '%s\n' "${inputs[@]}" | LC_ALL=C sort -u) \
-    | "${hash_command[@]}" \
-    | awk '{print $1}'
+{
+    printf 'ANVIL_CONTAINER_BASE_IMAGE\n%s\n' "$base_image"
+    while IFS= read -r relative; do
+        path="$repo_root/$relative"
+        if [[ ! -f "$path" ]]; then
+            echo "Container image input is missing: $relative" >&2
+            exit 1
+        fi
+        printf '%s\n' "$relative"
+        write_normalized_file "$path"
+        printf '\n'
+    done < <(printf '%s\n' "${inputs[@]}" | LC_ALL=C sort -u)
+} | "${hash_command[@]}" | awk '{print $1}'

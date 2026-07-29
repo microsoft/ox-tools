@@ -159,3 +159,24 @@ fn in_container_forces_native_execution() {
         ["first", "second"]
     );
 }
+
+#[test]
+fn invalid_runner_value_fails_instead_of_falling_back_to_native() {
+    if !just_available() {
+        return;
+    }
+    let tmp = fixture();
+    let output = run(tmp.path(), &["default"], &[("ANVIL_RUNNER", "Container")]);
+
+    assert!(
+        !output.status.success(),
+        "invalid runner unexpectedly succeeded: stdout={}; stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("expected 'native' or 'container'"),
+        "invalid runner error must be actionable: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

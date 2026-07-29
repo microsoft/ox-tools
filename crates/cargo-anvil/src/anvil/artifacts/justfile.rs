@@ -79,6 +79,7 @@ fn runner_routes_tiers_and_guards_recursion() {
     assert!(RUNNER_JUST.contains("replace(runner, \"'\", \"''\")"));
     assert!(RUNNER_JUST.contains("& $just --justfile $justfile anvil-container $nativeTier"));
     assert!(RUNNER_JUST.contains("exec \"$just_path\" --justfile \"$justfile\" anvil-container \"$native_tier\""));
+    assert_eq!(RUNNER_JUST.matches("expected 'native' or 'container'").count(), 2);
 }
 
 #[test]

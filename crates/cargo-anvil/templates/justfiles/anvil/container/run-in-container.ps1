@@ -81,8 +81,10 @@ if ($env:ANVIL_IN_CONTAINER) {
     exit $LASTEXITCODE
 }
 
-if ($Recipe.Count -gt 0 -and $Recipe[0] -notmatch '^_?anvil-[A-Za-z0-9-]+$') {
-    throw "anvil-container: expected an anvil-* recipe, got '$($Recipe[0])'."
+foreach ($recipeArg in $Recipe) {
+    if ($recipeArg -notmatch '^_?anvil-[A-Za-z0-9-]+$') {
+        throw "anvil-container: expected each argument to be an anvil-* recipe, got '$recipeArg'."
+    }
 }
 
 if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) {
@@ -118,6 +120,16 @@ if ($LASTEXITCODE -ne 0 -or -not $wslRepoRoot) {
     throw 'anvil-container: could not translate the repository path into the default WSL distribution.'
 }
 $wslScriptDir = "$wslRepoRoot/justfiles/anvil/container"
+$containerfile = Join-Path $scriptDir 'Containerfile'
+$baseImageMatch = [regex]::Match([IO.File]::ReadAllText($containerfile), '(?m)^ARG BASE_IMAGE=([^\r\n]+)')
+if (-not $baseImageMatch.Success) {
+    throw 'anvil-container: Containerfile must define ARG BASE_IMAGE=<digest-pinned-image>.'
+}
+$defaultBaseImage = $baseImageMatch.Groups[1].Value
+$baseImage = if ($env:ANVIL_CONTAINER_BASE_IMAGE) { $env:ANVIL_CONTAINER_BASE_IMAGE } else { $defaultBaseImage }
+if ($baseImage -notmatch '@sha256:[0-9a-fA-F]{64}$') {
+    throw 'anvil-container: ANVIL_CONTAINER_BASE_IMAGE must be pinned by sha256 digest (image@sha256:<64 hex characters>).'
+}
 $imageId = (& (Join-Path $scriptDir 'image-id.ps1')).Trim()
 $imageBase = if ($env:ANVIL_CONTAINER_IMAGE) { $env:ANVIL_CONTAINER_IMAGE } else { 'anvil-dev' }
 $image = "${imageBase}:$imageId"
@@ -134,13 +146,12 @@ foreach ($recipeArg in $Recipe) {
 }
 $runsOnlyGitHubCheck = $Recipe.Count -eq 1 -and $Recipe[0] -eq 'anvil-aprz'
 
-# Versioned customization contract: check warm/cold state before sourcing so
+# Customization contract: check warm/cold state before sourcing so
 # customization needed only for image construction can be skipped on a warm
 # run, then expose read-only inputs. See docs/design/containers.md.
 $null = & wsl -e docker image inspect $image 2>$null
 $imageExists = $LASTEXITCODE -eq 0
 
-New-Variable -Name AnvilContainerCustomizationApiVersion -Value 1 -Option ReadOnly
 New-Variable -Name AnvilContainerRepoRoot -Value $repoRoot -Option ReadOnly
 New-Variable -Name AnvilContainerDir -Value $scriptDir -Option ReadOnly
 New-Variable -Name AnvilContainerRepoRootWsl -Value $wslRepoRoot -Option ReadOnly
@@ -156,6 +167,7 @@ $AnvilContainerBuildArgs = @()
 $AnvilContainerPrepareArgs = @()
 $AnvilContainerPrepareCommand = @()
 $AnvilContainerRunArgs = @()
+$AnvilContainerNeedsGitHubToken = $needsGitHubToken
 $AnvilContainerCleanup = $null
 $githubToken = $null
 $githubTokenFile = $null
@@ -172,6 +184,10 @@ try {
     Test-AnvilContainerStringArray 'AnvilContainerPrepareCommand' $AnvilContainerPrepareCommand
     Test-AnvilContainerStringArray 'AnvilContainerRunArgs' $AnvilContainerRunArgs
     Test-AnvilContainerBuildArgs $AnvilContainerBuildArgs
+    if ($AnvilContainerNeedsGitHubToken -isnot [bool]) {
+        throw 'anvil-container: $AnvilContainerNeedsGitHubToken must be a Boolean.'
+    }
+    $needsGitHubToken = $needsGitHubToken -or $AnvilContainerNeedsGitHubToken
     if ($AnvilContainerPrepareArgs.Count -gt 0 -and $AnvilContainerPrepareCommand.Count -eq 0) {
         throw 'anvil-container: $AnvilContainerPrepareArgs requires $AnvilContainerPrepareCommand.'
     }
@@ -202,6 +218,7 @@ try {
             --tag $image `
             --file "$wslScriptDir/Containerfile" `
             --build-arg "ANVIL_IMAGE_ID=$imageId" `
+            --build-arg "BASE_IMAGE=$baseImage" `
             @AnvilContainerBuildArgs `
             $wslRepoRoot
         if ($LASTEXITCODE -ne 0) {
@@ -214,8 +231,8 @@ try {
     if ($containerUid -notmatch '^\d+$' -or $containerGid -notmatch '^\d+$') {
         throw 'anvil-container: could not determine the default WSL user identity.'
     }
-    $registryVolume = 'anvil-cargo-registry'
-    $gitVolume = 'anvil-cargo-git'
+    $registryVolume = "anvil-cargo-registry-$($repoHash.Substring(0, 12))"
+    $gitVolume = "anvil-cargo-git-$($repoHash.Substring(0, 12))"
     foreach ($volume in @($registryVolume, $gitVolume, $targetVolume)) {
         $null = & wsl -e docker volume create $volume
         if ($LASTEXITCODE -ne 0) {

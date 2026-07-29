@@ -20,6 +20,16 @@ if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
     throw 'anvil-container requires a repository-owned rust-toolchain.toml.'
 }
 $containerPath = Join-Path $repoRoot 'justfiles/anvil/container'
+$containerfile = Join-Path $containerPath 'Containerfile'
+$baseImageMatch = [regex]::Match([IO.File]::ReadAllText($containerfile), '(?m)^ARG BASE_IMAGE=([^\r\n]+)')
+if (-not $baseImageMatch.Success) {
+    throw 'anvil-container: Containerfile must define ARG BASE_IMAGE=<digest-pinned-image>.'
+}
+$defaultBaseImage = $baseImageMatch.Groups[1].Value
+$baseImage = if ($env:ANVIL_CONTAINER_BASE_IMAGE) { $env:ANVIL_CONTAINER_BASE_IMAGE } else { $defaultBaseImage }
+if ($baseImage -notmatch '@sha256:[0-9a-fA-F]{64}$') {
+    throw 'anvil-container: ANVIL_CONTAINER_BASE_IMAGE must be pinned by sha256 digest (image@sha256:<64 hex characters>).'
+}
 $containerPrefix = $containerPath + [IO.Path]::DirectorySeparatorChar
 $pathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
 $inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File -Filter '*.just' |
@@ -49,6 +59,7 @@ $inputs = [string[]]$uniqueInputs
 [Array]::Sort($inputs, [StringComparer]::Ordinal)
 
 $payload = [Text.StringBuilder]::new()
+[void]$payload.Append("ANVIL_CONTAINER_BASE_IMAGE`n").Append($baseImage).Append("`n")
 foreach ($relative in $inputs) {
     $path = Join-Path $repoRoot $relative
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
