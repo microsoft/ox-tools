@@ -71,7 +71,7 @@ impl Plan {
     /// [`PackagesExpansion::Explicit`] becomes an explicit
     /// `--package name@version` list.
     ///
-    /// [`Selection::is_whole_workspace`]: crate::Selection::is_whole_workspace
+    /// [`Selection::is_whole_workspace`]: crate::select::Selection::is_whole_workspace
     ///
     /// # Errors
     ///

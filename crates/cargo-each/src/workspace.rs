@@ -44,7 +44,7 @@ pub(crate) struct Member {
     pub(crate) dependencies: BTreeSet<String>,
     /// The member's `package.metadata` block, as freeform JSON.
     ///
-    /// Crate-private: only the in-crate [`Predicate`](crate::Predicate)
+    /// Crate-private: only the in-crate [`Predicate`](crate::filter::Predicate)
     /// evaluation reads it, so it stays out of the public API surface (and
     /// keeps `serde_json` off the public boundary).
     pub(crate) metadata: Value,
