@@ -18,30 +18,30 @@ use crate::error::{EachError, LoadMetadataError};
 
 /// A resolved view of the cargo workspace `cargo-each` is operating on.
 #[derive(Debug, Clone)]
-pub struct Workspace {
+pub(crate) struct Workspace {
     /// One entry per workspace member, in alphabetical order by name.
-    pub members: Vec<Member>,
+    pub(crate) members: Vec<Member>,
     /// Names of the workspace's default members (cargo's `default-members`,
     /// or every member when unset). Used to resolve a selection that names
     /// no packages.
-    pub default_member_names: HashSet<String>,
+    pub(crate) default_member_names: HashSet<String>,
 }
 
 /// A single workspace member and the facts selection/filtering key on.
 #[derive(Debug, Clone)]
-pub struct Member {
+pub(crate) struct Member {
     /// Cargo package name (e.g. `cargo-anvil`).
-    pub name: String,
+    pub(crate) name: String,
     /// Package version, rendered (e.g. `0.3.0`).
-    pub version: String,
+    pub(crate) version: String,
     /// Absolute path to this member's `Cargo.toml`.
-    pub manifest_path: PathBuf,
+    pub(crate) manifest_path: PathBuf,
     /// Whether the member has a `lib` target.
-    pub has_lib: bool,
+    pub(crate) has_lib: bool,
     /// Whether the member has a `bin` target.
-    pub has_bin: bool,
+    pub(crate) has_bin: bool,
     /// Names of this member's declared dependencies (any kind).
-    pub dependencies: BTreeSet<String>,
+    pub(crate) dependencies: BTreeSet<String>,
     /// The member's `package.metadata` block, as freeform JSON.
     ///
     /// Crate-private: only the in-crate [`Predicate`](crate::Predicate)
@@ -53,7 +53,7 @@ pub struct Member {
 impl Member {
     /// The version-qualified cargo spec, `name@version`.
     #[must_use]
-    pub fn spec(&self) -> String {
+    pub(crate) fn spec(&self) -> String {
         format!("{}@{}", self.name, self.version)
     }
 
@@ -65,7 +65,7 @@ impl Member {
     /// path, which necessarily has a parent directory. The `expect` documents
     /// that invariant.
     #[must_use]
-    pub fn manifest_dir(&self) -> &Path {
+    pub(crate) fn manifest_dir(&self) -> &Path {
         self.manifest_path
             .parent()
             .expect("cargo-metadata always reports a manifest file path with a parent directory")
@@ -84,7 +84,7 @@ impl Workspace {
     /// Returns [`EachError`] when the workspace cannot be enumerated — for
     /// example a missing or invalid manifest.
     #[ohno::enrich_err("failed to load cargo workspace metadata")]
-    pub fn load(manifest_path: Option<&Path>) -> Result<Self, EachError> {
+    pub(crate) fn load(manifest_path: Option<&Path>) -> Result<Self, EachError> {
         let mut cmd = MetadataCommand::new();
         cmd.no_deps();
         if let Some(path) = manifest_path {

@@ -6,10 +6,13 @@
 
 use std::process::{Command, ExitCode};
 
-use cargo_each::{Mode, PackagesExpansion, Plan, Predicate, Selection, Workspace};
 use ohno::{AppError, IntoAppError};
 
 use crate::cli::EachArgs;
+use crate::filter::Predicate;
+use crate::plan::{Mode, PackagesExpansion, Plan};
+use crate::select::Selection;
+use crate::workspace::{Member, Workspace};
 
 pub(crate) fn run(args: &EachArgs) -> Result<ExitCode, AppError> {
     let selection = build_selection(args);
@@ -69,7 +72,7 @@ fn build_selection(args: &EachArgs) -> Selection {
 /// inclusion, so a member matching both a keep and a drop predicate is
 /// dropped. This is the natural set pairing: keep is an intersection, drop is
 /// a union.
-fn apply_filters(members: &mut Vec<&cargo_each::Member>, args: &EachArgs) -> Result<(), AppError> {
+fn apply_filters(members: &mut Vec<&Member>, args: &EachArgs) -> Result<(), AppError> {
     let keep = parse_predicates(&args.filters)?;
     let drop = parse_predicates(&args.exclude_filters)?;
     members.retain(|m| keep.iter().all(|p| p.matches(m)) && !drop.iter().any(|p| p.matches(m)));

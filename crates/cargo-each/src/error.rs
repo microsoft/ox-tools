@@ -36,7 +36,7 @@
     PlaceholderMisuseError,
     ChdirRequiresPerPackageError
 )]
-pub struct EachError;
+pub(crate) struct EachError;
 
 /// Failed to invoke `cargo metadata` to enumerate workspace members.
 #[ohno::error]
@@ -49,15 +49,15 @@ pub(crate) struct LoadMetadataError;
 #[ohno::error]
 #[display("package selector `{selector}` did not match any workspace member")]
 pub(crate) struct UnknownSelectorError {
-    pub selector: String,
+    pub(crate) selector: String,
 }
 
 /// A `--filter` / `--exclude-filter` predicate could not be parsed.
 #[ohno::error]
 #[display("invalid filter predicate `{predicate}`: {reason}")]
 pub(crate) struct InvalidPredicateError {
-    pub predicate: String,
-    pub reason: String,
+    pub(crate) predicate: String,
+    pub(crate) reason: String,
 }
 
 /// A placeholder token was used in a mode that does not support it (e.g.
@@ -66,8 +66,8 @@ pub(crate) struct InvalidPredicateError {
 #[ohno::error]
 #[display("placeholder `{token}` cannot be used here: {reason}")]
 pub(crate) struct PlaceholderMisuseError {
-    pub token: String,
-    pub reason: String,
+    pub(crate) token: String,
+    pub(crate) reason: String,
 }
 
 /// `--chdir` was combined with `--once`. Changing into a member's crate root

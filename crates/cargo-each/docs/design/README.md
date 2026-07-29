@@ -78,6 +78,12 @@ substitution) or exactly once for the whole set.
   ever wanted, is a later, additive concern.
 - **A general templating engine.** Placeholder substitution is a fixed, small set
   of `{token}` replacements, not an expression language.
+- **A public library API.** `cargo-each` ships as an executable only. Its
+  modules are crate-internal (`pub(crate)`), so there is no semver-committed
+  library surface, no `check-external-types` obligation, and nothing to consume
+  as a dependency — the executable is published to crates.io, the internals are
+  not. The logic lives in ordinary crate modules (unit-tested in place) behind a
+  thin `main`, not in a reusable library.
 
 ## 3a. Prior art
 

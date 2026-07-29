@@ -20,7 +20,7 @@ use crate::workspace::Member;
 
 /// A parsed filter predicate.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Predicate {
+pub(crate) enum Predicate {
     /// `lib`: member has a `lib` target.
     HasLib,
     /// `bin`: member has a `bin` target.
@@ -46,7 +46,7 @@ impl Predicate {
     /// Returns [`EachError`] if `spec` is not one of the recognized predicate
     /// forms (`lib`, `bin`, `dep:<name>`, `metadata:<key>[=<value>]`) or has an
     /// empty dependency name / metadata key.
-    pub fn parse(spec: &str) -> Result<Self, EachError> {
+    pub(crate) fn parse(spec: &str) -> Result<Self, EachError> {
         match spec {
             "lib" => Ok(Self::HasLib),
             "bin" => Ok(Self::HasBin),
@@ -67,7 +67,7 @@ impl Predicate {
 
     /// Evaluate this predicate against a workspace member.
     #[must_use]
-    pub fn matches(&self, member: &Member) -> bool {
+    pub(crate) fn matches(&self, member: &Member) -> bool {
         match self {
             Self::HasLib => member.has_lib,
             Self::HasBin => member.has_bin,

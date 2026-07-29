@@ -16,18 +16,10 @@ license.workspace = true
 homepage.workspace = true
 repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-each"
 
-[package.metadata.docs.rs]
-all-features = true
-
-[package.metadata.cargo_check_external_types]
-# The `#[ohno::error]` attribute on `EachError` implements traits in
-# `ohno` that transitively appear in the public API. Allow the whole
-# `ohno` namespace rather than tracking individual re-exposed items.
-allowed_external_types = ["ohno::*"]
-
-[[bin]]
-name = "cargo-each"
-path = "src/bin/cargo-each/main.rs"
+[package.metadata.ox-gen-readme]
+# Binary-only crate: no library rustdoc to generate a README from, so the
+# README is hand-maintained rather than produced by cargo-doc2readme.
+disable = true
 
 [dependencies]
 cargo_metadata = { workspace = true }

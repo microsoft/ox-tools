@@ -27,15 +27,15 @@ use crate::workspace::{Member, Workspace};
 /// (e.g. an impact tier) passes it as ordinary `-p` / `--workspace` / `--none`
 /// flags via shell expansion.
 #[derive(Debug, Default, Clone)]
-pub struct Selection {
+pub(crate) struct Selection {
     /// `-p` / `--package` selectors (name, `name@version`, or glob).
-    pub packages: Vec<String>,
+    pub(crate) packages: Vec<String>,
     /// `--workspace` / `--all`: select every member.
-    pub all: bool,
+    pub(crate) all: bool,
     /// `--exclude` selectors (only meaningful with `all`).
-    pub exclude: Vec<String>,
+    pub(crate) exclude: Vec<String>,
     /// `--none`: explicitly resolve to the empty set.
-    pub none: bool,
+    pub(crate) none: bool,
 }
 
 impl Selection {
@@ -50,7 +50,7 @@ impl Selection {
     /// workspace (matching `cargo build`, where `--workspace` wins over `-p`),
     /// so the resolved set is still the whole workspace.
     #[must_use]
-    pub fn is_whole_workspace(&self) -> bool {
+    pub(crate) fn is_whole_workspace(&self) -> bool {
         self.all && self.exclude.is_empty() && !self.none
     }
 
@@ -64,7 +64,7 @@ impl Selection {
     ///
     /// Returns [`EachError`] if any `-p` / `--exclude` selector matches no
     /// workspace member.
-    pub fn resolve<'w>(&self, workspace: &'w Workspace) -> Result<Vec<&'w Member>, EachError> {
+    pub(crate) fn resolve<'w>(&self, workspace: &'w Workspace) -> Result<Vec<&'w Member>, EachError> {
         if self.none {
             return Ok(Vec::new());
         }

@@ -12,7 +12,7 @@ use crate::workspace::Member;
 
 /// How the command is run over the selected set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
+pub(crate) enum Mode {
     /// Run the command once per selected member (default).
     PerPackage,
     /// Run the command exactly once for the whole set (`--once`).
@@ -25,7 +25,7 @@ pub enum Mode {
 /// its intent by name and it cannot be transposed with the adjacent `chdir`
 /// flag at the call site.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PackagesExpansion {
+pub(crate) enum PackagesExpansion {
     /// The resolved set is the whole workspace with no narrowing: expand to a
     /// bare `--workspace`.
     Workspace,
@@ -36,16 +36,16 @@ pub enum PackagesExpansion {
 
 /// One fully-resolved command invocation.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Invocation {
+pub(crate) struct Invocation {
     /// A short label for progress output.
     ///
     /// The member name in per-package mode; `None` in once mode.
-    pub label: Option<String>,
+    pub(crate) label: Option<String>,
     /// The program and arguments to spawn, placeholders already expanded.
-    pub argv: Vec<String>,
+    pub(crate) argv: Vec<String>,
     /// The working directory to run in, when `--chdir` is set (the member's
     /// crate root). `None` runs in the caller's current directory.
-    pub work_dir: Option<PathBuf>,
+    pub(crate) work_dir: Option<PathBuf>,
 }
 
 /// The resolved list of invocations `cargo-each` will run.
@@ -53,9 +53,9 @@ pub struct Invocation {
 /// An empty [`Plan::invocations`] means the selection resolved to nothing:
 /// the caller treats that as a successful no-op (exit 0).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Plan {
+pub(crate) struct Plan {
     /// The invocations, in run order.
-    pub invocations: Vec<Invocation>,
+    pub(crate) invocations: Vec<Invocation>,
 }
 
 impl Plan {
@@ -77,7 +77,13 @@ impl Plan {
     ///
     /// Returns [`EachError`] if `chdir` is combined with [`Mode::Once`], or if
     /// a placeholder in `command` is used in the wrong mode.
-    pub fn build(members: &[&Member], mode: Mode, chdir: bool, packages: PackagesExpansion, command: &[String]) -> Result<Self, EachError> {
+    pub(crate) fn build(
+        members: &[&Member],
+        mode: Mode,
+        chdir: bool,
+        packages: PackagesExpansion,
+        command: &[String],
+    ) -> Result<Self, EachError> {
         if chdir && mode == Mode::Once {
             return Err(ChdirRequiresPerPackageError::new().into());
         }

@@ -23,6 +23,15 @@ member (with placeholder substitution) or exactly once for the whole set.
 It exists to replace hand-rolled for-each-package shell loops with a
 single cargo-native, cross-platform command.
 
+`cargo-each` ships as an executable only; it is a cargo subcommand, not a
+library dependency.
+
+## Installation
+
+```text
+cargo install cargo-each
+```
+
 ## Usage
 
 ```text
@@ -115,31 +124,8 @@ cargo each -p crate-a -p crate-b --once -- \
     cargo clippy {packages} --all-targets -- -D warnings
 ```
 
-## Library
-
-The binary (`src/bin/cargo-each`) is a thin shell over this library, which
-owns the reusable, testable spine. The library is **consumed as tooling**
-(build a plan, run it), not as a `match`-on-error API: [`EachError`][__link0] is an
-intentionally opaque application-style umbrella (see its module docs), and
-only the types the binary drives are public — placeholder expansion is an
-internal detail of [`Plan`][__link1].
-
-* [`Workspace`][__link2] / [`Member`][__link3] — `cargo metadata` discovery.
-* [`Selection`][__link4] — parse selectors and resolve them against a workspace.
-* [`Predicate`][__link5] — the `--filter` / `--exclude-filter` metadata language.
-* [`Plan`][__link6] — the resolved list of command invocations to run.
-
-
 <hr/>
 <sub>
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-each">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG-pkH42zvcT4G1mZ1f4k_fV6GzESfPX2RQymGzc4ZkMC_QvjYWSBg2pjYXJnby1lYWNoZTAuMS4wamNhcmdvX2VhY2g
- [__link0]: https://docs.rs/cargo-each/0.1.0/cargo_each/?search=EachError
- [__link1]: https://docs.rs/cargo-each/0.1.0/cargo_each/?search=Plan
- [__link2]: https://docs.rs/cargo-each/0.1.0/cargo_each/?search=Workspace
- [__link3]: https://docs.rs/cargo-each/0.1.0/cargo_each/?search=Member
- [__link4]: https://docs.rs/cargo-each/0.1.0/cargo_each/?search=Selection
- [__link5]: https://docs.rs/cargo-each/0.1.0/cargo_each/?search=Predicate
- [__link6]: https://docs.rs/cargo-each/0.1.0/cargo_each/?search=Plan

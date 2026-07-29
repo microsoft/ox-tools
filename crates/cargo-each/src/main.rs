@@ -11,6 +11,10 @@
 //! It exists to replace hand-rolled for-each-package shell loops with a
 //! single cargo-native, cross-platform command.
 //!
+//! This crate ships **only** the `cargo-each` executable; it exposes no
+//! library API (every module below is crate-internal). Consume it as a cargo
+//! subcommand, not as a dependency.
+//!
 //! # Usage
 //!
 //! ```text
@@ -103,32 +107,34 @@
 //! cargo each -p crate-a -p crate-b --once -- \
 //!     cargo clippy {packages} --all-targets -- -D warnings
 //! ```
-//!
-//! # Library
-//!
-//! The binary (`src/bin/cargo-each`) is a thin shell over this library, which
-//! owns the reusable, testable spine. The library is **consumed as tooling**
-//! (build a plan, run it), not as a `match`-on-error API: [`EachError`] is an
-//! intentionally opaque application-style umbrella (see its module docs), and
-//! only the types the binary drives are public — placeholder expansion is an
-//! internal detail of [`Plan`].
-//!
-//! - [`Workspace`] / [`Member`] — `cargo metadata` discovery.
-//! - [`Selection`] — parse selectors and resolve them against a workspace.
-//! - [`Predicate`] — the `--filter` / `--exclude-filter` metadata language.
-//! - [`Plan`] — the resolved list of command invocations to run.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
+mod cli;
 mod error;
 mod filter;
 mod plan;
+mod run;
 mod select;
 mod substitute;
 mod workspace;
 
-pub use error::EachError;
-pub use filter::Predicate;
-pub use plan::{Invocation, Mode, PackagesExpansion, Plan};
-pub use select::Selection;
-pub use workspace::{Member, Workspace};
+use std::process::ExitCode;
+
+use clap::Parser;
+
+use crate::cli::CargoCli;
+
+fn main() -> ExitCode {
+    let CargoCli::Each(args) = CargoCli::parse();
+    match run::run(&args) {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("error: {err}");
+            // Library-side failures are usage / configuration errors from
+            // cargo-each's point of view; map them all to exit 2. A command
+            // that ran but failed returns its own code via `Ok`.
+            ExitCode::from(2)
+        }
+    }
+}
