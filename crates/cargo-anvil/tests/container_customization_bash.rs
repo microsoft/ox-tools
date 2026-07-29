@@ -25,6 +25,7 @@
 //! `anvil-clippy` is used throughout so the GitHub-token path (which would
 //! also require a fake `gh`) is never exercised.
 
+use std::collections::BTreeSet;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
@@ -155,6 +156,14 @@ fn assert_token_files_removed(run: &DriverRun) {
     }
 }
 
+fn created_volumes(docker_log: &str) -> BTreeSet<String> {
+    docker_log
+        .lines()
+        .filter_map(|line| line.strip_prefix("volume create "))
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Runs the real generated `run-in-container.sh` against the fake `docker`,
 /// with `customize.sh` written from `customize_sh_body` beforehand.
 fn run_driver(root: &Path, customize_sh_body: &str, recipe: &str, env: &[(&str, &str)]) -> DriverRun {
@@ -170,6 +179,8 @@ fn run_driver_args(root: &Path, customize_sh_body: &str, recipe_args: &[&str], e
 
     let docker_log = root.join("docker.log");
     let test_log = root.join("test.log");
+    let _ = std::fs::remove_file(&docker_log);
+    let _ = std::fs::remove_file(&test_log);
     let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default());
 
     let mut command = Command::new("bash");
@@ -454,6 +465,45 @@ ANVIL_CONTAINER_CLEANUP=anvil_test_cleanup
         run.test_log.contains("cleanup-ran"),
         "cleanup must run after an ordinary successful invocation: {}",
         run.test_log
+    );
+}
+
+#[test]
+fn cargo_caches_are_repository_scoped_but_stable_across_image_ids() {
+    let first = repo_with_container();
+    let second = repo_with_container();
+    let first_run = run_driver(first.path(), "", "anvil-clippy", &[("FAKE_DOCKER_IMAGE_EXISTS", "1")]);
+    let second_run = run_driver(second.path(), "", "anvil-clippy", &[("FAKE_DOCKER_IMAGE_EXISTS", "1")]);
+
+    let first_volumes = created_volumes(&first_run.docker_log);
+    let second_volumes = created_volumes(&second_run.docker_log);
+    let first_registry = first_volumes
+        .iter()
+        .find(|name| name.starts_with("anvil-cargo-registry-"))
+        .expect("first repository must create a registry cache");
+    let second_registry = second_volumes
+        .iter()
+        .find(|name| name.starts_with("anvil-cargo-registry-"))
+        .expect("second repository must create a registry cache");
+    let first_git = first_volumes
+        .iter()
+        .find(|name| name.starts_with("anvil-cargo-git-"))
+        .expect("first repository must create a Git cache");
+    let second_git = second_volumes
+        .iter()
+        .find(|name| name.starts_with("anvil-cargo-git-"))
+        .expect("second repository must create a Git cache");
+    assert_ne!(first_registry, second_registry);
+    assert_ne!(first_git, second_git);
+
+    write(&first.path().join("justfiles/anvil/versions.just"), "changed := \"1\"\n");
+    let changed_run = run_driver(first.path(), "", "anvil-clippy", &[("FAKE_DOCKER_IMAGE_EXISTS", "1")]);
+    let changed_volumes = created_volumes(&changed_run.docker_log);
+    assert!(changed_volumes.contains(first_registry));
+    assert!(changed_volumes.contains(first_git));
+    assert_ne!(
+        first_volumes.iter().find(|name| name.starts_with("anvil-target-")),
+        changed_volumes.iter().find(|name| name.starts_with("anvil-target-"))
     );
 }
 
