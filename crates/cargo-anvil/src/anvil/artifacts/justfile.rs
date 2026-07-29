@@ -247,7 +247,7 @@ mod tests {
             "anvil-readme-check: cargo metadata failed",
             "running tests without coverage for opted-out packages",
             "all affected packages opted out of coverage",
-            "could not query the executed cargo-careful version",
+            "could not resolve the cargo-careful executable",
             "anvil-mutants-full: aarch64-pc-windows-msvc",
             "cargo-semver-checks exit 101",
             "unexpected cargo-semver-checks exit code",

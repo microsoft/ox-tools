@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.3.0"
-catalog_checksum = "sha256:f0c8dc3827daa09b50f1c564c85ded195a8b34130abb99b6c6dfcbdd700c4adf"
+catalog_checksum = "sha256:682aa31c6de0538f48c997b163cc2a9e0d760d11662fc437cd3996d9219d3e5c"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"
@@ -77,7 +77,7 @@ checksum = "sha256:d4864c1746fa49ac13789bc75d4da5c0bcadc9be9a416c8b51fd9150ec7b9
 
 [[file]]
 path = "justfiles/anvil/checks/careful.just"
-checksum = "sha256:0e8a1010d2ee83d5a5eadf916e643a5773f41a281f5413dffb79f4d6fce18c11"
+checksum = "sha256:e72b6fd3aa8f08587dbfd5a38986a2916d89f2bea5543faaae60ce9af61a3b24"
 
 [[file]]
 path = "justfiles/anvil/checks/cargo-hack.just"
