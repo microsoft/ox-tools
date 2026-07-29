@@ -79,6 +79,34 @@ substitution) or exactly once for the whole set.
 - **A general templating engine.** Placeholder substitution is a fixed, small set
   of `{token}` replacements, not an expression language.
 
+## 3a. Prior art: why not `cargo-workspaces exec`?
+
+[`cargo-workspaces`](https://crates.io/crates/cargo-workspaces) offers
+`cargo workspaces exec <cmd>`, which runs a command in each crate directory
+(with `--ignore-private` / `--no-bail`). It overlaps the *per-package
+iteration* chore but not the parts that motivate `cargo-each`:
+
+- **No cargo-native selection.** `exec` runs over *every* member; it does not
+  accept `cargo build`'s selectors (`-p`/`--package` with globs and
+  `@version`, `--workspace`, `--exclude`, `default-members`). The whole point
+  here is to consume the impact step's `--package name@version …` output
+  verbatim — so callers never re-parse or re-filter it.
+- **No metadata filter language.** There is no `--filter lib` / `dep:<name>` /
+  `metadata:<key>[=<value>]`, which is exactly the bespoke `cargo metadata`
+  filtering (§1 chore 3) `cargo-each` collapses into one flag.
+- **No selection-aware injection.** There is no `{packages}` once-mode token
+  that expands to a single `--workspace` (or an explicit `--package` list) for
+  workspace-wide tools, and no `{name}`/`{spec}`/`{manifest}` substitution — so
+  the `@version`-stripping chore (§1 chore 2) would remain.
+- **No empty-set-as-success contract.** `cargo-each` treats a resolved-empty
+  selection as an exit-0 no-op, which is what lets CI recipes drop their
+  `--skip`/default preamble (§1 chore 1).
+
+In short, `exec` covers "run this in each crate dir"; `cargo-each` covers
+"resolve a cargo-style, metadata-filtered selection (possibly empty) and run a
+command over it, once-per-member or once for the set." The extra
+`cargo-workspaces` dependency would not remove chores 1–3.
+
 ## 4. CLI surface
 
 ```
