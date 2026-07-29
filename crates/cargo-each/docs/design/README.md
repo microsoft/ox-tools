@@ -79,7 +79,13 @@ substitution) or exactly once for the whole set.
 - **A general templating engine.** Placeholder substitution is a fixed, small set
   of `{token}` replacements, not an expression language.
 
-## 3a. Prior art: why not `cargo-workspaces exec`?
+## 3a. Prior art
+
+Two existing tools overlap the "iterate workspace members" surface. Neither
+covers the selection + metadata-filter + arbitrary-command spine `cargo-each`
+needs, so this section records why.
+
+### `cargo-workspaces exec`
 
 [`cargo-workspaces`](https://crates.io/crates/cargo-workspaces) offers
 `cargo workspaces exec <cmd>`, which runs a command in each crate directory
@@ -106,6 +112,37 @@ In short, `exec` covers "run this in each crate dir"; `cargo-each` covers
 "resolve a cargo-style, metadata-filtered selection (possibly empty) and run a
 command over it, once-per-member or once for the set." The extra
 `cargo-workspaces` dependency would not remove chores 1–3.
+
+### `cargo-hack`
+
+[`cargo-hack`](https://crates.io/crates/cargo-hack) runs a **cargo
+subcommand** across a workspace, and *does* share package selectors
+(`-p`/`--package`, `--workspace`, `--exclude`, `--ignore-private`). Its reason
+for being, though, is **feature-flag and version-range combinatorics** —
+`--each-feature`, `--feature-powerset`, `--version-range`/`--rust-version` — a
+matrix explosion `cargo-each` explicitly leaves out (§4 has no feature axis).
+The gaps that matter for the ox-tools recipes:
+
+- **Runs cargo subcommands only.** `cargo hack <sub>` forwards to `cargo`;
+  it cannot spawn an arbitrary program. The per-manifest tools these recipes
+  drive — `check-external-types --manifest-path {manifest}`,
+  `cargo-doc2readme`, per-crate scripts — are not `-p`-aware cargo subcommands,
+  so `cargo-hack` cannot run them one-per-crate. `cargo-each` spawns any argv.
+- **No `{manifest}`/`{name}`/`{spec}` substitution.** With no way to inject a
+  member's manifest path or bare name into the command line, the tools above
+  (which take `--manifest-path`, not `--package`) can't be targeted per crate.
+- **No metadata filter language.** Selection is package + feature based; there
+  is no `--filter lib`/`dep:<name>`/`metadata:<key>[=<value>]` over
+  `package.metadata` (§1 chore 3).
+- **No `{packages}` once-mode / empty-set no-op.** No single-invocation mode
+  that injects the resolved selection into one workspace-wide command, and no
+  resolved-empty → exit-0 contract for the CI skip/default dance (§1 chores 1–2).
+
+So `cargo-hack` is the tool for "run a cargo subcommand across every
+feature/version combination"; `cargo-each` is the tool for "run an *arbitrary*
+command over a metadata-filtered cargo selection, with per-member
+substitution." The overlap is package iteration; the feature axis and the
+arbitrary-command + metadata-filter spine do not overlap.
 
 ## 4. CLI surface
 
