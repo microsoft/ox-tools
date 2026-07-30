@@ -93,6 +93,121 @@
 //! and run each check only over the affected packages, whereas a local
 //! `just anvil-pr` runs every check over the whole workspace.
 //!
+//! ## Containerized local checks
+//!
+//! Anvil can run any generated recipe in a content-addressed Linux container.
+//! The image installs the Rust toolchains and Cargo tools pinned by the
+//! repository's generated Anvil configuration, providing a repeatable Linux
+//! environment without installing those tools directly on the host.
+//!
+//! ### Prerequisites
+//!
+//! - Docker Engine 23.0 or newer, installed directly in Linux or WSL and
+//!   usable by the current user.
+//! - `git` and `just` on the host.
+//! - Bash on Linux and WSL; `PowerShell` Core (`pwsh`) and WSL 2 on Windows.
+//! - `[script]` support enabled in the root `Justfile` (`set unstable` when
+//!   required by the installed `just` version).
+//! - A repository-owned `rust-toolchain.toml`.
+//! - On Windows, Docker Engine running in the default WSL distribution:
+//!
+//! ```powershell
+//! wsl -e docker version
+//! ```
+//!
+//! The Windows driver invokes Docker in the default WSL distribution and does
+//! not call Windows `docker.exe`. Regardless of the installation, the command
+//! above must succeed. Docker Desktop is not required.
+//!
+//! On ARM64 hosts, Docker emulates the required `linux/amd64` environment, so
+//! image builds and checks can be substantially slower than on x86-64 hosts.
+//!
+//! ### Run a recipe
+//!
+//! ```text
+//! just anvil-container anvil-clippy
+//! just anvil-container anvil-pr
+//! just anvil-container
+//! ```
+//!
+//! The no-argument form opens an interactive shell. Anvil builds an image the
+//! first time it encounters a content hash and reuses it on later runs. Changes
+//! to the Rust toolchain, generated Anvil files, Containerfile, or other static
+//! image inputs select a new tag and build a new image. Images for earlier
+//! hashes remain available to older branches. Runtime `customize.*` files do not
+//! affect image identity.
+//! Every argument is a recipe name; recipe parameters are not supported by
+//! this command surface.
+//!
+//! Cargo registry and Cargo Git caches use repository-scoped named volumes;
+//! `target/` is additionally scoped by image ID. The
+//! repository is mounted at `/workspace`; keeping build output in a named
+//! volume avoids slow host bind-mount I/O, particularly on Windows.
+//!
+//! ### Make tiers use the container
+//!
+//! Native execution remains the default. Enable container execution for the
+//! current shell:
+//!
+//! ```powershell
+//! $env:ANVIL_RUNNER = "container"
+//! just anvil-pr
+//! ```
+//!
+//! On Unix:
+//!
+//! ```sh
+//! ANVIL_RUNNER=container just anvil-pr
+//! ```
+//!
+//! A one-off override is also supported:
+//!
+//! ```text
+//! just anvil_runner=container anvil-pr
+//! ```
+//!
+//! To make containers the project default, edit `<repository-root>/Justfile`
+//! and change the default value in the `anvil-runner` region from `"native"`
+//! to `"container"`. Commit `<repository-root>/Justfile` with that policy
+//! change. Set `ANVIL_RUNNER=native` to override it for one shell.
+//!
+//! ### Controls
+//!
+//! | Variable | Effect |
+//! |---|---|
+//! | `ANVIL_CONTAINER_BASE_IMAGE` | Select a compatible digest-pinned Linux base image; the value is included in the content hash. |
+//! | `ANVIL_CONTAINER_IMAGE` | Override the local image name. The content hash remains the tag. |
+//! | `ANVIL_CONTAINER_NO_REBUILD=1` | Fail when the matching image is missing instead of building it. |
+//!
+//! The public driver never pulls `ANVIL_CONTAINER_IMAGE` remotely. Repositories
+//! and derived catalogs can add trusted `customize.sh` and
+//! `customize.ps1` files for image-build secrets, dependency preparation,
+//! APRZ classification, runtime arguments, and cleanup through the documented
+//! customization contract without changing the public command surface.
+//!
+//! Customization files execute on the host with the developer's permissions
+//! before container isolation. Only run them from a repository or catalog you
+//! trust.
+//!
+//! For GitHub API checks, the driver automatically uses an existing host
+//! `GITHUB_TOKEN` or the token from an authenticated host `gh` CLI session. It
+//! mounts the token read-only for the command and removes the temporary file
+//! afterward. If `gh` is installed but not authenticated, an interactive run
+//! pauses before building the image, explains the unauthenticated API limit,
+//! and continues after the user completes `gh auth login` and presses Enter.
+//!
+//! ### Troubleshooting
+//!
+//! - A first-run image build is expected and may take several minutes.
+//! - `wsl -e docker images anvil-dev` lists locally cached Anvil images from
+//!   Windows; use `docker images anvil-dev` inside Linux or WSL.
+//! - `ANVIL_CONTAINER_NO_REBUILD=1` distinguishes a cache miss from a build
+//!   failure.
+//! - Non-interactive runs cannot pause for login. Authenticate `gh` or set host
+//!   `GITHUB_TOKEN` before starting them.
+//! - Regenerate managed files with `cargo anvil`; do not hand-edit
+//!   `justfiles/anvil/container/`.
+//!
 //! ## Checks and tiers
 //!
 //! Checks are grouped into **tiers** (`anvil-pr`, `anvil-scheduled`) that
