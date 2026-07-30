@@ -653,6 +653,19 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn missing_customized_container_recipe_defers_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let mut plan = Plan::default();
+        plan.push(PlanItem::propose_file(
+            "justfiles/anvil/container/container.just",
+            "updated recipe\n".to_owned(),
+            "sha256:updated".to_owned(),
+        ));
+
+        assert!(legacy_container_asset_prefixes_to_defer(tmp.path(), &plan).unwrap().is_empty());
+    }
+
     fn local_only() -> Cli {
         Cli {
             backends: vec![],
