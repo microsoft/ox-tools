@@ -229,7 +229,7 @@ fn recompose_region_proposals(repo_root: &Path, plan: &mut Plan, hosts: &mut Hos
         };
         // Build the fully-updated host = final live host with every proposed
         // region's new body spliced in. CommentSyntax is currently always
-        // Hash for managed regions (mirrors plan_managed_region /
+        // Hash for managed regions (mirrors plan_managed_region_with_placement /
         // plan_removals); revisit when the manifest records per-region syntax.
         for (_, id, body) in entries {
             let placement = if id == "anvil-delta" {
