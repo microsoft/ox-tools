@@ -206,11 +206,6 @@ supported host:
 .anvil/container/customize.ps1
 ```
 
-If upgrading from an older generated layout, move any repository-owned
-`customize.sh` or `customize.ps1` file from `justfiles/anvil/container/` or
-`anvil/container/` to the path above. The driver rejects legacy locations
-instead of silently ignoring the customization.
-
 The driver sources the matching file as trusted host code before authentication,
 image construction, and recipe execution. The documented customization
 contract provides inputs and validated outputs for APRZ classification, build

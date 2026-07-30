@@ -210,24 +210,6 @@ fn run_driver_args(root: &Path, customize_sh_body: &str, recipe_args: &[&str], e
 }
 
 #[test]
-fn legacy_customization_path_is_rejected() {
-    for legacy_path in ["justfiles/anvil/container/customize.sh", "anvil/container/customize.sh"] {
-        let tmp = repo_with_container();
-        write(&tmp.path().join(legacy_path), "# legacy customization\n");
-
-        let run = run_driver(tmp.path(), "# current customization\n", "anvil-clippy", &[]);
-
-        assert!(!run.status.success());
-        assert!(
-            run.stderr
-                .contains(&format!("legacy customization at {legacy_path} is unsupported")),
-            "{}",
-            run.stderr
-        );
-    }
-}
-
-#[test]
 fn every_requested_recipe_is_checked_for_github_authentication() {
     let tmp = repo_with_container();
     let run = run_driver_args(

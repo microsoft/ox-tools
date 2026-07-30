@@ -247,11 +247,6 @@ construction, dependency preparation, runtime arguments, and cleanup through:
 .anvil/container/customize.ps1
 ```
 
-Repositories upgrading from a previous layout must move any customization file
-from `justfiles/anvil/container/` or `anvil/container/` to the corresponding
-path above. The drivers reject legacy locations so customization cannot be
-silently skipped.
-
 > [!WARNING]
 > These files execute on the host with the developer's permissions before
 > container isolation. Checking out a branch that adds or changes one of them

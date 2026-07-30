@@ -136,16 +136,6 @@ cleanup() {
 trap cleanup EXIT
 
 customize_script="$script_dir/customize.sh"
-legacy_customize_script="$repo_root/justfiles/anvil/container/customize.sh"
-if [[ -f "$legacy_customize_script" ]]; then
-    echo "anvil-container: legacy customization at justfiles/anvil/container/customize.sh is unsupported; move its content to .anvil/container/customize.sh and remove the legacy file." >&2
-    exit 1
-fi
-legacy_customize_script="$repo_root/anvil/container/customize.sh"
-if [[ -f "$legacy_customize_script" ]]; then
-    echo "anvil-container: legacy customization at anvil/container/customize.sh is unsupported; move its content to .anvil/container/customize.sh and remove the legacy file." >&2
-    exit 1
-fi
 if [[ -f "$customize_script" ]]; then
     # shellcheck source=/dev/null
     source "$customize_script"
