@@ -457,7 +457,10 @@ mod tests {
             RegionPlacement::Start,
         )
         .unwrap();
-        assert!(new.starts_with("# >>> anvil-managed: x\ntrip_wire_patterns = []\n"));
+        assert_eq!(
+            new,
+            "# >>> anvil-managed: x\ntrip_wire_patterns = []\n# <<< anvil-managed: x\n\n[git]\nremote_branch = \"origin/main\"\n"
+        );
         let _: toml_edit::DocumentMut = new.parse().expect("root key before table must be valid TOML");
     }
 

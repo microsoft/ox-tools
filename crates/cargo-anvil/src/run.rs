@@ -1416,6 +1416,33 @@ mod tests {
         assert!(p0.contains("NEW a") && p0.contains("NEW b"), "every proposed body present:\n{p0}");
     }
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn recompose_places_delta_proposal_before_toml_tables() {
+        let tmp = TempDir::new().unwrap();
+        let host = ".delta.toml";
+        let final_live = "[git]\nremote_branch = \"origin/main\"\n\n\
+                          # >>> anvil-managed: anvil-delta\nold = true\n# <<< anvil-managed: anvil-delta\n"
+            .to_owned();
+        let mut hosts = HostTextCache::default();
+        hosts.set(host, final_live);
+
+        let mut plan = Plan::default();
+        plan.push(PlanItem::propose_region(
+            host,
+            "anvil-delta",
+            "trip_wire_patterns = []\n".into(),
+            "stale".into(),
+            "checksum".into(),
+        ));
+
+        recompose_region_proposals(tmp.path(), &mut plan, &mut hosts).unwrap();
+
+        let proposed = plan.items()[0].spliced_host.as_deref().unwrap();
+        assert!(proposed.starts_with("# >>> anvil-managed: anvil-delta\ntrip_wire_patterns = []\n"));
+        let _: toml_edit::DocumentMut = proposed.parse().expect("delta proposal must keep root keys before TOML tables");
+    }
+
     /// If a Propose item's host file vanished mid-run (external race), the
     /// recomposition pass leaves the eagerly-computed proposal untouched
     /// rather than dropping it.
