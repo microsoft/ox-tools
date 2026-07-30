@@ -414,13 +414,9 @@ mod tests {
         assert!(SHELL_DRIVER.contains("customize.sh"));
         assert!(!SHELL_DRIVER.contains("auth.sh"));
         assert!(!SHELL_DRIVER.contains("CUSTOMIZATION_API_VERSION"));
-        assert!(SHELL_DRIVER.contains("legacy customization at justfiles/anvil/container/customize.sh is unsupported"));
-        assert!(SHELL_DRIVER.contains("legacy customization at anvil/container/customize.sh is unsupported"));
         assert!(POWERSHELL_DRIVER.contains("customize.ps1"));
         assert!(!POWERSHELL_DRIVER.contains("auth.ps1"));
         assert!(!POWERSHELL_DRIVER.contains("CustomizationApiVersion"));
-        assert!(POWERSHELL_DRIVER.contains("legacy customization at justfiles/anvil/container/customize.ps1 is unsupported"));
-        assert!(POWERSHELL_DRIVER.contains("legacy customization at anvil/container/customize.ps1 is unsupported"));
 
         for (driver, image_exists, requested_recipes, needs_github_token) in [
             (

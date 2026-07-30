@@ -173,16 +173,8 @@ $githubToken = $null
 $githubTokenFile = $null
 $exitCode = 0
 $customizeScript = Join-Path $scriptDir 'customize.ps1'
-$legacyCustomizeScript = Join-Path $repoRoot 'justfiles/anvil/container/customize.ps1'
-$topLevelLegacyCustomizeScript = Join-Path $repoRoot 'anvil/container/customize.ps1'
 
 try {
-    if (Test-Path -LiteralPath $legacyCustomizeScript -PathType Leaf) {
-        throw 'anvil-container: legacy customization at justfiles/anvil/container/customize.ps1 is unsupported; move its content to .anvil/container/customize.ps1 and remove the legacy file.'
-    }
-    if (Test-Path -LiteralPath $topLevelLegacyCustomizeScript -PathType Leaf) {
-        throw 'anvil-container: legacy customization at anvil/container/customize.ps1 is unsupported; move its content to .anvil/container/customize.ps1 and remove the legacy file.'
-    }
     if (Test-Path -LiteralPath $customizeScript -PathType Leaf) {
         . $customizeScript
     }
