@@ -4,7 +4,6 @@
 # Cargo-Each
 
 [![crates.io](https://img.shields.io/crates/v/cargo-each.svg)](https://crates.io/crates/cargo-each)
-[![docs.rs](https://docs.rs/cargo-each/badge.svg)](https://docs.rs/cargo-each)
 [![MSRV](https://img.shields.io/crates/msrv/cargo-each)](https://crates.io/crates/cargo-each)
 [![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
 [![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)

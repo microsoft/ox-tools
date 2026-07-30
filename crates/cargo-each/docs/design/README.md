@@ -233,9 +233,10 @@ a usage error.
 
 - **Exit codes.** `0` when every executed command succeeded *or* the set was
   empty; the failing command's code (fail-fast) or `1` (`--keep-going` with any
-  failure) otherwise; `2` for a `cargo-each` usage/configuration error
-  (unknown selector, bad predicate, misused placeholder, or `--chdir` with
-  `--once`).
+  failure — including a command that could not be spawned) otherwise; `2` for a
+  `cargo-each` usage/configuration error (unknown selector, bad predicate,
+  misused placeholder, `--chdir` with `--once`, or — in fail-fast mode — a
+  command that could not be spawned at all).
 - **Empty set is success.** Both an empty selection (`--none`, or an impact
   variable that resolved to nothing) and an empty *filtered* set exit 0 after a
   one-line note to stderr. This is what lets callers drop their `--skip` guards.

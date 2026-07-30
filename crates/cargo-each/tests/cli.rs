@@ -209,6 +209,24 @@ fn prerelease_version_spec_matches_exactly_over_metadata() {
 
 #[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
 #[test]
+fn malformed_version_spec_is_rejected_over_metadata() {
+    // End-to-end: a malformed version qualifier cargo's grammar rejects (empty
+    // prerelease/build suffix, leading-zero component) matches no member, so it
+    // is a loud usage error (exit 2, "did not match") rather than silently
+    // resolving `alpha` as its well-formed `0.1.0` prefix would.
+    let (_tmp, manifest) = fixture();
+    for spec in ["alpha@0.1.0-", "alpha@0.1.0+", "alpha@01.0.0"] {
+        each(&manifest)
+            .args(["-p", spec, "--dry-run", "--", "echo", "{name}"])
+            .assert()
+            .failure()
+            .code(2)
+            .stderr(predicate::str::contains("did not match"));
+    }
+}
+
+#[cfg_attr(miri, ignore = "spawns the cargo-each binary and cargo subprocesses; miri supports neither")]
+#[test]
 fn multiple_filters_intersect() {
     // `--filter` is AND-combined: `lib` matches {alpha, gamma, delta, epsilon},
     // `bin` matches {beta, epsilon}; the intersection is only `epsilon` (both a

@@ -131,9 +131,9 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(err) => {
             eprintln!("error: {err}");
-            // Library-side failures are usage / configuration errors from
-            // cargo-each's point of view; map them all to exit 2. A command
-            // that ran but failed returns its own code via `Ok`.
+            // These are cargo-each's own usage / configuration errors (as
+            // opposed to a command that ran but failed, which returns its own
+            // code via `Ok`); map them all to exit 2.
             ExitCode::from(2)
         }
     }

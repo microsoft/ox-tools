@@ -1,27 +1,24 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Error types for the `cargo-each` library.
+//! Error types for the `cargo-each` crate.
 //!
-//! Built on [`ohno`] for backtrace capture and error-chain support. The
-//! public surface is a single zero-field [`EachError`] umbrella that every
-//! fallible library function returns; each distinct failure mode is a
-//! separate `pub(crate)` typed error that converts into the umbrella via
-//! `#[from]`, so `?` propagates naturally.
+//! Built on [`ohno`] for backtrace capture and error-chain support. Every
+//! fallible function returns a single zero-field [`EachError`] umbrella; each
+//! distinct failure mode is a separate `pub(crate)` typed error that converts
+//! into the umbrella via `#[from]`, so `?` propagates naturally.
 //!
 //! The umbrella is **intentionally opaque** (an application-style error, per
-//! M-APP-ERROR): `cargo-each` is consumed as a binary and as a *tooling* spine
-//! (build a plan, run it) rather than as a library callers `match` on. Failures
-//! are surfaced to a human via [`Display`] (the chained source renders as
-//! `Caused by: …`), not branched on in code, so the concrete variants stay
-//! `pub(crate)` and no variant is exposed to match on. If a future consumer
-//! needs to react to a specific failure category, promote the relevant variant
-//! then — not speculatively.
+//! M-APP-ERROR): everything here is crate-internal — `cargo-each` exposes no
+//! library API — and failures are surfaced to a human via [`Display`] (the
+//! chained source renders as `Caused by: …`), not branched on in code. If the
+//! crate ever needs to react to a specific failure category, match on a
+//! promoted variant then — not speculatively.
 //!
 //! [`Display`]: std::fmt::Display
 
 /// Top-level error returned from every fallible function in the
-/// `cargo-each` library.
+/// `cargo-each` crate.
 ///
 /// Carries no free-form fields — the specific cause is encoded in the
 /// chained source error (see the `From` impls). The [`Display`] rendering
