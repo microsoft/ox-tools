@@ -26,9 +26,9 @@ use tempfile::TempDir;
 const EXTRA_FILE: &str = "justfiles/anvil/demoforge.just";
 const METADATA_REGION: &str = "demoforge-metadata";
 const CONTAINER_JUST: &str = "justfiles/anvil/container/container.just";
-const CONTAINERFILE: &str = "justfiles/anvil/container/Containerfile";
-const CONTAINER_RUNNER: &str = "justfiles/anvil/container/run-in-container.ps1";
-const CONTAINER_CUSTOMIZE: &str = "justfiles/anvil/container/customize.ps1";
+const CONTAINERFILE: &str = "anvil/container/Containerfile";
+const CONTAINER_RUNNER: &str = "anvil/container/run-in-container.ps1";
+const CONTAINER_CUSTOMIZE: &str = "anvil/container/customize.ps1";
 
 /// The example downstream catalog: anvil's, customized four ways.
 fn demoforge() -> Catalog {
@@ -201,7 +201,7 @@ fn a_regular_repository_can_add_customization_files_without_a_derived_catalog() 
     // must not disturb them on a later re-run.
     let tmp = workspace();
     run_update(&Catalog::anvil(), &local(false), tmp.path()).unwrap();
-    let shell_customize = tmp.path().join("justfiles/anvil/container/customize.sh");
+    let shell_customize = tmp.path().join("anvil/container/customize.sh");
     let powershell_customize = tmp.path().join(CONTAINER_CUSTOMIZE);
     assert!(!shell_customize.exists(), "the public catalog must not emit customize.sh");
     assert!(!powershell_customize.exists(), "the public catalog must not emit customize.ps1");

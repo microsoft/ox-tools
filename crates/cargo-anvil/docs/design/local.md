@@ -20,41 +20,54 @@ repo/
 │   # <<< anvil-managed: anvil-imports
 │   …user content…
 │
-└── justfiles/anvil/                               owned (one checksum per file)
-    ├── mod.just            entry point: imports the sibling files and defines
-    │                       `alias anvil := anvil-pr`. The user's Justfile
-    │                       region pulls in this single file; everything else is
-    │                       reached transitively.
-    ├── helpers.just        shared helper recipes (_anvil-base-ref,
-    │                       _anvil-impact-format) and the impact env-var contract
-    │                       that the per-check recipes rely on.
-    ├── checks/             one file per check: checks/<check>.just holds the
-    │                       `anvil-<check>` recipe plus its paired `*-setup` and
-    │                       `*-validate-prereqs` recipes (anvil-fmt, anvil-clippy,
-    │                       anvil-llvm-cov, anvil-miri, …).
-    ├── groups/             one file per group: groups/<group>.just holds the
-    │                       `anvil-<group>` recipe plus its `*-setup` /
-    │                       `*-validate-prereqs` (anvil-pr-fast, anvil-pr-test,
-    │                       anvil-pr-runtime-analysis, anvil-pr-mutants,
-    │                       anvil-scheduled-test, …). `anvil-pr-slow` is a
-    │                       convenience umbrella over the three pr-slow sub-groups.
-    ├── tiers.just          tier aggregators (anvil-pr, anvil-scheduled, anvil-full).
-    ├── tools.just          tool/component/toolchain install + validate-prereqs recipes,
-    │                       plus anvil-system-deps-check and anvil-validate-prereqs.
-    └── versions.just       pinned nightly toolchains and pinned cargo-subcommand versions
-                            as plain just variables (rust_nightly, cargo_nextest_version, …).
-                            Read by recipes via `{{ var }}` interpolation.
-                            Single source of truth for all version pins. See §3.
+├── justfiles/anvil/                               owned (one checksum per file)
+│   ├── mod.just            entry point: imports the sibling files and defines
+│   │                       `alias anvil := anvil-pr`. The user's Justfile
+│   │                       region pulls in this single file; everything else is
+│   │                       reached transitively.
+│   ├── helpers.just        shared helper recipes (_anvil-base-ref,
+│   │                       _anvil-impact-format) and the impact env-var contract
+│   │                       that the per-check recipes rely on.
+│   ├── checks/             one file per check: checks/<check>.just holds the
+│   │                       `anvil-<check>` recipe plus its paired `*-setup` and
+│   │                       `*-validate-prereqs` recipes (anvil-fmt, anvil-clippy,
+│   │                       anvil-llvm-cov, anvil-miri, …).
+│   ├── groups/             one file per group: groups/<group>.just holds the
+│   │                       `anvil-<group>` recipe plus its `*-setup` /
+│   │                       `*-validate-prereqs` (anvil-pr-fast, anvil-pr-test,
+│   │                       anvil-pr-runtime-analysis, anvil-pr-mutants,
+│   │                       anvil-scheduled-test, …). `anvil-pr-slow` is a
+│   │                       convenience umbrella over the three pr-slow sub-groups.
+│   ├── container/
+│   │   └── container.just  optional container entry recipe.
+│   ├── tiers.just          tier aggregators (anvil-pr, anvil-scheduled, anvil-full).
+│   ├── tools.just          tool/component/toolchain install + validate-prereqs recipes,
+│   │                       plus anvil-system-deps-check and anvil-validate-prereqs.
+│   └── versions.just       pinned nightly toolchains and pinned cargo-subcommand versions
+│                           as plain just variables (rust_nightly, cargo_nextest_version, …).
+│                           Read by recipes via `{{ var }}` interpolation.
+│                           Single source of truth for all version pins. See §3.
+│
+└── anvil/container/                               optional non-recipe container assets
+    ├── Containerfile
+    ├── Containerfile.dockerignore
+    ├── README.md
+    ├── entrypoint.sh
+    ├── image-id.ps1
+    ├── image-id.sh
+    ├── run-in-container.ps1
+    └── run-in-container.sh
 ```
 
 The Justfile region is the only file anvil adds to that the user co-owns, and it's
-a single `import` line — everything anvil-specific lives inside `justfiles/anvil/`.
-All files under that directory are tool-owned (tracked by full-file checksum in
-the sidecar manifest). If the user wants to add project-specific recipes, they add them
-to the top-level `Justfile` outside the managed region, or to their own additional
+a single `import` line. Generated recipes live inside `justfiles/anvil/`; optional
+non-recipe container assets live inside `anvil/container/`. Generated files in
+both directories are tool-owned (tracked by full-file checksum in the sidecar
+manifest). If the user wants to add project-specific recipes, they add them to
+the top-level `Justfile` outside the managed region, or to their own additional
 imported `.just` files. The alias `anvil := anvil-pr` lives in `mod.just`, not in
-the user's `Justfile`, so renaming or retargeting the alias is a template update with
-no managed-region churn.
+the user's `Justfile`, so renaming or retargeting the alias is a template update
+with no managed-region churn.
 
 Recipes in the `groups/`, `tiers.just`, and `checks/` files that actually *run* checks
 are annotated with `[group("anvil")]`. The install/validate-prereqs/setup recipes
@@ -62,11 +75,12 @@ in `tools.just` (and the per-check/group/tier setup recipes colocated in the sam
 files) are annotated with `[group("anvil-setup")]`. `just --groups` therefore shows
 two clean clusters: one for "run checks", one for "install prereqs".
 
-> **Optional container backend.** When a catalog includes the opt-in container backend, an
-> additional `justfiles/anvil/container/` subtree adds one more recipe — `anvil-container <recipe>`
-> — that runs any of the recipes below inside a pinned Linux image (Linux-on-Windows parity, distro
-> pinning) instead of against the host toolchain. The recipe bodies are unchanged; see
-> [containers.md](./containers.md).
+> **Optional container backend.** When a catalog includes the opt-in container
+> backend, `justfiles/anvil/container/container.just` adds the
+> `anvil-container <recipe>` command and `anvil/container/` contains its
+> non-recipe assets. It runs any recipe below inside a pinned Linux image
+> (Linux-on-Windows parity, distro pinning) instead of against the host
+> toolchain. The recipe bodies are unchanged; see [containers.md](./containers.md).
 
 ## 2. Recipe layers
 
