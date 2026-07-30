@@ -12,7 +12,7 @@ if [[ ! -f "$toolchain_path" ]]; then
     exit 1
 fi
 
-container_dir="$repo_root/anvil/container"
+container_dir="$repo_root/.anvil/container"
 container_recipe_dir="$repo_root/justfiles/anvil/container"
 default_base_image="$(sed -n 's/^ARG BASE_IMAGE=//p' "$container_dir/Containerfile" | head -n 1)"
 if [[ -z "$default_base_image" ]]; then
