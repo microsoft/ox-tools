@@ -68,6 +68,12 @@ const GITATTRIBUTES_PATH: &str = ".gitattributes";
 /// Region id for the managed section of `.gitattributes`.
 const GITATTRIBUTES_REGION_ID: &str = "anvil-gitattributes";
 
+/// Region id for the user-controlled native/container tier policy.
+const JUSTFILE_RUNNER_REGION_ID: &str = "anvil-runner";
+
+/// Embedded body of the user-controlled tier execution policy.
+const JUSTFILE_RUNNER_BODY: &str = include_str!("../../../templates/regions/justfile-runner.just");
+
 /// Embedded body of the `deny.toml` `[advisories]` managed region.
 const DENY_ADVISORIES_BODY: &str = include_str!("../../../templates/regions/deny-advisories.toml");
 
@@ -133,6 +139,17 @@ pub fn justfile_imports() -> Artifact {
         justfile::JUSTFILE_REGION_ID,
         justfile::JUSTFILE_IMPORTS_BODY,
     )
+}
+
+/// `Justfile` / `anvil-runner` — user-controlled tier execution policy.
+#[must_use]
+pub fn justfile_runner() -> Artifact {
+    Artifact::region(RegionSpec {
+        host: HostSelector::Path(justfile::JUSTFILE_PATH.to_owned()),
+        id: RegionId::new(JUSTFILE_RUNNER_REGION_ID),
+        body: JUSTFILE_RUNNER_BODY.to_owned(),
+        syntax: CommentSyntax::Hash,
+    })
 }
 
 /// Root `Cargo.toml` / `anvil-workspace-lints`.
@@ -363,8 +380,9 @@ mod tests {
     }
 
     #[test]
-    fn gitattributes_body_pins_rust_sources_to_lf() {
+    fn gitattributes_body_pins_rust_and_shell_sources_to_lf() {
         assert!(GITATTRIBUTES_BODY.contains("*.rs text eol=lf"));
+        assert!(GITATTRIBUTES_BODY.contains("*.sh text eol=lf"));
     }
 
     #[test]
