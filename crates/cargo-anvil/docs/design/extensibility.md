@@ -468,7 +468,7 @@ engine internals or the template format.
 
 The public base catalog emits an explicit `anvil-container` recipe under
 `justfiles/anvil/container/` and its Containerfile, Docker Engine drivers,
-content-address helper, and README under `anvil/container/`. Native
+content-address helper, and README under `.anvil/container/`. Native
 `just anvil-*` execution remains the default.
 
 A downstream catalog replaces only environment-specific artifacts such as

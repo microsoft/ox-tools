@@ -48,7 +48,7 @@ repo/
 │                           Read by recipes via `{{ var }}` interpolation.
 │                           Single source of truth for all version pins. See §3.
 │
-└── anvil/container/                               optional non-recipe container assets
+└── .anvil/container/                              optional non-recipe container assets
     ├── Containerfile
     ├── Containerfile.dockerignore
     ├── README.md
@@ -61,7 +61,7 @@ repo/
 
 The Justfile region is the only file anvil adds to that the user co-owns, and it's
 a single `import` line. Generated recipes live inside `justfiles/anvil/`; optional
-non-recipe container assets live inside `anvil/container/`. Generated files in
+non-recipe container assets live inside `.anvil/container/`. Generated files in
 both directories are tool-owned (tracked by full-file checksum in the sidecar
 manifest). If the user wants to add project-specific recipes, they add them to
 the top-level `Justfile` outside the managed region, or to their own additional
@@ -77,7 +77,7 @@ two clean clusters: one for "run checks", one for "install prereqs".
 
 > **Optional container backend.** When a catalog includes the opt-in container
 > backend, `justfiles/anvil/container/container.just` adds the
-> `anvil-container <recipe>` command and `anvil/container/` contains its
+> `anvil-container <recipe>` command and `.anvil/container/` contains its
 > non-recipe assets. It runs any recipe below inside a pinned Linux image
 > (Linux-on-Windows parity, distro pinning) instead of against the host
 > toolchain. The recipe bodies are unchanged; see [containers.md](./containers.md).

@@ -364,7 +364,7 @@ fn push_region_at(
 /// disabled-backend files, and any other previously-tracked item that
 /// is no longer in scope.
 fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan, hosts: &mut HostTextCache) -> Result<(), AppError> {
-    let defer_legacy_container_assets = should_defer_legacy_container_asset_removal(repo_root, plan)?;
+    let deferred_container_asset_prefixes = legacy_container_asset_prefixes_to_defer(repo_root, plan)?;
     let live_files: BTreeSet<String> = plan
         .items()
         .iter()
@@ -386,8 +386,7 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan, hosts: 
         if live_files.contains(path) {
             continue;
         }
-        if defer_legacy_container_assets
-            && path.starts_with("justfiles/anvil/container/")
+        if deferred_container_asset_prefixes.iter().any(|prefix| path.starts_with(prefix))
             && Path::new(path).extension().and_then(|extension| extension.to_str()) != Some("just")
         {
             continue;
@@ -453,7 +452,7 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan, hosts: 
     Ok(())
 }
 
-fn should_defer_legacy_container_asset_removal(repo_root: &Path, plan: &Plan) -> Result<bool, AppError> {
+fn legacy_container_asset_prefixes_to_defer(repo_root: &Path, plan: &Plan) -> Result<Vec<&'static str>, AppError> {
     let recipe_is_customized = plan.items().iter().any(|item| {
         matches!(
             &item.target,
@@ -461,11 +460,32 @@ fn should_defer_legacy_container_asset_removal(repo_root: &Path, plan: &Plan) ->
         ) && matches!(item.decision, Decision::Propose | Decision::LeaveAlone)
     });
     if !recipe_is_customized {
-        return Ok(false);
+        return Ok(Vec::new());
     }
 
     let recipe = read_file_if_present(&repo_root.join("justfiles/anvil/container/container.just"))?;
-    Ok(recipe.is_some_and(|body| body.contains("justfiles/anvil/container/run-in-container.")))
+    let Some(recipe) = recipe else {
+        return Ok(Vec::new());
+    };
+    let mut prefixes = Vec::new();
+    for (driver, asset_prefix) in [
+        ("justfiles/anvil/container/run-in-container.", "justfiles/anvil/container/"),
+        ("anvil/container/run-in-container.", "anvil/container/"),
+    ] {
+        if contains_path_reference(&recipe, driver) {
+            prefixes.push(asset_prefix);
+        }
+    }
+    Ok(prefixes)
+}
+
+fn contains_path_reference(body: &str, path: &str) -> bool {
+    body.match_indices(path).any(|(index, _)| {
+        body[..index]
+            .chars()
+            .next_back()
+            .is_none_or(|character| !character.is_ascii_alphanumeric() && !matches!(character, '_' | '-' | '.' | '/'))
+    })
 }
 
 #[cfg(test)]
@@ -618,6 +638,19 @@ mod tests {
         assert_eq!(saved.tool.as_deref(), Some("anvil"));
         assert_eq!(saved.tool_version, Some(catalog.cli().version.clone()));
         assert_eq!(saved.catalog_checksum, Some(catalog.checksum()));
+    }
+
+    #[test]
+    fn legacy_path_reference_detection_requires_a_path_boundary() {
+        let path = "anvil/container/run-in-container.";
+        assert!(contains_path_reference("exec bash 'anvil/container/run-in-container.sh'", path));
+        assert!(contains_path_reference("exec bash \"anvil/container/run-in-container.sh\"", path));
+        assert!(contains_path_reference("exec bash anvil/container/run-in-container.sh", path));
+        assert!(!contains_path_reference("exec bash '.anvil/container/run-in-container.sh'", path));
+        assert!(!contains_path_reference(
+            "exec bash tools/anvil/container/run-in-container.sh",
+            path
+        ));
     }
 
     fn local_only() -> Cli {
@@ -1088,7 +1121,7 @@ mod tests {
 
         const RECIPE: &str = "justfiles/anvil/container/container.just";
         const LEGACY_DRIVER: &str = "justfiles/anvil/container/run-in-container.ps1";
-        const CURRENT_DRIVER: &str = "anvil/container/run-in-container.ps1";
+        const CURRENT_DRIVER: &str = ".anvil/container/run-in-container.ps1";
 
         let tmp = empty_workspace();
         let legacy_recipe = "anvil-container:\n    & 'justfiles/anvil/container/run-in-container.ps1'\n";
@@ -1101,7 +1134,7 @@ mod tests {
 
         fs::write(tmp.path().join(RECIPE), format!("{legacy_recipe}# repository customization\n")).unwrap();
 
-        let current_recipe = "anvil-container:\n    & 'anvil/container/run-in-container.ps1'\n";
+        let current_recipe = "anvil-container:\n    & '.anvil/container/run-in-container.ps1'\n";
         let current = Catalog::builder(CliMeta::new("anvil"))
             .with_artifact(Artifact::owned_file(RECIPE, current_recipe))
             .with_artifact(Artifact::owned_file(CURRENT_DRIVER, "# current driver\n"))
@@ -1119,7 +1152,11 @@ mod tests {
             "deferred legacy driver must remain tracked for removal after proposal acceptance"
         );
 
-        fs::copy(tmp.path().join(format!("{RECIPE}.anvil-proposed")), tmp.path().join(RECIPE)).unwrap();
+        fs::write(
+            tmp.path().join(RECIPE),
+            format!("{current_recipe}# retained repository customization\n"),
+        )
+        .unwrap();
         let accepted = run_update(&current, &local_only(), tmp.path()).unwrap();
         assert!(accepted.applied);
         assert!(
@@ -1127,6 +1164,136 @@ mod tests {
             "legacy driver must be removed after the recipe proposal is accepted"
         );
         assert!(!Manifest::load(tmp.path()).unwrap().files.contains_key(LEGACY_DRIVER));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn customized_recipe_defers_every_referenced_legacy_layout() {
+        use crate::catalog::CliMeta;
+
+        const RECIPE: &str = "justfiles/anvil/container/container.just";
+        const JUSTFILES_DRIVER: &str = "justfiles/anvil/container/run-in-container.ps1";
+        const TOP_LEVEL_DRIVER: &str = "anvil/container/run-in-container.sh";
+        const CURRENT_DRIVER: &str = ".anvil/container/run-in-container.ps1";
+
+        let tmp = empty_workspace();
+        let legacy_recipe = concat!(
+            "anvil-container:\n",
+            "    & \"justfiles/anvil/container/run-in-container.ps1\"\n",
+            "    exec bash \"anvil/container/run-in-container.sh\"\n",
+        );
+        let legacy = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::owned_file(RECIPE, legacy_recipe))
+            .with_artifact(Artifact::owned_file(JUSTFILES_DRIVER, "# legacy PowerShell driver\n"))
+            .with_artifact(Artifact::owned_file(TOP_LEVEL_DRIVER, "# legacy Bash driver\n"))
+            .build()
+            .unwrap();
+        assert!(run_update(&legacy, &local_only(), tmp.path()).unwrap().applied);
+        fs::write(tmp.path().join(RECIPE), format!("{legacy_recipe}# repository customization\n")).unwrap();
+
+        let current = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::owned_file(
+                RECIPE,
+                "anvil-container:\n    & '.anvil/container/run-in-container.ps1'\n",
+            ))
+            .with_artifact(Artifact::owned_file(CURRENT_DRIVER, "# current driver\n"))
+            .build()
+            .unwrap();
+        assert!(run_update(&current, &local_only(), tmp.path()).unwrap().applied);
+
+        for driver in [JUSTFILES_DRIVER, TOP_LEVEL_DRIVER] {
+            assert!(
+                tmp.path().join(driver).is_file(),
+                "referenced legacy driver must remain while the recipe proposal is pending: {driver}"
+            );
+            assert!(Manifest::load(tmp.path()).unwrap().files.contains_key(driver));
+        }
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn customized_top_level_container_recipe_defers_asset_removal() {
+        use crate::catalog::CliMeta;
+
+        const RECIPE: &str = "justfiles/anvil/container/container.just";
+        const LEGACY_DRIVER: &str = "anvil/container/run-in-container.ps1";
+        const CURRENT_DRIVER: &str = ".anvil/container/run-in-container.ps1";
+
+        let tmp = empty_workspace();
+        let legacy_recipe = "anvil-container:\n    & 'anvil/container/run-in-container.ps1'\n";
+        let legacy = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::owned_file(RECIPE, legacy_recipe))
+            .with_artifact(Artifact::owned_file(LEGACY_DRIVER, "# legacy driver\n"))
+            .build()
+            .unwrap();
+        assert!(run_update(&legacy, &local_only(), tmp.path()).unwrap().applied);
+
+        fs::write(tmp.path().join(RECIPE), format!("{legacy_recipe}# repository customization\n")).unwrap();
+
+        let current_recipe = "anvil-container:\n    & '.anvil/container/run-in-container.ps1'\n";
+        let current = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::owned_file(RECIPE, current_recipe))
+            .with_artifact(Artifact::owned_file(CURRENT_DRIVER, "# current driver\n"))
+            .build()
+            .unwrap();
+        let proposed = run_update(&current, &local_only(), tmp.path()).unwrap();
+        assert!(proposed.applied);
+        assert!(
+            tmp.path().join(LEGACY_DRIVER).is_file(),
+            "top-level driver must remain while the customized recipe still references it"
+        );
+        assert!(tmp.path().join(format!("{RECIPE}.anvil-proposed")).is_file());
+        assert!(Manifest::load(tmp.path()).unwrap().files.contains_key(LEGACY_DRIVER));
+
+        fs::write(
+            tmp.path().join(RECIPE),
+            format!("{current_recipe}# retained repository customization\n"),
+        )
+        .unwrap();
+        let accepted = run_update(&current, &local_only(), tmp.path()).unwrap();
+        assert!(accepted.applied);
+        assert!(
+            !tmp.path().join(LEGACY_DRIVER).exists(),
+            "top-level driver must be removed after the recipe proposal is accepted"
+        );
+        assert!(!Manifest::load(tmp.path()).unwrap().files.contains_key(LEGACY_DRIVER));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn untouched_legacy_container_recipe_does_not_defer_asset_removal() {
+        use crate::catalog::CliMeta;
+
+        const RECIPE: &str = "justfiles/anvil/container/container.just";
+        const LEGACY_DRIVER: &str = "justfiles/anvil/container/run-in-container.ps1";
+        const CURRENT_DRIVER: &str = ".anvil/container/run-in-container.ps1";
+
+        let tmp = empty_workspace();
+        let legacy = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::owned_file(
+                RECIPE,
+                "anvil-container:\n    & 'justfiles/anvil/container/run-in-container.ps1'\n",
+            ))
+            .with_artifact(Artifact::owned_file(LEGACY_DRIVER, "# legacy driver\n"))
+            .build()
+            .unwrap();
+        assert!(run_update(&legacy, &local_only(), tmp.path()).unwrap().applied);
+
+        let current = Catalog::builder(CliMeta::new("anvil"))
+            .with_artifact(Artifact::owned_file(
+                RECIPE,
+                "anvil-container:\n    & '.anvil/container/run-in-container.ps1'\n",
+            ))
+            .with_artifact(Artifact::owned_file(CURRENT_DRIVER, "# current driver\n"))
+            .build()
+            .unwrap();
+        let migrated = run_update(&current, &local_only(), tmp.path()).unwrap();
+
+        assert!(migrated.applied);
+        assert!(
+            !tmp.path().join(LEGACY_DRIVER).exists(),
+            "untouched legacy driver must be removed when the recipe update can be applied"
+        );
     }
 
     /// A previously-tracked owned file that is already missing on disk must

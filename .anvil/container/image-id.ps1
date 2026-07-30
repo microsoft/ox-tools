@@ -19,7 +19,7 @@ $toolchainPath = Join-Path $repoRoot 'rust-toolchain.toml'
 if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
     throw 'anvil-container requires a repository-owned rust-toolchain.toml.'
 }
-$containerPath = Join-Path $repoRoot 'anvil/container'
+$containerPath = Join-Path $repoRoot '.anvil/container'
 $containerRecipePath = Join-Path $repoRoot 'justfiles/anvil/container'
 $containerfile = Join-Path $containerPath 'Containerfile'
 $baseImageMatch = [regex]::Match([IO.File]::ReadAllText($containerfile), '(?m)^ARG BASE_IMAGE=([^\r\n]+)')

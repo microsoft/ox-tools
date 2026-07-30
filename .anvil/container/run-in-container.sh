@@ -44,7 +44,7 @@ version_at_least() {
 }
 
 command -v docker >/dev/null 2>&1 || {
-    echo "anvil-container: Docker Engine is required. See anvil/container/README.md." >&2
+    echo "anvil-container: Docker Engine is required. See .anvil/container/README.md." >&2
     exit 1
 }
 
@@ -67,7 +67,7 @@ if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     echo 'anvil-container must run from a Git repository.' >&2
     exit 1
 fi
-script_dir="$repo_root/anvil/container"
+script_dir="$repo_root/.anvil/container"
 default_base_image="$(sed -n 's/^ARG BASE_IMAGE=//p' "$script_dir/Containerfile" | head -n 1)"
 if [[ -z "$default_base_image" ]]; then
     echo 'anvil-container: Containerfile must define ARG BASE_IMAGE=<digest-pinned-image>.' >&2
@@ -138,7 +138,12 @@ trap cleanup EXIT
 customize_script="$script_dir/customize.sh"
 legacy_customize_script="$repo_root/justfiles/anvil/container/customize.sh"
 if [[ -f "$legacy_customize_script" ]]; then
-    echo "anvil-container: legacy customization at justfiles/anvil/container/customize.sh is unsupported; move its content to anvil/container/customize.sh and remove the legacy file." >&2
+    echo "anvil-container: legacy customization at justfiles/anvil/container/customize.sh is unsupported; move its content to .anvil/container/customize.sh and remove the legacy file." >&2
+    exit 1
+fi
+legacy_customize_script="$repo_root/anvil/container/customize.sh"
+if [[ -f "$legacy_customize_script" ]]; then
+    echo "anvil-container: legacy customization at anvil/container/customize.sh is unsupported; move its content to .anvil/container/customize.sh and remove the legacy file." >&2
     exit 1
 fi
 if [[ -f "$customize_script" ]]; then

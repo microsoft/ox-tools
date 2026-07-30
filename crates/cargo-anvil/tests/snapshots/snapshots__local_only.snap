@@ -2,130 +2,7 @@
 source: crates/cargo-anvil/tests/snapshots.rs
 expression: render_tree(tmp.path())
 ---
-=== .delta.toml ===
-# >>> anvil-managed: anvil-delta
-[delta]
-# Include the workspace root files that should invalidate every member's
-# impact analysis when changed (lockfile, root manifest, toolchain).
-root-files = [
-    "Cargo.lock",
-    "Cargo.toml",
-    "rust-toolchain.toml",
-]
-# <<< anvil-managed: anvil-delta
-
-=== .gitattributes ===
-# >>> anvil-managed: anvil-gitattributes
-# Force LF line endings for Rust sources regardless of the checkout
-# platform, so rustfmt and other tooling see consistent newlines.
-*.rs text eol=lf
-*.sh text eol=lf
-# <<< anvil-managed: anvil-gitattributes
-
-=== Cargo.toml ===
-[workspace]
-resolver = "2"
-members = ["crates/*"]
-
-# >>> anvil-managed: anvil-workspace-lints
-[workspace.lints]
-# Catalog of opinionated lints, in dotted-key form so users can extend the
-# same scope (`[workspace.lints]` or `[lints]`) outside the sentinels.
-# The host-specific table header (`[workspace.lints]` or `[lints]`) is
-# prepended by cargo-anvil based on whether the manifest is a workspace
-# root or a single-crate Cargo.toml.
-
-# --- rust ------------------------------------------------------------------
-rust.ambiguous_negative_literals = "warn"
-rust.missing_debug_implementations = "warn"
-rust.redundant_imports = "warn"
-rust.redundant_lifetimes = "warn"
-rust.trivial_numeric_casts = "warn"
-rust.unsafe_op_in_unsafe_fn = "warn"
-rust.unused_lifetimes = "warn"
-# `unexpected_cfgs` is on-by-default at warn since Rust 1.80; combined
-# with the catalog's `-D warnings` cloud-workflow policy, any custom cfg name
-# becomes a hard build failure. Pre-declare the cfgs that
-# `cargo llvm-cov` sets so the recommended coverage-exclusion pattern
-# `#[cfg_attr(coverage_nightly, coverage(off))]` works out of the box.
-# Adopters who need additional cfg names take ownership of this one
-# line (edit the check-cfg array); anvil's drift detector will
-# emit a `.anvil-proposed` sibling on future catalog bumps so the
-# customization is preserved.
-rust.unexpected_cfgs = { level = "warn", check-cfg = [
-    'cfg(coverage,coverage_nightly)',
-    'cfg(loom)',
-    'cfg(miri_race_coverage)',
-    'cfg(miri_strict_provenance)',
-    'cfg(miri_tree_borrows)',
-] }
-
-# --- rustdoc ---------------------------------------------------------------
-rustdoc.broken_intra_doc_links = "warn"
-rustdoc.missing_crate_level_docs = "warn"
-rustdoc.unescaped_backticks = "warn"
-
-# --- clippy: category gates (priority -1 so per-lint allows can override) --
-clippy.cargo = { level = "warn", priority = -1 }
-clippy.complexity = { level = "warn", priority = -1 }
-clippy.correctness = { level = "warn", priority = -1 }
-clippy.nursery = { level = "warn", priority = -1 }
-clippy.pedantic = { level = "warn", priority = -1 }
-clippy.perf = { level = "warn", priority = -1 }
-clippy.style = { level = "warn", priority = -1 }
-clippy.suspicious = { level = "warn", priority = -1 }
-
-# --- clippy: opinionated additions -----------------------------------------
-# Two-repo consensus (oxidizer + oxidizer-github). Restriction-group
-# lints that catch real code-smell cases. Adding a workspace-wide lint
-# means adopters can only opt out per-crate or by taking ownership of
-# this region; only enable when the consensus is strong enough to
-# justify that cost.
-clippy.allow_attributes = "warn"
-clippy.allow_attributes_without_reason = "warn"
-clippy.as_pointer_underscore = "warn"
-clippy.assertions_on_result_states = "warn"
-clippy.clone_on_ref_ptr = "warn"
-clippy.deref_by_slicing = "warn"
-clippy.disallowed_script_idents = "warn"
-clippy.empty_drop = "warn"
-clippy.empty_enum_variants_with_brackets = "warn"
-clippy.fn_to_numeric_cast_any = "warn"
-clippy.if_then_some_else_none = "warn"
-clippy.map_err_ignore = "warn"
-clippy.multiple_unsafe_ops_per_block = "warn"
-clippy.redundant_type_annotations = "warn"
-clippy.renamed_function_params = "warn"
-clippy.semicolon_outside_block = "warn"
-clippy.undocumented_unsafe_blocks = "warn"
-clippy.unnecessary_safety_comment = "warn"
-clippy.unnecessary_safety_doc = "warn"
-clippy.unneeded_field_pattern = "warn"
-clippy.unused_result_ok = "warn"
-clippy.unwrap_used = "warn"
-
-# --- clippy: opinionated suppressions of category-enabled lints ------------
-clippy.missing_const_for_fn = "allow"
-clippy.multiple_crate_versions = "allow"
-clippy.option_if_let_else = "allow"
-clippy.redundant_pub_crate = "allow"
-clippy.should_panic_without_expect = "allow"
-clippy.significant_drop_tightening = "allow"
-# Blocked by Clippy bug: https://github.com/rust-lang/rust-clippy/issues/15036
-clippy.wildcard_imports = "allow"
-
-# <<< anvil-managed: anvil-workspace-lints
-
-=== Justfile ===
-# >>> anvil-managed: anvil-imports
-import 'justfiles/anvil/mod.just'
-# <<< anvil-managed: anvil-imports
-
-# >>> anvil-managed: anvil-runner
-anvil_runner := env_var_or_default("ANVIL_RUNNER", "native")
-# <<< anvil-managed: anvil-runner
-
-=== anvil/container/Containerfile ===
+=== .anvil/container/Containerfile ===
 # syntax=docker/dockerfile:1
 
 ARG BASE_IMAGE=docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
@@ -186,7 +63,7 @@ RUN --mount=type=cache,id=anvil-cargo-registry,target=/usr/local/cargo/registry 
     printf "anvil_runner := \"native\"\nimport 'justfiles/anvil/mod.just'\n" > Justfile \
     && CARGO_TARGET_DIR=/tmp/anvil-target just anvil-setup
 
-COPY anvil/container/entrypoint.sh /usr/local/bin/anvil-container-entrypoint
+COPY .anvil/container/entrypoint.sh /usr/local/bin/anvil-container-entrypoint
 RUN chmod 755 /usr/local/bin/anvil-container-entrypoint
 
 ENV ANVIL_IN_CONTAINER=1
@@ -195,7 +72,7 @@ WORKDIR /workspace
 ENTRYPOINT ["anvil-container-entrypoint"]
 CMD ["bash"]
 
-=== anvil/container/Containerfile.dockerignore ===
+=== .anvil/container/Containerfile.dockerignore ===
 **
 !rust-toolchain.toml
 !justfiles
@@ -207,13 +84,13 @@ CMD ["bash"]
 !justfiles/anvil/container/*.just
 !justfiles/anvil/groups
 !justfiles/anvil/groups/*.just
-!anvil
-!anvil/container
-!anvil/container/*
-anvil/container/customize.sh
-anvil/container/customize.ps1
+!.anvil
+!.anvil/container
+!.anvil/container/*
+.anvil/container/customize.sh
+.anvil/container/customize.ps1
 
-=== anvil/container/README.md ===
+=== .anvil/container/README.md ===
 # Run Anvil checks in a local container
 
 Use `just anvil-container` to run generated Anvil checks in a reproducible
@@ -418,14 +295,14 @@ A repository or derived catalog can add one trusted customization file per
 supported host:
 
 ```text
-anvil/container/customize.sh
-anvil/container/customize.ps1
+.anvil/container/customize.sh
+.anvil/container/customize.ps1
 ```
 
 If upgrading from an older generated layout, move any repository-owned
-`customize.sh` or `customize.ps1` file from `justfiles/anvil/container/` to the
-path above. The driver rejects the legacy location instead of silently ignoring
-the customization.
+`customize.sh` or `customize.ps1` file from `justfiles/anvil/container/` or
+`anvil/container/` to the path above. The driver rejects legacy locations
+instead of silently ignoring the customization.
 
 The driver sources the matching file as trusted host code before authentication,
 image construction, and recipe execution. The documented customization
@@ -439,7 +316,7 @@ the `Containerfile`, entrypoint, or supporting build scripts.
 See the [container customization contract](https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/containers.md#8-container-customization)
 for the complete interface and security requirements.
 
-=== anvil/container/entrypoint.sh ===
+=== .anvil/container/entrypoint.sh ===
 #!/bin/sh
 set -eu
 
@@ -463,7 +340,7 @@ fi
 
 exec "$@"
 
-=== anvil/container/image-id.ps1 ===
+=== .anvil/container/image-id.ps1 ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
@@ -485,7 +362,7 @@ $toolchainPath = Join-Path $repoRoot 'rust-toolchain.toml'
 if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
     throw 'anvil-container requires a repository-owned rust-toolchain.toml.'
 }
-$containerPath = Join-Path $repoRoot 'anvil/container'
+$containerPath = Join-Path $repoRoot '.anvil/container'
 $containerRecipePath = Join-Path $repoRoot 'justfiles/anvil/container'
 $containerfile = Join-Path $containerPath 'Containerfile'
 $baseImageMatch = [regex]::Match([IO.File]::ReadAllText($containerfile), '(?m)^ARG BASE_IMAGE=([^\r\n]+)')
@@ -539,7 +416,7 @@ $bytes = [Text.Encoding]::UTF8.GetBytes($payload.ToString())
 $hash = [Security.Cryptography.SHA256]::HashData($bytes)
 Write-Output ([Convert]::ToHexString($hash).ToLowerInvariant())
 
-=== anvil/container/image-id.sh ===
+=== .anvil/container/image-id.sh ===
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -554,7 +431,7 @@ if [[ ! -f "$toolchain_path" ]]; then
     exit 1
 fi
 
-container_dir="$repo_root/anvil/container"
+container_dir="$repo_root/.anvil/container"
 container_recipe_dir="$repo_root/justfiles/anvil/container"
 default_base_image="$(sed -n 's/^ARG BASE_IMAGE=//p' "$container_dir/Containerfile" | head -n 1)"
 if [[ -z "$default_base_image" ]]; then
@@ -626,7 +503,7 @@ write_normalized_file() {
     done < <(printf '%s\n' "${inputs[@]}" | LC_ALL=C sort -u)
 } | "${hash_command[@]}" | awk '{print $1}'
 
-=== anvil/container/run-in-container.ps1 ===
+=== .anvil/container/run-in-container.ps1 ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
@@ -717,7 +594,7 @@ foreach ($recipeArg in $Recipe) {
 }
 
 if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) {
-    throw 'anvil-container: WSL 2 is required. See anvil/container/README.md.'
+    throw 'anvil-container: WSL 2 is required. See .anvil/container/README.md.'
 }
 
 $versionText = (& wsl -e docker version --format '{{.Server.Version}}' 2>$null)
@@ -743,12 +620,12 @@ if ($LASTEXITCODE -ne 0 -or -not $repoRoot) {
     throw 'anvil-container must run from a Git repository.'
 }
 
-$scriptDir = Join-Path $repoRoot 'anvil/container'
+$scriptDir = Join-Path $repoRoot '.anvil/container'
 $wslRepoRoot = (& wsl -e wslpath -a $repoRoot).Trim()
 if ($LASTEXITCODE -ne 0 -or -not $wslRepoRoot) {
     throw 'anvil-container: could not translate the repository path into the default WSL distribution.'
 }
-$wslScriptDir = "$wslRepoRoot/anvil/container"
+$wslScriptDir = "$wslRepoRoot/.anvil/container"
 $containerfile = Join-Path $scriptDir 'Containerfile'
 $baseImageMatch = [regex]::Match([IO.File]::ReadAllText($containerfile), '(?m)^ARG BASE_IMAGE=([^\r\n]+)')
 if (-not $baseImageMatch.Success) {
@@ -803,10 +680,14 @@ $githubTokenFile = $null
 $exitCode = 0
 $customizeScript = Join-Path $scriptDir 'customize.ps1'
 $legacyCustomizeScript = Join-Path $repoRoot 'justfiles/anvil/container/customize.ps1'
+$topLevelLegacyCustomizeScript = Join-Path $repoRoot 'anvil/container/customize.ps1'
 
 try {
     if (Test-Path -LiteralPath $legacyCustomizeScript -PathType Leaf) {
-        throw 'anvil-container: legacy customization at justfiles/anvil/container/customize.ps1 is unsupported; move its content to anvil/container/customize.ps1 and remove the legacy file.'
+        throw 'anvil-container: legacy customization at justfiles/anvil/container/customize.ps1 is unsupported; move its content to .anvil/container/customize.ps1 and remove the legacy file.'
+    }
+    if (Test-Path -LiteralPath $topLevelLegacyCustomizeScript -PathType Leaf) {
+        throw 'anvil-container: legacy customization at anvil/container/customize.ps1 is unsupported; move its content to .anvil/container/customize.ps1 and remove the legacy file.'
     }
     if (Test-Path -LiteralPath $customizeScript -PathType Leaf) {
         . $customizeScript
@@ -967,7 +848,7 @@ try {
 
 exit $exitCode
 
-=== anvil/container/run-in-container.sh ===
+=== .anvil/container/run-in-container.sh ===
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -1014,7 +895,7 @@ version_at_least() {
 }
 
 command -v docker >/dev/null 2>&1 || {
-    echo "anvil-container: Docker Engine is required. See anvil/container/README.md." >&2
+    echo "anvil-container: Docker Engine is required. See .anvil/container/README.md." >&2
     exit 1
 }
 
@@ -1037,7 +918,7 @@ if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     echo 'anvil-container must run from a Git repository.' >&2
     exit 1
 fi
-script_dir="$repo_root/anvil/container"
+script_dir="$repo_root/.anvil/container"
 default_base_image="$(sed -n 's/^ARG BASE_IMAGE=//p' "$script_dir/Containerfile" | head -n 1)"
 if [[ -z "$default_base_image" ]]; then
     echo 'anvil-container: Containerfile must define ARG BASE_IMAGE=<digest-pinned-image>.' >&2
@@ -1108,7 +989,12 @@ trap cleanup EXIT
 customize_script="$script_dir/customize.sh"
 legacy_customize_script="$repo_root/justfiles/anvil/container/customize.sh"
 if [[ -f "$legacy_customize_script" ]]; then
-    echo "anvil-container: legacy customization at justfiles/anvil/container/customize.sh is unsupported; move its content to anvil/container/customize.sh and remove the legacy file." >&2
+    echo "anvil-container: legacy customization at justfiles/anvil/container/customize.sh is unsupported; move its content to .anvil/container/customize.sh and remove the legacy file." >&2
+    exit 1
+fi
+legacy_customize_script="$repo_root/anvil/container/customize.sh"
+if [[ -f "$legacy_customize_script" ]]; then
+    echo "anvil-container: legacy customization at anvil/container/customize.sh is unsupported; move its content to .anvil/container/customize.sh and remove the legacy file." >&2
     exit 1
 fi
 if [[ -f "$customize_script" ]]; then
@@ -1292,6 +1178,129 @@ if (($# == 0)); then
     exit $?
 fi
 docker "${run_args[@]}" "$image" just "$@"
+
+=== .delta.toml ===
+# >>> anvil-managed: anvil-delta
+[delta]
+# Include the workspace root files that should invalidate every member's
+# impact analysis when changed (lockfile, root manifest, toolchain).
+root-files = [
+    "Cargo.lock",
+    "Cargo.toml",
+    "rust-toolchain.toml",
+]
+# <<< anvil-managed: anvil-delta
+
+=== .gitattributes ===
+# >>> anvil-managed: anvil-gitattributes
+# Force LF line endings for Rust sources regardless of the checkout
+# platform, so rustfmt and other tooling see consistent newlines.
+*.rs text eol=lf
+*.sh text eol=lf
+# <<< anvil-managed: anvil-gitattributes
+
+=== Cargo.toml ===
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+# >>> anvil-managed: anvil-workspace-lints
+[workspace.lints]
+# Catalog of opinionated lints, in dotted-key form so users can extend the
+# same scope (`[workspace.lints]` or `[lints]`) outside the sentinels.
+# The host-specific table header (`[workspace.lints]` or `[lints]`) is
+# prepended by cargo-anvil based on whether the manifest is a workspace
+# root or a single-crate Cargo.toml.
+
+# --- rust ------------------------------------------------------------------
+rust.ambiguous_negative_literals = "warn"
+rust.missing_debug_implementations = "warn"
+rust.redundant_imports = "warn"
+rust.redundant_lifetimes = "warn"
+rust.trivial_numeric_casts = "warn"
+rust.unsafe_op_in_unsafe_fn = "warn"
+rust.unused_lifetimes = "warn"
+# `unexpected_cfgs` is on-by-default at warn since Rust 1.80; combined
+# with the catalog's `-D warnings` cloud-workflow policy, any custom cfg name
+# becomes a hard build failure. Pre-declare the cfgs that
+# `cargo llvm-cov` sets so the recommended coverage-exclusion pattern
+# `#[cfg_attr(coverage_nightly, coverage(off))]` works out of the box.
+# Adopters who need additional cfg names take ownership of this one
+# line (edit the check-cfg array); anvil's drift detector will
+# emit a `.anvil-proposed` sibling on future catalog bumps so the
+# customization is preserved.
+rust.unexpected_cfgs = { level = "warn", check-cfg = [
+    'cfg(coverage,coverage_nightly)',
+    'cfg(loom)',
+    'cfg(miri_race_coverage)',
+    'cfg(miri_strict_provenance)',
+    'cfg(miri_tree_borrows)',
+] }
+
+# --- rustdoc ---------------------------------------------------------------
+rustdoc.broken_intra_doc_links = "warn"
+rustdoc.missing_crate_level_docs = "warn"
+rustdoc.unescaped_backticks = "warn"
+
+# --- clippy: category gates (priority -1 so per-lint allows can override) --
+clippy.cargo = { level = "warn", priority = -1 }
+clippy.complexity = { level = "warn", priority = -1 }
+clippy.correctness = { level = "warn", priority = -1 }
+clippy.nursery = { level = "warn", priority = -1 }
+clippy.pedantic = { level = "warn", priority = -1 }
+clippy.perf = { level = "warn", priority = -1 }
+clippy.style = { level = "warn", priority = -1 }
+clippy.suspicious = { level = "warn", priority = -1 }
+
+# --- clippy: opinionated additions -----------------------------------------
+# Two-repo consensus (oxidizer + oxidizer-github). Restriction-group
+# lints that catch real code-smell cases. Adding a workspace-wide lint
+# means adopters can only opt out per-crate or by taking ownership of
+# this region; only enable when the consensus is strong enough to
+# justify that cost.
+clippy.allow_attributes = "warn"
+clippy.allow_attributes_without_reason = "warn"
+clippy.as_pointer_underscore = "warn"
+clippy.assertions_on_result_states = "warn"
+clippy.clone_on_ref_ptr = "warn"
+clippy.deref_by_slicing = "warn"
+clippy.disallowed_script_idents = "warn"
+clippy.empty_drop = "warn"
+clippy.empty_enum_variants_with_brackets = "warn"
+clippy.fn_to_numeric_cast_any = "warn"
+clippy.if_then_some_else_none = "warn"
+clippy.map_err_ignore = "warn"
+clippy.multiple_unsafe_ops_per_block = "warn"
+clippy.redundant_type_annotations = "warn"
+clippy.renamed_function_params = "warn"
+clippy.semicolon_outside_block = "warn"
+clippy.undocumented_unsafe_blocks = "warn"
+clippy.unnecessary_safety_comment = "warn"
+clippy.unnecessary_safety_doc = "warn"
+clippy.unneeded_field_pattern = "warn"
+clippy.unused_result_ok = "warn"
+clippy.unwrap_used = "warn"
+
+# --- clippy: opinionated suppressions of category-enabled lints ------------
+clippy.missing_const_for_fn = "allow"
+clippy.multiple_crate_versions = "allow"
+clippy.option_if_let_else = "allow"
+clippy.redundant_pub_crate = "allow"
+clippy.should_panic_without_expect = "allow"
+clippy.significant_drop_tightening = "allow"
+# Blocked by Clippy bug: https://github.com/rust-lang/rust-clippy/issues/15036
+clippy.wildcard_imports = "allow"
+
+# <<< anvil-managed: anvil-workspace-lints
+
+=== Justfile ===
+# >>> anvil-managed: anvil-imports
+import 'justfiles/anvil/mod.just'
+# <<< anvil-managed: anvil-imports
+
+# >>> anvil-managed: anvil-runner
+anvil_runner := env_var_or_default("ANVIL_RUNNER", "native")
+# <<< anvil-managed: anvil-runner
 
 === clippy.toml ===
 # >>> anvil-managed: anvil-clippy
@@ -3116,7 +3125,7 @@ anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-too
 [script("pwsh")]
 anvil-container *recipe:
     $requested = @('{{ replace(recipe, "'", "''") }}' -split '\s+' | Where-Object { $_ })
-    & 'anvil/container/run-in-container.ps1' @requested
+    & '.anvil/container/run-in-container.ps1' @requested
     exit $LASTEXITCODE
 
 [unix]
@@ -3125,10 +3134,10 @@ anvil-container *recipe:
 anvil-container *recipe:
     requested={{ quote(recipe) }}
     if [[ -z "$requested" ]]; then
-        exec bash 'anvil/container/run-in-container.sh'
+        exec bash '.anvil/container/run-in-container.sh'
     fi
     read -r -a requested_args <<<"$requested"
-    exec bash 'anvil/container/run-in-container.sh' "${requested_args[@]}"
+    exec bash '.anvil/container/run-in-container.sh' "${requested_args[@]}"
 
 === justfiles/anvil/groups/pr-fast.just ===
 # Copyright (c) Microsoft Corporation.

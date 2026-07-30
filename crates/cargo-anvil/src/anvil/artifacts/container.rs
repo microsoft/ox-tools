@@ -20,16 +20,16 @@ const POWERSHELL_DRIVER: &str = include_str!("../../../templates/anvil/container
 const README: &str = include_str!("../../../templates/anvil/container/README.md");
 
 const RECIPE_PATH: &str = "justfiles/anvil/container/container.just";
-const CONTAINERFILE_PATH: &str = "anvil/container/Containerfile";
-const IGNORE_PATH: &str = "anvil/container/Containerfile.dockerignore";
-const ENTRYPOINT_PATH: &str = "anvil/container/entrypoint.sh";
-const IMAGE_ID_PATH: &str = "anvil/container/image-id.ps1";
-const SHELL_IMAGE_ID_PATH: &str = "anvil/container/image-id.sh";
-const SHELL_DRIVER_PATH: &str = "anvil/container/run-in-container.sh";
-const POWERSHELL_DRIVER_PATH: &str = "anvil/container/run-in-container.ps1";
-const README_PATH: &str = "anvil/container/README.md";
-const CUSTOMIZE_SHELL_PATH: &str = "anvil/container/customize.sh";
-const CUSTOMIZE_POWERSHELL_PATH: &str = "anvil/container/customize.ps1";
+const CONTAINERFILE_PATH: &str = ".anvil/container/Containerfile";
+const IGNORE_PATH: &str = ".anvil/container/Containerfile.dockerignore";
+const ENTRYPOINT_PATH: &str = ".anvil/container/entrypoint.sh";
+const IMAGE_ID_PATH: &str = ".anvil/container/image-id.ps1";
+const SHELL_IMAGE_ID_PATH: &str = ".anvil/container/image-id.sh";
+const SHELL_DRIVER_PATH: &str = ".anvil/container/run-in-container.sh";
+const POWERSHELL_DRIVER_PATH: &str = ".anvil/container/run-in-container.ps1";
+const README_PATH: &str = ".anvil/container/README.md";
+const CUSTOMIZE_SHELL_PATH: &str = ".anvil/container/customize.sh";
+const CUSTOMIZE_POWERSHELL_PATH: &str = ".anvil/container/customize.ps1";
 
 /// The full public container artifact group.
 #[must_use]
@@ -179,12 +179,12 @@ mod tests {
 
     #[cfg(windows)]
     fn run_image_id(repo: &Path) -> String {
-        run_image_id_command(repo, "pwsh", &["-NoProfile", "-File", "anvil/container/image-id.ps1"])
+        run_image_id_command(repo, "pwsh", &["-NoProfile", "-File", ".anvil/container/image-id.ps1"])
     }
 
     #[cfg(unix)]
     fn run_image_id(repo: &Path) -> String {
-        run_image_id_command(repo, "bash", &["anvil/container/image-id.sh"])
+        run_image_id_command(repo, "bash", &[".anvil/container/image-id.sh"])
     }
 
     fn write_image_id_fixture(root: &Path) {
@@ -227,7 +227,7 @@ mod tests {
     fn containerfile_installs_the_generated_toolset() {
         assert!(CONTAINERFILE.contains("just anvil-setup"));
         assert!(CONTAINERFILE.contains("COPY . ."));
-        assert!(IGNORE.contains("!anvil/container/*"));
+        assert!(IGNORE.contains("!.anvil/container/*"));
         assert!(IGNORE.contains("!justfiles/anvil/checks/*.just"));
         assert!(CONTAINERFILE.contains("anvil_runner := \\\"native\\\""));
         assert!(CONTAINERFILE.contains("requires rust-toolchain.toml"));
@@ -240,13 +240,13 @@ mod tests {
         // must never reach the build context, even though the broader
         // container directory is included above.
         let include_position = IGNORE
-            .find("!anvil/container/*")
+            .find("!.anvil/container/*")
             .expect("the container directory inclusion is asserted above");
         let shell_exclude_position = IGNORE
-            .find("anvil/container/customize.sh")
+            .find(".anvil/container/customize.sh")
             .expect("customize.sh must be excluded from the build context");
         let powershell_exclude_position = IGNORE
-            .find("anvil/container/customize.ps1")
+            .find(".anvil/container/customize.ps1")
             .expect("customize.ps1 must be excluded from the build context");
         assert!(
             !IGNORE[shell_exclude_position..].starts_with('!'),
@@ -415,10 +415,12 @@ mod tests {
         assert!(!SHELL_DRIVER.contains("auth.sh"));
         assert!(!SHELL_DRIVER.contains("CUSTOMIZATION_API_VERSION"));
         assert!(SHELL_DRIVER.contains("legacy customization at justfiles/anvil/container/customize.sh is unsupported"));
+        assert!(SHELL_DRIVER.contains("legacy customization at anvil/container/customize.sh is unsupported"));
         assert!(POWERSHELL_DRIVER.contains("customize.ps1"));
         assert!(!POWERSHELL_DRIVER.contains("auth.ps1"));
         assert!(!POWERSHELL_DRIVER.contains("CustomizationApiVersion"));
         assert!(POWERSHELL_DRIVER.contains("legacy customization at justfiles/anvil/container/customize.ps1 is unsupported"));
+        assert!(POWERSHELL_DRIVER.contains("legacy customization at anvil/container/customize.ps1 is unsupported"));
 
         for (driver, image_exists, requested_recipes, needs_github_token) in [
             (
@@ -531,11 +533,11 @@ mod tests {
         let overridden = run_image_id_command_with_base(
             root,
             "pwsh",
-            &["-NoProfile", "-File", "anvil/container/image-id.ps1"],
+            &["-NoProfile", "-File", ".anvil/container/image-id.ps1"],
             Some(override_image),
         );
         #[cfg(unix)]
-        let overridden = run_image_id_command_with_base(root, "bash", &["anvil/container/image-id.sh"], Some(override_image));
+        let overridden = run_image_id_command_with_base(root, "bash", &[".anvil/container/image-id.sh"], Some(override_image));
         assert_ne!(base, overridden, "the selected base image must affect the image ID");
 
         write(
@@ -578,8 +580,8 @@ mod tests {
             "nested-custom-recipe:\n    @echo custom\n",
         );
 
-        let shell = run_image_id_command(root, "bash", &["anvil/container/image-id.sh"]);
-        let powershell = run_image_id_command(root, "pwsh", &["-NoProfile", "-File", "anvil/container/image-id.ps1"]);
+        let shell = run_image_id_command(root, "bash", &[".anvil/container/image-id.sh"]);
+        let powershell = run_image_id_command(root, "pwsh", &["-NoProfile", "-File", ".anvil/container/image-id.ps1"]);
         assert_eq!(shell, powershell);
     }
 

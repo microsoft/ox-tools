@@ -206,7 +206,7 @@
 //! - Non-interactive runs cannot pause for login. Authenticate `gh` or set host
 //!   `GITHUB_TOKEN` before starting them.
 //! - Regenerate managed files with `cargo anvil`; do not hand-edit
-//!   `anvil/container/`.
+//!   `.anvil/container/`.
 //!
 //! ## Checks and tiers
 //!

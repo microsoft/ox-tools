@@ -88,7 +88,7 @@ foreach ($recipeArg in $Recipe) {
 }
 
 if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) {
-    throw 'anvil-container: WSL 2 is required. See anvil/container/README.md.'
+    throw 'anvil-container: WSL 2 is required. See .anvil/container/README.md.'
 }
 
 $versionText = (& wsl -e docker version --format '{{.Server.Version}}' 2>$null)
@@ -114,12 +114,12 @@ if ($LASTEXITCODE -ne 0 -or -not $repoRoot) {
     throw 'anvil-container must run from a Git repository.'
 }
 
-$scriptDir = Join-Path $repoRoot 'anvil/container'
+$scriptDir = Join-Path $repoRoot '.anvil/container'
 $wslRepoRoot = (& wsl -e wslpath -a $repoRoot).Trim()
 if ($LASTEXITCODE -ne 0 -or -not $wslRepoRoot) {
     throw 'anvil-container: could not translate the repository path into the default WSL distribution.'
 }
-$wslScriptDir = "$wslRepoRoot/anvil/container"
+$wslScriptDir = "$wslRepoRoot/.anvil/container"
 $containerfile = Join-Path $scriptDir 'Containerfile'
 $baseImageMatch = [regex]::Match([IO.File]::ReadAllText($containerfile), '(?m)^ARG BASE_IMAGE=([^\r\n]+)')
 if (-not $baseImageMatch.Success) {
@@ -174,10 +174,14 @@ $githubTokenFile = $null
 $exitCode = 0
 $customizeScript = Join-Path $scriptDir 'customize.ps1'
 $legacyCustomizeScript = Join-Path $repoRoot 'justfiles/anvil/container/customize.ps1'
+$topLevelLegacyCustomizeScript = Join-Path $repoRoot 'anvil/container/customize.ps1'
 
 try {
     if (Test-Path -LiteralPath $legacyCustomizeScript -PathType Leaf) {
-        throw 'anvil-container: legacy customization at justfiles/anvil/container/customize.ps1 is unsupported; move its content to anvil/container/customize.ps1 and remove the legacy file.'
+        throw 'anvil-container: legacy customization at justfiles/anvil/container/customize.ps1 is unsupported; move its content to .anvil/container/customize.ps1 and remove the legacy file.'
+    }
+    if (Test-Path -LiteralPath $topLevelLegacyCustomizeScript -PathType Leaf) {
+        throw 'anvil-container: legacy customization at anvil/container/customize.ps1 is unsupported; move its content to .anvil/container/customize.ps1 and remove the legacy file.'
     }
     if (Test-Path -LiteralPath $customizeScript -PathType Leaf) {
         . $customizeScript
