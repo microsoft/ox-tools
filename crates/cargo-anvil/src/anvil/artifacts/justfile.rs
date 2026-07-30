@@ -55,6 +55,12 @@ const IMPACT_JUST: &str = include_str!("../../../templates/justfiles/anvil/impac
 /// Repo-root-relative path of the impact recipe file.
 const IMPACT_JUST_PATH: &str = "justfiles/anvil/impact.just";
 
+/// Contents of `justfiles/anvil/runner.just` baked into the binary.
+const RUNNER_JUST: &str = include_str!("../../../templates/justfiles/anvil/runner.just");
+
+/// Repo-root-relative path of the tier execution router.
+const RUNNER_JUST_PATH: &str = "justfiles/anvil/runner.just";
+
 /// Emits `(path, include_str!)` pairs for a set of split recipe files that
 /// live under a subdirectory of `justfiles/anvil/`. Each file is one owned
 /// artifact, so the recipe tree is one file per check / per group rather
@@ -68,6 +74,36 @@ macro_rules! split_recipe_files {
             ),
         )*]
     };
+}
+
+#[test]
+fn runner_routes_tiers_and_guards_recursion() {
+    assert!(RUNNER_JUST.contains("[windows]"));
+    assert!(RUNNER_JUST.contains("[script(\"pwsh\")]"));
+    assert!(RUNNER_JUST.contains("[unix]"));
+    assert!(RUNNER_JUST.contains("[script(\"bash\")]"));
+    assert_eq!(RUNNER_JUST.matches("[no-exit-message]").count(), 2);
+    assert!(RUNNER_JUST.contains("if ($env:ANVIL_IN_CONTAINER)"));
+    assert!(RUNNER_JUST.contains("if [[ -n \"${ANVIL_IN_CONTAINER:-}\" ]]"));
+    assert!(RUNNER_JUST.contains("replace(just_executable(), \"'\", \"''\")"));
+    assert!(RUNNER_JUST.contains("replace(justfile(), \"'\", \"''\")"));
+    assert!(RUNNER_JUST.contains("replace(tier, \"'\", \"''\")"));
+    assert!(RUNNER_JUST.contains("replace(runner, \"'\", \"''\")"));
+    assert!(RUNNER_JUST.contains("& $just --justfile $justfile anvil-container $nativeTier"));
+    assert!(RUNNER_JUST.contains("exec \"$just_path\" --justfile \"$justfile\" anvil-container \"$native_tier\""));
+    assert_eq!(RUNNER_JUST.matches("expected 'native' or 'container'").count(), 2);
+}
+
+#[test]
+fn aprz_uses_the_container_secret_and_fails_fast_without_it() {
+    let aprz = CHECK_FILES
+        .iter()
+        .find_map(|(path, body)| path.ends_with("/aprz.just").then_some(*body))
+        .expect("aprz.just is registered in CHECK_FILES below");
+    assert!(aprz.contains("if ($env:ANVIL_IN_CONTAINER)"));
+    assert!(aprz.contains("ANVIL_APRZ_ALREADY_RAN"));
+    assert!(aprz.contains("/run/secrets/anvil-github-token"));
+    assert!(aprz.contains("Run `gh auth login` on the host"));
 }
 
 /// One `justfiles/anvil/checks/<check>.just` file per catalog check
@@ -131,6 +167,11 @@ const TIERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tiers.
 /// Repo-root-relative path of the tier aggregator file.
 const TIERS_JUST_PATH: &str = "justfiles/anvil/tiers.just";
 
+#[cfg(test)]
+pub(crate) fn dependency_recipe_sources() -> impl Iterator<Item = &'static str> {
+    std::iter::once(TIERS_JUST).chain(GROUP_FILES.iter().map(|(_, body)| *body))
+}
+
 /// Embedded body of the `anvil-imports` region in the user's Justfile.
 pub(crate) const JUSTFILE_IMPORTS_BODY: &str = include_str!("../../../templates/regions/justfile-imports.just");
 
@@ -173,6 +214,12 @@ pub fn helpers() -> Artifact {
 #[must_use]
 pub fn impact() -> Artifact {
     Artifact::owned_file(IMPACT_JUST_PATH, IMPACT_JUST)
+}
+
+/// `justfiles/anvil/runner.just` — native/container tier routing.
+#[must_use]
+pub fn runner() -> Artifact {
+    Artifact::owned_file(RUNNER_JUST_PATH, RUNNER_JUST)
 }
 
 /// The `justfiles/anvil/checks/<check>.just` files — one owned artifact
@@ -394,28 +441,37 @@ mod tests {
 
     #[test]
     fn tiers_just_template_has_three_tiers() {
-        for needle in ["anvil-pr:", "anvil-scheduled:", "anvil-full:"] {
+        for needle in [
+            "anvil-pr:",
+            "anvil-scheduled:",
+            "anvil-full:",
+            "_anvil-pr:",
+            "_anvil-scheduled:",
+            "_anvil-full:",
+        ] {
             assert!(TIERS_JUST.contains(needle), "tiers.just missing '{needle}'");
         }
-        // The PR tier runs its validate-prereqs aggregate first so a missing
-        // tool fails up front rather than mid-run.
-        assert!(
-            TIERS_JUST.contains("anvil-pr: anvil-pr-validate-prereqs"),
-            "PR tier must run its validate-prereqs first"
-        );
-        // The scheduled and full tiers are ANVIL_IMPACT=off wrappers: they set
-        // the env var and re-invoke a private `_*-impl` recipe (a dep-only
-        // recipe can't set env for its own deps). The validate-prereqs
-        // aggregate therefore lives on the `_*-impl` recipe.
+        // Every public tier entry point routes through the `_anvil-run`
+        // native/container router. The private `_anvil-<tier>` recipe carries
+        // the validate-prereqs aggregate (run first) so a missing tool fails
+        // up front rather than mid-run. The scheduled and full tiers pass the
+        // `"off"` impact argument so `_anvil-run` exports ANVIL_IMPACT=off --
+        // they are the full-workspace backstop for PR-tier impact scoping.
         for needle in [
-            "anvil-scheduled:",
-            "_anvil-scheduled-impl: anvil-scheduled-validate-prereqs",
-            "anvil-full:",
-            "_anvil-full-impl: anvil-full-validate-prereqs",
-            "$env:ANVIL_IMPACT = 'off'",
+            "anvil-pr: (_anvil-run \"pr\" anvil_runner)",
+            "_anvil-pr: anvil-pr-validate-prereqs",
+            "anvil-scheduled: (_anvil-run \"scheduled\" anvil_runner \"off\")",
+            "_anvil-scheduled: anvil-scheduled-validate-prereqs",
+            "anvil-full: (_anvil-run \"full\" anvil_runner \"off\")",
+            "_anvil-full: anvil-full-validate-prereqs",
         ] {
-            assert!(TIERS_JUST.contains(needle), "scheduled/full tier wrapper missing '{needle}'");
+            assert!(TIERS_JUST.contains(needle), "tier wrapper missing '{needle}'");
         }
+        // The runner forces impact off for the full-workspace tiers.
+        assert!(
+            RUNNER_JUST.contains("ANVIL_IMPACT"),
+            "runner must be able to force ANVIL_IMPACT=off for the scheduled/full tiers"
+        );
         // The scheduled tier must fan out to every scheduled group, including
         // runtime-analysis (a separate group from exhaustive).
         for needle in [
@@ -460,8 +516,10 @@ mod tests {
             "import 'impact.just'",
             "import 'checks/fmt.just'",
             "import 'checks/miri.just'",
+            "import 'container/container.just'",
             "import 'groups/pr-fast.just'",
             "import 'groups/scheduled-exhaustive.just'",
+            "import 'runner.just'",
             "import 'tiers.just'",
             "import 'tools.just'",
             "import 'versions.just'",

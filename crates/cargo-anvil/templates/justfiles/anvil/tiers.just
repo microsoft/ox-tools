@@ -12,7 +12,10 @@
 
 # Run all pull request checks.
 [group("anvil")]
-anvil-pr: anvil-pr-validate-prereqs \
+anvil-pr: (_anvil-run "pr" anvil_runner)
+
+[private]
+_anvil-pr: anvil-pr-validate-prereqs \
     anvil-pr-fast \
     anvil-pr-slow
 
@@ -24,41 +27,36 @@ anvil-pr: anvil-pr-validate-prereqs \
 # The scheduled tier is deliberately NOT impact-scoped: it is the
 # catch-all that backstops PR-tier scoping. Because every check now
 # depends on `anvil-impact` and self-populates its scope from the cache,
-# the tier sets ANVIL_IMPACT=off so `_anvil-impact-include` returns each
-# tier's full-workspace default and the `anvil-impact` dependency no-ops.
-# A dependency-only recipe can't set env for its own deps (deps run
-# before the body), so this is a thin two-stage wrapper: the body exports
-# the var and re-invokes `just` on the private impl recipe, whose deps
-# then inherit ANVIL_IMPACT=off.
+# the tier must run with ANVIL_IMPACT=off so `_anvil-impact-include`
+# returns each tier's full-workspace default and the `anvil-impact`
+# dependency no-ops. A dependency-only recipe can't set env for its own
+# deps (deps run before the body), so the public tier routes through
+# `_anvil-run` with the `"off"` impact argument: `_anvil-run` exports
+# ANVIL_IMPACT=off before invoking the private `_anvil-scheduled` recipe,
+# whose deps then inherit it.
 
 # Run all scheduled checks.
 [group("anvil")]
-[script("pwsh")]
-anvil-scheduled:
-    $env:ANVIL_IMPACT = 'off'
-    & "{{ just_executable() }}" _anvil-scheduled-impl
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+anvil-scheduled: (_anvil-run "scheduled" anvil_runner "off")
 
-_anvil-scheduled-impl: anvil-scheduled-validate-prereqs \
+[private]
+_anvil-scheduled: anvil-scheduled-validate-prereqs \
     anvil-scheduled-test \
     anvil-scheduled-advisories \
     anvil-scheduled-runtime-analysis \
     anvil-scheduled-exhaustive
 
-# Runs everything full-workspace (ANVIL_IMPACT=off), same wrapper shape
-# as anvil-scheduled.
+# Runs everything full-workspace (ANVIL_IMPACT=off, via the `"off"` impact
+# argument to _anvil-run), same wrapper shape as anvil-scheduled.
 
 # Full tier: PR + scheduled, end-to-end. Useful before tagging a release.
 [group("anvil")]
-[script("pwsh")]
-anvil-full:
-    $env:ANVIL_IMPACT = 'off'
-    & "{{ just_executable() }}" _anvil-full-impl
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+anvil-full: (_anvil-run "full" anvil_runner "off")
 
-_anvil-full-impl: anvil-full-validate-prereqs \
-    anvil-pr \
-    _anvil-scheduled-impl
+[private]
+_anvil-full: anvil-full-validate-prereqs \
+    _anvil-pr \
+    _anvil-scheduled
 
 # Tier-level + global setup + validate-prereqs
 # ===========================================================================
