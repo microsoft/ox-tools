@@ -283,10 +283,13 @@ Detail on each host:
 - **`rustfmt.toml`** — created with the opinionated baseline if absent; managed region at the
   end of the file. The most contested opinion in the catalog; users who want to keep their own
   formatting opt the file out via the empty-stub mechanism in [updates.md](./updates.md).
-- **`.delta.toml`** — a notice that cargo-anvil's cloud workflows load the owned
-  `justfiles/anvil/delta.toml`. Repository-specific local cargo-delta settings remain
-  user-owned outside the region. Disabling the notice does not alter cloud impact
-  scoping. See [checks.md](./checks.md#impact-scoping) and the per-backend wiring in
+- **`.delta.toml`** — managed trip-wire patterns for conservative impact analysis.
+  Repository-specific parser, exclusion, and fixed comparison-branch policy remains
+  user-owned outside the region. Cloud workflows explicitly load this same file, so
+  local and cloud impact analysis share one configuration. When adopting an existing
+  valid top-level `trip_wire_patterns` key, cargo-anvil preserves it and emits an empty
+  managed-region opt-out rather than creating a duplicate TOML key. See
+  [checks.md](./checks.md#impact-scoping) and the per-backend wiring in
   [github.md](./github.md) / [ado.md](./ado.md).
 - **`.gitattributes`** — managed region pinning `*.rs text eol=lf` so Rust sources keep LF
   line endings on every platform (rustfmt and other tools assume LF). Created if absent;

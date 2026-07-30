@@ -428,9 +428,10 @@ default to empty strings (recipes default to `--workspace`) and the reusable wor
 omits the passthrough. Threading them through is purely a PR-tier optimization;
 the scheduled tier never benefits.
 
-Cloud impact always loads the owned `justfiles/anvil/delta.toml`. The managed
-`.delta.toml` region only points local users at that file; emptying the region does
-not alter cloud impact behavior.
+Cloud impact explicitly loads the repository's `.delta.toml`, including the managed
+trip-wire patterns and any repository-owned parser, exclusion, or fixed comparison-
+branch settings. Existing repositories that already define top-level
+`trip_wire_patterns` retain that policy and receive an empty managed-region opt-out.
 
 The reusable workflow declares a small input set so the root workflow can pass overrides:
 
@@ -559,10 +560,10 @@ environment, then runs:
    cache; no catalog tools).
 2. `just anvil-tool-cargo-delta-install binstall` -- only tool this composite
    needs.
-3. Resolve the PR target with `_anvil-base-ref`, copy the owned
-   `justfiles/anvil/delta.toml` to a temporary config, and append that resolved
-   target as `[git].remote_branch`.
-4. Run configured snapshots for the target worktree and current checkout, then
+3. Resolve the snapshot baseline with `_anvil-base-ref` and load the repository's
+   `.delta.toml`. Its `[git].remote_branch`, when present, remains fixed repository
+   policy for cargo-delta's changed-file detection.
+4. Run configured snapshots for the baseline worktree and current checkout, then
    compare them with configured `cargo delta impact`.
 5. For each of the three tiers (`modified`, `affected`, `required`), format the crate
    list into a pre-built `--package X@ver --package Y@ver …` string (version-qualified

@@ -1,2 +1,24 @@
-# cargo-anvil's cloud workflows explicitly load justfiles/anvil/delta.toml.
-# This repository-level file remains available for additional local settings.
+# Changes to these workspace-level inputs conservatively affect every package.
+trip_wire_patterns = [
+    ".ado/**",
+    ".cargo/**",
+    ".delta.toml",
+    ".editorconfig",
+    ".github/**",
+    ".pipelines/**",
+    "*.just",
+    "Cargo.lock",
+    "Cargo.toml",
+    "Justfile",
+    "clippy.toml",
+    "codecov.yml",
+    "constants.env",
+    "deny.toml",
+    "justfile",
+    "justfiles/**",
+    "rust-toolchain.toml",
+    "rustfmt.toml",
+    "scripts/**",
+    "spellcheck.toml",
+    "unstable-rustfmt.toml",
+]

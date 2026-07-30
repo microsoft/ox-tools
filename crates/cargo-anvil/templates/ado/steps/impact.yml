@@ -33,13 +33,10 @@ steps:
       # source of truth; see the _anvil-base-ref recipe). On ADO PRs it
       # strips refs/heads/ from SYSTEM_PULLREQUEST_TARGETBRANCH and resolves
       # to origin/<branch>; BASE_REF overrides; non-PR runs fall back to
-      # origin/main then origin/master.
+      # origin/main then origin/master. cargo-delta's changed-file comparison
+      # branch remains the fixed repository policy configured in .delta.toml.
       base="$(just _anvil-base-ref)"
-      delta_config="$AGENT_TEMPDIRECTORY/anvil-delta.toml"
-      cp justfiles/anvil/delta.toml "$delta_config"
-      base_toml="${base//\\/\\\\}"
-      base_toml="${base_toml//\"/\\\"}"
-      printf '\n[git]\nremote_branch = "%s"\n' "$base_toml" >> "$delta_config"
+      delta_config="$(pwd)/.delta.toml"
       # The baseline worktree is checked out at the merge target, whose
       # rust-toolchain.toml may pin a toolchain that is NOT installed on the
       # agent (any PR that bumps rust-toolchain.toml hits this -- the agent

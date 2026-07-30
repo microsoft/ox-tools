@@ -21,7 +21,7 @@ use crate::checksum::checksum_str;
 use crate::decision::{Decision, DecisionInputs, UpdateDecision, decide};
 use crate::manifest::{Manifest, RegionKey};
 use crate::plan::{PlanItem, Target};
-use crate::region::{CommentSyntax, find_region, upsert_region};
+use crate::region::{CommentSyntax, RegionPlacement, find_region, upsert_region_with_placement};
 
 /// Compute the [`PlanItem`] for a managed region.
 ///
@@ -40,13 +40,14 @@ use crate::region::{CommentSyntax, find_region, upsert_region};
 /// # Errors
 ///
 /// Returns an error if the region in the host is malformed.
-pub fn plan_managed_region(
+pub fn plan_managed_region_with_placement(
     manifest: &Manifest,
     host_relpath: &str,
     host_text: Option<&str>,
     region_id: &str,
     rendered_body: &str,
     syntax: CommentSyntax,
+    placement: RegionPlacement,
 ) -> Result<PlanItem, AppError> {
     let template_checksum = checksum_str(rendered_body);
     let key = RegionKey {
@@ -55,10 +56,12 @@ pub fn plan_managed_region(
     };
     let last_rendered = manifest.regions.get(&key).map(String::as_str);
 
-    let disk_checksum = match host_text {
+    let disk_region = match host_text {
         None => None,
-        Some(text) => find_region(text, region_id, syntax)?.map(|region| checksum_str(region.body_str())),
+        Some(text) => find_region(text, region_id, syntax)?,
     };
+    let disk_checksum = disk_region.as_ref().map(|region| checksum_str(region.body_str()));
+    let needs_reposition = placement == RegionPlacement::Start && disk_region.as_ref().is_some_and(|region| region.start_line.start != 0);
 
     let inputs = DecisionInputs {
         last_rendered,
@@ -70,15 +73,19 @@ pub fn plan_managed_region(
         host: host_relpath.to_owned(),
         id: region_id.to_owned(),
     };
-    let item = match decide(&inputs) {
+    let decision = match decide(&inputs) {
+        UpdateDecision::InSync if needs_reposition => UpdateDecision::Write,
+        decision => decision,
+    };
+    let item = match decision {
         UpdateDecision::InSync => PlanItem::insync(target, template_checksum),
         UpdateDecision::LeaveAlone => PlanItem::noop(target, Decision::LeaveAlone),
         UpdateDecision::Write => {
-            let spliced = splice(host_text, region_id, rendered_body, syntax)?;
+            let spliced = splice(host_text, region_id, rendered_body, syntax, placement)?;
             PlanItem::write_region(host_relpath, region_id, rendered_body.to_owned(), spliced, template_checksum)
         }
         UpdateDecision::Propose => {
-            let spliced = splice(host_text, region_id, rendered_body, syntax)?;
+            let spliced = splice(host_text, region_id, rendered_body, syntax, placement)?;
             PlanItem::propose_region(host_relpath, region_id, rendered_body.to_owned(), spliced, template_checksum)
         }
     };
@@ -86,9 +93,35 @@ pub fn plan_managed_region(
     Ok(item)
 }
 
-fn splice(host_text: Option<&str>, region_id: &str, rendered_body: &str, syntax: CommentSyntax) -> Result<String, AppError> {
+#[cfg(test)]
+fn plan_managed_region(
+    manifest: &Manifest,
+    host_relpath: &str,
+    host_text: Option<&str>,
+    region_id: &str,
+    rendered_body: &str,
+    syntax: CommentSyntax,
+) -> Result<PlanItem, AppError> {
+    plan_managed_region_with_placement(
+        manifest,
+        host_relpath,
+        host_text,
+        region_id,
+        rendered_body,
+        syntax,
+        RegionPlacement::End,
+    )
+}
+
+fn splice(
+    host_text: Option<&str>,
+    region_id: &str,
+    rendered_body: &str,
+    syntax: CommentSyntax,
+    placement: RegionPlacement,
+) -> Result<String, AppError> {
     let base = host_text.unwrap_or("");
-    upsert_region(base, region_id, rendered_body, syntax)
+    upsert_region_with_placement(base, region_id, rendered_body, syntax, placement)
 }
 
 #[cfg(test)]
@@ -114,6 +147,34 @@ mod tests {
         let spliced = item.spliced_host.as_deref().unwrap();
         assert!(spliced.starts_with("user content\n"));
         assert!(spliced.contains("# >>> anvil-managed: r"));
+    }
+
+    #[test]
+    fn start_placement_moves_an_in_sync_body_at_the_end() {
+        let body = "trip_wire_patterns = []\n";
+        let host = "[git]\nremote_branch = \"origin/main\"\n\n# >>> anvil-managed: r\ntrip_wire_patterns = []\n# <<< anvil-managed: r\n";
+        let mut manifest = Manifest::default();
+        manifest.set_region("delta.toml", "r", checksum_str(body));
+
+        let item = plan_managed_region_with_placement(&manifest, "delta.toml", Some(host), "r", body, SYN, RegionPlacement::Start).unwrap();
+
+        assert_eq!(item.decision, Decision::Write);
+        assert!(item.spliced_host.as_deref().unwrap().starts_with("# >>> anvil-managed: r"));
+    }
+
+    #[test]
+    fn start_placement_updates_an_untouched_legacy_region_at_the_start() {
+        let old_body = "[delta]\nroot-files = [\"Cargo.toml\"]\n";
+        let new_body = "trip_wire_patterns = [\"Cargo.toml\"]\n";
+        let host = format!("# >>> anvil-managed: r\n{old_body}# <<< anvil-managed: r\n");
+        let mut manifest = Manifest::default();
+        manifest.set_region("delta.toml", "r", checksum_str(old_body));
+
+        let item =
+            plan_managed_region_with_placement(&manifest, "delta.toml", Some(&host), "r", new_body, SYN, RegionPlacement::Start).unwrap();
+
+        assert_eq!(item.decision, Decision::Write);
+        assert!(item.spliced_host.as_deref().unwrap().contains("trip_wire_patterns"));
     }
 
     #[test]

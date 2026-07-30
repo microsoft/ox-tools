@@ -356,12 +356,12 @@ mod tests {
 
     #[test]
     fn impact_step_loads_config_for_both_snapshots_and_impact() {
-        assert!(IMPACT_STEP.contains("cp justfiles/anvil/delta.toml"));
-        assert!(IMPACT_STEP.contains("remote_branch = \"%s\""));
+        assert!(IMPACT_STEP.contains("delta_config=\"$(pwd)/.delta.toml\""));
+        assert!(!IMPACT_STEP.contains("remote_branch ="));
         assert_eq!(
             IMPACT_STEP.matches("--config \"$delta_config\"").count(),
             3,
-            "current snapshot, baseline snapshot, and impact must share the resolved config"
+            "current snapshot, baseline snapshot, and impact must share the repository config"
         );
         assert!(IMPACT_STEP.contains("cargo delta --config \"$delta_config\" snapshot"));
         assert!(IMPACT_STEP.contains("cargo delta --config \"$delta_config\" impact"));

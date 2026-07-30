@@ -43,12 +43,6 @@ const HELPERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/help
 /// Repo-root-relative path of the shared-helpers recipe file.
 const HELPERS_JUST_PATH: &str = "justfiles/anvil/helpers.just";
 
-/// cargo-delta configuration loaded by cloud impact analysis.
-const DELTA_TOML: &str = include_str!("../../../templates/justfiles/anvil/delta.toml");
-
-/// Repo-root-relative path of cargo-anvil's cargo-delta configuration.
-const DELTA_TOML_PATH: &str = "justfiles/anvil/delta.toml";
-
 /// Contents of `justfiles/anvil/runner.just` baked into the binary.
 const RUNNER_JUST: &str = include_str!("../../../templates/justfiles/anvil/runner.just");
 
@@ -204,12 +198,6 @@ pub fn helpers() -> Artifact {
     Artifact::owned_file(HELPERS_JUST_PATH, HELPERS_JUST)
 }
 
-/// `justfiles/anvil/delta.toml` — conservative cloud impact configuration.
-#[must_use]
-pub fn delta_config() -> Artifact {
-    Artifact::owned_file(DELTA_TOML_PATH, DELTA_TOML)
-}
-
 /// `justfiles/anvil/runner.just` — native/container tier routing.
 #[must_use]
 pub fn runner() -> Artifact {
@@ -248,13 +236,6 @@ mod tests {
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-deny-validate-prereqs"));
         assert!(TOOLS_JUST.contains("anvil-component-default-clippy-install"));
         assert!(TOOLS_JUST.contains("anvil-toolchain-nightly-install"));
-    }
-
-    #[test]
-    fn delta_config_uses_cargo_delta_schema() {
-        assert!(DELTA_TOML.contains("trip_wire_patterns"));
-        assert!(DELTA_TOML.contains("\"Cargo.lock\""));
-        assert!(!DELTA_TOML.contains("[delta]"));
     }
 
     /// All `checks/*.just` bodies concatenated, for content assertions.

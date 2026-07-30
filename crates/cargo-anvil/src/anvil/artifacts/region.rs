@@ -396,9 +396,10 @@ mod tests {
     }
 
     #[test]
-    fn delta_body_points_to_owned_cloud_config() {
-        assert!(DELTA_BODY.contains("justfiles/anvil/delta.toml"));
-        assert!(DELTA_BODY.contains("additional local settings"));
+    fn delta_body_uses_cargo_delta_schema() {
+        assert!(DELTA_BODY.contains("trip_wire_patterns"));
+        assert!(DELTA_BODY.contains("\"Cargo.lock\""));
+        assert!(!DELTA_BODY.contains("[delta]"));
     }
 
     #[test]

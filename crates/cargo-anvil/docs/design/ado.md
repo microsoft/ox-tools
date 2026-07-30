@@ -529,9 +529,10 @@ the same `steps/job.yml` delegation. Scheduled step templates don't receive any
 `include*` parameters; they default to empty strings and recipes fall through to
 `--workspace`.
 
-If `.delta.toml`'s managed region is disabled
-([updates.md §opt-out](./updates.md#6-opting-out-in-file-stubs)), the impact step is
-unaffected: cloud impact uses the separate owned `justfiles/anvil/delta.toml`.
+Cloud impact explicitly loads `.delta.toml`, so its managed trip wires and
+repository-owned parser, exclusion, and fixed comparison-branch settings apply
+equally to local and ADO execution. Existing top-level `trip_wire_patterns` are
+preserved and opt the managed region out rather than being duplicated.
 
 ## 5. Per-group step templates
 
@@ -622,12 +623,11 @@ user's msrustup step in 1ESPT pipelines or by a previous step in OSS pipelines
 `cargo-binstall` has unresolved compliance issues for internal ADO pipelines.
 
 `impact.yml` invokes `setup.yml` with `group: none`, then installs `cargo-delta`
-via `anvil-tool-cargo-delta-install` and runs
-configured snapshots and `cargo delta impact --format json`. The step copies
-`justfiles/anvil/delta.toml` to a temporary file and binds its
-`[git].remote_branch` to `_anvil-base-ref`, so both snapshot comparison and
-changed-file detection use `$(System.PullRequest.TargetBranch)` (or `$BASE_REF`
-if set). Each tier becomes a pre-built `--package …` string or `--skip`; the
+via `anvil-tool-cargo-delta-install` and runs configured snapshots and
+`cargo delta impact --format json`. The snapshots use `_anvil-base-ref`; cargo-
+delta's changed-file detection uses the fixed `[git].remote_branch` policy from
+the repository's `.delta.toml` when configured. Each tier becomes a pre-built
+`--package …` string or `--skip`; the
 three results are exported as ADO output variables via
 `##vso[task.setvariable variable=…;isOutput=true]`:
 

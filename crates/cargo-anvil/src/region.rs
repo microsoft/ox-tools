@@ -34,6 +34,15 @@ pub enum CommentSyntax {
     SlashSlash,
 }
 
+/// Where a newly rendered managed region is placed in its host file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegionPlacement {
+    /// Place the region before user content.
+    Start,
+    /// Place the region after user content.
+    End,
+}
+
 impl CommentSyntax {
     fn prefix(self) -> &'static str {
         match self {
@@ -161,9 +170,32 @@ pub fn find_region<'a>(text: &'a str, id: &str, syntax: CommentSyntax) -> Result
 ///
 /// Returns an error if an existing region is malformed.
 pub fn upsert_region(text: &str, id: &str, new_body: &str, syntax: CommentSyntax) -> Result<String, AppError> {
+    upsert_region_with_placement(text, id, new_body, syntax, RegionPlacement::End)
+}
+
+/// Replace or insert a managed region at the requested host-file position.
+///
+/// Existing start-placed regions are moved to the beginning as part of an
+/// update. This is required for TOML root keys, which cannot be appended after
+/// a table header without becoming members of that table.
+///
+/// # Errors
+///
+/// Returns an error if an existing region is malformed.
+pub fn upsert_region_with_placement(
+    text: &str,
+    id: &str,
+    new_body: &str,
+    syntax: CommentSyntax,
+    placement: RegionPlacement,
+) -> Result<String, AppError> {
     let rendered = render_region(id, new_body, syntax);
 
     if let Some(region) = find_region(text, id, syntax)? {
+        if placement == RegionPlacement::Start {
+            let without_region = remove_region(text, id, syntax)?;
+            return Ok(prepend_region(&without_region, &rendered));
+        }
         let mut out = String::with_capacity(text.len() + rendered.len());
         out.push_str(&text[..region.start_line.start]);
         out.push_str(&rendered);
@@ -171,8 +203,12 @@ pub fn upsert_region(text: &str, id: &str, new_body: &str, syntax: CommentSyntax
         return Ok(out);
     }
 
-    // No region present — append at the end with one blank line of
-    // separation if the file is non-empty and doesn't end in two newlines.
+    if placement == RegionPlacement::Start {
+        return Ok(prepend_region(text, &rendered));
+    }
+
+    // No region present — append at the end with one blank line of separation
+    // if the file is non-empty and doesn't end in two newlines.
     let mut out = String::with_capacity(text.len() + rendered.len() + 1);
     out.push_str(text);
     if !text.is_empty() {
@@ -185,6 +221,16 @@ pub fn upsert_region(text: &str, id: &str, new_body: &str, syntax: CommentSyntax
     }
     out.push_str(&rendered);
     Ok(out)
+}
+
+fn prepend_region(text: &str, rendered: &str) -> String {
+    let mut out = String::with_capacity(text.len() + rendered.len() + 1);
+    out.push_str(rendered);
+    if !text.is_empty() && !text.starts_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(text);
+    out
 }
 
 /// Render an isolated region — sentinels plus body — without splicing it
@@ -399,6 +445,29 @@ mod tests {
     fn upsert_into_empty_file() {
         let new = upsert_region("", "x", "body\n", SYN).unwrap();
         assert_eq!(new, "# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n");
+    }
+
+    #[test]
+    fn start_placement_prepends_absent_region() {
+        let new = upsert_region_with_placement(
+            "[git]\nremote_branch = \"origin/main\"\n",
+            "x",
+            "trip_wire_patterns = []\n",
+            SYN,
+            RegionPlacement::Start,
+        )
+        .unwrap();
+        assert!(new.starts_with("# >>> anvil-managed: x\ntrip_wire_patterns = []\n"));
+        let _: toml_edit::DocumentMut = new.parse().expect("root key before table must be valid TOML");
+    }
+
+    #[test]
+    fn start_placement_moves_existing_region_from_end() {
+        let text = "[git]\nremote_branch = \"origin/main\"\n\n# >>> anvil-managed: x\nold = true\n# <<< anvil-managed: x\n";
+        let new = upsert_region_with_placement(text, "x", "trip_wire_patterns = []\n", SYN, RegionPlacement::Start).unwrap();
+        assert!(new.starts_with("# >>> anvil-managed: x\ntrip_wire_patterns = []\n"));
+        assert_eq!(new.matches("# >>> anvil-managed: x").count(), 1);
+        let _: toml_edit::DocumentMut = new.parse().expect("moved root key must be valid TOML");
     }
 
     #[test]

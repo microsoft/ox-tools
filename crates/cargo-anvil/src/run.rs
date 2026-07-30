@@ -9,7 +9,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
-use ohno::{AppError, bail};
+use ohno::{AppError, app_err, bail};
 use tracing::info;
 
 use crate::backend::{self, Backend};
@@ -18,11 +18,13 @@ use crate::catalog::artifact::{Artifact, HostSelector, RegionSpec};
 use crate::checksum::checksum_str;
 use crate::cli::Cli;
 use crate::decision::{Decision, RemovalDecision, decide_removal};
-use crate::emit::{plan_managed_region, plan_owned_file};
+use crate::emit::{plan_managed_region_with_placement, plan_owned_file};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
-use crate::region::{CommentSyntax, find_region, remove_region, upsert_region};
+#[cfg(test)]
+use crate::region::upsert_region;
+use crate::region::{CommentSyntax, RegionPlacement, find_region, remove_region, upsert_region_with_placement};
 use crate::workspace::{self, Workspace};
 
 /// Outcome of an `update` invocation.
@@ -230,7 +232,12 @@ fn recompose_region_proposals(repo_root: &Path, plan: &mut Plan, hosts: &mut Hos
         // Hash for managed regions (mirrors plan_managed_region /
         // plan_removals); revisit when the manifest records per-region syntax.
         for (_, id, body) in entries {
-            composed = upsert_region(&composed, id, body, CommentSyntax::Hash)?;
+            let placement = if id == "anvil-delta" {
+                RegionPlacement::Start
+            } else {
+                RegionPlacement::End
+            };
+            composed = upsert_region_with_placement(&composed, id, body, CommentSyntax::Hash, placement)?;
         }
         // Stamp the composed host onto every proposal for this host.
         for (idx, _, _) in entries {
@@ -340,7 +347,13 @@ fn push_region_at(
 ) -> Result<(), AppError> {
     let host = resolve_existing_case_insensitive(repo_root, host);
     let current = hosts.get_or_read(repo_root, &host)?;
-    let item = plan_managed_region(manifest, &host, current.as_deref(), spec.id.as_str(), &spec.body, spec.syntax)?;
+    let placement = region_placement(spec);
+    let body = if preserves_existing_delta_trip_wires(current.as_deref(), spec)? {
+        ""
+    } else {
+        &spec.body
+    };
+    let item = plan_managed_region_with_placement(manifest, &host, current.as_deref(), spec.id.as_str(), body, spec.syntax, placement)?;
     // Only a `Write` mutates the live host on disk; fold its spliced
     // output back into the accumulator so sibling regions compose. A
     // `Propose` writes a sibling, not the host, so it must not advance the
@@ -352,6 +365,28 @@ fn push_region_at(
     }
     plan.push(item);
     Ok(())
+}
+
+fn region_placement(spec: &RegionSpec) -> RegionPlacement {
+    if spec.id.as_str() == "anvil-delta" {
+        RegionPlacement::Start
+    } else {
+        RegionPlacement::End
+    }
+}
+
+fn preserves_existing_delta_trip_wires(host_text: Option<&str>, spec: &RegionSpec) -> Result<bool, AppError> {
+    if spec.id.as_str() != "anvil-delta" {
+        return Ok(false);
+    }
+    let Some(host_text) = host_text else {
+        return Ok(false);
+    };
+    let without_region = remove_region(host_text, spec.id.as_str(), spec.syntax)?;
+    let document: toml_edit::DocumentMut = without_region
+        .parse()
+        .map_err(|error| app_err!("could not parse .delta.toml while migrating trip_wire_patterns: {error}"))?;
+    Ok(document.as_table().contains_key("trip_wire_patterns"))
 }
 
 /// Scan the previous manifest for entries that the active plan items
@@ -953,6 +988,35 @@ mod tests {
         let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(!second.plan.has_changes());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn existing_delta_trip_wires_are_preserved_without_duplicate_key() {
+        let tmp = empty_workspace();
+        fs::write(
+            tmp.path().join(".delta.toml"),
+            "trip_wire_patterns = [\"custom/**\"]\n\n[git]\nremote_branch = \"origin/release\"\n",
+        )
+        .unwrap();
+        let args = Cli {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+            force: false,
+        };
+
+        let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+
+        let content = fs::read_to_string(tmp.path().join(".delta.toml")).unwrap();
+        let document: toml_edit::DocumentMut = content.parse().expect("migrated delta config must remain valid TOML");
+        assert_eq!(
+            document["trip_wire_patterns"].as_array().unwrap().get(0).unwrap().as_str(),
+            Some("custom/**")
+        );
+        assert_eq!(content.matches("trip_wire_patterns").count(), 1);
+        let region = find_region(&content, "anvil-delta", CommentSyntax::Hash).unwrap().unwrap();
+        assert!(region.is_empty(), "existing repository policy should opt out of managed defaults");
     }
 
     /// Files that were previously rendered but are no longer in scope

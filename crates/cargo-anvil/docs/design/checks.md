@@ -383,8 +383,8 @@ The recipe-side mechanics are in
 
 Trade-off acknowledged: the risk cargo-delta introduces is that a misconfigured analysis
 silently skips checks that should have run, leaving "all green" on a PR that actually broke
-something. The design mitigates this with: (1) trip-wire patterns in
-`justfiles/anvil/delta.toml` that
+something. The design mitigates this with: (1) managed trip-wire patterns in
+`.delta.toml` that
 bias toward full runs whenever config changes; (2) `unscoped` checks (`deny`, `audit`,
 `aprz`, `pr-title`, `mutants-full`) always run regardless of impact analysis;
 (3) scheduled always runs full-workspace, catching anything the PR-scoping missed within 24

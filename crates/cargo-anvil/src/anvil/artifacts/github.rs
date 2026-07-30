@@ -180,12 +180,12 @@ mod tests {
     fn impact_action_uses_group_none_and_installs_only_cargo_delta() {
         assert!(IMPACT_ACTION.contains("group: none"));
         assert!(IMPACT_ACTION.contains("anvil-tool-cargo-delta-install"));
-        assert!(IMPACT_ACTION.contains("cp justfiles/anvil/delta.toml"));
-        assert!(IMPACT_ACTION.contains("remote_branch = \"%s\""));
+        assert!(IMPACT_ACTION.contains("delta_config=\"$(pwd)/.delta.toml\""));
+        assert!(!IMPACT_ACTION.contains("remote_branch ="));
         assert_eq!(
             IMPACT_ACTION.matches("--config \"$delta_config\"").count(),
             3,
-            "current snapshot, baseline snapshot, and impact must share the resolved config"
+            "current snapshot, baseline snapshot, and impact must share the repository config"
         );
         assert!(IMPACT_ACTION.contains("cargo delta --config \"$delta_config\" snapshot"));
         assert!(IMPACT_ACTION.contains("cargo delta --config \"$delta_config\" impact"));

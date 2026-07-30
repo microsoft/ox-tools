@@ -28,8 +28,6 @@ repo/
     ├── helpers.just        shared helper recipes (_anvil-base-ref,
     │                       _anvil-impact-format) and the impact env-var contract
     │                       that the per-check recipes rely on.
-    ├── delta.toml          owned cargo-delta configuration used by cloud impact
-    │                       snapshots and changed-file detection.
     ├── checks/             one file per check: checks/<check>.just holds the
     │                       `anvil-<check>` recipe plus its paired `*-setup` and
     │                       `*-validate-prereqs` recipes (anvil-fmt, anvil-clippy,
