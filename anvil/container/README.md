@@ -202,9 +202,14 @@ A repository or derived catalog can add one trusted customization file per
 supported host:
 
 ```text
-justfiles/anvil/container/customize.sh
-justfiles/anvil/container/customize.ps1
+anvil/container/customize.sh
+anvil/container/customize.ps1
 ```
+
+If upgrading from an older generated layout, move any repository-owned
+`customize.sh` or `customize.ps1` file from `justfiles/anvil/container/` to the
+path above. The driver rejects the legacy location instead of silently ignoring
+the customization.
 
 The driver sources the matching file as trusted host code before authentication,
 image construction, and recipe execution. The documented customization

@@ -12,7 +12,8 @@ if [[ ! -f "$toolchain_path" ]]; then
     exit 1
 fi
 
-container_dir="$repo_root/justfiles/anvil/container"
+container_dir="$repo_root/anvil/container"
+container_recipe_dir="$repo_root/justfiles/anvil/container"
 default_base_image="$(sed -n 's/^ARG BASE_IMAGE=//p' "$container_dir/Containerfile" | head -n 1)"
 if [[ -z "$default_base_image" ]]; then
     echo 'anvil-container: Containerfile must define ARG BASE_IMAGE=<digest-pinned-image>.' >&2
@@ -26,12 +27,12 @@ fi
 inputs=(rust-toolchain.toml)
 while IFS= read -r path; do
     inputs+=("${path#"$repo_root"/}")
-done < <(find "$repo_root/justfiles/anvil" -type f -name '*.just' ! -path "$container_dir/*" -print)
+done < <(find "$repo_root/justfiles/anvil" -type f -name '*.just' ! -path "$container_recipe_dir/*" -print)
 
 for path in "$container_dir"/*; do
     [[ -f "$path" ]] || continue
     case "${path##*/}" in
-        container.just | image-id.ps1 | image-id.sh | README.md \
+        image-id.ps1 | image-id.sh | README.md \
             | run-in-container.ps1 | run-in-container.sh \
             | customize.sh | customize.ps1) continue ;;
     esac

@@ -6,7 +6,7 @@ the default.
 
 The intended audience is `cargo-anvil` maintainers and downstream catalog
 authors. User setup and troubleshooting are documented in the generated
-`justfiles/anvil/container/README.md`.
+`anvil/container/README.md`.
 
 ## 1. Problem
 
@@ -87,11 +87,12 @@ apply to the outer invocation and are not propagated to the selected tier.
 
 ## 4. Architecture
 
-Container support consists of a generated artifact group under
-`justfiles/anvil/container/`. `container.just` selects the PowerShell driver on
-Windows and the Bash driver on Linux or WSL. The PowerShell driver invokes
-Docker Engine in the default WSL distribution; the Bash driver invokes the
-local Docker Engine directly. Both implement the same lifecycle:
+Container support consists of the generated recipe
+`justfiles/anvil/container/container.just` and a generated artifact group under
+`anvil/container/`. The recipe selects the PowerShell driver on Windows and the
+Bash driver on Linux or WSL. The PowerShell driver invokes Docker Engine in the
+default WSL distribution; the Bash driver invokes the local Docker Engine
+directly. Both implement the same lifecycle:
 
 ```mermaid
 flowchart TD
@@ -242,9 +243,13 @@ Repositories and derived `cargo-anvil` distributions can customize image
 construction, dependency preparation, runtime arguments, and cleanup through:
 
 ```text
-justfiles/anvil/container/customize.sh
-justfiles/anvil/container/customize.ps1
+anvil/container/customize.sh
+anvil/container/customize.ps1
 ```
+
+Repositories upgrading from the previous layout must move any customization
+file from `justfiles/anvil/container/` to the corresponding path above. The
+drivers reject the legacy location so customization cannot be silently skipped.
 
 > [!WARNING]
 > These files execute on the host with the developer's permissions before
@@ -412,21 +417,21 @@ support.
 
 | Path | Purpose |
 |---|---|
-| `container/container.just` | Public `anvil-container` entry recipe |
-| `container/Containerfile` | Generic Linux image definition |
-| `container/Containerfile.dockerignore` | Restricted image build context |
-| `container/entrypoint.sh` | Non-root Cargo initialization |
-| `container/image-id.ps1` | Windows image-ID helper |
-| `container/image-id.sh` | Unix image-ID helper |
-| `container/run-in-container.ps1` | Windows driver for Docker Engine in WSL |
-| `container/run-in-container.sh` | Linux and WSL Docker Engine driver |
-| `container/customize.ps1` | Optional, not emitted by default; repository or derived-distribution Windows customization, see §8 |
-| `container/customize.sh` | Optional, not emitted by default; repository or derived-distribution Unix customization, see §8 |
-| `container/README.md` | Generated user instructions and troubleshooting |
-| `runner.just` | Native/container tier dispatch |
+| `justfiles/anvil/container/container.just` | Public `anvil-container` entry recipe |
+| `anvil/container/Containerfile` | Generic Linux image definition |
+| `anvil/container/Containerfile.dockerignore` | Restricted image build context |
+| `anvil/container/entrypoint.sh` | Non-root Cargo initialization |
+| `anvil/container/image-id.ps1` | Windows image-ID helper |
+| `anvil/container/image-id.sh` | Unix image-ID helper |
+| `anvil/container/run-in-container.ps1` | Windows driver for Docker Engine in WSL |
+| `anvil/container/run-in-container.sh` | Linux and WSL Docker Engine driver |
+| `anvil/container/customize.ps1` | Optional, not emitted by default; repository or derived-distribution Windows customization, see §8 |
+| `anvil/container/customize.sh` | Optional, not emitted by default; repository or derived-distribution Unix customization, see §8 |
+| `anvil/container/README.md` | Generated user instructions and troubleshooting |
+| `justfiles/anvil/runner.just` | Native/container tier dispatch |
 
-The paths above are relative to `justfiles/anvil/`. The catalog also emits the
-user-owned `anvil-runner` region in the repository-root `Justfile`.
+The catalog also emits the user-owned `anvil-runner` region in the
+repository-root `Justfile`.
 
 ## 13. References
 

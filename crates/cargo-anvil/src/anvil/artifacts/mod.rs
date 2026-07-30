@@ -131,4 +131,19 @@ mod tests {
             assert!(present(&artifact), "container artifact is not in Catalog::anvil(): {artifact:?}");
         }
     }
+
+    #[test]
+    fn justfiles_only_contains_just_recipes() {
+        for artifact in anvil_artifacts() {
+            if let Artifact::OwnedFile(spec) = artifact
+                && spec.path.starts_with("justfiles/")
+            {
+                assert!(
+                    std::path::Path::new(spec.path).extension().and_then(|extension| extension.to_str()) == Some("just"),
+                    "non-Just artifact must live outside justfiles/: {}",
+                    spec.path
+                );
+            }
+        }
+    }
 }
