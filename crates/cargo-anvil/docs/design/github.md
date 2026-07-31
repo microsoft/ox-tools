@@ -404,7 +404,6 @@ on:
       windows_runner:     { type: string, default: windows-latest }
       linux_arm_runner:   { type: string, default: ubuntu-24.04-arm }
       windows_arm_runner: { type: string, default: windows-11-arm }
-      publish_failure_issue: { type: boolean, default: true }
 jobs:
   scheduled-test:
     strategy:
@@ -437,7 +436,8 @@ jobs:
 
   publish-failure:
     needs: [scheduled-test, scheduled-advisories, scheduled-runtime-analysis, scheduled-exhaustive]
-    if: ${{ always() && inputs.publish_failure_issue && contains(needs.*.result, 'failure') }}
+    if: ${{ always() && vars.ANVIL_PUBLISH_FAILURE_ISSUE != 'false'
+      && contains(needs.*.result, 'failure') }}
     runs-on: ${{ inputs.linux_runner }}
     permissions: { contents: read, issues: write }
     steps:
@@ -465,7 +465,6 @@ The reusable workflow declares a small input set so the root workflow can pass o
 | `windows_runner`     | string | `windows-latest`     | Runner label for x86_64 Windows jobs.                  |
 | `linux_arm_runner`   | string | `ubuntu-24.04-arm`   | Runner label for aarch64 Linux jobs.                   |
 | `windows_arm_runner` | string | `windows-11-arm`     | Runner label for aarch64 Windows jobs.                 |
-| `publish_failure_issue` | boolean | `true`            | Scheduled workflow only: create or update an issue when any scheduled group fails. |
 
 The input surface is intentionally narrow: only per-leg *runner labels* are exposed,
 because swapping in self-hosted runners is the one common need that doesn't require
@@ -750,8 +749,11 @@ contents beyond read access and does not forward logs or environment data into t
 This narrow GitHub-native path also lets GitHub's Teams app relay issue notifications
 without an external webhook or additional secret.
 
-Repositories that do not want issue publication set `publish_failure_issue: false` in
-the root workflow's `with:` block and can remove `issues: write` from that call.
+Repositories that do not want issue publication set the
+`ANVIL_PUBLISH_FAILURE_ISSUE` Actions repository variable to `false`. This configuration
+lives in repository settings instead of an Anvil-owned workflow, so the root workflow
+stays on the automatic update path. The scheduled call retains `issues: write`; the
+publisher's condition prevents use of that permission when publication is disabled.
 
 ## 12. Advisory PR comments
 

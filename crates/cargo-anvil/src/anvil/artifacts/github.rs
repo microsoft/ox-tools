@@ -252,7 +252,7 @@ mod tests {
             );
         }
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("codecov/codecov-action"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("publish_failure_issue:"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("vars.ANVIL_PUBLISH_FAILURE_ISSUE != 'false'"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("contains(needs.*.result, 'failure')"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("github.rest.issues.createComment"));

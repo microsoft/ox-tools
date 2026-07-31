@@ -1100,10 +1100,6 @@ on:
         description: Runner label for aarch64 Windows jobs.
         type: string
         default: windows-11-arm
-      publish_failure_issue:
-        description: Create or update a GitHub issue when scheduled checks fail.
-        type: boolean
-        default: true
     secrets:
       CODECOV_TOKEN:
         description: |
@@ -1202,7 +1198,8 @@ jobs:
       - scheduled-advisories
       - scheduled-runtime-analysis
       - scheduled-exhaustive
-    if: ${{ always() && inputs.publish_failure_issue && contains(needs.*.result, 'failure') }}
+    if: ${{ always() && vars.ANVIL_PUBLISH_FAILURE_ISSUE != 'false'
+      && contains(needs.*.result, 'failure') }}
     runs-on: ${{ inputs.linux_runner }}
     permissions:
       contents: read
