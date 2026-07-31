@@ -93,6 +93,12 @@
 //! and run each check only over the affected packages, whereas a local
 //! `just anvil-pr` runs every check over the whole workspace.
 //!
+//! The generated GitHub scheduled workflow publishes failures as GitHub
+//! issues. It creates one issue for an active failure and comments on that
+//! issue when later scheduled runs also fail, providing a durable incident
+//! record without creating one issue per run. Repositories can disable this
+//! behavior through the reusable workflow's `publish_failure_issue` input.
+//!
 //! ## Containerized local checks
 //!
 //! Anvil can run any generated recipe in a content-addressed Linux container.

@@ -18,4 +18,5 @@ jobs:
     uses: ./.github/workflows/anvil-scheduled-impl.yml
     permissions:
       contents: read
+      issues: write
     secrets: inherit
