@@ -14,7 +14,7 @@
 # of total compile/test time.
 
 # Run documentation tests for affected workspace packages.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-doc-test: anvil-doc-test-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }

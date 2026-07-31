@@ -407,21 +407,15 @@ impact jobs isn't justified; if a repo finds the gap matters, splitting further 
 local catalog override. Caching keys already include OS (see
 [github.md §8](./github.md#8-caching) and [ado.md §7](./ado.md#7-caching)).
 
-**Helper scripts use PowerShell Core (`pwsh`) on every platform.** Almost every check
-recipe is a single-line `cargo …` invocation that works unmodified on Windows —
-including `license-headers` (which calls `cargo heather`), `ensure-no-cyclic-deps`
-(`cargo ensure-no-cyclic-deps`), and `ensure-no-default-features`
-(`cargo ensure-no-default-features`), all of which are plain cargo subcommands from the
-ox-tools family. The one current exception is `pr-title`, which does a regex match
-against `$PR_TITLE` (no equivalent cargo subcommand and `just` itself has no
-boolean-regex primitive). That check is written as a `[script("pwsh")]` block. `pwsh`
-is preinstalled on GH-hosted runners (`ubuntu-latest` included) and Microsoft-hosted
-ADO Linux agents; Linux/macOS developers install it from
+**Helper scripts use PowerShell Core (`pwsh`) on every platform.** Generated command
+recipes use `[script("pwsh", "-NoProfile")]`, so user and system startup profiles
+cannot inject output, alter inputs, or change exit behavior. This keeps the same recipe
+contract on Windows, Linux, and macOS. `pwsh` is preinstalled on GH-hosted runners
+(`ubuntu-latest` included) and Microsoft-hosted ADO Linux agents; Linux/macOS
+developers install it from
 <https://github.com/PowerShell/PowerShell> as a one-time prerequisite. The
 `anvil-tool-pwsh-validate-prereqs` recipe enforces this with a clean failure message and a per-OS
-install hint. The dependency is kept (rather than dropped to remove the one script)
-so future additions that don't fit cleanly as cargo subcommands have an established
-escape hatch.
+install hint.
 
 ### 8.4 Internal vs OSS
 

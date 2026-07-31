@@ -18,7 +18,7 @@
 # Unscoped (consults external risk DB).
 
 # Analyze dependency features and version requirements with cargo-aprz.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-aprz: anvil-aprz-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_APRZ_ALREADY_RAN -eq '1') {

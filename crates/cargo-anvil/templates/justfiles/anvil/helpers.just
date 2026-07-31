@@ -68,17 +68,17 @@
 # tools are workspace-wide); they only check the skip sentinel.
 #
 # Every recipe whose body uses multi-line conditionals or env-var
-# splicing is annotated with [script("pwsh")]. pwsh is preinstalled on
+# splicing is annotated with [script("pwsh", "-NoProfile")]. pwsh is preinstalled on
 # Windows (since Windows 10), on GH/ADO hosted Linux + Windows
 # runners, and installable on macOS via Homebrew or the upstream
 # installer. We chose pwsh over bash because just's shebang dispatch
 # requires `cygpath` on Windows (only on PATH from inside Git Bash),
-# while [script("pwsh")] works from plain PowerShell with no PATH
+# while [script("pwsh", "-NoProfile")] works from plain PowerShell with no PATH
 # augmentation. We require pwsh 7+ (enforced via _anvil-require pwsh)
 # for consistent semantics of the array-splat splice and the modern
 # operators used across these recipes.
 #
-# Every recipe that runs a command is annotated with [script("pwsh")],
+# Every recipe that runs a command is annotated with [script("pwsh", "-NoProfile")],
 # including single-command ones (cargo deny check, cargo audit). They do
 # NOT inherit the adopter's default shell: just defaults to `sh`, which is
 # absent on Windows and varies across environments, so relying on it makes
@@ -105,7 +105,7 @@
 # Prints ONLY the resolved ref to stdout so callers can capture it:
 #   pwsh : $base = (& {{just_executable()}} _anvil-base-ref)
 #   bash : base="$(just _anvil-base-ref)"
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _anvil-base-ref:
     $ErrorActionPreference = 'Stop'
     if ($env:BASE_REF) {
@@ -164,7 +164,7 @@ _anvil-base-ref:
 # Usage:
 #   bash : val="$(just _anvil-impact-format affected "$impact_json")"
 #   pwsh : $val = (& {{just_executable()}} _anvil-impact-format affected $impactJson)
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _anvil-impact-format tier impactJson:
     $ErrorActionPreference = 'Stop'
     $tier = '{{tier}}'

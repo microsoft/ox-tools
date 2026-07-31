@@ -44,7 +44,7 @@
 # found").
 
 # Check affected crates for semantic versioning violations.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-semver-check: anvil-semver-check-validate-prereqs
     $ErrorActionPreference = 'Stop'
     $commentFile = 'target/anvil/comments/semver.md'

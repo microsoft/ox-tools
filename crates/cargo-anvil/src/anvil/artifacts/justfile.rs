@@ -67,7 +67,7 @@ macro_rules! split_recipe_files {
 #[test]
 fn runner_routes_tiers_and_guards_recursion() {
     assert!(RUNNER_JUST.contains("[windows]"));
-    assert!(RUNNER_JUST.contains("[script(\"pwsh\")]"));
+    assert!(RUNNER_JUST.contains("[script(\"pwsh\", \"-NoProfile\")]"));
     assert!(RUNNER_JUST.contains("[unix]"));
     assert!(RUNNER_JUST.contains("[script(\"bash\")]"));
     assert_eq!(RUNNER_JUST.matches("[no-exit-message]").count(), 2);
@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn tools_just_template_is_not_empty() {
-        assert!(TOOLS_JUST.contains("anvil-system-deps-check"));
+        assert!(TOOLS_JUST.contains("anvil-cargo-spellcheck-source-deps-check"));
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-deny-install"));
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-deny-validate-prereqs"));
         assert!(TOOLS_JUST.contains("anvil-component-default-clippy-install"));
@@ -296,12 +296,14 @@ mod tests {
     #[test]
     fn spellcheck_checks_source_prerequisites_only_on_source_install() {
         assert!(
-            TOOLS_JUST.contains("_install-tool \"cargo-spellcheck\" cargo_spellcheck_version installer \"anvil-system-deps-check\""),
+            TOOLS_JUST.contains(
+                "_install-tool \"cargo-spellcheck\" cargo_spellcheck_version installer \"anvil-cargo-spellcheck-source-deps-check\""
+            ),
             "spellcheck installer must defer libclang validation to source installation"
         );
         let checks = all_check_bodies();
         assert!(
-            !checks.contains("anvil-spellcheck-setup installer=\"install\": anvil-system-deps-check"),
+            !checks.contains("anvil-spellcheck-setup installer=\"install\": anvil-cargo-spellcheck-source-deps-check"),
             "spellcheck setup must not require libclang before binstall"
         );
     }

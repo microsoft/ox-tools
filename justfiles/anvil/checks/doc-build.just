@@ -11,7 +11,7 @@
 # crate that wasn't itself modified.
 
 # Build documentation for required workspace packages.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-doc-build: anvil-doc-build-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }

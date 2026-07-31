@@ -9,7 +9,7 @@
 # Modified tier.
 
 # Check that workspace dependencies contain no cycles.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }

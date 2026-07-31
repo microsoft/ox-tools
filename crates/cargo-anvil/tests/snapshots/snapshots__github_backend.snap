@@ -1430,7 +1430,7 @@ unknown-git = "deny"
 # Unscoped (consults external risk DB).
 
 # Analyze dependency features and version requirements with cargo-aprz.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-aprz: anvil-aprz-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_APRZ_ALREADY_RAN -eq '1') {
@@ -1479,7 +1479,7 @@ anvil-aprz-validate-prereqs: anvil-tool-cargo-aprz-validate-prereqs
 # Unscoped (consults external advisory DB; reads Cargo.lock).
 
 # Audit dependencies for known security vulnerabilities.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-audit: anvil-audit-validate-prereqs
     $ErrorActionPreference = 'Stop'
     & cargo audit
@@ -1505,7 +1505,7 @@ anvil-audit-validate-prereqs: anvil-tool-cargo-audit-validate-prereqs
 # Affected tier.
 
 # Build all workspace benchmarks.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-bench: anvil-bench-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
@@ -1555,7 +1555,7 @@ anvil-bench-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # repo-specific to standardize).
 
 # Run Bolero tests for affected workspace packages.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-bolero: anvil-bolero-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if (-not $IsLinux) {
@@ -1654,7 +1654,7 @@ anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-to
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run tests with cargo-careful for affected workspace packages.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-careful: anvil-careful-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
@@ -1737,7 +1737,7 @@ anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereq
 # is the right scope.
 
 # Check feature combinations for required workspace packages.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-cargo-hack: anvil-cargo-hack-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
@@ -1775,7 +1775,7 @@ anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
 # blank lines as a formatting diff and fail the check.
 
 # Check that Cargo.toml dependency tables are sorted.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
@@ -1807,7 +1807,7 @@ anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs
 # rustup component; same reasoning as fmt for the require.
 
 # Lint affected workspace packages with Clippy.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-clippy: anvil-clippy-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
@@ -1836,7 +1836,7 @@ anvil-clippy-validate-prereqs: anvil-component-default-clippy-validate-prereqs
 # depend on the adopter's default shell (absent/varying on Windows).
 
 # Check dependency licenses, bans, sources, and advisories.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-deny: anvil-deny-validate-prereqs
     $ErrorActionPreference = 'Stop'
     & cargo deny check
@@ -1864,7 +1864,7 @@ anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs
 # crate that wasn't itself modified.
 
 # Build documentation for required workspace packages.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-doc-build: anvil-doc-build-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
@@ -1901,7 +1901,7 @@ anvil-doc-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # of total compile/test time.
 
 # Run documentation tests for affected workspace packages.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-doc-test: anvil-doc-test-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
@@ -1931,7 +1931,7 @@ anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Modified tier.
 
 # Check that workspace dependencies contain no cycles.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
@@ -1958,7 +1958,7 @@ anvil-ensure-no-cyclic-deps-validate-prereqs: anvil-tool-cargo-ensure-no-cyclic-
 # Modified tier.
 
 # Check that workspace packages compile without default features.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
@@ -1985,7 +1985,7 @@ anvil-ensure-no-default-features-validate-prereqs: anvil-tool-cargo-ensure-no-de
 # Affected tier.
 
 # Build all workspace examples.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-examples: anvil-examples-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
@@ -2023,7 +2023,7 @@ anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # crate. Hard-fails on errors (no tolerance, unlike semver-check).
 
 # Check public APIs for unapproved external types.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-external-types: anvil-external-types-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
@@ -2103,7 +2103,7 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 # explicitly avoid for udeps/miri/careful/external-types.
 
 # Check Rust source formatting.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-fmt: anvil-fmt-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
@@ -2145,7 +2145,7 @@ anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs
 # Modified tier.
 
 # Check source files for required license headers.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-license-headers: anvil-license-headers-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
@@ -2178,7 +2178,7 @@ anvil-license-headers-validate-prereqs: anvil-tool-cargo-heather-validate-prereq
 # `coverage-measure` recipe, which also runs on nightly.
 
 # Measure test coverage and enforce the coverage gate.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
@@ -2393,7 +2393,7 @@ anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-pre
 # invocations cleanly on both pwsh/bash.
 
 # Run Loom concurrency tests for affected workspace packages.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-loom: anvil-loom-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
@@ -2484,7 +2484,7 @@ anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # per-seed crashes, so coverage matters more than depth-per-seed.
 
 # Run Miri tests with race coverage tracking.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
@@ -2516,7 +2516,7 @@ anvil-miri-race-coverage-validate-prereqs: anvil-component-nightly-miri-validate
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # Run Miri tests with strict provenance checks.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
@@ -2557,7 +2557,7 @@ anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-vali
 # vars set.
 
 # Run Miri tests with the Tree Borrows model.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
@@ -2594,7 +2594,7 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 # applies. Skip guards are still included for local diff-scoped runs.
 
 # Run Miri tests for affected workspace packages.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-miri: anvil-miri-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
@@ -2656,7 +2656,7 @@ anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil
 # affected leg. Coverage on the other three legs is unchanged.
 
 # Run mutation testing for changes relative to the base branch.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-mutants-diff: anvil-mutants-diff-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
@@ -2707,7 +2707,7 @@ anvil-mutants-diff-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
 # workspace regardless of diff.
 
 # Run exhaustive mutation testing across the workspace.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-mutants-full: anvil-mutants-full-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
@@ -2750,7 +2750,7 @@ anvil-mutants-full-validate-prereqs: anvil-tool-cargo-mutants-validate-prereqs
 # the check loudly rather than silently passing.
 
 # Validate the pull request title.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-pr-title: anvil-pr-title-validate-prereqs
     $title = $env:PR_TITLE
     if (-not $title) {
@@ -2805,7 +2805,7 @@ anvil-pr-title-validate-prereqs: anvil-tool-pwsh-validate-prereqs
 # be intersected with the lib-crate set rather than splatted into cargo.
 
 # Check that crate README files are up to date.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-readme-check: anvil-readme-check-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {
@@ -2947,7 +2947,7 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 # found").
 
 # Check affected crates for semantic versioning violations.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-semver-check: anvil-semver-check-validate-prereqs
     $ErrorActionPreference = 'Stop'
     $commentFile = 'target/anvil/comments/semver.md'
@@ -3124,7 +3124,7 @@ anvil-semver-check-validate-prereqs: anvil-tool-cargo-semver-checks-validate-pre
 # leaving the path dangling.
 
 # Check spelling in source comments and documentation.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-spellcheck: anvil-spellcheck-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {
@@ -3191,7 +3191,7 @@ anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs
 # of {unused dep, unused dev-dep, dep that should be a dev-dep}.
 
 # Check required workspace packages for unused dependencies.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-udeps: anvil-udeps-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }
@@ -3532,7 +3532,7 @@ for the complete interface and security requirements.
 # open an interactive shell.
 [windows]
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-container *recipe:
     $requested = @('{{ replace(recipe, "'", "''") }}' -split '\s+' | Where-Object { $_ })
     & 'justfiles/anvil/container/run-in-container.ps1' @requested
@@ -4806,17 +4806,17 @@ anvil-scheduled-test-validate-prereqs: \
 # tools are workspace-wide); they only check the skip sentinel.
 #
 # Every recipe whose body uses multi-line conditionals or env-var
-# splicing is annotated with [script("pwsh")]. pwsh is preinstalled on
+# splicing is annotated with [script("pwsh", "-NoProfile")]. pwsh is preinstalled on
 # Windows (since Windows 10), on GH/ADO hosted Linux + Windows
 # runners, and installable on macOS via Homebrew or the upstream
 # installer. We chose pwsh over bash because just's shebang dispatch
 # requires `cygpath` on Windows (only on PATH from inside Git Bash),
-# while [script("pwsh")] works from plain PowerShell with no PATH
+# while [script("pwsh", "-NoProfile")] works from plain PowerShell with no PATH
 # augmentation. We require pwsh 7+ (enforced via _anvil-require pwsh)
 # for consistent semantics of the array-splat splice and the modern
 # operators used across these recipes.
 #
-# Every recipe that runs a command is annotated with [script("pwsh")],
+# Every recipe that runs a command is annotated with [script("pwsh", "-NoProfile")],
 # including single-command ones (cargo deny check, cargo audit). They do
 # NOT inherit the adopter's default shell: just defaults to `sh`, which is
 # absent on Windows and varies across environments, so relying on it makes
@@ -4843,7 +4843,7 @@ anvil-scheduled-test-validate-prereqs: \
 # Prints ONLY the resolved ref to stdout so callers can capture it:
 #   pwsh : $base = (& {{just_executable()}} _anvil-base-ref)
 #   bash : base="$(just _anvil-base-ref)"
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _anvil-base-ref:
     $ErrorActionPreference = 'Stop'
     if ($env:BASE_REF) {
@@ -4902,7 +4902,7 @@ _anvil-base-ref:
 # Usage:
 #   bash : val="$(just _anvil-impact-format affected "$impact_json")"
 #   pwsh : $val = (& {{just_executable()}} _anvil-impact-format affected $impactJson)
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _anvil-impact-format tier impactJson:
     $ErrorActionPreference = 'Stop'
     $tier = '{{tier}}'
@@ -4969,7 +4969,7 @@ _anvil-impact-format tier impactJson:
 # imports this single file; everything else lives in sibling .just files
 # pulled in here.
 
-# All multi-statement recipes in this tree use [script("pwsh")]. pwsh
+# All multi-statement recipes in this tree use [script("pwsh", "-NoProfile")]. pwsh
 # is preinstalled on Windows (10+), GH/ADO hosted Linux + Windows
 # runners, and is installable on macOS/Linux via Homebrew / upstream
 # installer. We chose pwsh over bash because:
@@ -4980,7 +4980,7 @@ _anvil-impact-format tier impactJson:
 #   - just's [script("bash")] attribute passes Windows tempfile paths
 #     to bash unescaped, and bash interprets the backslashes as escape
 #     characters — every recipe fails with a mangled path.
-#   - [script("pwsh")] works from plain PowerShell with no PATH
+#   - [script("pwsh", "-NoProfile")] works from plain PowerShell with no PATH
 #     augmentation and no path translation. pwsh handles Windows
 #     paths natively.
 #
@@ -5057,7 +5057,7 @@ alias anvil := anvil-pr
 [private]
 [no-exit-message]
 [windows]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _anvil-run tier runner:
     $just = '{{ replace(just_executable(), "'", "''") }}'
     $justfile = '{{ replace(justfile(), "'", "''") }}'
@@ -5252,10 +5252,10 @@ anvil-validate-prereqs: anvil-full-validate-prereqs anvil-tool-cargo-delta-valid
 # package manager and exits non-zero. No auto-install: admin / sudo and
 # package-manager choice stay with the user.
 
-# Check system-level build prerequisites for catalog tools.
+# Check cargo-spellcheck source-build prerequisites.
 [group("anvil-setup")]
-[script("pwsh")]
-anvil-system-deps-check:
+[script("pwsh", "-NoProfile")]
+anvil-cargo-spellcheck-source-deps-check:
     $ErrorActionPreference = 'Stop'
     $missing = @()
 
@@ -5356,7 +5356,7 @@ anvil-system-deps-check:
 
 # Validate that rustc is available.
 [group("anvil-setup")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-tool-rustc-validate-prereqs:
     if (-not (Get-Command rustc -ErrorAction SilentlyContinue)) {
         Write-Error 'anvil: rustc not found. Install via rustup: https://rustup.rs'
@@ -5365,7 +5365,7 @@ anvil-tool-rustc-validate-prereqs:
 
 # Validate that PowerShell Core is available.
 [group("anvil-setup")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-tool-pwsh-validate-prereqs:
     if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
         $hint = if ($IsMacOS) {
@@ -5396,7 +5396,7 @@ anvil-tool-pwsh-validate-prereqs:
 #                 itself if not on PATH.
 # `source_prereq`, when set, runs immediately before a source installation,
 # including a binstall fallback.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _install-tool name version installer source_prereq="":
     $ErrorActionPreference = 'Stop'
     $name = '{{name}}'
@@ -5457,7 +5457,7 @@ _install-tool name version installer source_prereq="":
 
 # _check-tool: verify a cargo subcommand is installed at or above the
 # pinned version. Errors with an install hint on missing or too-old.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _check-tool name version:
     $ErrorActionPreference = 'Stop'
     $name = '{{name}}'
@@ -5490,7 +5490,7 @@ _check-tool name version:
 # on warm or cache-restored runners. The probe uses `rustup toolchain list`
 # (a pure, no-network presence check). Substring match because rustup
 # suffixes the host triple to the toolchain name.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _install-toolchain toolchain:
     $ErrorActionPreference = 'Stop'
     $toolchain = '{{toolchain}}'
@@ -5507,7 +5507,7 @@ _install-toolchain toolchain:
 
 # _check-toolchain: verify a rustup toolchain is installed. Uses the same
 # `rustup toolchain list` substring probe as _install-toolchain.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _check-toolchain toolchain:
     $ErrorActionPreference = 'Stop'
     $toolchain = '{{toolchain}}'
@@ -5529,7 +5529,7 @@ _check-toolchain toolchain:
 # detection (cargo subcommand / sysroot file) rather than `rustup
 # component list` -- so the install path uses the same detection the
 # check path already had.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _install-component toolchain component:
     $ErrorActionPreference = 'Stop'
     $toolchain = '{{toolchain}}'
@@ -5601,7 +5601,7 @@ _install-component toolchain component:
 # rather than via array splat: the Windows rustup proxy mis-parses a
 # splatted toolchain token and reports `invalid toolchain name ''`, so a
 # splat would spuriously flag installed components as missing.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _check-component toolchain component:
     $ErrorActionPreference = 'Stop'
     $toolchain = '{{toolchain}}'
@@ -5773,7 +5773,7 @@ anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_
 
 # Install the pinned `cargo-bolero` tool.
 [group("anvil-setup")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-tool-cargo-bolero-install installer="install":
     if (-not $IsLinux) {
         Write-Host 'anvil-tool-cargo-bolero-install: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
@@ -5784,7 +5784,7 @@ anvil-tool-cargo-bolero-install installer="install":
 
 # Validate that the pinned `cargo-bolero` tool is available.
 [group("anvil-setup")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-tool-cargo-bolero-validate-prereqs:
     if (-not $IsLinux) {
         Write-Host 'anvil-tool-cargo-bolero-validate-prereqs: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
@@ -5890,7 +5890,7 @@ anvil-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_
 
 # Install the pinned `cargo-mutants` tool.
 [group("anvil-setup")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-tool-cargo-mutants-install installer="install":
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
         Write-Host 'anvil-tool-cargo-mutants-install: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
@@ -5901,7 +5901,7 @@ anvil-tool-cargo-mutants-install installer="install":
 
 # Validate that the pinned `cargo-mutants` tool is available.
 [group("anvil-setup")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-tool-cargo-mutants-validate-prereqs:
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
         Write-Host 'anvil-tool-cargo-mutants-validate-prereqs: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
@@ -5936,7 +5936,7 @@ anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_ver
 
 # Install the pinned `cargo-spellcheck` tool.
 [group("anvil-setup")]
-anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer "anvil-system-deps-check")
+anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer "anvil-cargo-spellcheck-source-deps-check")
 
 # Validate that the pinned `cargo-spellcheck` tool is available.
 [group("anvil-setup")]

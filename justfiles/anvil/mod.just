@@ -7,7 +7,7 @@
 # imports this single file; everything else lives in sibling .just files
 # pulled in here.
 
-# All multi-statement recipes in this tree use [script("pwsh")]. pwsh
+# All multi-statement recipes in this tree use [script("pwsh", "-NoProfile")]. pwsh
 # is preinstalled on Windows (10+), GH/ADO hosted Linux + Windows
 # runners, and is installable on macOS/Linux via Homebrew / upstream
 # installer. We chose pwsh over bash because:
@@ -18,7 +18,7 @@
 #   - just's [script("bash")] attribute passes Windows tempfile paths
 #     to bash unescaped, and bash interprets the backslashes as escape
 #     characters — every recipe fails with a mangled path.
-#   - [script("pwsh")] works from plain PowerShell with no PATH
+#   - [script("pwsh", "-NoProfile")] works from plain PowerShell with no PATH
 #     augmentation and no path translation. pwsh handles Windows
 #     paths natively.
 #

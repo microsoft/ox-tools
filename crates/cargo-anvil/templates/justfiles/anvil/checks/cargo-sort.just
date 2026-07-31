@@ -20,7 +20,7 @@
 # blank lines as a formatting diff and fail the check.
 
 # Check that Cargo.toml dependency tables are sorted.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }

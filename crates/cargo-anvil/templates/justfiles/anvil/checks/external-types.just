@@ -20,7 +20,7 @@
 # crate. Hard-fails on errors (no tolerance, unlike semver-check).
 
 # Check public APIs for unapproved external types.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-external-types: anvil-external-types-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {

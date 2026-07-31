@@ -11,7 +11,7 @@
 # applies. Skip guards are still included for local diff-scoped runs.
 
 # Run Miri tests for affected workspace packages.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-miri: anvil-miri-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }

@@ -9,7 +9,7 @@
 # Modified tier.
 
 # Check that workspace packages compile without default features.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }

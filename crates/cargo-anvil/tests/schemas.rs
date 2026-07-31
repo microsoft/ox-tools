@@ -153,6 +153,27 @@ fn just_lists_emitted_recipes() {
 }
 
 #[test]
+fn emitted_powershell_scripts_disable_profiles() {
+    let tmp = run_with_backend("github");
+    let root = tmp.path().join("justfiles/anvil");
+    let mut script_count = 0;
+    for entry in walkdir::WalkDir::new(root) {
+        let entry = entry.unwrap();
+        if !entry.file_type().is_file() || entry.path().extension().and_then(std::ffi::OsStr::to_str) != Some("just") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(entry.path()).unwrap();
+        assert!(
+            !contents.contains("[script(\"pwsh\")]"),
+            "{} contains a profile-loading PowerShell script attribute",
+            entry.path().display()
+        );
+        script_count += contents.matches("[script(\"pwsh\", \"-NoProfile\")]").count();
+    }
+    assert!(script_count > 0, "expected emitted PowerShell script recipes");
+}
+
+#[test]
 fn ado_yaml_emitted_files_have_consistent_indent() {
     let tmp = run_with_backend("ado");
     let root = tmp.path().join(".pipelines");

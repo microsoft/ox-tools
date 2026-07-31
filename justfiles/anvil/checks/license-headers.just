@@ -9,7 +9,7 @@
 # Modified tier.
 
 # Check source files for required license headers.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-license-headers: anvil-license-headers-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }

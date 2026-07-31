@@ -25,7 +25,7 @@
 # of {unused dep, unused dev-dep, dep that should be a dev-dep}.
 
 # Check required workspace packages for unused dependencies.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-udeps: anvil-udeps-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }

@@ -9,7 +9,7 @@
 # Affected tier.
 
 # Build all workspace benchmarks.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-bench: anvil-bench-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }

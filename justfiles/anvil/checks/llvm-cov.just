@@ -15,7 +15,7 @@
 # `coverage-measure` recipe, which also runs on nightly.
 
 # Measure test coverage and enforce the coverage gate.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {

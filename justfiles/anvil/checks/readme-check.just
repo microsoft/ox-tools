@@ -30,7 +30,7 @@
 # be intersected with the lib-crate set rather than splatted into cargo.
 
 # Check that crate README files are up to date.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-readme-check: anvil-readme-check-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {

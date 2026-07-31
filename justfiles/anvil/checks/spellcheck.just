@@ -21,7 +21,7 @@
 # leaving the path dangling.
 
 # Check spelling in source comments and documentation.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-spellcheck: anvil-spellcheck-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {

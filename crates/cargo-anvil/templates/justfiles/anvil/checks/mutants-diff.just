@@ -17,7 +17,7 @@
 # affected leg. Coverage on the other three legs is unchanged.
 
 # Run mutation testing for changes relative to the base branch.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-mutants-diff: anvil-mutants-diff-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {

@@ -11,7 +11,7 @@
 # depend on the adopter's default shell (absent/varying on Windows).
 
 # Check dependency licenses, bans, sources, and advisories.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-deny: anvil-deny-validate-prereqs
     $ErrorActionPreference = 'Stop'
     & cargo deny check

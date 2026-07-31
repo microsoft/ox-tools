@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn recipe_uses_native_host_interpreters() {
         assert!(RECIPE.contains("[windows]"));
-        assert!(RECIPE.contains("[script(\"pwsh\")]"));
+        assert!(RECIPE.contains("[script(\"pwsh\", \"-NoProfile\")]"));
         assert!(RECIPE.contains("[unix]"));
         assert!(RECIPE.contains("[script(\"bash\")]"));
         assert!(!RECIPE.contains("$IsWindows"));

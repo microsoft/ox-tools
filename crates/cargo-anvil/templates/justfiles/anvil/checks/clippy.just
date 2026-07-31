@@ -14,7 +14,7 @@
 # rustup component; same reasoning as fmt for the require.
 
 # Lint affected workspace packages with Clippy.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-clippy: anvil-clippy-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }

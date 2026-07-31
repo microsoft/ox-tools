@@ -10,7 +10,7 @@
 # workspace regardless of diff.
 
 # Run exhaustive mutation testing across the workspace.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-mutants-full: anvil-mutants-full-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {

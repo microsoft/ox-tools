@@ -34,10 +34,10 @@
 # package manager and exits non-zero. No auto-install: admin / sudo and
 # package-manager choice stay with the user.
 
-# Check system-level build prerequisites for catalog tools.
+# Check cargo-spellcheck source-build prerequisites.
 [group("anvil-setup")]
-[script("pwsh")]
-anvil-system-deps-check:
+[script("pwsh", "-NoProfile")]
+anvil-cargo-spellcheck-source-deps-check:
     $ErrorActionPreference = 'Stop'
     $missing = @()
 
@@ -138,7 +138,7 @@ anvil-system-deps-check:
 
 # Validate that rustc is available.
 [group("anvil-setup")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-tool-rustc-validate-prereqs:
     if (-not (Get-Command rustc -ErrorAction SilentlyContinue)) {
         Write-Error 'anvil: rustc not found. Install via rustup: https://rustup.rs'
@@ -147,7 +147,7 @@ anvil-tool-rustc-validate-prereqs:
 
 # Validate that PowerShell Core is available.
 [group("anvil-setup")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-tool-pwsh-validate-prereqs:
     if (-not (Get-Command pwsh -ErrorAction SilentlyContinue)) {
         $hint = if ($IsMacOS) {
@@ -178,7 +178,7 @@ anvil-tool-pwsh-validate-prereqs:
 #                 itself if not on PATH.
 # `source_prereq`, when set, runs immediately before a source installation,
 # including a binstall fallback.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _install-tool name version installer source_prereq="":
     $ErrorActionPreference = 'Stop'
     $name = '{{name}}'
@@ -239,7 +239,7 @@ _install-tool name version installer source_prereq="":
 
 # _check-tool: verify a cargo subcommand is installed at or above the
 # pinned version. Errors with an install hint on missing or too-old.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _check-tool name version:
     $ErrorActionPreference = 'Stop'
     $name = '{{name}}'
@@ -272,7 +272,7 @@ _check-tool name version:
 # on warm or cache-restored runners. The probe uses `rustup toolchain list`
 # (a pure, no-network presence check). Substring match because rustup
 # suffixes the host triple to the toolchain name.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _install-toolchain toolchain:
     $ErrorActionPreference = 'Stop'
     $toolchain = '{{toolchain}}'
@@ -289,7 +289,7 @@ _install-toolchain toolchain:
 
 # _check-toolchain: verify a rustup toolchain is installed. Uses the same
 # `rustup toolchain list` substring probe as _install-toolchain.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _check-toolchain toolchain:
     $ErrorActionPreference = 'Stop'
     $toolchain = '{{toolchain}}'
@@ -311,7 +311,7 @@ _check-toolchain toolchain:
 # detection (cargo subcommand / sysroot file) rather than `rustup
 # component list` -- so the install path uses the same detection the
 # check path already had.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _install-component toolchain component:
     $ErrorActionPreference = 'Stop'
     $toolchain = '{{toolchain}}'
@@ -383,7 +383,7 @@ _install-component toolchain component:
 # rather than via array splat: the Windows rustup proxy mis-parses a
 # splatted toolchain token and reports `invalid toolchain name ''`, so a
 # splat would spuriously flag installed components as missing.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _check-component toolchain component:
     $ErrorActionPreference = 'Stop'
     $toolchain = '{{toolchain}}'
@@ -555,7 +555,7 @@ anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_
 
 # Install the pinned `cargo-bolero` tool.
 [group("anvil-setup")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-tool-cargo-bolero-install installer="install":
     if (-not $IsLinux) {
         Write-Host 'anvil-tool-cargo-bolero-install: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
@@ -566,7 +566,7 @@ anvil-tool-cargo-bolero-install installer="install":
 
 # Validate that the pinned `cargo-bolero` tool is available.
 [group("anvil-setup")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-tool-cargo-bolero-validate-prereqs:
     if (-not $IsLinux) {
         Write-Host 'anvil-tool-cargo-bolero-validate-prereqs: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
@@ -672,7 +672,7 @@ anvil-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_
 
 # Install the pinned `cargo-mutants` tool.
 [group("anvil-setup")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-tool-cargo-mutants-install installer="install":
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
         Write-Host 'anvil-tool-cargo-mutants-install: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
@@ -683,7 +683,7 @@ anvil-tool-cargo-mutants-install installer="install":
 
 # Validate that the pinned `cargo-mutants` tool is available.
 [group("anvil-setup")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-tool-cargo-mutants-validate-prereqs:
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
         Write-Host 'anvil-tool-cargo-mutants-validate-prereqs: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
@@ -718,7 +718,7 @@ anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_ver
 
 # Install the pinned `cargo-spellcheck` tool.
 [group("anvil-setup")]
-anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer "anvil-system-deps-check")
+anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer "anvil-cargo-spellcheck-source-deps-check")
 
 # Validate that the pinned `cargo-spellcheck` tool is available.
 [group("anvil-setup")]

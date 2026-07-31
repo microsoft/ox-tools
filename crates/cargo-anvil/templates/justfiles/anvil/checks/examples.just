@@ -9,7 +9,7 @@
 # Affected tier.
 
 # Build all workspace examples.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-examples: anvil-examples-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }

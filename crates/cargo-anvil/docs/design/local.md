@@ -40,7 +40,8 @@ repo/
     │                       convenience umbrella over the three pr-slow sub-groups.
     ├── tiers.just          tier aggregators (anvil-pr, anvil-scheduled, anvil-full).
     ├── tools.just          tool/component/toolchain install + validate-prereqs recipes,
-    │                       plus anvil-system-deps-check and anvil-validate-prereqs.
+    │                       plus the cargo-spellcheck source-deps check and
+    │                       anvil-validate-prereqs.
     └── versions.just       catalog nightly toolchains and cargo-subcommand minimum versions
                             as plain just variables (rust_nightly, cargo_nextest_version, …).
                             Read by recipes via `{{ var }}` interpolation. See §3.
@@ -144,10 +145,10 @@ anvil-full: anvil-pr anvil-scheduled
 
 `tools.just` houses six layers of recipes:
 
-1. **`anvil-system-deps-check`** — probe for system-level libs that catalog tools need to
-   build from source (currently: `libclang` for `cargo-spellcheck`). Best-effort presence
-   check; on missing deps emits per-OS install hints and exits non-zero. No auto-install.
-   See §3.3.1.
+1. **`anvil-cargo-spellcheck-source-deps-check`** — probe for `libclang`, which
+   `cargo-spellcheck` needs when built from source. Best-effort presence check; on
+   missing deps emits per-OS install hints and exits non-zero. No auto-install. See
+   §3.3.1.
 2. **Private helpers** (`_install-tool`, `_check-tool`, `_install-toolchain`,
    `_check-toolchain`, `_install-component`, `_check-component`) — the single
    implementation point for "install this thing at the pinned version" and
@@ -290,11 +291,13 @@ install recipe can run:
 - **`just`** itself -- bootstrap with `cargo install just --locked` once, or use a
   system package. Every backend's setup composite/template installs it via cargo as
   a one-shot before calling any catalog recipe.
-- **`pwsh`** (PowerShell Core) -- used by every `[script("pwsh")]` recipe in the
-  catalog. Preinstalled on every relevant cloud-workflow runner (GH-hosted
-  Linux/Windows/macOS, Microsoft-hosted ADO agents). On a developer machine
-  without pwsh, `anvil-tool-pwsh-validate-prereqs` fails with a per-OS install
-  hint pointing at <https://github.com/PowerShell/PowerShell>.
+- **`pwsh`** (PowerShell Core) -- used by every
+  `[script("pwsh", "-NoProfile")]` recipe in the catalog. Disabling profiles
+  keeps machine-readable output and exit behavior independent of user or system
+  startup scripts. PowerShell is preinstalled on every relevant cloud-workflow
+  runner (GH-hosted Linux/Windows/macOS, Microsoft-hosted ADO agents). On a
+  developer machine without pwsh, `anvil-tool-pwsh-validate-prereqs` fails with
+  a per-OS install hint pointing at <https://github.com/PowerShell/PowerShell>.
 
 Trade-off acknowledged: `cargo install --locked` is slow on a cold cache (several
 minutes for the full catalog). It is also the most reliable mechanism in restricted
@@ -315,17 +318,17 @@ requires. anvil is not a general-purpose dev-env doctor. Repository-specific
 system deps (e.g. `openssl-devel`, `symcrypt` for the adopter's own crates) belong
 in the adopter's `setup.yml` customization, not in the anvil catalog.
 
-Detection (`anvil-system-deps-check`) uses presence-only probes -- file existence
+Detection (`anvil-cargo-spellcheck-source-deps-check`) uses presence-only probes -- file existence
 in standard install dirs plus the `LIBCLANG_PATH` env var override. No version
 checks: system libs upgrade independently of the catalog and any reasonably modern
 libclang satisfies clang-sys.
 
 On a missing dep the recipe prints per-OS install hints (apt-get / tdnf / brew /
 scoop / winget) and exits non-zero. **No auto-install** -- admin/sudo decisions and
-package-manager choice stay with the user. Tool-install recipes that need a system
-lib depend on `anvil-system-deps-check` (only on the source-build `install`
-backend), so missing system libs surface as a clear hint instead of a cryptic
-clang-sys build error 10 minutes into the install.
+package-manager choice stay with the user. The cargo-spellcheck install recipe
+depends on `anvil-cargo-spellcheck-source-deps-check` only on the source-build
+`install` backend, so missing libclang surfaces as a clear hint instead of a
+cryptic clang-sys build error 10 minutes into the install.
 
 Adding a new system dep is a one-block catalog change in `tools.just`; it
 propagates to adopters via `cargo anvil` like any other catalog edit.

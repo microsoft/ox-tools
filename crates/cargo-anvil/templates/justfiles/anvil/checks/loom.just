@@ -47,7 +47,7 @@
 # invocations cleanly on both pwsh/bash.
 
 # Run Loom concurrency tests for affected workspace packages.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-loom: anvil-loom-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {

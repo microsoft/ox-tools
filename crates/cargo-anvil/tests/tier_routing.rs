@@ -8,7 +8,8 @@
     reason = "panic-on-failure idioms are appropriate in tests"
 )]
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
@@ -38,25 +39,29 @@ _anvil-pr: first second
 _anvil-fail: first failing
 
 [windows]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 first:
     Write-Output first
 
 [windows]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 second:
     Write-Output second
 
 [windows]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 failing:
     Write-Output failing
     exit 7
 
 [windows]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-container *recipe:
     Write-Output 'container:{{ recipe }}'
+
+[script("pwsh", "-NoProfile")]
+profile-independent:
+    Write-Output profile-safe
 
 [unix]
 first:
@@ -76,11 +81,58 @@ anvil-container *recipe:
     @printf 'container:%s\n' '{{ recipe }}'
 "#;
     write(&tmp.path().join(JUSTFILE), justfile);
+    install_profile_noise_wrapper(tmp.path());
     tmp
 }
 
-fn just_available() -> bool {
-    Command::new("just").arg("--version").output().is_ok()
+fn tools_available() -> bool {
+    Command::new("just").arg("--version").output().is_ok() && Command::new("pwsh").arg("--version").output().is_ok()
+}
+
+fn pwsh_path() -> PathBuf {
+    let output = Command::new("pwsh")
+        .args(["-NoProfile", "-Command", "(Get-Command pwsh).Source"])
+        .output()
+        .expect("pwsh availability is checked before creating the fixture");
+    assert!(output.status.success(), "failed to resolve pwsh path");
+    PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+}
+
+fn install_profile_noise_wrapper(root: &Path) {
+    let bin = root.join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let real_pwsh = pwsh_path();
+
+    #[cfg(windows)]
+    write(
+        &bin.join("pwsh.cmd"),
+        &format!(
+            "@echo off\r\nset \"ANVIL_NOPROFILE=\"\r\nfor %%A in (%*) do if /I \"%%~A\"==\"-NoProfile\" set \"ANVIL_NOPROFILE=1\"\r\n\
+             if not defined ANVIL_NOPROFILE echo PROFILE_OUTPUT\r\n\"{}\" %*\r\nexit /b %ERRORLEVEL%\r\n",
+            real_pwsh.display()
+        ),
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let escaped = real_pwsh.to_string_lossy().replace('\'', "'\\''");
+        let wrapper = format!(
+            "#!/usr/bin/env sh\ncase \" $* \" in *\" -NoProfile \"*) ;; *) printf 'PROFILE_OUTPUT\\n' ;; esac\nexec '{escaped}' \"$@\"\n"
+        );
+        let path = bin.join("pwsh");
+        write(&path, &wrapper);
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+}
+
+fn path_with_profile_wrapper(root: &Path) -> OsString {
+    let mut paths = vec![root.join("fake-bin")];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    std::env::join_paths(paths).unwrap()
 }
 
 fn run(root: &Path, recipes: &[&str], environment: &[(&str, &str)]) -> Output {
@@ -88,13 +140,14 @@ fn run(root: &Path, recipes: &[&str], environment: &[(&str, &str)]) -> Output {
     command.args(["--justfile", root.join(JUSTFILE).to_str().unwrap()]);
     command.args(recipes).current_dir(root);
     command.env_remove("ANVIL_RUNNER").env_remove("ANVIL_IN_CONTAINER");
+    command.env("PATH", path_with_profile_wrapper(root));
     command.envs(environment.iter().copied());
     command.output().expect("just is required to verify generated tier routing")
 }
 
 #[test]
 fn native_routing_preserves_output_and_exit_status() {
-    if !just_available() {
+    if !tools_available() {
         return;
     }
     let tmp = fixture();
@@ -108,7 +161,7 @@ fn native_routing_preserves_output_and_exit_status() {
 
 #[test]
 fn native_routing_preserves_failure_output_and_exit_status() {
-    if !just_available() {
+    if !tools_available() {
         return;
     }
     let tmp = fixture();
@@ -123,7 +176,7 @@ fn native_routing_preserves_failure_output_and_exit_status() {
 
 #[test]
 fn configured_container_routing_uses_the_container_recipe() {
-    if !just_available() {
+    if !tools_available() {
         return;
     }
     let tmp = fixture();
@@ -139,7 +192,7 @@ fn configured_container_routing_uses_the_container_recipe() {
 
 #[test]
 fn in_container_forces_native_execution() {
-    if !just_available() {
+    if !tools_available() {
         return;
     }
     let tmp = fixture();
@@ -162,7 +215,7 @@ fn in_container_forces_native_execution() {
 
 #[test]
 fn invalid_runner_value_fails_instead_of_falling_back_to_native() {
-    if !just_available() {
+    if !tools_available() {
         return;
     }
     let tmp = fixture();
@@ -178,5 +231,24 @@ fn invalid_runner_value_fails_instead_of_falling_back_to_native() {
         String::from_utf8_lossy(&output.stderr).contains("expected 'native' or 'container'"),
         "invalid runner error must be actionable: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn powershell_recipe_output_is_independent_of_profiles() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture();
+    let output = run(tmp.path(), &["profile-independent"], &[]);
+
+    assert!(
+        output.status.success(),
+        "profile-independent recipe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).lines().collect::<Vec<_>>(),
+        ["profile-safe"]
     );
 }

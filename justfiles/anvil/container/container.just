@@ -7,7 +7,7 @@
 # open an interactive shell.
 [windows]
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-container *recipe:
     $requested = @('{{ replace(recipe, "'", "''") }}' -split '\s+' | Where-Object { $_ })
     & 'justfiles/anvil/container/run-in-container.ps1' @requested

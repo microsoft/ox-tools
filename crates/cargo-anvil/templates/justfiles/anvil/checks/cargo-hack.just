@@ -11,7 +11,7 @@
 # is the right scope.
 
 # Check feature combinations for required workspace packages.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-cargo-hack: anvil-cargo-hack-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_REQUIRED -eq '--skip') { exit 0 }

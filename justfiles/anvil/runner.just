@@ -8,7 +8,7 @@
 [private]
 [no-exit-message]
 [windows]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _anvil-run tier runner:
     $just = '{{ replace(just_executable(), "'", "''") }}'
     $justfile = '{{ replace(justfile(), "'", "''") }}'

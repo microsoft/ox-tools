@@ -19,7 +19,7 @@
 # the check loudly rather than silently passing.
 
 # Validate the pull request title.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-pr-title: anvil-pr-title-validate-prereqs
     $title = $env:PR_TITLE
     if (-not $title) {

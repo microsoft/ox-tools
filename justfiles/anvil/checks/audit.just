@@ -9,7 +9,7 @@
 # Unscoped (consults external advisory DB; reads Cargo.lock).
 
 # Audit dependencies for known security vulnerabilities.
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-audit: anvil-audit-validate-prereqs
     $ErrorActionPreference = 'Stop'
     & cargo audit
