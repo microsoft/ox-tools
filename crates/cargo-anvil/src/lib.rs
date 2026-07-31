@@ -26,8 +26,8 @@
 //!
 //! Each run of `cargo anvil` writes:
 //!
-//! - The `justfiles/anvil/` recipe tree (`tools.just`, `checks/`,
-//!   `groups/`, `tiers.just`) and cargo-delta config — owned files.
+//! - The owned `justfiles/anvil/` recipe tree (`tools.just`, `checks/`,
+//!   `groups/`, `tiers.just`).
 //! - A managed region in your `Justfile` that imports them.
 //! - A managed region in your workspace `Cargo.toml` carrying
 //!   `[workspace.lints]` in dotted-key form, plus a `[lints] workspace =

@@ -51,7 +51,7 @@ pub(crate) const RUSTFMT_REGION_ID: &str = "anvil-rustfmt";
 /// Repo-root-relative path of the `cargo-delta` config.
 const DELTA_PATH: &str = ".delta.toml";
 /// Region id for the managed section of `.delta.toml`.
-const DELTA_REGION_ID: &str = "anvil-delta";
+pub(crate) const DELTA_REGION_ID: &str = "anvil-delta";
 
 /// Repo-root-relative path of the `cargo-spellcheck` config.
 const SPELLCHECK_PATH: &str = "spellcheck.toml";

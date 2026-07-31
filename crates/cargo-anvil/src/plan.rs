@@ -236,12 +236,25 @@ impl PlanItem {
 #[derive(Debug, Default)]
 pub struct Plan {
     items: Vec<PlanItem>,
+    notes: Vec<String>,
 }
 
 impl Plan {
     /// Append a new item.
     pub fn push(&mut self, item: PlanItem) {
         self.items.push(item);
+    }
+
+    /// Append a user-visible diagnostic that does not itself represent a
+    /// filesystem change.
+    pub fn note(&mut self, note: impl Into<String>) {
+        self.notes.push(note.into());
+    }
+
+    /// User-visible diagnostics accumulated while planning.
+    #[must_use]
+    pub fn notes(&self) -> &[String] {
+        &self.notes
     }
 
     /// All plan items in insertion order.
@@ -324,6 +337,12 @@ impl Plan {
 
         if !in_syncs.is_empty() {
             let _ = writeln!(out, "Unchanged: {} item(s)", in_syncs.len());
+        }
+        if !self.notes.is_empty() {
+            let _ = writeln!(out, "Notes: {} item(s)", self.notes.len());
+            for note in &self.notes {
+                let _ = writeln!(out, "- {note}");
+            }
         }
 
         out
@@ -575,6 +594,17 @@ mod tests {
         assert!(s.contains("Unchanged: 1 item(s)"));
         // b.txt is in-sync — listed in the unchanged count, not enumerated by path.
         assert!(!s.contains("- b.txt"));
+    }
+
+    #[test]
+    fn summary_lists_planning_notes() {
+        let mut plan = Plan::default();
+        plan.note("remove the repository key to adopt the managed value");
+
+        let summary = plan.summary(None);
+
+        assert!(summary.contains("Notes: 1 item(s)"));
+        assert!(summary.contains("- remove the repository key to adopt the managed value"));
     }
 
     #[test]

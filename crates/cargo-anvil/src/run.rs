@@ -9,9 +9,10 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
-use ohno::{AppError, app_err, bail};
+use ohno::{AppError, bail};
 use tracing::info;
 
+use crate::anvil::artifacts::region::DELTA_REGION_ID;
 use crate::backend::{self, Backend};
 use crate::catalog::Catalog;
 use crate::catalog::artifact::{Artifact, HostSelector, RegionSpec};
@@ -232,11 +233,7 @@ fn recompose_region_proposals(repo_root: &Path, plan: &mut Plan, hosts: &mut Hos
         // Hash for managed regions (mirrors plan_managed_region_with_placement /
         // plan_removals); revisit when the manifest records per-region syntax.
         for (_, id, body) in entries {
-            let placement = if id == "anvil-delta" {
-                RegionPlacement::Start
-            } else {
-                RegionPlacement::End
-            };
+            let placement = region_placement(id);
             composed = upsert_region_with_placement(&composed, id, body, CommentSyntax::Hash, placement)?;
         }
         // Stamp the composed host onto every proposal for this host.
@@ -347,11 +344,31 @@ fn push_region_at(
 ) -> Result<(), AppError> {
     let host = resolve_existing_case_insensitive(repo_root, host);
     let current = hosts.get_or_read(repo_root, &host)?;
-    let placement = region_placement(spec);
-    let body = if preserves_existing_delta_trip_wires(current.as_deref(), spec)? {
-        ""
-    } else {
-        &spec.body
+    let placement = region_placement(spec.id.as_str());
+    let body = match delta_region_body(current.as_deref(), spec) {
+        DeltaRegionBody::Managed => spec.body.as_str(),
+        DeltaRegionBody::PreserveRepositoryKey => {
+            plan.note(
+                "The repository's .delta.toml already defines top-level `trip_wire_patterns`; \
+                 the managed anvil-delta region was left empty. Remove the repository key to \
+                 adopt the managed trip-wire list.",
+            );
+            ""
+        }
+        DeltaRegionBody::Malformed(reason) => {
+            plan.note(format!(
+                "Skipped .delta.toml [anvil-delta] because the existing host could not be safely \
+                 inspected: {reason}. Other artifacts were still planned."
+            ));
+            plan.push(PlanItem::noop(
+                Target::Region {
+                    host,
+                    id: spec.id.as_str().to_owned(),
+                },
+                Decision::LeaveAlone,
+            ));
+            return Ok(());
+        }
     };
     let item = plan_managed_region_with_placement(manifest, &host, current.as_deref(), spec.id.as_str(), body, spec.syntax, placement)?;
     // Only a `Write` mutates the live host on disk; fold its spliced
@@ -367,26 +384,42 @@ fn push_region_at(
     Ok(())
 }
 
-fn region_placement(spec: &RegionSpec) -> RegionPlacement {
-    if spec.id.as_str() == "anvil-delta" {
+fn region_placement(region_id: &str) -> RegionPlacement {
+    if region_id == DELTA_REGION_ID {
         RegionPlacement::Start
     } else {
         RegionPlacement::End
     }
 }
 
-fn preserves_existing_delta_trip_wires(host_text: Option<&str>, spec: &RegionSpec) -> Result<bool, AppError> {
-    if spec.id.as_str() != "anvil-delta" {
-        return Ok(false);
+enum DeltaRegionBody {
+    Managed,
+    PreserveRepositoryKey,
+    Malformed(String),
+}
+
+fn delta_region_body(host_text: Option<&str>, spec: &RegionSpec) -> DeltaRegionBody {
+    if spec.id.as_str() != DELTA_REGION_ID {
+        return DeltaRegionBody::Managed;
     }
     let Some(host_text) = host_text else {
-        return Ok(false);
+        return DeltaRegionBody::Managed;
     };
-    let without_region = remove_region(host_text, spec.id.as_str(), spec.syntax)?;
-    let document: toml_edit::DocumentMut = without_region
-        .parse()
-        .map_err(|error| app_err!("could not parse .delta.toml while migrating trip_wire_patterns: {error}"))?;
-    Ok(document.as_table().contains_key("trip_wire_patterns"))
+    let without_region = match remove_region(host_text, spec.id.as_str(), spec.syntax) {
+        Ok(without_region) => without_region,
+        Err(error) => return DeltaRegionBody::Malformed(format!("managed-region markers are malformed: {error}")),
+    };
+    let document = match without_region.parse::<toml_edit::DocumentMut>() {
+        Ok(document) => document,
+        Err(error) => {
+            return DeltaRegionBody::Malformed(format!("invalid TOML: {error}"));
+        }
+    };
+    if document.as_table().contains_key("trip_wire_patterns") {
+        DeltaRegionBody::PreserveRepositoryKey
+    } else {
+        DeltaRegionBody::Managed
+    }
 }
 
 /// Scan the previous manifest for entries that the active plan items
@@ -1006,7 +1039,7 @@ mod tests {
             force: false,
         };
 
-        let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
 
         let content = fs::read_to_string(tmp.path().join(".delta.toml")).unwrap();
         let document: toml_edit::DocumentMut = content.parse().expect("migrated delta config must remain valid TOML");
@@ -1015,8 +1048,104 @@ mod tests {
             Some("custom/**")
         );
         assert_eq!(content.matches("trip_wire_patterns").count(), 1);
-        let region = find_region(&content, "anvil-delta", CommentSyntax::Hash).unwrap().unwrap();
+        let region = find_region(&content, DELTA_REGION_ID, CommentSyntax::Hash).unwrap().unwrap();
         assert!(region.is_empty(), "existing repository policy should opt out of managed defaults");
+        assert!(
+            outcome
+                .plan
+                .notes()
+                .iter()
+                .any(|note| note.contains("Remove the repository key to adopt")),
+            "the persistent opt-out must be visible in the plan summary"
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn legacy_delta_region_moves_to_start_and_settles() {
+        let tmp = empty_workspace();
+        let old_body = "[delta]\nroot-files = [\"Cargo.lock\", \"Cargo.toml\", \"rust-toolchain.toml\"]\n";
+        let old_host = format!(
+            "[git]\nremote_branch = \"origin/main\"\n\n# >>> anvil-managed: {DELTA_REGION_ID}\n\
+             {old_body}# <<< anvil-managed: {DELTA_REGION_ID}\n"
+        );
+        fs::write(tmp.path().join(".delta.toml"), old_host).unwrap();
+        let mut manifest = Manifest::default();
+        manifest.set_region(".delta.toml", DELTA_REGION_ID, checksum_str(old_body));
+        manifest.save(tmp.path()).unwrap();
+
+        let first = run_update(&Catalog::anvil(), &local_only(), tmp.path()).unwrap();
+
+        let content = fs::read_to_string(tmp.path().join(".delta.toml")).unwrap();
+        assert!(
+            content.starts_with(&format!("# >>> anvil-managed: {DELTA_REGION_ID}\n")),
+            "the upgraded root-level key must precede every TOML table:\n{content}"
+        );
+        let document: toml_edit::DocumentMut = content.parse().expect("upgraded delta config must be valid TOML");
+        assert!(document["trip_wire_patterns"].is_array());
+        assert_eq!(content.matches("trip_wire_patterns").count(), 1);
+        assert_eq!(first.plan.notes().len(), 0);
+
+        let saved = Manifest::load(tmp.path()).unwrap();
+        let key = crate::manifest::RegionKey {
+            host: ".delta.toml".to_owned(),
+            id: DELTA_REGION_ID.to_owned(),
+        };
+        let expected_checksum = checksum_str(include_str!("../templates/regions/delta.toml"));
+        assert_eq!(saved.regions.get(&key).map(String::as_str), Some(expected_checksum.as_str()));
+
+        let second = run_update(&Catalog::anvil(), &local_only(), tmp.path()).unwrap();
+        assert!(
+            !second.plan.has_changes(),
+            "the relocated Delta region should be idempotent:\n{}",
+            second.plan.summary(Some(&second.previous_manifest))
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn malformed_delta_host_is_left_untouched_while_other_artifacts_update() {
+        let malformed_marker = format!("# >>> anvil-managed: {DELTA_REGION_ID}\ntrip_wire_patterns = []\n");
+        for malformed in ["[git\nremote_branch = \"origin/main\"\n".to_owned(), malformed_marker] {
+            let tmp = empty_workspace();
+            fs::write(tmp.path().join(".delta.toml"), &malformed).unwrap();
+            let previous_checksum = checksum_str("previous managed body\n");
+            let mut manifest = Manifest::default();
+            manifest.set_region(".delta.toml", DELTA_REGION_ID, previous_checksum.clone());
+            manifest.save(tmp.path()).unwrap();
+
+            let outcome = run_update(&Catalog::anvil(), &local_only(), tmp.path()).unwrap();
+
+            assert_eq!(fs::read_to_string(tmp.path().join(".delta.toml")).unwrap(), malformed);
+            assert!(tmp.path().join("Justfile").is_file(), "unrelated artifacts should still be emitted");
+            assert!(
+                outcome.plan.notes().iter().any(|note| note.contains("Skipped .delta.toml")),
+                "the scoped refusal must be visible to the user"
+            );
+            let delta_item = outcome
+                .plan
+                .items()
+                .iter()
+                .find(|item| {
+                    matches!(
+                        &item.target,
+                        Target::Region { host, id } if host == ".delta.toml" && id == DELTA_REGION_ID
+                    )
+                })
+                .expect("Delta region should remain represented in the plan");
+            assert_eq!(delta_item.decision, Decision::LeaveAlone);
+            assert!(!tmp.path().join(".delta.toml.anvil-proposed").exists());
+            let saved = Manifest::load(tmp.path()).unwrap();
+            let key = crate::manifest::RegionKey {
+                host: ".delta.toml".to_owned(),
+                id: DELTA_REGION_ID.to_owned(),
+            };
+            assert_eq!(
+                saved.regions.get(&key),
+                Some(&previous_checksum),
+                "a scoped refusal must preserve the previous region ownership record"
+            );
+        }
     }
 
     /// Files that were previously rendered but are no longer in scope
@@ -1421,16 +1550,17 @@ mod tests {
     fn recompose_places_delta_proposal_before_toml_tables() {
         let tmp = TempDir::new().unwrap();
         let host = ".delta.toml";
-        let final_live = "[git]\nremote_branch = \"origin/main\"\n\n\
-                          # >>> anvil-managed: anvil-delta\nold = true\n# <<< anvil-managed: anvil-delta\n"
-            .to_owned();
+        let final_live = format!(
+            "[git]\nremote_branch = \"origin/main\"\n\n\
+             # >>> anvil-managed: {DELTA_REGION_ID}\nold = true\n# <<< anvil-managed: {DELTA_REGION_ID}\n"
+        );
         let mut hosts = HostTextCache::default();
         hosts.set(host, final_live);
 
         let mut plan = Plan::default();
         plan.push(PlanItem::propose_region(
             host,
-            "anvil-delta",
+            DELTA_REGION_ID,
             "trip_wire_patterns = []\n".into(),
             "stale".into(),
             "checksum".into(),
@@ -1439,7 +1569,7 @@ mod tests {
         recompose_region_proposals(tmp.path(), &mut plan, &mut hosts).unwrap();
 
         let proposed = plan.items()[0].spliced_host.as_deref().unwrap();
-        assert!(proposed.starts_with("# >>> anvil-managed: anvil-delta\ntrip_wire_patterns = []\n"));
+        assert!(proposed.starts_with(&format!("# >>> anvil-managed: {DELTA_REGION_ID}\ntrip_wire_patterns = []\n")));
         let _: toml_edit::DocumentMut = proposed.parse().expect("delta proposal must keep root keys before TOML tables");
     }
 

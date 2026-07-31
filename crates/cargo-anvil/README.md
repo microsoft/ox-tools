@@ -28,8 +28,8 @@ you want to upgrade the opinionated baseline.
 
 Each run of `cargo anvil` writes:
 
-* The `justfiles/anvil/` recipe tree (`tools.just`, `checks/`,
-  `groups/`, `tiers.just`) and cargo-delta config — owned files.
+* The owned `justfiles/anvil/` recipe tree (`tools.just`, `checks/`,
+  `groups/`, `tiers.just`).
 * A managed region in your `Justfile` that imports them.
 * A managed region in your workspace `Cargo.toml` carrying
   `[workspace.lints]` in dotted-key form, plus a `[lints] workspace = true` region in each workspace member.
@@ -427,7 +427,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG2WA9RGd1OPdGw08Fx8pjTENG-OSCWt1OQh4G0TvL8OJ6aCzYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG2olIsiIi4XPGxyYfobgTdTFG8wADCFilxtZGxzspKbxkMjHYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

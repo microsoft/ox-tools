@@ -466,13 +466,31 @@ their values.
 
 ### 4.2 Local impact-scoped runs
 
-Not the default. To preview what cloud workflows would skip, run cargo-delta manually and export the
-env vars:
+Not the default. To preview what cloud workflows would skip, run the same configured
+snapshot/impact flow as the cloud action and export the env vars:
 
 ```sh
-# Use the same configured snapshot flow as the cloud impact action, then format
-# its affected tier with `just _anvil-impact-format`.
-export ANVIL_INCLUDE_AFFECTED="$(just _anvil-impact-format affected /tmp/anvil-impact.json)"
+base="$(just _anvil-base-ref)"
+delta_config="$PWD/.delta.toml"
+active_toolchain="$(rustup show active-toolchain | head -n1 | cut -d' ' -f1)"
+tmp="$(mktemp -d)"
+trap 'git worktree remove --force "$tmp/baseline" 2>/dev/null || true; rm -rf "$tmp"' EXIT
+
+cargo delta --config "$delta_config" snapshot > "$tmp/current.json"
+git worktree add --detach "$tmp/baseline" "$base"
+( cd "$tmp/baseline" &&
+  RUSTUP_TOOLCHAIN="$active_toolchain" cargo delta --config "$delta_config" snapshot ) \
+    > "$tmp/baseline.json"
+git worktree remove --force "$tmp/baseline"
+cargo delta --config "$delta_config" impact \
+    --baseline "$tmp/baseline.json" \
+    --current "$tmp/current.json" \
+    --format json \
+    > "$tmp/impact.json"
+
+export ANVIL_INCLUDE_MODIFIED="$(just _anvil-impact-format modified "$tmp/impact.json")"
+export ANVIL_INCLUDE_AFFECTED="$(just _anvil-impact-format affected "$tmp/impact.json")"
+export ANVIL_INCLUDE_REQUIRED="$(just _anvil-impact-format required "$tmp/impact.json")"
 just anvil-pr-test
 ```
 
