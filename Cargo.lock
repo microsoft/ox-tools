@@ -117,6 +117,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-each"
+version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "cargo_metadata",
+ "clap",
+ "mutants",
+ "ohno",
+ "predicates",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "cargo-ensure-no-cyclic-deps"
 version = "0.2.0"
 dependencies = [
