@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.3.0"
-catalog_checksum = "sha256:127ecf66f563bef0cc22f5af16e24d775ebe457103c06594aeb4827a44961584"
+catalog_checksum = "sha256:c55f80bf2535b198b07bcdcf0ea4aac2d926f965f0636450163e648f72e8ecfa"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"
@@ -209,11 +209,11 @@ checksum = "sha256:90392a4a8c21c557f44fe6f9b6cfe6e9c81d6d641153cbbc78f9889f432a3
 
 [[file]]
 path = "justfiles/anvil/container/run-in-container.ps1"
-checksum = "sha256:bbede04fb827c619cf8145fad3d52beb48c65aa74fa04509e8a4dd2a8ba89e3f"
+checksum = "sha256:8ef7ca2a2dd5db0b7e835d555202b7395fdd12f9d2b9d657a0abb455852bdfff"
 
 [[file]]
 path = "justfiles/anvil/container/run-in-container.sh"
-checksum = "sha256:6fc0150b7154e88235660e3b045f146456b69f93813bd1ec93989e751919264b"
+checksum = "sha256:bb82833fc2a0b4606ca9d7d78f8d1d07b207d5519bade209c4da76f2343cd9e9"
 
 [[file]]
 path = "justfiles/anvil/groups/pr-fast.just"

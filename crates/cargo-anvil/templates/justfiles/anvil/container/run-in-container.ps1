@@ -268,9 +268,7 @@ try {
     foreach ($name in @(
         'PR_TITLE',
         'BASE_REF',
-        'ANVIL_INCLUDE_MODIFIED',
-        'ANVIL_INCLUDE_AFFECTED',
-        'ANVIL_INCLUDE_REQUIRED',
+        'ANVIL_IMPACT',
         'GITHUB_BASE_REF',
         'SYSTEM_PULLREQUEST_TARGETBRANCH'
     )) {

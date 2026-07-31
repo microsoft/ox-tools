@@ -284,7 +284,7 @@ run_args=(
 )
 prepare_run_args=("${run_args[@]}")
 run_args+=(${ANVIL_CONTAINER_RUN_ARGS[@]+"${ANVIL_CONTAINER_RUN_ARGS[@]}"})
-for name in PR_TITLE BASE_REF ANVIL_INCLUDE_MODIFIED ANVIL_INCLUDE_AFFECTED ANVIL_INCLUDE_REQUIRED GITHUB_BASE_REF SYSTEM_PULLREQUEST_TARGETBRANCH; do
+for name in PR_TITLE BASE_REF ANVIL_IMPACT GITHUB_BASE_REF SYSTEM_PULLREQUEST_TARGETBRANCH; do
     if value="$(printenv "$name")"; then run_args+=(--env "$name=$value"); fi
 done
 if ((${#ANVIL_CONTAINER_PREPARE_COMMAND[@]} > 0)); then
