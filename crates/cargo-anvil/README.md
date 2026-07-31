@@ -66,7 +66,8 @@ Flags:
 * `--no-backends` — emit only local files; skip every cloud-workflow backend.
   Mutually exclusive with `--backend`.
 * `--dry-run` — analyze without writing. Exits 1 if anything would be
-  written or proposed.
+  written or proposed, or if Anvil refuses to manage an artifact it
+  cannot safely inspect.
 * `--force` — override the single-tool guard and switch the repository to
   this tool, then run a normal update. A repo is managed by exactly one
   anvil-family tool (recorded as `tool` in `.anvil.lock`); without
@@ -427,7 +428,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG2olIsiIi4XPGxyYfobgTdTFG8wADCFilxtZGxzspKbxkMjHYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG11WSu_JO6iYG-IbtIzrCcw9G6fR1cRimzD6G4AbHujrnt4hYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

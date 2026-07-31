@@ -237,6 +237,7 @@ impl PlanItem {
 pub struct Plan {
     items: Vec<PlanItem>,
     notes: Vec<String>,
+    refusals: Vec<String>,
 }
 
 impl Plan {
@@ -255,6 +256,19 @@ impl Plan {
     #[must_use]
     pub fn notes(&self) -> &[String] {
         &self.notes
+    }
+
+    /// Append a user-visible diagnostic for an artifact Anvil could not
+    /// safely manage. Refusals make dry-run drift gates fail even though
+    /// they do not themselves represent a filesystem change.
+    pub fn refusal(&mut self, refusal: impl Into<String>) {
+        self.refusals.push(refusal.into());
+    }
+
+    /// Artifact-management refusals accumulated while planning.
+    #[must_use]
+    pub fn refusals(&self) -> &[String] {
+        &self.refusals
     }
 
     /// All plan items in insertion order.
@@ -276,10 +290,11 @@ impl Plan {
         self.items.iter().any(|i| i.decision.writes())
     }
 
-    /// Exit code for `--dry-run`: 0 if everything is in sync, 1 otherwise.
+    /// Exit code for `--dry-run`: 0 if everything is in sync and every
+    /// artifact was safely inspected, 1 otherwise.
     #[must_use]
     pub fn dry_run_exit_code(&self) -> i32 {
-        i32::from(self.has_changes())
+        i32::from(self.has_changes() || !self.refusals.is_empty())
     }
 
     /// Render a stable, line-oriented summary suitable for stdout.
@@ -337,6 +352,12 @@ impl Plan {
 
         if !in_syncs.is_empty() {
             let _ = writeln!(out, "Unchanged: {} item(s)", in_syncs.len());
+        }
+        if !self.refusals.is_empty() {
+            let _ = writeln!(out, "Refused: {} item(s)", self.refusals.len());
+            for refusal in &self.refusals {
+                let _ = writeln!(out, "- {refusal}");
+            }
         }
         if !self.notes.is_empty() {
             let _ = writeln!(out, "Notes: {} item(s)", self.notes.len());
@@ -605,6 +626,20 @@ mod tests {
 
         assert!(summary.contains("Notes: 1 item(s)"));
         assert!(summary.contains("- remove the repository key to adopt the managed value"));
+    }
+
+    #[test]
+    fn refusal_is_distinct_and_fails_dry_run() {
+        let mut plan = Plan::default();
+        plan.refusal("could not safely inspect .delta.toml");
+
+        assert!(!plan.has_changes());
+        assert_eq!(plan.refusals(), ["could not safely inspect .delta.toml"]);
+        assert_eq!(plan.dry_run_exit_code(), 1);
+        let summary = plan.summary(None);
+        assert!(summary.contains("Refused: 1 item(s)"));
+        assert!(summary.contains("- could not safely inspect .delta.toml"));
+        assert!(!summary.contains("Notes:"));
     }
 
     #[test]

@@ -53,8 +53,11 @@ pub struct RunOutcome {
 pub fn run(catalog: &Catalog, cli: &Cli) -> Result<(), AppError> {
     let outcome = run_update(catalog, cli, &std::env::current_dir()?)?;
     print!("{}", outcome.plan.summary(Some(&outcome.previous_manifest)));
-    if cli.dry_run && outcome.plan.has_changes() {
-        std::process::exit(1);
+    if cli.dry_run {
+        let exit_code = outcome.plan.dry_run_exit_code();
+        if exit_code != 0 {
+            std::process::exit(exit_code);
+        }
     }
     Ok(())
 }
@@ -356,9 +359,9 @@ fn push_region_at(
             ""
         }
         DeltaRegionBody::Malformed(reason) => {
-            plan.note(format!(
-                "Skipped .delta.toml [anvil-delta] because the existing host could not be safely \
-                 inspected: {reason}. Other artifacts were still planned."
+            plan.refusal(format!(
+                "Refused to manage .delta.toml [anvil-delta] because the existing host could not \
+                 be safely inspected: {reason}. Other artifacts were still planned."
             ));
             plan.push(PlanItem::noop(
                 Target::Region {
@@ -1119,8 +1122,17 @@ mod tests {
             assert_eq!(fs::read_to_string(tmp.path().join(".delta.toml")).unwrap(), malformed);
             assert!(tmp.path().join("Justfile").is_file(), "unrelated artifacts should still be emitted");
             assert!(
-                outcome.plan.notes().iter().any(|note| note.contains("Skipped .delta.toml")),
+                outcome
+                    .plan
+                    .refusals()
+                    .iter()
+                    .any(|refusal| refusal.contains("Refused to manage .delta.toml")),
                 "the scoped refusal must be visible to the user"
+            );
+            assert_eq!(
+                outcome.plan.dry_run_exit_code(),
+                1,
+                "a scoped refusal must fail a dry-run drift gate"
             );
             let delta_item = outcome
                 .plan

@@ -522,7 +522,13 @@ the manifest nor any file). Output is grouped by category:
   left on disk unchanged; the manifest entry is dropped so anvil stops tracking
   them. The user can keep, edit, or delete them at their own discretion.
 - **Unchanged**: clean items whose template is identical to last render.
+- **Refused**: artifacts Anvil could not safely inspect or manage. The artifact is left
+  unchanged and unrelated artifacts remain eligible for updates, but the refusal makes a
+  dry-run drift gate fail.
+- **Notes**: advisory diagnostics that do not represent drift, such as preserving a
+  repository-owned key instead of adopting the managed value.
 
-Exit code 0 if everything is clean (only `InSync` and `LeaveAlone`); exit code 1 if
-the tool would change anything on disk. The same output format is printed at the end
-of a non-dry-run `update`, summarizing what actually happened.
+Exit code 0 if everything is clean (only `InSync` and `LeaveAlone`) and there are no
+refusals; exit code 1 if the tool would change anything on disk or refused to manage an
+artifact. Advisory notes do not affect the exit code. The same output format is printed
+at the end of a non-dry-run `update`, summarizing what actually happened.
