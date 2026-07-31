@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.3.0"
-catalog_checksum = "sha256:e42ac020359ad85574510c8123cfffde94be47738d4c59fa1c73f1e47e9438ec"
+catalog_checksum = "sha256:2581159069097262bca7ec3226e13bb205c782e83bce7c7e900a0fd3ac4d5bff"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"
@@ -253,11 +253,11 @@ checksum = "sha256:8c7e0b97a5fbeec22d51a8e9ea2487c8b2974c568bb538ce305bc32a18338
 
 [[file]]
 path = "justfiles/anvil/helpers.just"
-checksum = "sha256:4e9a24ac24fa7a8590814adb2afbff8a2889f6195ae382367dce4e557eb3a31d"
+checksum = "sha256:896b71aae705d403345c7e4bdacc767a00bb76c95bffae4c04b88a5483b22871"
 
 [[file]]
 path = "justfiles/anvil/impact.just"
-checksum = "sha256:a7099e928fd7fe19b7ed50f7e2bbf0f33c204ae90b380141eef5d79eeadba171"
+checksum = "sha256:50130eca1c465edcc62fe148786fb700a24a1364b7e5b7e4fc19525a8d155bd2"
 
 [[file]]
 path = "justfiles/anvil/mod.just"
@@ -321,6 +321,11 @@ checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103a
 
 [[region]]
 host = "crates/cargo-coverage-gate/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo-each/Cargo.toml"
 id = "anvil-lints"
 checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
 

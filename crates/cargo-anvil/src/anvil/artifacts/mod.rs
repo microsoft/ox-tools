@@ -26,6 +26,29 @@ pub mod region;
 
 use crate::catalog::Artifact;
 
+/// The impact-scoping mode a group's CI job runs under -- the word emitted into
+/// `export ANVIL_IMPACT=<mode>` in the group's action/step template.
+///
+/// PR groups download the `target/anvil/impact` artifact and trust it verbatim
+/// (`consume`); scheduled groups force `off` so every tier runs full-workspace.
+/// This is the single source of truth for the tier-to-mode policy, shared by
+/// both the GitHub and ADO backends (the per-backend `GROUPS` lists remain
+/// render inventories, but the *policy* answer lives here once). The match is
+/// exhaustive by group and panics on an unrecognized group, so adding a group
+/// forces an explicit classification here rather than silently defaulting into
+/// `consume` (which, per the `consume` no-op in impact.just, would degrade
+/// quietly to full-workspace instead of failing).
+#[must_use]
+pub(crate) fn impact_mode(group: &str) -> &'static str {
+    match group {
+        "pr-fast" | "pr-test" | "pr-runtime-analysis" | "pr-mutants" => "consume",
+        "scheduled-test" | "scheduled-advisories" | "scheduled-runtime-analysis" | "scheduled-exhaustive" => "off",
+        other => {
+            panic!("impact_mode: unclassified group '{other}'; add it to the pr/scheduled arms in artifacts::impact_mode")
+        }
+    }
+}
+
 /// The full built-in artifact set, in emission order.
 #[must_use]
 pub(crate) fn anvil_artifacts() -> Vec<Artifact> {

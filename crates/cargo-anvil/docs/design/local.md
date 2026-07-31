@@ -485,8 +485,20 @@ Set `ANVIL_IMPACT=off` in the environment to disable scoping entirely: `anvil-im
 affected/required, empty for modified). Because `just` runs a recipe's dependencies in the
 same environment, the guard is honored even when `anvil-impact` fires as a check
 dependency. This is exactly how the **scheduled** and **full** tiers stay full-workspace:
-`anvil-scheduled` / `anvil-full` are thin wrappers that export `ANVIL_IMPACT=off` and
-re-invoke a private `_*-impl` recipe, so the whole dependency tree runs unscoped.
+`anvil-scheduled` / `anvil-full` route through the `_anvil-run` tier router
+(`anvil-scheduled: (_anvil-run "scheduled" anvil_runner "off")`), which exports
+`ANVIL_IMPACT=off` before invoking the private `_anvil-<tier>` recipe, so the whole
+dependency tree runs unscoped. The export had to move into the router because a
+dependency-only tier recipe cannot set env for its own dependencies — they run before its
+body. The four scheduled *groups* (`anvil-scheduled-test`, …) route the same way, so a
+scheduled group invoked directly is full-workspace too.
+
+`ANVIL_IMPACT` is a strict tri-state — `off`, `consume`, or unset. Any other value makes
+all three read sites exit 2 with an actionable error, so a typo like `ANVIL_IMPACT=on`
+fails loudly rather than silently leaving scoping on. `consume` is CI-only: a group job
+that already downloaded the `target/anvil/impact` artifact sets it to trust that cache
+verbatim — `anvil-impact` no-ops after asserting the cache is present — and it is never set
+locally.
 
 The two-key cache means the expensive baseline snapshot is only retaken when the base ref
 moves, and the working-tree snapshot only when the tree changes; an unchanged repo yields

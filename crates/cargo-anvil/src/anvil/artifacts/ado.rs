@@ -66,28 +66,12 @@ const GROUP_PLACEHOLDER: &str = "__GROUP__";
 /// Placeholder token the per-group template uses for the impact-mode selection.
 const IMPACT_MODE_PLACEHOLDER: &str = "__IMPACT_MODE__";
 
-/// Impact-mode word substituted into the group step's
-/// `export ANVIL_IMPACT=__IMPACT_MODE__` line (the rationale lives next to that
-/// line in the template). PR group jobs download the `target/anvil/impact`
-/// artifact and trust it verbatim (`consume`); scheduled group jobs force
-/// `off` so every tier runs full-workspace. The mode is fixed by tier at emit
-/// time, never probed from a marker file.
-const IMPACT_MODE_PR: &str = "consume";
-
-/// See [`IMPACT_MODE_PR`]. Scheduled group jobs force the full-workspace mode.
-const IMPACT_MODE_SCHEDULED: &str = "off";
-
 /// Render the step template for one group.
 #[must_use]
 fn render_group_step(group: &str) -> String {
-    let impact_mode = if group.starts_with("scheduled-") {
-        IMPACT_MODE_SCHEDULED
-    } else {
-        IMPACT_MODE_PR
-    };
     GROUP_STEP_TEMPLATE
         .replace(GROUP_PLACEHOLDER, group)
-        .replace(IMPACT_MODE_PLACEHOLDER, impact_mode)
+        .replace(IMPACT_MODE_PLACEHOLDER, super::impact_mode(group))
 }
 
 /// Repo-root-relative path for one group's step template.

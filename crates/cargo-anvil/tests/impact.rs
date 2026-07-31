@@ -756,3 +756,125 @@ fn loom_runs_declared_targets_in_full_workspace_mode() {
         "loom must run the declared loom target in full-workspace mode; captured argv:\n{argv}"
     );
 }
+
+#[test]
+fn invalid_anvil_impact_value_fails_loudly_without_computing() {
+    if !tools_available() {
+        return;
+    }
+    // ANVIL_IMPACT is a strict tri-state (off / consume / unset). A typo like
+    // `on` must fail closed at every read site with exit 2 and an actionable
+    // error -- never silently fall through to "scoping on" (which could skip
+    // checks) or compute a scope.
+    let tmp = workspace();
+    let root = tmp.path();
+    for recipe in [&["anvil-impact"][..], &["_anvil-impact-include", "affected"][..]] {
+        let out = just_cmd(root, recipe).env("ANVIL_IMPACT", "on").output().unwrap();
+        let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "ANVIL_IMPACT=on must exit 2 for {recipe:?}:\n{combined}"
+        );
+        assert!(
+            combined.contains("recognized") && combined.contains("consume"),
+            "the error must be actionable for {recipe:?}:\n{combined}"
+        );
+    }
+    assert!(
+        !root.join("target/anvil/impact/impact.json").exists(),
+        "an invalid mode must not compute or write impact artifacts"
+    );
+}
+
+#[test]
+fn missing_base_ref_on_clean_tree_fails_with_fetch_guidance() {
+    if !tools_available() {
+        return;
+    }
+    // A clean tree does NOT hit the dirty-tree widen short-circuit, so a first
+    // run must resolve the base ref. When it is unresolvable (origin/<base>
+    // never fetched), the recompute path must fail loudly with actionable
+    // `git fetch` guidance rather than continue on an invalid baseline or
+    // mutate git state.
+    let tmp = workspace();
+    let root = tmp.path();
+    let out = just_cmd(root, &["anvil-impact"])
+        .env("BASE_REF", "refs/heads/anvil-nonexistent-base")
+        .output()
+        .unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "a clean tree with an unresolvable base must fail:\n{combined}"
+    );
+    assert!(
+        combined.contains("locally") && combined.contains("origin"),
+        "the error must point at `git fetch origin`:\n{combined}"
+    );
+    assert!(
+        !root.join("target/anvil/impact/impact.json").exists(),
+        "a failed base resolution must not write an impact set"
+    );
+}
+
+#[test]
+fn shallow_clone_fails_with_unshallow_guidance() {
+    if !tools_available() {
+        return;
+    }
+    // cargo-delta needs full history for the base ref, so a shallow checkout
+    // must fail loudly with `git fetch --unshallow` guidance rather than
+    // compute against a truncated history.
+    let tmp = workspace();
+    let root = tmp.path();
+    // git treats the presence of `.git/shallow` (listing a boundary commit) as
+    // a shallow clone, which is what `git rev-parse --is-shallow-repository`
+    // keys on.
+    let head = git_stdout(root, &["rev-parse", "HEAD"]);
+    write(&root.join(".git/shallow"), &format!("{head}\n"));
+
+    let out = just_cmd(root, &["anvil-impact"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_ne!(out.status.code(), Some(0), "a shallow clone must fail:\n{combined}");
+    assert!(
+        combined.contains("shallow") && combined.contains("--unshallow"),
+        "the error must point at `git fetch --unshallow`:\n{combined}"
+    );
+}
+
+#[test]
+fn consume_without_downloaded_cache_fails_loudly() {
+    if !tools_available() {
+        return;
+    }
+    // consume trusts a downloaded cache verbatim, so a missing cache is a real
+    // pipeline defect (renamed artifact, a missing download step, or a group
+    // action run directly). It must fail loudly rather than let every scoped
+    // check silently widen to --workspace while the pipeline stays green.
+    let tmp = workspace();
+    let root = tmp.path();
+    // No target/anvil/impact/ cache has been downloaded.
+    let out = just_cmd(root, &["anvil-impact"]).env("ANVIL_IMPACT", "consume").output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "consume with no downloaded cache must fail:\n{combined}"
+    );
+    assert!(
+        combined.contains("consume") && combined.contains("missing"),
+        "the error must explain the missing consume cache:\n{combined}"
+    );
+
+    // With the cache present (as after a real artifact download), consume is a
+    // successful no-op.
+    run_impact(root);
+    let ok = just_cmd(root, &["anvil-impact"]).env("ANVIL_IMPACT", "consume").output().unwrap();
+    let ok_combined = format!("{}{}", String::from_utf8_lossy(&ok.stdout), String::from_utf8_lossy(&ok.stderr));
+    assert!(
+        ok.status.success(),
+        "consume with a present cache must succeed as a no-op:\n{ok_combined}"
+    );
+}
