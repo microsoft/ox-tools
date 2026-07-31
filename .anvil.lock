@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.4.0"
-catalog_checksum = "sha256:df5327676750f40b3d34bea369cd683e40628dcfcab79d6c8fa3a3e209c33828"
+catalog_checksum = "sha256:8fc40f9789d523f9daa4a2389376dac9e2bbc5e003280262f80702a0309c8e41"
 
 [[file]]
 path = ".anvil/container/Containerfile"
@@ -85,11 +85,11 @@ checksum = "sha256:cb7996cc978eb3f6db6572a78eec1341bfbebb592c90f78f69d622eaacf6d
 
 [[file]]
 path = ".github/workflows/anvil-scheduled-impl.yml"
-checksum = "sha256:c0404d734d90a3d4cb184fcb40536f61417c735c497212e39c156c40fcd374c8"
+checksum = "sha256:781b61f724d79b769d1ec2af4767a4602e5498978f3bfd9aa277c0978351f64d"
 
 [[file]]
 path = ".github/workflows/anvil-scheduled.yml"
-checksum = "sha256:91408602dc3ee274b593e234841934c749ff03bba0ee7846ab88247c06f20cae"
+checksum = "sha256:d31b9878b377bc9bbfe4c0156e75b279dc1aeb6a421ff5089aeae623fe2a8974"
 
 [[file]]
 path = "justfiles/anvil/checks/aprz.just"

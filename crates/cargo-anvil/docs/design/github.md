@@ -128,6 +128,7 @@ flowchart LR
     sadv_job["scheduled-advisories<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     srun_job["scheduled-runtime-analysis<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     sexh_job["scheduled-exhaustive<br/>matrix: linux, windows"]:::job
+    publish_job["publish-failure<br/>upsert incident issue"]:::job
     stest_setup[".github/actions/<br/>anvil-setup"]:::action
     sadv_setup[".github/actions/<br/>anvil-setup"]:::action
     srun_setup[".github/actions/<br/>anvil-setup"]:::action
@@ -137,6 +138,7 @@ flowchart LR
     srun_act[".github/actions/<br/>anvil-scheduled-runtime-analysis"]:::action
     sexh_act[".github/actions/<br/>anvil-scheduled-exhaustive"]:::action
     codecov_act["codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f<br/>v7.0.0"]:::external
+    github_issues["GitHub Issues"]:::external
     stest_just["just anvil-scheduled-test"]:::recipe
     stest_setup_just["just anvil-setup"]:::recipe
     sadv_just["just anvil-scheduled-advisories"]:::recipe
@@ -150,22 +152,32 @@ flowchart LR
     sched_root -. uses .-> sched_impl
     sched_impl --> stest_job
     sched_impl --> sadv_job
+    sched_impl --> srun_job
     sched_impl --> sexh_job
+    stest_job --> publish_job
+    sadv_job --> publish_job
+    srun_job --> publish_job
+    sexh_job --> publish_job
 
     stest_job ==> stest_act
     stest_job ==> codecov_act
     sadv_job ==> sadv_act
+    srun_job ==> srun_act
     sexh_job ==> sexh_act
+    publish_job ==> github_issues
 
     stest_act ==> stest_setup
     stest_act ==> stest_just
     sadv_act ==> sadv_setup
     sadv_act ==> sadv_just
+    srun_act ==> srun_setup
+    srun_act ==> srun_just
     sexh_act ==> sexh_setup
     sexh_act ==> sexh_just
 
     stest_setup ==> stest_setup_just
     sadv_setup ==> sadv_setup_just
+    srun_setup ==> srun_setup_just
     sexh_setup ==> sexh_setup_just
 
     classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
@@ -392,6 +404,7 @@ on:
       windows_runner:     { type: string, default: windows-latest }
       linux_arm_runner:   { type: string, default: ubuntu-24.04-arm }
       windows_arm_runner: { type: string, default: windows-11-arm }
+      publish_failure_issue: { type: boolean, default: true }
 jobs:
   scheduled-test:
     strategy:
@@ -421,6 +434,15 @@ jobs:
         os: [linux, windows]
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}
     steps: [ { uses: actions/checkout }, { uses: ./.github/actions/anvil-scheduled-exhaustive } ]
+
+  publish-failure:
+    needs: [scheduled-test, scheduled-advisories, scheduled-runtime-analysis, scheduled-exhaustive]
+    if: ${{ always() && inputs.publish_failure_issue && contains(needs.*.result, 'failure') }}
+    runs-on: ${{ inputs.linux_runner }}
+    permissions: { contents: read, issues: write }
+    steps:
+      - uses: actions/github-script
+        # Upsert the stable "[Anvil] Scheduled checks failed" issue.
 ```
 
 Scheduled composite actions don't receive any `include_*` inputs at all — their inputs
@@ -441,6 +463,7 @@ The reusable workflow declares a small input set so the root workflow can pass o
 | `windows_runner`     | string | `windows-latest`     | Runner label for x86_64 Windows jobs.                  |
 | `linux_arm_runner`   | string | `ubuntu-24.04-arm`   | Runner label for aarch64 Linux jobs.                   |
 | `windows_arm_runner` | string | `windows-11-arm`     | Runner label for aarch64 Windows jobs.                 |
+| `publish_failure_issue` | boolean | `true`            | Scheduled workflow only: create or update an issue when any scheduled group fails. |
 
 The input surface is intentionally narrow: only per-leg *runner labels* are exposed,
 because swapping in self-hosted runners is the one common need that doesn't require
@@ -645,6 +668,9 @@ Recommended root workflow shape:
 
 - `permissions: contents: read` at the workflow level. anvil's default ships with
   this.
+- The scheduled reusable-workflow call grants `issues: write` at job scope so its
+  publisher can create or comment on the failure issue. The PR workflow never receives
+  this permission.
 - No `pull-requests: write` (the PR-title check only needs the title from the event
   payload, which is already in `${{ github.event.pull_request.title }}`).
 - Scheduled-tier secrets, if any, live on `anvil-scheduled.yml` only — never on `anvil-pr.yml`.
@@ -692,7 +718,36 @@ anvil does not gate the PR on coverage. The lcov upload is informational; Codeco
 own status check is the gating layer when the adopter wants one (configured in Codecov,
 visible as a separate required check in branch protection).
 
-## 11. Advisory PR comments
+## 11. Scheduled failure issues
+
+The GitHub scheduled reusable workflow publishes a failure as a repository issue by
+default. The publisher depends on every scheduled group and uses `always()` so it can
+inspect their terminal results even when one or more groups fail. It runs only when at
+least one result is `failure`; successful, skipped, and cancelled runs do not create
+issues.
+
+The issue title is the stable `[Anvil] Scheduled checks failed`. The publisher searches
+all open repository issues for that exact title:
+
+- If none exists, it creates one containing the failed group names and a link to the
+  workflow run.
+- If one exists, it adds the new failure details as a comment instead of creating a
+  duplicate.
+
+No label is required because repositories can remove or rename their default labels.
+The issue remains open until a maintainer resolves the underlying failure and closes it.
+If a later run fails after closure, the publisher creates a new incident issue.
+
+The publisher uses the workflow's short-lived `GITHUB_TOKEN`, with `issues: write`
+granted only to the scheduled root call and publishing job. It does not receive repository
+contents beyond read access and does not forward logs or environment data into the issue.
+This narrow GitHub-native path also lets GitHub's Teams app relay issue notifications
+without an external webhook or additional secret.
+
+Repositories that do not want issue publication set `publish_failure_issue: false` in
+the root workflow's `with:` block and can remove `issues: write` from that call.
+
+## 12. Advisory PR comments
 
 Recipes that surface non-blocking findings exit 0 and write a markdown body to
 `target/anvil/comments/<NAME>.md` (see [checks.md §6](./checks.md#6-advisory-pr-comments)
