@@ -298,6 +298,16 @@
 //!    region. The next `update` detects the dirt and writes a
 //!    `.anvil-proposed` sibling instead of overwriting.
 //!
+//! ### Scheduled failure issue publication (GitHub)
+//!
+//! The generated GitHub scheduled workflow creates or updates
+//! `[Anvil] Scheduled checks failed` when a scheduled group fails.
+//! To disable this behavior without editing an Anvil-owned workflow,
+//! set the Actions repository variable `ANVIL_PUBLISH_FAILURE_ISSUE`
+//! to `false` under **Settings → Secrets and variables → Actions →
+//! Variables**. Removing the variable or setting any other value
+//! restores the default publication behavior.
+//!
 //! ## In-tree tool customization
 //!
 //! anvil follows a few source-level and `Cargo.toml` conventions so you

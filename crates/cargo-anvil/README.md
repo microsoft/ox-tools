@@ -299,6 +299,16 @@ Four escape valves, in increasing severity:
    region. The next `update` detects the dirt and writes a
    `.anvil-proposed` sibling instead of overwriting.
 
+#### Scheduled failure issue publication (GitHub)
+
+The generated GitHub scheduled workflow creates or updates
+`[Anvil] Scheduled checks failed` when a scheduled group fails.
+To disable this behavior without editing an Anvil-owned workflow,
+set the Actions repository variable `ANVIL_PUBLISH_FAILURE_ISSUE`
+to `false` under **Settings → Secrets and variables → Actions →
+Variables**. Removing the variable or setting any other value
+restores the default publication behavior.
+
 ### In-tree tool customization
 
 anvil follows a few source-level and `Cargo.toml` conventions so you
@@ -434,7 +444,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEGxTMGoxCkeryG-0e3itMXrTaG5_wi70711hUGwwdB6rU2SfkYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG1ZxiUxO73irG03EARpRpRIgG4KBoqt1kAcUGwyV8-KGqpwBYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate
