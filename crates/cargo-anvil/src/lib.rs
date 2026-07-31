@@ -100,7 +100,8 @@
 //! issues. It creates one issue for an active failure and comments on that
 //! issue when later scheduled runs also fail, providing a durable incident
 //! record without creating one issue per run. Repositories can disable this
-//! behavior through the reusable workflow's `publish_failure_issue` input.
+//! behavior by setting the `ANVIL_PUBLISH_FAILURE_ISSUE` Actions repository
+//! variable to `false`.
 //!
 //! ## Containerized local checks
 //!

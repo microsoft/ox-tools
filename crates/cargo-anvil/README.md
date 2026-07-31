@@ -99,7 +99,8 @@ The generated GitHub scheduled workflow publishes failures as GitHub
 issues. It creates one issue for an active failure and comments on that
 issue when later scheduled runs also fail, providing a durable incident
 record without creating one issue per run. Repositories can disable this
-behavior through the reusable workflow's `publish_failure_issue` input.
+behavior by setting the `ANVIL_PUBLISH_FAILURE_ISSUE` Actions repository
+variable to `false`.
 
 ### Containerized local checks
 
@@ -433,7 +434,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbRQpVpEjw3x0b7FHf_9HBExgbfia0zvhKdz8bZ7R_zqIR8z1hZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbngRfcjTrm3AbvT9_mReE10AbWwjIrRrJUP8bMn8ZsSasRElhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate
