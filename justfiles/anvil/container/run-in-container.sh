@@ -15,7 +15,7 @@ done
 anvil_recipe_needs_github_token() {
     case "$1" in
         anvil-aprz | anvil-pr | _anvil-pr | anvil-pr-fast \
-            | anvil-scheduled | _anvil-scheduled | anvil-scheduled-advisories \
+            | anvil-scheduled | _anvil-scheduled | anvil-scheduled-advisories | _anvil-scheduled-advisories \
             | anvil-full | _anvil-full) return 0 ;;
         *) return 1 ;;
     esac

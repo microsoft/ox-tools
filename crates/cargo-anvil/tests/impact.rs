@@ -680,3 +680,79 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
         "the --skip sentinel must short-circuit the tool (no cargo build); captured argv:\n{argv_skip}"
     );
 }
+
+/// Write a fake `cargo` into `dir` that answers `cargo metadata …` by printing
+/// the contents of `metadata_json` and captures every other invocation's argv
+/// (one per line) to `log`, exiting 0. Lets `anvil-loom` be driven with a
+/// synthetic workspace shape without a real loom crate.
+fn fake_cargo_with_metadata(dir: &Path, log: &Path, metadata_json: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    #[cfg(windows)]
+    {
+        let script = format!(
+            "@echo off\r\nif \"%1\"==\"metadata\" (\r\n  type \"{meta}\"\r\n  exit /b 0\r\n)\r\n>>\"{log}\" echo %*\r\nexit /b 0\r\n",
+            meta = metadata_json.display(),
+            log = log.display()
+        );
+        std::fs::write(dir.join("cargo.cmd"), script).unwrap();
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = metadata ]; then cat '{meta}'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{log}'\nexit 0\n",
+            meta = metadata_json.display(),
+            log = log.display()
+        );
+        let path = dir.join("cargo");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[test]
+fn loom_runs_declared_targets_in_full_workspace_mode() {
+    if !tools_available() {
+        return;
+    }
+    // Regression guard for the loom `--workspace` path: `anvil-loom` parses its
+    // own package set from `cargo metadata`, and a prior bug turned the
+    // unscoped `--workspace` value into an empty affected set that silently
+    // skipped every loom target. The representative anvil-examples/`--skip`
+    // test can't catch this bespoke parsing. Here a fake `cargo metadata`
+    // reports a crate with a `required-features = ["loom"]` test target; run
+    // under ANVIL_IMPACT=off (so the tier resolves to --workspace), loom must
+    // detect that target and invoke `cargo test -p <pkg> --test <target>`.
+    let tmp = workspace_at_base();
+    let root = tmp.path();
+
+    // A synthetic single-crate workspace whose only test target requires the
+    // `loom` feature -- the shape `anvil-loom` looks for.
+    let metadata = root.join("metadata.json");
+    std::fs::write(
+        &metadata,
+        r#"{"packages":[{"name":"gamma","version":"0.1.0","features":{"loom":[]},"dependencies":[],"targets":[{"kind":["test"],"name":"loomtest","required-features":["loom"]}]}]}"#,
+    )
+    .unwrap();
+
+    let bin = root.join(".fakebin");
+    let log = root.join("cargo-argv.log");
+    fake_cargo_with_metadata(&bin, &log, &metadata);
+    let path = path_with_prefix(&bin);
+
+    // ANVIL_IMPACT=off -> anvil-impact no-ops and `_anvil-impact-include
+    // affected` returns --workspace, so loom runs over the full (faked)
+    // metadata rather than a scoped package list.
+    let out = just_cmd(root, &["anvil-loom"])
+        .env("ANVIL_IMPACT", "off")
+        .env("PATH", &path)
+        .output()
+        .unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "anvil-loom (full-workspace) run failed:\n{combined}");
+    let argv = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        argv.contains("test") && argv.contains("-p gamma") && argv.contains("--test loomtest"),
+        "loom must run the declared loom target in full-workspace mode; captured argv:\n{argv}"
+    );
+}

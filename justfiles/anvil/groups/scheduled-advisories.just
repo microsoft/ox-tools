@@ -6,9 +6,16 @@
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
+# Full-workspace backstop: routed through _anvil-run with impact "off" so
+# ANVIL_IMPACT=off is set before the check deps run, however the group is
+# invoked. Never recomputes, so no cargo-delta.
+
 # Run the scheduled advisory checks.
 [group("anvil")]
-anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
+anvil-scheduled-advisories: (_anvil-run "scheduled-advisories" anvil_runner "off")
+
+[private]
+_anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
     anvil-deny \
     anvil-audit \
     anvil-aprz \
@@ -17,7 +24,6 @@ anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
 # Install prerequisites for the `anvil-scheduled-advisories` recipe.
 [group("anvil-setup")]
 anvil-scheduled-advisories-setup installer="install": \
-    (anvil-tool-cargo-delta-install installer) \
     (anvil-deny-setup installer) \
     (anvil-audit-setup installer) \
     (anvil-aprz-setup installer) \
@@ -26,7 +32,6 @@ anvil-scheduled-advisories-setup installer="install": \
 # Validate prerequisites for the `anvil-scheduled-advisories` recipe.
 [group("anvil-setup")]
 anvil-scheduled-advisories-validate-prereqs: \
-    anvil-tool-cargo-delta-validate-prereqs \
     anvil-deny-validate-prereqs \
     anvil-audit-validate-prereqs \
     anvil-aprz-validate-prereqs \

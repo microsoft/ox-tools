@@ -8,9 +8,19 @@
 
 # Scheduled groups
 
+# Scheduled groups are the full-workspace backstop for PR-tier impact scoping,
+# so route through _anvil-run with impact "off": it exports ANVIL_IMPACT=off
+# before the check deps run, so the group is full-workspace however it is
+# invoked (CI, `just anvil-scheduled`, or `just anvil-scheduled-test`
+# directly). Because these groups never recompute the impact set, they no
+# longer need cargo-delta as a prerequisite.
+
 # Run the scheduled tests.
 [group("anvil")]
-anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
+anvil-scheduled-test: (_anvil-run "scheduled-test" anvil_runner "off")
+
+[private]
+_anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
     anvil-llvm-cov \
     anvil-doc-test \
     anvil-examples
@@ -18,7 +28,6 @@ anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
 # Install prerequisites for the `anvil-scheduled-test` recipe.
 [group("anvil-setup")]
 anvil-scheduled-test-setup installer="install": \
-    (anvil-tool-cargo-delta-install installer) \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
     (anvil-examples-setup installer)
@@ -26,7 +35,6 @@ anvil-scheduled-test-setup installer="install": \
 # Validate prerequisites for the `anvil-scheduled-test` recipe.
 [group("anvil-setup")]
 anvil-scheduled-test-validate-prereqs: \
-    anvil-tool-cargo-delta-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \
     anvil-doc-test-validate-prereqs \
     anvil-examples-validate-prereqs

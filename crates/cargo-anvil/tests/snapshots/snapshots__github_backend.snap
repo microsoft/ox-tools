@@ -119,10 +119,11 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # This PR group job downloaded the target/anvil/impact artifact, so it
-        # trusts that cache verbatim: "consume" makes anvil-impact a no-op (no
-        # snapshot / cargo-delta / base ref). The mode is fixed by tier here,
-        # not probed at runtime (see the scheduled variant).
+        # The impact mode is fixed by tier at emit time -- never probed from a
+        # marker file. PR group jobs downloaded the target/anvil/impact artifact
+        # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
+        # cargo-delta, or base ref); scheduled group jobs force off so every
+        # tier runs full-workspace.
         export ANVIL_IMPACT=consume
         just anvil-pr-fast
 
@@ -164,10 +165,11 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # This PR group job downloaded the target/anvil/impact artifact, so it
-        # trusts that cache verbatim: "consume" makes anvil-impact a no-op (no
-        # snapshot / cargo-delta / base ref). The mode is fixed by tier here,
-        # not probed at runtime (see the scheduled variant).
+        # The impact mode is fixed by tier at emit time -- never probed from a
+        # marker file. PR group jobs downloaded the target/anvil/impact artifact
+        # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
+        # cargo-delta, or base ref); scheduled group jobs force off so every
+        # tier runs full-workspace.
         export ANVIL_IMPACT=consume
         just anvil-pr-mutants
 
@@ -209,10 +211,11 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # This PR group job downloaded the target/anvil/impact artifact, so it
-        # trusts that cache verbatim: "consume" makes anvil-impact a no-op (no
-        # snapshot / cargo-delta / base ref). The mode is fixed by tier here,
-        # not probed at runtime (see the scheduled variant).
+        # The impact mode is fixed by tier at emit time -- never probed from a
+        # marker file. PR group jobs downloaded the target/anvil/impact artifact
+        # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
+        # cargo-delta, or base ref); scheduled group jobs force off so every
+        # tier runs full-workspace.
         export ANVIL_IMPACT=consume
         just anvil-pr-runtime-analysis
 
@@ -254,10 +257,11 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # This PR group job downloaded the target/anvil/impact artifact, so it
-        # trusts that cache verbatim: "consume" makes anvil-impact a no-op (no
-        # snapshot / cargo-delta / base ref). The mode is fixed by tier here,
-        # not probed at runtime (see the scheduled variant).
+        # The impact mode is fixed by tier at emit time -- never probed from a
+        # marker file. PR group jobs downloaded the target/anvil/impact artifact
+        # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
+        # cargo-delta, or base ref); scheduled group jobs force off so every
+        # tier runs full-workspace.
         export ANVIL_IMPACT=consume
         just anvil-pr-test
 
@@ -299,10 +303,11 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # Scheduled tier always validates the FULL workspace: force off
-        # (anvil-impact no-ops, every tier -> --workspace). Fixed by tier at
-        # emit time, never probed at runtime, so no leftover state on the
-        # runner can flip this job into impact scoping.
+        # The impact mode is fixed by tier at emit time -- never probed from a
+        # marker file. PR group jobs downloaded the target/anvil/impact artifact
+        # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
+        # cargo-delta, or base ref); scheduled group jobs force off so every
+        # tier runs full-workspace.
         export ANVIL_IMPACT=off
         just anvil-scheduled-advisories
 
@@ -344,10 +349,11 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # Scheduled tier always validates the FULL workspace: force off
-        # (anvil-impact no-ops, every tier -> --workspace). Fixed by tier at
-        # emit time, never probed at runtime, so no leftover state on the
-        # runner can flip this job into impact scoping.
+        # The impact mode is fixed by tier at emit time -- never probed from a
+        # marker file. PR group jobs downloaded the target/anvil/impact artifact
+        # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
+        # cargo-delta, or base ref); scheduled group jobs force off so every
+        # tier runs full-workspace.
         export ANVIL_IMPACT=off
         just anvil-scheduled-exhaustive
 
@@ -389,10 +395,11 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # Scheduled tier always validates the FULL workspace: force off
-        # (anvil-impact no-ops, every tier -> --workspace). Fixed by tier at
-        # emit time, never probed at runtime, so no leftover state on the
-        # runner can flip this job into impact scoping.
+        # The impact mode is fixed by tier at emit time -- never probed from a
+        # marker file. PR group jobs downloaded the target/anvil/impact artifact
+        # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
+        # cargo-delta, or base ref); scheduled group jobs force off so every
+        # tier runs full-workspace.
         export ANVIL_IMPACT=off
         just anvil-scheduled-runtime-analysis
 
@@ -434,10 +441,11 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # Scheduled tier always validates the FULL workspace: force off
-        # (anvil-impact no-ops, every tier -> --workspace). Fixed by tier at
-        # emit time, never probed at runtime, so no leftover state on the
-        # runner can flip this job into impact scoping.
+        # The impact mode is fixed by tier at emit time -- never probed from a
+        # marker file. PR group jobs downloaded the target/anvil/impact artifact
+        # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
+        # cargo-delta, or base ref); scheduled group jobs force off so every
+        # tier runs full-workspace.
         export ANVIL_IMPACT=off
         just anvil-scheduled-test
 
@@ -1357,7 +1365,7 @@ anvil-audit-validate-prereqs: anvil-tool-cargo-audit-validate-prereqs
 anvil-bench: anvil-bench-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-bench: no affected packages; skipping'; exit 0 }
     & cargo bench @(if ($include) { -split $include } else { '--workspace' }) --all-features --no-run
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1475,7 +1483,7 @@ anvil-bolero-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-to
 anvil-careful: anvil-careful-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-careful: no affected packages; skipping'; exit 0 }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
     # Guard against cargo-careful's stale-sysroot hazard. cargo-careful
     # builds a custom std ("careful sysroot": debug-assertions + extra UB
@@ -1548,7 +1556,7 @@ anvil-careful-validate-prereqs: anvil-component-nightly-rust-src-validate-prereq
 anvil-cargo-hack: anvil-cargo-hack-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include required)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-cargo-hack: no affected packages; skipping'; exit 0 }
     & cargo hack @(if ($include) { -split $include } else { '--workspace' }) --feature-powerset --depth 2 check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1588,7 +1596,7 @@ anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
 anvil-cargo-sort: anvil-cargo-sort-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-cargo-sort: no modified packages; skipping'; exit 0 }
     cargo sort --workspace --grouped --check --check-format
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1621,7 +1629,7 @@ anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-clippy: no affected packages; skipping'; exit 0 }
     & cargo clippy @(if ($include) { -split $include } else { '--workspace' }) --all-targets --all-features --locked "--" '-D' 'warnings'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1679,7 +1687,7 @@ anvil-deny-validate-prereqs: anvil-tool-cargo-deny-validate-prereqs
 anvil-doc-build: anvil-doc-build-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include required)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-doc-build: no affected packages; skipping'; exit 0 }
     $env:RUSTDOCFLAGS = '-D warnings'
     & cargo doc @(if ($include) { -split $include } else { '--workspace' }) --all-features --no-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1717,7 +1725,7 @@ anvil-doc-build-validate-prereqs: anvil-tool-rustc-validate-prereqs
 anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-doc-test: no affected packages; skipping'; exit 0 }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
     & cargo test --doc @pkg --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -1748,7 +1756,7 @@ anvil-doc-test-validate-prereqs: anvil-tool-rustc-validate-prereqs
 anvil-ensure-no-cyclic-deps: anvil-ensure-no-cyclic-deps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-ensure-no-cyclic-deps: no modified packages; skipping'; exit 0 }
     cargo ensure-no-cyclic-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1776,7 +1784,7 @@ anvil-ensure-no-cyclic-deps-validate-prereqs: anvil-tool-cargo-ensure-no-cyclic-
 anvil-ensure-no-default-features: anvil-ensure-no-default-features-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-ensure-no-default-features: no modified packages; skipping'; exit 0 }
     cargo ensure-no-default-features
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1804,7 +1812,7 @@ anvil-ensure-no-default-features-validate-prereqs: anvil-tool-cargo-ensure-no-de
 anvil-examples: anvil-examples-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-examples: no affected packages; skipping'; exit 0 }
     & cargo build @(if ($include) { -split $include } else { '--workspace' }) --examples --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1920,7 +1928,7 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 anvil-fmt: anvil-fmt-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-fmt: no modified packages; skipping'; exit 0 }
     cargo '+{{ rust_nightly }}' fmt --all --check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -1963,7 +1971,7 @@ anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs
 anvil-license-headers: anvil-license-headers-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-license-headers: no modified packages; skipping'; exit 0 }
     cargo heather
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
@@ -2288,7 +2296,7 @@ anvil-loom-validate-prereqs: anvil-tool-rustc-validate-prereqs
 anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-miri-race-coverage: no affected packages; skipping'; exit 0 }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
     $day = (Get-Date).Day
     $low = (2 * $day) - 1
@@ -2321,7 +2329,7 @@ anvil-miri-race-coverage-validate-prereqs: anvil-component-nightly-miri-validate
 anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-miri-strict-provenance: no affected packages; skipping'; exit 0 }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
     $env:MIRIFLAGS = "-Zmiri-strict-provenance $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_strict_provenance $($env:RUSTFLAGS)".Trim()
@@ -2364,7 +2372,7 @@ anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-vali
 anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-miri-tree-borrows: no affected packages; skipping'; exit 0 }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
     $env:MIRIFLAGS = "-Zmiri-tree-borrows $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_tree_borrows $($env:RUSTFLAGS)".Trim()
@@ -2403,7 +2411,7 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 anvil-miri: anvil-miri-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-miri: no affected packages; skipping'; exit 0 }
     # Run miri via libtest (`cargo miri test`), NOT `cargo miri nextest
     # run`. nextest uses a process-per-test model; under miri every
     # process pays the full cost of re-interpreting std initialization,
@@ -2992,7 +3000,7 @@ anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs
 anvil-udeps: anvil-udeps-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include required)
-    if ($include -eq '--skip') { exit 0 }
+    if ($include -eq '--skip') { Write-Host 'anvil-udeps: no affected packages; skipping'; exit 0 }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
     # Pass 1: default targets (lib + bins) -- surfaces [dependencies] that
     # are only used by tests/benches/examples (should be dev-deps).
@@ -3587,6 +3595,7 @@ function Test-AnvilRecipeNeedsGitHubToken([string]$Name) {
         'anvil-scheduled',
         '_anvil-scheduled',
         'anvil-scheduled-advisories',
+        '_anvil-scheduled-advisories',
         'anvil-full',
         '_anvil-full'
     )
@@ -3799,9 +3808,7 @@ try {
     foreach ($name in @(
         'PR_TITLE',
         'BASE_REF',
-        'ANVIL_INCLUDE_MODIFIED',
-        'ANVIL_INCLUDE_AFFECTED',
-        'ANVIL_INCLUDE_REQUIRED',
+        'ANVIL_IMPACT',
         'GITHUB_BASE_REF',
         'SYSTEM_PULLREQUEST_TARGETBRANCH'
     )) {
@@ -3883,7 +3890,7 @@ done
 anvil_recipe_needs_github_token() {
     case "$1" in
         anvil-aprz | anvil-pr | _anvil-pr | anvil-pr-fast \
-            | anvil-scheduled | _anvil-scheduled | anvil-scheduled-advisories \
+            | anvil-scheduled | _anvil-scheduled | anvil-scheduled-advisories | _anvil-scheduled-advisories \
             | anvil-full | _anvil-full) return 0 ;;
         *) return 1 ;;
     esac
@@ -4152,7 +4159,7 @@ run_args=(
 )
 prepare_run_args=("${run_args[@]}")
 run_args+=(${ANVIL_CONTAINER_RUN_ARGS[@]+"${ANVIL_CONTAINER_RUN_ARGS[@]}"})
-for name in PR_TITLE BASE_REF ANVIL_INCLUDE_MODIFIED ANVIL_INCLUDE_AFFECTED ANVIL_INCLUDE_REQUIRED GITHUB_BASE_REF SYSTEM_PULLREQUEST_TARGETBRANCH; do
+for name in PR_TITLE BASE_REF ANVIL_IMPACT GITHUB_BASE_REF SYSTEM_PULLREQUEST_TARGETBRANCH; do
     if value="$(printenv "$name")"; then run_args+=(--env "$name=$value"); fi
 done
 if ((${#ANVIL_CONTAINER_PREPARE_COMMAND[@]} > 0)); then
@@ -4408,9 +4415,16 @@ anvil-pr-test-validate-prereqs: \
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
+# Full-workspace backstop: routed through _anvil-run with impact "off" so
+# ANVIL_IMPACT=off is set before the check deps run, however the group is
+# invoked. Never recomputes, so no cargo-delta.
+
 # Run the scheduled advisory checks.
 [group("anvil")]
-anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
+anvil-scheduled-advisories: (_anvil-run "scheduled-advisories" anvil_runner "off")
+
+[private]
+_anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
     anvil-deny \
     anvil-audit \
     anvil-aprz \
@@ -4419,7 +4433,6 @@ anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
 # Install prerequisites for the `anvil-scheduled-advisories` recipe.
 [group("anvil-setup")]
 anvil-scheduled-advisories-setup installer="install": \
-    (anvil-tool-cargo-delta-install installer) \
     (anvil-deny-setup installer) \
     (anvil-audit-setup installer) \
     (anvil-aprz-setup installer) \
@@ -4428,7 +4441,6 @@ anvil-scheduled-advisories-setup installer="install": \
 # Validate prerequisites for the `anvil-scheduled-advisories` recipe.
 [group("anvil-setup")]
 anvil-scheduled-advisories-validate-prereqs: \
-    anvil-tool-cargo-delta-validate-prereqs \
     anvil-deny-validate-prereqs \
     anvil-audit-validate-prereqs \
     anvil-aprz-validate-prereqs \
@@ -4443,9 +4455,16 @@ anvil-scheduled-advisories-validate-prereqs: \
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
+# Full-workspace backstop: routed through _anvil-run with impact "off" so
+# ANVIL_IMPACT=off is set before the check deps run, however the group is
+# invoked. Never recomputes, so no cargo-delta.
+
 # Run the scheduled exhaustive checks.
 [group("anvil")]
-anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
+anvil-scheduled-exhaustive: (_anvil-run "scheduled-exhaustive" anvil_runner "off")
+
+[private]
+_anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
     anvil-mutants-full \
     anvil-cargo-hack \
     anvil-bench
@@ -4453,7 +4472,6 @@ anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
 # Install prerequisites for the `anvil-scheduled-exhaustive` recipe.
 [group("anvil-setup")]
 anvil-scheduled-exhaustive-setup installer="install": \
-    (anvil-tool-cargo-delta-install installer) \
     (anvil-mutants-full-setup installer) \
     (anvil-cargo-hack-setup installer) \
     (anvil-bench-setup installer)
@@ -4461,7 +4479,6 @@ anvil-scheduled-exhaustive-setup installer="install": \
 # Validate prerequisites for the `anvil-scheduled-exhaustive` recipe.
 [group("anvil-setup")]
 anvil-scheduled-exhaustive-validate-prereqs: \
-    anvil-tool-cargo-delta-validate-prereqs \
     anvil-mutants-full-validate-prereqs \
     anvil-cargo-hack-validate-prereqs \
     anvil-bench-validate-prereqs
@@ -4481,9 +4498,16 @@ anvil-scheduled-exhaustive-validate-prereqs: \
 # and adds the three stricter miri profiles (tree-borrows, strict-
 # provenance, race-coverage) which are too expensive for PR.
 
+# Full-workspace backstop: routed through _anvil-run with impact "off" so
+# ANVIL_IMPACT=off is set before the check deps run, however the group is
+# invoked. Never recomputes, so no cargo-delta.
+
 # Run the scheduled runtime analysis.
 [group("anvil")]
-anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prereqs \
+anvil-scheduled-runtime-analysis: (_anvil-run "scheduled-runtime-analysis" anvil_runner "off")
+
+[private]
+_anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prereqs \
     anvil-miri \
     anvil-miri-tree-borrows \
     anvil-miri-strict-provenance \
@@ -4492,7 +4516,6 @@ anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prer
 # Install prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
 [group("anvil-setup")]
 anvil-scheduled-runtime-analysis-setup installer="install": \
-    (anvil-tool-cargo-delta-install installer) \
     (anvil-miri-setup installer) \
     (anvil-miri-tree-borrows-setup installer) \
     (anvil-miri-strict-provenance-setup installer) \
@@ -4501,7 +4524,6 @@ anvil-scheduled-runtime-analysis-setup installer="install": \
 # Validate prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
 [group("anvil-setup")]
 anvil-scheduled-runtime-analysis-validate-prereqs: \
-    anvil-tool-cargo-delta-validate-prereqs \
     anvil-miri-validate-prereqs \
     anvil-miri-tree-borrows-validate-prereqs \
     anvil-miri-strict-provenance-validate-prereqs \
@@ -4518,9 +4540,19 @@ anvil-scheduled-runtime-analysis-validate-prereqs: \
 
 # Scheduled groups
 
+# Scheduled groups are the full-workspace backstop for PR-tier impact scoping,
+# so route through _anvil-run with impact "off": it exports ANVIL_IMPACT=off
+# before the check deps run, so the group is full-workspace however it is
+# invoked (CI, `just anvil-scheduled`, or `just anvil-scheduled-test`
+# directly). Because these groups never recompute the impact set, they no
+# longer need cargo-delta as a prerequisite.
+
 # Run the scheduled tests.
 [group("anvil")]
-anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
+anvil-scheduled-test: (_anvil-run "scheduled-test" anvil_runner "off")
+
+[private]
+_anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
     anvil-llvm-cov \
     anvil-doc-test \
     anvil-examples
@@ -4528,7 +4560,6 @@ anvil-scheduled-test: anvil-scheduled-test-validate-prereqs \
 # Install prerequisites for the `anvil-scheduled-test` recipe.
 [group("anvil-setup")]
 anvil-scheduled-test-setup installer="install": \
-    (anvil-tool-cargo-delta-install installer) \
     (anvil-llvm-cov-setup installer) \
     (anvil-doc-test-setup installer) \
     (anvil-examples-setup installer)
@@ -4536,7 +4567,6 @@ anvil-scheduled-test-setup installer="install": \
 # Validate prerequisites for the `anvil-scheduled-test` recipe.
 [group("anvil-setup")]
 anvil-scheduled-test-validate-prereqs: \
-    anvil-tool-cargo-delta-validate-prereqs \
     anvil-llvm-cov-validate-prereqs \
     anvil-doc-test-validate-prereqs \
     anvil-examples-validate-prereqs
@@ -4804,6 +4834,10 @@ _anvil-impact-format tier impactJson:
 [script("pwsh")]
 _anvil-impact-snapshot:
     $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
+        Write-Error "anvil: ANVIL_IMPACT='$($env:ANVIL_IMPACT)' is not recognized (expected 'off', 'consume', or unset)."
+        exit 2
+    }
     if ($env:ANVIL_IMPACT -eq 'off' -or $env:ANVIL_IMPACT -eq 'consume') { exit 0 }
 
     # Short-circuit on a dirty working tree, BEFORE the expensive recompute
@@ -4989,6 +5023,10 @@ _anvil-impact-snapshot:
 [script("pwsh")]
 anvil-impact: _anvil-impact-snapshot
     $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
+        Write-Error "anvil: ANVIL_IMPACT='$($env:ANVIL_IMPACT)' is not recognized (expected 'off', 'consume', or unset)."
+        exit 2
+    }
     if ($env:ANVIL_IMPACT -eq 'off' -or $env:ANVIL_IMPACT -eq 'consume') { exit 0 }
 
     $impactDir = 'target/anvil/impact'
@@ -5090,6 +5128,10 @@ _anvil-impact-include tier:
     $ErrorActionPreference = 'Stop'
     $tier = '{{ tier }}'
     $default = if ($tier -eq 'modified') { '' } else { '--workspace' }
+    if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
+        Write-Error "anvil: ANVIL_IMPACT='$($env:ANVIL_IMPACT)' is not recognized (expected 'off', 'consume', or unset)."
+        exit 2
+    }
     if ($env:ANVIL_IMPACT -eq 'off') { Write-Output $default; exit 0 }
     $file = "target/anvil/impact/include_$tier.txt"
     if (Test-Path $file) {

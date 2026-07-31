@@ -6,9 +6,16 @@
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
+# Full-workspace backstop: routed through _anvil-run with impact "off" so
+# ANVIL_IMPACT=off is set before the check deps run, however the group is
+# invoked. Never recomputes, so no cargo-delta.
+
 # Run the scheduled exhaustive checks.
 [group("anvil")]
-anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
+anvil-scheduled-exhaustive: (_anvil-run "scheduled-exhaustive" anvil_runner "off")
+
+[private]
+_anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
     anvil-mutants-full \
     anvil-cargo-hack \
     anvil-bench
@@ -16,7 +23,6 @@ anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs \
 # Install prerequisites for the `anvil-scheduled-exhaustive` recipe.
 [group("anvil-setup")]
 anvil-scheduled-exhaustive-setup installer="install": \
-    (anvil-tool-cargo-delta-install installer) \
     (anvil-mutants-full-setup installer) \
     (anvil-cargo-hack-setup installer) \
     (anvil-bench-setup installer)
@@ -24,7 +30,6 @@ anvil-scheduled-exhaustive-setup installer="install": \
 # Validate prerequisites for the `anvil-scheduled-exhaustive` recipe.
 [group("anvil-setup")]
 anvil-scheduled-exhaustive-validate-prereqs: \
-    anvil-tool-cargo-delta-validate-prereqs \
     anvil-mutants-full-validate-prereqs \
     anvil-cargo-hack-validate-prereqs \
     anvil-bench-validate-prereqs

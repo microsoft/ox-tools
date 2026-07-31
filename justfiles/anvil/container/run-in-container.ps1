@@ -56,6 +56,7 @@ function Test-AnvilRecipeNeedsGitHubToken([string]$Name) {
         'anvil-scheduled',
         '_anvil-scheduled',
         'anvil-scheduled-advisories',
+        '_anvil-scheduled-advisories',
         'anvil-full',
         '_anvil-full'
     )

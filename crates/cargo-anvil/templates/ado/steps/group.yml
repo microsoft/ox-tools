@@ -46,7 +46,12 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      __IMPACT_MODE__
+      # The impact mode is fixed by tier at emit time -- never probed from a
+      # marker file. PR group jobs downloaded the target/anvil/impact artifact
+      # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
+      # cargo-delta, or base ref); scheduled group jobs force off so every
+      # tier runs full-workspace.
+      export ANVIL_IMPACT=__IMPACT_MODE__
       just anvil-__GROUP__
     displayName: anvil-__GROUP__
     env:

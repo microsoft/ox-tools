@@ -44,6 +44,10 @@
 [script("pwsh")]
 _anvil-impact-snapshot:
     $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
+        Write-Error "anvil: ANVIL_IMPACT='$($env:ANVIL_IMPACT)' is not recognized (expected 'off', 'consume', or unset)."
+        exit 2
+    }
     if ($env:ANVIL_IMPACT -eq 'off' -or $env:ANVIL_IMPACT -eq 'consume') { exit 0 }
 
     # Short-circuit on a dirty working tree, BEFORE the expensive recompute
@@ -229,6 +233,10 @@ _anvil-impact-snapshot:
 [script("pwsh")]
 anvil-impact: _anvil-impact-snapshot
     $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
+        Write-Error "anvil: ANVIL_IMPACT='$($env:ANVIL_IMPACT)' is not recognized (expected 'off', 'consume', or unset)."
+        exit 2
+    }
     if ($env:ANVIL_IMPACT -eq 'off' -or $env:ANVIL_IMPACT -eq 'consume') { exit 0 }
 
     $impactDir = 'target/anvil/impact'
@@ -330,6 +338,10 @@ _anvil-impact-include tier:
     $ErrorActionPreference = 'Stop'
     $tier = '{{ tier }}'
     $default = if ($tier -eq 'modified') { '' } else { '--workspace' }
+    if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
+        Write-Error "anvil: ANVIL_IMPACT='$($env:ANVIL_IMPACT)' is not recognized (expected 'off', 'consume', or unset)."
+        exit 2
+    }
     if ($env:ANVIL_IMPACT -eq 'off') { Write-Output $default; exit 0 }
     $file = "target/anvil/impact/include_$tier.txt"
     if (Test-Path $file) {

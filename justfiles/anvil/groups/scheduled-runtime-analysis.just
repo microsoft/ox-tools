@@ -12,9 +12,16 @@
 # and adds the three stricter miri profiles (tree-borrows, strict-
 # provenance, race-coverage) which are too expensive for PR.
 
+# Full-workspace backstop: routed through _anvil-run with impact "off" so
+# ANVIL_IMPACT=off is set before the check deps run, however the group is
+# invoked. Never recomputes, so no cargo-delta.
+
 # Run the scheduled runtime analysis.
 [group("anvil")]
-anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prereqs \
+anvil-scheduled-runtime-analysis: (_anvil-run "scheduled-runtime-analysis" anvil_runner "off")
+
+[private]
+_anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prereqs \
     anvil-miri \
     anvil-miri-tree-borrows \
     anvil-miri-strict-provenance \
@@ -23,7 +30,6 @@ anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prer
 # Install prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
 [group("anvil-setup")]
 anvil-scheduled-runtime-analysis-setup installer="install": \
-    (anvil-tool-cargo-delta-install installer) \
     (anvil-miri-setup installer) \
     (anvil-miri-tree-borrows-setup installer) \
     (anvil-miri-strict-provenance-setup installer) \
@@ -32,7 +38,6 @@ anvil-scheduled-runtime-analysis-setup installer="install": \
 # Validate prerequisites for the `anvil-scheduled-runtime-analysis` recipe.
 [group("anvil-setup")]
 anvil-scheduled-runtime-analysis-validate-prereqs: \
-    anvil-tool-cargo-delta-validate-prereqs \
     anvil-miri-validate-prereqs \
     anvil-miri-tree-borrows-validate-prereqs \
     anvil-miri-strict-provenance-validate-prereqs \

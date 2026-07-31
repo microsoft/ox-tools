@@ -35,9 +35,10 @@ runs:
         GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
-        # This PR group job downloaded the target/anvil/impact artifact, so it
-        # trusts that cache verbatim: "consume" makes anvil-impact a no-op (no
-        # snapshot / cargo-delta / base ref). The mode is fixed by tier here,
-        # not probed at runtime (see the scheduled variant).
+        # The impact mode is fixed by tier at emit time -- never probed from a
+        # marker file. PR group jobs downloaded the target/anvil/impact artifact
+        # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
+        # cargo-delta, or base ref); scheduled group jobs force off so every
+        # tier runs full-workspace.
         export ANVIL_IMPACT=consume
         just anvil-pr-fast

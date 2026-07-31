@@ -385,45 +385,53 @@ mod tests {
             assert!(!groups.contains(needle), "groups tree still contains stale '{needle}'");
         }
         assert!(groups.contains("anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants"));
-        // Every group recipe lists its own validate-prereqs aggregate first so
+        // PR group recipes list their own validate-prereqs aggregate first so
         // all tool checks run up front (just dedups the per-check ones).
         for needle in [
             "anvil-pr-fast: anvil-pr-fast-validate-prereqs",
             "anvil-pr-test: anvil-pr-test-validate-prereqs",
             "anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs",
             "anvil-pr-mutants: anvil-pr-mutants-validate-prereqs",
-            "anvil-scheduled-test: anvil-scheduled-test-validate-prereqs",
-            "anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs",
-            "anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prereqs",
-            "anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs",
         ] {
             assert!(
                 groups.contains(needle),
                 "group recipe must run its validate-prereqs first: '{needle}'"
             );
         }
+        // Scheduled groups are the full-workspace backstop: the public recipe
+        // routes through `_anvil-run` with impact "off" (forcing
+        // ANVIL_IMPACT=off before the deps run), and the private `_anvil-<group>`
+        // fan-out lists its validate-prereqs aggregate first.
+        for g in [
+            "scheduled-test",
+            "scheduled-advisories",
+            "scheduled-runtime-analysis",
+            "scheduled-exhaustive",
+        ] {
+            assert!(
+                groups.contains(&format!("anvil-{g}: (_anvil-run \"{g}\" anvil_runner \"off\")")),
+                "scheduled group {g} must route through _anvil-run with impact off"
+            );
+            assert!(
+                groups.contains(&format!("_anvil-{g}: anvil-{g}-validate-prereqs")),
+                "scheduled group {g} private fan-out must run its validate-prereqs first"
+            );
+        }
     }
 
     #[test]
     fn impact_scoped_groups_declare_cargo_delta_prereq() {
-        // Every group whose checks are impact-scoped depends (transitively,
+        // Every PR group whose checks are impact-scoped depends (transitively,
         // via each scoped check) on `anvil-impact`, which invokes cargo-delta
         // when it (re)computes the impact set. The group's setup +
         // validate-prereqs must therefore install / verify cargo-delta, so a
         // missing tool fails fast at setup rather than mid-run. (pr-slow is an
         // umbrella and inherits this via pr-test / pr-runtime-analysis /
-        // pr-mutants.)
+        // pr-mutants.) Scheduled groups force ANVIL_IMPACT=off and never
+        // recompute the impact set, so they deliberately do NOT depend on
+        // cargo-delta.
         let groups = all_group_bodies();
-        for g in [
-            "pr-fast",
-            "pr-test",
-            "pr-runtime-analysis",
-            "pr-mutants",
-            "scheduled-test",
-            "scheduled-advisories",
-            "scheduled-exhaustive",
-            "scheduled-runtime-analysis",
-        ] {
+        for g in ["pr-fast", "pr-test", "pr-runtime-analysis", "pr-mutants"] {
             assert!(
                 groups.contains(&format!(
                     "anvil-{g}-setup installer=\"install\": \\\n    (anvil-tool-cargo-delta-install installer)"
@@ -435,6 +443,27 @@ mod tests {
                     "anvil-{g}-validate-prereqs: \\\n    anvil-tool-cargo-delta-validate-prereqs"
                 )),
                 "group {g} validate-prereqs must verify cargo-delta"
+            );
+        }
+        // Scheduled groups force impact off and never recompute, so they must
+        // NOT carry cargo-delta as a prerequisite.
+        for g in [
+            "scheduled-test",
+            "scheduled-advisories",
+            "scheduled-runtime-analysis",
+            "scheduled-exhaustive",
+        ] {
+            assert!(
+                !groups.contains(&format!(
+                    "anvil-{g}-setup installer=\"install\": \\\n    (anvil-tool-cargo-delta-install installer)"
+                )),
+                "scheduled group {g} must not install cargo-delta (it forces ANVIL_IMPACT=off and never recomputes)"
+            );
+            assert!(
+                !groups.contains(&format!(
+                    "anvil-{g}-validate-prereqs: \\\n    anvil-tool-cargo-delta-validate-prereqs"
+                )),
+                "scheduled group {g} must not verify cargo-delta (it forces ANVIL_IMPACT=off and never recomputes)"
             );
         }
     }
