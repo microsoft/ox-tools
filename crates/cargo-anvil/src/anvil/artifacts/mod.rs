@@ -98,6 +98,20 @@ mod tests {
     use crate::catalog::Catalog;
 
     #[test]
+    fn impact_mode_classifies_pr_and_scheduled_groups() {
+        assert_eq!(impact_mode("pr-fast"), "consume");
+        assert_eq!(impact_mode("pr-mutants"), "consume");
+        assert_eq!(impact_mode("scheduled-test"), "off");
+        assert_eq!(impact_mode("scheduled-exhaustive"), "off");
+    }
+
+    #[test]
+    #[should_panic(expected = "unclassified group")]
+    fn impact_mode_panics_on_an_unclassified_group() {
+        let _ = impact_mode("mystery-group");
+    }
+
+    #[test]
     fn every_registry_entry_is_in_the_anvil_catalog() {
         let catalog = Catalog::anvil();
         let present = |artifact: &Artifact| catalog.artifacts().iter().any(|a| a == artifact);
