@@ -63,6 +63,10 @@ anvil-container *recipe:
 profile-independent:
     Write-Output profile-safe
 
+[script("pwsh")]
+profile-dependent:
+    Write-Output profile-noisy
+
 [unix]
 first:
     @printf 'first\n'
@@ -81,12 +85,21 @@ anvil-container *recipe:
     @printf 'container:%s\n' '{{ recipe }}'
 "#;
     write(&tmp.path().join(JUSTFILE), justfile);
+    tmp
+}
+
+fn profile_fixture() -> TempDir {
+    let tmp = fixture();
     install_profile_noise_wrapper(tmp.path());
     tmp
 }
 
-fn tools_available() -> bool {
-    Command::new("just").arg("--version").output().is_ok() && Command::new("pwsh").arg("--version").output().is_ok()
+fn just_available() -> bool {
+    Command::new("just").arg("--version").output().is_ok()
+}
+
+fn pwsh_available() -> bool {
+    Command::new("pwsh").arg("--version").output().is_ok()
 }
 
 fn pwsh_path() -> PathBuf {
@@ -104,14 +117,38 @@ fn install_profile_noise_wrapper(root: &Path) {
     let real_pwsh = pwsh_path();
 
     #[cfg(windows)]
-    write(
-        &bin.join("pwsh.cmd"),
-        &format!(
-            "@echo off\r\nset \"ANVIL_NOPROFILE=\"\r\nfor %%A in (%*) do if /I \"%%~A\"==\"-NoProfile\" set \"ANVIL_NOPROFILE=1\"\r\n\
-             if not defined ANVIL_NOPROFILE echo PROFILE_OUTPUT\r\n\"{}\" %*\r\nexit /b %ERRORLEVEL%\r\n",
-            real_pwsh.display()
-        ),
-    );
+    {
+        let source = bin.join("pwsh.rs");
+        let real_pwsh = format!("{:?}", real_pwsh.to_string_lossy());
+        write(
+            &source,
+            &format!(
+                r#"use std::io::Write as _;
+use std::process::{{Command, exit}};
+
+fn main() {{
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if !args.iter().any(|arg| arg.to_string_lossy().eq_ignore_ascii_case("-NoProfile")) {{
+        println!("PROFILE_OUTPUT");
+        std::io::stdout().flush().expect("stdout must flush");
+    }}
+    let status = Command::new({real_pwsh})
+        .args(&args)
+        .status()
+        .expect("real pwsh must start");
+    exit(status.code().unwrap_or(1));
+}}
+"#
+            ),
+        );
+        let status = Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(bin.join("pwsh.exe"))
+            .status()
+            .expect("rustc is available while running cargo tests");
+        assert!(status.success(), "failed to compile the Windows pwsh test shim");
+    }
 
     #[cfg(unix)]
     {
@@ -147,7 +184,7 @@ fn run(root: &Path, recipes: &[&str], environment: &[(&str, &str)]) -> Output {
 
 #[test]
 fn native_routing_preserves_output_and_exit_status() {
-    if !tools_available() {
+    if !just_available() {
         return;
     }
     let tmp = fixture();
@@ -161,7 +198,7 @@ fn native_routing_preserves_output_and_exit_status() {
 
 #[test]
 fn native_routing_preserves_failure_output_and_exit_status() {
-    if !tools_available() {
+    if !just_available() {
         return;
     }
     let tmp = fixture();
@@ -176,7 +213,7 @@ fn native_routing_preserves_failure_output_and_exit_status() {
 
 #[test]
 fn configured_container_routing_uses_the_container_recipe() {
-    if !tools_available() {
+    if !just_available() {
         return;
     }
     let tmp = fixture();
@@ -192,7 +229,7 @@ fn configured_container_routing_uses_the_container_recipe() {
 
 #[test]
 fn in_container_forces_native_execution() {
-    if !tools_available() {
+    if !just_available() {
         return;
     }
     let tmp = fixture();
@@ -215,7 +252,7 @@ fn in_container_forces_native_execution() {
 
 #[test]
 fn invalid_runner_value_fails_instead_of_falling_back_to_native() {
-    if !tools_available() {
+    if !just_available() {
         return;
     }
     let tmp = fixture();
@@ -236,12 +273,23 @@ fn invalid_runner_value_fails_instead_of_falling_back_to_native() {
 
 #[test]
 fn powershell_recipe_output_is_independent_of_profiles() {
-    if !tools_available() {
+    if !just_available() || !pwsh_available() {
         return;
     }
-    let tmp = fixture();
-    let output = run(tmp.path(), &["profile-independent"], &[]);
+    let tmp = profile_fixture();
+    let noisy = run(tmp.path(), &["profile-dependent"], &[]);
+    assert!(
+        noisy.status.success(),
+        "profile-dependent negative control failed: {}",
+        String::from_utf8_lossy(&noisy.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&noisy.stdout).lines().collect::<Vec<_>>(),
+        ["PROFILE_OUTPUT", "profile-noisy"],
+        "the negative control must prove the fake pwsh shim was invoked"
+    );
 
+    let output = run(tmp.path(), &["profile-independent"], &[]);
     assert!(
         output.status.success(),
         "profile-independent recipe failed: {}",
