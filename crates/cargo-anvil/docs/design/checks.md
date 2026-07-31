@@ -6,7 +6,7 @@ canonical source for "what does anvil actually run?"
 
 See also:
 
-- [design.md](./design.md) for the overall principles and CLI shape.
+- [README.md](./README.md) for the overall principles and CLI shape.
 - [local.md](./local.md) for how the catalog is exposed as `just` recipes.
 - [github.md](./github.md) / [ado.md](./ado.md) for how groups map to cloud-workflow building blocks.
 
@@ -139,7 +139,7 @@ the per-leg runner-label inputs and forking the workflow when the matrix shape i
 needs to change, [ado.md §4](./ado.md#4-owned-stages-templates) for
 `linuxPool`/`windowsPool`).
 Locally there is no OS matrix; `just anvil-pr-slow` (the umbrella recipe) runs the three sub-recipes in sequence against whatever OS the
-developer is on. See [design.md §8.3](./design.md#83-cross-os-test-matrices) for the
+developer is on. See [README.md §8.3](./README.md#83-cross-os-test-matrices) for the
 overall rationale.
 
 The `scheduled-exhaustive` group's checks are independent and could in principle live in
@@ -166,7 +166,7 @@ that provided the strongest version of the check.
 | `doc-build`                    | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps` | oxidizer-github |
 | `readme-check`                 | `cargo doc2readme --check` for each crate that opts in (presence of a `[package.metadata.doc2readme]` table) | oxidizer-github |
 | `spellcheck`                   | `cargo spellcheck check --code 1`                         | oxidizer-github |
-| `pr-title`                     | Repository policy regex applied to the title in the `PR_TITLE` env var. The accepted `feat|fix|chore|docs|refactor|test|build|ci|perf|revert` forms are a deliberate subset of Conventional Commits, not the complete grammar. Skipped only outside a PR context; an invalid title or failure to retrieve a known PR's title fails loudly. GitHub supplies the event title directly. ADO resolves it through the REST API because it has no PR-title predefined variable. | oxidizer-github |
+| `pr-title`                     | Repository policy regex applied to the title in the `PR_TITLE` env var. The accepted `feat|fix|chore|docs|refactor|test|build|ci|perf|revert` forms are a deliberate subset of Conventional Commits, not the complete grammar. Skipped only outside a PR context, including local and scheduled-tier runs; an invalid title or failure to retrieve a known PR's title fails loudly. GitHub supplies the event title directly. ADO resolves it through the REST API because `System.PullRequest.Title` does not exist. | oxidizer-github |
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
 | `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` run **twice** — once with default targets (lib + bins) and once with `--all-targets`. cargo-udeps only analyzes the targets it's told to, and each run catches a variant the other masks: the default-targets run surfaces a dep in `[dependencies]` referenced only by tests/benches/examples (it should be a dev-dep; `--all-targets` would see it as "used"), while the `--all-targets` run surfaces unused `[dev-dependencies]` (never compiled by the default-targets run). Together they cover unused deps, unused dev-deps, and deps that should be dev-deps. | oxidizer, oxidizer-github |
