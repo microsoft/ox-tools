@@ -31,6 +31,9 @@ on:
           configured at Codecov; required for private repos.
         required: false
 
+permissions:
+  contents: read
+
 # Note on matrices: every multi-OS job below hardcodes its OS axis as
 # an inline YAML array. Per-leg runner *labels* are inputs (so adopters
 # can swap in self-hosted runners), but the OS axis itself is part of
@@ -79,6 +82,9 @@ jobs:
         uses: ./.github/actions/anvil-impact
 
   pr-fast:
+    permissions:
+      contents: read
+      pull-requests: write
     # Cross-OS / cross-arch because pr-fast contains compile-sensitive
     # checks (clippy, doc-build, udeps, semver-check, external-types)
     # whose results can differ across host for crates that use

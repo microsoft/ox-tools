@@ -672,8 +672,11 @@ Recommended root workflow shape:
   default permissions to `contents: read`, then restores `issues: write` only on the
   publishing job; scheduled check jobs do not inherit write access. The PR workflow
   never receives this permission.
-- No `pull-requests: write` (the PR-title check only needs the title from the event
-  payload, which is already in `${{ github.event.pull_request.title }}`).
+- The PR reusable-workflow call grants `pull-requests: write` for advisory comments.
+  The called workflow resets its default permissions to `contents: read`, then restores
+  `pull-requests: write` only on `pr-fast`, where the sticky-comment steps run. Other PR
+  jobs do not inherit write access. The PR-title check itself reads the title from the
+  event payload and does not use the write permission.
 - Scheduled-tier secrets, if any, live on `anvil-scheduled.yml` only — never on `anvil-pr.yml`.
 - All cargo-tool installs done by the catalog setup recipes use `--locked` (with
   `cargo install` or `cargo binstall` depending on `installer`).
@@ -811,9 +814,9 @@ Conditions explained:
   `pull-requests: write` to fork-PR workflow runs by default, so the action would 403.
 
 Permissions: the reusable workflow's caller (`anvil-pr.yml`) declares
-`pull-requests: write` on the `anvil-pr` job that calls `anvil-pr-impl.yml`. The
-top-level `permissions:` block stays at `contents: read` so unrelated reads in the same
-workflow are still least-privilege.
+`pull-requests: write` on the `anvil-pr` job that calls `anvil-pr-impl.yml`. The called
+workflow resets its default to `contents: read` and restores `pull-requests: write` only
+on `pr-fast`, where the sticky-comment steps run. Other called jobs remain read-only.
 
 Adding a new advisory check is a two-step change: the recipe writes
 `target/anvil/comments/<NEW>.md` (and removes it on a clean run); the workflow gains
