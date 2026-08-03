@@ -668,8 +668,10 @@ Recommended root workflow shape:
 - `permissions: contents: read` at the workflow level. anvil's default ships with
   this.
 - The scheduled reusable-workflow call grants `issues: write` at job scope so its
-  publisher can create or comment on the failure issue. The PR workflow never receives
-  this permission.
+  publisher can create or comment on the failure issue. The called workflow resets its
+  default permissions to `contents: read`, then restores `issues: write` only on the
+  publishing job; scheduled check jobs do not inherit write access. The PR workflow
+  never receives this permission.
 - No `pull-requests: write` (the PR-title check only needs the title from the event
   payload, which is already in `${{ github.event.pull_request.title }}`).
 - Scheduled-tier secrets, if any, live on `anvil-scheduled.yml` only — never on `anvil-pr.yml`.
@@ -745,11 +747,13 @@ No label is required because repositories can remove or rename their default lab
 The issue remains open until a maintainer resolves the underlying failure and closes it.
 If a later run fails after closure, the publisher creates a new incident issue.
 
-The publisher uses the workflow's short-lived `GITHUB_TOKEN`, with `issues: write`
-granted only to the scheduled root call and publishing job. It does not receive repository
-contents beyond read access and does not forward logs or environment data into the issue.
-This narrow GitHub-native path also lets GitHub's Teams app relay issue notifications
-without an external webhook or additional secret.
+The publisher uses the workflow's short-lived `GITHUB_TOKEN`. The scheduled root call
+allows `issues: write`, while the reusable workflow defaults to `contents: read` and
+grants `issues: write` only to the publishing job. Scheduled check jobs therefore retain
+read-only access. The publisher does not receive repository contents beyond read access
+and does not forward logs or environment data into the issue. This narrow GitHub-native
+path also lets GitHub's Teams app relay issue notifications without an external webhook
+or additional secret.
 
 The generated root and implementation workflows must be updated together. A repository
 that has taken ownership of the root workflow must retain `issues: write` on the reusable

@@ -271,6 +271,8 @@ mod tests {
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("github.rest.search.issuesAndPullRequests"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("github.rest.issues.createComment"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("github.rest.issues.create"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("\npermissions:\n  contents: read\n"));
+        assert_eq!(SCHEDULED_IMPL_WORKFLOW.matches("issues: write").count(), 1);
         assert_eq!(
             SCHEDULED_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
             1,

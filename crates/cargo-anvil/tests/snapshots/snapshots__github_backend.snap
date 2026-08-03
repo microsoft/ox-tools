@@ -2311,6 +2311,9 @@ on:
           configured at Codecov; required for private repos.
         required: false
 
+permissions:
+  contents: read
+
 # Note on matrices: see pr-impl-workflow.yml for the rationale. OS
 # matrices are hardcoded; per-leg runner labels are inputs.
 
