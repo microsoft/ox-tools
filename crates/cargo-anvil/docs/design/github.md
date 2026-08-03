@@ -732,7 +732,7 @@ least one result is `failure`; successful, skipped, and cancelled runs do not cr
 issues.
 
 The issue title is `[Anvil] Scheduled checks failed`, while the stable hidden marker
-`<!-- anvil:scheduled-failure -->` identifies an issue owned by the publisher. The
+`<!-- anvil scheduled failure -->` identifies an issue owned by the publisher. The
 publisher makes one repository-scoped Search API request for open issues whose bodies
 match the marker terms, then verifies the exact marker client-side:
 

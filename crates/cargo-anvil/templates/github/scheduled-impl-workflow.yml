@@ -136,7 +136,7 @@ jobs:
         with:
           script: |
             const title = "[Anvil] Scheduled checks failed";
-            const marker = "<!-- anvil:scheduled-failure -->";
+            const marker = "<!-- anvil scheduled failure -->";
             const runUrl =
               `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}` +
               `/actions/runs/${context.runId}`;
