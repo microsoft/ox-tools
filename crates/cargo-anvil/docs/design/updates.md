@@ -267,7 +267,7 @@ anchor:
 | Per-crate `Cargo.toml`                | `anvil-lints`                           | End of file.                                                  |
 | `deny.toml`                           | `anvil-deny-advisories`, `anvil-deny-licenses`, `anvil-deny-bans`, `anvil-deny-sources` | End of file, in catalog order. One region per top-level section so users can add their own keys in the gaps between them. |
 | `rustfmt.toml`                        | `anvil-rustfmt`                         | End of file.                                                  |
-| `.delta.toml`                         | `anvil-delta`                           | End of file.                                                  |
+| `.delta.toml`                         | `anvil-delta`                           | Start of file, before every TOML table header.                 |
 | `.gitattributes`                      | `anvil-gitattributes`                   | End of file.                                                  |
 
 When several regions target the same host (as `deny.toml`'s four sections do), the
@@ -282,13 +282,18 @@ never touch.
 If the host file is missing entirely (and the region is not disabled by a pre-created
 stub), the tool creates it containing only the managed region.
 
+`.delta.toml` is the placement exception because the managed `trip_wire_patterns` key is a
+root TOML key and must precede `[parser]`, `[git]`, and any other table header. When Anvil
+encounters a clean legacy `anvil-delta` region at the end of the file, it relocates that
+region to the start on the next update even when the rendered body is byte-identical.
+
 ## 5. The decision algorithm
 
 For every item the catalog manages (each owned file path; each `(host, region-id)`
-pair), the tool runs the same three-checksum comparison. There is no distinction between
-"first run" and "subsequent run" — the absence of a manifest entry is just one possible
-state — and there is no separate disable-detection pass: emptying a file or region
-just produces the standard dirty-file behavior (see §6).
+pair), the tool runs the same three-checksum comparison, then verifies any required region
+placement. There is no distinction between "first run" and "subsequent run" — the absence
+of a manifest entry is just one possible state — and there is no separate disable-detection
+pass: emptying a file or region just produces the standard dirty-file behavior (see §6).
 
 Let:
 
@@ -309,6 +314,11 @@ Let:
 The fourth-last row is the heart of the new model: a user-claimed file with no upstream
 churn produces zero noise. They claimed it; anvil stays out of the way until anvil's
 template actually changes.
+
+For a managed region with required `Start` placement, the clean and up-to-date row is a
+`Write` when the region is not already at the start of its host. This placement repair
+relocates the sentinel-delimited region without changing its body; dirty regions retain the
+normal leave-alone or proposal behavior.
 
 ### `.anvil-proposed` side files
 

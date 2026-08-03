@@ -151,8 +151,8 @@ _anvil-base-ref:
 #     transitive dependency pulled in at a different version, which a
 #     bare `-p name` cannot do ("multiple packages named name").
 #   * "--skip" when the tier is empty (recipes treat this as a no-op).
-# Diagnostics (dropped unknown names) go to STDERR so they never
-# pollute the captured value.
+# Metadata failures and unknown package names are written to STDERR and
+# fail the recipe, so callers never continue with an incomplete package set.
 #
 # Why pwsh + ConvertFrom-Json rather than jq + read: cargo-delta and
 # cargo-metadata both emit JSON, and parsing structured data through a

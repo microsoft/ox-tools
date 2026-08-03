@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn tools_just_template_is_not_empty() {
-        assert!(TOOLS_JUST.contains("anvil-cargo-spellcheck-source-deps-check"));
+        assert!(TOOLS_JUST.contains("anvil-tool-cargo-spellcheck-source-deps-check"));
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-deny-install"));
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-deny-validate-prereqs"));
         assert!(TOOLS_JUST.contains("anvil-component-default-clippy-install"));
@@ -294,16 +294,16 @@ mod tests {
     }
 
     #[test]
-    fn spellcheck_checks_source_prerequisites_only_on_source_install() {
+    fn spellcheck_checks_source_prerequisites_before_source_builds() {
         assert!(
             TOOLS_JUST.contains(
-                "_install-tool \"cargo-spellcheck\" cargo_spellcheck_version installer \"anvil-cargo-spellcheck-source-deps-check\""
+                "_install-tool \"cargo-spellcheck\" cargo_spellcheck_version installer \"anvil-tool-cargo-spellcheck-source-deps-check\""
             ),
-            "spellcheck installer must defer libclang validation to source installation"
+            "spellcheck installer must run libclang validation before source builds"
         );
         let checks = all_check_bodies();
         assert!(
-            !checks.contains("anvil-spellcheck-setup installer=\"install\": anvil-cargo-spellcheck-source-deps-check"),
+            !checks.contains("anvil-spellcheck-setup installer=\"install\": anvil-tool-cargo-spellcheck-source-deps-check"),
             "spellcheck setup must not require libclang before binstall"
         );
     }

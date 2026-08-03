@@ -145,7 +145,7 @@ anvil-full: anvil-pr anvil-scheduled
 
 `tools.just` houses six layers of recipes:
 
-1. **`anvil-cargo-spellcheck-source-deps-check`** — probe for `libclang`, which
+1. **`anvil-tool-cargo-spellcheck-source-deps-check`** — probe for `libclang`, which
    `cargo-spellcheck` needs when built from source. Best-effort presence check; on
    missing deps emits per-OS install hints and exits non-zero. No auto-install. See
    §3.3.1.
@@ -318,20 +318,22 @@ requires. anvil is not a general-purpose dev-env doctor. Repository-specific
 system deps (e.g. `openssl-devel`, `symcrypt` for the adopter's own crates) belong
 in the adopter's `setup.yml` customization, not in the anvil catalog.
 
-Detection (`anvil-cargo-spellcheck-source-deps-check`) uses presence-only probes -- file existence
+Detection (`anvil-tool-cargo-spellcheck-source-deps-check`) uses presence-only probes -- file existence
 in standard install dirs plus the `LIBCLANG_PATH` env var override. No version
 checks: system libs upgrade independently of the catalog and any reasonably modern
 libclang satisfies clang-sys.
 
 On a missing dep the recipe prints per-OS install hints (apt-get / tdnf / brew /
 scoop / winget) and exits non-zero. **No auto-install** -- admin/sudo decisions and
-package-manager choice stay with the user. The cargo-spellcheck install recipe
-depends on `anvil-cargo-spellcheck-source-deps-check` only on the source-build
-`install` backend, so missing libclang surfaces as a clear hint instead of a
-cryptic clang-sys build error 10 minutes into the install.
+package-manager choice stay with the user. The cargo-spellcheck install recipe passes
+`anvil-tool-cargo-spellcheck-source-deps-check` to `_install-tool` as its source prerequisite.
+The prerequisite runs for an explicit source-build `install` backend and when `binstall`
+cannot provide a binary and falls back to a source build, so missing libclang surfaces as a
+clear hint instead of a cryptic clang-sys build error 10 minutes into the install.
 
-Adding a new system dep is a one-block catalog change in `tools.just`; it
-propagates to adopters via `cargo anvil` like any other catalog edit.
+Each tool with a source-build system dependency owns a tool-specific prerequisite recipe and
+wires it into `_install-tool`. Catalog changes propagate to adopters via `cargo anvil` like
+any other template edit.
 
 ### 3.4 Per-check warnings
 

@@ -37,7 +37,7 @@
 # Check cargo-spellcheck source-build prerequisites.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
-anvil-cargo-spellcheck-source-deps-check:
+anvil-tool-cargo-spellcheck-source-deps-check:
     $ErrorActionPreference = 'Stop'
     $missing = @()
 
@@ -718,7 +718,7 @@ anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_ver
 
 # Install the pinned `cargo-spellcheck` tool.
 [group("anvil-setup")]
-anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer "anvil-cargo-spellcheck-source-deps-check")
+anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer "anvil-tool-cargo-spellcheck-source-deps-check")
 
 # Validate that the pinned `cargo-spellcheck` tool is available.
 [group("anvil-setup")]
