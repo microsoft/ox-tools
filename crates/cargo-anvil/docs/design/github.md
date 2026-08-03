@@ -755,16 +755,9 @@ clearable when a check is removed from the catalog.
 ## 12. Benchmark regression detection
 
 The scheduled benchmark group (see [benchmarks.md](./benchmarks.md)) runs
-`cargo-bench-history` and needs its history to persist across scheduled runs.
-That history is **cross-run state**, so it uses GitHub **Actions artifacts** — not
-the §8 build cache. The two are deliberately separate:
-
-- The §8 `actions/cache` is *acceleration*: evictable, keyed to the tool/toolchain
-  pins, scoped to make a repeat build faster. Using it as the system of record for
-  accumulating history would inherit its eviction and its immutable-key model.
-- The history is a small, durable, append-only store that must be fetched as *the
-  latest from the default branch*. Artifacts give retention and an explicit
-  cross-run fetch, which is the right primitive.
+`cargo-bench-history`, whose history persists across scheduled runs as GitHub
+**Actions artifacts**: a small, durable, append-only store fetched as the latest
+from the default branch, which artifacts' retention and cross-run download provide.
 
 Each scheduled benchmark job:
 
@@ -790,7 +783,3 @@ the scheduled job only; the PR workflow keeps `contents: read`.
 Blessings are applied from a committed `.config/bench-blessings.toml` before analyze
 (step 3), so accepting an intentional change is a reviewed pull request rather than an
 out-of-band action.
-
-If a repo opts into cbh's durable Azure Blob backend instead of the artifact rolling
-window, the §8 `actions/cache` may additionally host cbh's read-through object cache —
-the one place the build cache touches this subsystem.

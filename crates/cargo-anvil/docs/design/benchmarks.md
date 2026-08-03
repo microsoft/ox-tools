@@ -38,19 +38,15 @@ none of them gets this today — the existing `bench` check only compiles them.
   stays **compile-only**; running benches per-PR is too costly and, on shared
   runners, too noisy to gate a merge.
 - **History is cross-run state, kept in CI-native storage.** cbh's local backend
-  is an immutable, key-addressed directory. Between scheduled runs it round-trips
-  through each backend's native build **artifacts** — deliberately *not* the
-  tool/dependency cache, which is eviction-prone acceleration keyed to tool pins.
-  Artifacts give retention and a "fetch the latest from the default branch"
-  primitive, so the subsystem stays self-contained in the pipeline with no
-  external store to provision by default.
-- **A regression fails the scheduled build.** Because detection happens after the
-  offending change merged, there is no pull request to annotate, so the
-  advisory-PR-comment convention (see [checks.md §6](./checks.md)) does not
-  apply. Failing the scheduled build reuses each backend's native failure
-  notifications instead of a bespoke notifier. This does not contradict the
-  "advisory, never fail" rule, which governs *PR gating* — a scheduled build
-  blocks no one's merge.
+  is an immutable, key-addressed directory that round-trips between scheduled runs
+  through each backend's native build **artifacts**, whose retention and
+  fetch-the-latest-from-the-default-branch semantics keep the subsystem
+  self-contained in the pipeline with no external store to provision by default.
+- **A regression fails the scheduled build.** Detection happens after the
+  offending change merged, so there is no pull request to annotate; the signal is
+  a failed scheduled build, which each backend's native failure notifications
+  carry. This sits within the "advisory, never fail" tenet, which governs *PR
+  gating* — a scheduled build blocks no one's merge.
 - **Intentional changes are accepted through a reviewed file.** A regression is
   cleared by fixing it or by *blessing* it; blessing is expressed as a committed,
   reviewed entry rather than an out-of-band action, so accepting a slowdown is an
@@ -117,9 +113,9 @@ every deliberate tradeoff.
 
 - **Hosted-runner machine-key density.** cbh partitions by a hardware
   fingerprint; a heterogeneous hosted pool can split a series into per-key
-  partitions too sparse to analyze. Detection quality on *dense* series is
-  validated; density on hosted pools is a property to observe. Self-hosted or
-  dedicated runners avoid the concern.
+  partitions too sparse to analyze. Whether a hosted pool stays dense enough
+  depends on its hardware homogeneity; self-hosted or dedicated runners avoid the
+  concern.
 - **Attribution is coarse under sparse benchmarking.** Benches do not run on
   every commit, so the attributed commit is the first *benchmarked* one after a
   regression and may bundle several changes — an honest range, not always a
@@ -128,8 +124,8 @@ every deliberate tradeoff.
   regressions into one red; GitHub recovers per-regression detail through the
   updated issue, ADO through the build summary (its native notification is
   coarser while already red).
-- **cbh is young.** Its gating thresholds are sensible defaults, not values
-  calibrated to every consumer's data; the pinned-tool-version policy contains
-  that risk, and the signal only gates the scheduled build.
+- **Uncalibrated thresholds.** cbh's gating thresholds are defaults rather than
+  values calibrated to every consumer's data; pinning the tool version contains
+  the resulting risk, and the signal only gates the scheduled build.
 
 [cbh]: https://github.com/folo-rs/folo/tree/main/packages/cargo-bench-history

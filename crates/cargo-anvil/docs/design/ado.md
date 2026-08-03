@@ -823,17 +823,11 @@ removed from the catalog.
 ## 12. Benchmark regression detection
 
 The scheduled benchmark group (see [benchmarks.md](./benchmarks.md)) runs
-`cargo-bench-history` and persists its history across scheduled runs as **cross-run
-state**. It uses **pipeline artifacts** — not the §7 build cache — and reuses the
-§4.1 job-wrapper `artifacts` contract to publish, so no new emission mechanism is
-introduced.
-
-The two persistence mechanisms are separate on purpose:
-
-- The §7 pipeline cache is *acceleration* (evictable, keyed to tool/toolchain pins).
-- The history is a small, durable, append-only store fetched as *the latest from the
-  default branch*; pipeline artifacts give retention plus a `latestFromBranch`
-  download, which fits.
+`cargo-bench-history`, whose history persists across scheduled runs as **pipeline
+artifacts**, reusing the §4.1 job-wrapper `artifacts` contract to publish. The
+history is a small, durable, append-only store fetched as the latest from the
+default branch, which pipeline artifacts' retention and `latestFromBranch` download
+provide.
 
 Each scheduled benchmark job:
 
@@ -854,10 +848,9 @@ after merge (see [benchmarks.md §5](./benchmarks.md)). The benchmark recipe exi
 non-zero on an active regression, failing the stage; ADO's existing failed-build
 **notification subscriptions** fire, and the findings live in the build summary.
 
-Known limitation: the build status is one bit, so while the pipeline is already red
-from one regression a newly appearing second one does not re-fire the native
-notification (the findings are still in the summary). A later work-item updater could
-close this gap; it is out of scope for the first version.
+Because the build status is one bit, while the pipeline is already red from one
+regression a newly appearing second one does not re-fire the native notification;
+the findings remain in the build summary.
 
 Blessings are applied from a committed `.config/bench-blessings.toml` before analyze
 (step 3) — a reviewed pull request, not an out-of-band action.
