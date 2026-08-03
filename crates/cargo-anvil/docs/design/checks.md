@@ -311,7 +311,10 @@ What that means concretely:
 - **Run only in scheduled** -- the expensive whole-workspace work that doesn't fit a PR
   budget: the non-stacked miri profiles `miri-tree-borrows`, `miri-strict-provenance`,
   `miri-race-coverage` (in `scheduled-runtime-analysis`); full `mutants`,
-  `cargo-hack --feature-powerset`, `bench` (in `scheduled-exhaustive`).
+  `cargo-hack --feature-powerset`, and the compile-only `bench` (in
+  `scheduled-exhaustive`). Benchmark *regression detection* — running the
+  benches and analyzing the accumulated history — is also scheduled-only and is
+  designed in [benchmarks.md](./benchmarks.md).
 
 The single-tier-per-group rule still holds: when a check appears in both tiers it lives in
 two different groups (one PR group, one scheduled group). Repos that want a
