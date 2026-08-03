@@ -233,6 +233,8 @@ mod tests {
         );
         assert!(PR_IMPL_WORKFLOW.contains("matrix.os != 'windows-arm'"));
         assert!(PR_IMPL_WORKFLOW.contains("flags: ${{ matrix.os }}"));
+        assert!(PR_IMPL_WORKFLOW.contains("\npermissions:\n  contents: read\n"));
+        assert_eq!(PR_IMPL_WORKFLOW.matches("pull-requests: write").count(), 1);
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
             1,
