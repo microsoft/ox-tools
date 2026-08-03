@@ -292,9 +292,7 @@ const context = {
   repo: { owner: "microsoft", repo: "ox-tools" },
   runId: 42,
 };
-const expectedQuery =
-  `repo:${context.repo.owner}/${context.repo.repo} ` +
-  `is:issue is:open in:body "${searchableMarker}"`;
+const expectedQuery = `repo:${context.repo.owner}/${context.repo.repo} is:issue is:open in:body "${searchableMarker}"`;
 
 async function scenario(items) {
   const calls = { search: [], create: [], comment: [] };
