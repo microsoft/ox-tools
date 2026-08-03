@@ -279,6 +279,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
     fn scheduled_failure_script_upserts_marker_owned_issues() {
         let script = SCHEDULED_IMPL_WORKFLOW
             .split_once("          script: |\n")
