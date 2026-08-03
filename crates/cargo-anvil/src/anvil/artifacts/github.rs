@@ -292,7 +292,7 @@ mod tests {
 const assert = require("node:assert/strict");
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const run = new AsyncFunction("github", "context", "process", workflowScript);
-const marker = "<!-- anvil:scheduled-failure -->";
+const marker = "<!-- anvil scheduled failure -->";
 const title = "[Anvil] Scheduled checks failed";
 const context = {
   serverUrl: "https://github.com",
