@@ -52,6 +52,7 @@ flowchart LR
     sched --> s_adv[anvil-scheduled-advisories]:::group
     sched --> s_runtime[anvil-scheduled-runtime-analysis]:::group
     sched --> s_exh[anvil-scheduled-exhaustive]:::group
+    sched --> s_bench[anvil-scheduled-benchmarks]:::group
 
     pr_fast --> fmt[fmt]:::check
     pr_fast --> clippy[clippy]:::check
@@ -99,6 +100,8 @@ flowchart LR
     s_exh --> cargo_hack[cargo-hack]:::check
     s_exh --> bench[bench]:::check
 
+    s_bench --> bench_history[bench-history]:::check
+
     classDef tier fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
     classDef group fill:#f6f8fa,stroke:#586069,stroke-width:1px;
     classDef check fill:#f3e8ff,stroke:#6f42c1,stroke-width:1px,font-size:10px;
@@ -117,7 +120,7 @@ flowchart LR
 
 The three `pr-slow*` groups are independent: failures in `pr-test` don't block `pr-runtime-analysis` or `pr-mutants` from running, and overall PR wall-clock is `max(pr-test, pr-runtime-analysis, pr-mutants)` per leg rather than the sum. Locally, `just anvil-pr-slow` is an umbrella recipe that runs all three sub-recipes sequentially so adopters who want "run everything slow" don't have to type three commands.
 
-### scheduled tier (4 groups)
+### scheduled tier (5 groups)
 
 | Group                | OS scope                  | Purpose                                                                                                                                |
 |----------------------|---------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
@@ -125,6 +128,7 @@ The three `pr-slow*` groups are independent: failures in `pr-test` don't block `
 | `scheduled-advisories` | Same default as `pr-fast` | Re-runs every check whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain). Cross-OS because clippy compiles per host. |
 | `scheduled-runtime-analysis` | Same default as `pr-runtime-analysis` | Whole-workspace runtime correctness under profiles too expensive (or too non-deterministic) for PR: `miri` (stacked borrows, full-workspace re-run of the PR-tier impact-scoped check), `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`. Each profile is a separate cloud-workflow job so they fan out in parallel rather than serializing into a single multi-hour run. OS scope matches `pr-runtime-analysis` -- if miri-under-stacked-borrows is worth running on a given OS leg in PR, the harder miri profiles are worth running there too: their job is precisely to surface UB that the more permissive stacked-borrows model misses. Adopters who can't afford the full matrix (each profile costs hours per leg) override the matrix in their root workflow / pipeline. |
 | `scheduled-exhaustive` | Linux x86_64 + Windows x86_64 | The expensive whole-workspace permutations that don't fit the PR budget: full `cargo mutants`, `cargo-hack --feature-powerset`, and `cargo bench --no-run` plus a single-iteration smoke run per bench target. Cross-OS to match `oxidizer`'s policy and to give cargo-hack / bench compile coverage for cfg-gated code. **x86_64-only**: same `cargo-mutants` / `winapi` constraint as `pr-mutants`. Adopters who can't afford the full matrix (mutants-full can run for hours per leg) override the matrix in their root workflow / pipeline. |
+| `scheduled-benchmarks` | Same default as `scheduled-exhaustive` | Runs the benchmarks and analyzes the accumulated history with `cargo-bench-history` to detect performance regressions, restoring and publishing that history as a build artifact and failing on an active regression. Its own group so the history round-trip and fail-on-regression semantics stay isolated from the other exhaustive work. See [benchmarks.md](./benchmarks.md). |
 
 **Backend asymmetry on ARM coverage.** The GitHub backend ships a four-leg default matrix
 (Linux/Windows × x86_64/aarch64) because GH has Microsoft-hosted ARM runners

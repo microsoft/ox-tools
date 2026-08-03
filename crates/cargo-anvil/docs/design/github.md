@@ -168,6 +168,12 @@ flowchart LR
     sadv_setup ==> sadv_setup_just
     sexh_setup ==> sexh_setup_just
 
+    sched_impl --> sbench_job["scheduled-benchmarks<br/>matrix: linux, windows"]:::job
+    sbench_job ==> sbench_act[".github/actions/<br/>anvil-scheduled-benchmarks"]:::action
+    sbench_act ==> sbench_setup[".github/actions/<br/>anvil-setup"]:::action
+    sbench_act ==> sbench_just["just anvil-scheduled-benchmarks"]:::recipe
+    sbench_setup ==> sbench_setup_just["just anvil-setup"]:::recipe
+
     classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
     classDef root fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
     classDef impl fill:#dff0d8,stroke:#28a745,stroke-width:1px;
@@ -193,7 +199,8 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 │   ├── anvil-scheduled-test/action.yml  owned
 │   ├── anvil-scheduled-advisories/action.yml  owned
 │   ├── anvil-scheduled-runtime-analysis/action.yml  owned
-│   └── anvil-scheduled-exhaustive/action.yml  owned
+│   ├── anvil-scheduled-exhaustive/action.yml  owned
+│   └── anvil-scheduled-benchmarks/action.yml  owned
 └── workflows/
     ├── anvil-pr-impl.yml              owned   (reusable workflow doing the wiring)
     ├── anvil-scheduled-impl.yml         owned   (reusable workflow for the scheduled tier)

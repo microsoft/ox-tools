@@ -170,6 +170,12 @@ flowchart LR
     sadv_setup ==> sadv_setup_just
     sexh_setup ==> sexh_setup_just
 
+    sched_stages --> sbench_s["stage: scheduled_benchmarks<br/>linux + windows jobs"]:::stage
+    sbench_s ==> sbench_step[".pipelines/anvil/<br/>steps/scheduled-benchmarks.yml"]:::step
+    sbench_step ==> sbench_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
+    sbench_step ==> sbench_just["just anvil-scheduled-benchmarks"]:::recipe
+    sbench_setup ==> sbench_setup_just["just anvil-setup"]:::recipe
+
     classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
     classDef root fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
     classDef impl fill:#dff0d8,stroke:#28a745,stroke-width:1px;
@@ -215,7 +221,8 @@ Note the ADO topology differs from GitHub Actions in two places:
         ├── scheduled-test.yml        owned
         ├── scheduled-advisories.yml  owned
         ├── scheduled-runtime-analysis.yml  owned
-        └── scheduled-exhaustive.yml  owned
+        ├── scheduled-exhaustive.yml  owned
+        └── scheduled-benchmarks.yml  owned
 ```
 
 All files are regular owned files tracked by the sidecar `.anvil.lock` manifest

@@ -57,12 +57,14 @@ none of them gets this today — the existing `bench` check only compiles them.
 
 ## 3. Place in the catalog
 
-The compile-only `bench` check is unchanged. A new analyzing check runs the
-benchmarks, records this commit's results into the restored history, applies any
-pending blessings, and analyzes the accumulated series. It lives only in the
-scheduled tier and **exits non-zero when cbh reports an active regression**;
-locally and in cloud it behaves identically (always writes its findings; only
-the exit code gates), matching the local-vs-cloud parity every recipe keeps.
+The compile-only `bench` check is unchanged. A new analyzing check —
+`bench-history` — runs the benchmarks, records this commit's results into the
+restored history, applies any pending blessings, and analyzes the accumulated
+series. It lives in its own scheduled group, `scheduled-benchmarks`, so its
+history round-trip and failure semantics stay isolated, and it **exits non-zero
+when cbh reports an active regression**; locally and in cloud it behaves
+identically (always writes its findings; only the exit code gates), matching the
+local-vs-cloud parity every recipe keeps.
 
 ## 4. History as cross-run state
 
