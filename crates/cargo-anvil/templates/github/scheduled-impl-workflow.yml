@@ -136,6 +136,7 @@ jobs:
         with:
           script: |
             const title = "[Anvil] Scheduled checks failed";
+            const marker = "<!-- anvil:scheduled-failure -->";
             const runUrl =
               `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}` +
               `/actions/runs/${context.runId}`;
@@ -145,6 +146,8 @@ jobs:
               .map(([job]) => `- \`${job}\``)
               .join("\n");
             const body = [
+              marker,
+              "",
               "The Anvil scheduled workflow failed.",
               "",
               "Failed jobs:",
@@ -155,13 +158,15 @@ jobs:
 
             const query =
               `repo:${context.repo.owner}/${context.repo.repo} ` +
-              `is:issue is:open in:title "${title}"`;
+              `is:issue is:open in:body "anvil scheduled failure"`;
             const { data: search } =
               await github.rest.search.issuesAndPullRequests({
                 q: query,
                 per_page: 100,
               });
-            const existing = search.items.find(issue => issue.title === title);
+            const existing = search.items.find(
+              issue => issue.body?.includes(marker),
+            );
 
             if (existing) {
               await github.rest.issues.createComment({

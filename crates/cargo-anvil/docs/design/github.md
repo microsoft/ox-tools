@@ -731,13 +731,21 @@ inspect their terminal results even when one or more groups fail. It runs only w
 least one result is `failure`; successful, skipped, and cancelled runs do not create
 issues.
 
-The issue title is the stable `[Anvil] Scheduled checks failed`. The publisher searches
-all open repository issues for that exact title:
+The issue title is `[Anvil] Scheduled checks failed`, while the stable hidden marker
+`<!-- anvil:scheduled-failure -->` identifies an issue owned by the publisher. The
+publisher makes one repository-scoped Search API request for open issues whose bodies
+match the marker terms, then verifies the exact marker client-side:
 
 - If none exists, it creates one containing the failed group names and a link to the
   workflow run.
 - If one exists, it adds the new failure details as a comment instead of creating a
   duplicate.
+
+This is a best-effort upsert: GitHub's search index is eventually consistent and the
+single request considers at most 100 results, so closely overlapping failures can
+occasionally create duplicate incident issues. Marker-based identity prevents a
+human-authored issue with the same title from being reused and survives a maintainer
+renaming an Anvil incident.
 
 No label is required because repositories can remove or rename their default labels.
 The issue remains open until a maintainer resolves the underlying failure and closes it.
@@ -748,6 +756,13 @@ granted only to the scheduled root call and publishing job. It does not receive 
 contents beyond read access and does not forward logs or environment data into the issue.
 This narrow GitHub-native path also lets GitHub's Teams app relay issue notifications
 without an external webhook or additional secret.
+
+The generated root and implementation workflows must be updated together. A repository
+that has taken ownership of the root workflow must retain `issues: write` on the reusable
+workflow call (or apply the generated `.anvil-proposed` update) when adopting this job.
+Repositories with Issues disabled cannot publish failure incidents. Missing permission or
+disabled Issues deliberately fails the publishing job rather than silently losing the
+notification; the original failing scheduled jobs remain visible alongside that error.
 
 Repositories that do not want issue publication set the
 `ANVIL_PUBLISH_FAILURE_ISSUE` Actions repository variable to `false`. This configuration

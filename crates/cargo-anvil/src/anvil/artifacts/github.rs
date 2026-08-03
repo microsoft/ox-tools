@@ -142,6 +142,8 @@ pub(crate) fn all() -> Vec<Artifact> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::{fs, process::Command};
+
     use super::*;
 
     #[test]
@@ -262,6 +264,109 @@ mod tests {
             SCHEDULED_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
             1,
             "disk cleanup should be enabled for the scheduled test group"
+        );
+    }
+
+    #[test]
+    fn scheduled_failure_script_upserts_marker_owned_issues() {
+        let script = SCHEDULED_IMPL_WORKFLOW
+            .split_once("          script: |\n")
+            .expect("scheduled workflow should contain an inline script")
+            .1
+            .lines()
+            .map(|line| line.strip_prefix("            ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let harness = format!("const workflowScript = {script:?};\n")
+            + r#"
+const assert = require("node:assert/strict");
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const run = new AsyncFunction("github", "context", "process", workflowScript);
+const marker = "<!-- anvil:scheduled-failure -->";
+const title = "[Anvil] Scheduled checks failed";
+const context = {
+  serverUrl: "https://github.com",
+  repo: { owner: "microsoft", repo: "ox-tools" },
+  runId: 42,
+};
+
+async function scenario(items) {
+  const calls = { search: [], create: [], comment: [] };
+  const github = {
+    rest: {
+      search: {
+        issuesAndPullRequests: async args => {
+          calls.search.push(args);
+          return { data: { items } };
+        },
+      },
+      issues: {
+        create: async args => calls.create.push(args),
+        createComment: async args => calls.comment.push(args),
+      },
+    },
+  };
+  const process = {
+    env: {
+      ANVIL_JOB_RESULTS: JSON.stringify({
+        "scheduled-test": { result: "failure" },
+        "scheduled-advisories": { result: "success" },
+        "scheduled-runtime-analysis": { result: "cancelled" },
+        "scheduled-exhaustive": { result: "failure" },
+      }),
+    },
+  };
+  await run(github, context, process);
+  return calls;
+}
+
+(async () => {
+  const created = await scenario([]);
+  assert.equal(created.search.length, 1);
+  assert.match(created.search[0].q, /in:body/);
+  assert.equal(created.create.length, 1);
+  assert.equal(created.comment.length, 0);
+  assert.equal(created.create[0].title, title);
+  assert.match(created.create[0].body, new RegExp(marker));
+  assert.match(created.create[0].body, /- `scheduled-test`/);
+  assert.match(created.create[0].body, /- `scheduled-exhaustive`/);
+  assert.doesNotMatch(created.create[0].body, /scheduled-advisories/);
+  assert.doesNotMatch(created.create[0].body, /scheduled-runtime-analysis/);
+  assert.match(
+    created.create[0].body,
+    /https:\/\/github\.com\/microsoft\/ox-tools\/actions\/runs\/42/,
+  );
+
+  const existing = await scenario([
+    { number: 17, title: "Maintainer-renamed incident", body: marker },
+  ]);
+  assert.equal(existing.create.length, 0);
+  assert.equal(existing.comment.length, 1);
+  assert.equal(existing.comment[0].issue_number, 17);
+
+  const collision = await scenario([
+    { number: 23, title, body: "A human-authored issue without the marker." },
+  ]);
+  assert.equal(collision.create.length, 1);
+  assert.equal(collision.comment.length, 0);
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
+"#;
+
+        let dir = tempfile::tempdir().expect("create temporary test directory");
+        let path = dir.path().join("scheduled-failure.test.cjs");
+        fs::write(&path, harness).expect("write JavaScript behavior test");
+        let output = Command::new("node")
+            .arg(&path)
+            .output()
+            .expect("Node.js is required to test the generated github-script");
+        assert!(
+            output.status.success(),
+            "generated github-script behavior test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
