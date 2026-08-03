@@ -397,10 +397,11 @@ work — provided they hadn't customized it.
 
 ### Exit codes
 
-- `--dry-run` exit code 0: this run would write no proposal (clean, or dirty but
-  template unchanged since last render).
-- `--dry-run` exit code 1: at least one item is dirty *and* the template has changed
-  since last render — a `.anvil-proposed` sibling would be written.
+- `--dry-run` exit code 0: the run would change nothing on disk and every artifact was
+  safely inspected.
+- `--dry-run` exit code 1: the run would change something on disk, including writing a
+  `.anvil-proposed` sibling, or Anvil refused to manage an artifact it could not safely
+  inspect.
 
 The same partitioning is printed at the end of every non-`--dry-run` `update`.
 

@@ -131,7 +131,8 @@ The full per-item decision table lives in [updates.md](./updates.md).
 
 `--dry-run` performs the same analysis but writes nothing. Exit code 0 means "everything is in
 sync with the binary's current templates and all managed content matched, ignoring disabled
-items"; exit code 1 means "something is out of date or user-modified."
+items, and every artifact was safely inspected"; exit code 1 means "something would change on
+disk, or Anvil refused to manage an artifact it could not safely inspect."
 
 `--version` prints the build's version **and its catalog checksum** — a `sha256` over the entire
 compiled-in catalog — on a second line, e.g.:
