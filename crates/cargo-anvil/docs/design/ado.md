@@ -819,3 +819,45 @@ Adding a new advisory check is a two-step change: the recipe writes
 entry. There's deliberately no auto-discovery loop over the convention dir — explicit
 per-check entries keep stale comments deterministically clearable when a check is
 removed from the catalog.
+
+## 12. Benchmark regression detection
+
+The scheduled benchmark group (see [benchmarks.md](./benchmarks.md)) runs
+`cargo-bench-history` and persists its history across scheduled runs as **cross-run
+state**. It uses **pipeline artifacts** — not the §7 build cache — and reuses the
+§4.1 job-wrapper `artifacts` contract to publish, so no new emission mechanism is
+introduced.
+
+The two persistence mechanisms are separate on purpose:
+
+- The §7 pipeline cache is *acceleration* (evictable, keyed to tool/toolchain pins).
+- The history is a small, durable, append-only store fetched as *the latest from the
+  default branch*; pipeline artifacts give retention plus a `latestFromBranch`
+  download, which fits.
+
+Each scheduled benchmark job:
+
+1. checks out with full history (`fetchDepth: 0` — the §4.1 wrapper already exposes a
+   `checkout` input for this; analysis reads the commit graph);
+2. **restores** the history with `DownloadPipelineArtifact@2` (`buildType: specific`,
+   `buildVersionToDownload: latestFromBranch`, the default branch); the first run
+   finds none and starts empty;
+3. applies any pending blessings, runs collect + analyze, writing findings to the
+   build summary;
+4. **publishes** the updated store through the wrapper's `artifacts` parameter
+   (`{ name: bench-history, path: <store> }`), which the default wrapper emits as
+   `PublishPipelineArtifact@1` and 1ESPT wrappers as a `pipelineArtifact` output. A
+   retention lease on the latest successful scheduled run keeps the chain alive.
+
+Surfacing is by **build failure**, not a PR comment — the regression is discovered
+after merge (see [benchmarks.md §5](./benchmarks.md)). The benchmark recipe exits
+non-zero on an active regression, failing the stage; ADO's existing failed-build
+**notification subscriptions** fire, and the findings live in the build summary.
+
+Known limitation: the build status is one bit, so while the pipeline is already red
+from one regression a newly appearing second one does not re-fire the native
+notification (the findings are still in the summary). A later work-item updater could
+close this gap; it is out of scope for the first version.
+
+Blessings are applied from a committed `.config/bench-blessings.toml` before analyze
+(step 3) — a reviewed pull request, not an out-of-band action.

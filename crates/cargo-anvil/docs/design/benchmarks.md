@@ -39,8 +39,11 @@ none of them gets this today — the existing `bench` check only compiles them.
   runners, too noisy to gate a merge.
 - **History is cross-run state, kept in CI-native storage.** cbh's local backend
   is an immutable, key-addressed directory. Between scheduled runs it round-trips
-  through each backend's own artifact/cache, so the subsystem stays
-  self-contained in the pipeline with no external store to provision by default.
+  through each backend's native build **artifacts** — deliberately *not* the
+  tool/dependency cache, which is eviction-prone acceleration keyed to tool pins.
+  Artifacts give retention and a "fetch the latest from the default branch"
+  primitive, so the subsystem stays self-contained in the pipeline with no
+  external store to provision by default.
 - **A regression fails the scheduled build.** Because detection happens after the
   offending change merged, there is no pull request to annotate, so the
   advisory-PR-comment convention (see [checks.md §6](./checks.md)) does not
@@ -68,10 +71,11 @@ the exit code gates), matching the local-vs-cloud parity every recipe keeps.
 ## 4. History as cross-run state
 
 Each scheduled run checks out with full history (analysis reads the commit graph
-to order series and locate the base merge-base), restores the latest history,
-runs collect → apply-blessings → analyze, and saves the updated history back.
-Because each run republishes the whole accumulated directory, only the newest
-snapshot is ever needed.
+to order series and locate the base merge-base), restores the latest history
+**artifact from the default branch**, runs collect → apply-blessings → analyze,
+and publishes the updated history as this run's artifact. Because each run
+republishes the whole accumulated directory, only the newest snapshot is ever
+needed.
 
 The default is a **rolling window** on CI-native persistence — portable and
 zero-config, and on eviction it degrades to a harmless cold start, since

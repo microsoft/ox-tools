@@ -751,3 +751,46 @@ a matching `Upsert anvil-<NEW>` / `Clear anvil-<NEW>` pair with
 `header: anvil-<NEW>`. There's deliberately no auto-discovery loop over the
 convention dir — explicit per-check steps keep stale comments deterministically
 clearable when a check is removed from the catalog.
+
+## 12. Benchmark regression detection
+
+The scheduled benchmark group (see [benchmarks.md](./benchmarks.md)) runs
+`cargo-bench-history` and needs its history to persist across scheduled runs.
+That history is **cross-run state**, so it uses GitHub **Actions artifacts** — not
+the §8 build cache. The two are deliberately separate:
+
+- The §8 `actions/cache` is *acceleration*: evictable, keyed to the tool/toolchain
+  pins, scoped to make a repeat build faster. Using it as the system of record for
+  accumulating history would inherit its eviction and its immutable-key model.
+- The history is a small, durable, append-only store that must be fetched as *the
+  latest from the default branch*. Artifacts give retention and an explicit
+  cross-run fetch, which is the right primitive.
+
+Each scheduled benchmark job:
+
+1. checks out with `fetch-depth: 0` (analysis reads the commit graph);
+2. **restores** the history by downloading the `bench-history` artifact from the
+   most recent successful `anvil-scheduled` run on the default branch (a small step
+   queries the runs API for the latest success, then `actions/download-artifact`
+   fetches it by run id); the first run finds none and starts empty;
+3. applies any pending blessings, runs collect + analyze, writing findings to the
+   job summary and to a findings file;
+4. **saves** the updated store with `actions/upload-artifact` (name `bench-history`);
+   retention is set so the latest successful run's artifact outlives the gap to the
+   next scheduled run.
+
+Surfacing is by **build failure**, not a PR comment — the regression is discovered
+after merge (see [benchmarks.md §5](./benchmarks.md)). The benchmark recipe exits
+non-zero on an active regression, failing the job. The scheduled workflow's failure
+path creates-or-updates a tracking **issue** from the findings file — updated in
+place each run so concurrent regressions and the authors of their attributed commits
+surface even while the build is already red. This needs `issues: write`, declared on
+the scheduled job only; the PR workflow keeps `contents: read`.
+
+Blessings are applied from a committed `.config/bench-blessings.toml` before analyze
+(step 3), so accepting an intentional change is a reviewed pull request rather than an
+out-of-band action.
+
+If a repo opts into cbh's durable Azure Blob backend instead of the artifact rolling
+window, the §8 `actions/cache` may additionally host cbh's read-through object cache —
+the one place the build cache touches this subsystem.
