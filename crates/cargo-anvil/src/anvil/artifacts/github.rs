@@ -142,7 +142,8 @@ pub(crate) fn all() -> Vec<Artifact> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::{fs, process::Command};
+    use std::fs;
+    use std::process::Command;
 
     use super::*;
 
