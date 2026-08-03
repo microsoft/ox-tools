@@ -4709,10 +4709,11 @@ _anvil-base-ref:
 # target/anvil/impact/ as an artifact; each downstream group job downloads
 # it, so the checks read the cache instead of recomputing.
 #
-# The base-ref resolution and the impact -> `--package name@version` tier
-# projection are the SHARED helpers _anvil-base-ref and _anvil-impact-format
-# (helpers.just); this recipe orchestrates the snapshots + caching around
-# them so the exact same projection is used locally and in CI.
+# The base ref is resolved by the shared _anvil-base-ref helper (helpers.just,
+# also reused by anvil-mutants-diff). The impact -> `--package name@version`
+# tier projection is _anvil-impact-format, defined in THIS file next to its
+# sole caller; this recipe orchestrates the snapshots + caching around both so
+# the exact same projection is used locally and in CI.
 #
 # Escape hatch: set ANVIL_IMPACT=off in the environment that invokes `just`
 # to disable scoping entirely (no git, no snapshot, no cargo-delta). Because
@@ -4723,9 +4724,10 @@ _anvil-base-ref:
 # Set ANVIL_IMPACT=consume when an authoritative target/anvil/impact cache is
 # already present and must be trusted verbatim -- e.g. a cloud-workflow group
 # job that downloaded the impact artifact the impact job produced. In that
-# mode anvil-impact is a pure no-op: it neither snapshots nor recomputes (so
-# it needs neither cargo-delta nor a fetched base ref, which group jobs lack),
-# and the checks read the downloaded include_<tier>.txt files directly.
+# mode anvil-impact does not snapshot or recompute (so it needs neither
+# cargo-delta nor a fetched base ref, which group jobs lack); it asserts the
+# downloaded include_<tier>.txt files are present -- failing loudly if any are
+# missing -- and the checks read them directly.
 
 # Private. Produces the two cargo-delta snapshots under
 # target/anvil/impact/snapshots/ with two independent cache keys:

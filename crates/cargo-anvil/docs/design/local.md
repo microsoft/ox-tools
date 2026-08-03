@@ -25,16 +25,17 @@ repo/
     │                       `alias anvil := anvil-pr`. The user's Justfile
     │                       region pulls in this single file; everything else is
     │                       reached transitively.
-    ├── helpers.just        shared helper recipes reused across the impact recipe,
-    │                       the cloud impact steps, and anvil-mutants-diff:
-    │                       _anvil-base-ref (resolve the PR base ref) and
-    │                       _anvil-impact-format (project a cargo-delta report into
-    │                       the per-tier `--package name@version` include list).
+    ├── helpers.just        the shared helper recipe _anvil-base-ref (resolve the
+    │                       PR base ref), reused across the impact recipe, the
+    │                       cloud impact steps, and anvil-mutants-diff.
     ├── impact.just         the single `anvil-impact` building block: snapshots the
     │                       base ref + working tree (two independent cache keys),
     │                       runs `cargo delta impact`, and writes the
     │                       target/anvil/impact/ artifacts that scoped checks read
-    │                       via _anvil-impact-include. Same recipe locally and in CI.
+    │                       via _anvil-impact-include. Also owns _anvil-impact-format
+    │                       (project a cargo-delta report into the per-tier
+    │                       `--package name@version` include list). Same recipe
+    │                       locally and in CI.
     ├── checks/             one file per check: checks/<check>.just holds the
     │                       `anvil-<check>` recipe plus its paired `*-setup` and
     │                       `*-validate-prereqs` recipes (anvil-fmt, anvil-clippy,

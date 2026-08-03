@@ -877,4 +877,26 @@ fn consume_without_downloaded_cache_fails_loudly() {
         ok.status.success(),
         "consume with a present cache must succeed as a no-op:\n{ok_combined}"
     );
+
+    // A partially downloaded cache -- one tier's include file missing -- must
+    // also fail loudly and name the missing tier. This guards the
+    // all-three-files contract against regressing to a directory or
+    // representative-file check, which would let one tier silently fall back to
+    // its default.
+    std::fs::remove_file(root.join("target/anvil/impact/include_affected.txt")).unwrap();
+    let partial = just_cmd(root, &["anvil-impact"]).env("ANVIL_IMPACT", "consume").output().unwrap();
+    let partial_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&partial.stdout),
+        String::from_utf8_lossy(&partial.stderr)
+    );
+    assert_ne!(
+        partial.status.code(),
+        Some(0),
+        "consume with a partial cache must fail:\n{partial_combined}"
+    );
+    assert!(
+        partial_combined.contains("affected"),
+        "the error must name the missing tier (affected):\n{partial_combined}"
+    );
 }

@@ -36,8 +36,9 @@ use crate::catalog::Artifact;
 /// render inventories, but the *policy* answer lives here once). The match is
 /// exhaustive by group and panics on an unrecognized group, so adding a group
 /// forces an explicit classification here rather than silently defaulting into
-/// `consume` (which, per the `consume` no-op in impact.just, would degrade
-/// quietly to full-workspace instead of failing).
+/// `consume` -- which, since `consume` now hard-errors on a missing cache
+/// (impact.just), would fail the pipeline for an unclassified group instead of
+/// scoping it; either way, a missing classification is caught up front, not silent.
 #[must_use]
 pub(crate) fn impact_mode(group: &str) -> &'static str {
     match group {
