@@ -295,12 +295,16 @@ const assert = require("node:assert/strict");
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const run = new AsyncFunction("github", "context", "process", workflowScript);
 const marker = "<!-- anvil scheduled failure -->";
+const searchableMarker = marker.replace(/^<!--\s*|\s*-->$/g, "");
 const title = "[Anvil] Scheduled checks failed";
 const context = {
   serverUrl: "https://github.com",
   repo: { owner: "microsoft", repo: "ox-tools" },
   runId: 42,
 };
+const expectedQuery =
+  `repo:${context.repo.owner}/${context.repo.repo} ` +
+  `is:issue is:open in:body "${searchableMarker}"`;
 
 async function scenario(items) {
   const calls = { search: [], create: [], comment: [] };
@@ -309,7 +313,7 @@ async function scenario(items) {
       search: {
         issuesAndPullRequests: async args => {
           calls.search.push(args);
-          return { data: { items } };
+          return { data: { items: args.q === expectedQuery ? items : [] } };
         },
       },
       issues: {
@@ -335,7 +339,7 @@ async function scenario(items) {
 (async () => {
   const created = await scenario([]);
   assert.equal(created.search.length, 1);
-  assert.match(created.search[0].q, /in:body/);
+  assert.equal(created.search[0].q, expectedQuery);
   assert.equal(created.create.length, 1);
   assert.equal(created.comment.length, 0);
   assert.equal(created.create[0].title, title);
@@ -367,13 +371,17 @@ async function scenario(items) {
 });
 "#;
 
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+
         let dir = tempfile::tempdir().expect("create temporary test directory");
         let path = dir.path().join("scheduled-failure.test.cjs");
         fs::write(&path, harness).expect("write JavaScript behavior test");
         let output = Command::new("node")
             .arg(&path)
             .output()
-            .expect("Node.js is required to test the generated github-script");
+            .expect("execute generated github-script behavior test");
         assert!(
             output.status.success(),
             "generated github-script behavior test failed:\nstdout:\n{}\nstderr:\n{}",
