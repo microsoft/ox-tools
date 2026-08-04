@@ -427,14 +427,14 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG-W4Zsmp4-oGGxu6bPxIizmpG08WGD3cTJMxGw_Y1RjIWIdKYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG-W4Zsmp4-oGGxu6bPxIizmpG08WGD3cTJMxGw_Y1RjIWIdKYWSBg2tjYXJnby1hbnZpbGUwLjQuMGtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate
- [__link3]: https://docs.rs/cargo-anvil/0.3.0/cargo_anvil/?search=Catalog
- [__link4]: https://docs.rs/cargo-anvil/0.3.0/cargo_anvil/?search=Catalog::anvil
- [__link5]: https://docs.rs/cargo-anvil/0.3.0/cargo_anvil/?search=CliMeta
- [__link6]: https://docs.rs/cargo-anvil/0.3.0/cargo_anvil/?search=CatalogBuilder::with_artifact
- [__link7]: https://docs.rs/cargo-anvil/0.3.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
- [__link8]: https://docs.rs/cargo-anvil/0.3.0/cargo_anvil/?search=CatalogBuilder::without_artifact
- [__link9]: https://docs.rs/cargo-anvil/0.3.0/cargo_anvil/?search=artifacts
+ [__link3]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=Catalog
+ [__link4]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=Catalog::anvil
+ [__link5]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CliMeta
+ [__link6]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CatalogBuilder::with_artifact
+ [__link7]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
+ [__link8]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CatalogBuilder::without_artifact
+ [__link9]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts
