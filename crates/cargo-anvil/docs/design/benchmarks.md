@@ -59,7 +59,7 @@ none of them gets this today — the existing `bench` check only compiles them.
 
 The compile-only `bench` check is unchanged. A new analyzing check —
 `bench-history` — runs the benchmarks, records this commit's results into the
-restored history, applies any pending blessings, and analyzes the accumulated
+history, applies any pending blessings, and analyzes the accumulated
 series. It lives in its own scheduled group, `scheduled-benchmarks`, so its
 history round-trip and failure semantics stay isolated, and it **exits non-zero
 when cbh reports an active regression**; locally and in cloud it behaves
@@ -75,19 +75,20 @@ and publishes the updated history as this run's artifact. Because each run
 republishes the whole accumulated directory, only the newest snapshot is ever
 needed.
 
-The default is a **rolling window** on CI-native persistence — portable and
+The persistence is a **rolling window** on CI-native artifacts — portable and
 zero-config, and on eviction it degrades to a harmless cold start, since
-detection is advisory-by-design and gates nobody's merge. A **durable backend**
-(cbh's Azure Blob) is an opt-in for repos wanting history beyond that window; it
-needs provisioning and credentials, so it is never the default. The
-backend-specific restore/save building blocks live in [github.md](./github.md)
-and [ado.md](./ado.md).
+detection is advisory-by-design and gates nobody's merge. The backend-specific
+restore/save building blocks live in [github.md](./github.md) and
+[ado.md](./ado.md). cbh's own durable backends (for example Azure Blob) are
+outside anvil's scope: the artifact rolling window is the supported store.
 
 ## 5. Surfacing: failing the scheduled build
 
 An active regression fails the scheduled build; the findings — each benchmark,
 its magnitude, and the commit cbh attributes the change-point to — are written to
-the build summary and to a findings file the backend wiring consumes.
+the build summary and to a findings file the backend wiring consumes. The emitted
+findings include cbh's topology-accurate trend chart, so the reviewer's surface is
+self-contained — enough to decide *fix or bless* without reproducing the run.
 
 - **GitHub Actions** — the failure feeds the repo's create-issue-on-failure path;
   the issue is **updated in place** each run from the findings file, so
@@ -100,7 +101,25 @@ A sustained regression re-fails every run until it is fixed or blessed, so red
 stays meaningful only under the discipline that the build is always returned to
 green by one of those two actions.
 
-## 6. Accepting intentional changes: bless
+## 6. Local behavior
+
+The `bench-history` recipe is the same command locally and in cloud, but its
+*input* differs: the history lives only in the CI artifact store, so a local run
+has no shared trend to analyze. Locally the recipe runs the benches, records them
+into a gitignored local store, and analyzes that store — which on a fresh checkout
+is empty, so analysis is a clean no-op reporting that there is no local history
+yet. A developer thus gets the current run's numbers (and a single-machine local
+trend if they run it repeatedly), not the shared regression signal.
+
+Regression detection is therefore a scheduled, shared concern, and the failure
+surface (§5) — cbh's finding and trend chart in the issue or build summary — is
+the interface a developer acts on. Reproducing a CI finding locally is not a
+first-class workflow: it would require downloading that run's `bench-history`
+artifact into the local store and running cbh's `examine` with the run's machine
+key (a developer's machine has a different hardware fingerprint). That remains a
+documented manual escape hatch rather than a generated recipe.
+
+## 7. Accepting intentional changes: bless
 
 cbh's blessing re-baselines a series from a commit forward via an append-only
 sidecar written into the *history store*. To keep the store single-writer and to
@@ -111,7 +130,7 @@ a reviewed pull request accepting the change → the next scheduled run applies 
 and the build returns to green. The accumulated entries are an audit trail of
 every deliberate tradeoff.
 
-## 7. Boundaries and caveats
+## 8. Boundaries and caveats
 
 - **Hosted-runner machine-key density.** cbh partitions by a hardware
   fingerprint; a heterogeneous hosted pool can split a series into per-key
@@ -130,7 +149,7 @@ every deliberate tradeoff.
   values calibrated to every consumer's data; pinning the tool version contains
   the resulting risk, and the signal only gates the scheduled build.
 - **History horizon.** CI-native artifacts hold a rolling window, not unbounded
-  history; a repo that needs a longer horizon opts into the durable backend
-  (§4).
+  history; there is no anvil-supported durable store, so the horizon is the
+  artifact retention.
 
 [cbh]: https://github.com/folo-rs/folo/tree/main/packages/cargo-bench-history
