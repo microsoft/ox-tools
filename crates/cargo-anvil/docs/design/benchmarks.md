@@ -129,5 +129,8 @@ every deliberate tradeoff.
 - **Uncalibrated thresholds.** cbh's gating thresholds are defaults rather than
   values calibrated to every consumer's data; pinning the tool version contains
   the resulting risk, and the signal only gates the scheduled build.
+- **History horizon.** CI-native artifacts hold a rolling window, not unbounded
+  history; a repo that needs a longer horizon opts into the durable backend
+  (§4).
 
 [cbh]: https://github.com/folo-rs/folo/tree/main/packages/cargo-bench-history
