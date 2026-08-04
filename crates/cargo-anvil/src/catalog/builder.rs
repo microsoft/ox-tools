@@ -217,21 +217,44 @@ impl CatalogBuilder {
         self
     }
 
-    /// Finalize the catalog, failing if any verb recorded an error.
+    /// Finalize the catalog, failing if any verb recorded an error or if the
+    /// artifact set violates a structural invariant.
     ///
     /// # Errors
     ///
     /// Returns an error if any `with_artifact` / `replace_artifact` /
-    /// `without_artifact` call violated its add/override/remove invariant.
+    /// `without_artifact` call violated its add/override/remove invariant, or
+    /// if an owned file under `justfiles/` is not a `.just` recipe.
     pub fn build(self) -> Result<Catalog, AppError> {
-        if !self.errors.is_empty() {
-            bail!("invalid catalog for '{}':\n  - {}", self.cli.subcommand, self.errors.join("\n  - "));
+        let mut errors = self.errors;
+        errors.extend(self.artifacts.iter().filter_map(non_recipe_under_justfiles));
+        if !errors.is_empty() {
+            bail!("invalid catalog for '{}':\n  - {}", self.cli.subcommand, errors.join("\n  - "));
         }
         Ok(Catalog {
             cli: self.cli,
             artifacts: self.artifacts,
         })
     }
+}
+
+/// `justfiles/` is the recipe tree: the container image identity and the
+/// Docker build-context allow-list only ever consider `*.just` files below it,
+/// so any other owned file placed there would be silently dropped from both.
+/// Reject it at catalog-construction time instead, so a derived catalog fails
+/// loudly rather than shipping a file the container backend ignores.
+fn non_recipe_under_justfiles(artifact: &Artifact) -> Option<String> {
+    let Artifact::OwnedFile(spec) = artifact else {
+        return None;
+    };
+    let path = std::path::Path::new(spec.path);
+    if !spec.path.starts_with("justfiles/") || path.extension().is_some_and(|extension| extension == "just") {
+        return None;
+    }
+    Some(format!(
+        "owned file '{}' is not a .just recipe; non-recipe artifacts must live outside justfiles/ (the container image identity and build context only admit *.just there)",
+        spec.path
+    ))
 }
 
 #[cfg(test)]
@@ -314,6 +337,32 @@ mod tests {
             .build()
             .unwrap_err();
         assert!(err.to_string().contains("no artifact with identity"), "got: {err}");
+    }
+
+    #[test]
+    fn build_rejects_non_recipe_owned_files_under_justfiles() {
+        let err = Catalog::anvil()
+            .into_builder()
+            .with_artifact(Artifact::owned_file("justfiles/anvil/container/Containerfile", "FROM scratch\n"))
+            .build()
+            .unwrap_err();
+        assert!(err.to_string().contains("is not a .just recipe"), "got: {err}");
+    }
+
+    #[test]
+    fn build_accepts_recipes_under_justfiles_and_any_path_outside_it() {
+        let catalog = Catalog::anvil()
+            .into_builder()
+            .with_artifact(Artifact::owned_file("justfiles/anvil/extra.just", "x\n"))
+            .with_artifact(Artifact::owned_file(".anvil/container/extra.txt", "x\n"))
+            .build()
+            .unwrap();
+        assert!(
+            catalog
+                .artifacts()
+                .iter()
+                .any(|a| a.key() == Artifact::owned_file(".anvil/container/extra.txt", "").key())
+        );
     }
 
     #[test]

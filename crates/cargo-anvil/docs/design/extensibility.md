@@ -466,10 +466,10 @@ engine internals or the template format.
 
 ### 6.1 Optional container runner
 
-The public base catalog emits `justfiles/anvil/container/`: an explicit
-`anvil-container` recipe, generic Containerfile, Docker Engine drivers,
-content-address helper, and README. Native `just anvil-*` execution remains the
-default.
+The public base catalog emits an explicit `anvil-container` recipe at
+`justfiles/anvil/container.just` and its Containerfile, Docker Engine drivers,
+content-address helper, and README under `.anvil/container/`. Native
+`just anvil-*` execution remains the default.
 
 A downstream catalog replaces only environment-specific artifacts such as
 `artifacts::container::containerfile()` and can add the standard
@@ -478,6 +478,32 @@ A downstream catalog replaces only environment-specific artifacts such as
 image selection, caches, repository mounts, and recipe forwarding remain
 unchanged. Static image behavior stays in hashed artifacts; `customize.*`
 provides documented runtime orchestration.
+
+Two placement rules follow from how the container backend derives image
+identity and the build context, and both are enforced or documented rather
+than left to discovery:
+
+- **`justfiles/` holds `.just` recipes only.** The image ID hashes `*.just`
+  files under `justfiles/anvil/`, and the build-context allow-list admits only
+  those, so any other owned file placed there would be silently dropped from
+  both. [`CatalogBuilder::build`](#4-the-shape-of-a-catalog) rejects such an
+  artifact, so a derived catalog fails loudly at construction instead of
+  shipping a file the container backend ignores. Non-recipe assets belong in a
+  tool-owned directory such as `.anvil/`.
+- **Recipe locations outside the emitted shape need an ignore-file
+  override.** `Containerfile.dockerignore` is a deny-all allow-list whose
+  re-inclusions are per-directory (`justfiles/anvil/*.just`,
+  `justfiles/anvil/checks/*.just`, `justfiles/anvil/groups/*.just`,
+  `.anvil/container/*`); Docker only descends into a denied directory when
+  some re-inclusion pattern is prefixed by it. The image ID, by contrast,
+  hashes recipes recursively. A catalog that adds a recipe directory beyond
+  those three must also replace `artifacts::container::ignore_file()`;
+  otherwise the file is hashed into the image ID but never copied, and the
+  image build fails on the missing import. `.anvil/container/` is leaf-only on
+  both sides — the image-ID helpers list it one level deep, and
+  `.anvil/container/*/*` keeps the allow-list to the same depth — so a nested
+  asset is neither hashed nor copied, and a catalog that wants one must
+  replace the ignore file and the image-ID helpers together.
 
 `customize.sh`/`customize.ps1` are trusted host code: the driver sources them
 directly into its process before image construction and recipe execution, so
