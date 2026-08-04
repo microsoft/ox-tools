@@ -1,16 +1,7 @@
 **
 !rust-toolchain.toml
-!justfiles
-!justfiles/anvil
 !justfiles/anvil/*.just
-!justfiles/anvil/checks
 !justfiles/anvil/checks/*.just
-!justfiles/anvil/container
 !justfiles/anvil/container/*.just
-!justfiles/anvil/groups
 !justfiles/anvil/groups/*.just
-!.anvil
-!.anvil/container
-!.anvil/container/*
-.anvil/container/customize.sh
-.anvil/container/customize.ps1
+!.anvil/container/entrypoint.sh

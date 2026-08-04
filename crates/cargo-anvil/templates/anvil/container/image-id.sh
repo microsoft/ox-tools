@@ -13,7 +13,6 @@ if [[ ! -f "$toolchain_path" ]]; then
 fi
 
 container_dir="$repo_root/.anvil/container"
-container_recipe_dir="$repo_root/justfiles/anvil/container"
 default_base_image="$(sed -n 's/^ARG BASE_IMAGE=//p' "$container_dir/Containerfile" | head -n 1)"
 if [[ -z "$default_base_image" ]]; then
     echo 'anvil-container: Containerfile must define ARG BASE_IMAGE=<digest-pinned-image>.' >&2
@@ -24,11 +23,18 @@ if [[ ! "$base_image" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
     echo 'anvil-container: ANVIL_CONTAINER_BASE_IMAGE must be pinned by sha256 digest (image@sha256:<64 hex characters>).' >&2
     exit 1
 fi
+# Every recipe reaching the build context is hashed, including the
+# anvil-container entry recipe: `mod.just` imports it, so `just anvil-setup`
+# cannot parse without it during the image build.
 inputs=(rust-toolchain.toml)
 while IFS= read -r path; do
     inputs+=("${path#"$repo_root"/}")
-done < <(find "$repo_root/justfiles/anvil" -type f -name '*.just' ! -path "$container_recipe_dir/*" -print)
+done < <(find "$repo_root/justfiles/anvil" -type f -name '*.just' -print)
 
+# Host-only files never reach the build context (see
+# Containerfile.dockerignore), so they must not select an image either.
+# customize.sh/customize.ps1 are trusted runtime orchestration; static,
+# non-secret build customization belongs in a hashed artifact instead.
 for path in "$container_dir"/*; do
     [[ -f "$path" ]] || continue
     case "${path##*/}" in

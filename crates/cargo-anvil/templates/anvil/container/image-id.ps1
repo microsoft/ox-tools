@@ -20,7 +20,6 @@ if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
     throw 'anvil-container requires a repository-owned rust-toolchain.toml.'
 }
 $containerPath = Join-Path $repoRoot '.anvil/container'
-$containerRecipePath = Join-Path $repoRoot 'justfiles/anvil/container'
 $containerfile = Join-Path $containerPath 'Containerfile'
 $baseImageMatch = [regex]::Match([IO.File]::ReadAllText($containerfile), '(?m)^ARG BASE_IMAGE=([^\r\n]+)')
 if (-not $baseImageMatch.Success) {
@@ -31,10 +30,10 @@ $baseImage = if ($env:ANVIL_CONTAINER_BASE_IMAGE) { $env:ANVIL_CONTAINER_BASE_IM
 if ($baseImage -notmatch '@sha256:[0-9a-fA-F]{64}$') {
     throw 'anvil-container: ANVIL_CONTAINER_BASE_IMAGE must be pinned by sha256 digest (image@sha256:<64 hex characters>).'
 }
-$containerRecipePrefix = $containerRecipePath + [IO.Path]::DirectorySeparatorChar
-$pathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+# Every recipe reaching the build context is hashed, including the
+# anvil-container entry recipe: mod.just imports it, so `just anvil-setup`
+# cannot parse without it during the image build.
 $inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File -Filter '*.just' |
-    Where-Object { -not $_.FullName.StartsWith($containerRecipePrefix, $pathComparison) } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
 $executionOnly = @(
     'image-id.ps1',
@@ -45,9 +44,10 @@ $executionOnly = @(
     'customize.sh',
     'customize.ps1'
 )
-# customize.sh/customize.ps1 are trusted runtime orchestration, not image
-# content: their source must never affect the image ID or build context.
-# Static, non-secret build customization belongs in a hashed artifact instead.
+# Host-only files never reach the build context (see
+# Containerfile.dockerignore), so they must not select an image either.
+# customize.sh/customize.ps1 are trusted runtime orchestration; static,
+# non-secret build customization belongs in a hashed artifact instead.
 $inputs += Get-ChildItem $containerPath -File |
     Where-Object { $_.Name -notin $executionOnly } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }

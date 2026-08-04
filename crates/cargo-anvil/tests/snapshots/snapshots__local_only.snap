@@ -75,20 +75,11 @@ CMD ["bash"]
 === .anvil/container/Containerfile.dockerignore ===
 **
 !rust-toolchain.toml
-!justfiles
-!justfiles/anvil
 !justfiles/anvil/*.just
-!justfiles/anvil/checks
 !justfiles/anvil/checks/*.just
-!justfiles/anvil/container
 !justfiles/anvil/container/*.just
-!justfiles/anvil/groups
 !justfiles/anvil/groups/*.just
-!.anvil
-!.anvil/container
-!.anvil/container/*
-.anvil/container/customize.sh
-.anvil/container/customize.ps1
+!.anvil/container/entrypoint.sh
 
 === .anvil/container/README.md ===
 # Run Anvil checks in a local container
@@ -373,7 +364,6 @@ if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
     throw 'anvil-container requires a repository-owned rust-toolchain.toml.'
 }
 $containerPath = Join-Path $repoRoot '.anvil/container'
-$containerRecipePath = Join-Path $repoRoot 'justfiles/anvil/container'
 $containerfile = Join-Path $containerPath 'Containerfile'
 $baseImageMatch = [regex]::Match([IO.File]::ReadAllText($containerfile), '(?m)^ARG BASE_IMAGE=([^\r\n]+)')
 if (-not $baseImageMatch.Success) {
@@ -384,10 +374,10 @@ $baseImage = if ($env:ANVIL_CONTAINER_BASE_IMAGE) { $env:ANVIL_CONTAINER_BASE_IM
 if ($baseImage -notmatch '@sha256:[0-9a-fA-F]{64}$') {
     throw 'anvil-container: ANVIL_CONTAINER_BASE_IMAGE must be pinned by sha256 digest (image@sha256:<64 hex characters>).'
 }
-$containerRecipePrefix = $containerRecipePath + [IO.Path]::DirectorySeparatorChar
-$pathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+# Every recipe reaching the build context is hashed, including the
+# anvil-container entry recipe: mod.just imports it, so `just anvil-setup`
+# cannot parse without it during the image build.
 $inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File -Filter '*.just' |
-    Where-Object { -not $_.FullName.StartsWith($containerRecipePrefix, $pathComparison) } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
 $executionOnly = @(
     'image-id.ps1',
@@ -398,9 +388,10 @@ $executionOnly = @(
     'customize.sh',
     'customize.ps1'
 )
-# customize.sh/customize.ps1 are trusted runtime orchestration, not image
-# content: their source must never affect the image ID or build context.
-# Static, non-secret build customization belongs in a hashed artifact instead.
+# Host-only files never reach the build context (see
+# Containerfile.dockerignore), so they must not select an image either.
+# customize.sh/customize.ps1 are trusted runtime orchestration; static,
+# non-secret build customization belongs in a hashed artifact instead.
 $inputs += Get-ChildItem $containerPath -File |
     Where-Object { $_.Name -notin $executionOnly } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
@@ -442,7 +433,6 @@ if [[ ! -f "$toolchain_path" ]]; then
 fi
 
 container_dir="$repo_root/.anvil/container"
-container_recipe_dir="$repo_root/justfiles/anvil/container"
 default_base_image="$(sed -n 's/^ARG BASE_IMAGE=//p' "$container_dir/Containerfile" | head -n 1)"
 if [[ -z "$default_base_image" ]]; then
     echo 'anvil-container: Containerfile must define ARG BASE_IMAGE=<digest-pinned-image>.' >&2
@@ -453,11 +443,18 @@ if [[ ! "$base_image" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
     echo 'anvil-container: ANVIL_CONTAINER_BASE_IMAGE must be pinned by sha256 digest (image@sha256:<64 hex characters>).' >&2
     exit 1
 fi
+# Every recipe reaching the build context is hashed, including the
+# anvil-container entry recipe: `mod.just` imports it, so `just anvil-setup`
+# cannot parse without it during the image build.
 inputs=(rust-toolchain.toml)
 while IFS= read -r path; do
     inputs+=("${path#"$repo_root"/}")
-done < <(find "$repo_root/justfiles/anvil" -type f -name '*.just' ! -path "$container_recipe_dir/*" -print)
+done < <(find "$repo_root/justfiles/anvil" -type f -name '*.just' -print)
 
+# Host-only files never reach the build context (see
+# Containerfile.dockerignore), so they must not select an image either.
+# customize.sh/customize.ps1 are trusted runtime orchestration; static,
+# non-secret build customization belongs in a hashed artifact instead.
 for path in "$container_dir"/*; do
     [[ -f "$path" ]] || continue
     case "${path##*/}" in
@@ -796,11 +793,27 @@ try {
         '--mount', "type=volume,source=$gitVolume,target=/usr/local/cargo/git",
         '--mount', "type=volume,source=$targetVolume,target=/workspace/target"
     )
+
+    # Ownership initialization runs as root, so it mounts only the volumes it
+    # initializes -- never the worktree -- and passes each path as its own argv
+    # element rather than interpolating into a `sh -c` string. Both matter once
+    # these targets can come from a repository declaration: a shell string would
+    # make a target such as `/tmp/x;id` a root command.
+    $ownershipMountArgs = @(
+        '--mount', "type=volume,source=$registryVolume,target=/usr/local/cargo/registry",
+        '--mount', "type=volume,source=$gitVolume,target=/usr/local/cargo/git",
+        '--mount', "type=volume,source=$targetVolume,target=/workspace/target"
+    )
+    $ownershipTargets = @(
+        '/usr/local/cargo/registry',
+        '/usr/local/cargo/git',
+        '/workspace/target'
+    )
     & wsl -e docker run --rm --pull=never `
         --platform linux/amd64 `
         --user 0:0 `
-        @mountArgs `
-        $image sh -c "chown ${containerUid}:${containerGid} /usr/local/cargo/registry /usr/local/cargo/git /workspace/target"
+        @ownershipMountArgs `
+        $image chown "${containerUid}:${containerGid}" @ownershipTargets
     if ($LASTEXITCODE -ne 0) {
         throw "anvil-container: Docker volume initialization failed with exit code $LASTEXITCODE."
     }
@@ -1209,12 +1222,27 @@ mount_args=(
     --mount "type=volume,source=$git_volume,target=/usr/local/cargo/git"
     --mount "type=volume,source=$target_volume,target=/workspace/target"
 )
+
+# Ownership initialization runs as root, so it mounts only the volumes it
+# initializes -- never the worktree -- and passes each path as its own argv
+# element rather than interpolating into a `sh -c` string. Both matter once
+# these targets can come from a repository declaration: a shell string would
+# make a target such as `/tmp/x;id` a root command.
+ownership_mount_args=(
+    --mount "type=volume,source=$registry_volume,target=/usr/local/cargo/registry"
+    --mount "type=volume,source=$git_volume,target=/usr/local/cargo/git"
+    --mount "type=volume,source=$target_volume,target=/workspace/target"
+)
+ownership_targets=(
+    /usr/local/cargo/registry
+    /usr/local/cargo/git
+    /workspace/target
+)
 docker run --rm --pull=never \
     --platform linux/amd64 \
     --user 0:0 \
-    "${mount_args[@]}" \
-    "$image" sh -c \
-    "chown $container_uid:$container_gid /usr/local/cargo/registry /usr/local/cargo/git /workspace/target"
+    "${ownership_mount_args[@]}" \
+    "$image" chown "$container_uid:$container_gid" "${ownership_targets[@]}"
 
 run_args=(
     run --rm --pull=never

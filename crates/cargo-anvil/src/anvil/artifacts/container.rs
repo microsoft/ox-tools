@@ -190,6 +190,7 @@ mod tests {
     fn write_image_id_fixture(root: &Path) {
         write(&root.join("rust-toolchain.toml"), "channel = \"1.93\"\n");
         write(&root.join("justfiles/anvil/versions.just"), "tool_version := \"1\"\n");
+        write(&root.join(RECIPE_PATH), RECIPE);
         write(
             &root.join(CONTAINERFILE_PATH),
             "ARG BASE_IMAGE=example.invalid/base@sha256:0000000000000000000000000000000000000000000000000000000000000000\nFROM ${BASE_IMAGE}\n",
@@ -227,39 +228,45 @@ mod tests {
     fn containerfile_installs_the_generated_toolset() {
         assert!(CONTAINERFILE.contains("just anvil-setup"));
         assert!(CONTAINERFILE.contains("COPY . ."));
-        assert!(IGNORE.contains("!.anvil/container/*"));
+        assert!(IGNORE.contains("!.anvil/container/entrypoint.sh"));
         assert!(IGNORE.contains("!justfiles/anvil/checks/*.just"));
         assert!(CONTAINERFILE.contains("anvil_runner := \\\"native\\\""));
         assert!(CONTAINERFILE.contains("requires rust-toolchain.toml"));
         assert!(CONTAINERFILE.contains("anvil-container-entrypoint"));
     }
 
+    /// The build context is an allowlist of files, so a generated host-only
+    /// file cannot silently become image content under an unchanged
+    /// content-addressed tag.
     #[test]
-    fn ignore_file_excludes_customize_source_from_the_build_context() {
-        // Customization is trusted host orchestration, not image content: it
-        // must never reach the build context, even though the broader
-        // container directory is included above.
-        let include_position = IGNORE
-            .find("!.anvil/container/*")
-            .expect("the container directory inclusion is asserted above");
-        let shell_exclude_position = IGNORE
-            .find(".anvil/container/customize.sh")
-            .expect("customize.sh must be excluded from the build context");
-        let powershell_exclude_position = IGNORE
-            .find(".anvil/container/customize.ps1")
-            .expect("customize.ps1 must be excluded from the build context");
-        assert!(
-            !IGNORE[shell_exclude_position..].starts_with('!'),
-            "customize.sh must be a re-exclusion, not an inclusion"
+    fn ignore_file_admits_only_files_the_image_build_needs() {
+        let inclusions: Vec<&str> = IGNORE.lines().filter_map(|line| line.strip_prefix('!')).collect();
+        assert_eq!(
+            inclusions,
+            [
+                "rust-toolchain.toml",
+                "justfiles/anvil/*.just",
+                "justfiles/anvil/checks/*.just",
+                "justfiles/anvil/container/*.just",
+                "justfiles/anvil/groups/*.just",
+                ".anvil/container/entrypoint.sh"
+            ],
+            "only `just anvil-setup` inputs and the copied entrypoint belong in the \
+             build context; every other generated container file runs on the host"
         );
-        assert!(
-            !IGNORE[powershell_exclude_position..].starts_with('!'),
-            "customize.ps1 must be a re-exclusion, not an inclusion"
-        );
-        assert!(
-            include_position < shell_exclude_position && include_position < powershell_exclude_position,
-            "the re-exclusion must come after the broad directory inclusion so it wins"
-        );
+        // Un-ignoring a directory re-admits its entire subtree, which is how
+        // host-only drivers and helpers previously reached the image. Only
+        // files and file globs may be un-ignored.
+        for inclusion in &inclusions {
+            assert!(
+                inclusion.contains('.'),
+                "'{inclusion}' looks like a directory; un-ignoring one re-admits every file beneath it"
+            );
+        }
+        // Nothing needs re-exclusion once inclusion is explicit: customize.*
+        // is simply never admitted.
+        assert!(!IGNORE.contains("customize.sh"));
+        assert!(!IGNORE.contains("customize.ps1"));
     }
 
     #[test]
@@ -521,8 +528,19 @@ mod tests {
             "execution-only documentation must not affect the image ID"
         );
 
-        write(&root.join(RECIPE_PATH), "execution-only recipe change\n");
-        assert_eq!(base, run_image_id(root), "the container entry recipe must not affect the image ID");
+        // The entry recipe does reach the build context: `mod.just` imports it,
+        // so `just anvil-setup` cannot parse without it during the image build.
+        // Anything in the context must therefore select the image.
+        let recipe_changed = {
+            write(&root.join(RECIPE_PATH), "execution-only recipe change\n");
+            run_image_id(root)
+        };
+        assert_ne!(
+            base, recipe_changed,
+            "the container entry recipe reaches the build context, so it must affect the image ID"
+        );
+        write(&root.join(RECIPE_PATH), RECIPE);
+        assert_eq!(base, run_image_id(root), "restoring the entry recipe must restore the image ID");
 
         let override_image = "example.invalid/bullseye@sha256:1111111111111111111111111111111111111111111111111111111111111111";
         #[cfg(windows)]
@@ -538,9 +556,15 @@ mod tests {
 
         write(
             &root.join("justfiles/anvil/container/nested/custom.just"),
-            "nested-execution-only:\n    @echo nested\n",
+            "nested-recipe:\n    @echo nested\n",
         );
-        assert_eq!(base, run_image_id(root), "nested container recipes must not affect the image ID");
+        assert_ne!(
+            base,
+            run_image_id(root),
+            "nested container recipes reach the build context, so they must affect the image ID"
+        );
+        std::fs::remove_file(root.join("justfiles/anvil/container/nested/custom.just")).expect("test file must be removable");
+        assert_eq!(base, run_image_id(root), "removing the nested recipe must restore the image ID");
 
         // Static, hashed image content must still affect the image ID.
         write(
