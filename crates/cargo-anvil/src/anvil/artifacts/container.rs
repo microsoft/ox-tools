@@ -330,13 +330,19 @@ mod tests {
     }
 
     /// Every owned file the built-in catalog places in one of the two trees
-    /// the build context admits. The container backend copies these into the
-    /// image; anything else in the repository is bind-mounted at run time.
+    /// the build context admits: the recipe tree, and the container
+    /// directory itself. `.anvil/` at large is the general home for
+    /// tool-owned non-recipe assets, and the allow-list deliberately admits
+    /// only `.anvil/container/*` from it, so scoping to that directory keeps
+    /// this guard exhaustive for image inputs without making a future
+    /// `.anvil/<feature>` artifact fail a test it has no bearing on.
     fn catalog_context_inputs() -> Vec<&'static str> {
         crate::anvil::artifacts::anvil_artifacts()
             .into_iter()
             .filter_map(|artifact| match artifact {
-                Artifact::OwnedFile(spec) if spec.path.starts_with("justfiles/") || spec.path.starts_with(".anvil/") => Some(spec.path),
+                Artifact::OwnedFile(spec) if spec.path.starts_with("justfiles/") || spec.path.starts_with(".anvil/container/") => {
+                    Some(spec.path)
+                }
                 _ => None,
             })
             .collect()
