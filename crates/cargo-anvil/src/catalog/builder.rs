@@ -224,8 +224,7 @@ impl CatalogBuilder {
     ///
     /// Returns an error if any `with_artifact` / `replace_artifact` /
     /// `without_artifact` call violated its add/override/remove invariant, or
-    /// if an owned file under `justfiles/` is not a `.just` recipe (see
-    /// [`extensibility.md §6.1`](../../docs/design/extensibility.md)).
+    /// if an owned file under `justfiles/` is not a `.just` recipe.
     pub fn build(self) -> Result<Catalog, AppError> {
         let mut errors = self.errors;
         errors.extend(self.artifacts.iter().filter_map(non_recipe_under_justfiles));
