@@ -118,6 +118,10 @@ impl DriverRun {
 }
 
 fn run_driver(root: &Path) -> DriverRun {
+    run_driver_args(root, &["anvil-clippy"])
+}
+
+fn run_driver_args(root: &Path, args: &[&str]) -> DriverRun {
     let bin_dir = root.join("fake-bin");
     install_fake_docker(&bin_dir);
     let docker_log = bin_dir.join("docker.log");
@@ -126,7 +130,7 @@ fn run_driver(root: &Path) -> DriverRun {
 
     let output = Command::new("bash")
         .arg(".anvil/container/run-in-container.sh")
-        .arg("anvil-clippy")
+        .args(args)
         .current_dir(root)
         .env("PATH", path)
         .env("FAKE_DOCKER_LOG", &docker_log)
@@ -350,5 +354,115 @@ fn a_deleted_configuration_leaving_an_orphaned_runtime_file_is_refused() {
     let run = run_driver(tmp.path());
     assert!(!run.status.success(), "an orphaned runtime file must be detected");
     assert!(run.stderr.contains("out of date"), "got: {}", run.stderr);
+    assert_eq!(run.container_count(), 0, "no container may start: {}", run.docker_log);
+}
+
+const COMMAND_CONFIG: &str = r#"
+[[container.command]]
+name = "build-image"
+recipe = "build-service-image"
+workdir = "crates/alpha"
+
+[[container.command.arg]]
+name = "tag"
+type = "token"
+
+[[container.command.arg]]
+name = "mode"
+type = "enum"
+values = ["fast", "slow"]
+required = false
+"#;
+
+#[test]
+fn anvil_recipes_still_dispatch_unchanged_when_commands_are_registered() {
+    let tmp = repo_with_config(COMMAND_CONFIG);
+    let run = run_driver_args(tmp.path(), &["anvil-clippy", "anvil-fmt"]);
+    assert!(run.status.success(), "driver failed: {}", run.stderr);
+    assert!(
+        run.line_containing("just anvil-clippy").contains("just anvil-clippy anvil-fmt"),
+        "generated recipes keep today's behavior: {}",
+        run.docker_log
+    );
+}
+
+#[test]
+fn a_registered_command_resolves_to_its_recipe_and_working_directory() {
+    let tmp = repo_with_config(COMMAND_CONFIG);
+    let run = run_driver_args(tmp.path(), &["build-image", "v1.2.3"]);
+    assert!(run.status.success(), "driver failed: {}", run.stderr);
+
+    let invocation = run.line_containing("build-service-image");
+    // `--` stops a value ever being read as a just option.
+    assert!(invocation.contains("just build-service-image -- v1.2.3"), "got: {invocation}");
+    assert!(
+        invocation.contains("--workdir /workspace/crates/alpha"),
+        "the declared workdir must apply: {invocation}"
+    );
+}
+
+#[test]
+fn an_optional_argument_may_be_omitted_or_supplied() {
+    let tmp = repo_with_config(COMMAND_CONFIG);
+    for (args, expected) in [
+        (vec!["build-image", "v1"], "just build-service-image -- v1"),
+        (vec!["build-image", "v1", "fast"], "just build-service-image -- v1 fast"),
+    ] {
+        let run = run_driver_args(tmp.path(), &args);
+        assert!(run.status.success(), "driver failed for {args:?}: {}", run.stderr);
+        assert!(
+            run.line_containing("build-service-image").contains(expected),
+            "got: {}",
+            run.docker_log
+        );
+    }
+}
+
+#[test]
+fn an_unregistered_name_is_refused_before_any_container_starts() {
+    let tmp = repo_with_config(COMMAND_CONFIG);
+    let run = run_driver_args(tmp.path(), &["deploy-thing"]);
+    assert!(!run.status.success(), "an unregistered name must be refused");
+    assert!(run.stderr.contains("registered command"), "got: {}", run.stderr);
+    assert_eq!(run.container_count(), 0, "no container may start: {}", run.docker_log);
+}
+
+#[test]
+fn argument_count_mismatches_are_refused_before_any_container_starts() {
+    let tmp = repo_with_config(COMMAND_CONFIG);
+    for args in [vec!["build-image"], vec!["build-image", "v1", "fast", "extra"]] {
+        let run = run_driver_args(tmp.path(), &args);
+        assert!(!run.status.success(), "{args:?} must be refused");
+        assert!(run.stderr.contains("argument"), "got: {}", run.stderr);
+        assert_eq!(run.container_count(), 0, "no container may start for {args:?}");
+    }
+}
+
+/// The four argument types must accept and reject identically on both hosts,
+/// which is why they are a closed set rather than author-supplied patterns.
+#[test]
+fn argument_types_are_enforced() {
+    let tmp = repo_with_config(COMMAND_CONFIG);
+
+    let run = run_driver_args(tmp.path(), &["build-image", "v1", "medium"]);
+    assert!(!run.status.success(), "an out-of-set enum value must be refused");
+    assert!(run.stderr.contains("must be one of"), "got: {}", run.stderr);
+    assert_eq!(run.container_count(), 0);
+
+    let run = run_driver_args(tmp.path(), &["build-image", "-oops"]);
+    assert!(!run.status.success(), "a token may not start with a hyphen");
+    assert_eq!(run.container_count(), 0);
+}
+
+#[test]
+fn a_path_argument_may_not_escape_the_worktree() {
+    let tmp = repo_with_config(
+        "[[container.command]]\nname = \"pack\"\nrecipe = \"pack\"\n\n[[container.command.arg]]\nname = \"dir\"\ntype = \"path\"\n",
+    );
+    let run = run_driver_args(tmp.path(), &["pack", "crates/alpha"]);
+    assert!(run.status.success(), "an in-worktree path is accepted: {}", run.stderr);
+
+    let run = run_driver_args(tmp.path(), &["pack", "../outside"]);
+    assert!(!run.status.success(), "an escaping path must be refused");
     assert_eq!(run.container_count(), 0, "no container may start: {}", run.docker_log);
 }
