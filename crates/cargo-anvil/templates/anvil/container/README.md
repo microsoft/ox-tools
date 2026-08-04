@@ -196,14 +196,21 @@ default Anvil images.
 This directory is managed by `cargo-anvil`. Regenerate it with `cargo anvil`
 instead of editing its files directly.
 
+> [!IMPORTANT]
+> These assets previously lived in `justfiles/anvil/container/`. `cargo anvil`
+> relocates the files it generated, but it does not track a hand-authored
+> `customize.sh` or `customize.ps1`. Move any such file to
+> `.anvil/container/` yourself; the driver only loads customization from the
+> new location and warns on stderr when it finds one left behind.
+
 ## Advanced repository customization
 
 A repository or derived catalog can add one trusted customization file per
 supported host:
 
 ```text
-justfiles/anvil/container/customize.sh
-justfiles/anvil/container/customize.ps1
+.anvil/container/customize.sh
+.anvil/container/customize.ps1
 ```
 
 The driver sources the matching file as trusted host code before authentication,
