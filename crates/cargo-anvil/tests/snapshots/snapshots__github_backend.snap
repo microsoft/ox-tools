@@ -4788,11 +4788,13 @@ _anvil-impact-snapshot:
     # fetches the base ref -- consume the target/anvil/impact artifact produced
     # by the impact job instead of recomputing it (and it also short-circuits
     # a local repeat run). We still detect a moved base ref when it is cheaply
-    # resolvable (best effort): if the base cannot be resolved locally (e.g. a
-    # shallow CI consumer), we trust the present baseline -- the base cannot
-    # move within a single pipeline run.
+    # resolvable (best effort). If the base cannot be resolved, we only trust
+    # the present baseline under ANVIL_IMPACT=consume (a shallow CI consumer
+    # whose base cannot move within a pipeline run); in normal mode an
+    # unresolvable base falls through to the recompute path, which fails fast
+    # with git-fetch guidance rather than scoping against a stale baseline.
     $currentFresh = (Test-Path $currentJson) -and (Test-Path $currentStateFile) -and `
-        ((Get-Content -Raw $currentStateFile).Trim() -eq $currentState)
+        ("$(Get-Content -Raw $currentStateFile)".Trim() -eq $currentState)
     $baseSha = $null
     $base = (& "{{ just_executable() }}" _anvil-base-ref 2>$null)
     if (($LASTEXITCODE -eq 0) -and $base) {
@@ -4802,7 +4804,7 @@ _anvil-impact-snapshot:
     }
     $baselineFresh = (Test-Path $baselineShaFile) -and `
         ((Test-Path $baselineJson) -or (Test-Path $noWorkspaceMarker)) -and `
-        (($null -eq $baseSha) -or ((Get-Content -Raw $baselineShaFile).Trim() -eq $baseSha))
+        ((($env:ANVIL_IMPACT -eq 'consume') -and ($null -eq $baseSha)) -or ("$(Get-Content -Raw $baselineShaFile)".Trim() -eq $baseSha))
     if ($currentFresh -and $baselineFresh) {
         Write-Host 'anvil-impact: snapshots up to date'
         exit 0
@@ -4847,7 +4849,7 @@ _anvil-impact-snapshot:
 
     # --- Baseline snapshot: only when the base sha changed. ---
     $haveBaseline = (Test-Path $baselineShaFile) -and `
-        ((Get-Content -Raw $baselineShaFile).Trim() -eq $baseSha) -and `
+        ("$(Get-Content -Raw $baselineShaFile)".Trim() -eq $baseSha) -and `
         ((Test-Path $baselineJson) -or (Test-Path $noWorkspaceMarker))
     if ($haveBaseline) {
         Write-Host "anvil-impact: baseline snapshot up to date (base $baseSha)"
@@ -4907,7 +4909,7 @@ _anvil-impact-snapshot:
     # --- Current snapshot: only when the working tree changed
     # ($currentState was computed at the top of this recipe). ---
     $haveCurrent = (Test-Path $currentJson) -and (Test-Path $currentStateFile) -and `
-        ((Get-Content -Raw $currentStateFile).Trim() -eq $currentState)
+        ("$(Get-Content -Raw $currentStateFile)".Trim() -eq $currentState)
     if ($haveCurrent) {
         Write-Host 'anvil-impact: current snapshot up to date'
     } else {
@@ -4990,10 +4992,10 @@ anvil-impact: _anvil-impact-snapshot
     # Content cache key: regenerate the projection only when a snapshot moved
     # or an output is missing. Keyed on the snapshot markers, not mtimes, so a
     # downstream cloud-workflow job that downloaded the artifact recognizes it.
-    $wantState = ((Get-Content -Raw $baselineShaFile).Trim()) + ' ' + ((Get-Content -Raw $currentStateFile).Trim())
+    $wantState = ("$(Get-Content -Raw $baselineShaFile)".Trim()) + ' ' + ("$(Get-Content -Raw $currentStateFile)".Trim())
     $includeFiles = @('modified', 'affected', 'required') | ForEach-Object { Join-Path $impactDir "include_$_.txt" }
     $fresh = (Test-Path $impactJson) -and (Test-Path $impactStateFile) -and `
-        ((Get-Content -Raw $impactStateFile).Trim() -eq $wantState) -and `
+        ("$(Get-Content -Raw $impactStateFile)".Trim() -eq $wantState) -and `
         (@($includeFiles | Where-Object { -not (Test-Path $_) }).Count -eq 0)
     if ($fresh) {
         Write-Host 'anvil-impact: impact set up to date (cache hit)'
@@ -5097,12 +5099,13 @@ _anvil-impact-format tier impactJson:
     foreach ($p in $meta.packages) {
         $byName[$p.name] = $p
         foreach ($t in $p.targets) {
-            if ($t.kind -contains 'lib') { $byLib[$t.name] = $p }
+            if (($t.kind -contains 'lib') -or ($t.kind -contains 'proc-macro')) { $byLib[$t.name] = $p }
         }
     }
     $impact = Get-Content -LiteralPath $impactJson -Raw | ConvertFrom-Json
     $names = @($impact.$tierKey)
     $specs = [System.Collections.Generic.List[string]]::new()
+    $unmapped = $false
     foreach ($name in $names) {
         if ([string]::IsNullOrWhiteSpace($name)) { continue }
         $p = if ($byName.ContainsKey($name)) {
@@ -5113,16 +5116,23 @@ _anvil-impact-format tier impactJson:
             $null
         }
         if ($null -eq $p) {
-            # Names cargo-delta emits that aren't valid workspace
-            # packages (e.g. directory-leaf ambiguities like `ffi` /
-            # `ffi_build` in deeply nested workspaces) are dropped with a
-            # warning rather than failing the whole build.
-            [Console]::Error.WriteLine("anvil impact: dropping unknown package '$name' from $tier set")
+            # A name cargo-delta reported that doesn't resolve to a workspace
+            # package (e.g. directory-leaf ambiguities like `ffi` / `ffi_build`
+            # in deeply nested workspaces). Record it so we can fail *closed*
+            # below rather than silently narrowing the tier.
+            [Console]::Error.WriteLine("anvil impact: could not map '$name' to a workspace package in the $tier set")
+            $unmapped = $true
             continue
         }
         $specs.Add("--package $($p.name)@$($p.version)")
     }
-    if ($specs.Count -eq 0) {
+    if ($unmapped) {
+        # Fail closed: at least one changed name could not be mapped. Emitting
+        # the mapped subset (or --skip, when all dropped) would silently
+        # UNDER-scope and skip a check that should run -- the wrong direction
+        # for a safety net. Widen this tier to the full workspace instead.
+        Write-Output '--workspace'
+    } elseif ($specs.Count -eq 0) {
         Write-Output '--skip'
     } else {
         Write-Output ($specs -join ' ')
@@ -5150,7 +5160,7 @@ _anvil-impact-include tier:
     if ($env:ANVIL_IMPACT -eq 'off') { Write-Output $default; exit 0 }
     $file = "target/anvil/impact/include_$tier.txt"
     if (Test-Path $file) {
-        Write-Output ((Get-Content -Raw $file).Trim())
+        Write-Output ("$(Get-Content -Raw $file)".Trim())
     } else {
         Write-Output $default
     }

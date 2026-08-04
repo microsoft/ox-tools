@@ -449,6 +449,19 @@ after the user actually edits the file: from then on, anvil Proposes into
 file uses; the wrapper isn't special — it just happens to be the one file most
 internal adopters will customize.
 
+**Adding a parameter is a breaking change for already-customized wrappers.** The
+`inputArtifacts` parameter (added to share the impact cache) is the one sharp
+edge of the owned-wrapper model: `pr-stages.yml` / `scheduled-stages.yml` stay
+managed and start passing `inputArtifacts` to every job, but an adopter who
+edited their `job.yml` *before* this parameter existed has a `LeaveAlone` wrapper
+that only declares `{name, pool, steps, artifacts}`. On their next anvil update
+ADO rejects the now-unknown parameter with a template-expansion error at compile
+time, before any check runs. The migration is to merge the regenerated
+`job.yml.proposed` sibling (which adds the `inputArtifacts` handling) into the
+wrapper — the same `.proposed` mechanism every owned-file change uses. Fresh
+adopters and uncustomized wrappers are unaffected: the default wrapper already
+handles it and `inputArtifacts` defaults to `[]`.
+
 **Template-path note.** Each entry in the `steps:` parameter at the call site
 contains a `template:` reference (e.g. `template: steps/pr-fast.yml`). ADO
 resolves template paths relative to the file containing the `template:`

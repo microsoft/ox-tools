@@ -392,6 +392,49 @@ fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
         !recommitted.contains("widening"),
         "committing the WIP must restore scoping:\n{recommitted}"
     );
+    // Scoping is not just un-widened -- the newly committed crate must actually
+    // land in the affected tier (guards against a regression that drops it or
+    // widens without printing the warning).
+    let affected_after = std::fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
+    assert!(
+        affected_after.contains("--package beta@"),
+        "committing the WIP must scope beta into the affected tier, got: {affected_after}"
+    );
+}
+
+#[test]
+fn impact_include_reads_zero_byte_modified_file_without_throwing() {
+    if !tools_available() {
+        return;
+    }
+    // The dirty-tree widen writes include_modified.txt as a 0-byte file
+    // (`-Value '' -NoNewline`). `Get-Content -Raw` returns $null for a 0-byte
+    // file, so `_anvil-impact-include` must read it null-safely rather than
+    // throwing on `$null.Trim()` -- which every modified-tier check hits on any
+    // dirty local run.
+    let tmp = workspace();
+    let root = tmp.path();
+    // Uncommitted edit -> anvil-impact widens and writes the 0-byte include.
+    write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn wip() {}\n");
+    run_impact(root);
+    let modified_file = root.join("target/anvil/impact/include_modified.txt");
+    assert_eq!(
+        std::fs::metadata(&modified_file).unwrap().len(),
+        0,
+        "the dirty widen must write a 0-byte include_modified.txt for this test to be meaningful"
+    );
+
+    let out = just_cmd(root, &["_anvil-impact-include", "modified"]).output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "_anvil-impact-include must not throw on a 0-byte include file:\n{combined}"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        "",
+        "an empty modified tier must resolve to '' (run), not crash"
+    );
 }
 
 #[test]
@@ -483,37 +526,59 @@ fn impact_consume_mode_trusts_cache_without_recompute() {
 }
 
 #[test]
-fn impact_consumer_reuses_cache_with_unresolvable_base() {
+fn consumer_reuses_cache_with_unresolvable_base_only_under_consume() {
     if !tools_available() {
         return;
     }
-    // Simulate a downstream cloud-workflow group job: it DOWNLOADED the impact
-    // artifact (target/anvil/impact/) produced by the impact job, but its own
-    // checkout installs neither cargo-delta nor fetches the base ref. The
-    // consumer fast path must trust the present snapshots and no-op, rather
-    // than trying to recompute (which needs cargo-delta + a resolvable base).
+    // A downstream cloud-workflow group job DOWNLOADED the impact artifact but
+    // its checkout neither installs cargo-delta nor fetches the base ref. The
+    // supported way to reuse that cache is ANVIL_IMPACT=consume, which trusts
+    // the present cache verbatim. In normal (unset) mode an unresolvable base
+    // must NOT be trusted: trusting a present-but-possibly-stale baseline is the
+    // fail-open direction, so it falls through to recompute and fails fast.
     let tmp = workspace();
     let root = tmp.path();
     run_impact(root); // produce the cache (the "impact job")
 
-    // BASE_REF points at a ref that does not exist locally, standing in for a
-    // shallow consumer checkout where origin/<base> was never fetched.
-    let out = just_cmd(root, &["anvil-impact"])
+    // consume: trusts the present cache with an unresolvable base, no recompute.
+    let consume = just_cmd(root, &["anvil-impact"])
+        .env("ANVIL_IMPACT", "consume")
         .env("BASE_REF", "refs/heads/anvil-does-not-exist")
         .output()
         .unwrap();
-    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-    assert!(out.status.success(), "consumer run with unresolvable base failed:\n{combined}");
-    assert!(
-        combined.contains("snapshots up to date"),
-        "consumer must reuse the present snapshots:\n{combined}"
+    let consume_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&consume.stdout),
+        String::from_utf8_lossy(&consume.stderr)
     );
-    // No (re)snapshot happened -> cargo-delta was never invoked. "Snapshotting
-    // workspace.." (cargo-delta) and "snapshotting ..." (the recipe) both carry
-    // the substring "napshotting".
     assert!(
-        !combined.contains("napshotting"),
-        "consumer must not re-snapshot (cargo-delta must not be needed):\n{combined}"
+        consume.status.success(),
+        "consume must reuse the present cache with an unresolvable base:\n{consume_combined}"
+    );
+    assert!(
+        !consume_combined.contains("napshotting"),
+        "consume must not re-snapshot (cargo-delta must not be needed):\n{consume_combined}"
+    );
+
+    // normal (unset) mode: the same unresolvable base must NOT silently trust
+    // the present baseline -- it recomputes and fails fast with fetch guidance.
+    let normal = just_cmd(root, &["anvil-impact"])
+        .env("BASE_REF", "refs/heads/anvil-does-not-exist")
+        .output()
+        .unwrap();
+    let normal_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&normal.stdout),
+        String::from_utf8_lossy(&normal.stderr)
+    );
+    assert_ne!(
+        normal.status.code(),
+        Some(0),
+        "normal mode must not trust an unresolvable base:\n{normal_combined}"
+    );
+    assert!(
+        normal_combined.contains("locally") && normal_combined.contains("origin"),
+        "normal-mode failure must give git fetch guidance:\n{normal_combined}"
     );
 }
 
