@@ -123,6 +123,8 @@ anvil-pr-mutants: anvil-mutants-diff
 
 anvil-scheduled-test: anvil-llvm-cov anvil-doc-test anvil-examples
 anvil-scheduled-advisories: anvil-deny anvil-audit anvil-aprz anvil-clippy
+anvil-scheduled-runtime-analysis: anvil-miri anvil-miri-tree-borrows \
+                                  anvil-miri-strict-provenance anvil-miri-race-coverage
 anvil-scheduled-exhaustive: anvil-mutants-full anvil-cargo-hack anvil-bench
 anvil-scheduled-benchmarks: anvil-bench-history
 ```
@@ -139,7 +141,8 @@ in a deterministic order:
 ```just
 anvil-pr: anvil-pr-validate-prereqs anvil-pr-fast anvil-pr-slow
 anvil-scheduled: anvil-scheduled-validate-prereqs anvil-scheduled-test anvil-scheduled-advisories \
-               anvil-scheduled-exhaustive anvil-scheduled-benchmarks
+               anvil-scheduled-runtime-analysis anvil-scheduled-exhaustive \
+               anvil-scheduled-benchmarks
 anvil-full: anvil-pr anvil-scheduled
 ```
 

@@ -1,0 +1,27 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+#
+# Attaches the benchmark findings to the build summary, so a failed
+# scheduled build carries the per-finding detail its one-bit status
+# cannot. Runs whether or not the analysis flagged anything.
+#
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/benchmarks.md
+parameters:
+  - name: findings
+    type: string
+    default: target/anvil/bench/findings.md
+steps:
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      $findings = '${{ parameters.findings }}'
+      if (-not (Test-Path -LiteralPath $findings)) {
+          Write-Host "anvil: no $findings to attach"
+          exit 0
+      }
+      $full = (Resolve-Path -LiteralPath $findings).Path
+      Write-Host "##vso[task.uploadsummary]$full"
+    displayName: Publish benchmark findings
+    condition: succeededOrFailed()

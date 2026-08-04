@@ -271,6 +271,15 @@ The `miri` row above is the one place the catalog deliberately duplicates a chec
 | `cargo-hack` powerset | `cargo hack --workspace --feature-powerset --depth 2 check`                                                  | oxidizer, oxidizer-github |
 | `bench`               | `cargo bench --workspace --all-features --no-run` ＋ a single-iteration smoke benchmark for each bench target | oxidizer |
 
+### `scheduled-benchmarks`
+
+| Check          | Invocation                                                                                                                                                     | Source |
+|----------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|--------|
+| `bench-history` | `cargo bench-history` collect → apply-blessings → analyze over the history restored from the previous scheduled run; exits non-zero on an active regression. | new    |
+
+Unlike the compile-only `bench` above, this check actually *runs* the benchmarks and
+judges the resulting trend. See [benchmarks.md](./benchmarks.md).
+
 ## 3. Per-check vs grouped cloud workflows execution
 
 Each *group* is one cloud-workflow job. Within a job, the checks belonging to the group run sequentially
@@ -353,7 +362,7 @@ Bucket assignments per check:
 | modified  | `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features`, `readme-check`, `spellcheck` |
 | affected  | `clippy`*, `llvm-cov`, `doc-test`, `examples`, `mutants` (diff and full), `miri`, `careful`, `loom`, `bolero`, `semver-check`, `external-types`, `bench` |
 | required  | `doc-build`, `udeps`, `cargo-hack` (feature powerset)                                                                  |
-| unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage` |
+| unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`, `bench-history` |
 
 \* cargo-delta's README recommends `clippy` with the modified tier. anvil deliberately
 runs it on the affected set instead: a change in a crate's API can introduce clippy lints
@@ -369,7 +378,8 @@ deps), `cargo udeps` (unused-deps detection needs the resolved graph), `cargo ha
 
 `unscoped` is for checks that have nothing to do with workspace-member identity:
 `deny`/`audit` read `Cargo.lock`, `pr-title` reads PR metadata, `aprz` consults an
-external risk DB. These ignore the env vars and always run.
+external risk DB, and `bench-history` needs the same suite measured at every commit
+for its series to stay comparable. These ignore the env vars and always run.
 
 The sentinel `--skip` is a magic string that cannot be a valid cargo argument, so there
 is no collision with real package names. Recipes test for it with

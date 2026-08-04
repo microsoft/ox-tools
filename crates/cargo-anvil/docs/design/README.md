@@ -385,6 +385,7 @@ pipeline.
 | `pr-test`, `pr-runtime-analysis`, `scheduled-test`                     | All legs above                         | Where compile-time and runtime OS / arch bugs actually surface. The three `pr-slow*` groups run as parallel cloud-workflow jobs (split out from a former single `pr-slow`) for shorter wall-clock per leg. |
 | `pr-mutants`                                                    | GH: Linux x86_64 + Windows x86_64 + Linux aarch64 (windows-arm self-skips). ADO: Linux x86_64 + Windows x86_64 | Diff-scoped mutation testing. cargo-mutants doesn't build on `aarch64-pc-windows-msvc`; the recipe self-skips so the windows-arm leg is a no-op. |
 | `scheduled-exhaustive`                                       | Linux x86_64 + Windows x86_64 | Full `cargo-mutants` / `cargo-hack` / `bench`. cargo-mutants doesn't build on `aarch64-pc-windows-msvc`; rather than splitting the matrix to add an ARM-Linux leg for cargo-hack and bench, the whole group is x86-only. Adopters with ARM-specific concerns extend the matrix in their root workflow. |
+| `scheduled-benchmarks`                                       | Linux x86_64 + Windows x86_64 | Benchmark regression detection over the accumulated history. Matches `scheduled-exhaustive`; each leg carries its own history artifact because the series are partitioned per machine. See [benchmarks.md](./benchmarks.md). |
 
 macOS is not in the default matrix — adopters who need it fork the owned reusable
 workflow (GH) or override `testPools` (ADO). The GH-side knob set is intentionally

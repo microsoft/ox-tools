@@ -66,14 +66,27 @@ when cbh reports an active regression**; locally and in cloud it behaves
 identically (always writes its findings; only the exit code gates), matching the
 local-vs-cloud parity every recipe keeps.
 
+The check is **unscoped**: it ignores the impact-analysis include contract every
+other check honors. A series is only comparable when the same suite is measured at
+every commit, so measuring an impact-scoped subset would punch holes in the history
+that detection cannot tell apart from a benchmark being deleted.
+
 ## 4. History as cross-run state
 
 Each scheduled run checks out with full history (analysis reads the commit graph
-to order series and locate the base merge-base), restores the latest history
-**artifact from the default branch**, runs collect → apply-blessings → analyze,
-and publishes the updated history as this run's artifact. Because each run
-republishes the whole accumulated directory, only the newest snapshot is ever
-needed.
+to order series and locate the base merge-base), restores the history published by
+the most recent run on the **default branch that carries one**, runs collect →
+apply-blessings → analyze, and publishes the updated history as this run's
+artifact. Because each run republishes the whole accumulated directory, only the
+newest snapshot is ever needed.
+
+Both the restore and the publish are indifferent to the run's outcome. A flagged
+regression fails the build, so restoring only from green runs — or publishing only
+on success — would throw away exactly the samples taken while the pipeline stayed
+red, which is the stretch of history a reviewer most needs.
+
+Every series is partitioned by a machine key, so each leg of the group's matrix
+carries its own artifact rather than sharing one.
 
 The persistence is a **rolling window** on CI-native artifacts — portable and
 zero-config, and on eviction it degrades to a harmless cold start, since
@@ -130,13 +143,18 @@ a reviewed pull request accepting the change → the next scheduled run applies 
 and the build returns to green. The accumulated entries are an audit trail of
 every deliberate tradeoff.
 
+Idempotence comes from reconciling the committed entries against the blessings
+already recorded in the store, so re-running the job never re-appends a sidecar
+that is already in effect.
+
 ## 8. Boundaries and caveats
 
 - **Hosted-runner machine-key density.** cbh partitions by a hardware
   fingerprint; a heterogeneous hosted pool can split a series into per-key
   partitions too sparse to analyze. Whether a hosted pool stays dense enough
   depends on its hardware homogeneity; self-hosted or dedicated runners avoid the
-  concern.
+  concern. An adopter who knows their pool is uniform enough can substitute a
+  stable pool label for the fingerprint, trading partition fidelity for density.
 - **Attribution is coarse under sparse benchmarking.** Benches do not run on
   every commit, so the attributed commit is the first *benchmarked* one after a
   regression and may bundle several changes — an honest range, not always a

@@ -45,6 +45,7 @@ const GROUPS: &[&str] = &[
     "scheduled-advisories",
     "scheduled-runtime-analysis",
     "scheduled-exhaustive",
+    "scheduled-benchmarks",
 ];
 
 /// Embedded template for one per-group composite action. `__GROUP__` is
@@ -123,6 +124,7 @@ pub(crate) const GROUP_ACTIONS: &[(&str, &str)] = &[
         ".github/actions/anvil-scheduled-runtime-analysis/action.yml",
     ),
     ("scheduled-exhaustive", ".github/actions/anvil-scheduled-exhaustive/action.yml"),
+    ("scheduled-benchmarks", ".github/actions/anvil-scheduled-benchmarks/action.yml"),
 ];
 
 /// All GitHub backend artifacts in emission order.
@@ -244,6 +246,7 @@ mod tests {
             "scheduled-advisories:",
             "scheduled-runtime-analysis:",
             "scheduled-exhaustive:",
+            "scheduled-benchmarks:",
         ] {
             assert!(
                 SCHEDULED_IMPL_WORKFLOW.contains(needle),
@@ -256,6 +259,31 @@ mod tests {
             1,
             "disk cleanup should be enabled for the scheduled test group"
         );
+    }
+
+    #[test]
+    fn scheduled_benchmarks_job_round_trips_the_history_artifact() {
+        // Analysis walks the commit graph, so the leg needs full history.
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("fetch-depth: 0"));
+        // Per-leg artifact names: the history is partitioned per machine,
+        // and upload-artifact rejects a name reused within one run.
+        assert_eq!(
+            SCHEDULED_IMPL_WORKFLOW.matches("bench-history-${{ matrix.os }}").count(),
+            2,
+            "the restore and save steps must agree on the per-leg artifact name"
+        );
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("actions/upload-artifact@"));
+        // Saving on failure too: the samples collected while the pipeline
+        // is red from a regression are the ones that matter.
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("gh run download"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("gh issue create"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("gh issue edit"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("issues: write"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("GITHUB_STEP_SUMMARY"));
+        // The reusable workflow cannot grant itself more than the caller,
+        // so the root workflow must pass the same permission through.
+        assert!(SCHEDULED_ROOT_WORKFLOW.contains("issues: write"));
+        assert!(SCHEDULED_ROOT_WORKFLOW.contains("actions: read"));
     }
 
     #[test]

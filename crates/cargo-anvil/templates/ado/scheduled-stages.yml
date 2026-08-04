@@ -106,3 +106,46 @@ stages:
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-exhaustive.yml
+
+  - stage: scheduled_benchmarks
+    displayName: anvil scheduled-benchmarks
+    dependsOn: []
+    jobs:
+      # Benchmark regression detection. OS scope matches
+      # scheduled-exhaustive. The history is partitioned per machine, so
+      # each leg carries its own artifact rather than sharing one name.
+      # The restore step runs first; the wrapper's `artifacts` contract
+      # publishes the updated store at the end of the job -- including
+      # when the analysis failed the job, so the samples collected while
+      # the pipeline is red are not lost.
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          # The analysis orders each series by first-parent commit
+          # topology and locates the merge-base, so it needs the whole
+          # commit graph.
+          fetchDepth: '0'
+          artifacts:
+            - name: bench-history-linux
+              path: target/anvil/bench-history
+          steps:
+            - template: steps/bench-history-restore.yml
+              parameters:
+                artifact: bench-history-linux
+            - template: steps/scheduled-benchmarks.yml
+            - template: steps/bench-history-summary.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          fetchDepth: '0'
+          artifacts:
+            - name: bench-history-windows
+              path: target/anvil/bench-history
+          steps:
+            - template: steps/bench-history-restore.yml
+              parameters:
+                artifact: bench-history-windows
+            - template: steps/scheduled-benchmarks.yml
+            - template: steps/bench-history-summary.yml

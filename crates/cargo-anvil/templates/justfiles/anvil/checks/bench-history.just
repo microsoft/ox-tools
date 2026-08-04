@@ -1,0 +1,205 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/benchmarks.md
+
+# Unscoped by design. A benchmark's series is only comparable when the
+# same suite is measured at every commit, so impact-scoping the run would
+# punch holes in the history that detection cannot distinguish from a
+# benchmark being deleted. The recipe therefore ignores the
+# ANVIL_INCLUDE_* contract and always measures the whole workspace.
+#
+# Environment contract (all optional):
+#   ANVIL_BENCH_HISTORY_STORE  history directory (default target/anvil/bench-history)
+#   ANVIL_BENCH_MACHINE_KEY    machine key overriding cbh's hardware fingerprint
+#
+# The store is the cross-run state the cloud wiring restores before and
+# publishes after this recipe; locally it is whatever has accumulated
+# under target/, which on a fresh checkout is empty and analyzes to a
+# clean no-op.
+
+# Run the benchmarks and analyze the accumulated history for regressions.
+[script("pwsh")]
+anvil-bench-history: anvil-bench-history-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+
+    $store = if ($env:ANVIL_BENCH_HISTORY_STORE) { $env:ANVIL_BENCH_HISTORY_STORE } else { 'target/anvil/bench-history' }
+    $reportDir = 'target/anvil/bench'
+    $findingsMd = Join-Path $reportDir 'findings.md'
+    $summaryMd = Join-Path $reportDir 'findings-summary.md'
+    $findingsJson = Join-Path $reportDir 'findings.json'
+    $blessingsFile = '.config/bench-blessings.toml'
+
+    [System.IO.Directory]::CreateDirectory($store) | Out-Null
+    [System.IO.Directory]::CreateDirectory($reportDir) | Out-Null
+
+    # The machine key partitions every series. cargo-bench-history derives
+    # it from the host's hardware fingerprint; an adopter whose runner pool
+    # is heterogeneous enough to fragment the series into unanalyzable
+    # partitions sets ANVIL_BENCH_MACHINE_KEY to a stable pool label
+    # instead. It has to be the same on collect, bless, list and analyze,
+    # so every invocation below splats the same argument list.
+    $key = @()
+    if ($env:ANVIL_BENCH_MACHINE_KEY) { $key = @('--machine-key', $env:ANVIL_BENCH_MACHINE_KEY) }
+
+    # --skip-existing makes a re-run at an already-recorded commit a
+    # success that writes nothing, so a re-queued scheduled build does not
+    # fail on the duplicate and does not overwrite the original sample.
+    Write-Host 'anvil-bench-history: collecting benchmark results'
+    & cargo bench-history collect --local="$store" --skip-existing --all-features @key
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    # Blessings accept an intentional change. They live in a reviewed,
+    # committed file and are applied into the store here, ahead of the
+    # analysis, so the store stays single-writer.
+    & "{{just_executable()}}" _anvil-bench-history-bless "$store" "$blessingsFile"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    Write-Host 'anvil-bench-history: analyzing history'
+    & cargo bench-history analyze --local="$store" `
+        --markdown $findingsMd --markdown-summary $summaryMd --json $findingsJson @key
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    # Findings never affect cargo-bench-history's own exit code -- the
+    # machine-readable report is the signal. An *active* regression is the
+    # one thing that gates: an inactive finding has already recovered, and
+    # an improvement needs no action.
+    $report = Get-Content -LiteralPath $findingsJson -Raw | ConvertFrom-Json
+    $regressions = @($report.findings | Where-Object { $_.direction -eq 'regression' -and $_.active })
+    if ($regressions.Count -eq 0) {
+        Write-Host 'anvil-bench-history: no active regressions'
+        exit 0
+    }
+
+    Write-Host ''
+    Write-Host "anvil-bench-history: $($regressions.Count) active benchmark regression(s)" -ForegroundColor Red
+    foreach ($r in $regressions) {
+        $id = ($r.segments -join '/')
+        $delta = '{0:P2}' -f $r.relative_delta
+        Write-Host "  $id ($($r.kind)) $delta at $($r.commit)"
+    }
+    Write-Host ''
+    Write-Host "Findings: $findingsMd"
+    Write-Host "Fix the regression, or accept it by adding an entry to $blessingsFile."
+    exit 1
+
+# Apply the committed blessings into the history store, idempotently.
+#
+# `bless` writes an append-only sidecar into the store, so an entry that
+# is already in effect must not be re-applied on every scheduled run.
+# The already-applied set comes from `list blessings`, widened past the
+# default look-back so an old entry is not mistaken for a missing one.
+#
+# The file is a table array; unknown keys are ignored so the schema can
+# grow without breaking older tool pins:
+#
+#   [[blessing]]
+#   benchmark = "my_pkg/my_group/my_case"
+#   commit = "8392995a"
+#   reason = "switched to the arena allocator; the extra setup is intentional"
+[private]
+[script("pwsh")]
+_anvil-bench-history-bless store blessings:
+    $ErrorActionPreference = 'Stop'
+    $store = '{{store}}'
+    $blessingsFile = '{{blessings}}'
+
+    if (-not (Test-Path -LiteralPath $blessingsFile)) {
+        Write-Host "anvil-bench-history: no $blessingsFile; nothing to bless"
+        exit 0
+    }
+
+    # A deliberately small TOML subset: `[[blessing]]` headers plus
+    # `key = "value"` pairs. Depending on a TOML parser here would mean a
+    # second tool pin for three string fields.
+    $entries = New-Object System.Collections.Generic.List[object]
+    $current = $null
+    foreach ($rawLine in (Get-Content -LiteralPath $blessingsFile)) {
+        $line = ($rawLine -split '#', 2)[0].Trim()
+        if (-not $line) { continue }
+        if ($line -eq '[[blessing]]') {
+            $current = @{}
+            $entries.Add($current) | Out-Null
+            continue
+        }
+        if ($line -match '^\[') {
+            Write-Error "anvil-bench-history: unexpected table '$line' in $blessingsFile (expected only [[blessing]])"
+            exit 1
+        }
+        if ($line -match '^([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*"(.*)"$') {
+            if ($null -eq $current) {
+                Write-Error "anvil-bench-history: key '$($Matches[1])' outside any [[blessing]] in $blessingsFile"
+                exit 1
+            }
+            $current[$Matches[1]] = $Matches[2]
+            continue
+        }
+        Write-Error ('anvil-bench-history: cannot parse ''{0}'' in {1} (expected a [[blessing]] header or a key = "value" pair)' -f $line, $blessingsFile)
+        exit 1
+    }
+
+    if ($entries.Count -eq 0) {
+        Write-Host "anvil-bench-history: $blessingsFile declares no blessings"
+        exit 0
+    }
+
+    foreach ($e in $entries) {
+        foreach ($required in @('benchmark', 'commit', 'reason')) {
+            if (-not $e[$required]) {
+                Write-Error "anvil-bench-history: a [[blessing]] in $blessingsFile is missing '$required'"
+                exit 1
+            }
+        }
+    }
+
+    $key = @()
+    if ($env:ANVIL_BENCH_MACHINE_KEY) { $key = @('--machine-key', $env:ANVIL_BENCH_MACHINE_KEY) }
+
+    $tmpDir = $env:RUNNER_TEMP
+    if (-not $tmpDir) { $tmpDir = $env:AGENT_TEMPDIRECTORY }
+    if (-not $tmpDir) { $tmpDir = [System.IO.Path]::GetTempPath() }
+    $listJson = Join-Path $tmpDir 'anvil-bench-blessings.json'
+
+    & cargo bench-history list blessings --all --local="$store" `
+        --since 1970-01-01 --no-text --json $listJson @key
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $applied = @((Get-Content -LiteralPath $listJson -Raw | ConvertFrom-Json).blessings)
+
+    foreach ($e in $entries) {
+        $commit = $e['commit']
+        $benchmark = $e['benchmark']
+        # Resolve to a full commit id up front: the file may carry an
+        # abbreviated id, and a bogus one should fail here with git's own
+        # message rather than silently bless nothing.
+        $resolved = (& git rev-parse --verify "$commit^{commit}" 2>$null)
+        if ($LASTEXITCODE -ne 0 -or -not $resolved) {
+            Write-Error "anvil-bench-history: commit '$commit' in $blessingsFile is not present in this clone"
+            exit 1
+        }
+        $resolved = $resolved.Trim()
+        # Stored commits are abbreviated, and a stored blessing names
+        # either the concrete benchmark it resolved to (once a run exists
+        # at that commit) or the prefix filter it was issued with.
+        $already = $applied | Where-Object {
+            $resolved.StartsWith($_.commit) -and
+            (($_.benchmark -and $_.benchmark.StartsWith($benchmark)) -or ($_.prefixes -contains $benchmark))
+        }
+        if ($already) {
+            Write-Host "anvil-bench-history: blessing already in effect: $benchmark at $commit"
+            continue
+        }
+        Write-Host "anvil-bench-history: blessing $benchmark at $commit -- $($e['reason'])"
+        & cargo bench-history bless --local="$store" --context $resolved @key $benchmark
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+
+# Install prerequisites for the `anvil-bench-history` recipe.
+[group("anvil-setup")]
+anvil-bench-history-setup installer="install": (anvil-tool-cargo-bench-history-install installer)
+
+# Validate prerequisites for the `anvil-bench-history` recipe.
+[group("anvil-setup")]
+anvil-bench-history-validate-prereqs: anvil-tool-cargo-bench-history-validate-prereqs

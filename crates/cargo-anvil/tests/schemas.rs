@@ -97,6 +97,18 @@ fn taplo_validates_emitted_toml_files() {
 #[test]
 fn actionlint_validates_emitted_workflows() {
     let tmp = run_with_backend("github");
+    // actionlint refuses to run outside a git repository ("no project was
+    // found in any parent directories"), so the generated tree has to look
+    // like one before the workflows can be validated.
+    let Some(init) = try_run(Command::new("git").args(["init", "--quiet"]).current_dir(tmp.path())) else {
+        eprintln!("skipping: git not installed");
+        return;
+    };
+    assert!(
+        init.status.success(),
+        "git init failed in the fixture:\n{}",
+        String::from_utf8_lossy(&init.stderr)
+    );
     let mut cmd = Command::new("actionlint");
     cmd.current_dir(tmp.path());
     let Some(out) = try_run(&mut cmd) else {
@@ -141,6 +153,7 @@ fn just_lists_emitted_recipes() {
         ("anvil-scheduled", "# Run all scheduled checks."),
         ("anvil-scheduled-advisories", "# Run the scheduled advisory checks."),
         ("anvil-scheduled-exhaustive", "# Run the scheduled exhaustive checks."),
+        ("anvil-scheduled-benchmarks", "# Run the scheduled benchmark regression detection."),
         ("anvil-scheduled-runtime-analysis", "# Run the scheduled runtime analysis."),
         ("anvil-scheduled-test", "# Run the scheduled tests."),
     ] {

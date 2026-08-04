@@ -18,4 +18,10 @@ jobs:
     uses: ./.github/workflows/anvil-scheduled-impl.yml
     permissions:
       contents: read
+      # Restoring the history reads the Actions runs/artifacts API.
+      actions: read
+      # The scheduled-benchmarks job files the regression tracking issue.
+      # A reusable workflow cannot grant itself more than the caller does,
+      # so the grant is repeated here and narrowed to that one job inside.
+      issues: write
     secrets: inherit
