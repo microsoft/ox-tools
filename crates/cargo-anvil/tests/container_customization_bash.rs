@@ -180,12 +180,7 @@ fn run_driver_without_customization(root: &Path, recipe: &str, env: &[(&str, &st
     run_driver_maybe_customized(root, None, &[recipe], env)
 }
 
-fn run_driver_maybe_customized(
-    root: &Path,
-    customize_sh_body: Option<&str>,
-    recipe_args: &[&str],
-    env: &[(&str, &str)],
-) -> DriverRun {
+fn run_driver_maybe_customized(root: &Path, customize_sh_body: Option<&str>, recipe_args: &[&str], env: &[(&str, &str)]) -> DriverRun {
     let customize = root.join(".anvil/container/customize.sh");
     match customize_sh_body {
         Some(body) => write(&customize, body),
