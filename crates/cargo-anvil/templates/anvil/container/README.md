@@ -225,7 +225,6 @@ It declares four things, all optional:
 | `[[container.cache]]` | Persistent named cache volumes | No |
 | `[[container.mount]]` | Explicit host mounts | No |
 | `[[container.command]]` | Repository commands runnable in the container | No |
-
 Run `cargo anvil` after editing it. `cargo-anvil` validates the file and
 compiles it into the generated `Containerfile` and `runtime.conf`; the drivers
 read the generated files, never the TOML. If the two fall out of step,
@@ -251,6 +250,32 @@ Cache scope decides what a volume is shared with. `worktree` is named for what
 it keys on — a hash of the worktree path — so two linked worktrees of the same
 repository do **not** share one; use `global` when the content is genuinely
 interchangeable.
+
+### Registered commands
+
+A repository can make its own `just` recipes runnable in the container:
+
+```toml
+[[container.command]]
+name = "build-image"
+recipe = "build-service-image"
+workdir = "services/gateway"
+
+[[container.command.arg]]
+name = "tag"
+type = "token"        # or "integer", "path", "enum"
+```
+
+```text
+just anvil-container anvil-clippy anvil-fmt   # every argument is an anvil recipe
+just anvil-container build-image v1.2.3       # one registered command with arguments
+```
+
+A command name can never start with `anvil-`, so the first argument selects
+between the two modes with no flag, and existing `anvil-*` invocations are
+unchanged. Arguments are validated against their declared type before anything
+starts, and the recipe is invoked as `just <recipe> -- <args>` so a value can
+never be read as a `just` option. Argument values may not contain whitespace.
 
 > [!WARNING]
 > `.anvil/config.toml` is trusted repository content, in the same class as

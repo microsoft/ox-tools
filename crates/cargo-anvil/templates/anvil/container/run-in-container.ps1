@@ -81,31 +81,12 @@ if ($env:ANVIL_IN_CONTAINER) {
     exit $LASTEXITCODE
 }
 
-foreach ($recipeArg in $Recipe) {
-    if ($recipeArg -notmatch '^_?anvil-[A-Za-z0-9-]+$') {
-        throw "anvil-container: expected each argument to be an anvil-* recipe, got '$recipeArg'."
-    }
-}
-
-if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) {
-    throw 'anvil-container: WSL 2 is required. See .anvil/container/README.md.'
-}
-
-$versionText = (& wsl -e docker version --format '{{.Server.Version}}' 2>$null)
-if ($LASTEXITCODE -ne 0 -or -not $versionText) {
-    throw 'anvil-container: `wsl -e docker version` must succeed. Install or start Docker Engine in the default WSL distribution; this driver does not invoke Windows docker.exe.'
-}
-$versionText = $versionText.Trim()
-if ((ConvertTo-AnvilVersion $versionText) -lt [version]'23.0.0') {
-    throw "anvil-container: Docker Engine 23.0.0 or newer is required (found $versionText)."
-}
-$wslArchitecture = (& wsl -e uname -m 2>$null)
-if ($LASTEXITCODE -eq 0 -and $wslArchitecture) {
-    $wslArchitecture = $wslArchitecture.Trim()
-    if ($wslArchitecture -notin @('x86_64', 'amd64')) {
-        [Console]::Error.WriteLine(
-            "anvil-container: warning: $wslArchitecture requires emulation for linux/amd64; builds and checks may be substantially slower."
-        )
+# Argument validation happens after runtime.conf is read: which names are
+# registered commands is repository data, not something this script knows up
+# front. Until then, only the shape common to both modes is enforced.
+foreach ($candidateArg in $Recipe) {
+    if ($candidateArg -notmatch '^[A-Za-z0-9_.:/-]+$') {
+        throw "anvil-container: argument '$candidateArg' contains characters that are never valid in a recipe name or an argument value."
     }
 }
 
@@ -115,11 +96,7 @@ if ($LASTEXITCODE -ne 0 -or -not $repoRoot) {
 }
 
 $scriptDir = Join-Path $repoRoot '.anvil/container'
-$wslRepoRoot = (& wsl -e wslpath -a $repoRoot).Trim()
-if ($LASTEXITCODE -ne 0 -or -not $wslRepoRoot) {
-    throw 'anvil-container: could not translate the repository path into the default WSL distribution.'
-}
-$wslScriptDir = "$wslRepoRoot/.anvil/container"
+
 
 # The generated runtime file carries the repository's declarations and a
 # coherence record over the configuration and every artifact derived from it.
@@ -149,6 +126,8 @@ if ($hasConfig -ne $hasRuntime) { Assert-AnvilContainerFresh }
 
 $anvilCacheRecords = @()
 $anvilMountRecords = @()
+$anvilCommandRecords = @()
+$anvilArgRecords = @()
 if ($hasRuntime) {
     $recordedConfig = ''
     foreach ($line in [IO.File]::ReadAllLines($runtimeConf)) {
@@ -156,6 +135,8 @@ if ($hasRuntime) {
         switch ($fields[0]) {
             'cache' { $anvilCacheRecords += , $fields[1..3] }
             'mount' { $anvilMountRecords += , $fields[1..5] }
+            'command' { $anvilCommandRecords += , $fields[1..3] }
+            'arg' { $anvilArgRecords += , $fields[1..5] }
             'artifact' {
                 $artifactPath = Join-Path $repoRoot $fields[1]
                 if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) { Assert-AnvilContainerFresh }
@@ -168,6 +149,97 @@ if ($hasRuntime) {
     if ($recordedConfig -ne (Get-AnvilContainerChecksum $configFile)) { Assert-AnvilContainerFresh }
 }
 
+# A registered command name can never start with anvil-, so the first argument
+# selects the mode without a flag. Anything else keeps today's rule: every
+# argument is a generated anvil-* recipe.
+$selectedCommand = $null
+$commandRecipe = $null
+$commandWorkdir = $null
+$commandValues = @()
+if ($Recipe.Count -gt 0) {
+    foreach ($record in $anvilCommandRecords) {
+        if ($record[0] -eq $Recipe[0]) {
+            $selectedCommand, $commandRecipe, $commandWorkdir = $record
+            break
+        }
+    }
+}
+
+function Test-AnvilContainerArgument([string]$CommandName, [string]$ArgName, [string]$ArgType, [string]$ArgValues, [string]$Value) {
+    switch ($ArgType) {
+        'token' {
+            if ($Value -cmatch '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') { return }
+            throw "anvil-container: command '$CommandName' argument '$ArgName' must be a token ([A-Za-z0-9][A-Za-z0-9._-]*), got '$Value'."
+        }
+        'integer' {
+            if ($Value -cmatch '^-?[0-9]{1,18}$') { return }
+            throw "anvil-container: command '$CommandName' argument '$ArgName' must be an integer, got '$Value'."
+        }
+        'path' {
+            # Lexical containment only; the value names a path inside the
+            # mounted worktree, which the container resolves itself.
+            if ($Value -and -not $Value.StartsWith('/') -and $Value -notmatch '(^|/)\.\.(/|$)') { return }
+            throw "anvil-container: command '$CommandName' argument '$ArgName' must be a relative path inside the worktree, got '$Value'."
+        }
+        'enum' {
+            if ($Value -cin ($ArgValues -split ',')) { return }
+            throw "anvil-container: command '$CommandName' argument '$ArgName' must be one of: $($ArgValues -replace ',', ', '); got '$Value'."
+        }
+        default { throw "anvil-container: unknown argument type '$ArgType' in runtime.conf." }
+    }
+}
+
+if ($selectedCommand) {
+    $commandValues = @($Recipe | Select-Object -Skip 1)
+    $specs = @($anvilArgRecords | Where-Object { $_[0] -eq $selectedCommand })
+    $requiredCount = @($specs | Where-Object { $_[3] -eq 'required' }).Count
+    if ($commandValues.Count -lt $requiredCount -or $commandValues.Count -gt $specs.Count) {
+        throw "anvil-container: command '$selectedCommand' takes $requiredCount required and $($specs.Count) total argument(s), got $($commandValues.Count)."
+    }
+    for ($index = 0; $index -lt $commandValues.Count; $index++) {
+        $spec = $specs[$index]
+        Test-AnvilContainerArgument $selectedCommand $spec[1] $spec[2] $spec[4] $commandValues[$index]
+    }
+    # Classification and the customization contract both speak in recipes, so a
+    # registered command is represented by the recipe it resolves to.
+    $Recipe = @($commandRecipe)
+} else {
+    foreach ($recipeArg in $Recipe) {
+        if ($recipeArg -notmatch '^_?anvil-[A-Za-z0-9-]+$') {
+            throw "anvil-container: expected each argument to be an anvil-* recipe or a registered command, got '$recipeArg'."
+        }
+    }
+}
+
+# Docker and WSL are only needed once the requested work is known to be valid,
+# so an argument mistake costs no container-engine interaction at all.
+if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) {
+    throw 'anvil-container: WSL 2 is required. See .anvil/container/README.md.'
+}
+
+$versionText = (& wsl -e docker version --format '{{.Server.Version}}' 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not $versionText) {
+    throw 'anvil-container: `wsl -e docker version` must succeed. Install or start Docker Engine in the default WSL distribution; this driver does not invoke Windows docker.exe.'
+}
+$versionText = $versionText.Trim()
+if ((ConvertTo-AnvilVersion $versionText) -lt [version]'23.0.0') {
+    throw "anvil-container: Docker Engine 23.0.0 or newer is required (found $versionText)."
+}
+$wslArchitecture = (& wsl -e uname -m 2>$null)
+if ($LASTEXITCODE -eq 0 -and $wslArchitecture) {
+    $wslArchitecture = $wslArchitecture.Trim()
+    if ($wslArchitecture -notin @('x86_64', 'amd64')) {
+        [Console]::Error.WriteLine(
+            "anvil-container: warning: $wslArchitecture requires emulation for linux/amd64; builds and checks may be substantially slower."
+        )
+    }
+}
+
+$wslRepoRoot = (& wsl -e wslpath -a $repoRoot).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $wslRepoRoot) {
+    throw 'anvil-container: could not translate the repository path into the default WSL distribution.'
+}
+$wslScriptDir = "$wslRepoRoot/.anvil/container"
 # A linked worktree keeps objects, refs, and configuration in the common Git
 # directory, which lies outside the mounted worktree. Mount exactly that
 # directory read-only so history and remote discovery work in the container
@@ -482,6 +554,13 @@ try {
 
     if ($Recipe.Count -eq 0) {
         & wsl -e docker @runArgs --interactive --tty $image bash
+    } elseif ($selectedCommand) {
+        # `--` stops a value ever being read as a just option. It is placed in
+        # the splatted array rather than written literally, because PowerShell
+        # consumes a bare `--` as its own end-of-parameters marker.
+        if ($commandWorkdir) { $runArgs += @('--workdir', "/workspace/$commandWorkdir") }
+        $justArgs = @($commandRecipe, '--') + $commandValues
+        & wsl -e docker @runArgs $image just @justArgs
     } else {
         & wsl -e docker @runArgs $image just @Recipe
     }

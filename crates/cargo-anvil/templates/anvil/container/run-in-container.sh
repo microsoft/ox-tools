@@ -5,9 +5,12 @@ if [[ -n "${ANVIL_IN_CONTAINER:-}" ]]; then
     if (($# == 0)); then exec bash; else exec just "$@"; fi
 fi
 
-for recipe_arg in "$@"; do
-    if [[ ! "$recipe_arg" =~ ^_?anvil-[A-Za-z0-9-]+$ ]]; then
-        echo "anvil-container: expected each argument to be an anvil-* recipe, got '$recipe_arg'." >&2
+# Argument validation happens after runtime.conf is read: which names are
+# registered commands is repository data, not something this script knows up
+# front. Until then, only the shape common to both modes is enforced.
+for candidate_arg in "$@"; do
+    if [[ ! "$candidate_arg" =~ ^[A-Za-z0-9_.:/-]+$ ]]; then
+        echo "anvil-container: argument '$candidate_arg' contains characters that are never valid in a recipe name or an argument value." >&2
         exit 2
     fi
 done
@@ -43,25 +46,6 @@ version_at_least() {
     ((found_patch >= required_patch))
 }
 
-command -v docker >/dev/null 2>&1 || {
-    echo "anvil-container: Docker Engine is required. See .anvil/container/README.md." >&2
-    exit 1
-}
-
-version="$(docker version --format '{{.Server.Version}}' 2>/dev/null)" || {
-    echo "anvil-container: Docker Engine is unavailable. Start the Docker service and ensure the current user can access it." >&2
-    exit 1
-}
-minimum="23.0.0"
-if ! version_at_least "$version" "$minimum"; then
-    echo "anvil-container: Docker Engine $minimum or newer is required (found $version)." >&2
-    exit 1
-fi
-host_arch="$(uname -m 2>/dev/null || true)"
-case "$host_arch" in
-    x86_64 | amd64 | '') ;;
-    *) echo "anvil-container: warning: $host_arch requires emulation for linux/amd64; builds and checks may be substantially slower." >&2 ;;
-esac
 
 # A linked worktree created on Windows records an absolute Windows `gitdir`
 # pointer that Git inside WSL cannot follow, so translate it before any Git
@@ -119,7 +103,7 @@ anvil_container_stale() {
 if [[ -f "$config_file" && ! -f "$runtime_conf" ]] || [[ ! -f "$config_file" && -f "$runtime_conf" ]]; then
     anvil_container_stale
 fi
-declare -a anvil_cache_records=() anvil_mount_records=()
+declare -a anvil_cache_records=() anvil_mount_records=() anvil_command_records=() anvil_arg_records=()
 if [[ -f "$runtime_conf" ]]; then
     expected_config="$(anvil_container_checksum_of "$config_file")"
     recorded_config=""
@@ -127,6 +111,8 @@ if [[ -f "$runtime_conf" ]]; then
         case "$kind" in
             cache) anvil_cache_records+=("$field_a"$'\t'"$field_b"$'\t'"$field_c") ;;
             mount) anvil_mount_records+=("$field_a"$'\t'"$field_b"$'\t'"$field_c"$'\t'"$field_d"$'\t'"$field_e") ;;
+            command) anvil_command_records+=("$field_a"$'\t'"$field_b"$'\t'"$field_c") ;;
+            arg) anvil_arg_records+=("$field_a"$'\t'"$field_b"$'\t'"$field_c"$'\t'"$field_d"$'\t'"$field_e") ;;
             artifact)
                 [[ -f "$repo_root/$field_a" ]] || anvil_container_stale
                 [[ "$(anvil_container_checksum_of "$repo_root/$field_a")" == "$field_b" ]] || anvil_container_stale
@@ -138,6 +124,115 @@ if [[ -f "$runtime_conf" ]]; then
     [[ "$recorded_config" == "$expected_config" ]] || anvil_container_stale
 fi
 
+# A registered command name can never start with anvil-, so the first argument
+# selects the mode without a flag. Anything else keeps today's rule: every
+# argument is a generated anvil-* recipe.
+selected_command=""
+command_recipe=""
+command_workdir=""
+if (($# > 0)); then
+    for record in ${anvil_command_records[@]+"${anvil_command_records[@]}"}; do
+        IFS=$'\t' read -r candidate_name candidate_recipe candidate_workdir <<<"$record"
+        if [[ "$1" == "$candidate_name" ]]; then
+            selected_command="$candidate_name"
+            command_recipe="$candidate_recipe"
+            command_workdir="$candidate_workdir"
+            break
+        fi
+    done
+fi
+
+anvil_container_validate_argument() {
+    local command_name="$1" arg_name="$2" arg_type="$3" arg_values="$4" value="$5"
+    case "$arg_type" in
+        token)
+            [[ "$value" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] && return 0
+            echo "anvil-container: command '$command_name' argument '$arg_name' must be a token ([A-Za-z0-9][A-Za-z0-9._-]*), got '$value'." >&2
+            ;;
+        integer)
+            [[ "$value" =~ ^-?[0-9]{1,18}$ ]] && return 0
+            echo "anvil-container: command '$command_name' argument '$arg_name' must be an integer, got '$value'." >&2
+            ;;
+        path)
+            # Lexical containment only; the value names a path inside the
+            # mounted worktree, which the container resolves itself.
+            if [[ "$value" != /* && ! "$value" =~ (^|/)\.\.(/|$) && -n "$value" ]]; then return 0; fi
+            echo "anvil-container: command '$command_name' argument '$arg_name' must be a relative path inside the worktree, got '$value'." >&2
+            ;;
+        enum)
+            local candidate
+            IFS=, read -r -a enum_values <<<"$arg_values"
+            for candidate in ${enum_values[@]+"${enum_values[@]}"}; do
+                [[ "$value" == "$candidate" ]] && return 0
+            done
+            echo "anvil-container: command '$command_name' argument '$arg_name' must be one of: ${arg_values//,/, }; got '$value'." >&2
+            ;;
+        *)
+            echo "anvil-container: unknown argument type '$arg_type' in runtime.conf." >&2
+            ;;
+    esac
+    exit 2
+}
+
+declare -a command_values=()
+if [[ -n "$selected_command" ]]; then
+    shift
+    declare -a spec_names=() spec_types=() spec_required=() spec_values=()
+    for record in ${anvil_arg_records[@]+"${anvil_arg_records[@]}"}; do
+        IFS=$'\t' read -r owner arg_name arg_type arg_required arg_values <<<"$record"
+        [[ "$owner" == "$selected_command" ]] || continue
+        spec_names+=("$arg_name")
+        spec_types+=("$arg_type")
+        spec_required+=("$arg_required")
+        spec_values+=("$arg_values")
+    done
+    required_count=0
+    for state in ${spec_required[@]+"${spec_required[@]}"}; do
+        [[ "$state" == "required" ]] && ((required_count += 1))
+    done
+    if (($# < required_count || $# > ${#spec_names[@]})); then
+        echo "anvil-container: command '$selected_command' takes $required_count required and ${#spec_names[@]} total argument(s), got $#." >&2
+        exit 2
+    fi
+    for index in "${!spec_names[@]}"; do
+        ((index < $#)) || break
+        anvil_container_validate_argument \
+            "$selected_command" "${spec_names[index]}" "${spec_types[index]}" "${spec_values[index]}" "${@:index+1:1}"
+    done
+    command_values=("$@")
+    # Classification and the customization contract both speak in recipes, so a
+    # registered command is represented by the recipe it resolves to.
+    set -- "$command_recipe"
+else
+    for recipe_arg in "$@"; do
+        if [[ ! "$recipe_arg" =~ ^_?anvil-[A-Za-z0-9-]+$ ]]; then
+            echo "anvil-container: expected each argument to be an anvil-* recipe or a registered command, got '$recipe_arg'." >&2
+            exit 2
+        fi
+    done
+fi
+
+# Docker is only needed once the requested work is known to be valid, so an
+# argument mistake costs no container-engine interaction at all.
+command -v docker >/dev/null 2>&1 || {
+    echo "anvil-container: Docker Engine is required. See .anvil/container/README.md." >&2
+    exit 1
+}
+
+version="$(docker version --format '{{.Server.Version}}' 2>/dev/null)" || {
+    echo "anvil-container: Docker Engine is unavailable. Start the Docker service and ensure the current user can access it." >&2
+    exit 1
+}
+minimum="23.0.0"
+if ! version_at_least "$version" "$minimum"; then
+    echo "anvil-container: Docker Engine $minimum or newer is required (found $version)." >&2
+    exit 1
+fi
+host_arch="$(uname -m 2>/dev/null || true)"
+case "$host_arch" in
+    x86_64 | amd64 | '') ;;
+    *) echo "anvil-container: warning: $host_arch requires emulation for linux/amd64; builds and checks may be substantially slower." >&2 ;;
+esac
 # A linked worktree keeps objects, refs, and configuration in the common Git
 # directory, which lies outside the mounted worktree. Mount exactly that
 # directory read-only so history and remote discovery work in the container
@@ -494,6 +589,14 @@ fi
 
 if (($# == 0)); then
     docker "${run_args[@]}" --interactive --tty "$image" bash
+    exit $?
+fi
+if [[ -n "$selected_command" ]]; then
+    # `--` stops a value ever being read as a just option.
+    if [[ -n "$command_workdir" ]]; then
+        run_args+=(--workdir "/workspace/$command_workdir")
+    fi
+    docker "${run_args[@]}" "$image" just "$command_recipe" -- ${command_values[@]+"${command_values[@]}"}
     exit $?
 fi
 docker "${run_args[@]}" "$image" just "$@"
