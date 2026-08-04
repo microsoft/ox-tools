@@ -91,6 +91,13 @@ fn install_fake_wsl(bin_dir: &Path) {
         r"
 $command = $args[1]
 $commandArgs = @($args | Select-Object -Skip 2)
+if ($command -eq 'env') {
+    $dockerIndex = [Array]::IndexOf($commandArgs, 'docker')
+    if ($dockerIndex -ge 0) {
+        $command = 'docker'
+        $commandArgs = @($commandArgs | Select-Object -Skip ($dockerIndex + 1))
+    }
+}
 switch ($command) {
     'wslpath' {
         if ($env:FAKE_TOKEN_PATH_LOG -and $commandArgs[-1] -like '*anvil-github-token-*') {

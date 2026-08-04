@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.3.0"
-catalog_checksum = "sha256:dd739c9d26b66d6aaba1c10913fd949ce8b50023494072cbdb19c62ef808f2ee"
+catalog_checksum = "sha256:57e8c243a27e02105e3349111a0d7ee1fa8bb4ad11d4135322ef22f61a452c41"
 
 [[file]]
 path = ".anvil/container/Containerfile"
@@ -13,7 +13,7 @@ checksum = "sha256:1d358aebb4bebe57a150c43853e9ca4a71097b23f6759017ea9eba0a0befc
 
 [[file]]
 path = ".anvil/container/README.md"
-checksum = "sha256:24768b3ea08953ee70f4cdba6f7dfa42232fffe50cc85a547d6fb42e98a9578d"
+checksum = "sha256:d64cc75854f07c840e18d58b3e688ca0d946e8064aeb557ae94d04d15a4602e1"
 
 [[file]]
 path = ".anvil/container/entrypoint.sh"
@@ -29,11 +29,15 @@ checksum = "sha256:152dd7debf3926b4d2ed198c9d28dced202cb177b700b94923939b1f9daf8
 
 [[file]]
 path = ".anvil/container/run-in-container.ps1"
-checksum = "sha256:d4b06e8b3c67aa06ac87a1e6966c0797d9ffce6bdc9a3330817cdd01fe80f2ba"
+checksum = "sha256:b8033fd9696d76e89804d835420589ba720c7117b0a62188a0bf4caf185c41ce"
 
 [[file]]
 path = ".anvil/container/run-in-container.sh"
 checksum = "sha256:e31d2e0e6e2d4f75de5048b1535f736f2f614a386dd09e2471aad41ceac09394"
+
+[[file]]
+path = ".anvil/container/setup-docker-in-wsl.ps1"
+checksum = "sha256:b30a3f425c6b2a7525294a4edcf0e801bd17ff37491e648716ed2bf4881e1409"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"
@@ -213,7 +217,7 @@ checksum = "sha256:9c16366a4cb46e1e7efe7531180f7297d8a37b12c521c7f9f3c4323138d2c
 
 [[file]]
 path = "justfiles/anvil/container/container.just"
-checksum = "sha256:fbfe88ab6102cfe463da1c683bb8a55cfac0a7988a487a0b751f7e3b03397094"
+checksum = "sha256:5c38ee2797e31dabe57e41eee91f620d7fcdee87d811402a81b888933efe0f85"
 
 [[file]]
 path = "justfiles/anvil/groups/pr-fast.just"
@@ -317,6 +321,11 @@ checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103a
 
 [[region]]
 host = "crates/cargo-coverage-gate/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo-each/Cargo.toml"
 id = "anvil-lints"
 checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
 

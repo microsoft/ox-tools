@@ -12,6 +12,16 @@ anvil-container *recipe:
     & '.anvil/container/run-in-container.ps1' @requested
     exit $LASTEXITCODE
 
+[windows]
+[group("anvil-container")]
+anvil-container-doctor:
+    pwsh -NoProfile -File '.anvil/container/setup-docker-in-wsl.ps1' -Doctor
+
+[windows]
+[group("anvil-container")]
+anvil-container-bootstrap:
+    pwsh -NoProfile -File '.anvil/container/setup-docker-in-wsl.ps1'
+
 [unix]
 [group("anvil-container")]
 [script("bash")]
