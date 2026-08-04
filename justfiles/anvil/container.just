@@ -10,7 +10,7 @@
 [script("pwsh", "-NoProfile")]
 anvil-container *recipe:
     $requested = @('{{ replace(recipe, "'", "''") }}' -split '\s+' | Where-Object { $_ })
-    & 'justfiles/anvil/container/run-in-container.ps1' @requested
+    & '.anvil/container/run-in-container.ps1' @requested
     exit $LASTEXITCODE
 
 [unix]
@@ -19,7 +19,7 @@ anvil-container *recipe:
 anvil-container *recipe:
     requested={{ quote(recipe) }}
     if [[ -z "$requested" ]]; then
-        exec bash 'justfiles/anvil/container/run-in-container.sh'
+        exec bash '.anvil/container/run-in-container.sh'
     fi
     read -r -a requested_args <<<"$requested"
-    exec bash 'justfiles/anvil/container/run-in-container.sh' "${requested_args[@]}"
+    exec bash '.anvil/container/run-in-container.sh' "${requested_args[@]}"

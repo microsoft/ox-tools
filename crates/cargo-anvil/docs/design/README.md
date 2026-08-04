@@ -236,6 +236,7 @@ repo/
 ├── .anvil.lock                                    sidecar manifest tracking last-rendered checksums (see updates.md)
 ├── Justfile                                       managed-region: anvil-imports
 ├── justfiles/anvil/                               owned (see local.md)
+├── .anvil/container/                              owned, only with the container backend (see local.md, containers.md)
 ├── Cargo.toml                                     managed-region: anvil-workspace-lints (or anvil-lints in single-crate)
 ├── crates/<member>/Cargo.toml                     managed-region: anvil-lints (one per workspace member)
 ├── deny.toml                                      managed-regions: anvil-deny-{advisories,licenses,bans,sources}
@@ -263,6 +264,11 @@ repo/
 Detail on each host:
 
 - **`Justfile` and `justfiles/anvil/*.just`** — see [local.md](./local.md).
+- **`.anvil/container/`** — the non-recipe container assets (Containerfile,
+  drivers, image-ID helpers, README) emitted only when the catalog includes the
+  optional container backend. `justfiles/` holds `.just` recipes and nothing
+  else, so these live in a tool-owned directory of their own; see
+  [containers.md](./containers.md).
 - **`Cargo.toml` lints regions** — workspace `Cargo.toml` carries the
   `anvil-workspace-lints` region containing a single `[workspace.lints]` table whose
   rust/clippy/rustdoc entries are written in dotted-key form
