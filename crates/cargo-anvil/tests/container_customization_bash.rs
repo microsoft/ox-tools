@@ -16,7 +16,7 @@
 //! [`containers.md`](../docs/design/containers.md#8-container-customization).
 //!
 //! This is the Bash mirror of `container_customization.rs`'s `PowerShell`
-//! driver tests. It generates the real `justfiles/anvil/container/` tree
+//! driver tests. It generates the real `.anvil/container/` tree
 //! with [`cargo_anvil::test_support::run_update`], then runs the generated
 //! `run-in-container.sh` against a fake `docker` on `PATH` so the driver's
 //! own process, argument construction, and validation execute for real —
@@ -75,7 +75,7 @@ fn repo_with_container() -> TempDir {
     write(&root.join("rust-toolchain.toml"), "channel = \"1.93\"\n");
     run_update(&Catalog::anvil(), &local(), root).unwrap();
     assert!(
-        !root.join("justfiles/anvil/container/customize.sh").exists(),
+        !root.join(".anvil/container/customize.sh").exists(),
         "the public catalog must not emit customize.sh by default"
     );
     let status = Command::new("git")
@@ -171,7 +171,7 @@ fn run_driver(root: &Path, customize_sh_body: &str, recipe: &str, env: &[(&str, 
 }
 
 fn run_driver_args(root: &Path, customize_sh_body: &str, recipe_args: &[&str], env: &[(&str, &str)]) -> DriverRun {
-    let container_dir = root.join("justfiles/anvil/container");
+    let container_dir = root.join(".anvil/container");
     write(&container_dir.join("customize.sh"), customize_sh_body);
 
     let bin_dir = root.join("fake-bin");
@@ -185,7 +185,7 @@ fn run_driver_args(root: &Path, customize_sh_body: &str, recipe_args: &[&str], e
 
     let mut command = Command::new("bash");
     command
-        .arg("justfiles/anvil/container/run-in-container.sh")
+        .arg(".anvil/container/run-in-container.sh")
         .args(recipe_args)
         .current_dir(root)
         .env("PATH", path)
@@ -413,7 +413,7 @@ fn cold_run_with_empty_default_arrays_exposes_contract_inputs_scopes_phases_and_
 printf 'exists=%s\n' "$ANVIL_CONTAINER_IMAGE_EXISTS" >> "$FAKE_TEST_LOG"
 printf 'recipes=%s\n' "${ANVIL_CONTAINER_REQUESTED_RECIPES[*]}" >> "$FAKE_TEST_LOG"
 printf 'repo-is-dir=%s\n' "$([[ -d "$ANVIL_CONTAINER_REPO_ROOT" ]] && echo true || echo false)" >> "$FAKE_TEST_LOG"
-printf 'dir-is-container-dir=%s\n' "$([[ "$ANVIL_CONTAINER_DIR" == "$ANVIL_CONTAINER_REPO_ROOT/justfiles/anvil/container" ]] && echo true || echo false)" >> "$FAKE_TEST_LOG"
+printf 'dir-is-container-dir=%s\n' "$([[ "$ANVIL_CONTAINER_DIR" == "$ANVIL_CONTAINER_REPO_ROOT/.anvil/container" ]] && echo true || echo false)" >> "$FAKE_TEST_LOG"
 anvil_test_cleanup() { printf 'cleanup-ran\n' >> "$FAKE_TEST_LOG"; }
 ANVIL_CONTAINER_CLEANUP=anvil_test_cleanup
 "#;

@@ -10,26 +10,28 @@
 use crate::catalog::Artifact;
 
 const RECIPE: &str = include_str!("../../../templates/justfiles/anvil/container/container.just");
-const CONTAINERFILE: &str = include_str!("../../../templates/justfiles/anvil/container/Containerfile");
-const IGNORE: &str = include_str!("../../../templates/justfiles/anvil/container/Containerfile.dockerignore");
-const ENTRYPOINT: &str = include_str!("../../../templates/justfiles/anvil/container/entrypoint.sh");
-const IMAGE_ID: &str = include_str!("../../../templates/justfiles/anvil/container/image-id.ps1");
-const SHELL_IMAGE_ID: &str = include_str!("../../../templates/justfiles/anvil/container/image-id.sh");
-const SHELL_DRIVER: &str = include_str!("../../../templates/justfiles/anvil/container/run-in-container.sh");
-const POWERSHELL_DRIVER: &str = include_str!("../../../templates/justfiles/anvil/container/run-in-container.ps1");
-const README: &str = include_str!("../../../templates/justfiles/anvil/container/README.md");
+const CONTAINERFILE: &str = include_str!("../../../templates/anvil/container/Containerfile");
+const IGNORE: &str = include_str!("../../../templates/anvil/container/Containerfile.dockerignore");
+const ENTRYPOINT: &str = include_str!("../../../templates/anvil/container/entrypoint.sh");
+const IMAGE_ID: &str = include_str!("../../../templates/anvil/container/image-id.ps1");
+const SHELL_IMAGE_ID: &str = include_str!("../../../templates/anvil/container/image-id.sh");
+const SHELL_DRIVER: &str = include_str!("../../../templates/anvil/container/run-in-container.sh");
+const POWERSHELL_DRIVER: &str = include_str!("../../../templates/anvil/container/run-in-container.ps1");
+const WSL_BOOTSTRAP: &str = include_str!("../../../templates/anvil/container/setup-docker-in-wsl.ps1");
+const README: &str = include_str!("../../../templates/anvil/container/README.md");
 
 const RECIPE_PATH: &str = "justfiles/anvil/container/container.just";
-const CONTAINERFILE_PATH: &str = "justfiles/anvil/container/Containerfile";
-const IGNORE_PATH: &str = "justfiles/anvil/container/Containerfile.dockerignore";
-const ENTRYPOINT_PATH: &str = "justfiles/anvil/container/entrypoint.sh";
-const IMAGE_ID_PATH: &str = "justfiles/anvil/container/image-id.ps1";
-const SHELL_IMAGE_ID_PATH: &str = "justfiles/anvil/container/image-id.sh";
-const SHELL_DRIVER_PATH: &str = "justfiles/anvil/container/run-in-container.sh";
-const POWERSHELL_DRIVER_PATH: &str = "justfiles/anvil/container/run-in-container.ps1";
-const README_PATH: &str = "justfiles/anvil/container/README.md";
-const CUSTOMIZE_SHELL_PATH: &str = "justfiles/anvil/container/customize.sh";
-const CUSTOMIZE_POWERSHELL_PATH: &str = "justfiles/anvil/container/customize.ps1";
+const CONTAINERFILE_PATH: &str = ".anvil/container/Containerfile";
+const IGNORE_PATH: &str = ".anvil/container/Containerfile.dockerignore";
+const ENTRYPOINT_PATH: &str = ".anvil/container/entrypoint.sh";
+const IMAGE_ID_PATH: &str = ".anvil/container/image-id.ps1";
+const SHELL_IMAGE_ID_PATH: &str = ".anvil/container/image-id.sh";
+const SHELL_DRIVER_PATH: &str = ".anvil/container/run-in-container.sh";
+const POWERSHELL_DRIVER_PATH: &str = ".anvil/container/run-in-container.ps1";
+const WSL_BOOTSTRAP_PATH: &str = ".anvil/container/setup-docker-in-wsl.ps1";
+const README_PATH: &str = ".anvil/container/README.md";
+const CUSTOMIZE_SHELL_PATH: &str = ".anvil/container/customize.sh";
+const CUSTOMIZE_POWERSHELL_PATH: &str = ".anvil/container/customize.ps1";
 
 /// The full public container artifact group.
 #[must_use]
@@ -43,6 +45,7 @@ pub fn all() -> Vec<Artifact> {
         shell_image_id(),
         shell_driver(),
         powershell_driver(),
+        wsl_bootstrap(),
         readme(),
     ]
 }
@@ -93,6 +96,12 @@ pub fn shell_driver() -> Artifact {
 #[must_use]
 pub fn powershell_driver() -> Artifact {
     Artifact::owned_file(POWERSHELL_DRIVER_PATH, POWERSHELL_DRIVER)
+}
+
+/// The idempotent Windows host bootstrap and doctor for Docker Engine in WSL.
+#[must_use]
+pub fn wsl_bootstrap() -> Artifact {
+    Artifact::owned_file(WSL_BOOTSTRAP_PATH, WSL_BOOTSTRAP)
 }
 
 /// User-facing prerequisites and troubleshooting.
@@ -179,12 +188,12 @@ mod tests {
 
     #[cfg(windows)]
     fn run_image_id(repo: &Path) -> String {
-        run_image_id_command(repo, "pwsh", &["-NoProfile", "-File", "justfiles/anvil/container/image-id.ps1"])
+        run_image_id_command(repo, "pwsh", &["-NoProfile", "-File", ".anvil/container/image-id.ps1"])
     }
 
     #[cfg(unix)]
     fn run_image_id(repo: &Path) -> String {
-        run_image_id_command(repo, "bash", &["justfiles/anvil/container/image-id.sh"])
+        run_image_id_command(repo, "bash", &[".anvil/container/image-id.sh"])
     }
 
     fn write_image_id_fixture(root: &Path) {
@@ -218,16 +227,30 @@ mod tests {
                 SHELL_IMAGE_ID_PATH,
                 SHELL_DRIVER_PATH,
                 POWERSHELL_DRIVER_PATH,
+                WSL_BOOTSTRAP_PATH,
                 README_PATH
             ]
         );
     }
 
     #[test]
+    fn wsl_bootstrap_has_non_mutating_diagnostics_and_safe_boundaries() {
+        assert!(WSL_BOOTSTRAP.contains("[switch]$Doctor"));
+        assert!(WSL_BOOTSTRAP.contains("accepted only with -Doctor and never performs host changes"));
+        assert!(WSL_BOOTSTRAP.contains("wsl.exe --terminate $facts.distro"));
+        assert!(!WSL_BOOTSTRAP.contains("wsl.exe --shutdown"));
+        assert!(!WSL_BOOTSTRAP.contains("docker context"));
+        assert!(!WSL_BOOTSTRAP.contains("winget uninstall"));
+        assert!(WSL_BOOTSTRAP.contains("DOCKER_HOST=unix:///var/run/docker.sock"));
+        assert!(WSL_BOOTSTRAP.contains("wsl.exe -d $registration.Name -- env"));
+        assert!(WSL_BOOTSTRAP.contains("Docker Desktop, WSL distributions, containers, images, and volumes will not be removed."));
+    }
+
+    #[test]
     fn containerfile_installs_the_generated_toolset() {
         assert!(CONTAINERFILE.contains("just anvil-setup"));
         assert!(CONTAINERFILE.contains("COPY . ."));
-        assert!(IGNORE.contains("!justfiles/anvil/container/*"));
+        assert!(IGNORE.contains("!.anvil/container/*"));
         assert!(IGNORE.contains("!justfiles/anvil/checks/*.just"));
         assert!(CONTAINERFILE.contains("anvil_runner := \\\"native\\\""));
         assert!(CONTAINERFILE.contains("requires rust-toolchain.toml"));
@@ -240,13 +263,13 @@ mod tests {
         // must never reach the build context, even though the broader
         // container directory is included above.
         let include_position = IGNORE
-            .find("!justfiles/anvil/container/*")
+            .find("!.anvil/container/*")
             .expect("the container directory inclusion is asserted above");
         let shell_exclude_position = IGNORE
-            .find("justfiles/anvil/container/customize.sh")
+            .find(".anvil/container/customize.sh")
             .expect("customize.sh must be excluded from the build context");
         let powershell_exclude_position = IGNORE
-            .find("justfiles/anvil/container/customize.ps1")
+            .find(".anvil/container/customize.ps1")
             .expect("customize.ps1 must be excluded from the build context");
         assert!(
             !IGNORE[shell_exclude_position..].starts_with('!'),
@@ -265,9 +288,19 @@ mod tests {
     #[test]
     fn drivers_use_docker_and_content_addressing() {
         assert!(RECIPE.contains("replace(recipe, \"'\", \"''\")"));
-        for (driver, customization_source, build_command) in [
-            (SHELL_DRIVER, "source \"$script_dir/customize.sh\"", "docker build \\"),
-            (POWERSHELL_DRIVER, ". $customizeScript", "& wsl -e docker build"),
+        for (driver, customization_source, image_command, build_command) in [
+            (
+                SHELL_DRIVER,
+                "source \"$customize_script\"",
+                "docker image inspect",
+                "docker build \\",
+            ),
+            (
+                POWERSHELL_DRIVER,
+                ". $customizeScript",
+                "@dockerCommand image inspect",
+                "& wsl -e @dockerCommand build",
+            ),
         ] {
             assert!(driver.contains("docker"));
             assert!(driver.contains("ANVIL_CONTAINER_NO_REBUILD"));
@@ -287,9 +320,7 @@ mod tests {
             let auth_position = driver
                 .find("gh auth login --hostname github.com")
                 .expect("GitHub login command is asserted present above");
-            let image_position = driver
-                .find("docker image inspect")
-                .expect("Docker image check is asserted present above");
+            let image_position = driver.find(image_command).expect("Docker image check is asserted present above");
             let customization_position = driver
                 .find(customization_source)
                 .expect("customization source command must be present");
@@ -302,7 +333,8 @@ mod tests {
         assert!(POWERSHELL_DRIVER.contains("image-id.ps1"));
         assert!(IMAGE_ID.contains("[StringComparer]::Ordinal"));
         assert!(POWERSHELL_DRIVER.contains("AnvilContainerPrepareCommand"));
-        assert!(POWERSHELL_DRIVER.contains("wsl -e docker"));
+        assert!(POWERSHELL_DRIVER.contains("wsl -e @dockerCommand"));
+        assert!(POWERSHELL_DRIVER.contains("DOCKER_HOST=unix:///var/run/docker.sock"));
         assert!(!POWERSHELL_DRIVER.contains("BuildInMachine"));
         assert!(POWERSHELL_DRIVER.contains("git rev-parse --show-toplevel 2>$null"));
         assert!(IMAGE_ID.contains("git rev-parse --show-toplevel 2>$null"));
@@ -312,7 +344,7 @@ mod tests {
         assert!(POWERSHELL_DRIVER.contains("Read-Host"));
         assert!(POWERSHELL_DRIVER.contains("ConvertTo-AnvilVersion"));
         assert!(POWERSHELL_DRIVER.contains("isolated anvil-aprz"));
-        assert!(POWERSHELL_DRIVER.contains("docker volume create"));
+        assert!(POWERSHELL_DRIVER.contains("@dockerCommand volume create"));
         assert!(POWERSHELL_DRIVER.contains("--user', \"${containerUid}:${containerGid}\""));
         let token_file_create_position = POWERSHELL_DRIVER
             .find("[IO.File]::Create($githubTokenFile).Dispose()")
@@ -473,7 +505,10 @@ mod tests {
                 .find("must be a string array")
                 .or_else(|| driver.find("anvil_container_validate_array"))
                 .expect("output validation is present");
-            let build_position = driver.find("docker build").expect("build invocation is present");
+            let build_position = driver
+                .find("docker build")
+                .or_else(|| driver.find("@dockerCommand build"))
+                .expect("build invocation is present");
             assert!(
                 validate_position < build_position,
                 "output validation must occur before Docker build"
@@ -529,11 +564,11 @@ mod tests {
         let overridden = run_image_id_command_with_base(
             root,
             "pwsh",
-            &["-NoProfile", "-File", "justfiles/anvil/container/image-id.ps1"],
+            &["-NoProfile", "-File", ".anvil/container/image-id.ps1"],
             Some(override_image),
         );
         #[cfg(unix)]
-        let overridden = run_image_id_command_with_base(root, "bash", &["justfiles/anvil/container/image-id.sh"], Some(override_image));
+        let overridden = run_image_id_command_with_base(root, "bash", &[".anvil/container/image-id.sh"], Some(override_image));
         assert_ne!(base, overridden, "the selected base image must affect the image ID");
 
         write(
@@ -576,8 +611,8 @@ mod tests {
             "nested-custom-recipe:\n    @echo custom\n",
         );
 
-        let shell = run_image_id_command(root, "bash", &["justfiles/anvil/container/image-id.sh"]);
-        let powershell = run_image_id_command(root, "pwsh", &["-NoProfile", "-File", "justfiles/anvil/container/image-id.ps1"]);
+        let shell = run_image_id_command(root, "bash", &[".anvil/container/image-id.sh"]);
+        let powershell = run_image_id_command(root, "pwsh", &["-NoProfile", "-File", ".anvil/container/image-id.ps1"]);
         assert_eq!(shell, powershell);
     }
 
@@ -647,7 +682,7 @@ mod tests {
     fn drivers_support_interactive_shell_mode() {
         assert!(SHELL_DRIVER.contains("--interactive --tty"));
         assert!(SHELL_DRIVER.contains("\"$image\" bash"));
-        assert!(POWERSHELL_DRIVER.contains("wsl -e docker @runArgs --interactive --tty $image bash"));
+        assert!(POWERSHELL_DRIVER.contains("wsl -e @dockerCommand @runArgs --interactive --tty $image bash"));
     }
 
     #[test]

@@ -18,6 +18,23 @@ just anvil-container anvil-clippy
 
 The first run builds the matching image and can take several minutes.
 
+On Windows, validate the host without changing it:
+
+```powershell
+pwsh -NoProfile -File .anvil/container/setup-docker-in-wsl.ps1 -Doctor
+```
+
+If validation reports missing prerequisites, run the idempotent bootstrap:
+
+```powershell
+pwsh -NoProfile -File .anvil/container/setup-docker-in-wsl.ps1
+```
+
+The direct commands work immediately after `cargo anvil` generates this
+directory, before the `just anvil-container*` recipes are used. The equivalent
+convenience recipes are `just anvil-container-doctor` and
+`just anvil-container-bootstrap`.
+
 ## Prerequisites
 
 - [Docker Engine](https://docs.docker.com/engine/install/) 23.0 or newer,
@@ -30,17 +47,48 @@ The first run builds the matching image and can take several minutes.
 - A Linux or WSL environment capable of running `linux/amd64` images, either
   natively on x86-64 or through Docker emulation on ARM64.
 
-On Windows, the driver invokes Docker from the default WSL distribution rather
-than calling Windows `docker.exe`. Regardless of how Docker is installed, this
-command must succeed from PowerShell:
+The supported automatic Windows path is:
+
+- Windows 11 build 22000 or newer;
+- Microsoft Store WSL 2.1 or newer;
+- an Ubuntu 22.04 or 24.04 WSL 2 distribution using systemd;
+- Docker Engine 23.0 or newer. New installations use Docker's official Ubuntu
+  repository; an existing working native Engine is preserved.
+
+The driver invokes Docker in the selected default WSL distribution through
+`wsl.exe`; it does not install or call Windows `docker.exe`, expose the daemon
+over TCP, or configure SSH. This direct command forwarding is the supported
+Windows-to-WSL connection:
 
 ```text
-wsl -e docker version
+wsl -e env -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH DOCKER_HOST=unix:///var/run/docker.sock docker version
 ```
 
-Start the Docker service inside WSL when it is stopped and add the WSL user to
-the `docker` group when non-root access is not already configured. Docker
-Desktop is not required.
+The generated driver clears inherited Docker context and TLS variables and
+forces the local `/var/run/docker.sock`; remote TCP and SSH contexts do not
+satisfy the Anvil host contract.
+
+Pass `-Distro <name>` to the setup script when Anvil should use a registered
+distribution other than the Windows default, then make that distribution the
+default with `wsl --set-default <name>` before running Anvil.
+
+The bootstrap enables systemd, installs Docker Engine and its CLI, Buildx, and
+Compose packages, enables `docker.service`, and adds the current WSL user to
+the `docker` group. It terminates only the selected distribution when a restart
+is needed. Repeated runs detect completed work and converge without duplicating
+configuration. When installation or upgrade is required, the confirmation plan
+lists conflicting Ubuntu Docker packages before replacing them; Docker data
+under `/var/lib/docker` is preserved.
+
+For unattended bootstrap after reviewing the planned changes, invoke the
+script directly with `-Yes`. The `just anvil-container-bootstrap` recipe is
+intentionally interactive.
+
+Docker Desktop is not required. The bootstrap reports Docker Desktop
+coexistence and refuses to overwrite a Docker CLI injected from Docker Desktop.
+It never uninstalls Docker Desktop, unregisters a WSL distribution, or removes
+containers, images, or volumes. Resolve such conflicts manually after reviewing
+their data-loss impact.
 
 On ARM64 hosts, Docker emulates the required `linux/amd64` environment. Image
 builds and checks can therefore be substantially slower than on x86-64 hosts.
@@ -52,6 +100,12 @@ builds and checks can therefore be substantially slower than on x86-64 hosts.
 > permissions before container isolation begins. Reviewing and trusting these
 > files is equivalent to reviewing and trusting any other host-executed script
 > in the checked-out branch.
+
+Membership in the `docker` group grants root-equivalent control of the WSL
+distribution. The bootstrap requires root only inside WSL through
+`wsl.exe --user root`; it does not require an elevated Windows terminal, and
+ordinary Anvil runs require neither Windows elevation nor `sudo`. Review the
+generated setup script before running it from an untrusted branch.
 
 ## Common workflows
 
@@ -177,9 +231,12 @@ same inputs, at the cost of duplicate work.
 
 | Problem | Resolution |
 |---|---|
-| Docker is not found on Linux or WSL | Install Docker Engine 23.0 or newer inside that environment |
-| Docker is unavailable from Windows | Run `wsl -e docker version`; install or start Docker Engine in the default WSL distribution |
-| Docker requires elevated access | Add the Linux/WSL user to the `docker` group, then start a new shell |
+| Docker is not found on Linux | Install Docker Engine 23.0 or newer inside that environment |
+| Docker is unavailable from Windows | Run `just anvil-container-doctor`, then `just anvil-container-bootstrap` |
+| Docker requires elevated access in WSL | Rerun the bootstrap; it adds the current user to the `docker` group and refreshes the selected distribution |
+| Docker resolves under `/mnt/wsl/docker-desktop` | Restore a native Docker CLI inside the selected distribution; the bootstrap intentionally does not remove Docker Desktop or its data |
+| The automatic bootstrap does not support the distribution | Follow Docker's manual Engine installation guide, enable systemd and `docker.service`, add the user to the `docker` group, and verify `wsl -d <name> -- docker version` |
+| A partial installation remains after an error | Rerun the bootstrap; each operation detects current state and safely resumes |
 | ARM64 execution is slow | The current image is `linux/amd64` and runs through Docker emulation |
 | `linux/amd64` cannot run | Configure Docker to run `linux/amd64` images |
 | `[script]` recipes are unavailable | Enable `[script]` support; older `just` versions require `set unstable` |
@@ -202,8 +259,8 @@ A repository or derived catalog can add one trusted customization file per
 supported host:
 
 ```text
-justfiles/anvil/container/customize.sh
-justfiles/anvil/container/customize.ps1
+.anvil/container/customize.sh
+.anvil/container/customize.ps1
 ```
 
 The driver sources the matching file as trusted host code before authentication,

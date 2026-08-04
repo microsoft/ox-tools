@@ -88,12 +88,20 @@ foreach ($recipeArg in $Recipe) {
 }
 
 if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) {
-    throw 'anvil-container: WSL 2 is required. See justfiles/anvil/container/README.md.'
+    throw 'anvil-container: WSL 2 is required. See .anvil/container/README.md.'
 }
 
-$versionText = (& wsl -e docker version --format '{{.Server.Version}}' 2>$null)
+$dockerCommand = @(
+    'env',
+    '-u', 'DOCKER_CONTEXT',
+    '-u', 'DOCKER_TLS_VERIFY',
+    '-u', 'DOCKER_CERT_PATH',
+    'DOCKER_HOST=unix:///var/run/docker.sock',
+    'docker'
+)
+$versionText = (& wsl -e @dockerCommand version --format '{{.Server.Version}}' 2>$null)
 if ($LASTEXITCODE -ne 0 -or -not $versionText) {
-    throw 'anvil-container: `wsl -e docker version` must succeed. Install or start Docker Engine in the default WSL distribution; this driver does not invoke Windows docker.exe.'
+    throw 'anvil-container: the local Docker Engine in WSL is unavailable. Run `just anvil-container-doctor`, then `just anvil-container-bootstrap` to install or repair it.'
 }
 $versionText = $versionText.Trim()
 if ((ConvertTo-AnvilVersion $versionText) -lt [version]'23.0.0') {
@@ -114,12 +122,12 @@ if ($LASTEXITCODE -ne 0 -or -not $repoRoot) {
     throw 'anvil-container must run from a Git repository.'
 }
 
-$scriptDir = Join-Path $repoRoot 'justfiles/anvil/container'
+$scriptDir = Join-Path $repoRoot '.anvil/container'
 $wslRepoRoot = (& wsl -e wslpath -a $repoRoot).Trim()
 if ($LASTEXITCODE -ne 0 -or -not $wslRepoRoot) {
     throw 'anvil-container: could not translate the repository path into the default WSL distribution.'
 }
-$wslScriptDir = "$wslRepoRoot/justfiles/anvil/container"
+$wslScriptDir = "$wslRepoRoot/.anvil/container"
 $containerfile = Join-Path $scriptDir 'Containerfile'
 $baseImageMatch = [regex]::Match([IO.File]::ReadAllText($containerfile), '(?m)^ARG BASE_IMAGE=([^\r\n]+)')
 if (-not $baseImageMatch.Success) {
@@ -149,7 +157,7 @@ $runsOnlyGitHubCheck = $Recipe.Count -eq 1 -and $Recipe[0] -eq 'anvil-aprz'
 # Customization contract: check warm/cold state before sourcing so
 # customization needed only for image construction can be skipped on a warm
 # run, then expose read-only inputs. See docs/design/containers.md.
-$null = & wsl -e docker image inspect $image 2>$null
+$null = & wsl -e @dockerCommand image inspect $image 2>$null
 $imageExists = $LASTEXITCODE -eq 0
 
 New-Variable -Name AnvilContainerRepoRoot -Value $repoRoot -Option ReadOnly
@@ -213,7 +221,7 @@ try {
         if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {
             throw "anvil-container: image $image is missing and ANVIL_CONTAINER_NO_REBUILD=1."
         }
-        & wsl -e docker build `
+        & wsl -e @dockerCommand build `
             --platform linux/amd64 `
             --tag $image `
             --file "$wslScriptDir/Containerfile" `
@@ -234,7 +242,7 @@ try {
     $registryVolume = "anvil-cargo-registry-$($repoHash.Substring(0, 12))"
     $gitVolume = "anvil-cargo-git-$($repoHash.Substring(0, 12))"
     foreach ($volume in @($registryVolume, $gitVolume, $targetVolume)) {
-        $null = & wsl -e docker volume create $volume
+        $null = & wsl -e @dockerCommand volume create $volume
         if ($LASTEXITCODE -ne 0) {
             throw "anvil-container: Docker volume creation failed for '$volume' with exit code $LASTEXITCODE."
         }
@@ -245,7 +253,7 @@ try {
         '--mount', "type=volume,source=$gitVolume,target=/usr/local/cargo/git",
         '--mount', "type=volume,source=$targetVolume,target=/workspace/target"
     )
-    & wsl -e docker run --rm --pull=never `
+    & wsl -e @dockerCommand run --rm --pull=never `
         --platform linux/amd64 `
         --user 0:0 `
         @mountArgs `
@@ -279,7 +287,7 @@ try {
         }
     }
     if ($AnvilContainerPrepareCommand.Count -gt 0) {
-        & wsl -e docker @prepareRunArgs @AnvilContainerPrepareArgs $image @AnvilContainerPrepareCommand
+        & wsl -e @dockerCommand @prepareRunArgs @AnvilContainerPrepareArgs $image @AnvilContainerPrepareCommand
         if ($LASTEXITCODE -ne 0) {
             throw "anvil-container: preparation command failed with exit code $LASTEXITCODE."
         }
@@ -311,7 +319,7 @@ try {
         if ($runsOnlyGitHubCheck) {
             $runArgs = $githubRunArgs
         } else {
-            & wsl -e docker @githubRunArgs $image just anvil-aprz
+            & wsl -e @dockerCommand @githubRunArgs $image just anvil-aprz
             if ($LASTEXITCODE -ne 0) {
                 throw "anvil-container: isolated anvil-aprz failed with exit code $LASTEXITCODE."
             }
@@ -320,9 +328,9 @@ try {
     }
 
     if ($Recipe.Count -eq 0) {
-        & wsl -e docker @runArgs --interactive --tty $image bash
+        & wsl -e @dockerCommand @runArgs --interactive --tty $image bash
     } else {
-        & wsl -e docker @runArgs $image just @Recipe
+        & wsl -e @dockerCommand @runArgs $image just @Recipe
     }
     $exitCode = $LASTEXITCODE
 } finally {

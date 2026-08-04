@@ -11,7 +11,7 @@
 //! Driver-level verification of the `customize.ps1` runtime contract from
 //! [`containers.md`](../docs/design/containers.md#8-container-customization).
 //!
-//! Generates the real `justfiles/anvil/container/` tree with
+//! Generates the real `.anvil/container/` tree with
 //! [`cargo_anvil::test_support::run_update`], then runs the generated
 //! `run-in-container.ps1` against a fake `wsl` on `PATH` so the driver's
 //! own process, argument construction, and validation execute for real.
@@ -65,7 +65,7 @@ fn repo_with_container() -> TempDir {
     write(&root.join("rust-toolchain.toml"), "channel = \"1.93\"\n");
     run_update(&Catalog::anvil(), &local(), root).unwrap();
     assert!(
-        !root.join("justfiles/anvil/container/customize.ps1").exists(),
+        !root.join(".anvil/container/customize.ps1").exists(),
         "the public catalog must not emit customize.ps1 by default"
     );
     let status = Command::new("git")
@@ -91,6 +91,13 @@ fn install_fake_wsl(bin_dir: &Path) {
         r"
 $command = $args[1]
 $commandArgs = @($args | Select-Object -Skip 2)
+if ($command -eq 'env') {
+    $dockerIndex = [Array]::IndexOf($commandArgs, 'docker')
+    if ($dockerIndex -ge 0) {
+        $command = 'docker'
+        $commandArgs = @($commandArgs | Select-Object -Skip ($dockerIndex + 1))
+    }
+}
 switch ($command) {
     'wslpath' {
         if ($env:FAKE_TOKEN_PATH_LOG -and $commandArgs[-1] -like '*anvil-github-token-*') {
@@ -162,7 +169,7 @@ fn run_driver(root: &Path, customize_ps1_body: &str, recipe: &str, env: &[(&str,
 }
 
 fn run_driver_args(root: &Path, customize_ps1_body: &str, recipe_args: &[&str], env: &[(&str, &str)]) -> DriverRun {
-    let container_dir = root.join("justfiles/anvil/container");
+    let container_dir = root.join(".anvil/container");
     write(&container_dir.join("customize.ps1"), customize_ps1_body);
 
     let bin_dir = root.join("fake-bin");
@@ -184,7 +191,7 @@ fn run_driver_args(root: &Path, customize_ps1_body: &str, recipe_args: &[&str], 
 
     let mut command = Command::new("pwsh");
     command
-        .args(["-NoProfile", "-File", "justfiles/anvil/container/run-in-container.ps1"])
+        .args(["-NoProfile", "-File", ".anvil/container/run-in-container.ps1"])
         .args(recipe_args)
         .current_dir(root)
         .env("PATH", path)
@@ -428,7 +435,7 @@ fn powershell_just_dispatch_treats_interpolated_values_as_data() {
     );
 
     write(
-        &root.join("justfiles/anvil/container/run-in-container.ps1"),
+        &root.join(".anvil/container/run-in-container.ps1"),
         "param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Recipe)\nWrite-Output 'DRIVER_OK'\n",
     );
     let recipe_output = Command::new("just")
@@ -458,7 +465,7 @@ Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "exists=$AnvilContainerImageE
 Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "recipes=$($AnvilContainerRequestedRecipes -join ',')"
 Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "windows=$AnvilContainerHostIsWindows"
 Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "repo-is-dir=$(Test-Path -LiteralPath $AnvilContainerRepoRoot -PathType Container)"
-Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "dir-is-container-dir=$($AnvilContainerDir -eq (Join-Path $AnvilContainerRepoRoot 'justfiles/anvil/container'))"
+Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "dir-is-container-dir=$($AnvilContainerDir -eq (Join-Path $AnvilContainerRepoRoot '.anvil/container'))"
 Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "repo-wsl=$AnvilContainerRepoRootWsl"
 Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "dir-wsl=$AnvilContainerDirWsl"
 $AnvilContainerBuildArgs = @('--secret', 'id=build-marker,src=fake')
@@ -486,7 +493,7 @@ $AnvilContainerCleanup = { Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value 'c
     );
     assert!(run.test_log.contains(&format!("repo-wsl={fake_wsl_repo}")), "log: {}", run.test_log);
     assert!(
-        run.test_log.contains(&format!("dir-wsl={fake_wsl_repo}/justfiles/anvil/container")),
+        run.test_log.contains(&format!("dir-wsl={fake_wsl_repo}/.anvil/container")),
         "log: {}",
         run.test_log
     );

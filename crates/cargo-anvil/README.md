@@ -113,12 +113,22 @@ environment without installing those tools directly on the host.
 * On Windows, Docker Engine running in the default WSL distribution:
 
 ```powershell
-wsl -e docker version
+pwsh -NoProfile -File .anvil/container/setup-docker-in-wsl.ps1 -Doctor
+pwsh -NoProfile -File .anvil/container/setup-docker-in-wsl.ps1
+wsl -e env -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH DOCKER_HOST=unix:///var/run/docker.sock docker version
 ```
 
-The Windows driver invokes Docker in the default WSL distribution and does
-not call Windows `docker.exe`. Regardless of the installation, the command
-above must succeed. Docker Desktop is not required.
+The generated doctor is non-mutating. The idempotent bootstrap supports
+Windows 11 with Microsoft Store WSL 2.1 or newer and Ubuntu 22.04 or 24.04,
+enables systemd, installs Docker Engine from the official Docker repository,
+starts the daemon, and configures current-user socket access. It never
+removes Docker Desktop, WSL distributions, containers, images, or volumes.
+
+The Windows driver invokes Docker in the default WSL distribution through
+`wsl.exe` and does not call Windows `docker.exe`, expose the daemon over TCP,
+or configure SSH. It clears inherited Docker context and TLS variables and
+forces the local `/var/run/docker.sock`. Regardless of the installation,
+the generated doctor must report the Windows bridge ready.
 
 On ARM64 hosts, Docker emulates the required `linux/amd64` environment, so
 image builds and checks can be substantially slower than on x86-64 hosts.
@@ -200,6 +210,9 @@ and continues after the user completes `gh auth login` and presses Enter.
 #### Troubleshooting
 
 * A first-run image build is expected and may take several minutes.
+* `just anvil-container-doctor` validates Windows and WSL prerequisites
+  without changing them; `just anvil-container-bootstrap` repairs supported
+  missing prerequisites.
 * `wsl -e docker images anvil-dev` lists locally cached Anvil images from
   Windows; use `docker images anvil-dev` inside Linux or WSL.
 * `ANVIL_CONTAINER_NO_REBUILD=1` distinguishes a cache miss from a build
@@ -207,7 +220,7 @@ and continues after the user completes `gh auth login` and presses Enter.
 * Non-interactive runs cannot pause for login. Authenticate `gh` or set host
   `GITHUB_TOKEN` before starting them.
 * Regenerate managed files with `cargo anvil`; do not hand-edit
-  `justfiles/anvil/container/`.
+  `.anvil/container/`.
 
 ### Checks and tiers
 
@@ -427,7 +440,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG76pNrrFvoypG5Yy9vWamMzkGyGbd21IKVJKG88Ou0ypwGmzYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG1njbPmlZF3dGxtll-3HMOaYG6ybm3Pw7so7G9zoqNj1OCcEYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate
