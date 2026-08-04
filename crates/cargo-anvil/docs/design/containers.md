@@ -431,7 +431,7 @@ repository-root `Justfile`.
 
 ## 13. References
 
-- [Overall cargo-anvil design](./design.md)
+- [Overall cargo-anvil design](./README.md)
 - [Local recipe design](./local.md)
 - [Catalog extensibility](./extensibility.md)
 - [Continuous verification](../verification.md)
