@@ -35,13 +35,27 @@ const TOOLS_JUST_PATH: &str = "justfiles/anvil/tools.just";
 
 /// Contents of `justfiles/anvil/helpers.just` baked into the binary.
 ///
-/// Holds the shared helper recipes (`_anvil-base-ref`,
-/// `_anvil-impact-format`) and the impact env-var contract that the
+/// Holds the shared helper recipe `_anvil-base-ref` (reused by the impact
+/// recipe and anvil-mutants-diff) and the impact env-var contract that the
 /// per-check recipes rely on.
 const HELPERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/helpers.just");
 
 /// Repo-root-relative path of the shared-helpers recipe file.
 const HELPERS_JUST_PATH: &str = "justfiles/anvil/helpers.just";
+
+/// Contents of `justfiles/anvil/impact.just` baked into the binary.
+///
+/// The single `anvil-impact` recipe: it snapshots the base ref and the
+/// working tree (two independent cache keys), computes the cargo-delta
+/// impact set, and writes the `target/anvil/impact/` artifacts that the
+/// scoped checks consume via `_anvil-impact-include`. Also owns the tier
+/// projection helper `_anvil-impact-format` (which lives here next to its
+/// sole caller). The same recipe runs locally and in cloud workflows (which
+/// just share the artifacts).
+const IMPACT_JUST: &str = include_str!("../../../templates/justfiles/anvil/impact.just");
+
+/// Repo-root-relative path of the impact recipe file.
+const IMPACT_JUST_PATH: &str = "justfiles/anvil/impact.just";
 
 /// Contents of `justfiles/anvil/runner.just` baked into the binary.
 const RUNNER_JUST: &str = include_str!("../../../templates/justfiles/anvil/runner.just");
@@ -198,6 +212,12 @@ pub fn helpers() -> Artifact {
     Artifact::owned_file(HELPERS_JUST_PATH, HELPERS_JUST)
 }
 
+/// `justfiles/anvil/impact.just` — the shared `anvil-impact` recipe.
+#[must_use]
+pub fn impact() -> Artifact {
+    Artifact::owned_file(IMPACT_JUST_PATH, IMPACT_JUST)
+}
+
 /// `justfiles/anvil/runner.just` — native/container tier routing.
 #[must_use]
 pub fn runner() -> Artifact {
@@ -282,6 +302,53 @@ mod tests {
     }
 
     #[test]
+    fn impact_recipe_is_defined_and_reuses_shared_helpers() {
+        // The single impact building block: snapshot + compute + resolve.
+        for needle in ["anvil-impact:", "_anvil-impact-snapshot:", "_anvil-impact-include tier:"] {
+            assert!(IMPACT_JUST.contains(needle), "impact.just missing recipe '{needle}'");
+        }
+        // It orchestrates around the shared helpers rather than duplicating
+        // base-ref resolution or the tier -> `--package` projection.
+        for needle in ["_anvil-base-ref", "_anvil-impact-format", "cargo delta impact"] {
+            assert!(IMPACT_JUST.contains(needle), "impact.just must use '{needle}'");
+        }
+        // The ANVIL_IMPACT=off escape hatch guards every entry point.
+        assert!(
+            IMPACT_JUST.contains("$env:ANVIL_IMPACT -eq 'off'"),
+            "impact.just must honor ANVIL_IMPACT=off"
+        );
+    }
+
+    #[test]
+    fn every_scoped_check_depends_on_and_reads_the_impact_cache() {
+        // A check is "scoped" iff it resolves its package set from the impact
+        // cache via `_anvil-impact-include`. Every such check must depend on
+        // `anvil-impact` so the cache is fresh before it runs.
+        let mut scoped = 0;
+        for (path, body) in CHECK_FILES {
+            if !body.contains("_anvil-impact-include") {
+                continue;
+            }
+            scoped += 1;
+            assert!(
+                body.contains("-validate-prereqs anvil-impact"),
+                "{path} reads the impact cache but does not depend on anvil-impact"
+            );
+            // The scope is captured into a local variable and consumed
+            // directly -- no ANVIL_INCLUDE_* env-var indirection.
+            assert!(
+                body.contains("$include = (& \"{{ just_executable() }}\" _anvil-impact-include"),
+                "{path} must capture _anvil-impact-include into a local $include variable"
+            );
+            assert!(
+                !body.contains("ANVIL_INCLUDE_"),
+                "{path} must not reference the removed ANVIL_INCLUDE_* env vars"
+            );
+        }
+        assert_eq!(scoped, 25, "expected 25 scoped checks wired to anvil-impact");
+    }
+
+    #[test]
     fn semver_check_compares_against_the_pr_branch_baseline() {
         let (_, body) = CHECK_FILES
             .iter()
@@ -320,21 +387,85 @@ mod tests {
             assert!(!groups.contains(needle), "groups tree still contains stale '{needle}'");
         }
         assert!(groups.contains("anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants"));
-        // Every group recipe lists its own validate-prereqs aggregate first so
+        // PR group recipes list their own validate-prereqs aggregate first so
         // all tool checks run up front (just dedups the per-check ones).
         for needle in [
             "anvil-pr-fast: anvil-pr-fast-validate-prereqs",
             "anvil-pr-test: anvil-pr-test-validate-prereqs",
             "anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs",
             "anvil-pr-mutants: anvil-pr-mutants-validate-prereqs",
-            "anvil-scheduled-test: anvil-scheduled-test-validate-prereqs",
-            "anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs",
-            "anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prereqs",
-            "anvil-scheduled-exhaustive: anvil-scheduled-exhaustive-validate-prereqs",
         ] {
             assert!(
                 groups.contains(needle),
                 "group recipe must run its validate-prereqs first: '{needle}'"
+            );
+        }
+        // Scheduled groups are the full-workspace backstop: the public recipe
+        // routes through `_anvil-run` with impact "off" (forcing
+        // ANVIL_IMPACT=off before the deps run), and the private `_anvil-<group>`
+        // fan-out lists its validate-prereqs aggregate first.
+        for g in [
+            "scheduled-test",
+            "scheduled-advisories",
+            "scheduled-runtime-analysis",
+            "scheduled-exhaustive",
+        ] {
+            assert!(
+                groups.contains(&format!("anvil-{g}: (_anvil-run \"{g}\" anvil_runner \"off\")")),
+                "scheduled group {g} must route through _anvil-run with impact off"
+            );
+            assert!(
+                groups.contains(&format!("_anvil-{g}: anvil-{g}-validate-prereqs")),
+                "scheduled group {g} private fan-out must run its validate-prereqs first"
+            );
+        }
+    }
+
+    #[test]
+    fn impact_scoped_groups_declare_cargo_delta_prereq() {
+        // Every PR group whose checks are impact-scoped depends (transitively,
+        // via each scoped check) on `anvil-impact`, which invokes cargo-delta
+        // when it (re)computes the impact set. The group's setup +
+        // validate-prereqs must therefore install / verify cargo-delta, so a
+        // missing tool fails fast at setup rather than mid-run. (pr-slow is an
+        // umbrella and inherits this via pr-test / pr-runtime-analysis /
+        // pr-mutants.) Scheduled groups force ANVIL_IMPACT=off and never
+        // recompute the impact set, so they deliberately do NOT depend on
+        // cargo-delta.
+        let groups = all_group_bodies();
+        for g in ["pr-fast", "pr-test", "pr-runtime-analysis", "pr-mutants"] {
+            assert!(
+                groups.contains(&format!(
+                    "anvil-{g}-setup installer=\"install\": \\\n    (anvil-tool-cargo-delta-install installer)"
+                )),
+                "group {g} setup must install cargo-delta"
+            );
+            assert!(
+                groups.contains(&format!(
+                    "anvil-{g}-validate-prereqs: \\\n    anvil-tool-cargo-delta-validate-prereqs"
+                )),
+                "group {g} validate-prereqs must verify cargo-delta"
+            );
+        }
+        // Scheduled groups force impact off and never recompute, so they must
+        // NOT carry cargo-delta as a prerequisite.
+        for g in [
+            "scheduled-test",
+            "scheduled-advisories",
+            "scheduled-runtime-analysis",
+            "scheduled-exhaustive",
+        ] {
+            assert!(
+                !groups.contains(&format!(
+                    "anvil-{g}-setup installer=\"install\": \\\n    (anvil-tool-cargo-delta-install installer)"
+                )),
+                "scheduled group {g} must not install cargo-delta (it forces ANVIL_IMPACT=off and never recomputes)"
+            );
+            assert!(
+                !groups.contains(&format!(
+                    "anvil-{g}-validate-prereqs: \\\n    anvil-tool-cargo-delta-validate-prereqs"
+                )),
+                "scheduled group {g} must not verify cargo-delta (it forces ANVIL_IMPACT=off and never recomputes)"
             );
         }
     }
@@ -351,18 +482,27 @@ mod tests {
         ] {
             assert!(TIERS_JUST.contains(needle), "tiers.just missing '{needle}'");
         }
-        // Each tier runs its validate-prereqs aggregate first so a missing
-        // tool fails up front rather than mid-run.
+        // Every public tier entry point routes through the `_anvil-run`
+        // native/container router. The private `_anvil-<tier>` recipe carries
+        // the validate-prereqs aggregate (run first) so a missing tool fails
+        // up front rather than mid-run. The scheduled and full tiers pass the
+        // `"off"` impact argument so `_anvil-run` exports ANVIL_IMPACT=off --
+        // they are the full-workspace backstop for PR-tier impact scoping.
         for needle in [
             "anvil-pr: (_anvil-run \"pr\" anvil_runner)",
-            "anvil-scheduled: (_anvil-run \"scheduled\" anvil_runner)",
-            "anvil-full: (_anvil-run \"full\" anvil_runner)",
+            "_anvil-pr: anvil-pr-validate-prereqs",
+            "anvil-scheduled: (_anvil-run \"scheduled\" anvil_runner \"off\")",
+            "_anvil-scheduled: anvil-scheduled-validate-prereqs",
+            "anvil-full: (_anvil-run \"full\" anvil_runner \"off\")",
+            "_anvil-full: anvil-full-validate-prereqs",
         ] {
-            assert!(
-                TIERS_JUST.contains(needle),
-                "tier recipe must run its validate-prereqs first: '{needle}'"
-            );
+            assert!(TIERS_JUST.contains(needle), "tier wrapper missing '{needle}'");
         }
+        // The runner forces impact off for the full-workspace tiers.
+        assert!(
+            RUNNER_JUST.contains("ANVIL_IMPACT"),
+            "runner must be able to force ANVIL_IMPACT=off for the scheduled/full tiers"
+        );
         // The scheduled tier must fan out to every scheduled group, including
         // runtime-analysis (a separate group from exhaustive).
         for needle in [
@@ -404,6 +544,7 @@ mod tests {
     fn mod_just_imports_siblings_and_defines_alias() {
         for needle in [
             "import 'helpers.just'",
+            "import 'impact.just'",
             "import 'checks/fmt.just'",
             "import 'checks/miri.just'",
             "import 'container.just'",

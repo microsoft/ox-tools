@@ -63,10 +63,15 @@ const GROUP_STEP_TEMPLATE: &str = include_str!("../../../templates/ado/steps/gro
 /// Placeholder token the per-group template uses for the group name.
 const GROUP_PLACEHOLDER: &str = "__GROUP__";
 
+/// Placeholder token the per-group template uses for the impact-mode selection.
+const IMPACT_MODE_PLACEHOLDER: &str = "__IMPACT_MODE__";
+
 /// Render the step template for one group.
 #[must_use]
 fn render_group_step(group: &str) -> String {
-    GROUP_STEP_TEMPLATE.replace(GROUP_PLACEHOLDER, group)
+    GROUP_STEP_TEMPLATE
+        .replace(GROUP_PLACEHOLDER, group)
+        .replace(IMPACT_MODE_PLACEHOLDER, super::impact_mode(group))
 }
 
 /// Repo-root-relative path for one group's step template.
@@ -191,7 +196,10 @@ mod tests {
     fn setup_and_impact_step_templates_are_non_empty() {
         assert!(SETUP_STEP.contains("just anvil-setup"));
         assert!(IMPACT_STEP.contains("cargo-delta"));
-        assert!(IMPACT_STEP.contains("##vso[task.setvariable"));
+        // Impact runs the shared recipe; the compute job publishes its
+        // target/anvil/impact cache as an artifact (see pr-stages.yml).
+        assert!(IMPACT_STEP.contains("just anvil-impact"));
+        assert!(!IMPACT_STEP.contains("##vso[task.setvariable"));
     }
 
     #[test]
@@ -257,6 +265,8 @@ mod tests {
             "name: pool",
             "name: steps",
             "type: stepList",
+            "name: inputArtifacts",
+            "DownloadPipelineArtifact@2",
             "name: artifacts",
             "PublishPipelineArtifact@1",
         ] {
@@ -265,21 +275,50 @@ mod tests {
     }
 
     #[test]
-    fn render_group_step_has_include_inputs_and_env() {
+    fn render_group_step_shares_impact_via_cache_not_env() {
         let body = render_group_step("pr-fast");
-        assert!(body.contains("parameters:"));
-        assert!(body.contains("name: include_modified"));
-        assert!(body.contains("name: include_affected"));
-        assert!(body.contains("name: include_required"));
         assert!(body.contains("just anvil-pr-fast"));
-        assert!(body.contains("ANVIL_INCLUDE_MODIFIED"));
-        assert!(body.contains("ANVIL_INCLUDE_AFFECTED"));
-        assert!(body.contains("ANVIL_INCLUDE_REQUIRED"));
+        // The impact set is shared as a downloaded artifact, so the group step
+        // declares no include_* params and threads no ANVIL_INCLUDE_* env vars.
+        assert!(!body.contains("name: include_modified"));
+        assert!(
+            !body.contains("ANVIL_INCLUDE_"),
+            "group step must not thread ANVIL_INCLUDE_* env vars"
+        );
+        // A PR group always downloads the artifact, so it consumes it. The mode
+        // is fixed by tier -- not probed at runtime from a marker file.
+        assert!(body.contains("export ANVIL_IMPACT=consume"));
+        assert!(
+            !body.contains("ANVIL_IMPACT=off"),
+            "a PR group must not fall back to off (it always has the artifact)"
+        );
+        assert!(
+            !body.contains("[ -f target/anvil/impact/impact.state ]"),
+            "PR group must not gate its mode on a runtime marker-file probe"
+        );
         // PR_TITLE is resolved from the REST API (ADO has no PR-title
         // predefined variable) and threaded via the PR_TITLE pipeline var.
         assert!(body.contains("PR_TITLE: $(PR_TITLE)"));
         assert!(body.contains("setvariable variable=PR_TITLE"));
         assert!(!body.contains("PR_TITLE: $(System.PullRequest.Title)"));
+    }
+
+    #[test]
+    fn scheduled_group_step_forces_impact_off_unconditionally() {
+        // The scheduled tier always validates the full workspace. Its impact
+        // mode is fixed by tier at emit time, never probed at runtime from
+        // target/anvil/impact/impact.state, so no leftover state on the agent
+        // can wrongly enable scoping and skip the full-workspace backstop.
+        let body = render_group_step("scheduled-test");
+        assert!(body.contains("export ANVIL_IMPACT=off"));
+        assert!(
+            !body.contains("ANVIL_IMPACT=consume"),
+            "scheduled group must never consume the impact cache"
+        );
+        assert!(
+            !body.contains("[ -f target/anvil/impact/impact.state ]"),
+            "scheduled group must not gate its mode on a runtime marker-file probe"
+        );
     }
 
     #[test]
@@ -315,9 +354,14 @@ mod tests {
         // Two per-OS jobs in the single impact stage.
         assert!(PR_STAGES.contains("name: compute_linux"));
         assert!(PR_STAGES.contains("name: compute_windows"));
-        // Downstream stages consume the per-OS job outputs from the one stage.
-        assert!(PR_STAGES.contains("stageDependencies.impact.compute_linux.outputs"));
-        assert!(PR_STAGES.contains("stageDependencies.impact.compute_windows.outputs"));
+        // The impact set propagates as a per-OS pipeline ARTIFACT (published by
+        // the compute jobs, downloaded by each group job) -- not stage-output
+        // variables.
+        assert!(PR_STAGES.contains("name: anvil-impact-linux"));
+        assert!(PR_STAGES.contains("name: anvil-impact-windows"));
+        assert!(PR_STAGES.contains("inputArtifacts:"));
+        assert!(!PR_STAGES.contains("stageDependencies.impact"));
+        assert!(!PR_STAGES.contains("include_modified"));
         assert!(PR_STAGES.contains("- template: steps/job.yml"));
         assert!(
             !PR_STAGES.contains("\n      - job: "),

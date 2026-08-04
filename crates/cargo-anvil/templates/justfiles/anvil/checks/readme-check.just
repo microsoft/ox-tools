@@ -26,14 +26,15 @@
 # (publish=false, [package.metadata.ox-gen-readme] disable), per-crate
 # Push-Location into the crate dir (cargo-doc2readme is CWD-sensitive
 # rather than --manifest-path-driven), and per-crate template-path
-# resolution. The ANVIL_INCLUDE_MODIFIED value would still need to
+# resolution. The impact-scoped set ($include) would still need to
 # be intersected with the lib-crate set rather than splatted into cargo.
 
 # Check that crate README files are up to date.
 [script("pwsh")]
-anvil-readme-check: anvil-readme-check-validate-prereqs
+anvil-readme-check: anvil-readme-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {
+    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
+    if ($include -eq '--skip') {
         Write-Host 'anvil-readme-check: no modified packages; skipping'
         exit 0
     }
@@ -46,7 +47,7 @@ anvil-readme-check: anvil-readme-check-validate-prereqs
     }
     # Iterate library crates. Filter by impact set when set, then drop
     # bin-only crates and opt-outs.
-    $pkg = @(if ($env:ANVIL_INCLUDE_MODIFIED) { -split $env:ANVIL_INCLUDE_MODIFIED } else { '--workspace' })
+    $pkg = @(if ($include) { -split $include } else { '--workspace' })
     $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
     $byName = @{}
     foreach ($p in $meta.packages) { $byName[$p.name] = $p }

@@ -89,10 +89,11 @@ $ just anvil-full     # both, sequentially
 
 cloud workflows invoke the same recipes, so a check behaves identically
 locally and in cloud workflows — they share one implementation in the
-imported `.just` files. The one difference is scope: cloud-workflow PR
-runs perform impact analysis (via [`cargo-delta`][__link0])
-and run each check only over the affected packages, whereas a local
-`just anvil-pr` runs every check over the whole workspace.
+imported `.just` files, including impact scoping: a local `just anvil-pr`
+runs `anvil-impact` (via [`cargo-delta`][__link0])
+and scopes each check to the affected packages, exactly as a cloud-workflow
+PR run does. The scheduled and full tiers deliberately opt out
+(`ANVIL_IMPACT=off`) and run every check over the whole workspace.
 
 ### Containerized local checks
 
@@ -219,8 +220,8 @@ The catalog and per-check rationale live in `docs/design/checks.md`;
 the tables below map each check to the group that runs it, link each
 check to its tool’s documentation, and note anything anvil-specific.
 
-**PR tier** (`anvil-pr`) — runs on every pull request, impact-scoped in
-cloud workflows. Two jobs: `pr-fast`, and `pr-slow` (whose three
+**PR tier** (`anvil-pr`) — runs on every pull request, impact-scoped
+both locally and in cloud workflows. Two jobs: `pr-fast`, and `pr-slow` (whose three
 sub-groups run sequentially within the one job per OS leg):
 
 <table>
@@ -427,7 +428,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG-W4Zsmp4-oGGxu6bPxIizmpG08WGD3cTJMxGw_Y1RjIWIdKYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbfNoBeeI3cC8bZOejpLPhJiUbBEGFg2V6rLobB8UQMkHYmcRhZIGDa2NhcmdvLWFudmlsZTAuMy4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

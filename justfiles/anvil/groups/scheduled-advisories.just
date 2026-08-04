@@ -6,9 +6,16 @@
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
+# Full-workspace backstop: routed through _anvil-run with impact "off" so
+# ANVIL_IMPACT=off is set before the check deps run, however the group is
+# invoked. Never recomputes, so no cargo-delta.
+
 # Run the scheduled advisory checks.
 [group("anvil")]
-anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
+anvil-scheduled-advisories: (_anvil-run "scheduled-advisories" anvil_runner "off")
+
+[private]
+_anvil-scheduled-advisories: anvil-scheduled-advisories-validate-prereqs \
     anvil-deny \
     anvil-audit \
     anvil-aprz \

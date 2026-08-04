@@ -56,6 +56,7 @@ function Test-AnvilRecipeNeedsGitHubToken([string]$Name) {
         'anvil-scheduled',
         '_anvil-scheduled',
         'anvil-scheduled-advisories',
+        '_anvil-scheduled-advisories',
         'anvil-full',
         '_anvil-full'
     )
@@ -274,9 +275,7 @@ try {
     foreach ($name in @(
         'PR_TITLE',
         'BASE_REF',
-        'ANVIL_INCLUDE_MODIFIED',
-        'ANVIL_INCLUDE_AFFECTED',
-        'ANVIL_INCLUDE_REQUIRED',
+        'ANVIL_IMPACT',
         'GITHUB_BASE_REF',
         'SYSTEM_PULLREQUEST_TARGETBRANCH'
     )) {

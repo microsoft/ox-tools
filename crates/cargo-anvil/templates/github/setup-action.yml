@@ -81,7 +81,7 @@ runs:
         # tool-versions update all invalidate the cache cleanly.
         # runner.arch resolves to X64 / ARM64 / X86, which keeps the
         # x86_64 and aarch64 legs of the same OS from colliding on
-        # arch-incompatible target/ contents.
+        # arch-incompatible cached binaries in ~/.cargo/bin.
         #
         # ${{ github.job }} discriminates by workflow-job-id (`pr-fast`,
         # `pr-test`, `pr-slow`, etc.) so concurrent matrix legs that
@@ -110,7 +110,6 @@ runs:
           ~/.cargo/bin/
           ~/.cargo/.crates.toml
           ~/.cargo/.crates2.json
-          target/
 
     # System dependencies for the catalog's source builds.
     #
@@ -208,4 +207,3 @@ runs:
           ~/.cargo/bin/
           ~/.cargo/.crates.toml
           ~/.cargo/.crates2.json
-          target/
