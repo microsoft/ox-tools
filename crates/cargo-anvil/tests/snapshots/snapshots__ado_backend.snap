@@ -27,7 +27,6 @@ RUN apt-get update \
         build-essential ca-certificates clang libclang-dev curl git libicu-dev \
         libssl-dev pkg-config tar \
     && rm -rf /var/lib/apt/lists/*
-
 RUN curl -fsSLo /tmp/powershell.tar.gz \
         "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/powershell-${POWERSHELL_VERSION}-linux-x64.tar.gz" \
     && echo "${POWERSHELL_SHA256}  /tmp/powershell.tar.gz" | sha256sum -c - \
@@ -52,6 +51,15 @@ RUN curl --proto '=https' --tlsv1.2 -fsSLo /tmp/rustup-init \
     && rm /tmp/rustup-init
 
 WORKDIR /opt/anvil
+
+# Consumer image extensions declared in .anvil/config.toml are rendered here:
+# after the pinned public tools, and before `anvil-setup`, which compiles Cargo
+# tools that may need consumer-provided libraries, headers, or environment.
+# A downstream catalog moves the extension marker to change that position, and
+# edits the package marker's command to change the package ecosystem. Removing
+# both markers withdraws support, and a repository that declares extensions
+# then gets an actionable error rather than silence.
+
 COPY . .
 RUN test -f rust-toolchain.toml || { \
         echo "anvil-container requires rust-toolchain.toml" >&2; \
@@ -284,11 +292,73 @@ same inputs, at the cost of duplicate work.
 | GitHub authentication is unavailable | Run `gh auth login --hostname github.com` or set host `GITHUB_TOKEN` |
 | A matching image is missing with `ANVIL_CONTAINER_NO_REBUILD=1` | Unset the variable to allow the local image build |
 | The first run is slow | The initial image build installs the pinned tool catalog; later runs reuse it |
+| `.anvil/container/ is out of date` | Run `cargo anvil` to regenerate after editing `.anvil/config.toml`, or after locally modifying a generated container file |
+| A declared mount source does not exist | Create the path, or correct `source` in `.anvil/config.toml` |
 | A Windows-created worktree fails in WSL | Run the checks from Windows PowerShell, or recreate the worktree from Linux so its `.git` pointer records a path WSL Git can resolve |
 | Git metadata cannot be resolved | Run `git worktree repair` in the worktree; the `.git` pointer must name existing metadata |
 
 Use `docker images anvil-dev` inside Linux or WSL to list locally cached
 default Anvil images.
+
+## Configuration
+
+A repository can extend its container environment through a repository-owned
+file:
+
+```text
+.anvil/config.toml
+```
+
+It declares four things, all optional:
+
+| Section | Purpose | Rebuilds the image? |
+|---|---|---|
+| `[container.image]` | Packages, files, environment, and build steps added to the image | **Yes** |
+| `[[container.cache]]` | Persistent named cache volumes | No |
+| `[[container.mount]]` | Explicit host mounts | No |
+| `[[container.command]]` | Repository commands runnable in the container | No |
+
+Run `cargo anvil` after editing it. `cargo-anvil` validates the file and
+compiles it into the generated `Containerfile` and `runtime.conf`; the drivers
+read the generated files, never the TOML. If the two fall out of step,
+`anvil-container` refuses to run and tells you to regenerate.
+
+```toml
+[container.image]
+packages = ["protobuf-compiler"]
+
+[[container.cache]]
+name = "pip"
+target = "/tmp/anvil-user/.cache/pip"
+scope = "worktree"     # or "image", or "global"
+
+[[container.mount]]
+name = "shared-protos"
+source = { sibling = "shared-protos" }   # or { repository = ... } / { host = ... }
+target = "/shared-protos"
+mode = "read-only"                       # the default
+```
+
+Cache scope decides what a volume is shared with. `worktree` is named for what
+it keys on — a hash of the worktree path — so two linked worktrees of the same
+repository do **not** share one; use `global` when the content is genuinely
+interchangeable.
+
+> [!WARNING]
+> `.anvil/config.toml` is trusted repository content, in the same class as
+> `customize.sh` / `customize.ps1`. A host mount grants containerized code
+> access to a host path, a build step runs as root with network access during
+> image construction, and a registered command runs repository code with the
+> worktree mounted read/write. Reviewing a branch that changes this file is
+> reviewing code that will run. Anvil validates declarations to prevent
+> mistakes and accidental privilege; it is not a sandbox.
+
+The image tag is a hash of the declared build *instructions and inputs*, not of
+the resulting filesystem. A `packages` entry resolving against a moving package
+repository, or a `step` that downloads from the network, can still produce
+different images under the same tag — the same property the public
+`Containerfile` already has. Pin versions and verify checksums inside your own
+`step` when that matters.
 
 ## Managed files
 
@@ -395,6 +465,15 @@ $executionOnly = @(
 $inputs += Get-ChildItem $containerPath -File |
     Where-Object { $_.Name -notin $executionOnly } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
+
+# Files a repository declared through [[container.image.file]] are copied into
+# the image, so their contents select it. They are learned from the generated
+# Containerfile's COPY instructions rather than from a second list, so the
+# helper needs no TOML parser and the two lists cannot disagree.
+$inputs += [regex]::Matches(
+    [IO.File]::ReadAllText($containerfile),
+    '(?m)^COPY \["([^"]*)", "[^"]*"\]$'
+) | ForEach-Object { $_.Groups[1].Value }
 $uniqueInputs = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 foreach ($inputPath in $inputs) {
     [void]$uniqueInputs.Add($inputPath)
@@ -464,6 +543,15 @@ for path in "$container_dir"/*; do
     esac
     inputs+=("${path#"$repo_root"/}")
 done
+
+# Files a repository declared through [[container.image.file]] are copied into
+# the image, so their contents select it. They are learned from the generated
+# Containerfile's COPY instructions rather than from a second list, so the
+# helper needs no TOML parser and the two lists cannot disagree.
+while IFS= read -r declared; do
+    [[ -n "$declared" ]] || continue
+    inputs+=("$declared")
+done < <(sed -n 's/^COPY \["\([^"]*\)", "[^"]*"\]$/\1/p' "$container_dir/Containerfile")
 
 if command -v sha256sum >/dev/null 2>&1; then
     hash_command=(sha256sum)
@@ -633,6 +721,53 @@ if ($LASTEXITCODE -ne 0 -or -not $wslRepoRoot) {
     throw 'anvil-container: could not translate the repository path into the default WSL distribution.'
 }
 $wslScriptDir = "$wslRepoRoot/.anvil/container"
+
+# The generated runtime file carries the repository's declarations and a
+# coherence record over the configuration and every artifact derived from it.
+# Verifying all of them -- not just the configuration -- is what catches a
+# Containerfile that anvil left alone because the user had modified it: an
+# input-only check would pass while the image lacked a declared package.
+$runtimeConf = Join-Path $scriptDir 'runtime.conf'
+$configFile = Join-Path $repoRoot '.anvil/config.toml'
+function Get-AnvilContainerChecksum([string]$Path) {
+    # Line endings are normalized so a checksum recorded on one host matches on
+    # the other, exactly as the generator computes it.
+    $text = [IO.File]::ReadAllText($Path).Replace("`r`n", "`n")
+    $hash = [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($text))
+    'sha256:' + [Convert]::ToHexString($hash).ToLowerInvariant()
+}
+function Assert-AnvilContainerFresh {
+    throw @'
+anvil-container: .anvil/container/ is out of date with .anvil/config.toml.
+Run `cargo anvil` to regenerate it, then rerun.
+'@
+}
+$hasConfig = Test-Path -LiteralPath $configFile -PathType Leaf
+$hasRuntime = Test-Path -LiteralPath $runtimeConf -PathType Leaf
+# Either file existing without the other means generation has not caught up:
+# a configuration was added without regenerating, or deleted without it.
+if ($hasConfig -ne $hasRuntime) { Assert-AnvilContainerFresh }
+
+$anvilCacheRecords = @()
+$anvilMountRecords = @()
+if ($hasRuntime) {
+    $recordedConfig = ''
+    foreach ($line in [IO.File]::ReadAllLines($runtimeConf)) {
+        $fields = $line -split "`t"
+        switch ($fields[0]) {
+            'cache' { $anvilCacheRecords += , $fields[1..3] }
+            'mount' { $anvilMountRecords += , $fields[1..5] }
+            'artifact' {
+                $artifactPath = Join-Path $repoRoot $fields[1]
+                if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) { Assert-AnvilContainerFresh }
+                if ((Get-AnvilContainerChecksum $artifactPath) -ne $fields[2]) { Assert-AnvilContainerFresh }
+            }
+            'config' { $recordedConfig = $fields[1] }
+            default { }
+        }
+    }
+    if ($recordedConfig -ne (Get-AnvilContainerChecksum $configFile)) { Assert-AnvilContainerFresh }
+}
 
 # A linked worktree keeps objects, refs, and configuration in the common Git
 # directory, which lies outside the mounted worktree. Mount exactly that
@@ -809,6 +944,68 @@ try {
         '/usr/local/cargo/git',
         '/workspace/target'
     )
+
+    # Declared cache volumes join the anvil-owned ones: created explicitly,
+    # ownership-initialized in the same root container, and mounted everywhere
+    # the workspace is. Scope decides what the name encodes, and therefore what
+    # is shared. 'worktree' is named for the identifier it uses -- a hash of the
+    # worktree path -- so linked worktrees deliberately do not share one.
+    $cacheMountArgs = @()
+    foreach ($record in $anvilCacheRecords) {
+        $cacheName, $cacheTarget, $cacheScope = $record
+        $volume = switch ($cacheScope) {
+            'worktree' { "anvil-cache-$cacheName-$($repoHash.Substring(0, 12))" }
+            'image' { "anvil-cache-$cacheName-$($repoHash.Substring(0, 12))-$($imageId.Substring(0, 12))" }
+            'global' { "anvil-cache-$cacheName" }
+            default { throw "anvil-container: unknown cache scope '$cacheScope' in runtime.conf." }
+        }
+        $null = & wsl -e docker volume create `
+            --label "io.github.cargo-anvil.cache=$cacheName" `
+            --label "io.github.cargo-anvil.scope=$cacheScope" `
+            --label "io.github.cargo-anvil.worktree=$wslRepoRoot" `
+            $volume
+        if ($LASTEXITCODE -ne 0) {
+            throw "anvil-container: Docker volume creation failed for '$volume' with exit code $LASTEXITCODE."
+        }
+        $cacheMountArgs += @('--mount', "type=volume,source=$volume,target=$cacheTarget")
+        $ownershipMountArgs += @('--mount', "type=volume,source=$volume,target=$cacheTarget")
+        $ownershipTargets += $cacheTarget
+    }
+
+    # Host mounts never reach the root container: anvil does not modify
+    # ownership of host paths. Sources are resolved here, and a
+    # repository-relative source that resolves outside the worktree is refused
+    # -- lexical validation at generation time cannot see a symlink introduced
+    # afterwards.
+    $hostMountArgs = @()
+    foreach ($record in $anvilMountRecords) {
+        $mountName, $sourceKind, $sourceValue, $mountTarget, $mountMode = $record
+        $mountSource = switch ($sourceKind) {
+            'repository' { Join-Path $repoRoot $sourceValue }
+            'sibling' { Join-Path (Split-Path -Parent $repoRoot) $sourceValue }
+            'host' { $sourceValue }
+            default { throw "anvil-container: unknown mount source kind '$sourceKind' in runtime.conf." }
+        }
+        if (-not (Test-Path -LiteralPath $mountSource)) {
+            throw "anvil-container: mount '$mountName' source '$mountSource' does not exist on this host."
+        }
+        $resolvedSource = (Resolve-Path -LiteralPath $mountSource).ProviderPath
+        if ($sourceKind -eq 'repository') {
+            $repoReal = (Resolve-Path -LiteralPath $repoRoot).ProviderPath
+            if ($resolvedSource -ne $repoReal -and -not $resolvedSource.StartsWith($repoReal + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "anvil-container: mount '$mountName' resolves to '$resolvedSource', outside the worktree. A symlink may have been added after generation."
+            }
+        }
+        $wslMountSource = (& wsl -e wslpath -a $resolvedSource)
+        if ($LASTEXITCODE -ne 0 -or -not $wslMountSource) {
+            throw "anvil-container: could not translate mount '$mountName' source into the default WSL distribution."
+        }
+        $wslMountSource = $wslMountSource.Trim()
+        $descriptor = "type=bind,source=$wslMountSource,target=$mountTarget"
+        if ($mountMode -eq 'read-only') { $descriptor += ',readonly' }
+        $hostMountArgs += @('--mount', $descriptor)
+    }
+    $mountArgs += $cacheMountArgs + $hostMountArgs
     & wsl -e docker run --rm --pull=never `
         --platform linux/amd64 `
         --user 0:0 `
@@ -992,6 +1189,53 @@ if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     exit 1
 fi
 script_dir="$repo_root/.anvil/container"
+
+# The generated runtime file carries the repository's declarations and a
+# coherence record over the configuration and every artifact derived from it.
+# Verifying all of them -- not just the configuration -- is what catches a
+# Containerfile that anvil left alone because the user had modified it: an
+# input-only check would pass while the image lacked a declared package.
+runtime_conf="$script_dir/runtime.conf"
+config_file="$repo_root/.anvil/config.toml"
+anvil_container_checksum_of() {
+    # Line endings are normalized so a checksum recorded on one host matches on
+    # the other, exactly as the generator computes it.
+    local path="$1" digest
+    if command -v sha256sum >/dev/null 2>&1; then
+        digest="$(tr -d '\r' < "$path" | sha256sum | cut -d' ' -f1)"
+    else
+        digest="$(tr -d '\r' < "$path" | shasum -a 256 | cut -d' ' -f1)"
+    fi
+    printf 'sha256:%s' "$digest"
+}
+anvil_container_stale() {
+    echo "anvil-container: .anvil/container/ is out of date with .anvil/config.toml." >&2
+    echo 'Run `cargo anvil` to regenerate it, then rerun.' >&2
+    exit 1
+}
+# Either file existing without the other means generation has not caught up:
+# a configuration was added without regenerating, or deleted without it.
+if [[ -f "$config_file" && ! -f "$runtime_conf" ]] || [[ ! -f "$config_file" && -f "$runtime_conf" ]]; then
+    anvil_container_stale
+fi
+declare -a anvil_cache_records=() anvil_mount_records=()
+if [[ -f "$runtime_conf" ]]; then
+    expected_config="$(anvil_container_checksum_of "$config_file")"
+    recorded_config=""
+    while IFS=$'\t' read -r kind field_a field_b field_c field_d field_e || [[ -n "$kind" ]]; do
+        case "$kind" in
+            cache) anvil_cache_records+=("$field_a"$'\t'"$field_b"$'\t'"$field_c") ;;
+            mount) anvil_mount_records+=("$field_a"$'\t'"$field_b"$'\t'"$field_c"$'\t'"$field_d"$'\t'"$field_e") ;;
+            artifact)
+                [[ -f "$repo_root/$field_a" ]] || anvil_container_stale
+                [[ "$(anvil_container_checksum_of "$repo_root/$field_a")" == "$field_b" ]] || anvil_container_stale
+                ;;
+            config) recorded_config="$field_a" ;;
+            *) ;;
+        esac
+    done < "$runtime_conf"
+    [[ "$recorded_config" == "$expected_config" ]] || anvil_container_stale
+fi
 
 # A linked worktree keeps objects, refs, and configuration in the common Git
 # directory, which lies outside the mounted worktree. Mount exactly that
@@ -1238,6 +1482,70 @@ ownership_targets=(
     /usr/local/cargo/git
     /workspace/target
 )
+
+# Declared cache volumes join the Anvil-owned ones: created explicitly,
+# ownership-initialized in the same root container, and mounted everywhere the
+# workspace is. Scope decides what the name encodes, and therefore what is
+# shared. `worktree` is named for the identifier it uses -- a hash of the
+# worktree path -- so linked worktrees deliberately do not share one.
+declare -a cache_mount_args=()
+for record in ${anvil_cache_records[@]+"${anvil_cache_records[@]}"}; do
+    IFS=$'\t' read -r cache_name cache_target cache_scope <<<"$record"
+    case "$cache_scope" in
+        worktree) volume="anvil-cache-${cache_name}-${repo_id}" ;;
+        image) volume="anvil-cache-${cache_name}-${repo_id}-${image_id:0:12}" ;;
+        global) volume="anvil-cache-${cache_name}" ;;
+        *)
+            echo "anvil-container: unknown cache scope '$cache_scope' in runtime.conf." >&2
+            exit 1
+            ;;
+    esac
+    docker volume create \
+        --label "io.github.cargo-anvil.cache=$cache_name" \
+        --label "io.github.cargo-anvil.scope=$cache_scope" \
+        --label "io.github.cargo-anvil.worktree=$repo_root" \
+        "$volume" >/dev/null
+    cache_mount_args+=(--mount "type=volume,source=$volume,target=$cache_target")
+    ownership_mount_args+=(--mount "type=volume,source=$volume,target=$cache_target")
+    ownership_targets+=("$cache_target")
+done
+
+# Host mounts never reach the root container: anvil does not modify ownership
+# of host paths. Sources are resolved here, and a repository-relative source
+# that resolves outside the worktree is refused -- lexical validation at
+# generation time cannot see a symlink introduced afterwards.
+declare -a host_mount_args=()
+for record in ${anvil_mount_records[@]+"${anvil_mount_records[@]}"}; do
+    IFS=$'\t' read -r mount_name source_kind source_value mount_target mount_mode <<<"$record"
+    case "$source_kind" in
+        repository) mount_source="$repo_root/$source_value" ;;
+        sibling) mount_source="$(dirname "$repo_root")/$source_value" ;;
+        host) mount_source="$source_value" ;;
+        *)
+            echo "anvil-container: unknown mount source kind '$source_kind' in runtime.conf." >&2
+            exit 1
+            ;;
+    esac
+    if [[ ! -e "$mount_source" ]]; then
+        echo "anvil-container: mount '$mount_name' source '$mount_source' does not exist on this host." >&2
+        exit 1
+    fi
+    resolved_source="$(cd "$mount_source" 2>/dev/null && pwd -P || readlink -f "$mount_source")"
+    if [[ "$source_kind" == "repository" ]]; then
+        repo_real="$(cd "$repo_root" && pwd -P)"
+        if [[ "$resolved_source" != "$repo_real" && "$resolved_source" != "$repo_real"/* ]]; then
+            echo "anvil-container: mount '$mount_name' resolves to '$resolved_source', outside the worktree. A symlink may have been added after generation." >&2
+            exit 1
+        fi
+    fi
+    if [[ "$mount_mode" == "read-only" ]]; then
+        host_mount_args+=(--mount "type=bind,source=$resolved_source,target=$mount_target,readonly")
+    else
+        host_mount_args+=(--mount "type=bind,source=$resolved_source,target=$mount_target")
+    fi
+done
+mount_args+=(${cache_mount_args[@]+"${cache_mount_args[@]}"} ${host_mount_args[@]+"${host_mount_args[@]}"})
+
 docker run --rm --pull=never \
     --platform linux/amd64 \
     --user 0:0 \

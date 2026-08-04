@@ -200,11 +200,73 @@ same inputs, at the cost of duplicate work.
 | GitHub authentication is unavailable | Run `gh auth login --hostname github.com` or set host `GITHUB_TOKEN` |
 | A matching image is missing with `ANVIL_CONTAINER_NO_REBUILD=1` | Unset the variable to allow the local image build |
 | The first run is slow | The initial image build installs the pinned tool catalog; later runs reuse it |
+| `.anvil/container/ is out of date` | Run `cargo anvil` to regenerate after editing `.anvil/config.toml`, or after locally modifying a generated container file |
+| A declared mount source does not exist | Create the path, or correct `source` in `.anvil/config.toml` |
 | A Windows-created worktree fails in WSL | Run the checks from Windows PowerShell, or recreate the worktree from Linux so its `.git` pointer records a path WSL Git can resolve |
 | Git metadata cannot be resolved | Run `git worktree repair` in the worktree; the `.git` pointer must name existing metadata |
 
 Use `docker images anvil-dev` inside Linux or WSL to list locally cached
 default Anvil images.
+
+## Configuration
+
+A repository can extend its container environment through a repository-owned
+file:
+
+```text
+.anvil/config.toml
+```
+
+It declares four things, all optional:
+
+| Section | Purpose | Rebuilds the image? |
+|---|---|---|
+| `[container.image]` | Packages, files, environment, and build steps added to the image | **Yes** |
+| `[[container.cache]]` | Persistent named cache volumes | No |
+| `[[container.mount]]` | Explicit host mounts | No |
+| `[[container.command]]` | Repository commands runnable in the container | No |
+
+Run `cargo anvil` after editing it. `cargo-anvil` validates the file and
+compiles it into the generated `Containerfile` and `runtime.conf`; the drivers
+read the generated files, never the TOML. If the two fall out of step,
+`anvil-container` refuses to run and tells you to regenerate.
+
+```toml
+[container.image]
+packages = ["protobuf-compiler"]
+
+[[container.cache]]
+name = "pip"
+target = "/tmp/anvil-user/.cache/pip"
+scope = "worktree"     # or "image", or "global"
+
+[[container.mount]]
+name = "shared-protos"
+source = { sibling = "shared-protos" }   # or { repository = ... } / { host = ... }
+target = "/shared-protos"
+mode = "read-only"                       # the default
+```
+
+Cache scope decides what a volume is shared with. `worktree` is named for what
+it keys on — a hash of the worktree path — so two linked worktrees of the same
+repository do **not** share one; use `global` when the content is genuinely
+interchangeable.
+
+> [!WARNING]
+> `.anvil/config.toml` is trusted repository content, in the same class as
+> `customize.sh` / `customize.ps1`. A host mount grants containerized code
+> access to a host path, a build step runs as root with network access during
+> image construction, and a registered command runs repository code with the
+> worktree mounted read/write. Reviewing a branch that changes this file is
+> reviewing code that will run. Anvil validates declarations to prevent
+> mistakes and accidental privilege; it is not a sandbox.
+
+The image tag is a hash of the declared build *instructions and inputs*, not of
+the resulting filesystem. A `packages` entry resolving against a moving package
+repository, or a `step` that downloads from the network, can still produce
+different images under the same tag — the same property the public
+`Containerfile` already has. Pin versions and verify checksums inside your own
+`step` when that matters.
 
 ## Managed files
 

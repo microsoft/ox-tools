@@ -1,0 +1,354 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+#![cfg(all(unix, not(miri)))] // exercises the real Bash driver against a fake `docker`; miri can't sandbox this.
+#![allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    reason = "panic-on-failure idioms are appropriate in tests"
+)]
+#![expect(
+    clippy::literal_string_with_formatting_args,
+    reason = "the Bash fixture intentionally contains shell parameter expansions"
+)]
+
+//! Driver-level verification of the declarative container contract from
+//! [container-config.md](../docs/design/container-config.md).
+//!
+//! Generates the real `.anvil/container/` tree with
+//! [`cargo_anvil::test_support::run_update`], then runs the generated
+//! `run-in-container.sh` against a fake `docker` so cache naming, ownership
+//! argv, mount resolution, and the coherence guard execute for real.
+//!
+//! The `PowerShell` mirror lives in `container_config.rs` and runs on Windows.
+
+use std::path::Path;
+use std::process::Command;
+
+use cargo_anvil::Catalog;
+use cargo_anvil::test_support::{Cli, run_update};
+use tempfile::TempDir;
+
+fn write(path: &Path, contents: &str) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, contents).unwrap();
+}
+
+fn write_executable(path: &Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    write(path, contents);
+    let mut permissions = std::fs::metadata(path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(path, permissions).unwrap();
+}
+
+fn local() -> Cli {
+    Cli {
+        backends: vec![],
+        no_backends: true,
+        dry_run: false,
+        force: false,
+    }
+}
+
+/// A repository whose `.anvil/config.toml` is written *before* generation, so
+/// the generated tree and the coherence record agree.
+fn repo_with_config(config: &str) -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    write(
+        &root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+    );
+    write(
+        &root.join("crates/alpha/Cargo.toml"),
+        "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(&root.join("crates/alpha/src/lib.rs"), "");
+    write(&root.join("rust-toolchain.toml"), "channel = \"1.93\"\n");
+    if !config.is_empty() {
+        write(&root.join(".anvil/config.toml"), config);
+    }
+    run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    let status = Command::new("git")
+        .args(["init", "--quiet"])
+        .current_dir(root)
+        .status()
+        .expect("git must be available");
+    assert!(status.success(), "temporary Git repository must initialize");
+    tmp
+}
+
+fn install_fake_docker(bin_dir: &Path) {
+    write_executable(
+        &bin_dir.join("docker"),
+        r#"#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> "$FAKE_DOCKER_LOG"
+case "${1:-}" in
+    version) echo '26.1.5'; exit 0 ;;
+    image) exit 1 ;;
+    *) exit 0 ;;
+esac
+"#,
+    );
+}
+
+struct DriverRun {
+    status: std::process::ExitStatus,
+    stderr: String,
+    docker_log: String,
+}
+
+impl DriverRun {
+    fn line_containing(&self, needle: &str) -> &str {
+        self.docker_log
+            .lines()
+            .find(|line| line.contains(needle))
+            .unwrap_or_else(|| panic!("expected a docker line containing {needle}: {}", self.docker_log))
+    }
+
+    fn container_count(&self) -> usize {
+        self.docker_log.lines().filter(|line| line.starts_with("run ")).count()
+    }
+}
+
+fn run_driver(root: &Path) -> DriverRun {
+    let bin_dir = root.join("fake-bin");
+    install_fake_docker(&bin_dir);
+    let docker_log = bin_dir.join("docker.log");
+    let _ = std::fs::remove_file(&docker_log);
+    let path = format!("{}:{}", bin_dir.display(), std::env::var("PATH").unwrap_or_default());
+
+    let output = Command::new("bash")
+        .arg(".anvil/container/run-in-container.sh")
+        .arg("anvil-clippy")
+        .current_dir(root)
+        .env("PATH", path)
+        .env("FAKE_DOCKER_LOG", &docker_log)
+        .env_remove("ANVIL_IN_CONTAINER")
+        .env_remove("GITHUB_TOKEN")
+        .env_remove("ANVIL_CONTAINER_BASE_IMAGE")
+        .env_remove("ANVIL_CONTAINER_IMAGE")
+        .env_remove("ANVIL_CONTAINER_NO_REBUILD")
+        .output()
+        .expect("bash must be available to run the driver");
+
+    DriverRun {
+        status: output.status,
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        docker_log: std::fs::read_to_string(&docker_log).unwrap_or_default(),
+    }
+}
+
+const CACHE_CONFIG: &str = r#"
+[[container.cache]]
+name = "pip"
+target = "/tmp/anvil-user/.cache/pip"
+scope = "worktree"
+
+[[container.cache]]
+name = "tools"
+target = "/tmp/anvil-user/.cache/tools"
+scope = "global"
+"#;
+
+#[test]
+fn a_repository_declaring_nothing_creates_exactly_the_anvil_owned_volumes() {
+    let tmp = repo_with_config("");
+    let run = run_driver(tmp.path());
+    assert!(run.status.success(), "driver failed: {}", run.stderr);
+
+    assert!(
+        !tmp.path().join(".anvil/container/runtime.conf").exists(),
+        "no configuration means no runtime file"
+    );
+    let volumes: Vec<&str> = run.docker_log.lines().filter(|line| line.starts_with("volume create")).collect();
+    assert_eq!(volumes.len(), 3, "only the anvil-owned volumes: {volumes:?}");
+    assert!(!run.docker_log.contains("anvil-cache-"), "no declared caches: {}", run.docker_log);
+}
+
+#[test]
+fn cache_scope_decides_what_the_volume_name_encodes() {
+    let tmp = repo_with_config(CACHE_CONFIG);
+    let run = run_driver(tmp.path());
+    assert!(run.status.success(), "driver failed: {}", run.stderr);
+
+    let worktree = run.line_containing("io.github.cargo-anvil.cache=pip");
+    let global = run.line_containing("io.github.cargo-anvil.cache=tools");
+
+    // A global cache is shared across every repository, so its name carries no
+    // worktree or image identity.
+    assert!(global.ends_with("anvil-cache-tools"), "a global cache name must be bare: {global}");
+    // A worktree cache is keyed by the worktree hash and nothing else, so it
+    // survives an image change.
+    let name = worktree.split_whitespace().next_back().expect("volume name is the last argument");
+    assert!(name.starts_with("anvil-cache-pip-"), "got: {name}");
+    assert_eq!(name.matches('-').count(), 3, "no image segment in a worktree cache: {name}");
+
+    for line in [worktree, global] {
+        assert!(
+            line.contains("io.github.cargo-anvil.scope="),
+            "labels let lifecycle commands prune: {line}"
+        );
+        assert!(line.contains("io.github.cargo-anvil.worktree="), "got: {line}");
+    }
+}
+
+#[test]
+fn an_image_scoped_cache_changes_with_the_image() {
+    let config = "[[container.cache]]\nname = \"build\"\ntarget = \"/tmp/build\"\nscope = \"image\"\n";
+    let tmp = repo_with_config(config);
+    let run = run_driver(tmp.path());
+    assert!(run.status.success(), "driver failed: {}", run.stderr);
+
+    let name = run
+        .line_containing("io.github.cargo-anvil.cache=build")
+        .split_whitespace()
+        .next_back()
+        .expect("volume name is the last argument")
+        .to_owned();
+    assert_eq!(
+        name.matches('-').count(),
+        4,
+        "an image-scoped cache carries both worktree and image segments: {name}"
+    );
+}
+
+#[test]
+fn declared_cache_targets_are_ownership_initialized_without_a_shell() {
+    let tmp = repo_with_config(CACHE_CONFIG);
+    let run = run_driver(tmp.path());
+    assert!(run.status.success(), "driver failed: {}", run.stderr);
+
+    let ownership = run.line_containing("chown");
+    assert!(!ownership.contains("sh -c"), "no shell string: {ownership}");
+    assert!(
+        !ownership.contains("type=bind"),
+        "the root container mounts no host path: {ownership}"
+    );
+    for target in [
+        "/usr/local/cargo/registry",
+        "/tmp/anvil-user/.cache/pip",
+        "/tmp/anvil-user/.cache/tools",
+    ] {
+        assert!(ownership.contains(target), "missing {target} in: {ownership}");
+    }
+}
+
+#[test]
+fn host_mounts_default_to_read_only_and_skip_the_root_container() {
+    let tmp =
+        repo_with_config("[[container.mount]]\nname = \"fixtures\"\nsource = { repository = \"crates/alpha\" }\ntarget = \"/fixtures\"\n");
+    let run = run_driver(tmp.path());
+    assert!(run.status.success(), "driver failed: {}", run.stderr);
+
+    let recipe = run.line_containing("just anvil-clippy");
+    assert!(recipe.contains("target=/fixtures,readonly"), "read-only is the default: {recipe}");
+
+    let ownership = run.line_containing("chown");
+    assert!(
+        !ownership.contains("/fixtures"),
+        "host mounts never reach the root container: {ownership}"
+    );
+}
+
+#[test]
+fn a_read_write_mount_is_honored_when_explicitly_declared() {
+    let tmp = repo_with_config(
+        "[[container.mount]]\nname = \"out\"\nsource = { repository = \"crates\" }\ntarget = \"/out\"\nmode = \"read-write\"\n",
+    );
+    let run = run_driver(tmp.path());
+    assert!(run.status.success(), "driver failed: {}", run.stderr);
+
+    let recipe = run.line_containing("just anvil-clippy");
+    assert!(recipe.contains("target=/out"), "got: {recipe}");
+    assert!(
+        !recipe.contains("target=/out,readonly"),
+        "read-write must not be downgraded: {recipe}"
+    );
+}
+
+#[test]
+fn a_missing_mount_source_fails_before_any_container_starts() {
+    let tmp = repo_with_config("[[container.mount]]\nname = \"absent\"\nsource = { sibling = \"not-there\" }\ntarget = \"/absent\"\n");
+    let run = run_driver(tmp.path());
+    assert!(!run.status.success(), "a missing source must be refused");
+    assert!(run.stderr.contains("does not exist on this host"), "got: {}", run.stderr);
+    assert_eq!(run.container_count(), 0, "no container may start: {}", run.docker_log);
+}
+
+/// Lexical validation at generation time cannot see a symlink introduced
+/// afterwards, so the driver resolves and re-checks containment at runtime.
+#[test]
+fn a_symlinked_repository_source_escaping_the_worktree_is_refused_at_runtime() {
+    let outside = TempDir::new().unwrap();
+    let tmp =
+        repo_with_config("[[container.mount]]\nname = \"fixtures\"\nsource = { repository = \"fixtures\" }\ntarget = \"/fixtures\"\n");
+    std::os::unix::fs::symlink(outside.path(), tmp.path().join("fixtures")).unwrap();
+
+    let run = run_driver(tmp.path());
+    assert!(!run.status.success(), "an escaping symlink must be refused");
+    assert!(run.stderr.contains("outside the worktree"), "got: {}", run.stderr);
+    assert_eq!(run.container_count(), 0, "no container may start: {}", run.docker_log);
+}
+
+#[test]
+fn an_edited_configuration_that_was_not_regenerated_is_refused() {
+    let tmp = repo_with_config(CACHE_CONFIG);
+    let config = tmp.path().join(".anvil/config.toml");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str("\n[[container.cache]]\nname = \"extra\"\ntarget = \"/tmp/extra\"\n");
+    write(&config, &text);
+
+    let run = run_driver(tmp.path());
+    assert!(!run.status.success(), "a stale runtime file must be refused");
+    assert!(run.stderr.contains("out of date"), "got: {}", run.stderr);
+    assert_eq!(run.container_count(), 0, "no container may start: {}", run.docker_log);
+}
+
+/// The coherence record covers derived artifacts, not just the input. A
+/// `Containerfile` anvil left alone because the user modified it would
+/// otherwise pass an input-only guard while missing a declared package.
+#[test]
+fn a_locally_modified_containerfile_is_refused() {
+    let tmp = repo_with_config(CACHE_CONFIG);
+    let containerfile = tmp.path().join(".anvil/container/Containerfile");
+    let mut text = std::fs::read_to_string(&containerfile).unwrap();
+    text.push_str("RUN echo local-edit\n");
+    write(&containerfile, &text);
+
+    let run = run_driver(tmp.path());
+    assert!(!run.status.success(), "a stale Containerfile must be refused");
+    assert!(run.stderr.contains("out of date"), "got: {}", run.stderr);
+    assert_eq!(run.container_count(), 0, "no container may start: {}", run.docker_log);
+}
+
+#[test]
+fn a_configuration_added_without_regenerating_is_refused() {
+    let tmp = repo_with_config("");
+    write(
+        &tmp.path().join(".anvil/config.toml"),
+        "[[container.cache]]\nname = \"pip\"\ntarget = \"/tmp/pip\"\n",
+    );
+
+    let run = run_driver(tmp.path());
+    assert!(!run.status.success(), "adding a configuration must be detected");
+    assert!(run.stderr.contains("out of date"), "got: {}", run.stderr);
+    assert_eq!(run.container_count(), 0, "no container may start: {}", run.docker_log);
+}
+
+#[test]
+fn a_deleted_configuration_leaving_an_orphaned_runtime_file_is_refused() {
+    let tmp = repo_with_config(CACHE_CONFIG);
+    std::fs::remove_file(tmp.path().join(".anvil/config.toml")).unwrap();
+
+    let run = run_driver(tmp.path());
+    assert!(!run.status.success(), "an orphaned runtime file must be detected");
+    assert!(run.stderr.contains("out of date"), "got: {}", run.stderr);
+    assert_eq!(run.container_count(), 0, "no container may start: {}", run.docker_log);
+}

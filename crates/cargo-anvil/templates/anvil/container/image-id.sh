@@ -45,6 +45,15 @@ for path in "$container_dir"/*; do
     inputs+=("${path#"$repo_root"/}")
 done
 
+# Files a repository declared through [[container.image.file]] are copied into
+# the image, so their contents select it. They are learned from the generated
+# Containerfile's COPY instructions rather than from a second list, so the
+# helper needs no TOML parser and the two lists cannot disagree.
+while IFS= read -r declared; do
+    [[ -n "$declared" ]] || continue
+    inputs+=("$declared")
+done < <(sed -n 's/^COPY \["\([^"]*\)", "[^"]*"\]$/\1/p' "$container_dir/Containerfile")
+
 if command -v sha256sum >/dev/null 2>&1; then
     hash_command=(sha256sum)
 elif command -v shasum >/dev/null 2>&1; then
