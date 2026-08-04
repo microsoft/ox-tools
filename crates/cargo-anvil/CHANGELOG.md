@@ -28,5 +28,5 @@
     managed region is emitted into the root `Justfile`. Repositories that do
     not opt into the container backend keep running natively by default, but
     regenerating does change the emitted tree.
-  - Non-recipe container assets live under `.anvil/container/`; only
-    `container.just` remains under `justfiles/anvil/container/`.
+  - Non-recipe container assets live under `.anvil/container/`; the entry
+    recipe stays in `justfiles/` as a single `anvil/container.just` file.
