@@ -125,6 +125,19 @@ The repository is mounted read/write at `/workspace`. Build output remains in a
 named volume instead of the host `target/`, avoiding incompatible artifacts and
 slow host-to-virtual-machine I/O.
 
+## Git worktrees
+
+Ordinary repositories and [linked
+worktrees](https://git-scm.com/docs/git-worktree) both work, including
+worktrees created on Windows and run through WSL.
+
+In a linked worktree the shared Git data lives outside the worktree, so the
+driver additionally mounts that common Git directory **read-only** and points
+Git at it. Checks that read history — impact scoping, `anvil-aprz`, and
+`semver-check` — therefore behave the same as in an ordinary clone, while
+containerized commands cannot modify shared Git or Git LFS state. Nothing else
+about the run changes: the same image, caches, and target volume are used.
+
 ## GitHub authentication
 
 `anvil-aprz` and aggregate tiers that include it require GitHub API
@@ -187,6 +200,8 @@ same inputs, at the cost of duplicate work.
 | GitHub authentication is unavailable | Run `gh auth login --hostname github.com` or set host `GITHUB_TOKEN` |
 | A matching image is missing with `ANVIL_CONTAINER_NO_REBUILD=1` | Unset the variable to allow the local image build |
 | The first run is slow | The initial image build installs the pinned tool catalog; later runs reuse it |
+| A Windows-created worktree fails in WSL | Run the checks from Windows PowerShell, or recreate the worktree from Linux so its `.git` pointer records a path WSL Git can resolve |
+| Git metadata cannot be resolved | Run `git worktree repair` in the worktree; the `.git` pointer must name existing metadata |
 
 Use `docker images anvil-dev` inside Linux or WSL to list locally cached
 default Anvil images.

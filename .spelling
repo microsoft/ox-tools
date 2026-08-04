@@ -453,3 +453,6 @@ UB
 subdirectory
 Containerfile
 WSL
+LFS
+worktree
+worktrees
