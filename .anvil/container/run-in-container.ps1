@@ -173,10 +173,16 @@ $githubToken = $null
 $githubTokenFile = $null
 $exitCode = 0
 $customizeScript = Join-Path $scriptDir 'customize.ps1'
+$legacyCustomizeScript = Join-Path $repoRoot 'justfiles/anvil/container/customize.ps1'
 
 try {
     if (Test-Path -LiteralPath $customizeScript -PathType Leaf) {
         . $customizeScript
+    }
+    elseif (Test-Path -LiteralPath $legacyCustomizeScript -PathType Leaf) {
+        [Console]::Error.WriteLine(
+            'anvil-container: warning: ignoring justfiles/anvil/container/customize.ps1; container assets moved to .anvil/container/. Move the file to .anvil/container/customize.ps1 to keep it active.'
+        )
     }
 
     Test-AnvilContainerStringArray 'AnvilContainerBuildArgs' $AnvilContainerBuildArgs

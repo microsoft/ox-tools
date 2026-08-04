@@ -73,19 +73,20 @@ ENTRYPOINT ["anvil-container-entrypoint"]
 CMD ["bash"]
 
 === .anvil/container/Containerfile.dockerignore ===
+# Deny-all allow-list for the image build context.
+#
+# Docker matches each candidate against every pattern in order and lets the
+# last match win, testing the path itself *and each of its parent directories*
+# (moby/patternmatcher MatchesOrParentMatches). A bare directory re-inclusion
+# such as `!justfiles` therefore re-admits the entire subtree below it, which
+# would defeat this allow-list, so list only leaf patterns here. Docker still
+# descends into a denied directory when some re-inclusion pattern is prefixed
+# by it, so the intermediate directories need no entries of their own.
 **
 !rust-toolchain.toml
-!justfiles
-!justfiles/anvil
 !justfiles/anvil/*.just
-!justfiles/anvil/checks
 !justfiles/anvil/checks/*.just
-!justfiles/anvil/container
-!justfiles/anvil/container/*.just
-!justfiles/anvil/groups
 !justfiles/anvil/groups/*.just
-!.anvil
-!.anvil/container
 !.anvil/container/*
 .anvil/container/customize.sh
 .anvil/container/customize.ps1
@@ -289,6 +290,13 @@ default Anvil images.
 This directory is managed by `cargo-anvil`. Regenerate it with `cargo anvil`
 instead of editing its files directly.
 
+> [!IMPORTANT]
+> These assets previously lived in `justfiles/anvil/container/`. `cargo anvil`
+> relocates the files it generated, but it does not track a hand-authored
+> `customize.sh` or `customize.ps1`. Move any such file to
+> `.anvil/container/` yourself; the driver only loads customization from the
+> new location and warns on stderr when it finds one left behind.
+
 ## Advanced repository customization
 
 A repository or derived catalog can add one trusted customization file per
@@ -358,7 +366,7 @@ if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
     throw 'anvil-container requires a repository-owned rust-toolchain.toml.'
 }
 $containerPath = Join-Path $repoRoot '.anvil/container'
-$containerRecipePath = Join-Path $repoRoot 'justfiles/anvil/container'
+$containerRecipe = 'justfiles/anvil/container.just'
 $containerfile = Join-Path $containerPath 'Containerfile'
 $baseImageMatch = [regex]::Match([IO.File]::ReadAllText($containerfile), '(?m)^ARG BASE_IMAGE=([^\r\n]+)')
 if (-not $baseImageMatch.Success) {
@@ -369,11 +377,12 @@ $baseImage = if ($env:ANVIL_CONTAINER_BASE_IMAGE) { $env:ANVIL_CONTAINER_BASE_IM
 if ($baseImage -notmatch '@sha256:[0-9a-fA-F]{64}$') {
     throw 'anvil-container: ANVIL_CONTAINER_BASE_IMAGE must be pinned by sha256 digest (image@sha256:<64 hex characters>).'
 }
-$containerRecipePrefix = $containerRecipePath + [IO.Path]::DirectorySeparatorChar
 $pathComparison = if ($IsWindows) { [StringComparison]::OrdinalIgnoreCase } else { [StringComparison]::Ordinal }
+# The container entry recipe drives execution on the host; it is not image
+# content, so it must not participate in image identity.
 $inputs += Get-ChildItem (Join-Path $repoRoot 'justfiles/anvil') -Recurse -File -Filter '*.just' |
-    Where-Object { -not $_.FullName.StartsWith($containerRecipePrefix, $pathComparison) } |
-    ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
+    ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') } |
+    Where-Object { -not $_.Equals($containerRecipe, $pathComparison) }
 $executionOnly = @(
     'image-id.ps1',
     'image-id.sh',
@@ -427,7 +436,7 @@ if [[ ! -f "$toolchain_path" ]]; then
 fi
 
 container_dir="$repo_root/.anvil/container"
-container_recipe_dir="$repo_root/justfiles/anvil/container"
+container_recipe="justfiles/anvil/container.just"
 default_base_image="$(sed -n 's/^ARG BASE_IMAGE=//p' "$container_dir/Containerfile" | head -n 1)"
 if [[ -z "$default_base_image" ]]; then
     echo 'anvil-container: Containerfile must define ARG BASE_IMAGE=<digest-pinned-image>.' >&2
@@ -440,8 +449,13 @@ if [[ ! "$base_image" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
 fi
 inputs=(rust-toolchain.toml)
 while IFS= read -r path; do
-    inputs+=("${path#"$repo_root"/}")
-done < <(find "$repo_root/justfiles/anvil" -type f -name '*.just' ! -path "$container_recipe_dir/*" -print)
+    relative="${path#"$repo_root"/}"
+    # The container entry recipe drives execution on the host; it is not
+    # image content, so it must not participate in image identity.
+    if [[ "$relative" != "$container_recipe" ]]; then
+        inputs+=("$relative")
+    fi
+done < <(find "$repo_root/justfiles/anvil" -type f -name '*.just' -print)
 
 for path in "$container_dir"/*; do
     [[ -f "$path" ]] || continue
@@ -674,10 +688,16 @@ $githubToken = $null
 $githubTokenFile = $null
 $exitCode = 0
 $customizeScript = Join-Path $scriptDir 'customize.ps1'
+$legacyCustomizeScript = Join-Path $repoRoot 'justfiles/anvil/container/customize.ps1'
 
 try {
     if (Test-Path -LiteralPath $customizeScript -PathType Leaf) {
         . $customizeScript
+    }
+    elseif (Test-Path -LiteralPath $legacyCustomizeScript -PathType Leaf) {
+        [Console]::Error.WriteLine(
+            'anvil-container: warning: ignoring justfiles/anvil/container/customize.ps1; container assets moved to .anvil/container/. Move the file to .anvil/container/customize.ps1 to keep it active.'
+        )
     }
 
     Test-AnvilContainerStringArray 'AnvilContainerBuildArgs' $AnvilContainerBuildArgs
@@ -974,6 +994,10 @@ cleanup() {
 trap cleanup EXIT
 
 customize_script="$script_dir/customize.sh"
+legacy_customize_script="$repo_root/justfiles/anvil/container/customize.sh"
+if [[ ! -f "$customize_script" && -f "$legacy_customize_script" ]]; then
+    echo "anvil-container: warning: ignoring justfiles/anvil/container/customize.sh; container assets moved to .anvil/container/. Move the file to .anvil/container/customize.sh to keep it active." >&2
+fi
 if [[ -f "$customize_script" ]]; then
     # shellcheck source=/dev/null
     source "$customize_script"
@@ -3090,7 +3114,7 @@ anvil-udeps-setup installer="install": anvil-toolchain-nightly-install (anvil-to
 [group("anvil-setup")]
 anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-udeps-validate-prereqs
 
-=== justfiles/anvil/container/container.just ===
+=== justfiles/anvil/container.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 # Owned by cargo-anvil; edit via `cargo anvil`.
@@ -3751,7 +3775,7 @@ import 'checks/readme-check.just'
 import 'checks/semver-check.just'
 import 'checks/spellcheck.just'
 import 'checks/udeps.just'
-import 'container/container.just'
+import 'container.just'
 import 'groups/pr-fast.just'
 import 'groups/pr-slow.just'
 import 'groups/pr-test.just'

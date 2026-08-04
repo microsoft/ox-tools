@@ -136,6 +136,10 @@ cleanup() {
 trap cleanup EXIT
 
 customize_script="$script_dir/customize.sh"
+legacy_customize_script="$repo_root/justfiles/anvil/container/customize.sh"
+if [[ ! -f "$customize_script" && -f "$legacy_customize_script" ]]; then
+    echo "anvil-container: warning: ignoring justfiles/anvil/container/customize.sh; container assets moved to .anvil/container/. Move the file to .anvil/container/customize.sh to keep it active." >&2
+fi
 if [[ -f "$customize_script" ]]; then
     # shellcheck source=/dev/null
     source "$customize_script"

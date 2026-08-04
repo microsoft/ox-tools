@@ -88,7 +88,7 @@ apply to the outer invocation and are not propagated to the selected tier.
 ## 4. Architecture
 
 Container support consists of the generated recipe
-`justfiles/anvil/container/container.just` and a generated artifact group under
+`justfiles/anvil/container.just` and a generated artifact group under
 `.anvil/container/`. The recipe selects the PowerShell driver on Windows and the
 Bash driver on Linux or WSL. The PowerShell driver invokes Docker Engine in the
 default WSL distribution; the Bash driver invokes the local Docker Engine
@@ -413,7 +413,7 @@ support.
 
 | Path | Purpose |
 |---|---|
-| `justfiles/anvil/container/container.just` | Public `anvil-container` entry recipe |
+| `justfiles/anvil/container.just` | Public `anvil-container` entry recipe |
 | `.anvil/container/Containerfile` | Generic Linux image definition |
 | `.anvil/container/Containerfile.dockerignore` | Restricted image build context |
 | `.anvil/container/entrypoint.sh` | Non-root Cargo initialization |

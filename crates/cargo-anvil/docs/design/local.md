@@ -38,8 +38,7 @@ repo/
 │   │                       anvil-pr-runtime-analysis, anvil-pr-mutants,
 │   │                       anvil-scheduled-test, …). `anvil-pr-slow` is a
 │   │                       convenience umbrella over the three pr-slow sub-groups.
-│   ├── container/
-│   │   └── container.just  optional container entry recipe.
+│   ├── container.just      optional container entry recipe (`anvil-container`).
 │   ├── tiers.just          tier aggregators (anvil-pr, anvil-scheduled, anvil-full).
 │   ├── tools.just          tool/component/toolchain install + validate-prereqs recipes,
 │   │                       plus anvil-system-deps-check and anvil-validate-prereqs.
@@ -76,7 +75,7 @@ files) are annotated with `[group("anvil-setup")]`. `just --groups` therefore sh
 two clean clusters: one for "run checks", one for "install prereqs".
 
 > **Optional container backend.** When a catalog includes the opt-in container
-> backend, `justfiles/anvil/container/container.just` adds the
+> backend, `justfiles/anvil/container.just` adds the
 > `anvil-container <recipe>` command and `.anvil/container/` contains its
 > non-recipe assets. It runs any recipe below inside a pinned Linux image
 > (Linux-on-Windows parity, distro pinning) instead of against the host

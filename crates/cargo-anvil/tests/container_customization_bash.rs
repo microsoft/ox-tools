@@ -171,8 +171,26 @@ fn run_driver(root: &Path, customize_sh_body: &str, recipe: &str, env: &[(&str, 
 }
 
 fn run_driver_args(root: &Path, customize_sh_body: &str, recipe_args: &[&str], env: &[(&str, &str)]) -> DriverRun {
-    let container_dir = root.join(".anvil/container");
-    write(&container_dir.join("customize.sh"), customize_sh_body);
+    run_driver_maybe_customized(root, Some(customize_sh_body), recipe_args, env)
+}
+
+/// Runs the driver with no `customize.sh` at the current location, so the
+/// stranded-legacy-file detection is observable.
+fn run_driver_without_customization(root: &Path, recipe: &str, env: &[(&str, &str)]) -> DriverRun {
+    run_driver_maybe_customized(root, None, &[recipe], env)
+}
+
+fn run_driver_maybe_customized(
+    root: &Path,
+    customize_sh_body: Option<&str>,
+    recipe_args: &[&str],
+    env: &[(&str, &str)],
+) -> DriverRun {
+    let customize = root.join(".anvil/container/customize.sh");
+    match customize_sh_body {
+        Some(body) => write(&customize, body),
+        None => drop(std::fs::remove_file(&customize)),
+    }
 
     let bin_dir = root.join("fake-bin");
     install_fake_docker(&bin_dir);
@@ -207,6 +225,62 @@ fn run_driver_args(root: &Path, customize_sh_body: &str, recipe_args: &[&str], e
         docker_log: std::fs::read_to_string(&docker_log).unwrap_or_default(),
         test_log: std::fs::read_to_string(&test_log).unwrap_or_default(),
     }
+}
+
+#[test]
+fn a_customization_file_stranded_at_the_pre_move_path_is_reported_and_not_sourced() {
+    // Container assets moved from justfiles/anvil/container/ to
+    // .anvil/container/. A hand-authored customization file is not
+    // catalog-tracked, so `cargo anvil` cannot relocate it; the driver must
+    // say so instead of silently running without it.
+    let tmp = repo_with_container();
+    write(
+        &tmp.path().join("justfiles/anvil/container/customize.sh"),
+        "ANVIL_CONTAINER_RUN_ARGS=(--label stranded=1)\n",
+    );
+
+    let run = run_driver_without_customization(tmp.path(), "anvil-clippy", &[("FAKE_DOCKER_IMAGE_EXISTS", "1")]);
+
+    assert!(run.status.success(), "the run must still proceed: stderr={}", run.stderr);
+    assert!(
+        run.stderr.contains("justfiles/anvil/container/customize.sh") && run.stderr.contains(".anvil/container/customize.sh"),
+        "the stranded file and its new home must both be named: stderr={}",
+        run.stderr
+    );
+    assert!(
+        !run.docker_log.contains("stranded=1"),
+        "the stranded file must not be sourced: docker.log={}",
+        run.docker_log
+    );
+}
+
+#[test]
+fn a_customization_file_at_the_current_path_wins_without_a_migration_warning() {
+    let tmp = repo_with_container();
+    // A stale copy at the old path must be inert, not a second source.
+    write(
+        &tmp.path().join("justfiles/anvil/container/customize.sh"),
+        "echo 'the pre-move path must never be sourced' >&2\nexit 1\n",
+    );
+
+    let run = run_driver(
+        tmp.path(),
+        "ANVIL_CONTAINER_RUN_ARGS=(--label current=1)\n",
+        "anvil-clippy",
+        &[("FAKE_DOCKER_IMAGE_EXISTS", "1")],
+    );
+
+    assert!(run.status.success(), "the run must succeed: stderr={}", run.stderr);
+    assert!(
+        !run.stderr.contains("justfiles/anvil/container/customize.sh"),
+        "no migration warning is due when the current path is populated: stderr={}",
+        run.stderr
+    );
+    assert!(
+        run.docker_log.contains("current=1"),
+        "the current customization must take effect: docker.log={}",
+        run.docker_log
+    );
 }
 
 #[test]
