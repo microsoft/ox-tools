@@ -547,7 +547,7 @@ mod tests {
             "import 'impact.just'",
             "import 'checks/fmt.just'",
             "import 'checks/miri.just'",
-            "import 'container/container.just'",
+            "import 'container.just'",
             "import 'groups/pr-fast.just'",
             "import 'groups/scheduled-exhaustive.just'",
             "import 'runner.just'",

@@ -44,7 +44,7 @@ version_at_least() {
 }
 
 command -v docker >/dev/null 2>&1 || {
-    echo "anvil-container: Docker Engine is required. See justfiles/anvil/container/README.md." >&2
+    echo "anvil-container: Docker Engine is required. See .anvil/container/README.md." >&2
     exit 1
 }
 
@@ -67,7 +67,7 @@ if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     echo 'anvil-container must run from a Git repository.' >&2
     exit 1
 fi
-script_dir="$repo_root/justfiles/anvil/container"
+script_dir="$repo_root/.anvil/container"
 default_base_image="$(sed -n 's/^ARG BASE_IMAGE=//p' "$script_dir/Containerfile" | head -n 1)"
 if [[ -z "$default_base_image" ]]; then
     echo 'anvil-container: Containerfile must define ARG BASE_IMAGE=<digest-pinned-image>.' >&2
@@ -135,9 +135,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-if [[ -f "$script_dir/customize.sh" ]]; then
+customize_script="$script_dir/customize.sh"
+legacy_customize_script="$repo_root/justfiles/anvil/container/customize.sh"
+if [[ ! -f "$customize_script" && -f "$legacy_customize_script" ]]; then
+    echo "anvil-container: warning: ignoring justfiles/anvil/container/customize.sh; container assets moved to .anvil/container/. Move the file to .anvil/container/customize.sh to keep it active." >&2
+fi
+if [[ -f "$customize_script" ]]; then
     # shellcheck source=/dev/null
-    source "$script_dir/customize.sh"
+    source "$customize_script"
 fi
 
 # Bash 3.2 has neither namerefs (the nameref flag on `local`/`declare`, Bash

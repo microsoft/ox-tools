@@ -208,7 +208,7 @@ and continues after the user completes `gh auth login` and presses Enter.
 * Non-interactive runs cannot pause for login. Authenticate `gh` or set host
   `GITHUB_TOKEN` before starting them.
 * Regenerate managed files with `cargo anvil`; do not hand-edit
-  `justfiles/anvil/container/`.
+  `.anvil/container/`.
 
 ### Checks and tiers
 
@@ -428,7 +428,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbYlb69Zb1gYwbE593WAL4QU8bC8PfbxH3JBkbsEafJUpM555hZIGDa2NhcmdvLWFudmlsZTAuMy4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbfNoBeeI3cC8bZOejpLPhJiUbBEGFg2V6rLobB8UQMkHYmcRhZIGDa2NhcmdvLWFudmlsZTAuMy4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate
