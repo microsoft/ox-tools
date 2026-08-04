@@ -6,7 +6,9 @@ the default.
 
 The intended audience is `cargo-anvil` maintainers and downstream catalog
 authors. User setup and troubleshooting are documented in the generated
-`.anvil/container/README.md`.
+`.anvil/container/README.md`. The declarative contract a repository uses to
+extend the image and declare mounts, caches, and repository-owned commands is
+described in [container-config.md](./container-config.md).
 
 ## 1. Problem
 
@@ -146,10 +148,12 @@ The local image tag is a SHA-256 hash of build-relevant repository content:
   the `Containerfile` default when the variable is absent.
 
 Execution-only drivers, image-ID helpers, the entry recipe, user
-documentation, and `customize.sh`/`customize.ps1` are excluded. Customization
-source is runtime orchestration, not image content: it is excluded from both
-image identity and the build context, so it can never silently change what a
-tag names. See [8.9](#89-image-identity-and-the-build-context). Paths are
+documentation, generated runtime data, and `customize.sh`/`customize.ps1` are
+excluded. Customization source is runtime orchestration, not image content: it
+is excluded from both image identity and the build context, so it can never
+silently change what a tag names. See
+[8.9](#89-image-identity-and-the-build-context) and
+[container-config.md §7](./container-config.md#7-image-identity). Paths are
 sorted and deduplicated, and line endings are normalized so the Bash and
 PowerShell helpers produce the same ID.
 
@@ -295,6 +299,13 @@ construction, dependency preparation, runtime arguments, and cleanup through:
 .anvil/container/customize.ps1
 ```
 
+> [!NOTE]
+> `customize.*` is the *imperative* seam, for behavior that genuinely needs to
+> run host code — principally acquiring a short-lived credential. Static image
+> extensions, additional mounts, persistent caches, and repository-owned
+> commands are declared as validated data instead; see
+> [container-config.md](./container-config.md).
+
 > [!WARNING]
 > These files execute on the host with the developer's permissions before
 > container isolation. Checking out a branch that adds or changes one of them
@@ -385,7 +396,10 @@ This keeps public behavior generic while allowing a downstream catalog to
 provide an internal base image, toolchain installer, registry configuration,
 and short-lived authentication.
 
-See [extensibility.md](./extensibility.md) for the catalog builder API.
+See [extensibility.md](./extensibility.md) for the catalog builder API, and
+[container-config.md §8](./container-config.md#8-downstream-catalog-specialization)
+for how a catalog constrains or replaces the consumer image-extension
+mechanism.
 
 ## 10. Requirements, controls, and limitations
 
