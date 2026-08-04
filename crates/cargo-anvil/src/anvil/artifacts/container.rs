@@ -329,28 +329,41 @@ mod tests {
         }
     }
 
+    /// Every owned file the built-in catalog places in one of the two trees
+    /// the build context admits. The container backend copies these into the
+    /// image; anything else in the repository is bind-mounted at run time.
+    fn catalog_context_inputs() -> Vec<&'static str> {
+        crate::anvil::artifacts::anvil_artifacts()
+            .into_iter()
+            .filter_map(|artifact| match artifact {
+                Artifact::OwnedFile(spec) if spec.path.starts_with("justfiles/") || spec.path.starts_with(".anvil/") => Some(spec.path),
+                _ => None,
+            })
+            .collect()
+    }
+
     #[test]
     fn ignore_file_admits_only_image_inputs_into_the_build_context() {
         let ignore = DockerIgnore::parse(IGNORE);
 
-        for included in [
+        // Driving the include set from the catalog rather than a literal list
+        // makes this the regression guard for the second placement rule in
+        // extensibility.md §6.1: an owned file placed outside an admitted glob
+        // fails here instead of inside a real `docker build`.
+        let mut included: Vec<&str> = vec![
+            // Repository-owned rather than catalog-owned, but a required
+            // image input all the same.
             "rust-toolchain.toml",
-            "justfiles/anvil/mod.just",
-            "justfiles/anvil/versions.just",
-            "justfiles/anvil/checks/clippy.just",
-            "justfiles/anvil/groups/pr-fast.just",
-            // The entry recipe is not image content, but `mod.just` imports
-            // it unconditionally, so `just anvil-setup` needs it present.
-            RECIPE_PATH,
-            CONTAINERFILE_PATH,
-            IGNORE_PATH,
-            ENTRYPOINT_PATH,
-            IMAGE_ID_PATH,
-            SHELL_IMAGE_ID_PATH,
-            SHELL_DRIVER_PATH,
-            POWERSHELL_DRIVER_PATH,
-            README_PATH,
-        ] {
+        ];
+        included.extend(catalog_context_inputs());
+        assert!(
+            included.contains(&CONTAINERFILE_PATH) && included.contains(&"justfiles/anvil/checks/clippy.just"),
+            "the catalog-derived include set must cover both admitted trees"
+        );
+        // The entry recipe is not image content, but `mod.just` imports it
+        // unconditionally, so `just anvil-setup` needs it present.
+        assert!(included.contains(&RECIPE_PATH), "the entry recipe must reach the build context");
+        for included in included {
             assert!(!ignore.is_ignored(included), "{included} must reach the build context");
         }
 
@@ -359,6 +372,14 @@ mod tests {
             // the surrounding directory is admitted.
             CUSTOMIZE_SHELL_PATH,
             CUSTOMIZE_POWERSHELL_PATH,
+            // The container directory is admitted one level deep only, which
+            // is exactly the depth the image-ID helpers list. Under the
+            // strictest reading of Docker's parent testing a subdirectory
+            // matches `!.anvil/container/*` in its own right, so the
+            // allow-list denies deeper paths explicitly.
+            ".anvil/container/nested/asset.txt",
+            ".anvil/container/nested/customize.sh",
+            ".anvil/container/nested/deeper/asset.txt",
             // Assets stranded at the pre-move location, including a
             // hand-authored customization file, must not re-enter through a
             // directory-level re-inclusion.
@@ -382,8 +403,8 @@ mod tests {
 
     #[test]
     fn ignore_file_excludes_customize_source_from_the_build_context() {
-        // Order is load-bearing: the customize re-exclusions only win because
-        // they come after the directory-wide re-inclusion.
+        // Order is load-bearing: the customize and nested re-exclusions only
+        // win because they come after the directory-wide re-inclusion.
         let include_position = IGNORE
             .find("!.anvil/container/*")
             .expect("the container directory inclusion is asserted above");
@@ -393,8 +414,13 @@ mod tests {
         let powershell_exclude_position = IGNORE
             .find("\n.anvil/container/customize.ps1")
             .expect("customize.ps1 must be excluded from the build context");
+        let nested_exclude_position = IGNORE
+            .find("\n.anvil/container/*/*")
+            .expect("nested container assets must be excluded from the build context");
         assert!(
-            include_position < shell_exclude_position && include_position < powershell_exclude_position,
+            include_position < shell_exclude_position
+                && include_position < powershell_exclude_position
+                && include_position < nested_exclude_position,
             "the re-exclusion must come after the broad directory inclusion so it wins"
         );
     }

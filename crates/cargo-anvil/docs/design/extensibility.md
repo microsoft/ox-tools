@@ -497,9 +497,13 @@ than left to discovery:
   `.anvil/container/*`); Docker only descends into a denied directory when
   some re-inclusion pattern is prefixed by it. The image ID, by contrast,
   hashes recipes recursively. A catalog that adds a recipe directory beyond
-  those three, or a nested file under `.anvil/container/`, must also replace
-  `artifacts::container::ignore_file()`; otherwise the file is hashed into the
-  image ID but never copied, and the image build fails on the missing import.
+  those three must also replace `artifacts::container::ignore_file()`;
+  otherwise the file is hashed into the image ID but never copied, and the
+  image build fails on the missing import. `.anvil/container/` is leaf-only on
+  both sides — the image-ID helpers list it one level deep, and
+  `.anvil/container/*/*` keeps the allow-list to the same depth — so a nested
+  asset is neither hashed nor copied, and a catalog that wants one must
+  replace the ignore file and the image-ID helpers together.
 
 `customize.sh`/`customize.ps1` are trusted host code: the driver sources them
 directly into its process before image construction and recipe execution, so
