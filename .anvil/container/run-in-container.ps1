@@ -120,6 +120,41 @@ if ($LASTEXITCODE -ne 0 -or -not $wslRepoRoot) {
     throw 'anvil-container: could not translate the repository path into the default WSL distribution.'
 }
 $wslScriptDir = "$wslRepoRoot/.anvil/container"
+
+# A linked worktree keeps objects, refs, and configuration in the common Git
+# directory, which lies outside the mounted worktree. Mount exactly that
+# directory read-only so history and remote discovery work in the container
+# without containerized checks mutating shared host metadata. Optional locks
+# are disabled and Git LFS is redirected to container-local storage so filters
+# never attempt to write into the read-only mount.
+$gitDir = (git rev-parse --absolute-git-dir 2>$null)
+$gitCommonDir = (git rev-parse --path-format=absolute --git-common-dir 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not $gitDir -or -not $gitCommonDir) {
+    throw 'anvil-container: could not resolve the Git metadata directories. Git 2.31 or newer is required.'
+}
+$gitDir = $gitDir.Trim()
+$gitCommonDir = $gitCommonDir.Trim()
+$linkedWorktreeGitArgs = @()
+if ($gitDir -ne $gitCommonDir) {
+    $gitDirRelative = [IO.Path]::GetRelativePath($gitCommonDir, $gitDir).Replace('\', '/')
+    if ($gitDirRelative -eq '..' -or $gitDirRelative.StartsWith('../', [StringComparison]::Ordinal)) {
+        throw 'anvil-container: the linked-worktree Git directory is outside its common Git directory; mounting it would expose an unrelated host path.'
+    }
+    $wslGitCommonDir = (& wsl -e wslpath -a $gitCommonDir)
+    if ($LASTEXITCODE -ne 0 -or -not $wslGitCommonDir) {
+        throw 'anvil-container: could not translate the common Git directory into the default WSL distribution.'
+    }
+    $wslGitCommonDir = $wslGitCommonDir.Trim()
+    $linkedWorktreeGitArgs = @(
+        '--mount', "type=bind,source=$wslGitCommonDir,target=/anvil-git,readonly",
+        '--env', "GIT_DIR=/anvil-git/$gitDirRelative",
+        '--env', 'GIT_WORK_TREE=/workspace',
+        '--env', 'GIT_OPTIONAL_LOCKS=0',
+        '--env', 'GIT_CONFIG_COUNT=1',
+        '--env', 'GIT_CONFIG_KEY_0=lfs.storage',
+        '--env', 'GIT_CONFIG_VALUE_0=/tmp/anvil-lfs'
+    )
+}
 $containerfile = Join-Path $scriptDir 'Containerfile'
 $baseImageMatch = [regex]::Match([IO.File]::ReadAllText($containerfile), '(?m)^ARG BASE_IMAGE=([^\r\n]+)')
 if (-not $baseImageMatch.Success) {
@@ -173,10 +208,16 @@ $githubToken = $null
 $githubTokenFile = $null
 $exitCode = 0
 $customizeScript = Join-Path $scriptDir 'customize.ps1'
+$legacyCustomizeScript = Join-Path $repoRoot 'justfiles/anvil/container/customize.ps1'
 
 try {
     if (Test-Path -LiteralPath $customizeScript -PathType Leaf) {
         . $customizeScript
+    }
+    elseif (Test-Path -LiteralPath $legacyCustomizeScript -PathType Leaf) {
+        [Console]::Error.WriteLine(
+            'anvil-container: warning: ignoring justfiles/anvil/container/customize.ps1; container assets moved to .anvil/container/. Move the file to .anvil/container/customize.ps1 to keep it active.'
+        )
     }
 
     Test-AnvilContainerStringArray 'AnvilContainerBuildArgs' $AnvilContainerBuildArgs
@@ -263,6 +304,7 @@ try {
         '--workdir', '/workspace'
     )
     $runArgs += $mountArgs
+    $runArgs += $linkedWorktreeGitArgs
     $prepareRunArgs = @($runArgs)
     $runArgs += $AnvilContainerRunArgs
     foreach ($name in @(

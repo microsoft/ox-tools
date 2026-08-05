@@ -236,7 +236,7 @@ Acknowledged limits of this strategy:
 - **Self-hosted runner pools** — ox-tools uses GH-hosted; the `runs_on` input is set
   to defaults. Self-hosted shapes are documented but exercised only by the manual
   release checklist.
-- **macOS** — not in the default matrix (see [design.md §8.3](./design/design.md#83-cross-os-test-matrices));
+- **macOS** — not in the default matrix (see [README.md §8.3](./design/README.md#83-cross-os-test-matrices));
   not dogfooded.
 - **Very deep workspaces or unusual layouts** — covered only by fixtures, not by
   real-world traffic. New layouts that adopters surface become new fixtures.

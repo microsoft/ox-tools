@@ -5,7 +5,7 @@
 > reusing the same anvil engine (decision table, region splicing, manifest tracking, backend
 > resolution, dry-run, summary).
 
-This is a companion to the top-level [design.md](./design.md). It assumes familiarity with the
+This is a companion to the top-level [README.md](./README.md). It assumes familiarity with the
 core concepts defined there and in [checks.md](./checks.md), [local.md](./local.md), and
 [updates.md](./updates.md).
 
@@ -330,7 +330,7 @@ OwnedFileSpec {
 }
 ```
 
-Selection is unchanged from [design.md §5.2](./design.md): the engine resolves a backend set from
+Selection is unchanged from [README.md §5.2](./README.md): the engine resolves a backend set from
 explicit `--backend` flags or autodetection over the *fixed* `{github, ado}`, and only emits an
 owned file whose `gate` is `None` or names a selected backend. Each built-in backend file is
 exposed as a public artifact (§4.1), and a fork manipulates them — and adds new ones — with the
@@ -466,8 +466,8 @@ engine internals or the template format.
 
 ### 6.1 Optional container runner
 
-The public base catalog emits an explicit `anvil-container` recipe under
-`justfiles/anvil/container/` and its Containerfile, Docker Engine drivers,
+The public base catalog emits an explicit `anvil-container` recipe at
+`justfiles/anvil/container.just` and its Containerfile, Docker Engine drivers,
 content-address helper, and README under `.anvil/container/`. Native
 `just anvil-*` execution remains the default.
 
@@ -478,6 +478,32 @@ A downstream catalog replaces only environment-specific artifacts such as
 image selection, caches, repository mounts, and recipe forwarding remain
 unchanged. Static image behavior stays in hashed artifacts; `customize.*`
 provides documented runtime orchestration.
+
+Two placement rules follow from how the container backend derives image
+identity and the build context, and both are enforced or documented rather
+than left to discovery:
+
+- **`justfiles/` holds `.just` recipes only.** The image ID hashes `*.just`
+  files under `justfiles/anvil/`, and the build-context allow-list admits only
+  those, so any other owned file placed there would be silently dropped from
+  both. [`CatalogBuilder::build`](#4-the-shape-of-a-catalog) rejects such an
+  artifact, so a derived catalog fails loudly at construction instead of
+  shipping a file the container backend ignores. Non-recipe assets belong in a
+  tool-owned directory such as `.anvil/`.
+- **Recipe locations outside the emitted shape need an ignore-file
+  override.** `Containerfile.dockerignore` is a deny-all allow-list whose
+  re-inclusions are per-directory (`justfiles/anvil/*.just`,
+  `justfiles/anvil/checks/*.just`, `justfiles/anvil/groups/*.just`,
+  `.anvil/container/*`); Docker only descends into a denied directory when
+  some re-inclusion pattern is prefixed by it. The image ID, by contrast,
+  hashes recipes recursively. A catalog that adds a recipe directory beyond
+  those three must also replace `artifacts::container::ignore_file()`;
+  otherwise the file is hashed into the image ID but never copied, and the
+  image build fails on the missing import. `.anvil/container/` is leaf-only on
+  both sides — the image-ID helpers list it one level deep, and
+  `.anvil/container/*/*` keeps the allow-list to the same depth — so a nested
+  asset is neither hashed nor copied, and a catalog that wants one must
+  replace the ignore file and the image-ID helpers together.
 
 `customize.sh`/`customize.ps1` are trusted host code: the driver sources them
 directly into its process before image construction and recipe execution, so
@@ -556,7 +582,7 @@ ancestors defined seamlessly, as one tool managing one namespace.
   sentinels, `justfiles/anvil/`, or the `anvil-` recipe prefix. Those belong to the engine.
 - **Runtime plugins / dynamic loading.** A catalog is Rust code compiled into the downstream
   binary, not a config file discovered at runtime. This keeps the "writes files, then exits"
-  stance ([design.md §3](./design.md)) and avoids a plugin ABI.
+  stance ([README.md §3](./README.md)) and avoids a plugin ABI.
 - **Fork-authored backends.** The backend set is closed (`github`, `ado`); a fork cannot add a
   backend (§4.3). It can override, drop, or add individual files gated on an *existing* backend,
   but the `Backend` enum and backend selection/autodetection are engine-owned.

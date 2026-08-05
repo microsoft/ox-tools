@@ -134,6 +134,9 @@ mod tests {
 
     #[test]
     fn justfiles_only_contains_just_recipes() {
+        // `CatalogBuilder::build` enforces this for every derived catalog;
+        // `Catalog::anvil` is assembled directly from parts, so assert the
+        // built-in set satisfies the same invariant.
         for artifact in anvil_artifacts() {
             if let Artifact::OwnedFile(spec) = artifact
                 && spec.path.starts_with("justfiles/")
@@ -145,5 +148,9 @@ mod tests {
                 );
             }
         }
+        Catalog::anvil()
+            .into_builder()
+            .build()
+            .expect("the built-in catalog must pass the builder's justfiles/ invariant");
     }
 }

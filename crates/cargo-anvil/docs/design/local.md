@@ -6,7 +6,7 @@ don't — that's the design).
 
 See also:
 
-- [design.md](./design.md) for the overall principles.
+- [README.md](./README.md) for the overall principles.
 - [checks.md](./checks.md) for the catalog the recipes implement.
 - [updates.md](./updates.md) for how these files are tracked / regenerated.
 
@@ -38,8 +38,7 @@ repo/
 │   │                       anvil-pr-runtime-analysis, anvil-pr-mutants,
 │   │                       anvil-scheduled-test, …). `anvil-pr-slow` is a
 │   │                       convenience umbrella over the three pr-slow sub-groups.
-│   ├── container/
-│   │   └── container.just  optional container entry recipe.
+│   ├── container.just      optional container entry recipe (`anvil-container`).
 │   ├── tiers.just          tier aggregators (anvil-pr, anvil-scheduled, anvil-full).
 │   ├── tools.just          tool/component/toolchain install + validate-prereqs recipes,
 │   │                       plus anvil-system-deps-check and anvil-validate-prereqs.
@@ -76,7 +75,7 @@ files) are annotated with `[group("anvil-setup")]`. `just --groups` therefore sh
 two clean clusters: one for "run checks", one for "install prereqs".
 
 > **Optional container backend.** When a catalog includes the opt-in container
-> backend, `justfiles/anvil/container/container.just` adds the
+> backend, `justfiles/anvil/container.just` adds the
 > `anvil-container <recipe>` command and `.anvil/container/` contains its
 > non-recipe assets. It runs any recipe below inside a pinned Linux image
 > (Linux-on-Windows parity, distro pinning) instead of against the host
@@ -515,7 +514,7 @@ tools.
 
 ## 7. Customization at the recipe level
 
-Per the four customization tiers in [design.md §7](./design.md#7-customization):
+Per the four customization tiers in [README.md §7](./README.md#7-customization):
 
 - **Add your own recipes** to the top-level `Justfile` outside the managed region. The
   Justfile's managed region only contains `import` lines and an alias — your recipes never
