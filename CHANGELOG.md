@@ -5,6 +5,7 @@ Please see each crate's change log below:
 - [`anyspawn`](./crates/anyspawn/CHANGELOG.md)
 - [`bytesbuf`](./crates/bytesbuf/CHANGELOG.md)
 - [`bytesbuf_io`](./crates/bytesbuf_io/CHANGELOG.md)
+- [`cargo-anvil`](./crates/cargo-anvil/CHANGELOG.md)
 - [`cargo-heather`](./crates/cargo-heather/CHANGELOG.md)
 - [`data_privacy`](./crates/data_privacy/CHANGELOG.md)
 - [`data_privacy_macros`](./crates/data_privacy_macros/CHANGELOG.md)
