@@ -68,5 +68,7 @@ cargo_mutants_version := "27.0.0"
 cargo_nextest_version := "0.9.137"
 cargo_semver_checks_version := "0.49.0"
 cargo_sort_version := "2.1.4"
+# When bumping this pin, re-evaluate the temporary ARM64 compatibility guard
+# in tools.just and checks/spellcheck.just.
 cargo_spellcheck_version := "0.15.1"
 cargo_udeps_version := "0.1.61"

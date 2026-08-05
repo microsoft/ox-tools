@@ -344,19 +344,24 @@ scoop / winget) and exits non-zero. **No auto-install** -- admin/sudo decisions 
 package-manager choice stay with the user. The cargo-spellcheck install recipe passes
 `anvil-tool-cargo-spellcheck-source-deps-check` to `_install-tool` as its source prerequisite.
 The prerequisite runs for an explicit source-build `install` backend and when `binstall`
-cannot provide a binary. Anvil disables binstall's own compile strategy and performs the
-source fallback itself, so missing libclang surfaces as a clear hint before compilation
-instead of a cryptic clang-sys build error 10 minutes into the install.
+cannot provide a binary. When a tool declares a source prerequisite, Anvil disables binstall's own compile
+strategy and performs the source fallback itself, so missing libclang surfaces as a
+clear hint before compilation instead of a cryptic clang-sys build error 10 minutes
+into the install. Tools without a source prerequisite retain binstall's normal compile
+strategy.
 
 Each tool with a source-build system dependency owns a tool-specific prerequisite recipe and
 wires it into `_install-tool`. Catalog changes propagate to adopters via `cargo anvil` like
 any other template edit.
 
-`cargo-spellcheck 0.15.1` is skipped end-to-end on ARM64. Its pinned
-`ra_ap_stdx` dependency does not compile with current Rust on Linux ARM64, and
-the available Windows ARM64 binary terminates with an access violation. Because
-spelling results are architecture-independent, x64 workflow legs retain the
-check while ARM64 setup, prerequisite validation, and execution are no-ops.
+`cargo-spellcheck 0.15.1` is not usable on ARM64. Its pinned `ra_ap_stdx`
+dependency does not compile with current Rust on Linux ARM64, and the available
+Windows ARM64 binary terminates with an access violation. The generated
+mixed-architecture GitHub workflow explicitly authorizes setup, validation, and
+execution no-ops on ARM64 because both x64 legs retain the architecture-independent
+check. Direct ARM64 invocations fail loudly instead of silently omitting spelling
+coverage. The guard is coupled to version 0.15.1, so changing the pin forces its
+compatibility decision to be revisited.
 
 ### 3.4 Per-check warnings
 

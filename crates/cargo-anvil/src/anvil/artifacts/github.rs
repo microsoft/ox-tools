@@ -216,6 +216,9 @@ mod tests {
     #[test]
     fn pr_impl_workflow_has_expected_jobs() {
         assert!(PR_IMPL_WORKFLOW.contains("workflow_call:"));
+        assert!(
+            PR_IMPL_WORKFLOW.contains("ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64: ${{ endsWith(matrix.os, '-arm') && 'true' || 'false' }}")
+        );
         for needle in [
             "impact-linux:",
             "impact-windows:",

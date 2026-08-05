@@ -296,7 +296,11 @@ mod tests {
     #[test]
     fn spellcheck_checks_source_prerequisites_before_source_builds() {
         assert!(
-            TOOLS_JUST.contains("--disable-strategies compile"),
+            TOOLS_JUST.contains("if ($sourcePrereq)"),
+            "binstall compile strategy must only be disabled for tools with source prerequisites"
+        );
+        assert!(
+            TOOLS_JUST.contains("$binstallArgs += @('--disable-strategies', 'compile')"),
             "binstall must not compile before Anvil checks source prerequisites"
         );
         assert!(
@@ -304,8 +308,8 @@ mod tests {
             "spellcheck installer must run libclang validation before source builds"
         );
         assert!(
-            TOOLS_JUST.contains("anvil-tool-cargo-spellcheck-install: ARM64 -- skipping (upstream tool incompatibility)"),
-            "spellcheck installation must skip unsupported ARM64 hosts"
+            TOOLS_JUST.contains("ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64"),
+            "spellcheck installation must require an explicit workflow policy to skip ARM64"
         );
         let checks = all_check_bodies();
         assert!(
@@ -313,8 +317,12 @@ mod tests {
             "spellcheck setup must not require libclang before binstall"
         );
         assert!(
-            checks.contains("anvil-spellcheck: ARM64 -- skipping (upstream tool incompatibility)"),
-            "spellcheck execution must skip unsupported ARM64 hosts"
+            checks.contains("ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64"),
+            "spellcheck execution must require an explicit workflow policy to skip ARM64"
+        );
+        assert!(
+            checks.contains("cargo-spellcheck pin changed; re-evaluate"),
+            "changing the spellcheck pin must surface the temporary ARM64 guard"
         );
     }
 

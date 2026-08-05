@@ -2099,6 +2099,11 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+    env:
+      # cargo-spellcheck 0.15.1 is unusable on ARM64. This workflow may
+      # skip it there because the same architecture-independent check
+      # runs on both x64 legs; direct ARM64 recipe invocations fail.
+      ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64: ${{ endsWith(matrix.os, '-arm') && 'true' || 'false' }}
     # Cross-OS / cross-arch because pr-fast contains compile-sensitive
     # checks (clippy, doc-build, udeps, semver-check, external-types)
     # whose results can differ across host for crates that use
@@ -4423,8 +4428,16 @@ anvil-semver-check-validate-prereqs: anvil-tool-cargo-semver-checks-validate-pre
 anvil-spellcheck: anvil-spellcheck-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) {
-        Write-Host 'anvil-spellcheck: ARM64 -- skipping (upstream tool incompatibility)'
-        exit 0
+        if ('{{cargo_spellcheck_version}}' -ne '0.15.1') {
+            Write-Error 'cargo-spellcheck pin changed; re-evaluate and remove or update the ARM64 compatibility guard'
+            exit 2
+        }
+        if ($env:ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64 -eq 'true') {
+            Write-Host 'anvil-spellcheck: ARM64 -- workflow-authorized skip (cargo-spellcheck 0.15.1 incompatibility)'
+            exit 0
+        }
+        Write-Error 'cargo-spellcheck 0.15.1 is unsupported on ARM64; run spellcheck on x64 or explicitly authorize the generated mixed-architecture workflow skip'
+        exit 2
     }
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {
         Write-Host 'anvil-spellcheck: no modified packages; skipping'
@@ -5626,8 +5639,14 @@ _install-tool name version installer source_prereq="":
             }
         }
         # Keep source builds behind Anvil's prerequisite check instead of
-        # allowing binstall to compile before that check can run.
-        cargo binstall --no-confirm --locked --disable-strategies compile $name --version "=$version"
+        # allowing binstall to compile before that check can run. Tools with
+        # no source prerequisite may still use binstall's compile strategy.
+        $binstallArgs = @('binstall', '--no-confirm', '--locked')
+        if ($sourcePrereq) {
+            $binstallArgs += @('--disable-strategies', 'compile')
+        }
+        $binstallArgs += @($name, '--version', "=$version")
+        cargo @binstallArgs
         if ($LASTEXITCODE -eq 0) { exit 0 }
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
     }
@@ -6122,16 +6141,25 @@ anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_ver
 
 # cargo-spellcheck 0.15.1 is not usable on ARM64: its source dependency
 # ra_ap_stdx no longer compiles with current Rust, and its Windows ARM64 binary
-# segfaults. Spelling is architecture-independent and runs on the x64 matrix
-# legs, so installation, validation, and execution all self-skip on ARM64.
+# segfaults. The generated mixed-architecture GitHub workflow explicitly
+# permits ARM64 to skip because its x64 legs perform the same check. Direct
+# ARM64 invocations fail loudly instead of reporting success without coverage.
 
 # Install the pinned `cargo-spellcheck` tool.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
 anvil-tool-cargo-spellcheck-install installer="install":
     if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) {
-        Write-Host 'anvil-tool-cargo-spellcheck-install: ARM64 -- skipping (upstream tool incompatibility)'
-        exit 0
+        if ('{{cargo_spellcheck_version}}' -ne '0.15.1') {
+            Write-Error 'cargo-spellcheck pin changed; re-evaluate and remove or update the ARM64 compatibility guard'
+            exit 2
+        }
+        if ($env:ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64 -eq 'true') {
+            Write-Host 'anvil-tool-cargo-spellcheck-install: ARM64 -- workflow-authorized skip (cargo-spellcheck 0.15.1 incompatibility)'
+            exit 0
+        }
+        Write-Error 'cargo-spellcheck 0.15.1 is unsupported on ARM64; run spellcheck on x64 or explicitly authorize the generated mixed-architecture workflow skip'
+        exit 2
     }
     & "{{just_executable()}}" _install-tool cargo-spellcheck {{cargo_spellcheck_version}} {{installer}} anvil-tool-cargo-spellcheck-source-deps-check
     exit $LASTEXITCODE
@@ -6141,8 +6169,16 @@ anvil-tool-cargo-spellcheck-install installer="install":
 [script("pwsh", "-NoProfile")]
 anvil-tool-cargo-spellcheck-validate-prereqs:
     if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) {
-        Write-Host 'anvil-tool-cargo-spellcheck-validate-prereqs: ARM64 -- skipping (upstream tool incompatibility)'
-        exit 0
+        if ('{{cargo_spellcheck_version}}' -ne '0.15.1') {
+            Write-Error 'cargo-spellcheck pin changed; re-evaluate and remove or update the ARM64 compatibility guard'
+            exit 2
+        }
+        if ($env:ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64 -eq 'true') {
+            Write-Host 'anvil-tool-cargo-spellcheck-validate-prereqs: ARM64 -- workflow-authorized skip (cargo-spellcheck 0.15.1 incompatibility)'
+            exit 0
+        }
+        Write-Error 'cargo-spellcheck 0.15.1 is unsupported on ARM64; run spellcheck on x64 or explicitly authorize the generated mixed-architecture workflow skip'
+        exit 2
     }
     & "{{just_executable()}}" _check-tool cargo-spellcheck {{cargo_spellcheck_version}}
     exit $LASTEXITCODE
@@ -6226,6 +6262,8 @@ cargo_mutants_version := "27.0.0"
 cargo_nextest_version := "0.9.137"
 cargo_semver_checks_version := "0.49.0"
 cargo_sort_version := "2.1.4"
+# When bumping this pin, re-evaluate the temporary ARM64 compatibility guard
+# in tools.just and checks/spellcheck.just.
 cargo_spellcheck_version := "0.15.1"
 cargo_udeps_version := "0.1.61"
 
