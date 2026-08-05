@@ -3445,7 +3445,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
         Write-Host 'anvil-llvm-cov: aarch64-pc-windows-msvc -- skipping coverage; running plain nextest'
         foreach ($cfg in $configs) {
-            & cargo '+{{ rust_nightly }}' nextest run @allTestPkg $cfg.flag --locked
+            & cargo '+{{ rust_nightly }}' nextest run @allTestPkg $cfg.flag --no-tests=pass --locked
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
         exit 0
@@ -3453,7 +3453,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
     if ($testOnlyPkg.Count -gt 0) {
         Write-Host 'anvil-llvm-cov: running tests without coverage for opted-out packages'
         foreach ($cfg in $configs) {
-            & cargo '+{{ rust_nightly }}' nextest run @testOnlyPkg $cfg.flag --locked
+            & cargo '+{{ rust_nightly }}' nextest run @testOnlyPkg $cfg.flag --no-tests=pass --locked
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         }
     }

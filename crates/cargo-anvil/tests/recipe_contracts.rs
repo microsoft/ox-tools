@@ -90,6 +90,9 @@ if ($args -contains 'bolero' -and $args -contains 'list') {
     exit [int]$env:FAKE_BOLERO_LIST_EXIT
 }
 if ($args -contains 'nextest') {
+    if ($env:FAKE_NEXTEST_EXIT -eq '4' -and $args -contains '--no-tests=pass') {
+        exit 0
+    }
     exit [int]$env:FAKE_NEXTEST_EXIT
 }
 exit 0
@@ -329,8 +332,23 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
     assert_eq!(calls.matches("nextest run").count(), 2, "calls:\n{calls}");
     assert!(calls.contains("--all-features"), "calls:\n{calls}");
     assert!(calls.contains("--no-default-features"), "calls:\n{calls}");
+    assert_eq!(calls.matches("--no-tests=pass").count(), 2, "calls:\n{calls}");
     assert!(!calls.contains("llvm-cov"), "coverage commands must not run:\n{calls}");
     assert!(!calls.contains("coverage-gate"), "the coverage gate must not run:\n{calls}");
+
+    let no_tests = run_just(
+        tmp.path(),
+        &["anvil-llvm-cov"],
+        &[
+            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
+            ("FAKE_NEXTEST_EXIT", OsStr::new("4")),
+        ],
+    );
+    assert!(
+        no_tests.status.success(),
+        "opted-out packages with no runnable tests should succeed:\n{}",
+        String::from_utf8_lossy(&no_tests.stderr)
+    );
 
     let failed = run_just(
         tmp.path(),
