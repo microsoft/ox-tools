@@ -20,6 +20,7 @@ const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
 const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.just");
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
+const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
 
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
@@ -248,6 +249,46 @@ fn semver_exit_code_contract_is_executed() {
             ],
         );
         assert_failed(&failed, &format!("cargo-semver-checks exit {exit}"));
+    }
+}
+
+#[test]
+fn public_api_checks_fail_when_metadata_discovery_fails() {
+    if !tools_available() {
+        return;
+    }
+    for (recipe_file, contents, recipe, dependencies) in [
+        (
+            "semver.just",
+            SEMVER,
+            "anvil-semver-check",
+            &[
+                "anvil-tool-cargo-semver-checks-validate-prereqs",
+                "anvil-tool-cargo-semver-checks-install installer",
+            ][..],
+        ),
+        (
+            "external-types.just",
+            EXTERNAL_TYPES,
+            "anvil-external-types",
+            &[
+                "anvil-tool-cargo-check-external-types-validate-prereqs",
+                "anvil-toolchain-external-types-validate-prereqs",
+                "anvil-tool-cargo-check-external-types-install installer",
+                "anvil-toolchain-external-types-install",
+            ][..],
+        ),
+    ] {
+        let tmp = fixture(&[(recipe_file, contents)], dependencies);
+        let output = run_just(
+            tmp.path(),
+            &[recipe],
+            &[
+                ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
+                ("FAKE_METADATA_EXIT", OsStr::new("23")),
+            ],
+        );
+        assert_failed(&output, &format!("{recipe} cargo metadata failure"));
     }
 }
 

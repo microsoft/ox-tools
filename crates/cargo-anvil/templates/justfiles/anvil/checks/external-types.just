@@ -30,7 +30,17 @@ anvil-external-types: anvil-external-types-validate-prereqs
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
     # Build pkg-name -> manifest-path map, restricted to library crates.
     $libPkgs = @{}
-    $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+    $metadataJson = & cargo metadata --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error 'anvil-external-types: cargo metadata failed'
+        exit $LASTEXITCODE
+    }
+    try {
+        $meta = $metadataJson | ConvertFrom-Json
+    } catch {
+        Write-Error "anvil-external-types: could not parse cargo metadata output: $_"
+        exit 1
+    }
     foreach ($p in $meta.packages) {
         if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
             $libPkgs[$p.name] = $p.manifest_path

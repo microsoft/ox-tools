@@ -63,7 +63,17 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
     # we got here via impact-scoping (cloud workflows) or full-workspace
     # fallback (local).
     $libPkgs = @{}
-    $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+    $metadataJson = & cargo metadata --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error 'anvil-semver-check: cargo metadata failed'
+        exit $LASTEXITCODE
+    }
+    try {
+        $meta = $metadataJson | ConvertFrom-Json
+    } catch {
+        Write-Error "anvil-semver-check: could not parse cargo metadata output: $_"
+        exit 1
+    }
     foreach ($p in $meta.packages) {
         if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
             $libPkgs[$p.name] = $p
