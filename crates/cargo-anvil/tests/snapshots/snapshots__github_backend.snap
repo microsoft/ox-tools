@@ -1867,7 +1867,7 @@ runs:
 
     - name: Free disk space (Windows)
       if: inputs.free-disk-space == 'true' && runner.environment == 'github-hosted' && runner.os == 'Windows'
-      shell: pwsh
+      shell: pwsh -NoProfile -Command ". '{0}'"
       run: |
         function Get-FreeDiskGiB {
           [math]::Round((Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'").FreeSpace / 1GB, 1)

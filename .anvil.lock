@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.3.0"
-catalog_checksum = "sha256:0827f590c4fc5c6e8e496de11440fd767d27bc8022921c78b10cdd88472bae83"
+catalog_checksum = "sha256:3b12d6208d47e39e42d381ca81c2424082c3b426178b7a50397f9bcd24e5c27d"
 
 [[file]]
 path = ".anvil/container/Containerfile"
@@ -73,7 +73,7 @@ checksum = "sha256:08123d39920c9d73c8d22c36ae20cbe594420078e25b53d0b8eb47e8361cc
 
 [[file]]
 path = ".github/actions/anvil-setup/action.yml"
-checksum = "sha256:9eedcb9741242087c4134fab9d27189fd7182b3b3c4cab4851d72798a10c5e27"
+checksum = "sha256:a153fa2ce4307ef9da91ff215e4f37e5a329d0bbb2c04c2b1f26096887f6459d"
 
 [[file]]
 path = ".github/workflows/anvil-pr-impl.yml"

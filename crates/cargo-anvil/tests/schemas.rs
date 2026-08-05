@@ -155,11 +155,11 @@ fn just_lists_emitted_recipes() {
 #[test]
 fn emitted_powershell_scripts_disable_profiles() {
     let tmp = run_with_backend("github");
-    let root = tmp.path().join("justfiles/anvil");
     let mut script_count = 0;
-    for entry in walkdir::WalkDir::new(root) {
+    let mut workflow_shell_count = 0;
+    for entry in walkdir::WalkDir::new(tmp.path()) {
         let entry = entry.unwrap();
-        if !entry.file_type().is_file() || entry.path().extension().and_then(std::ffi::OsStr::to_str) != Some("just") {
+        if !entry.file_type().is_file() {
             continue;
         }
         let contents = std::fs::read_to_string(entry.path()).unwrap();
@@ -168,9 +168,16 @@ fn emitted_powershell_scripts_disable_profiles() {
             "{} contains a profile-loading PowerShell script attribute",
             entry.path().display()
         );
+        assert!(
+            !contents.lines().any(|line| line.trim() == "shell: pwsh"),
+            "{} contains a profile-loading GitHub Actions PowerShell shell",
+            entry.path().display()
+        );
         script_count += contents.matches("[script(\"pwsh\", \"-NoProfile\")]").count();
+        workflow_shell_count += contents.matches("shell: pwsh -NoProfile").count();
     }
     assert!(script_count > 0, "expected emitted PowerShell script recipes");
+    assert!(workflow_shell_count > 0, "expected an emitted GitHub Actions PowerShell shell");
 }
 
 #[test]
