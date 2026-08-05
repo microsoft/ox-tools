@@ -11,25 +11,52 @@
 //!
 //! See [`extensibility.md §4, §5`](../../docs/design/extensibility.md).
 
+use std::collections::BTreeSet;
+
 use ohno::{AppError, bail};
 
-use crate::catalog::artifact::Artifact;
+use crate::catalog::artifact::{Artifact, ArtifactKey};
 use crate::catalog::meta::CliMeta;
 use crate::checksum::checksum_str;
+use crate::config::ContainerConfig;
 
 /// The set of artifacts a tool emits, plus its CLI identity.
 #[derive(Debug, Clone)]
 pub struct Catalog {
     cli: CliMeta,
     artifacts: Vec<Artifact>,
+    container_defaults: ContainerConfig,
+    /// Keys of artifacts that are only emitted when container execution is
+    /// enabled. Tracked here — parallel to `artifacts` and keyed by the
+    /// existing [`ArtifactKey`] — so the artifact model itself stays
+    /// untouched and container gating works uniformly for owned files and
+    /// regions.
+    container_gated: BTreeSet<ArtifactKey>,
 }
 
 impl Catalog {
-    /// Assemble a catalog from its parts. The base-catalog constructor
-    /// ([`Catalog::anvil`], defined in the `anvil` module) and the builder go
-    /// through this so the fields stay private to the reusable engine.
-    pub(crate) fn from_parts(cli: CliMeta, artifacts: Vec<Artifact>) -> Self {
-        Self { cli, artifacts }
+    /// Assemble the base catalog from its ordinary artifacts plus a set of
+    /// container-gated artifacts, infallibly.
+    ///
+    /// The base-catalog constructor ([`Catalog::anvil`], defined in the
+    /// `anvil` module) goes through this so the fields stay private to the
+    /// reusable engine. Its artifact identities are unique by construction, so
+    /// it needs neither the builder's duplicate detection nor a fallible
+    /// `build` (and thus stays panic-free — a fork that composes arbitrary
+    /// artifacts still goes through the checked builder verbs). Pass an empty
+    /// `container` vec for a catalog with no container support.
+    pub(crate) fn from_parts_with_container(cli: CliMeta, mut artifacts: Vec<Artifact>, container: Vec<Artifact>) -> Self {
+        let mut container_gated = BTreeSet::new();
+        for artifact in container {
+            container_gated.insert(artifact.key());
+            artifacts.push(artifact);
+        }
+        Self {
+            cli,
+            artifacts,
+            container_defaults: ContainerConfig::default(),
+            container_gated,
+        }
     }
 
     /// Start a new, empty catalog from a CLI identity.
@@ -38,6 +65,8 @@ impl Catalog {
         CatalogBuilder {
             cli,
             artifacts: Vec::new(),
+            container_defaults: ContainerConfig::default(),
+            container_gated: BTreeSet::new(),
             errors: Vec::new(),
         }
     }
@@ -48,6 +77,8 @@ impl Catalog {
         CatalogBuilder {
             cli: self.cli,
             artifacts: self.artifacts,
+            container_defaults: self.container_defaults,
+            container_gated: self.container_gated,
             errors: Vec::new(),
         }
     }
@@ -64,6 +95,30 @@ impl Catalog {
         &self.artifacts
     }
 
+    /// The catalog-supplied container defaults. A fork sets these via
+    /// [`CatalogBuilder::with_container_defaults`]; the user's `anvil.toml`
+    /// overrides them field-by-field. Empty by default (base `anvil` ships no
+    /// container defaults, so an absent `anvil.toml` keeps container mode off).
+    #[must_use]
+    pub(crate) fn container_defaults(&self) -> &ContainerConfig {
+        &self.container_defaults
+    }
+
+    /// Whether the artifact with `key` is container-gated (emitted only when
+    /// container execution is enabled).
+    #[must_use]
+    pub(crate) fn is_container_gated(&self, key: &ArtifactKey) -> bool {
+        self.container_gated.contains(key)
+    }
+
+    /// Whether this catalog registered any container-gated artifacts. When
+    /// false, enabling container mode in `anvil.toml` is meaningless (there is
+    /// no `container.just` to emit), so `run_update` rejects it.
+    #[must_use]
+    pub(crate) fn supports_containers(&self) -> bool {
+        !self.container_gated.is_empty()
+    }
+
     /// A `sha256:…` checksum over the whole catalog — every artifact's
     /// identity and rendered body, in canonical (sorted) order.
     ///
@@ -78,7 +133,28 @@ impl Catalog {
     pub fn checksum(&self) -> String {
         let mut entries: Vec<String> = self.artifacts.iter().map(canonical_repr).collect();
         entries.sort();
-        checksum_str(&entries.join("\n"))
+        let mut repr = entries.join("\n");
+        // The container-gated key set contributes to the checksum only when
+        // it is non-empty, so a catalog with no container artifacts (the base
+        // `anvil` catalog) produces exactly the checksum it produced before
+        // container support existed.
+        if !self.container_gated.is_empty() {
+            let mut gated: Vec<String> = self.container_gated.iter().map(key_repr).collect();
+            gated.sort();
+            repr.push_str("\n\u{1f}container-gated\u{1f}\n");
+            repr.push_str(&gated.join("\n"));
+        }
+        checksum_str(&repr)
+    }
+}
+
+/// Canonical string for a container-gated key: enough to distinguish owned
+/// files from regions and to change the checksum when the gated set changes.
+fn key_repr(key: &ArtifactKey) -> String {
+    const SEP: char = '\u{1f}';
+    match key {
+        ArtifactKey::OwnedFile(path) => format!("file{SEP}{path}"),
+        ArtifactKey::Region { host, id } => format!("region{SEP}{}{SEP}{id}", host_repr(host)),
     }
 }
 
@@ -135,6 +211,8 @@ fn syntax_repr(syntax: crate::region::CommentSyntax) -> &'static str {
 pub struct CatalogBuilder {
     cli: CliMeta,
     artifacts: Vec<Artifact>,
+    container_defaults: ContainerConfig,
+    container_gated: BTreeSet<ArtifactKey>,
     errors: Vec<String>,
 }
 
@@ -161,6 +239,32 @@ impl CatalogBuilder {
     pub fn version(mut self, version: impl Into<String>) -> Self {
         self.cli.version = version.into();
         self
+    }
+
+    /// Supply catalog-level container defaults.
+    ///
+    /// A fork calls this to pre-fill container settings (most usefully
+    /// `image`) so a repository can enable container mode with a minimal
+    /// `anvil.toml`. The user's `anvil.toml` still overrides these
+    /// field-by-field; fields the user omits fall back to what is set here,
+    /// and fields neither sets fall back to the built-in defaults.
+    #[must_use]
+    pub fn with_container_defaults(mut self, defaults: ContainerConfig) -> Self {
+        self.container_defaults = defaults;
+        self
+    }
+
+    /// Append a container-gated artifact: inserted like [`Self::with_artifact`]
+    /// and additionally recorded as container-gated, so it is emitted only
+    /// when container execution is enabled (via `anvil.toml`) and its body
+    /// receives plan-time token substitution. Additive; the existing verbs
+    /// keep their exact behavior.
+    #[must_use]
+    pub fn with_container_artifact(self, artifact: Artifact) -> Self {
+        let key = artifact.key();
+        let mut builder = self.with_artifact(artifact);
+        builder.container_gated.insert(key);
+        builder
     }
 
     /// Position of an artifact with the same identity as `artifact`, if any.
@@ -230,6 +334,8 @@ impl CatalogBuilder {
         Ok(Catalog {
             cli: self.cli,
             artifacts: self.artifacts,
+            container_defaults: self.container_defaults,
+            container_gated: self.container_gated,
         })
     }
 }
@@ -413,6 +519,66 @@ mod tests {
         assert_ne!(base, added);
         assert_ne!(base, removed);
         assert_ne!(added, removed);
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "hashes the full embedded anvil catalog; pure safe Rust with no leak/UB to exercise, covered by the native run"
+    )]
+    #[test]
+    fn base_catalog_checksum_is_deterministic_not_pinned() {
+        // This test used to pin `Catalog::anvil()`'s checksum to the
+        // cargo-anvil-v0.3.0 value. That pin was removed DELIBERATELY and must
+        // not be reinstated: the base catalog now registers the container
+        // artifacts (container-gated), which necessarily changes the catalog
+        // checksum. A base catalog that gains capability changing its checksum
+        // is normal and expected — every anvil release that adds a check does
+        // the same. It is NOT a breaking change: the checksum is not public
+        // API, and `.anvil.lock`'s `catalog_checksum` is only stamped on save,
+        // while per-artifact write/skip decisions are made by content hash in
+        // `decision.rs` — so a changed checksum causes no file churn.
+        //
+        // The property that actually matters — that turning containerization
+        // off yields byte-identical *output* — is asserted by
+        // `disabled_container_is_byte_identical_to_base` and the unchanged
+        // base-tree snapshots. Here we assert only that the checksum is a
+        // deterministic sha256, and that the base catalog does now carry
+        // container support.
+        assert_eq!(Catalog::anvil().checksum(), Catalog::anvil().checksum());
+        assert!(Catalog::anvil().checksum().starts_with("sha256:"));
+        assert!(
+            Catalog::anvil().supports_containers(),
+            "containerization ships in the base catalog (container-gated)"
+        );
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "hashes the full embedded anvil catalog; pure safe Rust with no leak/UB to exercise, covered by the native run"
+    )]
+    #[test]
+    fn container_gating_is_additive_and_affects_checksum_only_when_present() {
+        // A catalog with no container-gated artifacts folds nothing extra into
+        // its checksum; adding a gated artifact changes it deterministically.
+        // (Built from empty so the property is exercised in isolation — the
+        // base `Catalog::anvil()` now always carries container support.)
+        let cli = Catalog::anvil().cli().clone();
+        let plain = Catalog::builder(cli.clone())
+            .with_artifact(Artifact::owned_file("justfiles/anvil/x.just", "x\n"))
+            .build()
+            .unwrap();
+        assert!(!plain.supports_containers());
+
+        let with_container = Catalog::builder(cli)
+            .with_artifact(Artifact::owned_file("justfiles/anvil/x.just", "x\n"))
+            .with_container_artifact(artifacts::container::container_just())
+            .build()
+            .unwrap();
+        assert!(with_container.supports_containers());
+        assert!(with_container.is_container_gated(&artifacts::container::container_just().key()));
+        // The gated key set is non-empty, so the checksum diverges from the
+        // otherwise-identical plain catalog.
+        assert_ne!(plain.checksum(), with_container.checksum());
     }
 
     #[test]

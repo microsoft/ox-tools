@@ -12,12 +12,14 @@ use std::path::Path;
 use ohno::{AppError, bail};
 use tracing::info;
 
+use crate::anvil::artifacts::container;
 use crate::anvil::artifacts::region::DELTA_REGION_ID;
 use crate::backend::{self, Backend};
 use crate::catalog::Catalog;
 use crate::catalog::artifact::{Artifact, HostSelector, RegionSpec};
 use crate::checksum::checksum_str;
 use crate::cli::Cli;
+use crate::config::{self, ResolvedContainer};
 use crate::decision::{Decision, RemovalDecision, decide_removal};
 use crate::emit::{ManagedRegionRequest, plan_managed_region, plan_owned_file};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
@@ -91,14 +93,54 @@ pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<Run
     let ws = workspace::load_workspace(&repo_root)?;
 
     let backends = backend::resolve(&args.backends, args.no_backends, &repo_root)?;
+
+    // Load `anvil.toml` (absent → defaults), layer it over any catalog-supplied
+    // container defaults, and resolve to concrete settings. An absent/disabled
+    // config resolves to `enabled = false`, which keeps the whole plan
+    // byte-identical to a no-container build.
+    let repo_name = repo_root
+        .file_name()
+        .map_or_else(|| "workspace".to_owned(), |name| name.to_string_lossy().into_owned());
+    let anvil_config = config::load(&repo_root)?;
+    let container = anvil_config
+        .container
+        .clone()
+        .overlay(catalog.container_defaults())
+        .resolve(&repo_name)?;
+
+    // The artifact-group allow-list. An omitted `[anvil] artifacts` key selects
+    // every group, which keeps the emitted tree byte-identical to a build
+    // without the allow-list. Group selection composes with — and never
+    // overrides — the existing backend and container gates: an artifact emits
+    // only when its group is selected *and* its gates pass. In particular the
+    // `backends` group and `--no-backends` intersect, so passing
+    // `--no-backends` still suppresses every backend file even when `backends`
+    // is selected.
+    let groups = anvil_config.artifacts.unwrap_or_else(config::ArtifactGroup::all_set);
+
+    // Container execution requires the catalog to register the container
+    // artifacts (the `container.just` shim et al.). The base `anvil` catalog
+    // ships them (container-gated), so `[container] enabled = true` works out
+    // of the box; this guard only trips a fork that stripped them, turning an
+    // otherwise silent no-op into a clear configuration error.
+    if container.enabled && !catalog.supports_containers() {
+        bail!(
+            "`[container] enabled = true` in anvil.toml, but this anvil catalog does not \
+             provide container support. Remove the `[container]` section or use a catalog \
+             built with container artifacts."
+        );
+    }
+
     info!(
         repo_root = %repo_root.display(),
         backends = ?backends.iter().map(|b| b.name()).collect::<Vec<_>>(),
+        container = container.enabled,
+        artifacts = ?groups.iter().map(|g| g.as_str()).collect::<Vec<_>>(),
         dry_run = args.dry_run,
         "anvil"
     );
 
-    let plan = build_plan(&repo_root, &ws, &manifest, &backends, catalog)?;
+    let plan = build_plan(&repo_root, &ws, &manifest, &backends, catalog, &container, &groups)?;
 
     let applied = if args.dry_run {
         false
@@ -146,27 +188,72 @@ fn enforce_single_tool_guard(catalog: &Catalog, args: &Cli, manifest: &Manifest)
 ///
 /// Each artifact dispatches to the generic owned-file / managed-region
 /// driver. Owned files carrying a backend `gate` are emitted only when that
-/// backend is in the resolved set. Managed-region host selectors are expanded
-/// against the discovered workspace (see [`push_region`]). Every path is
-/// resolved to its on-disk casing so anvil follows whatever a repo already
-/// uses (e.g. `justfile` vs `Justfile`).
+/// backend is in the resolved set; files carrying a container gate are emitted
+/// only when container mode is enabled. Owned-file bodies are then passed
+/// through the container renderer, which is a no-op when container mode is
+/// disabled (so a disabled build is byte-identical to a no-container build)
+/// and otherwise injects the re-entry guard and fills in the shim/devcontainer
+/// templates. Managed-region host selectors are expanded against the
+/// discovered workspace (see [`push_region`]). Every path is resolved to its
+/// on-disk casing so anvil follows whatever a repo already uses (e.g.
+/// `justfile` vs `Justfile`).
+///
+/// `groups` is the `[anvil] artifacts` allow-list of artifact groups to
+/// manage (every group when the key is omitted). An artifact is emitted only
+/// when its group is in `groups` **and** its gates pass — the group selection
+/// *composes with*, and never overrides, the backend and container gates. The
+/// precedence is therefore: an artifact reaches disk iff
+/// `group selected ∧ backend gate open ∧ container gate open`. Because
+/// `--no-backends` yields an empty `backends` set, selecting the `backends`
+/// group under `--no-backends` still emits nothing — the effective backend set
+/// is the intersection of the two switches.
+///
+/// Any artifact filtered out here (group not selected, or a gate closed) is
+/// absent from the live plan, so [`plan_removals`] retracts it if a previous
+/// run owned it. This is what gives the allow-list clean **retraction**
+/// semantics: dropping a group from `[anvil] artifacts` removes the managed
+/// regions and deletes the owned files that group previously emitted, while
+/// never touching anything anvil did not own.
 fn build_plan(
     repo_root: &Path,
     workspace: &Workspace,
     manifest: &Manifest,
     backends: &[Backend],
     catalog: &Catalog,
+    container: &ResolvedContainer,
+    groups: &BTreeSet<config::ArtifactGroup>,
 ) -> Result<Plan, AppError> {
     let mut plan = Plan::default();
     let mut hosts = HostTextCache::default();
 
     for artifact in catalog.artifacts() {
+        // Artifact-group allow-list: an artifact whose group is not selected in
+        // `[anvil] artifacts` is skipped. This composes with (never overrides)
+        // the backend and container gates below — a selected group still has to
+        // clear its gate to emit.
+        if !groups.contains(&crate::anvil::group::group_of(catalog, artifact)) {
+            continue;
+        }
+        // Container-gated artifacts (registered via `with_container_artifact`)
+        // are emitted only when container execution is enabled. This applies
+        // uniformly to owned files and regions, keyed by artifact identity.
+        if !container.enabled && catalog.is_container_gated(&artifact.key()) {
+            continue;
+        }
         match artifact {
             Artifact::OwnedFile(spec) => {
-                let selected = spec.gate.is_none_or(|gate| backends.contains(&gate));
-                if selected {
+                let backend_ok = spec.gate.is_none_or(|backend| backends.contains(&backend));
+                // Some container-gated owned files need more than the
+                // container flag to emit: the devcontainer descriptor needs
+                // `devcontainer = true`, the image recipes need at least one
+                // `[[image]]`, and the cluster files need a `[cluster]`
+                // section. `secondary_gate_open` encodes those per-path
+                // conditions; every other path is unconstrained.
+                let secondary_ok = container::secondary_gate_open(spec.path, container);
+                if backend_ok && secondary_ok {
+                    let body = container::render_owned_body(spec.path, &spec.body, container);
                     let path = resolve_existing_case_insensitive(repo_root, spec.path);
-                    plan.push(plan_owned_file(repo_root, manifest, &path, &spec.body)?);
+                    plan.push(plan_owned_file(repo_root, manifest, &path, &body)?);
                 }
             }
             Artifact::Region(spec) => {
