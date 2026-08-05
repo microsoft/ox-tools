@@ -21,6 +21,7 @@ const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.ju
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
+const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
 
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
@@ -239,6 +240,25 @@ fn semver_exit_code_contract_is_executed() {
     );
     assert!(!tmp.path().join("target/anvil/comments/semver.md").exists());
 
+    for output in ["has no lib target", "no library targets found"] {
+        let bin_to_lib = run_just(
+            tmp.path(),
+            &["anvil-semver-check"],
+            &[
+                common[0],
+                common[1],
+                common[2],
+                ("FAKE_SEMVER_EXIT", OsStr::new("101")),
+                ("FAKE_SEMVER_OUTPUT", OsStr::new(output)),
+            ],
+        );
+        assert!(
+            bin_to_lib.status.success(),
+            "bin-to-lib exit 101 wording '{output}' should succeed:\n{}",
+            String::from_utf8_lossy(&bin_to_lib.stderr)
+        );
+    }
+
     for (exit, output) in [("101", "operational failure"), ("42", "unexpected failure")] {
         let failed = run_just(
             tmp.path(),
@@ -253,6 +273,43 @@ fn semver_exit_code_contract_is_executed() {
         );
         assert_failed(&failed, &format!("cargo-semver-checks exit {exit}"));
     }
+}
+
+#[test]
+fn repository_constants_match_shared_anvil_versions() {
+    let constants_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../constants.env");
+    if !constants_path.is_file() {
+        return;
+    }
+
+    let repository_constants = std::fs::read_to_string(constants_path).unwrap();
+    let constants = repository_constants.lines().filter_map(|line| {
+        let (name, value) = line.split_once('=')?;
+        Some((name.to_ascii_lowercase(), value.trim().to_owned()))
+    });
+    let anvil_versions = VERSIONS.lines().filter_map(|line| {
+        let (name, value) = line.split_once(":=")?;
+        Some((name.trim().to_owned(), value.trim().trim_matches('"').to_owned()))
+    });
+    let constants = constants.collect::<std::collections::HashMap<_, _>>();
+    let anvil_versions = anvil_versions.collect::<std::collections::HashMap<_, _>>();
+
+    let mismatches = constants
+        .iter()
+        // The legacy workflow's broad nightly follows rust-toolchain.toml,
+        // while Anvil's general-purpose nightly has its own compatibility cadence.
+        .filter(|(name, _)| name.as_str() != "rust_nightly")
+        .filter_map(|(name, constant)| {
+            let anvil = anvil_versions.get(name)?;
+            (constant != anvil).then(|| format!("{name}: constants.env={constant}, anvil={anvil}"))
+        })
+        .collect::<Vec<_>>();
+
+    assert!(
+        mismatches.is_empty(),
+        "shared repository and Anvil versions must match:\n{}",
+        mismatches.join("\n")
+    );
 }
 
 #[test]

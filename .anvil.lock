@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.3.0"
-catalog_checksum = "sha256:e7ea645500c6356ab9873c372c23547d3566bc7cae962050d71f5da88ecf09c7"
+catalog_checksum = "sha256:aa79c4bfeaeb48c2414322e2130d31f86868d94090936f80a43f0cb20233026b"
 
 [[file]]
 path = ".anvil/container/Containerfile"
@@ -201,7 +201,7 @@ checksum = "sha256:fb395f5413de48848f10ab3e4069599c0093a790cb31224776ba41f90c8d5
 
 [[file]]
 path = "justfiles/anvil/checks/semver-check.just"
-checksum = "sha256:64c0ea5e31fe8b18ede1c701801751913e6c396514daebc7b07b86c8f65911cb"
+checksum = "sha256:3210a749418e6716d1b689c3da5bb5e3af36700e09da0c2077fc44ade11c9f2d"
 
 [[file]]
 path = "justfiles/anvil/checks/spellcheck.just"
@@ -273,7 +273,7 @@ checksum = "sha256:662ad55792b05981ada347a4ff4a8026ad0969a61ae9bd046b8e5a03cc7e8
 
 [[file]]
 path = "justfiles/anvil/versions.just"
-checksum = "sha256:342912fe1bc38dc1622e05c1cf876a9a0c8d667280b2527bc10590e8656d080e"
+checksum = "sha256:e39768d6e252d5fe4b1baaebea5aada3f7478fc2a30e890df39c6f28c0126239"
 
 [[region]]
 host = ".delta.toml"

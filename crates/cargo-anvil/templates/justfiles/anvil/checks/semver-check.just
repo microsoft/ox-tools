@@ -10,7 +10,7 @@
 # target branch baseline; only changed crates' surface is at risk).
 #
 # Several real-world conditions aren't actually SemVer violations:
-#   - bin-only crates have no API to compare ("no library targets found").
+#   - bin-only crates have no API to compare (reported as a missing lib target).
 #   - crates newly added since the PR base have no manifest at their
 #     current workspace-relative path in that baseline.
 #   - crates renamed since the PR base have no matching package in that
@@ -40,8 +40,8 @@
 # set, verify the PR branch baseline is present, skip newly-added
 # manifest paths, then invoke per-crate against that baseline with
 # selective error tolerance for renamed crates ("package `<name>` not
-# found in ...") and bin->bin+lib transitions ("no library targets
-# found").
+# found in ...") and bin->bin+lib transitions (reported as a missing
+# lib target).
 
 # Check affected crates for semantic versioning violations.
 [script("pwsh", "-NoProfile")]
@@ -58,7 +58,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
     # its manifest path can also be checked in the baseline. Always
     # iterate per-package over library crates only -- cargo-semver-checks
     # --workspace would fail on workspaces that contain bin-only crates
-    # ("no library targets found"), and we want the same tolerance for
+    # (reported as a missing lib target), and we want the same tolerance for
     # new / renamed / bin->lib-transition crates regardless of whether
     # we got here via impact-scoping (cloud workflows) or full-workspace
     # fallback (local).
@@ -161,7 +161,8 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
             $packageMissing = $output.Contains(('package `{0}` not found in' -f $p))
             $manifestParseFailed = $output.Contains('possibly due to errors:')
             $renamedPackage = $packageMissing -and -not $manifestParseFailed
-            $baselineLibraryMissing = $output.Contains('has no lib target')
+            $baselineLibraryMissing = $output.Contains('has no lib target') -or
+                                      $output.Contains('no library targets found')
             if ($renamedPackage -or $baselineLibraryMissing) {
                 Write-Host "  $p has no comparable branch baseline; skipping (likely renamed or bin->lib transition)" -ForegroundColor Yellow
             } else {
