@@ -5055,8 +5055,8 @@ _anvil-impact-format tier impactJson:
         }
     }
     # Build three lookups from workspace members:
-    #   * $byName: exact cargo package name (may contain hyphens) -> pkg
-    #   * $byLib:  library target name (snake_case) -> pkg
+    #   * $byName: exact cargo package name (may contain hyphens) -> candidate packages
+    #   * $byLib:  library target name (snake_case) -> candidate packages
     #   * $byDirLeaf: manifest directory leaf -> candidate packages
     # cargo-delta reports *library* names (snake_case), but for crates
     # whose package name differs from the lib name (e.g. `cargo-anvil`
@@ -5064,16 +5064,34 @@ _anvil-impact-format tier impactJson:
     # accepts. Bin-only crates have no lib target; cargo-delta reports
     # those by their package name, caught by $byName. In deeply nested
     # workspaces cargo-delta can instead emit a manifest directory leaf;
-    # accept that alias only when it identifies one workspace package.
-    $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # accept any reported identifier only when all matching namespaces
+    # identify the same workspace package.
+    $metadataJson = & cargo metadata --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error 'anvil impact: cargo metadata failed'
+        exit $LASTEXITCODE
+    }
+    try {
+        $meta = $metadataJson | ConvertFrom-Json
+    } catch {
+        Write-Error "anvil impact: could not parse cargo metadata output: $_"
+        exit 1
+    }
     $byName = @{}
     $byLib = @{}
     $byDirLeaf = @{}
     foreach ($p in $meta.packages) {
-        $byName[$p.name] = $p
+        if (-not $byName.ContainsKey($p.name)) {
+            $byName[$p.name] = [System.Collections.Generic.List[object]]::new()
+        }
+        $byName[$p.name].Add($p)
         foreach ($t in $p.targets) {
-            if ($t.kind -contains 'lib') { $byLib[$t.name] = $p }
+            if ($t.kind -contains 'lib') {
+                if (-not $byLib.ContainsKey($t.name)) {
+                    $byLib[$t.name] = [System.Collections.Generic.List[object]]::new()
+                }
+                $byLib[$t.name].Add($p)
+            }
         }
         $dirLeaf = Split-Path (Split-Path $p.manifest_path -Parent) -Leaf
         if (-not $byDirLeaf.ContainsKey($dirLeaf)) {
@@ -5086,25 +5104,33 @@ _anvil-impact-format tier impactJson:
     $specs = [System.Collections.Generic.List[string]]::new()
     foreach ($name in $names) {
         if ([string]::IsNullOrWhiteSpace($name)) { continue }
-        $p = if ($byName.ContainsKey($name)) {
-            $byName[$name]
-        } elseif ($byLib.ContainsKey($name)) {
-            $byLib[$name]
-        } elseif ($byDirLeaf.ContainsKey($name)) {
-            $candidates = @($byDirLeaf[$name])
-            if ($candidates.Count -ne 1) {
-                $candidateNames = ($candidates | ForEach-Object { $_.name }) -join ', '
-                Write-Error "anvil impact: cargo-delta returned ambiguous directory leaf '$name' in the $tier set (matches: $candidateNames)"
-                exit 1
+        $matches = @{}
+        if ($byName.ContainsKey($name)) {
+            foreach ($candidate in $byName[$name]) {
+                $matches[$candidate.id] = $candidate
             }
-            $candidates[0]
-        } else {
-            $null
         }
-        if ($null -eq $p) {
+        if ($byLib.ContainsKey($name)) {
+            foreach ($candidate in $byLib[$name]) {
+                $matches[$candidate.id] = $candidate
+            }
+        }
+        if ($byDirLeaf.ContainsKey($name)) {
+            foreach ($candidate in $byDirLeaf[$name]) {
+                $matches[$candidate.id] = $candidate
+            }
+        }
+        $candidates = @($matches.Values)
+        if ($candidates.Count -eq 0) {
             Write-Error "anvil impact: cargo-delta returned unknown package '$name' in the $tier set"
             exit 1
         }
+        if ($candidates.Count -ne 1) {
+            $candidateNames = ($candidates | ForEach-Object { $_.name } | Sort-Object) -join ', '
+            Write-Error "anvil impact: cargo-delta returned ambiguous package identifier '$name' in the $tier set (matches: $candidateNames)"
+            exit 1
+        }
+        $p = $candidates[0]
         $specs.Add("--package $($p.name)@$($p.version)")
     }
     if ($specs.Count -eq 0) {

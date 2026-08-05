@@ -63,6 +63,10 @@ if ($env:FAKE_CARGO_LOG) {
 }
 if ($args -contains 'metadata') {
     if ($env:FAKE_METADATA_EXIT) { exit [int]$env:FAKE_METADATA_EXIT }
+    if ($env:FAKE_METADATA_INVALID) {
+        Write-Output '{invalid metadata'
+        exit 0
+    }
     $root = $env:FAKE_WORKSPACE_ROOT
     $packageName = if ($env:FAKE_PACKAGE_NAME) { $env:FAKE_PACKAGE_NAME } else { 'fixture' }
     $libName = if ($env:FAKE_LIB_NAME) { $env:FAKE_LIB_NAME } else { 'fixture' }
@@ -84,11 +88,16 @@ if ($args -contains 'metadata') {
         }
     )
     if ($env:FAKE_SECOND_PACKAGE_NAME) {
+        $secondDirLeaf = if ($env:FAKE_SECOND_PACKAGE_DIR_LEAF) {
+            $env:FAKE_SECOND_PACKAGE_DIR_LEAF
+        } else {
+            $env:FAKE_PACKAGE_DIR_LEAF
+        }
         $packages += [pscustomobject]@{
             name = $env:FAKE_SECOND_PACKAGE_NAME
             version = '0.1.0'
             id = "$($env:FAKE_SECOND_PACKAGE_NAME) 0.1.0"
-            manifest_path = [System.IO.Path]::Combine($root, 'nested', $env:FAKE_PACKAGE_DIR_LEAF, 'Cargo.toml')
+            manifest_path = [System.IO.Path]::Combine($root, 'nested', $secondDirLeaf, 'Cargo.toml')
             targets = @([pscustomobject]@{ name = $env:FAKE_SECOND_PACKAGE_NAME; kind = @('lib') })
             metadata = [pscustomobject]@{}
         }
@@ -201,12 +210,44 @@ fn impact_format_resolves_directory_aliases_and_fails_closed() {
     );
     assert_failed(&ambiguous_alias, "ambiguous cargo-delta directory alias");
 
+    write(
+        &tmp.path().join("impact.json"),
+        r#"{"Modified":[],"Affected":["workspace-leaf"],"Required":[]}"#,
+    );
+    let cross_namespace_alias = run_just(
+        tmp.path(),
+        &["_anvil-impact-format", "affected", "impact.json"],
+        &[
+            ("FAKE_PACKAGE_NAME", OsStr::new("workspace-leaf")),
+            ("FAKE_LIB_NAME", OsStr::new("fixture_lib")),
+            ("FAKE_PACKAGE_DIR_LEAF", OsStr::new("first-package")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other-package")),
+            ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("workspace-leaf")),
+        ],
+    );
+    assert_failed(
+        &cross_namespace_alias,
+        "cargo-delta alias that collides across identifier namespaces",
+    );
+
     let metadata_error = run_just(
         tmp.path(),
         &["_anvil-impact-format", "affected", "impact.json"],
         &[("FAKE_METADATA_EXIT", OsStr::new("23")), ("FAKE_CARGO_LOG", log.as_os_str())],
     );
     assert_failed(&metadata_error, "cargo metadata failure");
+
+    let malformed_metadata = run_just(
+        tmp.path(),
+        &["_anvil-impact-format", "affected", "impact.json"],
+        &[("FAKE_METADATA_INVALID", OsStr::new("1"))],
+    );
+    assert_failed(&malformed_metadata, "malformed cargo metadata");
+    assert!(
+        String::from_utf8_lossy(&malformed_metadata.stderr).contains("could not parse cargo metadata output"),
+        "malformed metadata should be diagnosed directly:\n{}",
+        String::from_utf8_lossy(&malformed_metadata.stderr)
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -347,20 +388,59 @@ fn repository_constants_match_shared_anvil_versions() {
     let constants = constants.collect::<std::collections::HashMap<_, _>>();
     let anvil_versions = anvil_versions.collect::<std::collections::HashMap<_, _>>();
 
-    let mismatches = constants
-        .iter()
+    let shared_keys = [
+        "rust_nightly_external_types",
+        "cargo_careful_version",
+        "cargo_check_external_types_version",
+        "cargo_deny_version",
+        "cargo_doc2readme_version",
+        "cargo_ensure_no_cyclic_deps_version",
+        "cargo_ensure_no_default_features_version",
+        "cargo_hack_version",
+        "cargo_llvm_cov_version",
+        "cargo_mutants_version",
+        "cargo_nextest_version",
+        "cargo_semver_checks_version",
+        "cargo_sort_version",
+        "cargo_spellcheck_version",
+        "cargo_udeps_version",
+    ];
+    let intentionally_unshared_keys = [
+        "rust_msrv",
+        "rust_latest",
         // The legacy workflow's broad nightly follows rust-toolchain.toml,
         // while Anvil's general-purpose nightly has its own compatibility cadence.
-        .filter(|(name, _)| name.as_str() != "rust_nightly")
-        .filter_map(|(name, constant)| {
-            let anvil = anvil_versions.get(name)?;
-            (constant != anvil).then(|| format!("{name}: constants.env={constant}, anvil={anvil}"))
+        "rust_nightly",
+        // These bootstrap/repository-only tools are not managed by Anvil.
+        "cargo_workspaces_version",
+        "just_version",
+        "sccache_version",
+    ];
+    let mut mismatches = shared_keys
+        .iter()
+        .filter_map(|name| match (constants.get(*name), anvil_versions.get(*name)) {
+            (Some(constant), Some(anvil)) if constant == anvil => None,
+            (Some(constant), Some(anvil)) => Some(format!("{name}: constants.env={constant}, anvil={anvil}")),
+            (None, Some(_)) => Some(format!("{name}: missing from constants.env")),
+            (Some(_), None) => Some(format!("{name}: missing from versions.just")),
+            (None, None) => Some(format!("{name}: missing from constants.env and versions.just")),
         })
         .collect::<Vec<_>>();
+    let known_constants = shared_keys
+        .iter()
+        .chain(intentionally_unshared_keys.iter())
+        .copied()
+        .collect::<std::collections::HashSet<_>>();
+    mismatches.extend(
+        constants
+            .keys()
+            .filter(|name| !known_constants.contains(name.as_str()))
+            .map(|name| format!("{name}: constants.env key is not classified as shared or intentionally unshared")),
+    );
 
     assert!(
         mismatches.is_empty(),
-        "shared repository and Anvil versions must match:\n{}",
+        "the explicit shared repository and Anvil version set must be present and match:\n{}",
         mismatches.join("\n")
     );
 }
@@ -402,6 +482,16 @@ fn public_api_checks_fail_when_metadata_discovery_fails() {
             ],
         );
         assert_failed(&output, &format!("{recipe} cargo metadata failure"));
+
+        let malformed = run_just(
+            tmp.path(),
+            &[recipe],
+            &[
+                ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
+                ("FAKE_METADATA_INVALID", OsStr::new("1")),
+            ],
+        );
+        assert_failed(&malformed, &format!("{recipe} malformed cargo metadata"));
     }
 }
 
@@ -470,4 +560,47 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
         ],
     );
     assert_failed(&failed, "plain nextest failure for an opted-out package");
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_arm64_fallback_accepts_empty_nextest_sets_in_both_configurations() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("llvm-cov.just", LLVM_COV)],
+        &[
+            "anvil-component-nightly-llvm-tools-validate-prereqs",
+            "anvil-tool-cargo-llvm-cov-validate-prereqs",
+            "anvil-tool-cargo-nextest-validate-prereqs",
+            "anvil-tool-cargo-coverage-gate-validate-prereqs",
+            "anvil-component-nightly-llvm-tools-install",
+            "anvil-tool-cargo-llvm-cov-install installer",
+            "anvil-tool-cargo-nextest-install installer",
+            "anvil-tool-cargo-coverage-gate-install installer",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-llvm-cov"],
+        &[
+            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
+            ("PROCESSOR_ARCHITECTURE", OsStr::new("ARM64")),
+            ("FAKE_NEXTEST_EXIT", OsStr::new("4")),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "Windows ARM64 fallback should accept empty nextest sets:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(calls.matches("nextest run").count(), 2, "calls:\n{calls}");
+    assert!(calls.contains("--all-features"), "calls:\n{calls}");
+    assert!(calls.contains("--no-default-features"), "calls:\n{calls}");
+    assert_eq!(calls.matches("--no-tests=pass").count(), 2, "calls:\n{calls}");
+    assert!(!calls.contains("llvm-cov"), "coverage commands must not run:\n{calls}");
 }
