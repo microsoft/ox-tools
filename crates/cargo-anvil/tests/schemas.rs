@@ -166,6 +166,34 @@ fn just_lists_emitted_recipes() {
 }
 
 #[test]
+fn emitted_powershell_scripts_disable_profiles() {
+    let tmp = run_with_backend("github");
+    let mut script_count = 0;
+    let mut workflow_shell_count = 0;
+    for entry in walkdir::WalkDir::new(tmp.path()) {
+        let entry = entry.unwrap();
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let contents = std::fs::read_to_string(entry.path()).unwrap();
+        assert!(
+            !contents.contains("[script(\"pwsh\")]"),
+            "{} contains a profile-loading PowerShell script attribute",
+            entry.path().display()
+        );
+        assert!(
+            !contents.lines().any(|line| line.trim() == "shell: pwsh"),
+            "{} contains a profile-loading GitHub Actions PowerShell shell",
+            entry.path().display()
+        );
+        script_count += contents.matches("[script(\"pwsh\", \"-NoProfile\")]").count();
+        workflow_shell_count += contents.matches("shell: pwsh -NoProfile").count();
+    }
+    assert!(script_count > 0, "expected emitted PowerShell script recipes");
+    assert!(workflow_shell_count > 0, "expected an emitted GitHub Actions PowerShell shell");
+}
+
+#[test]
 fn ado_yaml_emitted_files_have_consistent_indent() {
     let tmp = run_with_backend("ado");
     let root = tmp.path().join(".pipelines");

@@ -28,8 +28,8 @@ you want to upgrade the opinionated baseline.
 
 Each run of `cargo anvil` writes:
 
-* The `justfiles/anvil/` recipe tree (`tools.just`, `checks.just`,
-  `groups.just`, `tiers.just`) — owned files.
+* The owned `justfiles/anvil/` recipe tree (`tools.just`, `checks/`,
+  `groups/`, `tiers.just`).
 * A managed region in your `Justfile` that imports them.
 * A managed region in your workspace `Cargo.toml` carrying
   `[workspace.lints]` in dotted-key form, plus a `[lints] workspace = true` region in each workspace member.
@@ -66,7 +66,8 @@ Flags:
 * `--no-backends` — emit only local files; skip every cloud-workflow backend.
   Mutually exclusive with `--backend`.
 * `--dry-run` — analyze without writing. Exits 1 if anything would be
-  written or proposed.
+  written or proposed, or if Anvil refuses to manage an artifact it
+  cannot safely inspect.
 * `--force` — override the single-tool guard and switch the repository to
   this tool, then run a normal update. A repo is managed by exactly one
   anvil-family tool (recorded as `tool` in `.anvil.lock`); without
@@ -428,7 +429,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG924U18WOtymGxfBoJCeze0eGzTQ9xSQumaFG5sJwoDpJBBrYWSBg2tjYXJnby1hbnZpbGUwLjMuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbtlRLbl7fzzsbKVENG4O2364bKa13FEUmPjIbbGkzyWuPIN1hZIGDa2NhcmdvLWFudmlsZTAuMy4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

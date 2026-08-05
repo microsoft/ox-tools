@@ -424,6 +424,27 @@ mod tests {
     }
 
     #[test]
+    fn impact_step_loads_config_for_both_snapshots_and_impact() {
+        assert!(IMPACT_STEP.contains("delta_config=\"$(pwd)/.delta.toml\""));
+        assert!(!IMPACT_STEP.contains("remote_branch ="));
+        assert_eq!(
+            IMPACT_STEP.matches("--config \"$delta_config\"").count(),
+            3,
+            "current snapshot, baseline snapshot, and impact must share the repository config"
+        );
+        assert!(IMPACT_STEP.contains("cargo delta --config \"$delta_config\" snapshot"));
+        assert!(IMPACT_STEP.contains("cargo delta --config \"$delta_config\" impact"));
+    }
+
+    #[test]
+    fn setup_caches_cargo_install_metadata_without_eager_libclang_install() {
+        assert!(SETUP_STEP.contains("$(HOME)/.cargo/.crates.toml"));
+        assert!(SETUP_STEP.contains("$(HOME)/.cargo/.crates2.json"));
+        assert!(!SETUP_STEP.contains("install libclang"));
+        assert!(!SETUP_STEP.contains("install -y clang-devel"));
+    }
+
+    #[test]
     fn custom_stages_stubs_are_empty_and_take_pool_parameters() {
         // The extension stubs must emit a valid empty stages list (so the
         // default emit doesn't break the pipeline) and declare the pool

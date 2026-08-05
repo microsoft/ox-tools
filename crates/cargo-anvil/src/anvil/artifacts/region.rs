@@ -51,7 +51,7 @@ pub(crate) const RUSTFMT_REGION_ID: &str = "anvil-rustfmt";
 /// Repo-root-relative path of the `cargo-delta` config.
 const DELTA_PATH: &str = ".delta.toml";
 /// Region id for the managed section of `.delta.toml`.
-const DELTA_REGION_ID: &str = "anvil-delta";
+pub(crate) const DELTA_REGION_ID: &str = "anvil-delta";
 
 /// Repo-root-relative path of the `cargo-spellcheck` config.
 const SPELLCHECK_PATH: &str = "spellcheck.toml";
@@ -396,9 +396,10 @@ mod tests {
     }
 
     #[test]
-    fn delta_body_has_root_files() {
-        assert!(DELTA_BODY.contains("root-files"));
-        assert!(DELTA_BODY.contains("Cargo.lock"));
+    fn delta_body_uses_cargo_delta_schema() {
+        assert!(DELTA_BODY.contains("trip_wire_patterns"));
+        assert!(DELTA_BODY.contains("\"Cargo.lock\""));
+        assert!(!DELTA_BODY.contains("[delta]"));
     }
 
     #[test]
