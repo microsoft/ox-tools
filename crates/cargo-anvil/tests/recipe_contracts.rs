@@ -56,7 +56,7 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
     std::fs::create_dir_all(&bin).unwrap();
     write(
         &bin.join("cargo.ps1"),
-        r"
+        r#"
 $joined = $args -join ' '
 if ($env:FAKE_CARGO_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value $joined
@@ -64,21 +64,39 @@ if ($env:FAKE_CARGO_LOG) {
 if ($args -contains 'metadata') {
     if ($env:FAKE_METADATA_EXIT) { exit [int]$env:FAKE_METADATA_EXIT }
     $root = $env:FAKE_WORKSPACE_ROOT
+    $packageName = if ($env:FAKE_PACKAGE_NAME) { $env:FAKE_PACKAGE_NAME } else { 'fixture' }
+    $libName = if ($env:FAKE_LIB_NAME) { $env:FAKE_LIB_NAME } else { 'fixture' }
+    $manifestPath = if ($env:FAKE_PACKAGE_DIR_LEAF) {
+        [System.IO.Path]::Combine($root, $env:FAKE_PACKAGE_DIR_LEAF, 'Cargo.toml')
+    } else {
+        [System.IO.Path]::Combine($root, 'Cargo.toml')
+    }
+    $packages = @(
+        [pscustomobject]@{
+            name = $packageName
+            version = '0.1.0'
+            id = "$packageName 0.1.0"
+            manifest_path = $manifestPath
+            targets = @([pscustomobject]@{ name = $libName; kind = @('lib') })
+            metadata = [pscustomobject]@{
+                'coverage-gate' = [pscustomobject]@{ 'min-lines-percent' = 0 }
+            }
+        }
+    )
+    if ($env:FAKE_SECOND_PACKAGE_NAME) {
+        $packages += [pscustomobject]@{
+            name = $env:FAKE_SECOND_PACKAGE_NAME
+            version = '0.1.0'
+            id = "$($env:FAKE_SECOND_PACKAGE_NAME) 0.1.0"
+            manifest_path = [System.IO.Path]::Combine($root, 'nested', $env:FAKE_PACKAGE_DIR_LEAF, 'Cargo.toml')
+            targets = @([pscustomobject]@{ name = $env:FAKE_SECOND_PACKAGE_NAME; kind = @('lib') })
+            metadata = [pscustomobject]@{}
+        }
+    }
     $metadata = [pscustomobject]@{
         workspace_root = $root
-        workspace_members = @('fixture 0.1.0')
-        packages = @(
-            [pscustomobject]@{
-                name = 'fixture'
-                version = '0.1.0'
-                id = 'fixture 0.1.0'
-                manifest_path = [System.IO.Path]::Combine($root, 'Cargo.toml')
-                targets = @([pscustomobject]@{ name = 'fixture'; kind = @('lib') })
-                metadata = [pscustomobject]@{
-                    'coverage-gate' = [pscustomobject]@{ 'min-lines-percent' = 0 }
-                }
-            }
-        )
+        workspace_members = @($packages | ForEach-Object { $_.id })
+        packages = $packages
     }
     $metadata | ConvertTo-Json -Depth 8 -Compress
     exit 0
@@ -97,7 +115,7 @@ if ($args -contains 'nextest') {
     exit [int]$env:FAKE_NEXTEST_EXIT
 }
 exit 0
-",
+"#,
     );
     write(&bin.join("git.ps1"), "exit 0\n");
     tmp
@@ -130,7 +148,7 @@ fn assert_failed(output: &Output, context: &str) {
 }
 
 #[test]
-fn impact_format_fails_for_unknown_packages_and_metadata_errors() {
+fn impact_format_resolves_directory_aliases_and_fails_closed() {
     if !tools_available() {
         return;
     }
@@ -147,6 +165,41 @@ fn impact_format_fails_for_unknown_packages_and_metadata_errors() {
         &[("FAKE_METADATA_EXIT", OsStr::new("0")), ("FAKE_CARGO_LOG", log.as_os_str())],
     );
     assert_failed(&unknown, "unknown cargo-delta package");
+
+    write(
+        &tmp.path().join("impact.json"),
+        r#"{"Modified":[],"Affected":["workspace-leaf"],"Required":[]}"#,
+    );
+    let directory_alias = run_just(
+        tmp.path(),
+        &["_anvil-impact-format", "affected", "impact.json"],
+        &[
+            ("FAKE_PACKAGE_NAME", OsStr::new("fixture-package")),
+            ("FAKE_LIB_NAME", OsStr::new("fixture_lib")),
+            ("FAKE_PACKAGE_DIR_LEAF", OsStr::new("workspace-leaf")),
+        ],
+    );
+    assert!(
+        directory_alias.status.success(),
+        "unique manifest directory alias should resolve:\n{}",
+        String::from_utf8_lossy(&directory_alias.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&directory_alias.stdout).trim(),
+        "--package fixture-package@0.1.0"
+    );
+
+    let ambiguous_alias = run_just(
+        tmp.path(),
+        &["_anvil-impact-format", "affected", "impact.json"],
+        &[
+            ("FAKE_PACKAGE_NAME", OsStr::new("fixture-package")),
+            ("FAKE_LIB_NAME", OsStr::new("fixture_lib")),
+            ("FAKE_PACKAGE_DIR_LEAF", OsStr::new("workspace-leaf")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other-package")),
+        ],
+    );
+    assert_failed(&ambiguous_alias, "ambiguous cargo-delta directory alias");
 
     let metadata_error = run_just(
         tmp.path(),

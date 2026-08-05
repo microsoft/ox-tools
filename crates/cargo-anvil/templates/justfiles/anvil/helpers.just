@@ -179,23 +179,32 @@ _anvil-impact-format tier impactJson:
             exit 1
         }
     }
-    # Build two lookups from workspace members:
+    # Build three lookups from workspace members:
     #   * $byName: exact cargo package name (may contain hyphens) -> pkg
     #   * $byLib:  library target name (snake_case) -> pkg
+    #   * $byDirLeaf: manifest directory leaf -> candidate packages
     # cargo-delta reports *library* names (snake_case), but for crates
     # whose package name differs from the lib name (e.g. `cargo-anvil`
     # vs `cargo_anvil`) we must translate back to the package name cargo
     # accepts. Bin-only crates have no lib target; cargo-delta reports
-    # those by their package name, caught by $byName.
+    # those by their package name, caught by $byName. In deeply nested
+    # workspaces cargo-delta can instead emit a manifest directory leaf;
+    # accept that alias only when it identifies one workspace package.
     $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $byName = @{}
     $byLib = @{}
+    $byDirLeaf = @{}
     foreach ($p in $meta.packages) {
         $byName[$p.name] = $p
         foreach ($t in $p.targets) {
             if ($t.kind -contains 'lib') { $byLib[$t.name] = $p }
         }
+        $dirLeaf = Split-Path (Split-Path $p.manifest_path -Parent) -Leaf
+        if (-not $byDirLeaf.ContainsKey($dirLeaf)) {
+            $byDirLeaf[$dirLeaf] = [System.Collections.Generic.List[object]]::new()
+        }
+        $byDirLeaf[$dirLeaf].Add($p)
     }
     $impact = Get-Content -LiteralPath $impactJson -Raw | ConvertFrom-Json
     $names = @($impact.$tierKey)
@@ -206,6 +215,14 @@ _anvil-impact-format tier impactJson:
             $byName[$name]
         } elseif ($byLib.ContainsKey($name)) {
             $byLib[$name]
+        } elseif ($byDirLeaf.ContainsKey($name)) {
+            $candidates = @($byDirLeaf[$name])
+            if ($candidates.Count -ne 1) {
+                $candidateNames = ($candidates | ForEach-Object { $_.name }) -join ', '
+                Write-Error "anvil impact: cargo-delta returned ambiguous directory leaf '$name' in the $tier set (matches: $candidateNames)"
+                exit 1
+            }
+            $candidates[0]
         } else {
             $null
         }

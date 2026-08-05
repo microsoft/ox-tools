@@ -373,6 +373,9 @@ Impact and target discovery use three outcomes: work found, proven no work, and
 failure. Only the first two may continue successfully. Malformed impact tiers,
 unknown package names, failed Cargo metadata, unavailable PR metadata in a PR
 build, and failed tool discovery are errors; they never collapse to `--skip`.
+When cargo-delta reports a manifest directory leaf instead of a package or library
+name, Anvil accepts it only if it uniquely identifies one workspace package;
+missing or ambiguous aliases fail rather than silently dropping affected work.
 Advisory checks may report policy findings without failing, but failure to execute
 the advisory tool is still an operational error.
 
