@@ -23,16 +23,42 @@ use crate::manifest::{Manifest, RegionKey};
 use crate::plan::{PlanItem, Target};
 use crate::region::{CommentSyntax, RegionPlacement, find_region, upsert_region_with_placement};
 
+/// Inputs that identify and render one managed region.
+#[derive(Clone, Copy)]
+pub struct ManagedRegionRequest<'a> {
+    /// Repo-root-relative forward-slash path of the host file.
+    pub host_relpath: &'a str,
+    /// Stable identifier written into the region sentinels.
+    pub region_id: &'a str,
+    /// Byte-exact content rendered between the sentinels.
+    pub rendered_body: &'a str,
+    /// Comment flavor used by the host file.
+    pub syntax: CommentSyntax,
+    /// Required position of the region within the host file.
+    pub placement: RegionPlacement,
+}
+
+impl ManagedRegionRequest<'_> {
+    #[cfg(test)]
+    fn at_end<'a>(host_relpath: &'a str, region_id: &'a str, rendered_body: &'a str, syntax: CommentSyntax) -> ManagedRegionRequest<'a> {
+        ManagedRegionRequest {
+            host_relpath,
+            region_id,
+            rendered_body,
+            syntax,
+            placement: RegionPlacement::End,
+        }
+    }
+}
+
 /// Compute the [`PlanItem`] for a managed region.
 ///
-/// `host_relpath` is the repo-root-relative forward-slash path of the
-/// host file. `host_text` is the host file's current content — `None`
+/// `host_text` is the host file's current content — `None`
 /// when the host file does not (yet) exist — which for the second and
 /// later regions in one host is the in-memory result of splicing the
-/// earlier regions, not the original disk state. `region_id` is the
-/// stable region id. `rendered_body` is the byte-exact content the
-/// template would render between the sentinels. `syntax` is the host's
-/// comment flavor.
+/// earlier regions, not the original disk state. `request` identifies
+/// the host and region and carries its rendered body, comment flavor,
+/// and placement.
 ///
 /// If the host text is `None`, the region is treated as a `Write` and
 /// the spliced output will be just the rendered region (sentinels + body).
@@ -40,15 +66,14 @@ use crate::region::{CommentSyntax, RegionPlacement, find_region, upsert_region_w
 /// # Errors
 ///
 /// Returns an error if the region in the host is malformed.
-pub fn plan_managed_region_with_placement(
-    manifest: &Manifest,
-    host_relpath: &str,
-    host_text: Option<&str>,
-    region_id: &str,
-    rendered_body: &str,
-    syntax: CommentSyntax,
-    placement: RegionPlacement,
-) -> Result<PlanItem, AppError> {
+pub fn plan_managed_region(manifest: &Manifest, host_text: Option<&str>, request: ManagedRegionRequest<'_>) -> Result<PlanItem, AppError> {
+    let ManagedRegionRequest {
+        host_relpath,
+        region_id,
+        rendered_body,
+        syntax,
+        placement,
+    } = request;
     let template_checksum = checksum_str(rendered_body);
     let key = RegionKey {
         host: host_relpath.to_owned(),
@@ -93,26 +118,6 @@ pub fn plan_managed_region_with_placement(
     Ok(item)
 }
 
-#[cfg(test)]
-fn plan_managed_region(
-    manifest: &Manifest,
-    host_relpath: &str,
-    host_text: Option<&str>,
-    region_id: &str,
-    rendered_body: &str,
-    syntax: CommentSyntax,
-) -> Result<PlanItem, AppError> {
-    plan_managed_region_with_placement(
-        manifest,
-        host_relpath,
-        host_text,
-        region_id,
-        rendered_body,
-        syntax,
-        RegionPlacement::End,
-    )
-}
-
 fn splice(
     host_text: Option<&str>,
     region_id: &str,
@@ -131,9 +136,13 @@ mod tests {
 
     const SYN: CommentSyntax = CommentSyntax::Hash;
 
+    fn request<'a>(host_relpath: &'a str, region_id: &'a str, rendered_body: &'a str) -> ManagedRegionRequest<'a> {
+        ManagedRegionRequest::at_end(host_relpath, region_id, rendered_body, SYN)
+    }
+
     #[test]
     fn missing_host_writes_new_file() {
-        let item = plan_managed_region(&Manifest::default(), "Justfile", None, "r", "body line\n", SYN).unwrap();
+        let item = plan_managed_region(&Manifest::default(), None, request("Justfile", "r", "body line\n")).unwrap();
         assert_eq!(item.decision, Decision::Write);
         let spliced = item.spliced_host.as_deref().unwrap();
         assert!(spliced.contains("# >>> anvil-managed: r"));
@@ -142,7 +151,7 @@ mod tests {
 
     #[test]
     fn existing_host_without_region_appends_region() {
-        let item = plan_managed_region(&Manifest::default(), "Justfile", Some("user content\n"), "r", "body\n", SYN).unwrap();
+        let item = plan_managed_region(&Manifest::default(), Some("user content\n"), request("Justfile", "r", "body\n")).unwrap();
         assert_eq!(item.decision, Decision::Write);
         let spliced = item.spliced_host.as_deref().unwrap();
         assert!(spliced.starts_with("user content\n"));
@@ -156,7 +165,15 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.set_region("delta.toml", "r", checksum_str(body));
 
-        let item = plan_managed_region_with_placement(&manifest, "delta.toml", Some(host), "r", body, SYN, RegionPlacement::Start).unwrap();
+        let item = plan_managed_region(
+            &manifest,
+            Some(host),
+            ManagedRegionRequest {
+                placement: RegionPlacement::Start,
+                ..request("delta.toml", "r", body)
+            },
+        )
+        .unwrap();
 
         assert_eq!(item.decision, Decision::Write);
         assert!(item.spliced_host.as_deref().unwrap().starts_with("# >>> anvil-managed: r"));
@@ -170,8 +187,15 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.set_region("delta.toml", "r", checksum_str(old_body));
 
-        let item =
-            plan_managed_region_with_placement(&manifest, "delta.toml", Some(&host), "r", new_body, SYN, RegionPlacement::Start).unwrap();
+        let item = plan_managed_region(
+            &manifest,
+            Some(&host),
+            ManagedRegionRequest {
+                placement: RegionPlacement::Start,
+                ..request("delta.toml", "r", new_body)
+            },
+        )
+        .unwrap();
 
         assert_eq!(item.decision, Decision::Write);
         assert!(item.spliced_host.as_deref().unwrap().contains("trip_wire_patterns"));
@@ -184,7 +208,7 @@ mod tests {
                     body\n\
                     # <<< anvil-managed: r\n\
                     after\n";
-        let item = plan_managed_region(&Manifest::default(), "Justfile", Some(host), "r", "body\n", SYN).unwrap();
+        let item = plan_managed_region(&Manifest::default(), Some(host), request("Justfile", "r", "body\n")).unwrap();
         assert_eq!(item.decision, Decision::InSync);
     }
 
@@ -193,7 +217,7 @@ mod tests {
         let host = "# >>> anvil-managed: r\nuser body\n# <<< anvil-managed: r\n";
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("old body\n"));
-        let item = plan_managed_region(&manifest, "Justfile", Some(host), "r", "new body\n", SYN).unwrap();
+        let item = plan_managed_region(&manifest, Some(host), request("Justfile", "r", "new body\n")).unwrap();
         assert_eq!(item.decision, Decision::Propose);
         assert!(item.spliced_host.is_some());
     }
@@ -203,7 +227,7 @@ mod tests {
         let host = "# >>> anvil-managed: r\nuser body\n# <<< anvil-managed: r\n";
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("body\n"));
-        let item = plan_managed_region(&manifest, "Justfile", Some(host), "r", "body\n", SYN).unwrap();
+        let item = plan_managed_region(&manifest, Some(host), request("Justfile", "r", "body\n")).unwrap();
         assert_eq!(item.decision, Decision::LeaveAlone);
     }
 
@@ -213,7 +237,7 @@ mod tests {
         let host = "# >>> anvil-managed: r\n# <<< anvil-managed: r\n";
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("body\n"));
-        let item = plan_managed_region(&manifest, "Justfile", Some(host), "r", "body\n", SYN).unwrap();
+        let item = plan_managed_region(&manifest, Some(host), request("Justfile", "r", "body\n")).unwrap();
         assert_eq!(item.decision, Decision::LeaveAlone);
     }
 
@@ -222,7 +246,7 @@ mod tests {
         let host = "# >>> anvil-managed: r\n# <<< anvil-managed: r\n";
         let mut manifest = Manifest::default();
         manifest.set_region("Justfile", "r", checksum_str("old\n"));
-        let item = plan_managed_region(&manifest, "Justfile", Some(host), "r", "new\n", SYN).unwrap();
+        let item = plan_managed_region(&manifest, Some(host), request("Justfile", "r", "new\n")).unwrap();
         // Opt-out remains in place but the user gets a proposed host file.
         assert_eq!(item.decision, Decision::Propose);
     }
@@ -234,7 +258,7 @@ mod tests {
         // this is the in-memory composition that lets several regions
         // share one host file (e.g. the sections of deny.toml).
         let host = "# >>> anvil-managed: a\nbody-a\n# <<< anvil-managed: a\n";
-        let item = plan_managed_region(&Manifest::default(), "deny.toml", Some(host), "b", "body-b\n", SYN).unwrap();
+        let item = plan_managed_region(&Manifest::default(), Some(host), request("deny.toml", "b", "body-b\n")).unwrap();
         assert_eq!(item.decision, Decision::Write);
         let spliced = item.spliced_host.as_deref().unwrap();
         assert!(spliced.contains("anvil-managed: a"), "first region preserved");

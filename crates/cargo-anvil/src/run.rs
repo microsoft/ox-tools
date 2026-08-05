@@ -19,7 +19,7 @@ use crate::catalog::artifact::{Artifact, HostSelector, RegionSpec};
 use crate::checksum::checksum_str;
 use crate::cli::Cli;
 use crate::decision::{Decision, RemovalDecision, decide_removal};
-use crate::emit::{plan_managed_region_with_placement, plan_owned_file};
+use crate::emit::{ManagedRegionRequest, plan_managed_region, plan_owned_file};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
 use crate::manifest::Manifest;
 use crate::plan::{Plan, PlanItem, Target};
@@ -233,7 +233,7 @@ fn recompose_region_proposals(repo_root: &Path, plan: &mut Plan, hosts: &mut Hos
         };
         // Build the fully-updated host = final live host with every proposed
         // region's new body spliced in. CommentSyntax is currently always
-        // Hash for managed regions (mirrors plan_managed_region_with_placement /
+        // Hash for managed regions (mirrors plan_managed_region /
         // plan_removals); revisit when the manifest records per-region syntax.
         for (_, id, body) in entries {
             let placement = region_placement(id);
@@ -373,7 +373,17 @@ fn push_region_at(
             return Ok(());
         }
     };
-    let item = plan_managed_region_with_placement(manifest, &host, current.as_deref(), spec.id.as_str(), body, spec.syntax, placement)?;
+    let item = plan_managed_region(
+        manifest,
+        current.as_deref(),
+        ManagedRegionRequest {
+            host_relpath: &host,
+            region_id: spec.id.as_str(),
+            rendered_body: body,
+            syntax: spec.syntax,
+            placement,
+        },
+    )?;
     // Only a `Write` mutates the live host on disk; fold its spliced
     // output back into the accumulator so sibling regions compose. A
     // `Propose` writes a sibling, not the host, so it must not advance the
