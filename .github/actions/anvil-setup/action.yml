@@ -147,15 +147,6 @@ runs:
           cargo binstall --no-confirm --locked just || cargo install --locked just
         fi
 
-    # cargo-spellcheck has no prebuilt Linux ARM64 artifact at the catalog
-    # version, so pr-fast must compile it. Provision its system dependency only
-    # on the managed runner and groups that install cargo-spellcheck; local and
-    # self-hosted environments retain Anvil's no-auto-install policy.
-    - name: Install cargo-spellcheck source dependency (Linux ARM64)
-      if: runner.environment == 'github-hosted' && runner.os == 'Linux' && runner.arch == 'ARM64' && (inputs.group == '' || inputs.group == 'pr-fast')
-      shell: bash
-      run: sudo apt-get update && sudo apt-get install -y libclang-dev
-
     - name: Install anvil toolchains + tools
       shell: bash
       # When `group` is empty (the default), installs the full catalog

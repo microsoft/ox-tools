@@ -168,10 +168,8 @@ mod tests {
         assert!(SETUP_ACTION.contains("runner.environment == 'github-hosted'"));
         assert!(SETUP_ACTION.contains("/usr/local/lib/android"));
         assert!(SETUP_ACTION.contains(r"C:\Program Files (x86)\Android"));
-        assert!(SETUP_ACTION.contains("Install cargo-spellcheck source dependency (Linux ARM64)"));
-        assert!(SETUP_ACTION.contains("runner.arch == 'ARM64'"));
-        assert!(SETUP_ACTION.contains("inputs.group == '' || inputs.group == 'pr-fast'"));
-        assert!(SETUP_ACTION.contains("sudo apt-get install -y libclang-dev"));
+        assert!(!SETUP_ACTION.contains("Install libclang"));
+        assert!(!SETUP_ACTION.contains("apt-get install -y libclang-dev"));
     }
 
     #[test]
