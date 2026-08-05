@@ -41,7 +41,12 @@ fn write(path: &Path, contents: &str) {
 /// strictly its own output.
 fn bare_workspace() -> TempDir {
     let tmp = TempDir::new().unwrap();
-    let root = tmp.path();
+    populate_bare_workspace(tmp.path());
+    tmp
+}
+
+/// Write the bare-workspace fixture into `root`.
+fn populate_bare_workspace(root: &Path) {
     write(
         &root.join("Cargo.toml"),
         "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
@@ -51,7 +56,19 @@ fn bare_workspace() -> TempDir {
         "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
     );
     write(&root.join("crates/alpha/src/lib.rs"), "");
-    tmp
+}
+
+/// A bare workspace rooted at a *fixed-name* subdirectory of a tempdir.
+///
+/// Container rendering embeds the repo directory name (cache-volume prefix,
+/// workdir), so snapshots must not depend on the tempdir's random name. The
+/// caller passes the returned repo root as the anvil start dir.
+fn named_workspace(name: &str) -> (TempDir, PathBuf) {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join(name);
+    std::fs::create_dir_all(&root).unwrap();
+    populate_bare_workspace(&root);
+    (tmp, root)
 }
 
 /// Walk the workspace, collect every file produced or modified by
@@ -62,12 +79,22 @@ fn bare_workspace() -> TempDir {
 /// drowning the actual content review in noise. The schema-validation
 /// test suite already asserts the manifest is valid TOML.
 fn render_tree(root: &Path) -> String {
+    render_tree_excluding(root, "")
+}
+
+/// Like [`render_tree`] but additionally omits any file whose name equals
+/// `extra` (e.g. the user-authored `anvil.toml`, which is not a generated
+/// artifact and would otherwise be the sole diff between two trees).
+fn render_tree_excluding(root: &Path, extra: &str) -> String {
     let mut paths: Vec<PathBuf> = walkdir::WalkDir::new(root)
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| e.file_type().is_file())
         .map(walkdir::DirEntry::into_path)
-        .filter(|p| p.file_name().and_then(|n| n.to_str()) != Some(MANIFEST_FILE_NAME))
+        .filter(|p| {
+            let name = p.file_name().and_then(|n| n.to_str());
+            name != Some(MANIFEST_FILE_NAME) && name != Some(extra)
+        })
         .collect();
     paths.sort();
 
@@ -89,6 +116,33 @@ fn render_tree(root: &Path) -> String {
 
 fn run(args: &Cli, tmp: &TempDir) {
     run_update(&cargo_anvil::Catalog::anvil(), args, tmp.path()).unwrap();
+}
+
+/// The stock public catalog. Container support now ships in the base
+/// `Catalog::anvil()` (container-gated), so these tests exercise the real
+/// public catalog directly — no fork and no `with_container_artifact` call is
+/// needed to opt in, exactly as a public `cargo-anvil` user experiences it.
+fn container_catalog() -> cargo_anvil::Catalog {
+    cargo_anvil::Catalog::anvil()
+}
+
+/// A `Cli` selecting the GitHub backend and applying (not dry-run).
+fn github_apply() -> Cli {
+    Cli {
+        backends: vec!["github".to_owned()],
+        no_backends: false,
+        dry_run: false,
+        force: false,
+    }
+}
+
+fn ado_apply() -> Cli {
+    Cli {
+        backends: vec!["ado".to_owned()],
+        no_backends: false,
+        dry_run: false,
+        force: false,
+    }
 }
 
 #[test]
@@ -134,4 +188,348 @@ fn ado_backend_tree() {
         &tmp,
     );
     insta::assert_snapshot!("ado_backend", render_tree(tmp.path()));
+}
+
+/// A `[container] enabled = true` anvil.toml (with `devcontainer = true`) must
+/// emit the container shim, the devcontainer descriptor, the optional import
+/// in `mod.just`, and the re-entry guard on every tier/group recipe. Snapshot
+/// the whole tree so those transforms are reviewable byte-for-byte.
+#[test]
+fn container_enabled_tree() {
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "[container]\n\
+         enabled = true\n\
+         image = \"ghcr.io/acme/rust-dev:1.2.3\"\n\
+         engine = \"auto\"\n\
+         cache-volumes = [\"cargo\", \"rustup\", \"target\"]\n\
+         forward-env = [\"CARGO_*\", \"RUST*\"]\n\
+         devcontainer = true\n",
+    );
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+    insta::assert_snapshot!("container_enabled", render_tree(&root));
+}
+
+/// Container gating: enabling emits the shim + devcontainer; the default
+/// (absent config) emits neither, and the tier/group bodies stay untouched.
+#[test]
+fn container_gate_controls_emission() {
+    // Enabled: shim + devcontainer present, mod.just imports the shim,
+    // tiers.just carries the re-entry guard.
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "[container]\nenabled = true\nimage = \"img:1\"\ndevcontainer = true\n",
+    );
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+    assert!(root.join("justfiles/anvil/container.just").is_file());
+    assert!(root.join(".devcontainer/devcontainer.json").is_file());
+    let mod_just = std::fs::read_to_string(root.join("justfiles/anvil/mod.just")).unwrap();
+    assert!(mod_just.contains("import? 'container.just'"));
+    let tiers = std::fs::read_to_string(root.join("justfiles/anvil/tiers.just")).unwrap();
+    assert!(tiers.contains("just _anvil-container-run anvil-pr"));
+
+    // Disabled (absent anvil.toml): neither container file appears.
+    let (_tmp2, root2) = named_workspace("repo");
+    run_update(&container_catalog(), &github_apply(), &root2).unwrap();
+    assert!(!root2.join("justfiles/anvil/container.just").exists());
+    assert!(!root2.join(".devcontainer/devcontainer.json").exists());
+    let mod_just2 = std::fs::read_to_string(root2.join("justfiles/anvil/mod.just")).unwrap();
+    assert!(!mod_just2.contains("container.just"));
+}
+
+/// `devcontainer` defaults to false: enabling the container without the flag
+/// emits the shim but not the descriptor.
+#[test]
+fn devcontainer_requires_explicit_flag() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), "[container]\nenabled = true\nimage = \"img:1\"\n");
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+    assert!(root.join("justfiles/anvil/container.just").is_file());
+    assert!(!root.join(".devcontainer/devcontainer.json").exists());
+}
+
+/// After applying with container mode enabled, a second dry-run must report no
+/// changes — the enabled transforms are deterministic and the regenerate-check
+/// stays green.
+#[test]
+fn container_enabled_apply_then_dry_run_is_clean() {
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "[container]\nenabled = true\nimage = \"img:1\"\ndevcontainer = true\n",
+    );
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    let dry = Cli {
+        backends: vec!["github".to_owned()],
+        no_backends: false,
+        dry_run: true,
+        force: false,
+    };
+    let outcome = run_update(&container_catalog(), &dry, &root).unwrap();
+    assert!(!outcome.plan.has_changes(), "second dry-run after apply must be clean");
+}
+
+/// ADO CI job-level container injection: when container mode is enabled with
+/// the ADO backend, the root pipelines declare the `anvil_container` resource
+/// and the job wrapper gains the `container` parameter, the conditional
+/// `container:` binding, and the `ANVIL_IN_CONTAINER` variable.
+#[test]
+fn container_enabled_ado_ci() {
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "[container]\nenabled = true\nimage = \"ghcr.io/acme/rust-dev:1.2.3\"\n",
+    );
+    run_update(&container_catalog(), &ado_apply(), &root).unwrap();
+
+    let job = std::fs::read_to_string(root.join(".pipelines/anvil/steps/job.yml")).unwrap();
+    assert!(job.contains("  - name: container\n    type: string\n    default: anvil_container\n"));
+    assert!(job.contains("    ${{ if ne(parameters.container, '') }}:\n      container: ${{ parameters.container }}\n"));
+    assert!(job.contains("    variables:\n      ANVIL_IN_CONTAINER: '1'\n"));
+
+    for name in ["anvil-pr.yml", "anvil-scheduled.yml"] {
+        let root_pipeline = std::fs::read_to_string(root.join(".pipelines").join(name)).unwrap();
+        assert!(
+            root_pipeline
+                .contains("resources:\n  containers:\n    - container: anvil_container\n      image: \"ghcr.io/acme/rust-dev:1.2.3\"\n"),
+            "{name} declares the container resource"
+        );
+    }
+}
+
+/// Acceptance test for the opt-in requirement: the **stock** public
+/// `Catalog::anvil()` — no fork, no `with_container_artifact` call — must let a
+/// repo opt into container execution purely by writing `[container] enabled =
+/// true` in `anvil.toml`, and emit the `container.just` shim. This is the exact
+/// scenario that previously failed with "this anvil catalog does not provide
+/// container support".
+#[test]
+fn base_catalog_supports_container_mode() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), "[container]\nenabled = true\nimage = \"img:1\"\n");
+
+    // The stock catalog, exactly as a public cargo-anvil user has it.
+    run_update(&cargo_anvil::Catalog::anvil(), &github_apply(), &root).unwrap();
+
+    assert!(
+        root.join("justfiles/anvil/container.just").is_file(),
+        "enabling [container] on the stock catalog must emit container.just"
+    );
+    let mod_just = std::fs::read_to_string(root.join("justfiles/anvil/mod.just")).unwrap();
+    assert!(mod_just.contains("container.just"), "mod.just must import the container shim");
+}
+
+/// The stock catalog must also drive pillars 2 and 3 with no fork: a config
+/// that enables container execution and adds `[[image]]` and `[cluster]`
+/// emits the image-build recipes and the cluster harness alongside the shim.
+#[test]
+fn base_catalog_supports_image_and_cluster() {
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "[container]\nenabled = true\nimage = \"img:1\"\n\n\
+         [[image]]\nname = \"svc\"\ndockerfile = \"D\"\ncontext = \"out/svc\"\n\n\
+         [cluster]\nname = \"anvil-kind\"\nload-images = [\"svc\"]\n",
+    );
+
+    run_update(&cargo_anvil::Catalog::anvil(), &github_apply(), &root).unwrap();
+
+    assert!(root.join("justfiles/anvil/container.just").is_file());
+    assert!(root.join("justfiles/anvil/container-images.just").is_file());
+    assert!(root.join("justfiles/anvil/cluster.just").is_file());
+    assert!(root.join("justfiles/anvil/cluster-bootstrap.just").is_file());
+}
+
+/// With `[container] enabled = false`, even a container-capable catalog emits a
+/// tree byte-identical to the base catalog's — the disabled path is inert.
+#[test]
+fn disabled_container_is_byte_identical_to_base() {
+    let (_tmp_a, root_a) = named_workspace("repo");
+    run_update(&cargo_anvil::Catalog::anvil(), &github_apply(), &root_a).unwrap();
+
+    let (_tmp_b, root_b) = named_workspace("repo");
+    write(
+        &root_b.join("anvil.toml"),
+        "[container]\nenabled = false\nimage = \"img:1\"\ndevcontainer = true\n",
+    );
+    run_update(&container_catalog(), &github_apply(), &root_b).unwrap();
+
+    // The disabled anvil.toml is the only differing file; every generated
+    // artifact must match byte-for-byte.
+    assert_eq!(
+        render_tree_excluding(&root_a, "anvil.toml"),
+        render_tree_excluding(&root_b, "anvil.toml"),
+        "disabled container mode must not alter the emitted tree"
+    );
+}
+
+/// A generic anvil.toml exercising all three pillars together — the customer's
+/// shape: containerized recipe execution (`[container]`), a multi-image build
+/// with deps, staged artifacts, build-args and a target (`[[image]]`), and a
+/// Kind cluster harness (`[cluster]`) with a pinned dependency chart, a
+/// repo-local chart with CRDs/`--set`/rollout waits, diagnostics, bounded
+/// retries and every extension hook. Snapshot the whole tree so the generated
+/// image recipes and cluster harness are reviewable byte-for-byte.
+fn image_cluster_toml() -> &'static str {
+    "image-output-dir = \"out\"\n\
+     \n\
+     [container]\n\
+     enabled = true\n\
+     image = \"ghcr.io/acme/rust-dev:1.2.3\"\n\
+     engine = \"docker\"\n\
+     \n\
+     [[image]]\n\
+     name = \"base-image\"\n\
+     dockerfile = \"containers/base/Dockerfile\"\n\
+     context = \"out/base\"\n\
+     build-args = { BASE_IMAGE = \"mcr.example/base:3.0\" }\n\
+     \n\
+     [[image]]\n\
+     name = \"my-service\"\n\
+     dockerfile = \"containers/svc/Dockerfile\"\n\
+     target = \"runtime\"\n\
+     context = \"out/svc\"\n\
+     depends-on = [\"base-image\"]\n\
+     stage-artifacts = [\n\
+       { from = \"target/{profile}/my-svc\", to = \"bin/my-svc\" },\n\
+     ]\n\
+     \n\
+     [cluster]\n\
+     name = \"anvil-kind\"\n\
+     node-image = \"kindest/node:v1.31.0\"\n\
+     workers = 2\n\
+     load-images = [\"my-service\"]\n\
+     \n\
+     [[cluster.dependency]]\n\
+     name = \"cert-manager\"\n\
+     manifest = \"https://example.com/cert-manager.yaml\"\n\
+     version = \"v1.16.1\"\n\
+     preload-images = [\"quay.io/jetstack/cert-manager-controller:v1.16.1\"]\n\
+     wait = [\"deployment/cert-manager-webhook\"]\n\
+     \n\
+     [[cluster.chart]]\n\
+     name = \"svc\"\n\
+     path = \"charts/svc\"\n\
+     namespace = \"svc-system\"\n\
+     crds = \"charts/svc/crds\"\n\
+     set = { \"image.tag\" = \"{tag}\" }\n\
+     wait = [\"deployment/svc-controller\"]\n\
+     \n\
+     [cluster.diagnostics]\n\
+     resources = [\"pods -A -o wide\", \"events --sort-by=.lastTimestamp\"]\n\
+     logs = [\"deployment/svc-controller\"]\n\
+     \n\
+     [cluster.retry]\n\
+     attempts = 2\n\
+     delay-seconds = 10\n\
+     \n\
+     [cluster.hooks]\n\
+     pre-install = \"cosmic-native-auth\"\n\
+     post-install = \"record-issuer\"\n\
+     pre-test = \"seed-data\"\n\
+     on-failure = \"collect-support-bundle\"\n"
+}
+
+#[test]
+fn container_image_and_cluster_tree() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), image_cluster_toml());
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+    insta::assert_snapshot!("container_image_and_cluster", render_tree(&root));
+}
+
+/// The generated image recipes and cluster harness must have every `__TOKEN__`
+/// placeholder substituted — no generation marker may survive into the output.
+#[test]
+fn rendered_container_files_have_no_unsubstituted_tokens() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), image_cluster_toml());
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    for rel in [
+        "justfiles/anvil/container-images.just",
+        "justfiles/anvil/cluster.just",
+        "justfiles/anvil/cluster-bootstrap.just",
+        "justfiles/anvil/container.just",
+    ] {
+        let body = std::fs::read_to_string(root.join(rel)).unwrap();
+        assert!(!body.contains("__"), "{rel} still contains a `__TOKEN__` placeholder:\n{body}");
+    }
+}
+
+/// Pillar 2/3 are additive: a container-enabled config that configures neither
+/// `[[image]]` nor `[cluster]` must not emit any of the new files, and
+/// `mod.just` must not import them — so a plain pillar-1 container build is
+/// byte-identical whether or not the new artifacts are registered.
+#[test]
+fn image_cluster_files_absent_when_unconfigured() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), "[container]\nenabled = true\nimage = \"img:1\"\n");
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    assert!(!root.join("justfiles/anvil/container-images.just").exists());
+    assert!(!root.join("justfiles/anvil/cluster.just").exists());
+    assert!(!root.join("justfiles/anvil/cluster-bootstrap.just").exists());
+    let mod_just = std::fs::read_to_string(root.join("justfiles/anvil/mod.just")).unwrap();
+    assert!(!mod_just.contains("container-images.just"));
+    assert!(!mod_just.contains("cluster.just"));
+    assert!(!mod_just.contains("cluster-bootstrap.just"));
+}
+
+/// Only the configured pillar emits: images without a cluster emit the image
+/// recipes and their import, but neither cluster file nor cluster import.
+#[test]
+fn images_without_cluster_emit_only_images() {
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "[container]\nenabled = true\nimage = \"img:1\"\n\n[[image]]\nname = \"svc\"\ndockerfile = \"D\"\ncontext = \"out/svc\"\n",
+    );
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    assert!(root.join("justfiles/anvil/container-images.just").is_file());
+    assert!(!root.join("justfiles/anvil/cluster.just").exists());
+    let mod_just = std::fs::read_to_string(root.join("justfiles/anvil/mod.just")).unwrap();
+    assert!(mod_just.contains("import? 'container-images.just'"));
+    assert!(!mod_just.contains("cluster.just"));
+}
+
+/// The mirror of the above: a cluster without any `[[image]]` emits the cluster
+/// files and their imports, but neither the image recipe file nor its import.
+#[test]
+fn cluster_without_images_emit_only_cluster() {
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "[container]\nenabled = true\nimage = \"img:1\"\n\n[cluster]\nname = \"anvil-kind\"\n",
+    );
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    assert!(root.join("justfiles/anvil/cluster.just").is_file());
+    assert!(root.join("justfiles/anvil/cluster-bootstrap.just").is_file());
+    assert!(!root.join("justfiles/anvil/container-images.just").exists());
+    let mod_just = std::fs::read_to_string(root.join("justfiles/anvil/mod.just")).unwrap();
+    assert!(mod_just.contains("cluster.just"));
+    assert!(!mod_just.contains("container-images.just"));
+}
+
+/// After applying an image+cluster config, a second dry-run must report no
+/// changes — the generated recipes are deterministic.
+#[test]
+fn image_cluster_apply_then_dry_run_is_clean() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), image_cluster_toml());
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    let dry = Cli {
+        backends: vec!["github".to_owned()],
+        no_backends: false,
+        dry_run: true,
+        force: false,
+    };
+    let outcome = run_update(&container_catalog(), &dry, &root).unwrap();
+    assert!(!outcome.plan.has_changes(), "second dry-run after apply must be clean");
 }

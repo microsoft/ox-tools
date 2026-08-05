@@ -313,6 +313,7 @@ pub(crate) mod backend;
 pub(crate) mod catalog;
 pub(crate) mod checksum;
 pub(crate) mod cli;
+pub(crate) mod config;
 pub(crate) mod decision;
 pub(crate) mod emit;
 pub(crate) mod io;
@@ -359,6 +360,10 @@ use std::process::ExitCode;
 pub use anvil::artifacts;
 pub use backend::Backend;
 pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec};
+pub use config::{
+    ClusterChart, ClusterConfig, ClusterDependency, ClusterDiagnostics, ClusterHooks, ClusterRetry, ContainerConfig, Engine, ImageSpec,
+    NativeWhen, StageArtifact,
+};
 pub use region::CommentSyntax;
 
 /// One-call entry point for a tool built on the anvil engine.

@@ -19,6 +19,7 @@
 //! key/content split. See [`extensibility.md §4.1`](../../../docs/design/extensibility.md).
 
 pub mod ado;
+pub mod container;
 pub mod github;
 pub mod justfile;
 pub mod region;
@@ -61,6 +62,28 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
     out.extend(ado::all());
 
     out
+}
+
+/// The container-gated built-in artifacts: the container-execution shim and
+/// devcontainer descriptor (pillar 1), the OCI image-build recipes (pillar 2),
+/// and the Kind cluster harness plus its host bootstrap (pillar 3).
+///
+/// These ship in the base [`Catalog::anvil`](crate::Catalog::anvil) but are
+/// registered *container-gated*, so `build_plan` skips them entirely unless
+/// `anvil.toml` opts in (`[container] enabled = true`, plus the relevant
+/// `[[image]]` / `[cluster]` sections). With containerization off the emitted
+/// tree is therefore byte-identical to a build that never registered them.
+/// A fork can still register *additional* container artifacts via
+/// [`CatalogBuilder::with_container_artifact`](crate::CatalogBuilder::with_container_artifact).
+#[must_use]
+pub(crate) fn anvil_container_artifacts() -> Vec<Artifact> {
+    vec![
+        container::container_just(),
+        container::devcontainer(),
+        container::container_images_just(),
+        container::cluster_just(),
+        container::cluster_bootstrap_just(),
+    ]
 }
 
 #[cfg(test)]
