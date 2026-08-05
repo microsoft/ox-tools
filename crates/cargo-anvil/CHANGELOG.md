@@ -10,6 +10,12 @@
 
   - move container assets out of justfiles ([#63](https://github.com/microsoft/ox-tools/pull/63))
 
+- 🐛 Bug Fixes
+
+  - address validated CI bugs: impact scoping, failure handling, cache
+    correctness, platform behavior, generated ownership markers, and tool
+    catalog synchronization ([#62](https://github.com/microsoft/ox-tools/pull/62))
+
 - 📝 Documentation
 
   - rename the design doc to `README.md` and update the in-code links that

@@ -8,7 +8,8 @@
     reason = "panic-on-failure idioms are appropriate in tests"
 )]
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
@@ -38,25 +39,33 @@ _anvil-pr: first second
 _anvil-fail: first failing
 
 [windows]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 first:
     Write-Output first
 
 [windows]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 second:
     Write-Output second
 
 [windows]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 failing:
     Write-Output failing
     exit 7
 
 [windows]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-container *recipe:
     Write-Output 'container:{{ recipe }}'
+
+[script("pwsh", "-NoProfile")]
+profile-independent:
+    Write-Output profile-safe
+
+[script("pwsh")]
+profile-dependent:
+    Write-Output profile-noisy
 
 [unix]
 first:
@@ -79,8 +88,88 @@ anvil-container *recipe:
     tmp
 }
 
+fn profile_fixture() -> TempDir {
+    let tmp = fixture();
+    install_profile_noise_wrapper(tmp.path());
+    tmp
+}
+
 fn just_available() -> bool {
     Command::new("just").arg("--version").output().is_ok()
+}
+
+fn pwsh_available() -> bool {
+    Command::new("pwsh").arg("--version").output().is_ok()
+}
+
+fn pwsh_path() -> PathBuf {
+    let output = Command::new("pwsh")
+        .args(["-NoProfile", "-Command", "(Get-Command pwsh).Source"])
+        .output()
+        .expect("pwsh availability is checked before creating the fixture");
+    assert!(output.status.success(), "failed to resolve pwsh path");
+    PathBuf::from(String::from_utf8(output.stdout).unwrap().trim())
+}
+
+fn install_profile_noise_wrapper(root: &Path) {
+    let bin = root.join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let real_pwsh = pwsh_path();
+
+    #[cfg(windows)]
+    {
+        let source = bin.join("pwsh.rs");
+        let real_pwsh = format!("{:?}", real_pwsh.to_string_lossy());
+        write(
+            &source,
+            &format!(
+                r#"use std::io::Write as _;
+use std::process::{{Command, exit}};
+
+fn main() {{
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if !args.iter().any(|arg| arg.to_string_lossy().eq_ignore_ascii_case("-NoProfile")) {{
+        println!("PROFILE_OUTPUT");
+        std::io::stdout().flush().expect("stdout must flush");
+    }}
+    let status = Command::new({real_pwsh})
+        .args(&args)
+        .status()
+        .expect("real pwsh must start");
+    exit(status.code().unwrap_or(1));
+}}
+"#
+            ),
+        );
+        let status = Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(bin.join("pwsh.exe"))
+            .status()
+            .expect("rustc is available while running cargo tests");
+        assert!(status.success(), "failed to compile the Windows pwsh test shim");
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let escaped = real_pwsh.to_string_lossy().replace('\'', "'\\''");
+        let wrapper = format!(
+            "#!/usr/bin/env sh\ncase \" $* \" in *\" -NoProfile \"*) ;; *) printf 'PROFILE_OUTPUT\\n' ;; esac\nexec '{escaped}' \"$@\"\n"
+        );
+        let path = bin.join("pwsh");
+        write(&path, &wrapper);
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(path, permissions).unwrap();
+    }
+}
+
+fn path_with_profile_wrapper(root: &Path) -> OsString {
+    let mut paths = vec![root.join("fake-bin")];
+    paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    std::env::join_paths(paths).unwrap()
 }
 
 fn run(root: &Path, recipes: &[&str], environment: &[(&str, &str)]) -> Output {
@@ -88,6 +177,7 @@ fn run(root: &Path, recipes: &[&str], environment: &[(&str, &str)]) -> Output {
     command.args(["--justfile", root.join(JUSTFILE).to_str().unwrap()]);
     command.args(recipes).current_dir(root);
     command.env_remove("ANVIL_RUNNER").env_remove("ANVIL_IN_CONTAINER");
+    command.env("PATH", path_with_profile_wrapper(root));
     command.envs(environment.iter().copied());
     command.output().expect("just is required to verify generated tier routing")
 }
@@ -178,5 +268,35 @@ fn invalid_runner_value_fails_instead_of_falling_back_to_native() {
         String::from_utf8_lossy(&output.stderr).contains("expected 'native' or 'container'"),
         "invalid runner error must be actionable: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn powershell_recipe_output_is_independent_of_profiles() {
+    if !just_available() || !pwsh_available() {
+        return;
+    }
+    let tmp = profile_fixture();
+    let noisy = run(tmp.path(), &["profile-dependent"], &[]);
+    assert!(
+        noisy.status.success(),
+        "profile-dependent negative control failed: {}",
+        String::from_utf8_lossy(&noisy.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&noisy.stdout).lines().collect::<Vec<_>>(),
+        ["PROFILE_OUTPUT", "profile-noisy"],
+        "the negative control must prove the fake pwsh shim was invoked"
+    );
+
+    let output = run(tmp.path(), &["profile-independent"], &[]);
+    assert!(
+        output.status.success(),
+        "profile-independent recipe failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).lines().collect::<Vec<_>>(),
+        ["profile-safe"]
     );
 }

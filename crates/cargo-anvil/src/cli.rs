@@ -44,7 +44,8 @@ pub struct Cli {
 
     /// Analyze and report without writing any files.
     ///
-    /// Exits with code 1 if anything would be written or proposed.
+    /// Exits with code 1 if anything would be written or proposed, or if
+    /// Anvil refuses to manage an artifact it cannot safely inspect.
     #[arg(long)]
     pub dry_run: bool,
 
