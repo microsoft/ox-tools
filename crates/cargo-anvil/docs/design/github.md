@@ -572,6 +572,14 @@ workflows explicitly enable this input only for `pr-test` and `scheduled-test`,
 mirroring the testing-job integration in [microsoft/oxidizer#583](https://github.com/microsoft/oxidizer/pull/583).
 Other groups retain the action's disabled default.
 
+GitHub-hosted Linux ARM64 runners do not provide `libclang`, and
+`cargo-spellcheck` has no prebuilt ARM64 artifact at the catalog version. For the
+full catalog and `pr-fast` group only, the setup action installs `libclang-dev`
+before the catalog recipes run. This managed-runner provisioning is intentionally
+scoped by environment, OS, architecture, and group; local and self-hosted setup
+continues to report the missing source dependency without choosing a system
+package manager or elevating privileges.
+
 ## 6. Impact scoping
 
 `.github/actions/anvil-impact/action.yml` is a composite action with no branch input.

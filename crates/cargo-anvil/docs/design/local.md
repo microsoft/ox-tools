@@ -278,10 +278,13 @@ The `installer` argument:
   source builds; works in any cargo environment with no extra runtime dependency.
   Slow on a cold runner (~30 min for the full catalog) because every tool
   re-compiles common deps (`clap`, `syn`, `quote`, ...) from scratch independently.
-- `binstall` -- `cargo binstall --no-confirm --locked <tool> --version '=<pin>'`.
-  Downloads a prebuilt binary from each tool's GitHub Releases when available.
-  Cuts the cold-runner install phase from ~30 min to ~1 min. `cargo-binstall`
-  itself needs to be on PATH; the GH setup composite arranges this.
+- `binstall` -- `cargo binstall --no-confirm --locked --disable-strategies compile
+  <tool> --version '=<pin>'`. Downloads a prebuilt binary from each tool's GitHub
+  Releases when available. If no binary is available, Anvil runs the tool's source
+  prerequisite before invoking `cargo install` itself; disabling binstall's compile
+  strategy prevents an uncontrolled source build from bypassing that check. The
+  binary path cuts the cold-runner install phase from ~30 min to ~1 min.
+  `cargo-binstall` itself needs to be on PATH; the GH setup composite arranges this.
 
 The GitHub composite setup action calls `just anvil-<group>-setup binstall`
 (or just `anvil-setup binstall` when no group is scoped). The ADO setup step
@@ -341,8 +344,9 @@ scoop / winget) and exits non-zero. **No auto-install** -- admin/sudo decisions 
 package-manager choice stay with the user. The cargo-spellcheck install recipe passes
 `anvil-tool-cargo-spellcheck-source-deps-check` to `_install-tool` as its source prerequisite.
 The prerequisite runs for an explicit source-build `install` backend and when `binstall`
-cannot provide a binary and falls back to a source build, so missing libclang surfaces as a
-clear hint instead of a cryptic clang-sys build error 10 minutes into the install.
+cannot provide a binary. Anvil disables binstall's own compile strategy and performs the
+source fallback itself, so missing libclang surfaces as a clear hint before compilation
+instead of a cryptic clang-sys build error 10 minutes into the install.
 
 Each tool with a source-build system dependency owns a tool-specific prerequisite recipe and
 wires it into `_install-tool`. Catalog changes propagate to adopters via `cargo anvil` like

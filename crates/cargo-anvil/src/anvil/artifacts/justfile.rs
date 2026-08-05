@@ -296,6 +296,10 @@ mod tests {
     #[test]
     fn spellcheck_checks_source_prerequisites_before_source_builds() {
         assert!(
+            TOOLS_JUST.contains("--disable-strategies compile"),
+            "binstall must not compile before Anvil checks source prerequisites"
+        );
+        assert!(
             TOOLS_JUST.contains(
                 "_install-tool \"cargo-spellcheck\" cargo_spellcheck_version installer \"anvil-tool-cargo-spellcheck-source-deps-check\""
             ),
