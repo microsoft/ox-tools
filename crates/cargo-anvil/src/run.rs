@@ -1569,6 +1569,24 @@ mod tests {
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
+    fn malformed_non_delta_region_fails_planning() {
+        let tmp = empty_workspace();
+        fs::write(
+            tmp.path().join("rustfmt.toml"),
+            format!("# >>> anvil-managed: {}\nmax_width = 120\n", region::RUSTFMT_REGION_ID),
+        )
+        .unwrap();
+
+        let error = run_update(&Catalog::anvil(), &local_only(), tmp.path()).unwrap_err();
+
+        assert!(
+            error.to_string().contains("opening sentinel but no closing sentinel"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
     fn recompose_places_delta_proposal_before_toml_tables() {
         let tmp = TempDir::new().unwrap();
         let host = ".delta.toml";
