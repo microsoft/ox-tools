@@ -1960,6 +1960,15 @@ runs:
           cargo binstall --no-confirm --locked just || cargo install --locked just
         fi
 
+    # cargo-spellcheck has no prebuilt Linux ARM64 artifact at the catalog
+    # version, so pr-fast must compile it. Provision its system dependency only
+    # on the managed runner and groups that install cargo-spellcheck; local and
+    # self-hosted environments retain Anvil's no-auto-install policy.
+    - name: Install cargo-spellcheck source dependency (Linux ARM64)
+      if: runner.environment == 'github-hosted' && runner.os == 'Linux' && runner.arch == 'ARM64' && (inputs.group == '' || inputs.group == 'pr-fast')
+      shell: bash
+      run: sudo apt-get update && sudo apt-get install -y libclang-dev
+
     - name: Install anvil toolchains + tools
       shell: bash
       # When `group` is empty (the default), installs the full catalog
@@ -5620,9 +5629,9 @@ anvil-tool-pwsh-validate-prereqs:
 # or no-op if it is already installed at or above that version. The
 # `installer` parameter selects between:
 #   - "install"  (cargo install --locked, pure-source). Default.
-#   - "binstall" (cargo binstall --no-confirm --locked, with cargo install
-#                 fallback if binstall fails). Bootstraps cargo-binstall
-#                 itself if not on PATH.
+#   - "binstall" (cargo binstall --no-confirm --locked with binstall's compile
+#                 strategy disabled, followed by a controlled cargo install
+#                 fallback). Bootstraps cargo-binstall itself if not on PATH.
 # `source_prereq`, when set, runs immediately before a source installation,
 # including a binstall fallback.
 [script("pwsh", "-NoProfile")]
@@ -5670,7 +5679,9 @@ _install-tool name version installer source_prereq="":
                 exit $LASTEXITCODE
             }
         }
-        cargo binstall --no-confirm --locked $name --version "=$version"
+        # Keep source builds behind Anvil's prerequisite check instead of
+        # allowing binstall to compile before that check can run.
+        cargo binstall --no-confirm --locked --disable-strategies compile $name --version "=$version"
         if ($LASTEXITCODE -eq 0) { exit 0 }
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
     }
