@@ -4820,16 +4820,15 @@ _anvil-impact-snapshot:
     $currentState = "$headSha $diffHash"
 
     # Consumer fast path: reuse an already-present, matching snapshot set
-    # WITHOUT cargo-delta or a fetched base ref. This is what lets a
-    # cloud-workflow group job -- which neither runs cargo-delta nor
-    # fetches the base ref -- consume the target/anvil/impact artifact produced
-    # by the impact job instead of recomputing it (and it also short-circuits
-    # a local repeat run). We still detect a moved base ref when it is cheaply
-    # resolvable (best effort). If the base cannot be resolved, we only trust
-    # the present baseline under ANVIL_IMPACT=consume (a shallow CI consumer
-    # whose base cannot move within a pipeline run); in normal mode an
-    # unresolvable base falls through to the recompute path, which fails fast
-    # with git-fetch guidance rather than scoping against a stale baseline.
+    # WITHOUT cargo-delta or a fetched base ref -- this short-circuits a local
+    # repeat run when nothing changed. (The cloud-workflow consume path never
+    # reaches here: ANVIL_IMPACT=consume returned at the guard above and trusts
+    # the downloaded artifact verbatim -- anvil-impact asserts its presence
+    # before any scoped check reads it.) We still detect a moved base ref when
+    # it is cheaply resolvable (best effort). If the base cannot be resolved
+    # $baseSha stays $null, the baseline is treated as not fresh, and we fall
+    # through to the recompute path, which fails fast with git-fetch guidance
+    # rather than scoping against a stale baseline.
     $currentFresh = (Test-Path $currentJson) -and (Test-Path $currentStateFile) -and `
         ("$(Get-Content -Raw $currentStateFile)".Trim() -eq $currentState)
     $baseSha = $null
@@ -4841,7 +4840,7 @@ _anvil-impact-snapshot:
     }
     $baselineFresh = (Test-Path $baselineShaFile) -and `
         ((Test-Path $baselineJson) -or (Test-Path $noWorkspaceMarker)) -and `
-        ((($env:ANVIL_IMPACT -eq 'consume') -and ($null -eq $baseSha)) -or ("$(Get-Content -Raw $baselineShaFile)".Trim() -eq $baseSha))
+        ("$(Get-Content -Raw $baselineShaFile)".Trim() -eq $baseSha)
     if ($currentFresh -and $baselineFresh) {
         Write-Host 'anvil-impact: snapshots up to date'
         exit 0

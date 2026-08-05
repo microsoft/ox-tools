@@ -476,6 +476,14 @@ full-workspace default (`--workspace` for affected/required, empty for modified)
 tier is unscoped. Every value comes from the shared `_anvil-impact-format` helper via the
 cache.
 
+`_anvil-impact-format` also emits `--workspace` for a *scoped* tier — including the
+modified tier, whose usual full-workspace default is empty — when at least one name
+cargo-delta reported cannot be mapped to a workspace package. This is deliberate
+**fail-closed widening**: rather than silently narrow the tier (and skip a check that
+should run), the helper logs `could not map '<name>' to a workspace package` to stderr and
+runs the whole workspace. So an adopter who sees clippy run workspace-wide on a small PR
+should look for that diagnostic — it is intentional widening, not broken scoping.
+
 The mapping from check to bucket is fixed in the catalog (see
 [checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)). Unscoped checks
 (`pr-title`, `deny`, `audit`, `aprz`, `mutants-full`) take no `anvil-impact` dependency

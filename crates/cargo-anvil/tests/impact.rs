@@ -965,3 +965,86 @@ fn consume_without_downloaded_cache_fails_loudly() {
         "the error must name the missing tier (affected):\n{partial_combined}"
     );
 }
+
+/// Invoke the emitted `_anvil-impact-format` helper directly against a
+/// hand-written impact JSON file, returning (trimmed stdout, stderr, success).
+/// This exercises the formatter's mapping logic -- name/lib/proc-macro
+/// resolution and fail-closed widening -- in isolation from the snapshot/cache
+/// machinery, which the snapshot tests only pin as emitted *text*.
+fn run_format(root: &Path, tier: &str, impact_json_rel: &str) -> (String, String, bool) {
+    let out = just_cmd(root, &["_anvil-impact-format", tier, impact_json_rel]).output().unwrap();
+    (
+        String::from_utf8_lossy(&out.stdout).trim().to_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+        out.status.success(),
+    )
+}
+
+#[test]
+fn impact_format_fails_closed_to_workspace_on_unmappable_name() {
+    if !tools_available() {
+        return;
+    }
+    // A cargo-delta report naming a package that resolves to no workspace
+    // member must widen the whole tier to --workspace (fail closed), NOT emit
+    // the mapped subset or --skip -- either of which would silently UNDER-scope
+    // and skip a check that should run. The snapshot tests pin the emitted
+    // script text; this pins what that script actually does.
+    let tmp = workspace();
+    let root = tmp.path();
+    // A valid member (`alpha`) plus a name that maps to nothing here.
+    let fixture = "impact-fixture.json";
+    write(&root.join(fixture), "{\"Affected\":[\"alpha\",\"ghostpkg\"]}\n");
+
+    let (stdout, stderr, ok) = run_format(root, "affected", fixture);
+    assert!(ok, "the formatter must exit 0 even when widening:\nstderr: {stderr}");
+    assert_eq!(
+        stdout, "--workspace",
+        "an unmappable name must widen the tier to --workspace, not the mapped subset:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("ghostpkg"),
+        "the diagnostic must name the unmappable package:\n{stderr}"
+    );
+}
+
+#[test]
+fn impact_format_maps_proc_macro_target_name_to_its_package() {
+    if !tools_available() {
+        return;
+    }
+    // cargo-delta reports *target* names (snake_case). A proc-macro crate whose
+    // package name differs from its target name (`my-macro` vs `my_macro`) must
+    // still resolve to `--package my-macro@<version>` via the proc-macro branch
+    // of the lib-target lookup -- NOT fall into the unknown-name --workspace
+    // fallback, which would silently cost a full-workspace run and be
+    // indistinguishable from a real mapping regression.
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    write(
+        &root.join("Cargo.toml"),
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+    );
+    write(
+        &root.join("crates/my-macro/Cargo.toml"),
+        "[package]\nname = \"my-macro\"\nversion = \"0.3.0\"\nedition = \"2024\"\n\n[lib]\nproc-macro = true\n",
+    );
+    write(&root.join("crates/my-macro/src/lib.rs"), "");
+    let args = Cli {
+        backends: vec![],
+        no_backends: true,
+        dry_run: false,
+        force: false,
+    };
+    run_update(&cargo_anvil::Catalog::anvil(), &args, root).unwrap();
+
+    let fixture = "impact-fixture.json";
+    write(&root.join(fixture), "{\"Affected\":[\"my_macro\"]}\n");
+
+    let (stdout, stderr, ok) = run_format(root, "affected", fixture);
+    assert!(ok, "the formatter must exit 0:\nstderr: {stderr}");
+    assert_eq!(
+        stdout, "--package my-macro@0.3.0",
+        "the proc-macro target `my_macro` must map back to its package `my-macro`, not widen:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
