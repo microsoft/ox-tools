@@ -20,6 +20,8 @@ const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
 const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.just");
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
+#[cfg(target_arch = "aarch64")]
+const SPELLCHECK: &str = include_str!("../templates/justfiles/anvil/checks/spellcheck.just");
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
 const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
@@ -149,6 +151,7 @@ fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> 
     command.args(["--justfile", "Justfile"]).args(arguments).current_dir(root);
     command.env("PATH", path_with_fake_bin(root));
     command.env("FAKE_WORKSPACE_ROOT", root);
+    command.env_remove("ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64");
     for &(key, value) in environment {
         command.env(key, value);
     }
@@ -161,6 +164,55 @@ fn assert_failed(output: &Output, context: &str) {
         "{context} unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_arch = "aarch64")]
+fn assert_arm_spellcheck_recipes_fail(root: &Path, environment: &[(&str, &OsStr)], expected: &str) {
+    for recipe in [
+        "anvil-tool-cargo-spellcheck-install",
+        "anvil-tool-cargo-spellcheck-validate-prereqs",
+        "anvil-spellcheck",
+    ] {
+        let output = run_just(root, &[recipe], environment);
+        assert_failed(&output, recipe);
+        let diagnostics = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            diagnostics.contains(expected),
+            "{recipe} did not emit expected diagnostic '{expected}':\n{diagnostics}"
+        );
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn arm_spellcheck_skip_is_explicit_and_version_coupled() {
+    if !tools_available() {
+        return;
+    }
+    let unsupported = fixture(
+        &[("versions.just", VERSIONS), ("tools.just", TOOLS), ("spellcheck.just", SPELLCHECK)],
+        &[],
+    );
+    assert_arm_spellcheck_recipes_fail(unsupported.path(), &[], "ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64=true");
+
+    let changed_versions = VERSIONS.replace("cargo_spellcheck_version := \"0.15.1\"", "cargo_spellcheck_version := \"0.15.2\"");
+    let changed_pin = fixture(
+        &[
+            ("versions.just", &changed_versions),
+            ("tools.just", TOOLS),
+            ("spellcheck.just", SPELLCHECK),
+        ],
+        &[],
+    );
+    assert_arm_spellcheck_recipes_fail(
+        changed_pin.path(),
+        &[("ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64", OsStr::new("true"))],
+        "cargo-spellcheck pin changed; re-evaluate",
     );
 }
 

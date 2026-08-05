@@ -743,7 +743,7 @@ anvil-tool-cargo-spellcheck-install installer="install":
             Write-Host 'anvil-tool-cargo-spellcheck-install: ARM64 -- workflow-authorized skip (cargo-spellcheck 0.15.1 incompatibility)'
             exit 0
         }
-        Write-Error 'cargo-spellcheck 0.15.1 is unsupported on ARM64; run spellcheck on x64 or explicitly authorize the generated mixed-architecture workflow skip'
+        Write-Error 'cargo-spellcheck 0.15.1 is unsupported on ARM64; run spellcheck on x64, or set ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64=true to accept the skip (the generated GitHub pr-fast workflow sets it on ARM legs where x64 legs provide coverage)'
         exit 2
     }
     & "{{just_executable()}}" _install-tool cargo-spellcheck {{cargo_spellcheck_version}} {{installer}} anvil-tool-cargo-spellcheck-source-deps-check
@@ -762,7 +762,7 @@ anvil-tool-cargo-spellcheck-validate-prereqs:
             Write-Host 'anvil-tool-cargo-spellcheck-validate-prereqs: ARM64 -- workflow-authorized skip (cargo-spellcheck 0.15.1 incompatibility)'
             exit 0
         }
-        Write-Error 'cargo-spellcheck 0.15.1 is unsupported on ARM64; run spellcheck on x64 or explicitly authorize the generated mixed-architecture workflow skip'
+        Write-Error 'cargo-spellcheck 0.15.1 is unsupported on ARM64; run spellcheck on x64, or set ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64=true to accept the skip (the generated GitHub pr-fast workflow sets it on ARM legs where x64 legs provide coverage)'
         exit 2
     }
     & "{{just_executable()}}" _check-tool cargo-spellcheck {{cargo_spellcheck_version}}

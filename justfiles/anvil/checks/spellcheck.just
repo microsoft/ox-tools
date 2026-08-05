@@ -33,7 +33,7 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
             Write-Host 'anvil-spellcheck: ARM64 -- workflow-authorized skip (cargo-spellcheck 0.15.1 incompatibility)'
             exit 0
         }
-        Write-Error 'cargo-spellcheck 0.15.1 is unsupported on ARM64; run spellcheck on x64 or explicitly authorize the generated mixed-architecture workflow skip'
+        Write-Error 'cargo-spellcheck 0.15.1 is unsupported on ARM64; run spellcheck on x64, or set ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64=true to accept the skip (the generated GitHub pr-fast workflow sets it on ARM legs where x64 legs provide coverage)'
         exit 2
     }
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {

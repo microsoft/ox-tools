@@ -359,9 +359,11 @@ dependency does not compile with current Rust on Linux ARM64, and the available
 Windows ARM64 binary terminates with an access violation. The generated
 mixed-architecture GitHub workflow explicitly authorizes setup, validation, and
 execution no-ops on ARM64 because both x64 legs retain the architecture-independent
-check. Direct ARM64 invocations fail loudly instead of silently omitting spelling
-coverage. The guard is coupled to version 0.15.1, so changing the pin forces its
-compatibility decision to be revisited.
+check by setting `ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64=true` on its ARM legs.
+Direct ARM64 invocations fail loudly and name that opt-in instead of silently
+omitting spelling coverage. ARM64-only callers should set it only after arranging
+equivalent x64 coverage. The guard is coupled to version 0.15.1, so changing the
+pin forces its compatibility decision to be revisited.
 
 ### 3.4 Per-check warnings
 
