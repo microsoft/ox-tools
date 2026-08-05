@@ -22,41 +22,7 @@ const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-co
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
-
-fn write(path: &Path, contents: &str) {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    std::fs::write(path, contents).unwrap();
-}
-
-fn tools_available() -> bool {
-    Command::new("just").arg("--version").output().is_ok() && Command::new("pwsh").arg("--version").output().is_ok()
-}
-
-fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
-    let tmp = TempDir::new().unwrap();
-    let mut justfile = String::from("set unstable\n\nrust_nightly := \"nightly-test\"\n\n");
-    for (name, contents) in imports {
-        write(&tmp.path().join(name), contents);
-        writeln!(justfile, "import '{name}'").unwrap();
-    }
-    justfile.push('\n');
-    for recipe in dependency_recipes {
-        justfile.push_str(recipe);
-        justfile.push_str(":\n\n");
-    }
-    write(&tmp.path().join("Justfile"), &justfile);
-    write(
-        &tmp.path().join("Cargo.toml"),
-        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
-    );
-
-    let bin = tmp.path().join("fake-bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    write(
-        &bin.join("cargo.ps1"),
-        r#"
+const FAKE_CARGO_PS1: &str = r#"
 $joined = $args -join ' '
 if ($env:FAKE_CARGO_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value $joined
@@ -124,8 +90,43 @@ if ($args -contains 'nextest') {
     exit [int]$env:FAKE_NEXTEST_EXIT
 }
 exit 0
-"#,
+"#;
+
+fn write(path: &Path, contents: &str) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, contents).unwrap();
+}
+
+fn tools_available() -> bool {
+    Command::new("just").arg("--version").output().is_ok() && Command::new("pwsh").arg("--version").output().is_ok()
+}
+
+fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let mut justfile = String::from("set unstable\n\n");
+    if !imports.iter().any(|(name, _)| *name == "versions.just") {
+        justfile.push_str("rust_nightly := \"nightly-test\"\n\n");
+    }
+    for (name, contents) in imports {
+        write(&tmp.path().join(name), contents);
+        writeln!(justfile, "import '{name}'").unwrap();
+    }
+    justfile.push('\n');
+    for recipe in dependency_recipes {
+        justfile.push_str(recipe);
+        justfile.push_str(":\n\n");
+    }
+    write(&tmp.path().join("Justfile"), &justfile);
+    write(
+        &tmp.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
     );
+
+    let bin = tmp.path().join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    write(&bin.join("cargo.ps1"), FAKE_CARGO_PS1);
     write(&bin.join("git.ps1"), "exit 0\n");
     tmp
 }
