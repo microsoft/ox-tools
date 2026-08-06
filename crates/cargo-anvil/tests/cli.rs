@@ -16,6 +16,7 @@
 //! Exploratory: added to measure what additional coverage spawn-based
 //! integration tests contribute over the in-process suite.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command as StdCommand;
 
@@ -67,6 +68,18 @@ fn git_init_with_origin(dir: &Path, origin: &str) {
     }
 }
 
+fn snapshot_tree(root: &Path) -> BTreeMap<String, Vec<u8>> {
+    walkdir::WalkDir::new(root)
+        .into_iter()
+        .map(Result::unwrap)
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| {
+            let relative = entry.path().strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/");
+            (relative, std::fs::read(entry.path()).unwrap())
+        })
+        .collect()
+}
+
 #[test]
 fn version_flag_prints_version() {
     let tmp = TempDir::new().unwrap();
@@ -116,6 +129,23 @@ fn apply_writes_files_then_dry_run_is_clean() {
 
     // Second dry-run against the now-up-to-date tree: no changes, exit 0.
     anvil(ws.path(), &["--no-backends", "--dry-run"]).assert().success();
+}
+
+#[test]
+fn dry_run_refusal_exits_1_without_writing() {
+    let ws = workspace();
+    anvil(ws.path(), &["--no-backends"]).assert().success();
+    write(&ws.path().join(".delta.toml"), "not = [valid toml");
+    let before = snapshot_tree(ws.path());
+
+    anvil(ws.path(), &["--no-backends", "--dry-run"])
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicates::str::contains("Refused: 1 item(s)"))
+        .stdout(predicates::str::contains("Refused to manage .delta.toml"));
+
+    assert_eq!(snapshot_tree(ws.path()), before, "dry-run refusal must not modify the workspace");
 }
 
 #[test]
