@@ -5,7 +5,7 @@
 set unstable
 
 set windows-shell := ["pwsh.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command"]
-set script-interpreter := ["pwsh"]
+set script-interpreter := ["pwsh", "-NoProfile"]
 
 # Constants shared by Just commands and GitHub workflows.
 set dotenv-path := "./constants.env"

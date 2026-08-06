@@ -202,7 +202,7 @@ Note the ADO topology differs from GitHub Actions in two places:
     │                                    scheduled-tier stages here)
     └── steps/
         ├── setup.yml               owned   (install just + catalog tools)
-        ├── impact.yml              owned   (cargo-delta impact step; omitted if .delta.toml disabled)
+        ├── impact.yml              owned   (cargo-delta impact step)
         ├── job.yml                 owned-but-user-customizable
         │                                   (per-job wrapper; takes `name`,
         │                                    `pool`, `steps`, `artifacts`;
@@ -529,15 +529,15 @@ the same `steps/job.yml` delegation. Scheduled step templates don't receive any
 `include*` parameters; they default to empty strings and recipes fall through to
 `--workspace`.
 
-If `.delta.toml`'s managed region is disabled
-([updates.md §opt-out](./updates.md#6-opting-out-in-file-stubs)), the impact step is
-unaffected — `cargo delta impact` uses its own defaults when the config file is missing
-or empty.
+Cloud impact explicitly loads `.delta.toml`, so its managed trip wires and
+repository-owned parser, exclusion, and fixed comparison-branch settings apply
+equally to local and ADO execution. Existing top-level `trip_wire_patterns` are
+preserved and opt the managed region out rather than being duplicated.
 
 ## 5. Per-group step templates
 
 Each per-group step template has the **same** uniform parameter surface — the three
-impact-include variables plus a per-template handful of PR-context strings. This means
+impact-include variables. PR context comes from ADO environment variables. This means
 the stages template doesn't need to know which include vars a group's checks consume;
 it just threads all three to every group. Moving a check between groups (or between
 buckets) is a pure catalog change.
@@ -558,14 +558,14 @@ steps:
 - template: setup.yml
 # ADO has no PR-title predefined variable (System.PullRequest.Title does
 # not exist), so resolve it from the REST API on PR builds and publish it
-# as PR_TITLE. Best-effort: empty on non-PR / fork / API failure, in which
-# case anvil-pr-title skips.
+# as PR_TITLE. Non-PR runs leave it empty; a known PR whose metadata cannot
+# be retrieved fails closed.
 - pwsh: |
     $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
     if (-not $prId) { Write-Host '##vso[task.setvariable variable=PR_TITLE]'; exit 0 }
     $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
     try { $r = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }; Write-Host "##vso[task.setvariable variable=PR_TITLE]$($r.title)" }
-    catch { Write-Host '##vso[task.setvariable variable=PR_TITLE]' }
+    catch { Write-Error "Could not resolve PR title for PR $prId"; exit 1 }
   env:
     SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 - script: just anvil-pr-fast
@@ -585,16 +585,10 @@ Uniform parameter set on every per-group template:
 | `includeAffected` | `""`    | Forwarded as `ANVIL_INCLUDE_AFFECTED`. Same semantics.                                                          |
 | `includeRequired` | `""`    | Forwarded as `ANVIL_INCLUDE_REQUIRED`. Same semantics.                                                          |
 
-Per-group additions (only where the group consumes PR-context strings the recipe needs):
-
-| Template                  | Extra parameters                                                        |
-|---------------------------|-------------------------------------------------------------------------|
-| `pr-fast.yml`             | `prTitle` (resolved from the REST API; ADO has no PR-title variable)     |
-| `pr-mutants.yml`            | `prBaseRef` (default `$(System.PullRequest.TargetBranch)`)              |
-| `pr-test.yml`, `pr-runtime-analysis.yml`, `scheduled-*.yml` | —                                                                       |
-
-`$(System.PullRequest.*)` are auto-populated by ADO on PR build-validation runs. No
-manual web-UI wiring is needed.
+There are no group-specific parameters. The shared group template resolves
+`PR_TITLE` on PR builds, and `_anvil-base-ref` reads
+`$(System.PullRequest.TargetBranch)` directly for mutation and impact checks.
+No manual web-UI wiring is needed.
 
 The recipes themselves consume only the env vars they need; the catalog records the
 mapping (see [checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)).
@@ -629,11 +623,13 @@ user's msrustup step in 1ESPT pipelines or by a previous step in OSS pipelines
 `cargo-binstall` has unresolved compliance issues for internal ADO pipelines.
 
 `impact.yml` invokes `setup.yml` with `group: none`, then installs `cargo-delta`
-via `anvil-tool-cargo-delta-install` and runs
-`cargo delta impact --format json` against `$(System.PullRequest.TargetBranch)`
-(or `$BASE_REF` if set), formatting each tier into a pre-built `--package …`
-string or the sentinel `--skip`. The three results are exported as ADO output
-variables via `##vso[task.setvariable variable=…;isOutput=true]`:
+via `anvil-tool-cargo-delta-install` and runs configured snapshots and
+`cargo delta impact --format json`. The snapshots use `_anvil-base-ref`; cargo-
+delta's changed-file detection uses the fixed `[git].remote_branch` policy from
+the repository's `.delta.toml` when configured. Each tier becomes a pre-built
+`--package …` string or `--skip`; the
+three results are exported as ADO output variables via
+`##vso[task.setvariable variable=…;isOutput=true]`:
 
 - `compute.include_modified`
 - `compute.include_affected`
@@ -675,15 +671,14 @@ msrustup.
 
 ## 7. Caching
 
-`setup.yml` computes a cache key from: OS, rustc version (read from
-`rust-toolchain.toml`), `Cargo.lock`, `.cargo/config.toml`, and `versions.just`
-(the single source of truth for catalog tool/toolchain pins). Uses the ADO
-pipeline workspace cache (`Cache@2` task). `CARGO_HOME` is pinned to a
-workspace-scratch location to keep cache scoping predictable.
+`setup.yml` computes a cache key from agent OS and architecture, the actual
+`rustc --version`, and hashes of `Cargo.lock`, `.cargo/config.toml`,
+`rust-toolchain.toml`, and `versions.just`. It uses the ADO `Cache@2` task.
 
 The cache covers:
 
-- The `cargo install`-ed tools installed by the catalog setup recipes.
+- The cargo registry, installed binaries, and Cargo's `.crates.toml` /
+  `.crates2.json` install metadata.
 - The `target/` directory (per anvil recipe; a per-recipe cache scope means a `pr-test`
   cache hit doesn't have to wait on a `pr-fast` cache miss).
 

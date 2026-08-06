@@ -15,7 +15,7 @@ a separate regular expression. Pattern expansion escapes the display syntax befo
 trusted regular-expression fragments; the reverse order would escape the fragments themselves and
 match them literally.
 
-The skip path is shared by an unset and an explicitly empty `PR_TITLE`, because Azure DevOps
-publishes an empty value on non-PR builds, forks, and REST API failures. Snapshot tests pin the
-emitted template, while the focused integration test executes the generated recipe and verifies
-accepted titles, rejected titles, both skip cases, and corrective output.
+The skip path is shared by an unset and an explicitly empty `PR_TITLE`, because cloud backends
+publish an empty value outside a pull request context. Snapshot tests pin the emitted template,
+while the focused integration test executes the generated recipe and verifies accepted titles,
+rejected titles, both skip cases, and corrective output.
