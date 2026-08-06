@@ -413,6 +413,7 @@ fn render_cluster(template: &str, cluster: &ClusterConfig, _container: &Resolved
         .replace("__CHARTS_PWSH__", &charts_pwsh(&cluster.charts))
         .replace("__DIAG_RESOURCES_ARRAY__", &ps_array(&diagnostics.resources))
         .replace("__DIAG_LOGS_ARRAY__", &ps_array(&diagnostics.logs))
+        .replace("__DIAG_NAMESPACE__", &ps_escape(diagnostics.namespace.as_deref().unwrap_or("")))
 }
 
 /// The cluster dependencies as a `PowerShell` array of hashtables.

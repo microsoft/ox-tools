@@ -3561,9 +3561,10 @@ anvil-cluster-diagnostics:
         $parts = $r -split '\s+'
         kubectl --context $ctx get @parts
     }
+    $diagNs = @(); if ('' -ne '') { $diagNs = @('-n', '') }
     foreach ($d in @('deployment/svc-controller')) {
         Write-Output "=== logs $d ==="
-        kubectl --context $ctx logs $d --all-containers --tail=200
+        kubectl --context $ctx @diagNs logs $d --all-containers --tail=200
     }
     exit 0
 

@@ -223,9 +223,10 @@ anvil-cluster-diagnostics:
         $parts = $r -split '\s+'
         kubectl --context $ctx get @parts
     }
+    $diagNs = @(); if ('__DIAG_NAMESPACE__' -ne '') { $diagNs = @('-n', '__DIAG_NAMESPACE__') }
     foreach ($d in __DIAG_LOGS_ARRAY__) {
         Write-Output "=== logs $d ==="
-        kubectl --context $ctx logs $d --all-containers --tail=200
+        kubectl --context $ctx @diagNs logs $d --all-containers --tail=200
     }
     exit 0
 
