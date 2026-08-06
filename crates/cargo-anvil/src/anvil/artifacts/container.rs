@@ -789,6 +789,51 @@ mod tests {
         ContainerConfig::default().resolve(repo).unwrap()
     }
 
+    /// `just --list` renders the *contiguous* comment block immediately above a
+    /// recipe as its documentation, and shows only the final line. A two-line
+    /// comment therefore surfaces as a meaningless fragment in the primary
+    /// discovery UX (e.g. `anvil-container-shell  # `_anvil-container-run` uses.`).
+    ///
+    /// Keep the last comment line before a recipe's attributes a complete,
+    /// standalone summary. Longer prose is still fine — put it above, separated
+    /// by a blank line, so it is not part of the doc block.
+    #[test]
+    fn recipe_doc_comments_are_single_line() {
+        let templates = [
+            ("container.just", CONTAINER_JUST),
+            ("container-images.just", CONTAINER_IMAGES_JUST),
+            ("cluster.just", CLUSTER_JUST),
+            ("cluster-bootstrap.just", CLUSTER_BOOTSTRAP_JUST),
+        ];
+
+        for (name, body) in templates {
+            let lines: Vec<&str> = body.lines().collect();
+            for (index, line) in lines.iter().enumerate() {
+                // Attribute blocks introduce a recipe; walk back over any further
+                // attributes, then count the contiguous comment lines above them.
+                if !line.starts_with('[') {
+                    continue;
+                }
+                let mut cursor = index;
+                while cursor > 0 && lines[cursor - 1].starts_with('[') {
+                    cursor -= 1;
+                }
+                let mut comments = 0;
+                while cursor > 0 && lines[cursor - 1].starts_with('#') {
+                    comments += 1;
+                    cursor -= 1;
+                }
+                assert!(
+                    comments <= 1,
+                    "{name}: recipe near line {} has a {comments}-line doc comment; \
+                     `just --list` would show only its last line. Collapse it to one \
+                     line, or move the prose above a blank line.",
+                    index + 1,
+                );
+            }
+        }
+    }
+
     #[test]
     fn disabled_leaves_every_body_untouched() {
         let container = disabled("repo");

@@ -20,8 +20,7 @@ kubectl_sha256 := "7c27adc64a84d1c0cc3dcf7bf4b6e916cc00f3f576a2dbac51b318d926032
 helm_version := "v3.16.0"
 helm_sha256 := "327cfbc7ddc5a3eb644039ceb0cff66394628654c4f5a76bf715ed15b893983b"
 
-# Verify the engine/daemon and kind/kubectl/helm are present, with actionable
-# messages. Does not install anything.
+# Verify the engine/daemon and kind/kubectl/helm are present. Installs nothing.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-preflight:
@@ -51,8 +50,7 @@ anvil-cluster-preflight:
     Write-Output "anvil: preflight OK (engine=$engine; kind, kubectl, helm present)"
     exit 0
 
-# Install pinned, checksum-verified kind/kubectl/helm into ~/.local/bin, tune
-# WSL inotify limits, and check bridged-traffic iptables. Linux/WSL only.
+# Install pinned kind/kubectl/helm and tune WSL limits. Linux/WSL only.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-bootstrap:
