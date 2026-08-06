@@ -365,6 +365,16 @@ pub struct ContainerConfig {
     pub image: Option<String>,
     /// Container engine. Built-in default: [`Engine::Auto`].
     pub engine: Option<Engine>,
+    /// Stable identifier for this repository, used to expand `{repo}` in
+    /// `workdir` and to prefix cache volume names. Built-in default: the
+    /// repo-root directory name.
+    ///
+    /// Set this explicitly in any repository that enforces a regeneration
+    /// drift check. The directory-name default is *not* stable across
+    /// checkouts — a CI agent that clones into `s`, a git worktree, and a
+    /// developer's clone all produce different names, so the emitted
+    /// `container.just` would differ and the drift check would fail.
+    pub name: Option<String>,
     /// In-container mount point of the repo root. Built-in default:
     /// `/workspaces/{repo}` (`{repo}` = repo directory name).
     pub workdir: Option<String>,
@@ -398,6 +408,7 @@ impl ContainerConfig {
             enabled: self.enabled.or(base.enabled),
             image: self.image.or_else(|| base.image.clone()),
             engine: self.engine.or(base.engine),
+            name: self.name.or_else(|| base.name.clone()),
             workdir: self.workdir.or_else(|| base.workdir.clone()),
             cache_volumes: self.cache_volumes.or_else(|| base.cache_volumes.clone()),
             forward_env: self.forward_env.or_else(|| base.forward_env.clone()),
@@ -410,9 +421,13 @@ impl ContainerConfig {
     }
 
     /// Apply built-in defaults and validate, producing the concrete settings
-    /// the emitter consumes. `repo_name` is the repo-root directory name, used
-    /// to expand the `{repo}` placeholder in `workdir` and to prefix cache
-    /// volume names.
+    /// the emitter consumes. `dir_name` is the repo-root directory name, used
+    /// as the fallback identity when `[container] name` is unset: it expands
+    /// the `{repo}` placeholder in `workdir` and prefixes cache volume names.
+    ///
+    /// Prefer setting `name` explicitly. The directory name is not stable
+    /// across checkouts, so relying on it makes the emitted `container.just`
+    /// depend on where the repository happens to be cloned.
     ///
     /// # Errors
     ///
@@ -420,9 +435,10 @@ impl ContainerConfig {
     /// `image` is set, or if the image/cluster sections are invalid
     /// (duplicate/ill-named images, a `depends-on` cycle, a context outside
     /// the image output dir, or a `load-images` entry naming no image).
-    pub(crate) fn resolve(&self, repo_name: &str) -> Result<ResolvedContainer, AppError> {
+    pub(crate) fn resolve(&self, dir_name: &str) -> Result<ResolvedContainer, AppError> {
         let enabled = self.enabled.unwrap_or(false);
         let image = self.image.clone().unwrap_or_default();
+        let repo_name = self.name.clone().unwrap_or_else(|| dir_name.to_owned());
         let workdir = self.workdir.clone().unwrap_or_else(|| format!("/workspaces/{repo_name}"));
         let cache_volumes = self
             .cache_volumes
@@ -460,7 +476,7 @@ impl ContainerConfig {
             forward_env,
             devcontainer: self.devcontainer.unwrap_or(false),
             native_when: self.native_when.clone(),
-            repo_name: repo_name.to_owned(),
+            repo_name,
             images,
             image_output_dir,
             image_build_order,
@@ -737,6 +753,7 @@ fn parse_container(item: &Item) -> Result<ContainerConfig, AppError> {
             ),
             "image" => config.image = Some(as_string(key, value)?),
             "engine" => config.engine = Some(Engine::parse(&as_string(key, value)?)?),
+            "name" => config.name = Some(as_string(key, value)?),
             "workdir" => config.workdir = Some(as_string(key, value)?),
             "cache-volumes" => config.cache_volumes = Some(as_string_array(key, value)?),
             "forward-env" => config.forward_env = Some(as_string_array(key, value)?),
@@ -751,7 +768,7 @@ fn parse_container(item: &Item) -> Result<ContainerConfig, AppError> {
                  top-level key"
             ),
             other => bail!(
-                "unknown key '[container] {other}' (valid keys: enabled, image, engine, \
+                "unknown key '[container] {other}' (valid keys: enabled, image, engine, name, \
                  workdir, cache-volumes, forward-env, devcontainer, native-when)"
             ),
         }
@@ -1323,6 +1340,47 @@ stage-artifacts = [
     /// on its own, independent of pillar 1.
     fn resolve_body(body: &str) -> Result<ResolvedContainer, AppError> {
         parse(body).unwrap().container.resolve("repo")
+    }
+
+    /// Without `[container] name`, identity falls back to the repo-root
+    /// directory name. This is convenient but *not* stable across checkouts.
+    #[test]
+    fn identity_falls_back_to_the_directory_name() {
+        let body = "[container]\nenabled = true\nimage = \"img:1\"\n";
+        let resolved = parse(body).unwrap().container.resolve("some-dir").unwrap();
+        assert_eq!(resolved.repo_name, "some-dir");
+        assert_eq!(resolved.workdir, "/workspaces/some-dir");
+    }
+
+    /// An explicit `[container] name` pins the identity, so the emitted
+    /// `container.just` is byte-identical no matter where the repository is
+    /// cloned. Without this, a CI agent cloning into `s`, a git worktree, and a
+    /// developer's clone each render different content and any regeneration
+    /// drift check fails.
+    #[test]
+    fn explicit_name_makes_identity_independent_of_the_checkout_directory() {
+        let body = "[container]\nenabled = true\nimage = \"img:1\"\nname = \"cosmicrust\"\n";
+        let config = parse(body).unwrap().container;
+
+        let from_clone = config.resolve("COSMICRust").unwrap();
+        let from_worktree = config.resolve("COSMICRust-container").unwrap();
+        let from_ci = config.resolve("s").unwrap();
+
+        for resolved in [&from_clone, &from_worktree, &from_ci] {
+            assert_eq!(resolved.repo_name, "cosmicrust");
+            assert_eq!(resolved.workdir, "/workspaces/cosmicrust");
+        }
+        assert_eq!(from_clone, from_ci);
+        assert_eq!(from_clone, from_worktree);
+    }
+
+    /// An explicit `workdir` still wins over the derived default.
+    #[test]
+    fn explicit_workdir_overrides_the_name_derived_default() {
+        let body = "[container]\nenabled = true\nimage = \"img:1\"\nname = \"x\"\nworkdir = \"/src\"\n";
+        let resolved = parse(body).unwrap().container.resolve("dir").unwrap();
+        assert_eq!(resolved.repo_name, "x");
+        assert_eq!(resolved.workdir, "/src");
     }
 
     #[test]
