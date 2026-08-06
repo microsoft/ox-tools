@@ -213,6 +213,54 @@ After the initial image build, repeated container runs reuse the image,
 dependency caches, and compilation output, substantially reducing warm-run
 time.
 
+### 6.1 Linked Git worktrees
+
+Anvil checks read Git history: impact scoping resolves a base ref, `anvil-aprz`
+inspects the pull request, and `semver-check` builds a baseline. Mounting only
+the working tree is sufficient for an ordinary repository, whose `.git`
+directory lies inside that mount. A [linked
+worktree](https://git-scm.com/docs/git-worktree) instead stores a `.git` *file*
+pointing at a per-worktree directory under the common Git directory of the main
+repository, which is outside the mount.
+
+The drivers therefore resolve both directories before starting any container:
+
+| Resolution | Command |
+|---|---|
+| Worktree Git directory | `git rev-parse --absolute-git-dir` |
+| Common Git directory | `git rev-parse --path-format=absolute --git-common-dir` |
+
+When the two differ, the invocation is a linked worktree and the driver adds:
+
+- a read-only bind mount of the **common Git directory only** at `/anvil-git`;
+- `GIT_DIR=/anvil-git/<worktree-relative-path>` and
+  `GIT_WORK_TREE=/workspace`, so Git pairs the read-only metadata with the
+  writable mounted worktree;
+- `GIT_OPTIONAL_LOCKS=0`, so commands such as `git status` do not attempt the
+  optional index refresh that would write into the read-only mount;
+- `lfs.storage=/tmp/anvil-lfs` through `GIT_CONFIG_COUNT`, so Git LFS filters
+  use container-local storage instead of mutating shared host LFS state.
+
+No parent directory of the common Git directory is mounted. The worktree Git
+directory must lie inside the common Git directory; otherwise the driver fails
+with an actionable diagnostic rather than exposing an unrelated host path.
+An ordinary repository adds none of these arguments, so its behavior, image
+identity, and cache naming are unchanged.
+
+Git metadata is runtime state, not image content. It is never present during
+image construction and is excluded from the build context, so a worktree
+invocation selects the same content-addressed image as any other invocation of
+that repository.
+
+A worktree created on Windows records an absolute Windows path in its `.git`
+pointer file. Git running in WSL cannot follow that path, and Git discovery
+happens before the driver can resolve anything else, so the Bash driver
+translates the pointer with `wslpath` and exports `GIT_DIR`/`GIT_WORK_TREE`
+before its first Git invocation. Worktrees created from Linux or WSL already
+record a resolvable path and skip this step. The PowerShell driver resolves the
+paths with Windows Git and translates only the resulting common Git directory
+for Docker.
+
 ## 7. Authentication and secret isolation
 
 Authentication has distinct public and downstream extension paths.

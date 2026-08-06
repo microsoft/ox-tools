@@ -465,3 +465,6 @@ prerelease
 versioned
 Containerfile
 WSL
+LFS
+worktree
+worktrees

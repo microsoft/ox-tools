@@ -231,6 +231,19 @@ The repository is mounted read/write at `/workspace`. Build output remains in a
 named volume instead of the host `target/`, avoiding incompatible artifacts and
 slow host-to-virtual-machine I/O.
 
+## Git worktrees
+
+Ordinary repositories and [linked
+worktrees](https://git-scm.com/docs/git-worktree) both work, including
+worktrees created on Windows and run through WSL.
+
+In a linked worktree the shared Git data lives outside the worktree, so the
+driver additionally mounts that common Git directory **read-only** and points
+Git at it. Checks that read history — impact scoping, `anvil-aprz`, and
+`semver-check` — therefore behave the same as in an ordinary clone, while
+containerized commands cannot modify shared Git or Git LFS state. Nothing else
+about the run changes: the same image, caches, and target volume are used.
+
 ## GitHub authentication
 
 `anvil-aprz` and aggregate tiers that include it require GitHub API
@@ -293,6 +306,8 @@ same inputs, at the cost of duplicate work.
 | GitHub authentication is unavailable | Run `gh auth login --hostname github.com` or set host `GITHUB_TOKEN` |
 | A matching image is missing with `ANVIL_CONTAINER_NO_REBUILD=1` | Unset the variable to allow the local image build |
 | The first run is slow | The initial image build installs the pinned tool catalog; later runs reuse it |
+| A Windows-created worktree fails in WSL | Run the checks from Windows PowerShell, or recreate the worktree from Linux so its `.git` pointer records a path WSL Git can resolve |
+| Git metadata cannot be resolved | Run `git worktree repair` in the worktree; the `.git` pointer must name existing metadata |
 
 Use `docker images anvil-dev` inside Linux or WSL to list locally cached
 default Anvil images.
@@ -651,6 +666,41 @@ if ($LASTEXITCODE -ne 0 -or -not $wslRepoRoot) {
     throw 'anvil-container: could not translate the repository path into the default WSL distribution.'
 }
 $wslScriptDir = "$wslRepoRoot/.anvil/container"
+
+# A linked worktree keeps objects, refs, and configuration in the common Git
+# directory, which lies outside the mounted worktree. Mount exactly that
+# directory read-only so history and remote discovery work in the container
+# without containerized checks mutating shared host metadata. Optional locks
+# are disabled and Git LFS is redirected to container-local storage so filters
+# never attempt to write into the read-only mount.
+$gitDir = (git rev-parse --absolute-git-dir 2>$null)
+$gitCommonDir = (git rev-parse --path-format=absolute --git-common-dir 2>$null)
+if ($LASTEXITCODE -ne 0 -or -not $gitDir -or -not $gitCommonDir) {
+    throw 'anvil-container: could not resolve the Git metadata directories. Git 2.31 or newer is required.'
+}
+$gitDir = $gitDir.Trim()
+$gitCommonDir = $gitCommonDir.Trim()
+$linkedWorktreeGitArgs = @()
+if ($gitDir -ne $gitCommonDir) {
+    $gitDirRelative = [IO.Path]::GetRelativePath($gitCommonDir, $gitDir).Replace('\', '/')
+    if ($gitDirRelative -eq '..' -or $gitDirRelative.StartsWith('../', [StringComparison]::Ordinal)) {
+        throw 'anvil-container: the linked-worktree Git directory is outside its common Git directory; mounting it would expose an unrelated host path.'
+    }
+    $wslGitCommonDir = (& wsl -e wslpath -a $gitCommonDir)
+    if ($LASTEXITCODE -ne 0 -or -not $wslGitCommonDir) {
+        throw 'anvil-container: could not translate the common Git directory into the default WSL distribution.'
+    }
+    $wslGitCommonDir = $wslGitCommonDir.Trim()
+    $linkedWorktreeGitArgs = @(
+        '--mount', "type=bind,source=$wslGitCommonDir,target=/anvil-git,readonly",
+        '--env', "GIT_DIR=/anvil-git/$gitDirRelative",
+        '--env', 'GIT_WORK_TREE=/workspace',
+        '--env', 'GIT_OPTIONAL_LOCKS=0',
+        '--env', 'GIT_CONFIG_COUNT=1',
+        '--env', 'GIT_CONFIG_KEY_0=lfs.storage',
+        '--env', 'GIT_CONFIG_VALUE_0=/tmp/anvil-lfs'
+    )
+}
 $containerfile = Join-Path $scriptDir 'Containerfile'
 $baseImageMatch = [regex]::Match([IO.File]::ReadAllText($containerfile), '(?m)^ARG BASE_IMAGE=([^\r\n]+)')
 if (-not $baseImageMatch.Success) {
@@ -800,6 +850,7 @@ try {
         '--workdir', '/workspace'
     )
     $runArgs += $mountArgs
+    $runArgs += $linkedWorktreeGitArgs
     $prepareRunArgs = @($runArgs)
     $runArgs += $AnvilContainerRunArgs
     foreach ($name in @(
@@ -938,11 +989,64 @@ case "$host_arch" in
     *) echo "anvil-container: warning: $host_arch requires emulation for linux/amd64; builds and checks may be substantially slower." >&2 ;;
 esac
 
+# A linked worktree created on Windows records an absolute Windows `gitdir`
+# pointer that Git inside WSL cannot follow, so translate it before any Git
+# discovery runs. Worktrees created from Linux or WSL already record a path
+# this Git can resolve, and an ordinary repository has a `.git` directory.
+if [[ -f .git ]]; then
+    linked_git_dir="$(sed -n 's/^gitdir: //p' .git | tr -d '\r')"
+    case "$linked_git_dir" in
+        [A-Za-z]:[\\/]*)
+            if ! command -v wslpath >/dev/null 2>&1; then
+                echo 'anvil-container: wslpath is required to run a Windows-created linked worktree. Run the Windows driver from PowerShell, or recreate the worktree from Linux.' >&2
+                exit 1
+            fi
+            if ! linked_git_dir="$(wslpath -a "$linked_git_dir" 2>/dev/null)" || [[ ! -d "$linked_git_dir" ]]; then
+                echo 'anvil-container: could not resolve the Windows linked-worktree gitdir pointer in WSL. Verify that the worktree metadata still exists.' >&2
+                exit 1
+            fi
+            export GIT_DIR="$linked_git_dir"
+            export GIT_WORK_TREE="$PWD"
+            ;;
+    esac
+fi
+
 if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     echo 'anvil-container must run from a Git repository.' >&2
     exit 1
 fi
 script_dir="$repo_root/.anvil/container"
+
+# A linked worktree keeps objects, refs, and configuration in the common Git
+# directory, which lies outside the mounted worktree. Mount exactly that
+# directory read-only so history and remote discovery work in the container
+# without containerized checks mutating shared host metadata. Optional locks
+# are disabled and Git LFS is redirected to container-local storage so filters
+# never attempt to write into the read-only mount.
+if ! git_dir="$(git rev-parse --absolute-git-dir 2>/dev/null)" ||
+    ! git_common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+    echo 'anvil-container: could not resolve the Git metadata directories. Git 2.31 or newer is required.' >&2
+    exit 1
+fi
+linked_worktree_args=()
+if [[ "$git_dir" != "$git_common_dir" ]]; then
+    case "$git_dir" in
+        "$git_common_dir"/*) git_dir_relative="${git_dir#"$git_common_dir"/}" ;;
+        *)
+            echo 'anvil-container: the linked-worktree Git directory is outside its common Git directory; mounting it would expose an unrelated host path.' >&2
+            exit 1
+            ;;
+    esac
+    linked_worktree_args=(
+        --mount "type=bind,source=$git_common_dir,target=/anvil-git,readonly"
+        --env "GIT_DIR=/anvil-git/$git_dir_relative"
+        --env GIT_WORK_TREE=/workspace
+        --env GIT_OPTIONAL_LOCKS=0
+        --env GIT_CONFIG_COUNT=1
+        --env GIT_CONFIG_KEY_0=lfs.storage
+        --env GIT_CONFIG_VALUE_0=/tmp/anvil-lfs
+    )
+fi
 default_base_image="$(sed -n 's/^ARG BASE_IMAGE=//p' "$script_dir/Containerfile" | head -n 1)"
 if [[ -z "$default_base_image" ]]; then
     echo 'anvil-container: Containerfile must define ARG BASE_IMAGE=<digest-pinned-image>.' >&2
@@ -1160,6 +1264,7 @@ run_args=(
     --env ANVIL_IN_CONTAINER=1
     --env HOME=/tmp/anvil-user
     "${mount_args[@]}"
+    ${linked_worktree_args[@]+"${linked_worktree_args[@]}"}
     --workdir /workspace
 )
 prepare_run_args=("${run_args[@]}")
