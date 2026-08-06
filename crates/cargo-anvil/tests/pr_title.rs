@@ -1,6 +1,14 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+//! Coverage for the `anvil-pr-title` recipe.
+//!
+//! Every case here carries `#[serial]`. Each one runs the recipe, which starts a
+//! `PowerShell` process, and `PowerShell` intermittently aborts while parsing an
+//! assembly name during startup (PowerShell/PowerShell#26940). Concurrent
+//! interpreter startups on constrained runners hit that abort often enough to
+//! fail the suite, so a new case must be serialized alongside the rest.
+
 #![cfg(not(miri))] // miri cannot sandbox the filesystem and process operations used here.
 #![allow(
     clippy::expect_used,
@@ -10,9 +18,9 @@
 
 use std::path::Path;
 use std::process::{Command, Output};
-use std::sync::Mutex;
 
 use cargo_anvil::test_support::{Cli, run_update};
+use serial_test::serial;
 use tempfile::TempDir;
 
 /// Emitted by the recipe for every value that defers validation.
@@ -20,16 +28,6 @@ const SKIP_MESSAGE: &str = "anvil-pr-title: PR_TITLE env var is unset or empty; 
 
 /// Opens the diagnostic the recipe emits for a title it rejects.
 const REJECTION_PREFIX: &str = "PR title '";
-
-/// Serializes the recipe invocations that the cases below perform.
-///
-/// Every case runs the recipe, which starts a `PowerShell` process. Several
-/// `PowerShell` processes starting at once exhaust a constrained runner and abort
-/// while loading the .NET runtime assemblies, which surfaces as an unrelated
-/// case failing rather than as a diagnosable resource error. Running one case at
-/// a time keeps the interpreter startup cost off the critical path of the
-/// assertions.
-static RECIPE_LOCK: Mutex<()> = Mutex::new(());
 
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
@@ -71,9 +69,6 @@ fn tools_available() -> bool {
 }
 
 fn run_title(root: &Path, title: Option<&str>) -> Output {
-    // A failing case poisons the lock; the remaining cases are still valid, so
-    // recover the guard rather than reporting them all as lock failures.
-    let _guard = RECIPE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut command = Command::new("just");
     command
         .args(["--justfile", "Justfile", "--color", "never", "anvil-pr-title"])
@@ -126,6 +121,7 @@ fn assert_skipped(title: Option<&str>) {
 }
 
 #[test]
+#[serial]
 fn accepts_type_and_description() {
     if !tools_available() {
         return;
@@ -135,6 +131,7 @@ fn accepts_type_and_description() {
 }
 
 #[test]
+#[serial]
 fn accepts_scope() {
     if !tools_available() {
         return;
@@ -144,6 +141,7 @@ fn accepts_scope() {
 }
 
 #[test]
+#[serial]
 fn accepts_breaking_change_marker() {
     if !tools_available() {
         return;
@@ -153,6 +151,7 @@ fn accepts_breaking_change_marker() {
 }
 
 #[test]
+#[serial]
 fn accepts_scope_with_breaking_change_marker() {
     if !tools_available() {
         return;
@@ -162,6 +161,7 @@ fn accepts_scope_with_breaking_change_marker() {
 }
 
 #[test]
+#[serial]
 fn accepts_uppercase_type() {
     if !tools_available() {
         return;
@@ -171,6 +171,7 @@ fn accepts_uppercase_type() {
 }
 
 #[test]
+#[serial]
 fn rejects_title_without_type_prefix() {
     if !tools_available() {
         return;
@@ -180,6 +181,7 @@ fn rejects_title_without_type_prefix() {
 }
 
 #[test]
+#[serial]
 fn rejects_unlisted_type() {
     if !tools_available() {
         return;
@@ -189,6 +191,7 @@ fn rejects_unlisted_type() {
 }
 
 #[test]
+#[serial]
 fn rejects_empty_scope() {
     if !tools_available() {
         return;
@@ -198,6 +201,7 @@ fn rejects_empty_scope() {
 }
 
 #[test]
+#[serial]
 fn rejection_reports_accepted_patterns_and_types() {
     if !tools_available() {
         return;
@@ -218,6 +222,7 @@ fn rejection_reports_accepted_patterns_and_types() {
 }
 
 #[test]
+#[serial]
 fn skips_when_title_is_unset() {
     if !tools_available() {
         return;
@@ -227,6 +232,7 @@ fn skips_when_title_is_unset() {
 }
 
 #[test]
+#[serial]
 fn skips_when_title_is_empty() {
     if !tools_available() {
         return;
