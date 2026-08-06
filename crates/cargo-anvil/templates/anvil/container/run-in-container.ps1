@@ -122,6 +122,53 @@ if ($LASTEXITCODE -ne 0 -or -not $wslRepoRoot) {
 }
 $wslScriptDir = "$wslRepoRoot/.anvil/container"
 
+# The generated runtime file carries the repository's declarations and a
+# coherence record over the configuration and every artifact derived from it.
+# Verifying all of them -- not just the configuration -- is what catches a
+# Containerfile that anvil left alone because the user had modified it: an
+# input-only check would pass while the image lacked a declared package.
+$runtimeConf = Join-Path $scriptDir 'runtime.conf'
+$configFile = Join-Path $repoRoot '.anvil/config.toml'
+function Get-AnvilContainerChecksum([string]$Path) {
+    # Line endings are normalized so a checksum recorded on one host matches on
+    # the other, exactly as the generator computes it.
+    $text = [IO.File]::ReadAllText($Path).Replace("`r`n", "`n")
+    $hash = [Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($text))
+    'sha256:' + [Convert]::ToHexString($hash).ToLowerInvariant()
+}
+function Assert-AnvilContainerFresh {
+    throw @'
+anvil-container: .anvil/container/ is out of date with .anvil/config.toml.
+Run `cargo anvil` to regenerate it, then rerun.
+'@
+}
+$hasConfig = Test-Path -LiteralPath $configFile -PathType Leaf
+$hasRuntime = Test-Path -LiteralPath $runtimeConf -PathType Leaf
+# Either file existing without the other means generation has not caught up:
+# a configuration was added without regenerating, or deleted without it.
+if ($hasConfig -ne $hasRuntime) { Assert-AnvilContainerFresh }
+
+$anvilCacheRecords = @()
+$anvilMountRecords = @()
+if ($hasRuntime) {
+    $recordedConfig = ''
+    foreach ($line in [IO.File]::ReadAllLines($runtimeConf)) {
+        $fields = $line -split "`t"
+        switch ($fields[0]) {
+            'cache' { $anvilCacheRecords += , $fields[1..3] }
+            'mount' { $anvilMountRecords += , $fields[1..5] }
+            'artifact' {
+                $artifactPath = Join-Path $repoRoot $fields[1]
+                if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) { Assert-AnvilContainerFresh }
+                if ((Get-AnvilContainerChecksum $artifactPath) -ne $fields[2]) { Assert-AnvilContainerFresh }
+            }
+            'config' { $recordedConfig = $fields[1] }
+            default { }
+        }
+    }
+    if ($recordedConfig -ne (Get-AnvilContainerChecksum $configFile)) { Assert-AnvilContainerFresh }
+}
+
 # A linked worktree keeps objects, refs, and configuration in the common Git
 # directory, which lies outside the mounted worktree. Mount exactly that
 # directory read-only so history and remote discovery work in the container
@@ -303,6 +350,68 @@ try {
         '/usr/local/cargo/git',
         '/workspace/target'
     )
+
+    # Declared cache volumes join the anvil-owned ones: created explicitly,
+    # ownership-initialized in the same root container, and mounted everywhere
+    # the workspace is. Scope decides what the name encodes, and therefore what
+    # is shared. 'worktree' is named for the identifier it uses -- a hash of the
+    # worktree path -- so linked worktrees deliberately do not share one.
+    $cacheMountArgs = @()
+    foreach ($record in $anvilCacheRecords) {
+        $cacheName, $cacheTarget, $cacheScope = $record
+        $volume = switch ($cacheScope) {
+            'worktree' { "anvil-cache-$cacheName-$($repoHash.Substring(0, 12))" }
+            'image' { "anvil-cache-$cacheName-$($repoHash.Substring(0, 12))-$($imageId.Substring(0, 12))" }
+            'global' { "anvil-cache-$cacheName" }
+            default { throw "anvil-container: unknown cache scope '$cacheScope' in runtime.conf." }
+        }
+        $null = & wsl -e docker volume create `
+            --label "io.github.cargo-anvil.cache=$cacheName" `
+            --label "io.github.cargo-anvil.scope=$cacheScope" `
+            --label "io.github.cargo-anvil.worktree=$wslRepoRoot" `
+            $volume
+        if ($LASTEXITCODE -ne 0) {
+            throw "anvil-container: Docker volume creation failed for '$volume' with exit code $LASTEXITCODE."
+        }
+        $cacheMountArgs += @('--mount', "type=volume,source=$volume,target=$cacheTarget")
+        $ownershipMountArgs += @('--mount', "type=volume,source=$volume,target=$cacheTarget")
+        $ownershipTargets += $cacheTarget
+    }
+
+    # Host mounts never reach the root container: anvil does not modify
+    # ownership of host paths. Sources are resolved here, and a
+    # repository-relative source that resolves outside the worktree is refused
+    # -- lexical validation at generation time cannot see a symlink introduced
+    # afterwards.
+    $hostMountArgs = @()
+    foreach ($record in $anvilMountRecords) {
+        $mountName, $sourceKind, $sourceValue, $mountTarget, $mountMode = $record
+        $mountSource = switch ($sourceKind) {
+            'repository' { Join-Path $repoRoot $sourceValue }
+            'sibling' { Join-Path (Split-Path -Parent $repoRoot) $sourceValue }
+            'host' { $sourceValue }
+            default { throw "anvil-container: unknown mount source kind '$sourceKind' in runtime.conf." }
+        }
+        if (-not (Test-Path -LiteralPath $mountSource)) {
+            throw "anvil-container: mount '$mountName' source '$mountSource' does not exist on this host."
+        }
+        $resolvedSource = (Resolve-Path -LiteralPath $mountSource).ProviderPath
+        if ($sourceKind -eq 'repository') {
+            $repoReal = (Resolve-Path -LiteralPath $repoRoot).ProviderPath
+            if ($resolvedSource -ne $repoReal -and -not $resolvedSource.StartsWith($repoReal + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+                throw "anvil-container: mount '$mountName' resolves to '$resolvedSource', outside the worktree. A symlink may have been added after generation."
+            }
+        }
+        $wslMountSource = (& wsl -e wslpath -a $resolvedSource)
+        if ($LASTEXITCODE -ne 0 -or -not $wslMountSource) {
+            throw "anvil-container: could not translate mount '$mountName' source into the default WSL distribution."
+        }
+        $wslMountSource = $wslMountSource.Trim()
+        $descriptor = "type=bind,source=$wslMountSource,target=$mountTarget"
+        if ($mountMode -eq 'read-only') { $descriptor += ',readonly' }
+        $hostMountArgs += @('--mount', $descriptor)
+    }
+    $mountArgs += $cacheMountArgs + $hostMountArgs
     & wsl -e docker run --rm --pull=never `
         --platform linux/amd64 `
         --user 0:0 `

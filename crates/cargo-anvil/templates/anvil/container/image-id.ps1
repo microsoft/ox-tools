@@ -53,6 +53,15 @@ $executionOnly = @(
 $inputs += Get-ChildItem $containerPath -File |
     Where-Object { $_.Name -notin $executionOnly } |
     ForEach-Object { [IO.Path]::GetRelativePath($repoRoot, $_.FullName).Replace('\', '/') }
+
+# Files a repository declared through [[container.image.file]] are copied into
+# the image, so their contents select it. They are learned from the generated
+# Containerfile's COPY instructions rather than from a second list, so the
+# helper needs no TOML parser and the two lists cannot disagree.
+$inputs += [regex]::Matches(
+    [IO.File]::ReadAllText($containerfile),
+    '(?m)^COPY \["([^"]*)", "[^"]*"\]$'
+) | ForEach-Object { $_.Groups[1].Value }
 $uniqueInputs = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
 foreach ($inputPath in $inputs) {
     [void]$uniqueInputs.Add($inputPath)

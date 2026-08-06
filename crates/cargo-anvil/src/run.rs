@@ -18,6 +18,7 @@ use crate::catalog::Catalog;
 use crate::catalog::artifact::{Artifact, HostSelector, RegionSpec};
 use crate::checksum::checksum_str;
 use crate::cli::Cli;
+use crate::container::{self, ContainerConfig};
 use crate::decision::{Decision, RemovalDecision, decide_removal};
 use crate::emit::{ManagedRegionRequest, plan_managed_region, plan_owned_file};
 use crate::io::{read_file_if_present, resolve_existing_case_insensitive};
@@ -160,19 +161,49 @@ fn build_plan(
     let mut plan = Plan::default();
     let mut hosts = HostTextCache::default();
 
+    // The repository-owned container contract, if any. Absence is the ordinary
+    // case and must leave every emitted byte unchanged.
+    let config = ContainerConfig::load(repo_root)?;
+    let config_text = read_config_text(repo_root)?;
+    let empty_config = ContainerConfig::default();
+    let effective_config = config.as_ref().unwrap_or(&empty_config);
+    let mut containerfile_body: Option<String> = None;
+
     for artifact in catalog.artifacts() {
         match artifact {
             Artifact::OwnedFile(spec) => {
                 let selected = spec.gate.is_none_or(|gate| backends.contains(&gate));
                 if selected {
                     let path = resolve_existing_case_insensitive(repo_root, spec.path);
-                    plan.push(plan_owned_file(repo_root, manifest, &path, &spec.body)?);
+                    let body = if spec.path == CONTAINERFILE_PATH {
+                        let rendered = container::render_containerfile(effective_config, &spec.body, &catalog.cli().subcommand)?;
+                        containerfile_body = Some(rendered.clone());
+                        rendered
+                    } else if spec.path == IGNORE_PATH {
+                        container::render_ignore_file(effective_config, &spec.body)
+                    } else {
+                        spec.body.clone()
+                    };
+                    plan.push(plan_owned_file(repo_root, manifest, &path, &body)?);
                 }
             }
             Artifact::Region(spec) => {
                 push_region(repo_root, workspace, manifest, &mut plan, &mut hosts, spec)?;
             }
         }
+    }
+
+    // The runtime file exists only when the repository declares something, so
+    // a repository that declares nothing keeps today's tree byte for byte.
+    // It is pushed after every artifact it vouches for.
+    if let Some(config) = &config {
+        let mut artifacts: Vec<(&str, String)> = Vec::new();
+        if let Some(body) = &containerfile_body {
+            artifacts.push((CONTAINERFILE_PATH, crate::checksum::checksum_str(body)));
+        }
+        let artifact_refs: Vec<(&str, &str)> = artifacts.iter().map(|(name, sum)| (*name, sum.as_str())).collect();
+        let body = container::render_runtime_file(config, &container::config_checksum(config_text.as_deref()), &artifact_refs);
+        plan.push(plan_owned_file(repo_root, manifest, container::RUNTIME_FILE_NAME, &body)?);
     }
 
     plan_removals(repo_root, manifest, &mut plan, &mut hosts)?;
@@ -186,8 +217,19 @@ fn build_plan(
     Ok(plan)
 }
 
-/// Re-splice every region `Propose` item's `.anvil-proposed` payload against
-/// the *final* composed host text — the in-memory host after all `Write` and
+/// The generated `Containerfile`, the one artifact whose body depends on the
+/// repository's declarations.
+const CONTAINERFILE_PATH: &str = ".anvil/container/Containerfile";
+
+/// The generated build-context ignore file, extended with declared image files.
+const IGNORE_PATH: &str = ".anvil/container/Containerfile.dockerignore";
+
+/// Read the raw configuration text for checksumming, if the file exists.
+fn read_config_text(repo_root: &Path) -> Result<Option<String>, AppError> {
+    read_file_if_present(&repo_root.join(container::CONFIG_FILE_NAME))
+}
+
+/// Re-splice every region `Propose` item's `.anvil-proposed` payload against/// the *final* composed host text — the in-memory host after all `Write` and
 /// region `Remove` operations for that host have been folded into the
 /// accumulator.
 ///

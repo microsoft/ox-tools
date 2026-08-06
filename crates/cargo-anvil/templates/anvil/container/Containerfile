@@ -23,7 +23,6 @@ RUN apt-get update \
         build-essential ca-certificates clang libclang-dev curl git libicu-dev \
         libssl-dev pkg-config tar \
     && rm -rf /var/lib/apt/lists/*
-
 RUN curl -fsSLo /tmp/powershell.tar.gz \
         "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/powershell-${POWERSHELL_VERSION}-linux-x64.tar.gz" \
     && echo "${POWERSHELL_SHA256}  /tmp/powershell.tar.gz" | sha256sum -c - \
@@ -48,6 +47,17 @@ RUN curl --proto '=https' --tlsv1.2 -fsSLo /tmp/rustup-init \
     && rm /tmp/rustup-init
 
 WORKDIR /opt/anvil
+
+# Consumer image extensions declared in .anvil/config.toml are rendered here:
+# after the pinned public tools, and before `anvil-setup`, which compiles Cargo
+# tools that may need consumer-provided libraries, headers, or environment.
+# A downstream catalog moves the extension marker to change that position, and
+# edits the package marker's command to change the package ecosystem. Removing
+# both markers withdraws support, and a repository that declares extensions
+# then gets an actionable error rather than silence.
+# anvil-container-packages: apt-get update && apt-get install -y --no-install-recommends {{packages}} && rm -rf /var/lib/apt/lists/*
+# anvil-container-extensions
+
 COPY . .
 RUN test -f rust-toolchain.toml || { \
         echo "anvil-container requires rust-toolchain.toml" >&2; \

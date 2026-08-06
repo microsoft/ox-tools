@@ -449,8 +449,8 @@ a **coherence record** in `runtime.conf`:
 - the SHA-256 of every generated artifact derived from it — currently the
   `Containerfile` and `runtime.conf` itself.
 
-The drivers verify all of these before doing anything else and refuse to run on
-a mismatch:
+The drivers verify all of these before starting any container or building any
+image, and refuse to run on a mismatch:
 
 ```text
 anvil-container: .anvil/container/ is out of date with .anvil/config.toml.

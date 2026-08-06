@@ -429,6 +429,7 @@ pub(crate) mod backend;
 pub(crate) mod catalog;
 pub(crate) mod checksum;
 pub(crate) mod cli;
+pub(crate) mod container;
 pub(crate) mod decision;
 pub(crate) mod emit;
 pub(crate) mod io;
@@ -475,6 +476,10 @@ use std::process::ExitCode;
 pub use anvil::artifacts;
 pub use backend::Backend;
 pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec};
+pub use container::{
+    ArgKind, ArgSpec, CacheScope, CacheSpec, CommandSpec, ContainerConfig, FileSpec, ImageConfig, MountMode, MountSource, MountSpec,
+    StepSpec,
+};
 pub use region::CommentSyntax;
 
 /// One-call entry point for a tool built on the anvil engine.

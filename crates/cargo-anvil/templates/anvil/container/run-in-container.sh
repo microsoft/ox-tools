@@ -92,6 +92,53 @@ if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
 fi
 script_dir="$repo_root/.anvil/container"
 
+# The generated runtime file carries the repository's declarations and a
+# coherence record over the configuration and every artifact derived from it.
+# Verifying all of them -- not just the configuration -- is what catches a
+# Containerfile that anvil left alone because the user had modified it: an
+# input-only check would pass while the image lacked a declared package.
+runtime_conf="$script_dir/runtime.conf"
+config_file="$repo_root/.anvil/config.toml"
+anvil_container_checksum_of() {
+    # Line endings are normalized so a checksum recorded on one host matches on
+    # the other, exactly as the generator computes it.
+    local path="$1" digest
+    if command -v sha256sum >/dev/null 2>&1; then
+        digest="$(tr -d '\r' < "$path" | sha256sum | cut -d' ' -f1)"
+    else
+        digest="$(tr -d '\r' < "$path" | shasum -a 256 | cut -d' ' -f1)"
+    fi
+    printf 'sha256:%s' "$digest"
+}
+anvil_container_stale() {
+    echo "anvil-container: .anvil/container/ is out of date with .anvil/config.toml." >&2
+    echo 'Run `cargo anvil` to regenerate it, then rerun.' >&2
+    exit 1
+}
+# Either file existing without the other means generation has not caught up:
+# a configuration was added without regenerating, or deleted without it.
+if [[ -f "$config_file" && ! -f "$runtime_conf" ]] || [[ ! -f "$config_file" && -f "$runtime_conf" ]]; then
+    anvil_container_stale
+fi
+declare -a anvil_cache_records=() anvil_mount_records=()
+if [[ -f "$runtime_conf" ]]; then
+    expected_config="$(anvil_container_checksum_of "$config_file")"
+    recorded_config=""
+    while IFS=$'\t' read -r kind field_a field_b field_c field_d field_e || [[ -n "$kind" ]]; do
+        case "$kind" in
+            cache) anvil_cache_records+=("$field_a"$'\t'"$field_b"$'\t'"$field_c") ;;
+            mount) anvil_mount_records+=("$field_a"$'\t'"$field_b"$'\t'"$field_c"$'\t'"$field_d"$'\t'"$field_e") ;;
+            artifact)
+                [[ -f "$repo_root/$field_a" ]] || anvil_container_stale
+                [[ "$(anvil_container_checksum_of "$repo_root/$field_a")" == "$field_b" ]] || anvil_container_stale
+                ;;
+            config) recorded_config="$field_a" ;;
+            *) ;;
+        esac
+    done < "$runtime_conf"
+    [[ "$recorded_config" == "$expected_config" ]] || anvil_container_stale
+fi
+
 # A linked worktree keeps objects, refs, and configuration in the common Git
 # directory, which lies outside the mounted worktree. Mount exactly that
 # directory read-only so history and remote discovery work in the container
@@ -341,6 +388,70 @@ ownership_targets=(
     /usr/local/cargo/git
     /workspace/target
 )
+
+# Declared cache volumes join the Anvil-owned ones: created explicitly,
+# ownership-initialized in the same root container, and mounted everywhere the
+# workspace is. Scope decides what the name encodes, and therefore what is
+# shared. `worktree` is named for the identifier it uses -- a hash of the
+# worktree path -- so linked worktrees deliberately do not share one.
+declare -a cache_mount_args=()
+for record in ${anvil_cache_records[@]+"${anvil_cache_records[@]}"}; do
+    IFS=$'\t' read -r cache_name cache_target cache_scope <<<"$record"
+    case "$cache_scope" in
+        worktree) volume="anvil-cache-${cache_name}-${repo_id}" ;;
+        image) volume="anvil-cache-${cache_name}-${repo_id}-${image_id:0:12}" ;;
+        global) volume="anvil-cache-${cache_name}" ;;
+        *)
+            echo "anvil-container: unknown cache scope '$cache_scope' in runtime.conf." >&2
+            exit 1
+            ;;
+    esac
+    docker volume create \
+        --label "io.github.cargo-anvil.cache=$cache_name" \
+        --label "io.github.cargo-anvil.scope=$cache_scope" \
+        --label "io.github.cargo-anvil.worktree=$repo_root" \
+        "$volume" >/dev/null
+    cache_mount_args+=(--mount "type=volume,source=$volume,target=$cache_target")
+    ownership_mount_args+=(--mount "type=volume,source=$volume,target=$cache_target")
+    ownership_targets+=("$cache_target")
+done
+
+# Host mounts never reach the root container: anvil does not modify ownership
+# of host paths. Sources are resolved here, and a repository-relative source
+# that resolves outside the worktree is refused -- lexical validation at
+# generation time cannot see a symlink introduced afterwards.
+declare -a host_mount_args=()
+for record in ${anvil_mount_records[@]+"${anvil_mount_records[@]}"}; do
+    IFS=$'\t' read -r mount_name source_kind source_value mount_target mount_mode <<<"$record"
+    case "$source_kind" in
+        repository) mount_source="$repo_root/$source_value" ;;
+        sibling) mount_source="$(dirname "$repo_root")/$source_value" ;;
+        host) mount_source="$source_value" ;;
+        *)
+            echo "anvil-container: unknown mount source kind '$source_kind' in runtime.conf." >&2
+            exit 1
+            ;;
+    esac
+    if [[ ! -e "$mount_source" ]]; then
+        echo "anvil-container: mount '$mount_name' source '$mount_source' does not exist on this host." >&2
+        exit 1
+    fi
+    resolved_source="$(cd "$mount_source" 2>/dev/null && pwd -P || readlink -f "$mount_source")"
+    if [[ "$source_kind" == "repository" ]]; then
+        repo_real="$(cd "$repo_root" && pwd -P)"
+        if [[ "$resolved_source" != "$repo_real" && "$resolved_source" != "$repo_real"/* ]]; then
+            echo "anvil-container: mount '$mount_name' resolves to '$resolved_source', outside the worktree. A symlink may have been added after generation." >&2
+            exit 1
+        fi
+    fi
+    if [[ "$mount_mode" == "read-only" ]]; then
+        host_mount_args+=(--mount "type=bind,source=$resolved_source,target=$mount_target,readonly")
+    else
+        host_mount_args+=(--mount "type=bind,source=$resolved_source,target=$mount_target")
+    fi
+done
+mount_args+=(${cache_mount_args[@]+"${cache_mount_args[@]}"} ${host_mount_args[@]+"${host_mount_args[@]}"})
+
 docker run --rm --pull=never \
     --platform linux/amd64 \
     --user 0:0 \
