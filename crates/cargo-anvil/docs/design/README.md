@@ -15,6 +15,8 @@ user-visible shape of the tool. Detail lives in companion documents:
 - [ado.md](./ado.md) — Azure DevOps Pipelines emission, 1ESPT/msrustup composition.
 - [containers.md](./containers.md) — the opt-in, local-only container backend for running any
   `anvil-*` recipe in a pinned Linux image (Linux-on-Windows parity, distro pinning).
+- [container-config.md](./container-config.md) — the declarative contract a repository uses to
+  extend the container image and declare mounts, caches, and repository-owned commands.
 - [../verification.md](../verification.md) — continuous-validation strategy: dogfooding,
   fixture tests, schema validation.
 
