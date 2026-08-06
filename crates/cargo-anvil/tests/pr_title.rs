@@ -10,12 +10,26 @@
 
 use std::path::Path;
 use std::process::{Command, Output};
+use std::sync::Mutex;
 
 use cargo_anvil::test_support::{Cli, run_update};
 use tempfile::TempDir;
 
 /// Emitted by the recipe for every value that defers validation.
 const SKIP_MESSAGE: &str = "anvil-pr-title: PR_TITLE env var is unset or empty; skipping title validation";
+
+/// Opens the diagnostic the recipe emits for a title it rejects.
+const REJECTION_PREFIX: &str = "PR title '";
+
+/// Serializes the recipe invocations that the cases below perform.
+///
+/// Every case runs the recipe, which starts a `PowerShell` process. Several
+/// `PowerShell` processes starting at once exhaust a constrained runner and abort
+/// while loading the .NET runtime assemblies, which surfaces as an unrelated
+/// case failing rather than as a diagnosable resource error. Running one case at
+/// a time keeps the interpreter startup cost off the critical path of the
+/// assertions.
+static RECIPE_LOCK: Mutex<()> = Mutex::new(());
 
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
@@ -57,6 +71,9 @@ fn tools_available() -> bool {
 }
 
 fn run_title(root: &Path, title: Option<&str>) -> Output {
+    // A failing case poisons the lock; the remaining cases are still valid, so
+    // recover the guard rather than reporting them all as lock failures.
+    let _guard = RECIPE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut command = Command::new("just");
     command
         .args(["--justfile", "Justfile", "--color", "never", "anvil-pr-title"])
@@ -91,6 +108,12 @@ fn assert_rejected(title: &str) -> String {
     let output = run_title(tmp.path(), Some(title));
     let combined = combined_output(&output);
     assert!(!output.status.success(), "expected '{title}' to be rejected:\n{combined}");
+    // An interpreter that fails to start also exits nonzero, so require the
+    // validation diagnostic to confirm the rejection came from the recipe.
+    assert!(
+        combined.contains(REJECTION_PREFIX),
+        "expected '{title}' to be rejected by the recipe:\n{combined}"
+    );
     combined
 }
 
