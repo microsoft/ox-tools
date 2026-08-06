@@ -3276,7 +3276,15 @@ anvil-cluster-bootstrap:
         Write-Error "anvil-cluster-bootstrap installs Linux tooling; run it inside WSL / the Linux engine host"
         exit 1
     }
-    $bin = Join-Path $HOME '.local/bin'
+    # Prefer a directory already on PATH so the tools are usable immediately.
+    # ~/.local/bin is the correct non-root fallback, but it is not on the
+    # default PATH for a root shell, which silently leaves the tools invisible
+    # right after a successful bootstrap.
+    $bin = '/usr/local/bin'
+    if (-not (Test-Path $bin) -or -not (& sh -c 'test -w /usr/local/bin && echo writable')) {
+        $bin = Join-Path $HOME '.local/bin'
+    }
+    $onPath = ($env:PATH -split ':') -contains $bin
     New-Item -ItemType Directory -Force -Path $bin | Out-Null
 
     function Install-Pinned($name, $url, $sha256, $dest, $isArchive, $archiveMember) {
@@ -3318,7 +3326,13 @@ anvil-cluster-bootstrap:
     if ($bridge -ne '1') {
         Write-Warning "bridge-nf-call-iptables is not 1; load br_netfilter and set net.bridge.bridge-nf-call-iptables=1"
     }
-    Write-Output "anvil: bootstrap complete; ensure $bin is on PATH"
+    if ($onPath) {
+        Write-Output "anvil: bootstrap complete; tools installed to $bin"
+    } else {
+        Write-Output "anvil: bootstrap complete; tools installed to $bin"
+        Write-Output "anvil: $bin is NOT on PATH — add it with:"
+        Write-Output "         export PATH=`"`$PATH:$bin`""
+    }
     exit 0
 
 === justfiles/anvil/cluster.just ===
