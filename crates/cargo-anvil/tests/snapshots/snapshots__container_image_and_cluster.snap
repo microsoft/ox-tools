@@ -3464,7 +3464,7 @@ anvil-cluster-load profile="debug" tag="dev" registry="local":
 
     # Dependency preload images can inherit an unreachable WSL DNS proxy inside
     # Kind node containerd, so pull them on the host and kind load them.
-    foreach ($dep in @(@{ name = 'cert-manager'; manifest = 'https://example.com/cert-manager.yaml'; version = 'v1.16.1'; preload = @('quay.io/jetstack/cert-manager-controller:v1.16.1'); wait = @('deployment/cert-manager-webhook') })) {
+    foreach ($dep in @(@{ name = 'cert-manager'; manifest = 'https://example.com/cert-manager.yaml'; version = 'v1.16.1'; namespace = ''; preload = @('quay.io/jetstack/cert-manager-controller:v1.16.1'); wait = @('deployment/cert-manager-webhook') })) {
         foreach ($img in $dep.preload) {
             Write-Output "anvil: pre-pulling $img for dependency $($dep.name)"
             & $engine pull $img
@@ -3504,11 +3504,11 @@ anvil-cluster-deploy profile="debug" tag="dev" registry="local":
         if ($LASTEXITCODE -ne 0) { throw "pre-install hook '$preInstall' failed" }
     }
 
-    foreach ($dep in @(@{ name = 'cert-manager'; manifest = 'https://example.com/cert-manager.yaml'; version = 'v1.16.1'; preload = @('quay.io/jetstack/cert-manager-controller:v1.16.1'); wait = @('deployment/cert-manager-webhook') })) {
+    foreach ($dep in @(@{ name = 'cert-manager'; manifest = 'https://example.com/cert-manager.yaml'; version = 'v1.16.1'; namespace = ''; preload = @('quay.io/jetstack/cert-manager-controller:v1.16.1'); wait = @('deployment/cert-manager-webhook') })) {
         Write-Output "anvil: applying dependency $($dep.name) $($dep.version)"
         kubectl --context $ctx apply -f $dep.manifest
         if ($LASTEXITCODE -ne 0) { throw "failed to apply dependency $($dep.name)" }
-        Wait-Targets $ctx $dep.wait ''
+        Wait-Targets $ctx $dep.wait $dep.namespace
     }
 
     foreach ($chart in @(@{ name = 'svc'; path = 'charts/svc'; namespace = 'svc-system'; crds = 'charts/svc/crds'; set = @(@{ k = 'image.tag'; v = '{tag}' }); wait = @('deployment/svc-controller') })) {
