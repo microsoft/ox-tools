@@ -41,7 +41,7 @@ generating the drivers in the first place.
 
 ## 2. Design principles
 
-These follow from [design.md §4](./design.md#4-guiding-principle) and
+These follow from [`README.md §4`](./README.md#4-guiding-principle) and
 [containers.md §2](./containers.md#2-design-principles); this document adds no
 new ones.
 

@@ -9,7 +9,7 @@
 
 use crate::catalog::Artifact;
 
-const RECIPE: &str = include_str!("../../../templates/justfiles/anvil/container/container.just");
+const RECIPE: &str = include_str!("../../../templates/justfiles/anvil/container.just");
 const CONTAINERFILE: &str = include_str!("../../../templates/anvil/container/Containerfile");
 const IGNORE: &str = include_str!("../../../templates/anvil/container/Containerfile.dockerignore");
 const ENTRYPOINT: &str = include_str!("../../../templates/anvil/container/entrypoint.sh");
@@ -19,7 +19,7 @@ const SHELL_DRIVER: &str = include_str!("../../../templates/anvil/container/run-
 const POWERSHELL_DRIVER: &str = include_str!("../../../templates/anvil/container/run-in-container.ps1");
 const README: &str = include_str!("../../../templates/anvil/container/README.md");
 
-const RECIPE_PATH: &str = "justfiles/anvil/container/container.just";
+const RECIPE_PATH: &str = "justfiles/anvil/container.just";
 const CONTAINERFILE_PATH: &str = ".anvil/container/Containerfile";
 const IGNORE_PATH: &str = ".anvil/container/Containerfile.dockerignore";
 const ENTRYPOINT_PATH: &str = ".anvil/container/entrypoint.sh";
@@ -190,7 +190,6 @@ mod tests {
     fn write_image_id_fixture(root: &Path) {
         write(&root.join("rust-toolchain.toml"), "channel = \"1.93\"\n");
         write(&root.join("justfiles/anvil/versions.just"), "tool_version := \"1\"\n");
-        write(&root.join(RECIPE_PATH), RECIPE);
         write(
             &root.join(CONTAINERFILE_PATH),
             "ARG BASE_IMAGE=example.invalid/base@sha256:0000000000000000000000000000000000000000000000000000000000000000\nFROM ${BASE_IMAGE}\n",
@@ -228,45 +227,208 @@ mod tests {
     fn containerfile_installs_the_generated_toolset() {
         assert!(CONTAINERFILE.contains("just anvil-setup"));
         assert!(CONTAINERFILE.contains("COPY . ."));
-        assert!(IGNORE.contains("!.anvil/container/entrypoint.sh"));
+        assert!(IGNORE.contains("!.anvil/container/*"));
         assert!(IGNORE.contains("!justfiles/anvil/checks/*.just"));
         assert!(CONTAINERFILE.contains("anvil_runner := \\\"native\\\""));
         assert!(CONTAINERFILE.contains("requires rust-toolchain.toml"));
         assert!(CONTAINERFILE.contains("anvil-container-entrypoint"));
     }
 
-    /// The build context is an allowlist of files, so a generated host-only
-    /// file cannot silently become image content under an unchanged
-    /// content-addressed tag.
-    #[test]
-    fn ignore_file_admits_only_files_the_image_build_needs() {
-        let inclusions: Vec<&str> = IGNORE.lines().filter_map(|line| line.strip_prefix('!')).collect();
-        assert_eq!(
-            inclusions,
-            [
-                "rust-toolchain.toml",
-                "justfiles/anvil/*.just",
-                "justfiles/anvil/checks/*.just",
-                "justfiles/anvil/container/*.just",
-                "justfiles/anvil/groups/*.just",
-                ".anvil/container/entrypoint.sh"
-            ],
-            "only `just anvil-setup` inputs and the copied entrypoint belong in the \
-             build context; every other generated container file runs on the host"
-        );
-        // Un-ignoring a directory re-admits its entire subtree, which is how
-        // host-only drivers and helpers previously reached the image. Only
-        // files and file globs may be un-ignored.
-        for inclusion in &inclusions {
-            assert!(
-                inclusion.contains('.'),
-                "'{inclusion}' looks like a directory; un-ignoring one re-admits every file beneath it"
-            );
+    /// The Docker build-context ignore evaluation, ported from
+    /// `MatchesOrParentMatches` in `moby/patternmatcher`: patterns apply in
+    /// order and the last match wins, an `!` pattern applies only while the
+    /// candidate is ignored (and a plain pattern only while it is not), and
+    /// every pattern is tested against the candidate path *and each of its
+    /// parent directories*. Blank and `#` lines are dropped, as
+    /// `ignorefile::ReadAll` drops them.
+    ///
+    /// Only the pattern vocabulary the template actually uses is modeled;
+    /// anything else panics rather than silently matching differently from
+    /// Docker.
+    struct DockerIgnore {
+        patterns: Vec<(bool, Vec<String>)>,
+    }
+
+    impl DockerIgnore {
+        fn parse(text: &str) -> Self {
+            let mut patterns = Vec::new();
+            for line in text.lines() {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let (exclusion, body) = line.strip_prefix('!').map_or((false, line), |rest| (true, rest));
+                assert!(!body.is_empty(), "illegal exclusion pattern: \"!\"");
+                let segments: Vec<String> = body.split('/').map(str::to_owned).collect();
+                for segment in &segments {
+                    assert!(
+                        !segment.contains("**") || (segment == "**" && segments.len() == 1),
+                        "only a bare `**` is modeled; `{body}` needs Docker's full regex translation"
+                    );
+                    assert!(
+                        !segment.contains(['[', ']', '\\']),
+                        "character classes and escapes are not modeled: {body}"
+                    );
+                }
+                patterns.push((exclusion, segments));
+            }
+            Self { patterns }
         }
-        // Nothing needs re-exclusion once inclusion is explicit: customize.*
-        // is simply never admitted.
-        assert!(!IGNORE.contains("customize.sh"));
-        assert!(!IGNORE.contains("customize.ps1"));
+
+        /// Glob one path segment. `*` and `?` never cross a separator, which
+        /// is already guaranteed because the caller splits on `/`.
+        fn segment_matches(pattern: &str, segment: &str) -> bool {
+            let pattern: Vec<char> = pattern.chars().collect();
+            let segment: Vec<char> = segment.chars().collect();
+            let (mut p, mut s) = (0, 0);
+            let (mut star, mut retry) = (None, 0);
+            while s < segment.len() {
+                if p < pattern.len() && (pattern[p] == '?' || pattern[p] == segment[s]) {
+                    p += 1;
+                    s += 1;
+                } else if p < pattern.len() && pattern[p] == '*' {
+                    star = Some(p);
+                    p += 1;
+                    retry = s;
+                } else if let Some(index) = star {
+                    p = index + 1;
+                    retry += 1;
+                    s = retry;
+                } else {
+                    return false;
+                }
+            }
+            pattern[p..].iter().all(|character| *character == '*')
+        }
+
+        fn pattern_matches(pattern: &[String], path: &str) -> bool {
+            if pattern.len() == 1 && pattern[0] == "**" {
+                return true;
+            }
+            let candidate: Vec<&str> = path.split('/').collect();
+            pattern.len() == candidate.len()
+                && pattern
+                    .iter()
+                    .zip(candidate)
+                    .all(|(pattern, segment)| Self::segment_matches(pattern, segment))
+        }
+
+        fn is_ignored(&self, path: &str) -> bool {
+            let segments: Vec<&str> = path.split('/').collect();
+            let parents: Vec<String> = (1..segments.len()).map(|end| segments[..end].join("/")).collect();
+            let mut ignored = false;
+            for (exclusion, pattern) in &self.patterns {
+                if *exclusion != ignored {
+                    continue;
+                }
+                if Self::pattern_matches(pattern, path) || parents.iter().any(|parent| Self::pattern_matches(pattern, parent)) {
+                    ignored = !exclusion;
+                }
+            }
+            ignored
+        }
+    }
+
+    /// Every owned file the built-in catalog places in one of the two trees
+    /// the build context admits: the recipe tree, and the container
+    /// directory itself. `.anvil/` at large is the general home for
+    /// tool-owned non-recipe assets, and the allow-list deliberately admits
+    /// only `.anvil/container/*` from it, so scoping to that directory keeps
+    /// this guard exhaustive for image inputs without making a future
+    /// `.anvil/<feature>` artifact fail a test it has no bearing on.
+    fn catalog_context_inputs() -> Vec<&'static str> {
+        crate::anvil::artifacts::anvil_artifacts()
+            .into_iter()
+            .filter_map(|artifact| match artifact {
+                Artifact::OwnedFile(spec) if spec.path.starts_with("justfiles/") || spec.path.starts_with(".anvil/container/") => {
+                    Some(spec.path)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn ignore_file_admits_only_image_inputs_into_the_build_context() {
+        let ignore = DockerIgnore::parse(IGNORE);
+
+        // Driving the include set from the catalog rather than a literal list
+        // makes this the regression guard for the second placement rule in
+        // extensibility.md §6.1: an owned file placed outside an admitted glob
+        // fails here instead of inside a real `docker build`.
+        let mut included: Vec<&str> = vec![
+            // Repository-owned rather than catalog-owned, but a required
+            // image input all the same.
+            "rust-toolchain.toml",
+        ];
+        included.extend(catalog_context_inputs());
+        assert!(
+            included.contains(&CONTAINERFILE_PATH) && included.contains(&"justfiles/anvil/checks/clippy.just"),
+            "the catalog-derived include set must cover both admitted trees"
+        );
+        // The entry recipe is not image content, but `mod.just` imports it
+        // unconditionally, so `just anvil-setup` needs it present.
+        assert!(included.contains(&RECIPE_PATH), "the entry recipe must reach the build context");
+        for included in included {
+            assert!(!ignore.is_ignored(included), "{included} must reach the build context");
+        }
+
+        for excluded in [
+            // Trusted host orchestration: never image content, even though
+            // the surrounding directory is admitted.
+            CUSTOMIZE_SHELL_PATH,
+            CUSTOMIZE_POWERSHELL_PATH,
+            // The container directory is admitted one level deep only, which
+            // is exactly the depth the image-ID helpers list. Under the
+            // strictest reading of Docker's parent testing a subdirectory
+            // matches `!.anvil/container/*` in its own right, so the
+            // allow-list denies deeper paths explicitly.
+            ".anvil/container/nested/asset.txt",
+            ".anvil/container/nested/customize.sh",
+            ".anvil/container/nested/deeper/asset.txt",
+            // Assets stranded at the pre-move location, including a
+            // hand-authored customization file, must not re-enter through a
+            // directory-level re-inclusion.
+            "justfiles/anvil/container/customize.sh",
+            "justfiles/anvil/container/customize.ps1",
+            "justfiles/anvil/container/Containerfile",
+            "justfiles/anvil/container/run-in-container.sh",
+            // Everything else stays out: the working tree is bind-mounted at
+            // run time rather than baked into the image.
+            "Cargo.toml",
+            "crates/example/src/lib.rs",
+            "justfiles/basic.just",
+            "justfiles/anvil/notes.md",
+            ".anvil.lock",
+            ".anvil/other/asset.txt",
+            ".git/config",
+        ] {
+            assert!(ignore.is_ignored(excluded), "{excluded} must not reach the build context");
+        }
+    }
+
+    #[test]
+    fn ignore_file_excludes_customize_source_from_the_build_context() {
+        // Order is load-bearing: the customize and nested re-exclusions only
+        // win because they come after the directory-wide re-inclusion.
+        let include_position = IGNORE
+            .find("!.anvil/container/*")
+            .expect("the container directory inclusion is asserted above");
+        let shell_exclude_position = IGNORE
+            .find("\n.anvil/container/customize.sh")
+            .expect("customize.sh must be excluded from the build context");
+        let powershell_exclude_position = IGNORE
+            .find("\n.anvil/container/customize.ps1")
+            .expect("customize.ps1 must be excluded from the build context");
+        let nested_exclude_position = IGNORE
+            .find("\n.anvil/container/*/*")
+            .expect("nested container assets must be excluded from the build context");
+        assert!(
+            include_position < shell_exclude_position
+                && include_position < powershell_exclude_position
+                && include_position < nested_exclude_position,
+            "the re-exclusion must come after the broad directory inclusion so it wins"
+        );
     }
 
     #[test]
@@ -528,19 +690,8 @@ mod tests {
             "execution-only documentation must not affect the image ID"
         );
 
-        // The entry recipe does reach the build context: `mod.just` imports it,
-        // so `just anvil-setup` cannot parse without it during the image build.
-        // Anything in the context must therefore select the image.
-        let recipe_changed = {
-            write(&root.join(RECIPE_PATH), "execution-only recipe change\n");
-            run_image_id(root)
-        };
-        assert_ne!(
-            base, recipe_changed,
-            "the container entry recipe reaches the build context, so it must affect the image ID"
-        );
-        write(&root.join(RECIPE_PATH), RECIPE);
-        assert_eq!(base, run_image_id(root), "restoring the entry recipe must restore the image ID");
+        write(&root.join(RECIPE_PATH), "execution-only recipe change\n");
+        assert_eq!(base, run_image_id(root), "the container entry recipe must not affect the image ID");
 
         let override_image = "example.invalid/bullseye@sha256:1111111111111111111111111111111111111111111111111111111111111111";
         #[cfg(windows)]
@@ -554,17 +705,14 @@ mod tests {
         let overridden = run_image_id_command_with_base(root, "bash", &[".anvil/container/image-id.sh"], Some(override_image));
         assert_ne!(base, overridden, "the selected base image must affect the image ID");
 
-        write(
-            &root.join("justfiles/anvil/container/nested/custom.just"),
-            "nested-recipe:\n    @echo nested\n",
-        );
+        write(&root.join("justfiles/anvil/checks/extra.just"), "anvil-extra:\n    @echo extra\n");
         assert_ne!(
             base,
             run_image_id(root),
-            "nested container recipes reach the build context, so they must affect the image ID"
+            "only the container entry recipe itself is execution-only; other recipes are hashed"
         );
-        std::fs::remove_file(root.join("justfiles/anvil/container/nested/custom.just")).expect("test file must be removable");
-        assert_eq!(base, run_image_id(root), "removing the nested recipe must restore the image ID");
+        std::fs::remove_file(root.join("justfiles/anvil/checks/extra.just")).expect("test file must be removable");
+        assert_eq!(base, run_image_id(root), "removing the extra recipe must restore the image ID");
 
         // Static, hashed image content must still affect the image ID.
         write(
@@ -596,9 +744,12 @@ mod tests {
         assert!(status.success(), "temporary Git repository must initialize");
         write_image_id_fixture(root);
         write(
-            &root.join("justfiles/anvil/container/nested/custom.just"),
+            &root.join("justfiles/anvil/checks/custom.just"),
             "nested-custom-recipe:\n    @echo custom\n",
         );
+        // The entry recipe is skipped by both helpers; seed it so the skip
+        // itself is compared, not just the recipes they agree to hash.
+        write(&root.join(RECIPE_PATH), "execution-only:\n    @echo entry\n");
 
         let shell = run_image_id_command(root, "bash", &[".anvil/container/image-id.sh"]);
         let powershell = run_image_id_command(root, "pwsh", &["-NoProfile", "-File", ".anvil/container/image-id.ps1"]);
@@ -650,7 +801,7 @@ mod tests {
     #[test]
     fn recipe_uses_native_host_interpreters() {
         assert!(RECIPE.contains("[windows]"));
-        assert!(RECIPE.contains("[script(\"pwsh\")]"));
+        assert!(RECIPE.contains("[script(\"pwsh\", \"-NoProfile\")]"));
         assert!(RECIPE.contains("[unix]"));
         assert!(RECIPE.contains("[script(\"bash\")]"));
         assert!(!RECIPE.contains("$IsWindows"));

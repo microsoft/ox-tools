@@ -25,7 +25,7 @@ use tempfile::TempDir;
 
 const EXTRA_FILE: &str = "justfiles/anvil/demoforge.just";
 const METADATA_REGION: &str = "demoforge-metadata";
-const CONTAINER_JUST: &str = "justfiles/anvil/container/container.just";
+const CONTAINER_JUST: &str = "justfiles/anvil/container.just";
 const CONTAINERFILE: &str = ".anvil/container/Containerfile";
 const CONTAINER_RUNNER: &str = ".anvil/container/run-in-container.ps1";
 const CONTAINER_CUSTOMIZE: &str = ".anvil/container/customize.ps1";
