@@ -287,11 +287,27 @@ try {
         '--mount', "type=volume,source=$gitVolume,target=/usr/local/cargo/git",
         '--mount', "type=volume,source=$targetVolume,target=/workspace/target"
     )
+
+    # Ownership initialization runs as root, so it mounts only the volumes it
+    # initializes -- never the worktree -- and passes each path as its own argv
+    # element rather than interpolating into a `sh -c` string. Both matter once
+    # these targets can come from a repository declaration: a shell string would
+    # make a target such as `/tmp/x;id` a root command.
+    $ownershipMountArgs = @(
+        '--mount', "type=volume,source=$registryVolume,target=/usr/local/cargo/registry",
+        '--mount', "type=volume,source=$gitVolume,target=/usr/local/cargo/git",
+        '--mount', "type=volume,source=$targetVolume,target=/workspace/target"
+    )
+    $ownershipTargets = @(
+        '/usr/local/cargo/registry',
+        '/usr/local/cargo/git',
+        '/workspace/target'
+    )
     & wsl -e docker run --rm --pull=never `
         --platform linux/amd64 `
         --user 0:0 `
-        @mountArgs `
-        $image sh -c "chown ${containerUid}:${containerGid} /usr/local/cargo/registry /usr/local/cargo/git /workspace/target"
+        @ownershipMountArgs `
+        $image chown "${containerUid}:${containerGid}" @ownershipTargets
     if ($LASTEXITCODE -ne 0) {
         throw "anvil-container: Docker volume initialization failed with exit code $LASTEXITCODE."
     }

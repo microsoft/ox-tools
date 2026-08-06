@@ -238,7 +238,7 @@ fn linked_worktree_mounts_the_common_git_directory_read_only() {
     let ownership_container = run
         .docker_log
         .lines()
-        .find(|line| line.contains("sh -c chown"))
+        .find(|line| line.contains("chown"))
         .unwrap_or_else(|| panic!("expected an ownership container: {}", run.docker_log));
     assert!(
         !ownership_container.contains(GIT_METADATA_TARGET),

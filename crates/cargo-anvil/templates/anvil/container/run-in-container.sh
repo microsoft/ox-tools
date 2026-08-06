@@ -325,12 +325,27 @@ mount_args=(
     --mount "type=volume,source=$git_volume,target=/usr/local/cargo/git"
     --mount "type=volume,source=$target_volume,target=/workspace/target"
 )
+
+# Ownership initialization runs as root, so it mounts only the volumes it
+# initializes -- never the worktree -- and passes each path as its own argv
+# element rather than interpolating into a `sh -c` string. Both matter once
+# these targets can come from a repository declaration: a shell string would
+# make a target such as `/tmp/x;id` a root command.
+ownership_mount_args=(
+    --mount "type=volume,source=$registry_volume,target=/usr/local/cargo/registry"
+    --mount "type=volume,source=$git_volume,target=/usr/local/cargo/git"
+    --mount "type=volume,source=$target_volume,target=/workspace/target"
+)
+ownership_targets=(
+    /usr/local/cargo/registry
+    /usr/local/cargo/git
+    /workspace/target
+)
 docker run --rm --pull=never \
     --platform linux/amd64 \
     --user 0:0 \
-    "${mount_args[@]}" \
-    "$image" sh -c \
-    "chown $container_uid:$container_gid /usr/local/cargo/registry /usr/local/cargo/git /workspace/target"
+    "${ownership_mount_args[@]}" \
+    "$image" chown "$container_uid:$container_gid" "${ownership_targets[@]}"
 
 run_args=(
     run --rm --pull=never

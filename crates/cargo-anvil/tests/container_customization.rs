@@ -597,6 +597,38 @@ $AnvilContainerCleanup = { Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value 'c
     );
 }
 
+/// The root ownership container is the one place a declared path would reach
+/// code running as UID 0, so it must never build a shell string and never
+/// mount the worktree.
+#[test]
+fn ownership_container_uses_argv_and_omits_the_worktree() {
+    let tmp = repo_with_container();
+    let run = run_driver(tmp.path(), "", "anvil-clippy", &[("FAKE_DOCKER_IMAGE_EXISTS", "1")]);
+    assert!(run.status.success(), "driver failed: {}", run.stderr);
+
+    let ownership = run
+        .docker_log
+        .lines()
+        .find(|line| line.contains("chown"))
+        .unwrap_or_else(|| panic!("expected an ownership container: {}", run.docker_log));
+
+    assert!(
+        !ownership.contains("sh -c"),
+        "ownership must not interpolate paths into a shell string: {ownership}"
+    );
+    assert!(
+        ownership.contains("--user 0:0"),
+        "ownership initialization runs as root: {ownership}"
+    );
+    assert!(
+        !ownership.contains("type=bind"),
+        "the root container must not mount the worktree or any host path: {ownership}"
+    );
+    for target in ["/usr/local/cargo/registry", "/usr/local/cargo/git", "/workspace/target"] {
+        assert!(ownership.contains(target), "missing {target} in: {ownership}");
+    }
+}
+
 #[test]
 fn cargo_caches_are_repository_scoped_but_stable_across_image_ids() {
     let first = repo_with_container();
