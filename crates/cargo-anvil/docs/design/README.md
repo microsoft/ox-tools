@@ -133,7 +133,8 @@ The full per-item decision table lives in [updates.md](./updates.md).
 
 `--dry-run` performs the same analysis but writes nothing. Exit code 0 means "everything is in
 sync with the binary's current templates and all managed content matched, ignoring disabled
-items"; exit code 1 means "something is out of date or user-modified."
+items, and every artifact was safely inspected"; exit code 1 means "something would change on
+disk, or Anvil refused to manage an artifact it could not safely inspect."
 
 `--version` prints the build's version **and its catalog checksum** — a `sha256` over the entire
 compiled-in catalog — on a second line, e.g.:
@@ -237,11 +238,12 @@ repo/
 ├── .anvil.lock                                    sidecar manifest tracking last-rendered checksums (see updates.md)
 ├── Justfile                                       managed-region: anvil-imports
 ├── justfiles/anvil/                               owned (see local.md)
+├── .anvil/container/                              owned, only with the container backend (see local.md, containers.md)
 ├── Cargo.toml                                     managed-region: anvil-workspace-lints (or anvil-lints in single-crate)
 ├── crates/<member>/Cargo.toml                     managed-region: anvil-lints (one per workspace member)
 ├── deny.toml                                      managed-regions: anvil-deny-{advisories,licenses,bans,sources}
 ├── rustfmt.toml                                   managed-region: anvil-rustfmt (opt out with empty stub)
-├── .delta.toml                                    managed-region: anvil-delta (opt out disables impact scoping)
+├── .delta.toml                                    managed-region: anvil-delta (points to owned cloud config)
 ├── .gitattributes                                 managed-region: anvil-gitattributes (pins *.rs to LF)
 ├── rust-toolchain.toml                            user-authored (read only)
 ├── .cargo/config.toml                             user-authored (read only)
@@ -264,6 +266,11 @@ repo/
 Detail on each host:
 
 - **`Justfile` and `justfiles/anvil/*.just`** — see [local.md](./local.md).
+- **`.anvil/container/`** — the non-recipe container assets (Containerfile,
+  drivers, image-ID helpers, README) emitted only when the catalog includes the
+  optional container backend. `justfiles/` holds `.just` recipes and nothing
+  else, so these live in a tool-owned directory of their own; see
+  [containers.md](./containers.md).
 - **`Cargo.toml` lints regions** — workspace `Cargo.toml` carries the
   `anvil-workspace-lints` region containing a single `[workspace.lints]` table whose
   rust/clippy/rustdoc entries are written in dotted-key form
@@ -285,9 +292,13 @@ Detail on each host:
 - **`rustfmt.toml`** — created with the opinionated baseline if absent; managed region at the
   end of the file. The most contested opinion in the catalog; users who want to keep their own
   formatting opt the file out via the empty-stub mechanism in [updates.md](./updates.md).
-- **`.delta.toml`** — cargo-delta configuration that drives impact-scoped cloud-workflow runs. Created if
-  absent. Region at the end of the file. Disabling the region opts the repo out of impact
-  scoping entirely. See [checks.md](./checks.md#impact-scoping) and the per-backend wiring in
+- **`.delta.toml`** — managed trip-wire patterns for conservative impact analysis.
+  Repository-specific parser, exclusion, and fixed comparison-branch policy remains
+  user-owned outside the region. Cloud workflows explicitly load this same file, so
+  local and cloud impact analysis share one configuration. When adopting an existing
+  valid top-level `trip_wire_patterns` key, cargo-anvil preserves it and emits an empty
+  managed-region opt-out rather than creating a duplicate TOML key. See
+  [checks.md](./checks.md#impact-scoping) and the per-backend wiring in
   [github.md](./github.md) / [ado.md](./ado.md).
 - **`.gitattributes`** — managed region pinning `*.rs text eol=lf` so Rust sources keep LF
   line endings on every platform (rustfmt and other tools assume LF). Created if absent;
@@ -405,21 +416,15 @@ impact jobs isn't justified; if a repo finds the gap matters, splitting further 
 local catalog override. Caching keys already include OS (see
 [github.md §8](./github.md#8-caching) and [ado.md §7](./ado.md#7-caching)).
 
-**Helper scripts use PowerShell Core (`pwsh`) on every platform.** Almost every check
-recipe is a single-line `cargo …` invocation that works unmodified on Windows —
-including `license-headers` (which calls `cargo heather`), `ensure-no-cyclic-deps`
-(`cargo ensure-no-cyclic-deps`), and `ensure-no-default-features`
-(`cargo ensure-no-default-features`), all of which are plain cargo subcommands from the
-ox-tools family. The one current exception is `pr-title`, which does a regex match
-against `$PR_TITLE` (no equivalent cargo subcommand and `just` itself has no
-boolean-regex primitive). That check is written as a `[script("pwsh")]` block. `pwsh`
-is preinstalled on GH-hosted runners (`ubuntu-latest` included) and Microsoft-hosted
-ADO Linux agents; Linux/macOS developers install it from
+**Helper scripts use PowerShell Core (`pwsh`) on every platform.** Generated command
+recipes use `[script("pwsh", "-NoProfile")]`, so user and system startup profiles
+cannot inject output, alter inputs, or change exit behavior. This keeps the same recipe
+contract on Windows, Linux, and macOS. `pwsh` is preinstalled on GH-hosted runners
+(`ubuntu-latest` included) and Microsoft-hosted ADO Linux agents; Linux/macOS
+developers install it from
 <https://github.com/PowerShell/PowerShell> as a one-time prerequisite. The
 `anvil-tool-pwsh-validate-prereqs` recipe enforces this with a clean failure message and a per-OS
-install hint. The dependency is kept (rather than dropped to remove the one script)
-so future additions that don't fit cleanly as cargo subcommands have an established
-escape hatch.
+install hint.
 
 ### 8.4 Internal vs OSS
 
@@ -433,4 +438,3 @@ from that repo) and from crates.io. The binary contains:
 There is no overlay system, no internal-only check, and no proprietary content. ADO
 templates are plain ADO templates — they happen to be shaped to compose cleanly with
 SubstratePT/1ESPT, but they are freely usable in any ADO environment.
-
