@@ -52,6 +52,10 @@ anvil-pr-title: anvil-pr-title-validate-prereqs
         }
         $pattern
     }
+    # Anchored at both ends so a title cannot smuggle extra lines past a
+    # matching prefix. `$` rather than `\z` leaves a lone trailing newline
+    # tolerated, which costs nothing and avoids failing on a title source
+    # that terminates its value.
     $titleRegex = '^(?:' + ($titlePatterns -join '|') + ')$'
 
     # The accepted forms are a deliberate subset of Conventional Commits, so the

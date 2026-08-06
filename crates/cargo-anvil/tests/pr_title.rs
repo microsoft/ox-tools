@@ -202,6 +202,16 @@ fn rejects_empty_scope() {
 
 #[test]
 #[serial]
+fn rejects_trailing_line_after_a_valid_first_line() {
+    if !tools_available() {
+        return;
+    }
+
+    assert_rejected("feat: add validation\nrm -rf /");
+}
+
+#[test]
+#[serial]
 fn rejection_reports_accepted_patterns_and_types() {
     if !tools_available() {
         return;
