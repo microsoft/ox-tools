@@ -26,8 +26,7 @@
 
 anvil_cluster_name := "__CLUSTER_NAME__"
 
-# Create the cluster if it does not already exist, then repair the apiserver
-# endpoint for docker-outside-of-docker. Idempotent.
+# Create the cluster if absent, then repair the apiserver endpoint. Idempotent.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-up profile="debug" tag="dev" registry="local":
@@ -90,8 +89,7 @@ anvil-cluster-down:
     kind delete cluster --name '{{anvil_cluster_name}}'
     exit 0
 
-# Load every configured image into the cluster, plus pre-pull and load each
-# dependency's preload images. Uses the three-rung load ladder.
+# Load configured and dependency images into the cluster via the load ladder.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-load profile="debug" tag="dev" registry="local":
@@ -155,6 +153,8 @@ anvil-cluster-load profile="debug" tag="dev" registry="local":
 # Apply dependencies then install the repo's charts. CRDs are applied
 # server-side BEFORE `helm upgrade --install` because Helm skips CRDs on
 # upgrade. Invokes the pre-install and post-install hooks around the charts.
+
+# Apply dependencies and install the repo's charts, CRDs first.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-deploy profile="debug" tag="dev" registry="local":
@@ -212,8 +212,7 @@ anvil-cluster-deploy profile="debug" tag="dev" registry="local":
     }
     exit 0
 
-# Dump the configured diagnostic resources and tail logs for the configured
-# deployments. Best-effort — never fails the caller.
+# Dump diagnostic resources and deployment logs. Best-effort, never fails.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-diagnostics:
@@ -234,6 +233,8 @@ anvil-cluster-diagnostics:
 # readiness re-check. On failure, run the on-failure hook and dump
 # diagnostics, wait the configured delay, and retry. A retry that eventually
 # passes emits a FLAKY warning.
+
+# Full cluster flow with bounded retries and flaky reporting.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-test profile="debug" tag="dev" registry="local":
@@ -278,8 +279,7 @@ anvil-cluster-test profile="debug" tag="dev" registry="local":
     Write-Output "anvil: cluster test passed"
     exit 0
 
-# Tear down. `cluster` (default) deletes the Kind cluster; `full` also removes
-# the locally built images from the engine.
+# Tear down: `cluster` deletes the Kind cluster, `full` also removes built images.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-clean mode="cluster" tag="dev" registry="local":

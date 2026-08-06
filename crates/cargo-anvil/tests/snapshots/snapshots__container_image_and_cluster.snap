@@ -3237,8 +3237,7 @@ kubectl_sha256 := "7c27adc64a84d1c0cc3dcf7bf4b6e916cc00f3f576a2dbac51b318d926032
 helm_version := "v3.16.0"
 helm_sha256 := "327cfbc7ddc5a3eb644039ceb0cff66394628654c4f5a76bf715ed15b893983b"
 
-# Verify the engine/daemon and kind/kubectl/helm are present, with actionable
-# messages. Does not install anything.
+# Verify the engine/daemon and kind/kubectl/helm are present. Installs nothing.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-preflight:
@@ -3268,8 +3267,7 @@ anvil-cluster-preflight:
     Write-Output "anvil: preflight OK (engine=$engine; kind, kubectl, helm present)"
     exit 0
 
-# Install pinned, checksum-verified kind/kubectl/helm into ~/.local/bin, tune
-# WSL inotify limits, and check bridged-traffic iptables. Linux/WSL only.
+# Install pinned kind/kubectl/helm and tune WSL limits. Linux/WSL only.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-bootstrap:
@@ -3352,8 +3350,7 @@ anvil-cluster-bootstrap:
 
 anvil_cluster_name := "anvil-kind"
 
-# Create the cluster if it does not already exist, then repair the apiserver
-# endpoint for docker-outside-of-docker. Idempotent.
+# Create the cluster if absent, then repair the apiserver endpoint. Idempotent.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-up profile="debug" tag="dev" registry="local":
@@ -3416,8 +3413,7 @@ anvil-cluster-down:
     kind delete cluster --name '{{anvil_cluster_name}}'
     exit 0
 
-# Load every configured image into the cluster, plus pre-pull and load each
-# dependency's preload images. Uses the three-rung load ladder.
+# Load configured and dependency images into the cluster via the load ladder.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-load profile="debug" tag="dev" registry="local":
@@ -3481,6 +3477,8 @@ anvil-cluster-load profile="debug" tag="dev" registry="local":
 # Apply dependencies then install the repo's charts. CRDs are applied
 # server-side BEFORE `helm upgrade --install` because Helm skips CRDs on
 # upgrade. Invokes the pre-install and post-install hooks around the charts.
+
+# Apply dependencies and install the repo's charts, CRDs first.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-deploy profile="debug" tag="dev" registry="local":
@@ -3538,8 +3536,7 @@ anvil-cluster-deploy profile="debug" tag="dev" registry="local":
     }
     exit 0
 
-# Dump the configured diagnostic resources and tail logs for the configured
-# deployments. Best-effort — never fails the caller.
+# Dump diagnostic resources and deployment logs. Best-effort, never fails.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-diagnostics:
@@ -3560,6 +3557,8 @@ anvil-cluster-diagnostics:
 # readiness re-check. On failure, run the on-failure hook and dump
 # diagnostics, wait the configured delay, and retry. A retry that eventually
 # passes emits a FLAKY warning.
+
+# Full cluster flow with bounded retries and flaky reporting.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-test profile="debug" tag="dev" registry="local":
@@ -3604,8 +3603,7 @@ anvil-cluster-test profile="debug" tag="dev" registry="local":
     Write-Output "anvil: cluster test passed"
     exit 0
 
-# Tear down. `cluster` (default) deletes the Kind cluster; `full` also removes
-# the locally built images from the engine.
+# Tear down: `cluster` deletes the Kind cluster, `full` also removes built images.
 [group("anvil-cluster")]
 [script("pwsh")]
 anvil-cluster-clean mode="cluster" tag="dev" registry="local":
@@ -3765,8 +3763,7 @@ anvil_container_repo := "repo"
 # set this by hand.
 export ANVIL_CONTAINER := "1"
 
-# Resolve the container engine: honor an explicit `engine`, else auto-detect
-# docker then podman. Prints the resolved engine name on stdout.
+# Resolve the engine: honor an explicit `engine`, else auto-detect docker then podman.
 [group("anvil-container")]
 [script("pwsh")]
 _anvil-container-engine:
@@ -3794,6 +3791,8 @@ _anvil-container-engine:
 # directory mapped to its in-container equivalent, the configured cache
 # volumes mounted, and the configured host env vars forwarded. Exit code is
 # propagated faithfully.
+
+# Run `just TARGET` inside the container. The single indirection point.
 [group("anvil-container")]
 [script("pwsh")]
 _anvil-container-run target:
@@ -3878,8 +3877,7 @@ anvil-container-down:
     }
     exit 0
 
-# Open an interactive shell in the image, with the same repo and cache mounts
-# `_anvil-container-run` uses.
+# Open an interactive shell in the image, with the same mounts a recipe run uses.
 [group("anvil-container")]
 [script("pwsh")]
 anvil-container-shell:
@@ -3896,8 +3894,7 @@ anvil-container-shell:
     & $engine @runArgs
     exit $LASTEXITCODE
 
-# Report the resolved engine, configured image, and whether the image is
-# present locally.
+# Report the resolved engine, the configured image, and whether it is present locally.
 [group("anvil-container")]
 [script("pwsh")]
 anvil-container-status:

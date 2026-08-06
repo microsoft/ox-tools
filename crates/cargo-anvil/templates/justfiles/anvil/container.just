@@ -24,8 +24,7 @@ anvil_container_repo := "__REPO__"
 # set this by hand.
 export ANVIL_CONTAINER := "1"
 
-# Resolve the container engine: honor an explicit `engine`, else auto-detect
-# docker then podman. Prints the resolved engine name on stdout.
+# Resolve the engine: honor an explicit `engine`, else auto-detect docker then podman.
 [group("anvil-container")]
 [script("pwsh")]
 _anvil-container-engine:
@@ -53,6 +52,8 @@ _anvil-container-engine:
 # directory mapped to its in-container equivalent, the configured cache
 # volumes mounted, and the configured host env vars forwarded. Exit code is
 # propagated faithfully.
+
+# Run `just TARGET` inside the container. The single indirection point.
 [group("anvil-container")]
 [script("pwsh")]
 _anvil-container-run target:
@@ -137,8 +138,7 @@ anvil-container-down:
     }
     exit 0
 
-# Open an interactive shell in the image, with the same repo and cache mounts
-# `_anvil-container-run` uses.
+# Open an interactive shell in the image, with the same mounts a recipe run uses.
 [group("anvil-container")]
 [script("pwsh")]
 anvil-container-shell:
@@ -155,8 +155,7 @@ anvil-container-shell:
     & $engine @runArgs
     exit $LASTEXITCODE
 
-# Report the resolved engine, configured image, and whether the image is
-# present locally.
+# Report the resolved engine, the configured image, and whether it is present locally.
 [group("anvil-container")]
 [script("pwsh")]
 anvil-container-status:
