@@ -424,10 +424,11 @@ fn deps_pwsh(deps: &[ClusterDependency]) -> String {
         .iter()
         .map(|d| {
             format!(
-                "@{{ name = {}; manifest = {}; version = {}; preload = {}; wait = {} }}",
+                "@{{ name = {}; manifest = {}; version = {}; namespace = {}; preload = {}; wait = {} }}",
                 ps_lit(&d.name),
                 ps_lit(&d.manifest),
                 ps_lit(d.version.as_deref().unwrap_or("")),
+                ps_lit(d.namespace.as_deref().unwrap_or("")),
                 ps_array(&d.preload_images),
                 ps_array(&d.wait),
             )

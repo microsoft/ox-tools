@@ -184,7 +184,7 @@ anvil-cluster-deploy profile="debug" tag="dev" registry="local":
         Write-Output "anvil: applying dependency $($dep.name) $($dep.version)"
         kubectl --context $ctx apply -f $dep.manifest
         if ($LASTEXITCODE -ne 0) { throw "failed to apply dependency $($dep.name)" }
-        Wait-Targets $ctx $dep.wait ''
+        Wait-Targets $ctx $dep.wait $dep.namespace
     }
 
     foreach ($chart in __CHARTS_PWSH__) {

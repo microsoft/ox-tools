@@ -231,6 +231,11 @@ pub struct ClusterDependency {
     pub manifest: String,
     /// Optional pinned version (informational; recorded in log output).
     pub version: Option<String>,
+    /// Namespace the dependency installs into. Rollout targets in `wait` are
+    /// resolved against it, so a dependency that creates its own namespace
+    /// (cert-manager, ingress-nginx, …) must set this or the wait looks in
+    /// `default` and fails.
+    pub namespace: Option<String>,
     /// Images to pre-pull on the host and `kind load` before applying the
     /// manifest (Kind node containerd can inherit an unreachable DNS proxy).
     pub preload_images: Vec<String>,
@@ -881,6 +886,7 @@ fn parse_dependencies(item: &Item) -> Result<Vec<ClusterDependency>, AppError> {
         let mut name = None;
         let mut manifest = None;
         let mut version = None;
+        let mut namespace = None;
         let mut preload_images = Vec::new();
         let mut wait = Vec::new();
         for (key, value) in table {
@@ -888,11 +894,12 @@ fn parse_dependencies(item: &Item) -> Result<Vec<ClusterDependency>, AppError> {
                 "name" => name = Some(as_string(key, value)?),
                 "manifest" => manifest = Some(as_string(key, value)?),
                 "version" => version = Some(as_string(key, value)?),
+                "namespace" => namespace = Some(as_string(key, value)?),
                 "preload-images" => preload_images = as_string_array(key, value)?,
                 "wait" => wait = as_string_array(key, value)?,
                 other => bail!(
                     "unknown key '[[cluster.dependency]] {other}' (valid keys: name, \
-                     manifest, version, preload-images, wait)"
+                     manifest, version, namespace, preload-images, wait)"
                 ),
             }
         }
@@ -900,6 +907,7 @@ fn parse_dependencies(item: &Item) -> Result<Vec<ClusterDependency>, AppError> {
             name: name.ok_or_else(|| app_err!("[[cluster.dependency]] requires a `name`"))?,
             manifest: manifest.ok_or_else(|| app_err!("[[cluster.dependency]] requires a `manifest`"))?,
             version,
+            namespace,
             preload_images,
             wait,
         });
@@ -1381,6 +1389,30 @@ stage-artifacts = [
         let resolved = parse(body).unwrap().container.resolve("dir").unwrap();
         assert_eq!(resolved.repo_name, "x");
         assert_eq!(resolved.workdir, "/src");
+    }
+
+    /// A dependency that installs into its own namespace must be able to say
+    /// so: its `wait` rollout targets are resolved against that namespace.
+    /// Without it, waiting on `deployment/cert-manager-webhook` looks in
+    /// `default` and fails, so the charts install before the dependency's
+    /// webhook is serving and Helm dies calling it.
+    #[test]
+    fn dependency_namespace_is_parsed_for_wait_resolution() {
+        let body = "\n[cluster]\nname = \"c\"\n\n[[cluster.dependency]]\nname = \"cert-manager\"\n\
+                    manifest = \"https://example/cert-manager.yaml\"\nnamespace = \"cert-manager\"\n\
+                    wait = [\"deployment/cert-manager-webhook\"]\n";
+        let resolved = resolve_body(body).unwrap();
+        let dep = &resolved.cluster.as_ref().unwrap().dependencies[0];
+        assert_eq!(dep.namespace.as_deref(), Some("cert-manager"));
+        assert_eq!(dep.wait, vec!["deployment/cert-manager-webhook".to_owned()]);
+    }
+
+    /// The namespace is optional; omitting it keeps the previous shape.
+    #[test]
+    fn dependency_namespace_is_optional() {
+        let body = "\n[cluster]\nname = \"c\"\n\n[[cluster.dependency]]\nname = \"d\"\nmanifest = \"m\"\n";
+        let resolved = resolve_body(body).unwrap();
+        assert_eq!(resolved.cluster.as_ref().unwrap().dependencies[0].namespace, None);
     }
 
     #[test]
