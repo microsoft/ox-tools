@@ -360,6 +360,15 @@ fn image_recipe(image: &ImageSpec, output_dir: &str) -> String {
         "    foreach ($b in $buildArgs) {{ $cmd += @('--build-arg', \"$($b.name)=$(Expand-Tokens $b.value)\") }}"
     );
     let _ = writeln!(out, "    $cmd += $ctxFull");
+    // A BuildKit build defaults to attaching a provenance attestation, which
+    // turns the result into an index whose attestation content `kind load`
+    // cannot resolve ("content digest not found" under ctr --all-platforms).
+    // Images built here exist to be loaded into a local cluster, so suppress
+    // the attestation on engines that understand the flag.
+    let _ = writeln!(
+        out,
+        "    if ($engine -eq 'docker') {{ $cmd = @($cmd[0]) + @('--provenance=false') + $cmd[1..($cmd.Length - 1)] }}"
+    );
     let _ = writeln!(out, "    Write-Output \"anvil: building $ref\"");
     let _ = writeln!(out, "    & $engine @cmd");
     let _ = writeln!(out, "    exit $LASTEXITCODE");

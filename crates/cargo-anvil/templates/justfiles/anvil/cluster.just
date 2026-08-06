@@ -111,21 +111,33 @@ anvil-cluster-load profile="debug" tag="dev" registry="local":
     # Image load ladder: (1) kind load docker-image; on failure (2) save to an
     # OCI archive and kind load image-archive; on failure (3) copy the archive
     # to each node and ctr import under the k8s.io namespace.
+    #
+    # `--platform` matters on rung 2: with the containerd image store a pulled
+    # multi-arch image is kept as an index carrying attestation manifests whose
+    # content is not all present locally, and the resulting archive fails to
+    # import with "content digest not found". Selecting one platform produces a
+    # flat, importable archive. Engines that predate the flag fall back to a
+    # plain save.
     function Import-Image($engine, $cluster, $ref) {
         kind load docker-image --name $cluster $ref
         if ($LASTEXITCODE -eq 0) { return }
         Write-Warning "kind load docker-image failed for $ref; falling back to image-archive"
         $safe = ($ref -replace '[^A-Za-z0-9]', '_')
         $archive = Join-Path ([System.IO.Path]::GetTempPath()) "anvil-$safe.tar"
-        & $engine save -o $archive $ref
-        if ($LASTEXITCODE -eq 0) {
+        & $engine save --platform linux/amd64 -o $archive $ref 2>$null
+        if ($LASTEXITCODE -ne 0) { & $engine save -o $archive $ref }
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $archive)) {
             kind load image-archive --name $cluster $archive
             if ($LASTEXITCODE -eq 0) { Remove-Item -Force $archive -ErrorAction SilentlyContinue; return }
+        }
+        if (-not (Test-Path $archive)) {
+            throw "cannot load ${ref}: '$engine save' produced no archive, so there is nothing to import into the nodes"
         }
         Write-Warning "kind load image-archive failed for $ref; falling back to per-node ctr import"
         $nodes = @(kind get nodes --name $cluster)
         foreach ($node in $nodes) {
             & $engine cp $archive "${node}:/tmp/anvil-image.tar"
+            if ($LASTEXITCODE -ne 0) { throw "failed to copy $ref archive into node $node" }
             & $engine exec $node ctr --namespace=k8s.io images import /tmp/anvil-image.tar
             if ($LASTEXITCODE -ne 0) { throw "failed to import $ref into node $node" }
         }
@@ -140,10 +152,13 @@ anvil-cluster-load profile="debug" tag="dev" registry="local":
 
     # Dependency preload images can inherit an unreachable WSL DNS proxy inside
     # Kind node containerd, so pull them on the host and kind load them.
+    # Pull one platform explicitly: a multi-arch pull lands as an index that
+    # `kind load docker-image` cannot consume, forcing the slower archive path.
     foreach ($dep in __DEPENDENCIES_PWSH__) {
         foreach ($img in $dep.preload) {
             Write-Output "anvil: pre-pulling $img for dependency $($dep.name)"
-            & $engine pull $img
+            & $engine pull --platform linux/amd64 $img 2>$null
+            if ($LASTEXITCODE -ne 0) { & $engine pull $img }
             if ($LASTEXITCODE -ne 0) { Write-Warning "pull failed for $img (continuing)"; continue }
             Import-Image $engine $cluster $img
         }
