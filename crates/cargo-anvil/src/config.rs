@@ -270,6 +270,10 @@ pub struct ClusterDiagnostics {
     pub resources: Vec<String>,
     /// Deployments whose logs to tail.
     pub logs: Vec<String>,
+    /// Namespace the `logs` targets live in. Without it the targets resolve
+    /// in `default`, so a chart installed into its own namespace yields
+    /// "not found" instead of logs — exactly when the diagnostics matter most.
+    pub namespace: Option<String>,
 }
 
 /// The `[cluster.retry]` table: bounded retries around the deploy +
@@ -962,7 +966,8 @@ fn parse_diagnostics(item: &Item) -> Result<ClusterDiagnostics, AppError> {
         match key {
             "resources" => diagnostics.resources = as_string_array(key, value)?,
             "logs" => diagnostics.logs = as_string_array(key, value)?,
-            other => bail!("unknown key '[cluster.diagnostics] {other}' (valid keys: resources, logs)"),
+            "namespace" => diagnostics.namespace = Some(as_string(key, value)?),
+            other => bail!("unknown key '[cluster.diagnostics] {other}' (valid keys: resources, logs, namespace)"),
         }
     }
     Ok(diagnostics)
@@ -1413,6 +1418,19 @@ stage-artifacts = [
         let body = "\n[cluster]\nname = \"c\"\n\n[[cluster.dependency]]\nname = \"d\"\nmanifest = \"m\"\n";
         let resolved = resolve_body(body).unwrap();
         assert_eq!(resolved.cluster.as_ref().unwrap().dependencies[0].namespace, None);
+    }
+
+    /// Diagnostics log targets are namespaced too: without a namespace they
+    /// resolve in `default` and report "not found" instead of logs, precisely
+    /// when a failure has occurred and the logs are most needed.
+    #[test]
+    fn diagnostics_namespace_is_parsed() {
+        let body = "\n[cluster]\nname = \"c\"\n\n[cluster.diagnostics]\n\
+                    logs = [\"deployment/demo\"]\nnamespace = \"demo-system\"\n";
+        let resolved = resolve_body(body).unwrap();
+        let diag = resolved.cluster.as_ref().unwrap().diagnostics.as_ref().unwrap();
+        assert_eq!(diag.namespace.as_deref(), Some("demo-system"));
+        assert_eq!(diag.logs, vec!["deployment/demo".to_owned()]);
     }
 
     #[test]
