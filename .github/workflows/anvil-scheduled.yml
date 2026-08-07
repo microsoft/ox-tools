@@ -18,4 +18,9 @@ jobs:
     uses: ./.github/workflows/anvil-scheduled-impl.yml
     permissions:
       contents: read
+      # The scheduled-benchmarks job restores its history artifact, which
+      # reads the Actions runs/artifacts API. A reusable workflow cannot
+      # grant itself more than its caller does, so the grant is repeated
+      # here and narrowed to that one job inside.
+      actions: read
     secrets: inherit

@@ -274,6 +274,7 @@ schedule against the default branch, not on PRs:
     <tr><td rowspan="3"><code>scheduled-exhaustive</code></td><td><a href="https://mutants.rs/">mutants-full</a></td><td></td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-hack">cargo-hack</a></td><td>feature powerset</td></tr>
     <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-bench.html">bench</a></td><td>compile-only</td></tr>
+    <tr><td><code>scheduled-benchmarks</code></td><td><a href="https://github.com/folo-rs/folo/tree/main/packages/cargo-bench-history">bench-history</a></td><td>regression detection over the accumulated benchmark history</td></tr>
   </tbody>
 </table>
 
@@ -428,7 +429,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGkYW0CYXSEGxYc2fK81jTWG7kWg0hlspxYGx-DzHaE-xjXG1cDT7T4wIbxYXKEG7VbetTfxlJTGxvRM3l3qEetG_F0Ae5JDGjCG4jajt1KgnpKYWSBg2tjYXJnby1hbnZpbGUwLjQuMGtjYXJnb19hbnZpbA
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbtlRLbl7fzzsbKVENG4O2364bKa13FEUmPjIbbGkzyWuPIN1hZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

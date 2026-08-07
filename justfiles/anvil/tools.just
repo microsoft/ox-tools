@@ -542,6 +542,14 @@ anvil-tool-cargo-audit-install installer="install": (_install-tool "cargo-audit"
 [group("anvil-setup")]
 anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_version)
 
+# Install the pinned `cargo-bench-history` tool.
+[group("anvil-setup")]
+anvil-tool-cargo-bench-history-install installer="install": (_install-tool "cargo-bench-history" cargo_bench_history_version installer)
+
+# Validate that the pinned `cargo-bench-history` tool is available.
+[group("anvil-setup")]
+anvil-tool-cargo-bench-history-validate-prereqs: (_check-tool "cargo-bench-history" cargo_bench_history_version)
+
 # cargo-bolero is Linux-only: its `bolero-afl` build dependency
 # compiles AFL's native C (afl-fuzz.c), which needs POSIX headers
 # (`unistd.h`) and uses preprocessor constructs MSVC rejects, so the

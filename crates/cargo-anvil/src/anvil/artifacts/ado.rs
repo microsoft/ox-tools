@@ -22,6 +22,12 @@ const ADVISORY_COMMENTS_STEP: &str = include_str!("../../../templates/ado/steps/
 /// Embedded body of the dirty-file job wrapper.
 const JOB_WRAPPER: &str = include_str!("../../../templates/ado/steps/job.yml");
 
+/// Embedded body of the benchmark-history restore step template.
+const BENCH_HISTORY_RESTORE_STEP: &str = include_str!("../../../templates/ado/steps/bench-history-restore.yml");
+
+/// Embedded body of the benchmark-findings build-summary step template.
+const BENCH_HISTORY_SUMMARY_STEP: &str = include_str!("../../../templates/ado/steps/bench-history-summary.yml");
+
 /// Embedded body of the PR-tier stages template.
 const PR_STAGES: &str = include_str!("../../../templates/ado/pr-stages.yml");
 
@@ -54,6 +60,7 @@ const GROUPS: &[&str] = &[
     "scheduled-advisories",
     "scheduled-runtime-analysis",
     "scheduled-exhaustive",
+    "scheduled-benchmarks",
 ];
 
 /// Embedded template for one per-group step. `__GROUP__` is substituted with
@@ -98,6 +105,28 @@ pub fn advisory_comments() -> Artifact {
 #[must_use]
 pub fn job_wrapper() -> Artifact {
     Artifact::backend_file(Backend::Ado, ".pipelines/anvil/steps/job.yml", JOB_WRAPPER)
+}
+
+/// `.pipelines/anvil/steps/bench-history-restore.yml` — restores the
+/// benchmark history the previous scheduled run published.
+#[must_use]
+pub fn bench_history_restore() -> Artifact {
+    Artifact::backend_file(
+        Backend::Ado,
+        ".pipelines/anvil/steps/bench-history-restore.yml",
+        BENCH_HISTORY_RESTORE_STEP,
+    )
+}
+
+/// `.pipelines/anvil/steps/bench-history-summary.yml` — attaches the
+/// benchmark findings to the build summary.
+#[must_use]
+pub fn bench_history_summary() -> Artifact {
+    Artifact::backend_file(
+        Backend::Ado,
+        ".pipelines/anvil/steps/bench-history-summary.yml",
+        BENCH_HISTORY_SUMMARY_STEP,
+    )
 }
 
 /// `.pipelines/anvil/pr.yml` — the PR-tier stages template.
@@ -164,12 +193,20 @@ pub(crate) const GROUP_STEPS: &[(&str, &str)] = &[
         ".pipelines/anvil/steps/scheduled-runtime-analysis.yml",
     ),
     ("scheduled-exhaustive", ".pipelines/anvil/steps/scheduled-exhaustive.yml"),
+    ("scheduled-benchmarks", ".pipelines/anvil/steps/scheduled-benchmarks.yml"),
 ];
 
 /// All ADO backend artifacts in emission order.
 #[must_use]
 pub(crate) fn all() -> Vec<Artifact> {
-    let mut out = vec![setup_step(), impact_step(), advisory_comments(), job_wrapper()];
+    let mut out = vec![
+        setup_step(),
+        impact_step(),
+        advisory_comments(),
+        job_wrapper(),
+        bench_history_restore(),
+        bench_history_summary(),
+    ];
     for (group, path) in GROUP_STEPS {
         out.push(Artifact::backend_file(Backend::Ado, path, render_group_step(group)));
     }
@@ -258,6 +295,7 @@ mod tests {
             "name: steps",
             "type: stepList",
             "name: artifacts",
+            "name: fetchDepth",
             "PublishPipelineArtifact@1",
         ] {
             assert!(JOB_WRAPPER.contains(needle), "wrapper missing '{needle}'");
@@ -343,6 +381,7 @@ mod tests {
             "stage: scheduled_advisories",
             "stage: scheduled_runtime_analysis",
             "stage: scheduled_exhaustive",
+            "stage: scheduled_benchmarks",
         ] {
             assert!(SCHEDULED_STAGES.contains(needle), "scheduled stages missing '{needle}'");
         }
@@ -352,6 +391,36 @@ mod tests {
             !SCHEDULED_STAGES.contains("\n      - job: "),
             "Scheduled stages defines a bare `- job:` instead of going through steps/job.yml"
         );
+    }
+
+    #[test]
+    fn scheduled_benchmarks_stage_round_trips_the_history_artifact() {
+        // Analysis walks the commit graph, so both legs check out fully.
+        assert_eq!(
+            SCHEDULED_STAGES.matches("fetchDepth: '0'").count(),
+            2,
+            "both benchmark legs must check out the full history"
+        );
+        // Per-leg artifact names: the history is partitioned per machine.
+        for needle in ["bench-history-linux", "bench-history-windows"] {
+            assert_eq!(
+                SCHEDULED_STAGES.matches(needle).count(),
+                2,
+                "the restore and publish sides must agree on the artifact name '{needle}'"
+            );
+        }
+        assert!(SCHEDULED_STAGES.contains("template: steps/bench-history-restore.yml"));
+        assert!(SCHEDULED_STAGES.contains("template: steps/bench-history-summary.yml"));
+        // Take the newest run carrying the artifact whatever its outcome:
+        // restoring only from green runs would drop every sample collected
+        // while the pipeline was red from a regression.
+        assert!(BENCH_HISTORY_RESTORE_STEP.contains("buildVersionToDownload: latestFromBranch"));
+        assert!(BENCH_HISTORY_RESTORE_STEP.contains("allowFailedBuilds: true"));
+        assert!(BENCH_HISTORY_RESTORE_STEP.contains("allowPartiallySucceededBuilds: true"));
+        // A missing artifact is a cold start, not a failure.
+        assert!(BENCH_HISTORY_RESTORE_STEP.contains("continueOnError: true"));
+        assert!(BENCH_HISTORY_SUMMARY_STEP.contains("##vso[task.uploadsummary]"));
+        assert!(BENCH_HISTORY_SUMMARY_STEP.contains("condition: succeededOrFailed()"));
     }
 
     #[test]

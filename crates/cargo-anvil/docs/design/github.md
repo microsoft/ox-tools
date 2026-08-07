@@ -168,6 +168,12 @@ flowchart LR
     sadv_setup ==> sadv_setup_just
     sexh_setup ==> sexh_setup_just
 
+    sched_impl --> sbench_job["scheduled-benchmarks<br/>matrix: linux, windows"]:::job
+    sbench_job ==> sbench_act[".github/actions/<br/>anvil-scheduled-benchmarks"]:::action
+    sbench_act ==> sbench_setup[".github/actions/<br/>anvil-setup"]:::action
+    sbench_act ==> sbench_just["just anvil-scheduled-benchmarks"]:::recipe
+    sbench_setup ==> sbench_setup_just["just anvil-setup"]:::recipe
+
     classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
     classDef root fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
     classDef impl fill:#dff0d8,stroke:#28a745,stroke-width:1px;
@@ -193,7 +199,8 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 │   ├── anvil-scheduled-test/action.yml  owned
 │   ├── anvil-scheduled-advisories/action.yml  owned
 │   ├── anvil-scheduled-runtime-analysis/action.yml  owned
-│   └── anvil-scheduled-exhaustive/action.yml  owned
+│   ├── anvil-scheduled-exhaustive/action.yml  owned
+│   └── anvil-scheduled-benchmarks/action.yml  owned
 └── workflows/
     ├── anvil-pr-impl.yml              owned   (reusable workflow doing the wiring)
     ├── anvil-scheduled-impl.yml         owned   (reusable workflow for the scheduled tier)
@@ -745,3 +752,46 @@ a matching `Upsert anvil-<NEW>` / `Clear anvil-<NEW>` pair with
 `header: anvil-<NEW>`. There's deliberately no auto-discovery loop over the
 convention dir — explicit per-check steps keep stale comments deterministically
 clearable when a check is removed from the catalog.
+
+## 12. Benchmark regression detection
+
+The scheduled benchmark group (see [benchmarks.md](./benchmarks.md)) runs
+`cargo-bench-history`, whose history persists across scheduled runs as GitHub
+**Actions artifacts**. The history is partitioned per machine, so each leg of the
+group's matrix carries its own artifact (`bench-history-<leg>`) — which also keeps
+the names distinct within a run, as artifact upload requires.
+
+Each scheduled benchmark job:
+
+1. checks out with `fetch-depth: 0` (analysis reads the commit graph);
+2. **restores** the history by walking back from the newest `anvil-scheduled` run
+   on the default branch and taking the first that carries the leg's artifact; the
+   first run finds none and starts empty;
+3. applies any pending blessings, runs collect + analyze, writing findings to the
+   job summary and to a findings file;
+4. **saves** the updated store with `actions/upload-artifact`, whatever the job's
+   outcome, so the samples collected while the pipeline is red are not lost.
+   Retention is set so the latest artifact outlives the gap to the next scheduled
+   run.
+
+The restore step queries the runs and artifacts APIs, so the job needs
+`actions: read`. A reusable workflow cannot grant itself more than its caller, so
+the root workflow passes it through and the impl workflow narrows it to the
+benchmark job; the PR workflow keeps `contents: read`.
+
+Restoring from the newest run that *carries* the artifact rather than the newest
+*successful* one is what keeps the chain intact across a regression: a flagged
+regression fails the job, so a success-only restore would discard every sample
+taken while the pipeline stayed red.
+
+Surfacing is by **build failure**, not a PR comment — the regression is discovered
+after merge (see [benchmarks.md §5](./benchmarks.md)). The benchmark recipe exits
+non-zero on an active regression, failing the job; the repo's scheduled-failure
+issue publisher then reports it like any other scheduled failure. The per-finding
+detail — each benchmark, its magnitude, its attributed commit, and cbh's trend
+chart — is written to the job summary, so the failed run carries everything a
+reviewer needs to decide *fix or bless*.
+
+Blessings are applied from a committed `.config/bench-blessings.toml` before analyze
+(step 3), so accepting an intentional change is a reviewed pull request rather than an
+out-of-band action.

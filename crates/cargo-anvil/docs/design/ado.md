@@ -170,6 +170,12 @@ flowchart LR
     sadv_setup ==> sadv_setup_just
     sexh_setup ==> sexh_setup_just
 
+    sched_stages --> sbench_s["stage: scheduled_benchmarks<br/>linux + windows jobs"]:::stage
+    sbench_s ==> sbench_step[".pipelines/anvil/<br/>steps/scheduled-benchmarks.yml"]:::step
+    sbench_step ==> sbench_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
+    sbench_step ==> sbench_just["just anvil-scheduled-benchmarks"]:::recipe
+    sbench_setup ==> sbench_setup_just["just anvil-setup"]:::recipe
+
     classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
     classDef root fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
     classDef impl fill:#dff0d8,stroke:#28a745,stroke-width:1px;
@@ -205,9 +211,11 @@ Note the ADO topology differs from GitHub Actions in two places:
         ├── impact.yml              owned   (cargo-delta impact step)
         ├── job.yml                 owned-but-user-customizable
         │                                   (per-job wrapper; takes `name`,
-        │                                    `pool`, `steps`, `artifacts`;
-        │                                    users edit to inject 1ESPT
-        │                                    `templateContext:` etc.)
+        │                                    `pool`, `steps`, `fetchDepth`,
+        │                                    `artifacts`; users edit to inject
+        │                                    1ESPT `templateContext:` etc.)
+        ├── bench-history-restore.yml owned (restore the benchmark history artifact)
+        ├── bench-history-summary.yml owned (attach benchmark findings to the build summary)
         ├── pr-fast.yml             owned   (one step template per group)
         ├── pr-test.yml            owned
         ├── pr-runtime-analysis.yml            owned
@@ -215,7 +223,8 @@ Note the ADO topology differs from GitHub Actions in two places:
         ├── scheduled-test.yml        owned
         ├── scheduled-advisories.yml  owned
         ├── scheduled-runtime-analysis.yml  owned
-        └── scheduled-exhaustive.yml  owned
+        ├── scheduled-exhaustive.yml  owned
+        └── scheduled-benchmarks.yml  owned
 ```
 
 All files are regular owned files tracked by the sidecar `.anvil.lock` manifest
@@ -226,8 +235,8 @@ customized by adopters whose ADO instance requires extension templates
 (1ES PT, SubstratePT, M365PT). Once a user edits it, the standard dirty-file
 flow kicks in — subsequent anvil updates Propose into a `.proposed` sibling
 rather than overwriting. The stages templates address the wrapper only via its
-parameter contract (`name`, `pool`, `steps`, `artifacts`), so the wrapper can
-diverge arbitrarily without blocking stage-shape updates. See §4.1.
+parameter contract (`name`, `pool`, `steps`, `fetchDepth`, `artifacts`), so the
+wrapper can diverge arbitrarily without blocking stage-shape updates. See §4.1.
 
 ## 3. Root pipelines
 
@@ -370,6 +379,7 @@ The contract is intentionally small and stable:
 | `name`      | `string`   | yes      | Job name; ADO derives the display name from it.                                                                                                                                        |
 | `pool`      | `object`   | yes      | Pool block, passed verbatim to ADO's `pool:` key. `linuxPool` and `windowsPool` at the stage level are object parameters, so users can override their shape (e.g. `{ name, os, image }` for 1ESPT). |
 | `steps`     | `stepList` | yes      | Body of the job. Templated step lists are fine — the wrapper splices them in via `${{ each step in parameters.steps }}: - ${{ step }}`.                                                |
+| `fetchDepth` | `string`  | no       | When set, the job checks out explicitly at this depth (`'0'` for full history) instead of taking the implicit default checkout. 1ESPT wrappers map it onto `templateContext.inputs` instead. |
 | `artifacts` | `object`   | no       | List of pipeline artifacts to publish. Each item: `{ name: string, path: string }`. Default wrapper appends one `PublishPipelineArtifact@1` per entry; 1ESPT wrappers translate the same list into `templateContext.outputs.pipelineArtifact` blocks. The stages templates don't need to know which backend they're targeting. |
 
 The default wrapper anvil ships is six lines of logic:
@@ -379,11 +389,15 @@ parameters:
   - { name: name, type: string }
   - { name: pool, type: object }
   - { name: steps, type: stepList }
+  - { name: fetchDepth, type: string, default: '' }
   - { name: artifacts, type: object, default: [] }
 jobs:
   - job: ${{ parameters.name }}
     pool: ${{ parameters.pool }}
     steps:
+      - ${{ if ne(parameters.fetchDepth, '') }}:
+          - checkout: self
+            fetchDepth: ${{ parameters.fetchDepth }}
       - ${{ each step in parameters.steps }}:
           - ${{ step }}
       - ${{ each artifact in parameters.artifacts }}:
@@ -405,7 +419,7 @@ jobs:
       inputs:
         - input: checkout
           repository: self
-          fetchDepth: 0
+          fetchDepth: ${{ parameters.fetchDepth }}
       outputs:
         - ${{ each artifact in parameters.artifacts }}:
             - output: pipelineArtifact
@@ -814,3 +828,41 @@ Adding a new advisory check is a two-step change: the recipe writes
 entry. There's deliberately no auto-discovery loop over the convention dir — explicit
 per-check entries keep stale comments deterministically clearable when a check is
 removed from the catalog.
+
+## 12. Benchmark regression detection
+
+The scheduled benchmark group (see [benchmarks.md](./benchmarks.md)) runs
+`cargo-bench-history`, whose history persists across scheduled runs as **pipeline
+artifacts**, reusing the §4.1 job-wrapper `artifacts` contract to publish. The
+history is partitioned per machine, so each leg of the group's matrix carries its
+own artifact (`bench-history-<leg>`).
+
+Each scheduled benchmark job:
+
+1. checks out with full history (the §4.1 wrapper's `fetchDepth` parameter; analysis
+   reads the commit graph);
+2. **restores** the history with `DownloadPipelineArtifact@2`
+   (`buildVersionToDownload: latestFromBranch`, the default branch); the first run
+   finds none and starts empty;
+3. applies any pending blessings, runs collect + analyze, writing findings to a
+   findings file which a following step attaches to the build summary;
+4. **publishes** the updated store through the wrapper's `artifacts` parameter
+   (`{ name: bench-history-<leg>, path: <store> }`), which the default wrapper emits
+   as `PublishPipelineArtifact@1` and 1ESPT wrappers as a `pipelineArtifact` output.
+
+The restore admits failed and partially succeeded builds, which is what keeps the
+chain intact across a regression: a flagged regression fails the stage, so a
+success-only restore would discard every sample taken while the pipeline stayed red.
+The publish likewise runs whatever the job's outcome.
+
+Surfacing is by **build failure**, not a PR comment — the regression is discovered
+after merge (see [benchmarks.md §5](./benchmarks.md)). The benchmark recipe exits
+non-zero on an active regression, failing the stage; ADO's existing failed-build
+**notification subscriptions** fire, and the findings live in the build summary.
+
+Because the build status is one bit, while the pipeline is already red from one
+regression a newly appearing second one does not re-fire the native notification;
+the findings remain in the build summary.
+
+Blessings are applied from a committed `.config/bench-blessings.toml` before analyze
+(step 3) — a reviewed pull request, not an out-of-band action.

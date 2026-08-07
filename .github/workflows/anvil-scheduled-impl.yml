@@ -114,3 +114,70 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/anvil-scheduled-exhaustive
+
+  scheduled-benchmarks:
+    # Benchmark regression detection. x86_64-only, matching
+    # scheduled-exhaustive. The history is partitioned per machine, so
+    # each leg carries its own artifact rather than sharing one name.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}
+    permissions:
+      contents: read
+      # Restoring the history reads the Actions runs/artifacts API.
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The analysis orders each series by first-parent commit
+          # topology and locates the merge-base, so it needs the whole
+          # commit graph.
+          fetch-depth: 0
+      - name: Restore benchmark history
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT: bench-history-${{ matrix.os }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          mkdir -p target/anvil/bench-history
+          # Walk back from the newest run and take the first one that
+          # carries the artifact. Restoring from the latest *successful*
+          # run would drop every sample collected while the pipeline was
+          # red from a regression — precisely the window that matters.
+          # The in-progress run of this very workflow has not uploaded
+          # yet, so it simply fails the download and the loop moves on.
+          for run_id in $(gh run list --workflow anvil-scheduled.yml \
+              --branch "$DEFAULT_BRANCH" --limit 10 \
+              --json databaseId --jq '.[].databaseId'); do
+            if gh run download "$run_id" --name "$ARTIFACT" \
+                --dir target/anvil/bench-history 2>/dev/null; then
+              echo "restored benchmark history from run $run_id"
+              exit 0
+            fi
+          done
+          echo "no $ARTIFACT artifact in the recent scheduled runs; starting with an empty history"
+      - uses: ./.github/actions/anvil-scheduled-benchmarks
+      - name: Save benchmark history
+        # always(): the run's own samples belong in the history even
+        # when the analysis flagged a regression and failed the job.
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bench-history-${{ matrix.os }}
+          path: target/anvil/bench-history
+          # Comfortably longer than the scheduled cadence, so a paused
+          # or infrequent schedule does not break the chain.
+          retention-days: 90
+          if-no-files-found: ignore
+      - name: Publish benchmark findings
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f target/anvil/bench/findings.md ]; then
+            cat target/anvil/bench/findings.md >> "$GITHUB_STEP_SUMMARY"
+          fi
