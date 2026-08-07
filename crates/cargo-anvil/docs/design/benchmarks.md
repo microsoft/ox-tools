@@ -99,16 +99,15 @@ outside anvil's scope: the artifact rolling window is the supported store.
 
 An active regression fails the scheduled build; the findings — each benchmark,
 its magnitude, and the commit cbh attributes the change-point to — are written to
-the build summary and to a findings file the backend wiring consumes. The emitted
-findings include cbh's topology-accurate trend chart, so the reviewer's surface is
-self-contained — enough to decide *fix or bless* without reproducing the run.
+the build summary and to a findings file. The emitted findings include cbh's
+topology-accurate trend chart, so the reviewer's surface is self-contained —
+enough to decide *fix or bless* without reproducing the run.
 
-- **GitHub Actions** — the failure feeds the repo's create-issue-on-failure path;
-  the issue is **updated in place** each run from the findings file, so
-  concurrent regressions and the authors of their attributed commits surface even
-  while the build is already red.
-- **Azure DevOps** — existing failed-build notification subscriptions fire; the
-  findings live in the build summary.
+The failure itself is reported by whatever mechanism the backend already uses for
+a failed scheduled build: notification subscriptions on Azure DevOps, the
+scheduled-failure issue publisher on GitHub Actions. This subsystem contributes
+the *detail* on the build summary rather than a notification channel of its own, so
+a regression reaches a human exactly the way every other scheduled failure does.
 
 A sustained regression re-fails every run until it is fixed or blessed, so red
 stays meaningful only under the discipline that the build is always returned to
@@ -125,7 +124,7 @@ yet. A developer thus gets the current run's numbers (and a single-machine local
 trend if they run it repeatedly), not the shared regression signal.
 
 Regression detection is therefore a scheduled, shared concern, and the failure
-surface (§5) — cbh's finding and trend chart in the issue or build summary — is
+surface (§5) — cbh's finding and trend chart on the build summary — is
 the interface a developer acts on. Reproducing a CI finding locally is not a
 first-class workflow: it would require downloading that run's `bench-history`
 artifact into the local store and running cbh's `examine` with the run's machine
@@ -160,9 +159,9 @@ that is already in effect.
   regression and may bundle several changes — an honest range, not always a
   single culprit.
 - **The scheduled status is one bit.** It collapses several concurrent
-  regressions into one red; GitHub recovers per-regression detail through the
-  updated issue, ADO through the build summary (its native notification is
-  coarser while already red).
+  regressions into one red, and a second regression appearing while the build is
+  already red re-fires no notification. The per-regression detail is recovered
+  from the build summary, which lists every finding on every run.
 - **Uncalibrated thresholds.** cbh's gating thresholds are defaults rather than
   values calibrated to every consumer's data; pinning the tool version contains
   the resulting risk, and the signal only gates the scheduled build.

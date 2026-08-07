@@ -286,13 +286,13 @@ mod tests {
         // Saving on failure too: the samples collected while the pipeline
         // is red from a regression are the ones that matter.
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("gh run download"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("gh issue create"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("gh issue edit"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("issues: write"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("GITHUB_STEP_SUMMARY"));
-        // The reusable workflow cannot grant itself more than the caller,
-        // so the root workflow must pass the same permission through.
-        assert!(SCHEDULED_ROOT_WORKFLOW.contains("issues: write"));
+        // Notifying a human is the generic scheduled-failure publisher's
+        // job; this group only has to fail and leave its findings behind.
+        assert!(!SCHEDULED_IMPL_WORKFLOW.contains("gh issue create"));
+        // Restoring the history reads the runs/artifacts API, and a
+        // reusable workflow cannot grant itself more than its caller.
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("actions: read"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("actions: read"));
     }
 

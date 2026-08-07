@@ -774,6 +774,11 @@ Each scheduled benchmark job:
    Retention is set so the latest artifact outlives the gap to the next scheduled
    run.
 
+The restore step queries the runs and artifacts APIs, so the job needs
+`actions: read`. A reusable workflow cannot grant itself more than its caller, so
+the root workflow passes it through and the impl workflow narrows it to the
+benchmark job; the PR workflow keeps `contents: read`.
+
 Restoring from the newest run that *carries* the artifact rather than the newest
 *successful* one is what keeps the chain intact across a regression: a flagged
 regression fails the job, so a success-only restore would discard every sample
@@ -781,14 +786,11 @@ taken while the pipeline stayed red.
 
 Surfacing is by **build failure**, not a PR comment — the regression is discovered
 after merge (see [benchmarks.md §5](./benchmarks.md)). The benchmark recipe exits
-non-zero on an active regression, failing the job. The scheduled workflow's failure
-path creates-or-updates a tracking **issue** from the findings file — updated in
-place each run so concurrent regressions and the authors of their attributed commits
-surface even while the build is already red. This needs `issues: write` and, for the
-restore step's runs/artifacts queries, `actions: read`. A reusable workflow cannot
-grant itself more than its caller, so the root workflow passes both through and the
-impl workflow narrows them to the benchmark job; the PR workflow keeps
-`contents: read`.
+non-zero on an active regression, failing the job; the repo's scheduled-failure
+issue publisher then reports it like any other scheduled failure. The per-finding
+detail — each benchmark, its magnitude, its attributed commit, and cbh's trend
+chart — is written to the job summary, so the failed run carries everything a
+reviewer needs to decide *fix or bless*.
 
 Blessings are applied from a committed `.config/bench-blessings.toml` before analyze
 (step 3), so accepting an intentional change is a reviewed pull request rather than an

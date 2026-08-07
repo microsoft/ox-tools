@@ -128,8 +128,6 @@ jobs:
       contents: read
       # Restoring the history reads the Actions runs/artifacts API.
       actions: read
-      # Only this job files the regression tracking issue.
-      issues: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -182,37 +180,4 @@ jobs:
           set -euo pipefail
           if [ -f target/anvil/bench/findings.md ]; then
             cat target/anvil/bench/findings.md >> "$GITHUB_STEP_SUMMARY"
-          fi
-      - name: File a benchmark regression issue
-        # Surfacing is by failed build; the issue carries the per-finding
-        # detail the one-bit build status cannot, and is updated in place
-        # so a regression appearing while the build is already red still
-        # reaches the author of its attributed commit.
-        if: failure()
-        continue-on-error: true
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TITLE: Benchmark regressions detected (${{ matrix.os }})
-          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          set -euo pipefail
-          findings=target/anvil/bench/findings-summary.md
-          if [ ! -f "$findings" ]; then
-            echo "the job failed before producing findings; nothing to file"
-            exit 0
-          fi
-          body=$(mktemp)
-          {
-            printf 'Detected by `cargo-bench-history` in [this scheduled run](%s).\n\n' "$RUN_URL"
-            printf 'Fix the regression, or accept it by adding an entry to `.config/bench-blessings.toml`.\n\n'
-            cat "$findings"
-          } > "$body"
-          number=$(gh issue list --state open --limit 100 --json number,title \
-            --jq "[.[] | select(.title == \"$TITLE\")] | .[0].number // empty")
-          if [ -n "$number" ]; then
-            gh issue edit "$number" --body-file "$body"
-            echo "updated issue #$number"
-          else
-            gh issue create --title "$TITLE" --body-file "$body"
           fi
