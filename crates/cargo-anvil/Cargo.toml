@@ -3,7 +3,7 @@
 
 [package]
 name = "cargo-anvil"
-version = "0.3.0"
+version = "0.4.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -41,6 +41,7 @@ tracing-subscriber = { workspace = true, features = ["fmt"] }
 assert_cmd = { workspace = true }
 insta = { workspace = true, features = ["filters"] }
 predicates = { workspace = true }
+serial_test = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
 

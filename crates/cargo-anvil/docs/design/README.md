@@ -17,6 +17,7 @@ user-visible shape of the tool. Detail lives in companion documents:
   `anvil-*` recipe in a pinned Linux image (Linux-on-Windows parity, distro pinning).
 - [benchmarks.md](./benchmarks.md) — scheduled benchmark regression detection via
   `cargo-bench-history`: history persistence, fail-the-build surfacing, and bless.
+- [../implementation.md](../implementation.md) — internal implementation guidance.
 - [../verification.md](../verification.md) — continuous-validation strategy: dogfooding,
   fixture tests, schema validation.
 
