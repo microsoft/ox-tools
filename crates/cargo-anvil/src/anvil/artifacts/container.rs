@@ -341,7 +341,11 @@ fn image_recipe(image: &ImageSpec, output_dir: &str) -> String {
     let _ = writeln!(out, "    }}");
     let _ = writeln!(out, "    $engine = just _anvil-container-engine");
     let _ = writeln!(out, "    if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}");
-    let _ = writeln!(out, "    $ref = \"${{registry}}/{}:${{tag}}\"", image.name);
+    let _ = writeln!(
+        out,
+        "    $ref = \"${{registry}}/{}:${{tag}}\"",
+        image.repository.as_deref().unwrap_or(&image.name)
+    );
     let _ = writeln!(
         out,
         "    if ($engine -eq 'podman' -and $registry -notmatch '[.:/]' -and $registry -ne 'localhost') {{ $ref = \"localhost/$ref\" }}"
@@ -399,8 +403,22 @@ fn images_aggregate(order: &[String]) -> String {
 // ---------------------------------------------------------------------------
 
 /// Fill in `cluster.just` from the resolved `[cluster]` section.
-fn render_cluster(template: &str, cluster: &ClusterConfig, _container: &ResolvedContainer) -> String {
+fn render_cluster(template: &str, cluster: &ClusterConfig, container: &ResolvedContainer) -> String {
     let diagnostics = cluster.diagnostics.clone().unwrap_or_default();
+    // `load-images` names images; the cluster loads them by *reference*, so map
+    // each name through its repository override before emitting.
+    let load_refs: Vec<String> = cluster
+        .load_images
+        .iter()
+        .map(|name| {
+            container
+                .images
+                .iter()
+                .find(|image| &image.name == name)
+                .and_then(|image| image.repository.clone())
+                .unwrap_or_else(|| name.clone())
+        })
+        .collect();
     template
         .replace("__CLUSTER_NAME__", &just_dq(&cluster.name))
         .replace("__NODE_IMAGE__", &ps_escape(cluster.node_image.as_deref().unwrap_or("")))
@@ -417,7 +435,7 @@ fn render_cluster(template: &str, cluster: &ClusterConfig, _container: &Resolved
         )
         .replace("__HOOK_PRE_TEST__", &ps_escape(cluster.hooks.pre_test.as_deref().unwrap_or("")))
         .replace("__HOOK_ON_FAILURE__", &ps_escape(cluster.hooks.on_failure.as_deref().unwrap_or("")))
-        .replace("__LOAD_IMAGES_ARRAY__", &ps_array(&cluster.load_images))
+        .replace("__LOAD_IMAGES_ARRAY__", &ps_array(&load_refs))
         .replace("__DEPENDENCIES_PWSH__", &deps_pwsh(&cluster.dependencies))
         .replace("__CHARTS_PWSH__", &charts_pwsh(&cluster.charts))
         .replace("__DIAG_RESOURCES_ARRAY__", &ps_array(&diagnostics.resources))

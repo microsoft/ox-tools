@@ -203,6 +203,15 @@ pub struct ImageSpec {
     /// image set and restricted to a valid `just` recipe token
     /// (`[A-Za-z][A-Za-z0-9_-]*`).
     pub name: String,
+    /// Image repository path, appended to the registry to form the reference
+    /// `<registry>/<repository>:<tag>`. Defaults to [`Self::name`].
+    ///
+    /// Needed whenever the published path differs from the recipe name — a
+    /// repository that groups its images under a namespace publishes
+    /// `local/cosmic-sandbox/cs-agent` while the recipe must stay
+    /// `anvil-image-cs-agent`, because `/` is not a valid `just` recipe token.
+    /// Getting this wrong is invisible until a pod tries to pull.
+    pub repository: Option<String>,
     /// Repo-root-relative path to the Dockerfile.
     pub dockerfile: String,
     /// Optional multi-stage build target.
@@ -799,6 +808,7 @@ fn parse_images(item: &Item) -> Result<Vec<ImageSpec>, AppError> {
 
 fn parse_image(table: &toml_edit::Table) -> Result<ImageSpec, AppError> {
     let mut name = None;
+    let mut repository = None;
     let mut dockerfile = None;
     let mut target = None;
     let mut context = None;
@@ -808,6 +818,7 @@ fn parse_image(table: &toml_edit::Table) -> Result<ImageSpec, AppError> {
     for (key, value) in table {
         match key {
             "name" => name = Some(as_string(key, value)?),
+            "repository" => repository = Some(as_string(key, value)?),
             "dockerfile" => dockerfile = Some(as_string(key, value)?),
             "target" => target = Some(as_string(key, value)?),
             "context" => context = Some(as_string(key, value)?),
@@ -815,13 +826,14 @@ fn parse_image(table: &toml_edit::Table) -> Result<ImageSpec, AppError> {
             "build-args" => build_args = parse_string_map(key, value)?,
             "depends-on" => depends_on = as_string_array(key, value)?,
             other => bail!(
-                "unknown key '[[image]] {other}' (valid keys: name, dockerfile, \
+                "unknown key '[[image]] {other}' (valid keys: name, repository, dockerfile, \
                  target, context, stage-artifacts, build-args, depends-on)"
             ),
         }
     }
     Ok(ImageSpec {
         name: name.ok_or_else(|| app_err!("[[image]] requires a `name`"))?,
+        repository,
         dockerfile: dockerfile.ok_or_else(|| app_err!("[[image]] requires a `dockerfile`"))?,
         target,
         context: context.ok_or_else(|| app_err!("[[image]] requires a `context`"))?,
@@ -1431,6 +1443,30 @@ stage-artifacts = [
         let diag = resolved.cluster.as_ref().unwrap().diagnostics.as_ref().unwrap();
         assert_eq!(diag.namespace.as_deref(), Some("demo-system"));
         assert_eq!(diag.logs, vec!["deployment/demo".to_owned()]);
+    }
+
+    /// A published image path can differ from the recipe name: `/` is not a
+    /// valid `just` recipe token, so a repository grouping its images under a
+    /// namespace needs `repository` to carry the real path. The cluster loader
+    /// must resolve `load-images` names through it, or the images land in the
+    /// nodes under a reference no pod ever requests.
+    #[test]
+    fn image_repository_overrides_the_reference_path() {
+        let body = "\n[[image]]\nname = \"cs-agent\"\nrepository = \"cosmic-sandbox/cs-agent\"\n\
+                    dockerfile = \"D\"\ncontext = \"out/a\"\n\n[cluster]\nname = \"c\"\n\
+                    load-images = [\"cs-agent\"]\n";
+        let resolved = resolve_body(body).unwrap();
+        assert_eq!(resolved.images[0].repository.as_deref(), Some("cosmic-sandbox/cs-agent"));
+        // The recipe name stays a valid just token even though the path is nested.
+        assert_eq!(resolved.images[0].name, "cs-agent");
+    }
+
+    /// Omitting `repository` keeps the previous behaviour: path == name.
+    #[test]
+    fn image_repository_defaults_to_the_name() {
+        let body = "\n[[image]]\nname = \"svc\"\ndockerfile = \"D\"\ncontext = \"out/a\"\n";
+        let resolved = resolve_body(body).unwrap();
+        assert_eq!(resolved.images[0].repository, None);
     }
 
     #[test]
