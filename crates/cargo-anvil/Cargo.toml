@@ -41,6 +41,7 @@ tracing-subscriber = { workspace = true, features = ["fmt"] }
 assert_cmd = { workspace = true }
 insta = { workspace = true, features = ["filters"] }
 predicates = { workspace = true }
+serial_test = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
 
