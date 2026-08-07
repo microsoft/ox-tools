@@ -64,9 +64,10 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
     out
 }
 
-/// The container-gated built-in artifacts: the container-execution shim and
-/// devcontainer descriptor (pillar 1), the OCI image-build recipes (pillar 2),
-/// and the Kind cluster harness plus its host bootstrap (pillar 3).
+/// The container-gated built-in artifacts: the container-execution shim, its
+/// default exec image, and the devcontainer descriptor (pillar 1), the OCI
+/// image-build recipes (pillar 2), and the Kind cluster harness plus its host
+/// bootstrap (pillar 3).
 ///
 /// These ship in the base [`Catalog::anvil`](crate::Catalog::anvil) but are
 /// registered *container-gated*, so `build_plan` skips them entirely unless
@@ -79,6 +80,8 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
 pub(crate) fn anvil_container_artifacts() -> Vec<Artifact> {
     vec![
         container::container_just(),
+        container::exec_dockerfile(),
+        container::exec_dockerignore(),
         container::devcontainer(),
         container::container_images_just(),
         container::cluster_just(),

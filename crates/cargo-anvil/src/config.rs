@@ -363,6 +363,32 @@ impl Default for ClusterConfig {
     }
 }
 
+/// Where the exec image comes from.
+///
+/// The three variants are selected by which of `[container] image` and
+/// `[container] dockerfile` are set — see [`ContainerConfig::resolve`]. Setting
+/// both is rejected, because "pull this" and "build that" cannot both be the
+/// answer and silently preferring one would hide a config mistake.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ExecImageSource {
+    /// `image` set, `dockerfile` unset: pull the reference verbatim. The
+    /// reference carries its own tag, so there is nothing to hash.
+    Pull,
+    /// Neither set: build from the Dockerfile anvil generates. This is what
+    /// makes a repository self-sustaining with no image configuration at all.
+    BuildDefault,
+    /// `dockerfile` set: build from that repo-owned Dockerfile.
+    BuildRepo,
+}
+
+impl ExecImageSource {
+    /// Whether this source builds the image locally rather than pulling it.
+    /// Only built images have a content-derived tag.
+    pub(crate) const fn builds(self) -> bool {
+        matches!(self, Self::BuildDefault | Self::BuildRepo)
+    }
+}
+
 /// The resolved container-feature configuration, as a set of **optional**
 /// overrides.
 ///
@@ -379,8 +405,26 @@ impl Default for ClusterConfig {
 pub struct ContainerConfig {
     /// Opt into container execution. Built-in default: `false`.
     pub enabled: Option<bool>,
-    /// Container image reference. Required when `enabled` resolves to `true`.
+    /// Pre-built exec image reference to pull. Mutually exclusive with
+    /// [`Self::dockerfile`]; see [`ExecImageSource`] for the selection rule.
     pub image: Option<String>,
+    /// Repo-root-relative Dockerfile that builds the exec image locally.
+    /// Mutually exclusive with [`Self::image`].
+    pub dockerfile: Option<String>,
+    /// `--build-arg` pairs for the exec-image build, in declaration order.
+    /// Part of the image identity hash. Built-in default: empty.
+    pub build_args: Option<Vec<(String, String)>>,
+    /// BuildKit `--secret` specifications for the exec-image build, e.g.
+    /// `id=msrustup_token,env=MSRUSTUP_ACCESS_TOKEN`.
+    ///
+    /// Deliberately *excluded* from the identity hash: a secret's value must
+    /// never influence a tag, and its presence is a property of the caller's
+    /// environment rather than of the image contents. Built-in default: empty.
+    pub build_secrets: Option<Vec<String>>,
+    /// Extra repo-root-relative files folded into the exec-image identity
+    /// hash. Needed whenever the Dockerfile `COPY`s something the built-in
+    /// input list does not already cover. Built-in default: empty.
+    pub hash_inputs: Option<Vec<String>>,
     /// Container engine. Built-in default: [`Engine::Auto`].
     pub engine: Option<Engine>,
     /// Stable identifier for this repository, used to expand `{repo}` in
@@ -422,9 +466,25 @@ impl ContainerConfig {
     /// over the catalog defaults (`base`).
     #[must_use]
     pub fn overlay(self, base: &Self) -> Self {
+        // `image` and `dockerfile` are mutually exclusive, so they overlay as
+        // a single slot rather than field-by-field: if `self` names either
+        // one, it owns the choice of source and inherits neither. Merging them
+        // independently would let a catalog default `image` collide with a
+        // repository's `dockerfile` and fail resolution with an ambiguity the
+        // author never wrote.
+        let overrides_source = self.image.is_some() || self.dockerfile.is_some();
+        let (image, dockerfile) = if overrides_source {
+            (self.image, self.dockerfile)
+        } else {
+            (base.image.clone(), base.dockerfile.clone())
+        };
         Self {
             enabled: self.enabled.or(base.enabled),
-            image: self.image.or_else(|| base.image.clone()),
+            image,
+            dockerfile,
+            build_args: self.build_args.or_else(|| base.build_args.clone()),
+            build_secrets: self.build_secrets.or_else(|| base.build_secrets.clone()),
+            hash_inputs: self.hash_inputs.or_else(|| base.hash_inputs.clone()),
             engine: self.engine.or(base.engine),
             name: self.name.or_else(|| base.name.clone()),
             workdir: self.workdir.or_else(|| base.workdir.clone()),
@@ -449,13 +509,16 @@ impl ContainerConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if `enabled` resolves to `true` but no non-empty
-    /// `image` is set, or if the image/cluster sections are invalid
-    /// (duplicate/ill-named images, a `depends-on` cycle, a context outside
-    /// the image output dir, or a `load-images` entry naming no image).
+    /// Returns an error if `enabled` resolves to `true` but the exec image
+    /// source is ambiguous (both `image` and `dockerfile` set) or ill-formed
+    /// (an empty `image` or `dockerfile`), or if the image/cluster sections
+    /// are invalid (duplicate/ill-named images, a `depends-on` cycle, a
+    /// context outside the image output dir, or a `load-images` entry naming
+    /// no image).
     pub(crate) fn resolve(&self, dir_name: &str) -> Result<ResolvedContainer, AppError> {
         let enabled = self.enabled.unwrap_or(false);
         let image = self.image.clone().unwrap_or_default();
+        let dockerfile = self.dockerfile.clone().unwrap_or_default();
         let repo_name = self.name.clone().unwrap_or_else(|| dir_name.to_owned());
         let workdir = self.workdir.clone().unwrap_or_else(|| format!("/workspaces/{repo_name}"));
         let cache_volumes = self
@@ -473,21 +536,35 @@ impl ContainerConfig {
             validate_cluster(cluster, &images)?;
         }
 
-        // The exec-container shim needs a base `image` whenever container
-        // execution is enabled. This is independent of the top-level `[[image]]`
-        // builds and `[cluster]` harness, which are siblings — a config may
-        // enable all three at once (the exec image plus image builds plus a
-        // cluster) or any subset.
-        if enabled && image.trim().is_empty() {
-            bail!(
-                "[container] enabled = true requires a non-empty `image` \
-                 (set it in anvil.toml, or have your catalog provide a default)"
-            );
-        }
+        // Select the exec-image source. `image` means pull a pre-built
+        // reference; `dockerfile` means build one locally; neither means build
+        // from the Dockerfile anvil generates, which is what lets a repository
+        // adopt container execution without owning any image plumbing.
+        //
+        // An explicitly empty value clears the slot rather than erroring, so a
+        // repository whose catalog pre-fills `image` can select the default
+        // build with `image = ""`. Rejecting it would leave no way to opt out:
+        // deleting the key just re-inherits the catalog's value.
+        let has_image = !image.trim().is_empty();
+        let has_dockerfile = !dockerfile.trim().is_empty();
+        let image_source = match (has_image, has_dockerfile) {
+            (true, true) => bail!(
+                "[container] sets both `image` and `dockerfile`; keep `image` to pull a \
+                 pre-built image, or `dockerfile` to build one locally"
+            ),
+            (true, false) => ExecImageSource::Pull,
+            (false, true) => ExecImageSource::BuildRepo,
+            (false, false) => ExecImageSource::BuildDefault,
+        };
 
         Ok(ResolvedContainer {
             enabled,
             image,
+            dockerfile,
+            image_source,
+            build_args: self.build_args.clone().unwrap_or_default(),
+            build_secrets: self.build_secrets.clone().unwrap_or_default(),
+            hash_inputs: self.hash_inputs.clone().unwrap_or_default(),
             engine: self.engine.unwrap_or_default(),
             workdir,
             cache_volumes,
@@ -648,7 +725,20 @@ pub struct AnvilConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ResolvedContainer {
     pub enabled: bool,
+    /// Pre-built reference to pull; empty unless `image_source` is
+    /// [`ExecImageSource::Pull`].
     pub image: String,
+    /// Repo-owned Dockerfile path; empty unless `image_source` is
+    /// [`ExecImageSource::BuildRepo`].
+    pub dockerfile: String,
+    /// How the exec image is obtained.
+    pub image_source: ExecImageSource,
+    /// `--build-arg` pairs for the exec-image build, in declaration order.
+    pub build_args: Vec<(String, String)>,
+    /// BuildKit `--secret` specifications for the exec-image build.
+    pub build_secrets: Vec<String>,
+    /// Extra files folded into the exec-image identity hash.
+    pub hash_inputs: Vec<String>,
     pub engine: Engine,
     pub workdir: String,
     pub cache_volumes: Vec<String>,
@@ -770,6 +860,10 @@ fn parse_container(item: &Item) -> Result<ContainerConfig, AppError> {
                  top level as [[image]]"
             ),
             "image" => config.image = Some(as_string(key, value)?),
+            "dockerfile" => config.dockerfile = Some(as_string(key, value)?),
+            "build-args" => config.build_args = Some(parse_string_map(key, value)?),
+            "build-secrets" => config.build_secrets = Some(as_string_array(key, value)?),
+            "hash-inputs" => config.hash_inputs = Some(as_string_array(key, value)?),
             "engine" => config.engine = Some(Engine::parse(&as_string(key, value)?)?),
             "name" => config.name = Some(as_string(key, value)?),
             "workdir" => config.workdir = Some(as_string(key, value)?),
@@ -786,8 +880,9 @@ fn parse_container(item: &Item) -> Result<ContainerConfig, AppError> {
                  top-level key"
             ),
             other => bail!(
-                "unknown key '[container] {other}' (valid keys: enabled, image, engine, name, \
-                 workdir, cache-volumes, forward-env, devcontainer, native-when)"
+                "unknown key '[container] {other}' (valid keys: enabled, image, dockerfile, \
+                 build-args, build-secrets, hash-inputs, engine, name, workdir, cache-volumes, \
+                 forward-env, devcontainer, native-when)"
             ),
         }
     }
@@ -1128,16 +1223,79 @@ version-id = "22.04"
     }
 
     #[test]
-    fn enabled_without_image_is_an_error() {
+    fn enabled_without_image_builds_the_default_image() {
         let config = parse("[container]\nenabled = true\n").unwrap();
-        let err = config.container.resolve("repo").unwrap_err().to_string();
-        assert!(err.contains("requires a non-empty `image`"), "got: {err}");
+        let resolved = config.container.resolve("repo").unwrap();
+        // No image plumbing configured is the self-sustaining case, not an
+        // error: anvil supplies the Dockerfile and builds it locally.
+        assert_eq!(resolved.image_source, ExecImageSource::BuildDefault);
+        assert!(resolved.image_source.builds());
     }
 
     #[test]
-    fn enabled_with_blank_image_is_an_error() {
-        let config = parse("[container]\nenabled = true\nimage = \"   \"\n").unwrap();
-        config.container.resolve("repo").unwrap_err();
+    fn image_alone_selects_pull() {
+        let config = parse("[container]\nenabled = true\nimage = \"example.io/dev:1\"\n").unwrap();
+        let resolved = config.container.resolve("repo").unwrap();
+        assert_eq!(resolved.image_source, ExecImageSource::Pull);
+        assert!(!resolved.image_source.builds());
+        assert_eq!(resolved.image, "example.io/dev:1");
+    }
+
+    #[test]
+    fn dockerfile_alone_selects_a_repo_build() {
+        let config = parse("[container]\nenabled = true\ndockerfile = \"ci/Dockerfile\"\n").unwrap();
+        let resolved = config.container.resolve("repo").unwrap();
+        assert_eq!(resolved.image_source, ExecImageSource::BuildRepo);
+        assert_eq!(resolved.dockerfile, "ci/Dockerfile");
+    }
+
+    #[test]
+    fn image_and_dockerfile_together_are_an_error() {
+        let config = parse("[container]\nenabled = true\nimage = \"a:1\"\ndockerfile = \"D\"\n").unwrap();
+        let err = config.container.resolve("repo").unwrap_err().to_string();
+        assert!(err.contains("both `image` and `dockerfile`"), "got: {err}");
+    }
+
+    /// A catalog default naming a pre-built image must not collide with a
+    /// repository that chooses to build its own: picking either field replaces
+    /// the whole source choice rather than merging with it.
+    #[test]
+    fn choosing_a_source_does_not_inherit_the_other() {
+        let base = parse("[container]\nenabled = true\nimage = \"catalog.io/dev:1\"\n")
+            .unwrap()
+            .container;
+        let repo = parse("[container]\ndockerfile = \"ci/Dockerfile\"\n").unwrap().container;
+        let resolved = repo.overlay(&base).resolve("repo").unwrap();
+        assert_eq!(resolved.image_source, ExecImageSource::BuildRepo);
+        assert!(resolved.image.is_empty());
+    }
+
+    #[test]
+    fn build_inputs_round_trip() {
+        let config = parse(
+            "[container]\nenabled = true\ndockerfile = \"ci/Dockerfile\"\n\
+             build-args = { RUST_CHANNEL = \"1.95\" }\n\
+             build-secrets = [\"id=tok,env=TOK\"]\n\
+             hash-inputs = [\"ci/setup.sh\"]\n",
+        )
+        .unwrap();
+        let resolved = config.container.resolve("repo").unwrap();
+        assert_eq!(resolved.build_args, vec![("RUST_CHANNEL".to_owned(), "1.95".to_owned())]);
+        assert_eq!(resolved.build_secrets, vec!["id=tok,env=TOK"]);
+        assert_eq!(resolved.hash_inputs, vec!["ci/setup.sh"]);
+    }
+
+    /// An explicitly empty value clears the source slot rather than failing.
+    /// This is the only way for a repository to opt out of a catalog-provided
+    /// `image`: deleting the key would simply re-inherit it.
+    #[test]
+    fn blank_image_clears_a_catalog_provided_image() {
+        let base = parse("[container]\nenabled = true\nimage = \"catalog.io/dev:1\"\n")
+            .unwrap()
+            .container;
+        let repo = parse("[container]\nimage = \"\"\n").unwrap().container;
+        let resolved = repo.overlay(&base).resolve("repo").unwrap();
+        assert_eq!(resolved.image_source, ExecImageSource::BuildDefault);
     }
 
     #[test]

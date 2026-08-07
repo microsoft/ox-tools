@@ -20,7 +20,7 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use crate::catalog::Artifact;
-use crate::config::{ClusterChart, ClusterConfig, ClusterDependency, ImageSpec, NativeWhen, ResolvedContainer};
+use crate::config::{ClusterChart, ClusterConfig, ClusterDependency, ExecImageSource, ImageSpec, NativeWhen, ResolvedContainer};
 
 /// Repo-root-relative path of the container shim recipe file.
 pub(crate) const CONTAINER_JUST_PATH: &str = "justfiles/anvil/container.just";
@@ -36,6 +36,12 @@ pub(crate) const CLUSTER_JUST_PATH: &str = "justfiles/anvil/cluster.just";
 
 /// Repo-root-relative path of the cluster host bootstrap + preflight recipes.
 pub(crate) const CLUSTER_BOOTSTRAP_JUST_PATH: &str = "justfiles/anvil/cluster-bootstrap.just";
+
+/// Repo-root-relative path of the generated default exec-image Dockerfile.
+pub(crate) const EXEC_DOCKERFILE_PATH: &str = "justfiles/anvil/container/Dockerfile";
+
+/// Repo-root-relative path of the exec-image build-context filter.
+pub(crate) const EXEC_DOCKERIGNORE_PATH: &str = "justfiles/anvil/container/Dockerfile.dockerignore";
 
 /// Path of the recipe-tree entry point (kept in sync with
 /// [`super::justfile`]).
@@ -82,6 +88,13 @@ const CLUSTER_JUST: &str = include_str!("../../../templates/justfiles/anvil/clus
 /// Embedded body of the cluster host bootstrap + preflight (fully static —
 /// pinned, checksum-verified tooling; no placeholders).
 const CLUSTER_BOOTSTRAP_JUST: &str = include_str!("../../../templates/justfiles/anvil/cluster-bootstrap.just");
+
+/// Embedded body of the default exec-image Dockerfile (with `__TOKEN__`
+/// placeholders).
+const EXEC_DOCKERFILE: &str = include_str!("../../../templates/container/Dockerfile");
+
+/// Embedded body of the exec-image build-context filter (fully static).
+const EXEC_DOCKERIGNORE: &str = include_str!("../../../templates/container/Dockerfile.dockerignore");
 
 /// `justfiles/anvil/container.just` — the container shim.
 ///
@@ -148,6 +161,26 @@ pub fn cluster_bootstrap_just() -> Artifact {
     Artifact::owned_file(CLUSTER_BOOTSTRAP_JUST_PATH, CLUSTER_BOOTSTRAP_JUST)
 }
 
+/// `justfiles/anvil/container/Dockerfile` — the default exec image.
+///
+/// Register it with
+/// [`CatalogBuilder::with_container_artifact`](crate::CatalogBuilder::with_container_artifact).
+/// Suppressed unless the exec image is built from anvil's own Dockerfile; a
+/// repository that pulls a pre-built image or points at its own Dockerfile has
+/// no use for it, and emitting it anyway would invite edits to a file nothing
+/// reads.
+#[must_use]
+pub fn exec_dockerfile() -> Artifact {
+    Artifact::owned_file(EXEC_DOCKERFILE_PATH, EXEC_DOCKERFILE)
+}
+
+/// `justfiles/anvil/container/Dockerfile.dockerignore` — build-context filter
+/// for [`exec_dockerfile`]. Gated identically.
+#[must_use]
+pub fn exec_dockerignore() -> Artifact {
+    Artifact::owned_file(EXEC_DOCKERIGNORE_PATH, EXEC_DOCKERIGNORE)
+}
+
 /// Secondary emission gate for container-gated artifacts whose emission
 /// depends on more than the container flag: the devcontainer descriptor needs
 /// `devcontainer = true`, the image recipes need at least one
@@ -159,6 +192,7 @@ pub(crate) fn secondary_gate_open(path: &str, container: &ResolvedContainer) -> 
         DEVCONTAINER_PATH => emits_devcontainer(container),
         CONTAINER_IMAGES_JUST_PATH => !container.images.is_empty(),
         CLUSTER_JUST_PATH | CLUSTER_BOOTSTRAP_JUST_PATH => container.cluster.is_some(),
+        EXEC_DOCKERFILE_PATH | EXEC_DOCKERIGNORE_PATH => container.image_source == ExecImageSource::BuildDefault,
         _ => true,
     }
 }
@@ -186,6 +220,10 @@ pub(crate) fn render_owned_body<'a>(path: &str, body: &'a str, container: &Resol
             None => Cow::Borrowed(body),
         },
         CLUSTER_BOOTSTRAP_JUST_PATH => Cow::Borrowed(body),
+        // The default Dockerfile carries one placeholder (the in-container
+        // workdir); the ignore file is fully static.
+        EXEC_DOCKERFILE_PATH => Cow::Owned(body.replace("__WORKDIR__", &container.workdir)),
+        EXEC_DOCKERIGNORE_PATH => Cow::Borrowed(body),
         // Everything else is untouched unless container mode is enabled.
         _ if !container.enabled => Cow::Borrowed(body),
         MOD_JUST_PATH => Cow::Owned(add_container_imports(body, container)),
@@ -203,12 +241,116 @@ pub(crate) fn render_owned_body<'a>(path: &str, body: &'a str, container: &Resol
                 Cow::Borrowed(body)
             }
         }
-        GH_PR_IMPL_PATH | GH_SCHEDULED_IMPL_PATH => Cow::Owned(inject_github_impl(body)),
-        GH_PR_ROOT_PATH | GH_SCHEDULED_ROOT_PATH => Cow::Owned(inject_github_root(body, container)),
-        ADO_JOB_PATH => Cow::Owned(inject_ado_job(body)),
-        ADO_PR_ROOT_PATH | ADO_SCHEDULED_ROOT_PATH => Cow::Owned(inject_ado_root(body, container)),
+        // CI job containers are gated on `Pull`. A job-level `container:` needs
+        // a reference the runner can resolve *before* the job starts, which a
+        // locally-built, content-tagged image is not: it exists only on the
+        // machine that built it. Injecting it anyway would splice an empty
+        // reference — rejected outright by ADO, and silently non-containerized
+        // on GitHub, which is worse. A repository that wants containerized CI
+        // publishes an image and sets `image`.
+        GH_PR_IMPL_PATH | GH_SCHEDULED_IMPL_PATH if container.image_source == ExecImageSource::Pull => Cow::Owned(inject_github_impl(body)),
+        GH_PR_ROOT_PATH | GH_SCHEDULED_ROOT_PATH if container.image_source == ExecImageSource::Pull => {
+            Cow::Owned(inject_github_root(body, container))
+        }
+        ADO_JOB_PATH if container.image_source == ExecImageSource::Pull => Cow::Owned(inject_ado_job(body)),
+        ADO_PR_ROOT_PATH | ADO_SCHEDULED_ROOT_PATH if container.image_source == ExecImageSource::Pull => {
+            Cow::Owned(inject_ado_root(body, container))
+        }
         _ => Cow::Borrowed(body),
     }
+}
+
+/// Recipe-visible name for the exec-image source: `pull` or `build`.
+const fn image_source_token(container: &ResolvedContainer) -> &'static str {
+    if container.image_source.builds() { "build" } else { "pull" }
+}
+
+/// Repository part of a locally-built exec image. The tag is appended at run
+/// time from the content hash, so this is only the stable half of the
+/// reference.
+fn built_image_name(repo_name: &str) -> String {
+    format!("anvil-{}", sanitize_image_name(repo_name))
+}
+
+/// Coerce a repository name into the character set an image reference allows
+/// (lowercase alphanumerics plus `.`, `_`, `-`). A repo whose directory name
+/// contains anything else would otherwise produce a reference the engine
+/// rejects, at run time, with a message about the tag rather than the name.
+fn sanitize_image_name(repo_name: &str) -> String {
+    let mut out: String = repo_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // A reference component must start with an alphanumeric.
+    while out.starts_with(|c: char| !c.is_ascii_alphanumeric()) {
+        out.remove(0);
+    }
+    if out.is_empty() { "repo".to_owned() } else { out }
+}
+
+/// Dockerfile that builds the exec image: the repository's own when it named
+/// one, otherwise the copy anvil generates. Empty in pull mode, where nothing
+/// is built.
+fn exec_dockerfile_path(container: &ResolvedContainer) -> String {
+    match container.image_source {
+        ExecImageSource::Pull => String::new(),
+        ExecImageSource::BuildDefault => EXEC_DOCKERFILE_PATH.to_owned(),
+        ExecImageSource::BuildRepo => container.dockerfile.clone(),
+    }
+}
+
+/// `--build-arg` pairs as `KEY=VALUE`, in declaration order.
+fn build_arg_pairs(container: &ResolvedContainer) -> Vec<String> {
+    container.build_args.iter().map(|(key, value)| format!("{key}={value}")).collect()
+}
+
+/// Files whose contents define the exec image's identity.
+///
+/// This is the *literal* half of the list: the Dockerfile, its context filter,
+/// the pinned toolchain, and whatever the repository declared. The generated
+/// recipe adds the recipe tree at run time, because the image installs its
+/// tools by running `just anvil-setup` and that chain reaches the tier, group,
+/// check and tool files — a set anvil cannot enumerate from configuration
+/// alone. See [`hash_excludes`] for the files held back.
+fn hash_inputs(container: &ResolvedContainer) -> Vec<String> {
+    if !container.image_source.builds() {
+        return Vec::new();
+    }
+    let mut inputs = vec![exec_dockerfile_path(container), "rust-toolchain.toml".to_owned()];
+    if container.image_source == ExecImageSource::BuildDefault {
+        // The ignore file decides what reaches the daemon, so it changes the
+        // build as surely as the Dockerfile does.
+        inputs.push(EXEC_DOCKERIGNORE_PATH.to_owned());
+    }
+    inputs.extend(container.hash_inputs.iter().cloned());
+    inputs.sort_unstable();
+    inputs.dedup();
+    inputs
+}
+
+/// Recipe files excluded from the image identity.
+///
+/// Each one drives the container *from the host* or targets the cluster, so
+/// none can change what `just anvil-setup` installs. `container.just` in
+/// particular must be excluded on pain of circularity: it is the file that
+/// computes the hash.
+fn hash_excludes(container: &ResolvedContainer) -> Vec<String> {
+    let mut excluded = vec![CONTAINER_JUST_PATH.to_owned()];
+    if !container.images.is_empty() {
+        excluded.push(CONTAINER_IMAGES_JUST_PATH.to_owned());
+    }
+    if container.cluster.is_some() {
+        excluded.push(CLUSTER_JUST_PATH.to_owned());
+        excluded.push(CLUSTER_BOOTSTRAP_JUST_PATH.to_owned());
+    }
+    excluded.sort_unstable();
+    excluded
 }
 
 /// Fill in the container shim template from the resolved settings.
@@ -232,6 +374,13 @@ fn render_container_just(template: &str, container: &ResolvedContainer) -> Strin
 
     template
         .replace("__IMAGE__", &container.image)
+        .replace("__IMAGE_SOURCE__", image_source_token(container))
+        .replace("__IMAGE_NAME__", &built_image_name(&container.repo_name))
+        .replace("__DOCKERFILE__", &exec_dockerfile_path(container))
+        .replace("__BUILD_ARGS_ARRAY__", &ps_array(&build_arg_pairs(container)))
+        .replace("__BUILD_SECRETS_ARRAY__", &ps_array(&container.build_secrets))
+        .replace("__HASH_INPUTS_ARRAY__", &ps_array(&hash_inputs(container)))
+        .replace("__HASH_EXCLUDE_ARRAY__", &ps_array(&hash_excludes(container)))
         .replace("__ENGINE__", container.engine.as_str())
         .replace("__WORKDIR__", &container.workdir)
         .replace("__REPO__", &container.repo_name)
@@ -244,9 +393,41 @@ fn render_container_just(template: &str, container: &ResolvedContainer) -> Strin
 /// Fill in the devcontainer descriptor template from the resolved settings.
 fn render_devcontainer(template: &str, container: &ResolvedContainer) -> String {
     template
-        .replace("__IMAGE__", &container.image)
+        .replace("__IMAGE_OR_BUILD__", &devcontainer_source_json(container))
         .replace("__WORKDIR__", &container.workdir)
         .replace("__MOUNTS_JSON__", &devcontainer_mounts_json(container))
+}
+
+/// The descriptor's image source: a reference to pull, or a build to run.
+///
+/// The editor resolves this itself and cannot call the generated recipes, so a
+/// locally-built image has to be expressed as a `build` block. Emitting an
+/// `image` key here in build mode would name an image the editor has no way to
+/// obtain — and, before the tag exists, no way to even identify.
+fn devcontainer_source_json(container: &ResolvedContainer) -> String {
+    if container.image_source.builds() {
+        let mut out = format!(
+            "\"build\": {{\n    \"dockerfile\": \"{}\",\n    \"context\": \"..\"",
+            json_escape(&exec_dockerfile_path(container))
+        );
+        if !container.build_args.is_empty() {
+            let args: Vec<String> = container
+                .build_args
+                .iter()
+                .map(|(key, value)| format!("\"{}\": \"{}\"", json_escape(key), json_escape(value)))
+                .collect();
+            out.push_str(&format!(",\n    \"args\": {{ {} }}", args.join(", ")));
+        }
+        out.push_str("\n  }");
+        out
+    } else {
+        format!("\"image\": \"{}\"", json_escape(&container.image))
+    }
+}
+
+/// Escape a string for embedding in a JSON string literal.
+fn json_escape(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 // ---------------------------------------------------------------------------
@@ -815,6 +996,295 @@ mod tests {
 
     fn disabled(repo: &str) -> ResolvedContainer {
         ContainerConfig::default().resolve(repo).unwrap()
+    }
+
+    /// `_anvil-container-image` returns the image reference on stdout, and its
+    /// callers capture that stdout. Anything else written there silently
+    /// becomes part of the reference — which produced a real bug where the
+    /// build notice was prepended to the tag. Progress must go to stderr.
+    #[test]
+    fn image_recipe_keeps_stdout_clean() {
+        let body = CONTAINER_JUST
+            .split("_anvil-container-image:")
+            .nth(1)
+            .expect("the shim defines the image recipe");
+        let recipe = body.split("\n# ").next().unwrap_or(body);
+        assert!(
+            !recipe.contains("Write-Host"),
+            "Write-Host in _anvil-container-image pollutes the returned image reference; \
+             use [Console]::Error.WriteLine for progress"
+        );
+        assert!(
+            recipe.contains("[Console]::Error.WriteLine"),
+            "the build notice must still be reported, on stderr"
+        );
+    }
+
+    /// Every `[script("pwsh")]` recipe body must actually parse as PowerShell.
+    ///
+    /// A parse error is not local to the offending line: PowerShell rejects the
+    /// whole script, so one bad token disables an entire recipe. This shipped
+    /// once already (`*>&2`, which is not valid redirection syntax) and was
+    /// invisible to every Rust-level test, because the generator's job is to
+    /// emit text — it never runs what it writes.
+    #[test]
+    fn generated_powershell_recipes_parse() {
+        let Some(pwsh) = which_pwsh() else {
+            // Not installed here; the recipes themselves already require it, so
+            // any machine that can run them will run this check.
+            return;
+        };
+
+        // Render with every section configured: the cluster and image
+        // templates keep their placeholders when their section is absent, and
+        // in that case they are never emitted at all.
+        let container = ContainerConfig {
+            enabled: Some(true),
+            images: Some(vec![ImageSpec {
+                name: "svc".to_owned(),
+                repository: None,
+                dockerfile: "svc/Dockerfile".to_owned(),
+                target: None,
+                context: "out/svc".to_owned(),
+                stage_artifacts: Vec::new(),
+                build_args: Vec::new(),
+                depends_on: Vec::new(),
+            }]),
+            cluster: Some(crate::config::ClusterConfig::default()),
+            ..ContainerConfig::default()
+        }
+        .resolve("repo")
+        .unwrap();
+
+        for (name, template) in [
+            ("container.just", CONTAINER_JUST),
+            ("container-images.just", CONTAINER_IMAGES_JUST),
+            ("cluster.just", CLUSTER_JUST),
+            ("cluster-bootstrap.just", CLUSTER_BOOTSTRAP_JUST),
+        ] {
+            let rendered = super::render_owned_body(&format!("justfiles/anvil/{name}"), template, &container).into_owned();
+            for (recipe, body) in pwsh_recipe_bodies(&rendered) {
+                assert_powershell_parses(&pwsh, name, &recipe, &body);
+            }
+        }
+    }
+
+    /// Locate a PowerShell executable, or `None` when the host has none.
+    fn which_pwsh() -> Option<String> {
+        for candidate in ["pwsh", "pwsh.exe"] {
+            if std::process::Command::new(candidate)
+                .args(["-NoProfile", "-Command", "exit 0"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+            {
+                return Some(candidate.to_owned());
+            }
+        }
+        None
+    }
+
+    /// Split a rendered `.just` file into `(recipe name, script body)` pairs
+    /// for every `[script("pwsh")]` recipe, undoing `just`'s indentation.
+    fn pwsh_recipe_bodies(rendered: &str) -> Vec<(String, String)> {
+        let lines: Vec<&str> = rendered.lines().collect();
+        let mut out = Vec::new();
+        for (index, line) in lines.iter().enumerate() {
+            if !line.starts_with("[script(\"pwsh\"") {
+                continue;
+            }
+            // Skip any further attributes to reach the recipe header.
+            let mut cursor = index + 1;
+            while cursor < lines.len() && lines[cursor].starts_with('[') {
+                cursor += 1;
+            }
+            let Some(header) = lines.get(cursor) else { continue };
+            let name = header.split(|c: char| c == ':' || c == ' ').next().unwrap_or(header);
+            let mut body = String::new();
+            cursor += 1;
+            while cursor < lines.len() {
+                let current = lines[cursor];
+                if !current.is_empty() && !current.starts_with("    ") {
+                    break;
+                }
+                body.push_str(current.strip_prefix("    ").unwrap_or(current));
+                body.push('\n');
+                cursor += 1;
+            }
+            out.push((name.to_owned(), body));
+        }
+        assert!(!out.is_empty(), "expected at least one pwsh recipe to check");
+        out
+    }
+
+    /// Parse a script with PowerShell's own parser and fail with its errors.
+    fn assert_powershell_parses(pwsh: &str, file: &str, recipe: &str, body: &str) {
+        // `just` substitutes `{{ ... }}` before pwsh sees the script; replace
+        // them with a literal so interpolation braces do not read as syntax.
+        let mut script = String::new();
+        let mut rest = body;
+        while let Some(start) = rest.find("{{") {
+            script.push_str(&rest[..start]);
+            script.push_str("anvil_substituted");
+            let after = &rest[start + 2..];
+            match after.find("}}") {
+                Some(end) => rest = &after[end + 2..],
+                None => {
+                    rest = "";
+                    break;
+                }
+            }
+        }
+        script.push_str(rest);
+
+        let mut child = std::process::Command::new(pwsh)
+            .args([
+                "-NoProfile",
+                "-Command",
+                "$src = [Console]::In.ReadToEnd(); \
+                 $errors = $null; \
+                 [void][System.Management.Automation.Language.Parser]::ParseInput($src, [ref]$null, [ref]$errors); \
+                 if ($errors.Count) { $errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }; exit 1 }",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn pwsh");
+        {
+            use std::io::Write as _;
+            child.stdin.take().expect("stdin").write_all(script.as_bytes()).unwrap();
+        }
+        let output = child.wait_with_output().expect("run pwsh");
+        assert!(
+            output.status.success(),
+            "{file}: recipe `{recipe}` is not valid PowerShell:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// An image reference component must be lowercase and drawn from a
+    /// restricted alphabet. A repository whose directory name breaks that would
+    /// otherwise fail at run time with a message about the tag rather than the
+    /// name, long after the mistake was made.
+    #[test]
+    fn built_image_name_is_a_valid_reference_component() {
+        assert_eq!(built_image_name("ox-tools"), "anvil-ox-tools");
+        assert_eq!(built_image_name("COSMICRust"), "anvil-cosmicrust");
+        assert_eq!(built_image_name("my repo!"), "anvil-my-repo-");
+        assert_eq!(built_image_name("_leading"), "anvil-leading");
+        assert_eq!(built_image_name("---"), "anvil-repo");
+    }
+
+    /// Identity inputs are sorted and deduplicated, so the same declared set
+    /// always produces the same stream regardless of declaration order — a tag
+    /// that changed when a config line moved would rebuild for no reason.
+    #[test]
+    fn hash_inputs_are_ordered_and_deduplicated() {
+        let container = ContainerConfig {
+            enabled: Some(true),
+            dockerfile: Some("ci/Dockerfile".to_owned()),
+            hash_inputs: Some(vec![
+                "z.sh".to_owned(),
+                "a.sh".to_owned(),
+                "z.sh".to_owned(),
+                // Redeclaring a built-in input must not double it.
+                "rust-toolchain.toml".to_owned(),
+            ]),
+            ..ContainerConfig::default()
+        }
+        .resolve("repo")
+        .unwrap();
+
+        assert_eq!(
+            hash_inputs(&container),
+            vec!["a.sh", "ci/Dockerfile", "rust-toolchain.toml", "z.sh"]
+        );
+    }
+
+    /// The image installs its tools through `just anvil-setup`, whose
+    /// dependency chain reaches the tier, group, check and tool recipes — so
+    /// the recipe tree defines image contents and is hashed at run time. Only
+    /// the files that drive the container from the host, or target the
+    /// cluster, are held back. Excluding `container.just` is load-bearing: it
+    /// is the file that computes the hash.
+    #[test]
+    fn only_host_side_recipes_are_excluded_from_identity() {
+        let default_build = ContainerConfig {
+            enabled: Some(true),
+            ..ContainerConfig::default()
+        }
+        .resolve("repo")
+        .unwrap();
+        assert_eq!(hash_excludes(&default_build), vec![CONTAINER_JUST_PATH.to_owned()]);
+
+        // The generated Dockerfile and its context filter both change the
+        // build, so both belong to the identity.
+        let inputs = hash_inputs(&default_build);
+        assert!(inputs.contains(&EXEC_DOCKERFILE_PATH.to_owned()));
+        assert!(inputs.contains(&EXEC_DOCKERIGNORE_PATH.to_owned()));
+        assert!(inputs.contains(&"rust-toolchain.toml".to_owned()));
+
+        // Pull mode describes no build, so there is nothing to hash.
+        assert!(hash_inputs(&enabled("repo")).is_empty());
+    }
+
+    /// The cluster and image-build recipes never affect what `anvil-setup`
+    /// installs, so they must not force an image rebuild when they change.
+    #[test]
+    fn cluster_and_image_recipes_do_not_define_image_identity() {
+        let container = ContainerConfig {
+            enabled: Some(true),
+            images: Some(vec![ImageSpec {
+                name: "svc".to_owned(),
+                repository: None,
+                dockerfile: "svc/Dockerfile".to_owned(),
+                target: None,
+                context: "out/svc".to_owned(),
+                stage_artifacts: Vec::new(),
+                build_args: Vec::new(),
+                depends_on: Vec::new(),
+            }]),
+            cluster: Some(crate::config::ClusterConfig::default()),
+            ..ContainerConfig::default()
+        }
+        .resolve("repo")
+        .unwrap();
+
+        let excluded = hash_excludes(&container);
+        for path in [
+            CONTAINER_JUST_PATH,
+            CONTAINER_IMAGES_JUST_PATH,
+            CLUSTER_JUST_PATH,
+            CLUSTER_BOOTSTRAP_JUST_PATH,
+        ] {
+            assert!(excluded.contains(&path.to_owned()), "{path} must not define image identity");
+        }
+    }
+
+    /// The generated Dockerfile is emitted only when it is the one being built.
+    /// Shipping it alongside a repository's own would invite edits to a file
+    /// nothing reads.
+    #[test]
+    fn generated_dockerfile_is_emitted_only_when_used() {
+        let default_build = ContainerConfig {
+            enabled: Some(true),
+            ..ContainerConfig::default()
+        }
+        .resolve("repo")
+        .unwrap();
+        assert!(secondary_gate_open(EXEC_DOCKERFILE_PATH, &default_build));
+
+        let repo_build = ContainerConfig {
+            enabled: Some(true),
+            dockerfile: Some("ci/Dockerfile".to_owned()),
+            ..ContainerConfig::default()
+        }
+        .resolve("repo")
+        .unwrap();
+        assert!(!secondary_gate_open(EXEC_DOCKERFILE_PATH, &repo_build));
+        assert!(!secondary_gate_open(EXEC_DOCKERIGNORE_PATH, &enabled("repo")));
     }
 
     /// `just --list` renders the *contiguous* comment block immediately above a

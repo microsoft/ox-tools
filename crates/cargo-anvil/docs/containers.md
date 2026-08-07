@@ -21,19 +21,22 @@ Create `anvil.toml` in the repo root:
 ```toml
 [container]
 enabled = true
-image = "docker.io/library/rust:1.85"
 ```
 
 Re-run the generator and start working:
 
 ```bash
 cargo anvil                  # regenerate; now emits the container recipes
-just anvil-container-up      # pull the image
-just anvil-pr                # runs inside the container
+just anvil-pr                # builds the image on first use, then runs inside it
 ```
 
-That is the whole adoption story for containerized execution. Image builds and the cluster harness are added by declaring
-`[[image]]` and `[cluster]` sections — see [Configuration reference](#3-configuration-reference).
+That is the whole adoption story for containerized execution: no image to publish, no registry to reach, no Dockerfile
+to write. Anvil generates `justfiles/anvil/container/Dockerfile`, which installs the toolchain and tools this repository
+already pins, and builds it the first time it is needed.
+
+Point `image` at a pre-built reference to pull one instead, or `dockerfile` at your own to build something else — see
+[`[container]`](#container--containerized-execution). Image builds and the cluster harness are added by declaring
+`[[image]]` and `[cluster]` sections.
 
 ## 2. Usage
 
@@ -45,11 +48,38 @@ Emitted when `[container] enabled = true`.
 
 | Recipe | Purpose |
 | --- | --- |
-| `just anvil-container-up` | Pull the configured image so the next run starts warm. |
-| `just anvil-container-status` | Report the resolved engine, image, workdir, and whether the image is present locally. |
+| `just anvil-container-up` | Make the image available so the next run starts warm: build it, or pull it if `image` is set. |
+| `just anvil-container-status` | Report the engine, workdir, image reference, and whether it is present and current. |
 | `just anvil-container-shell` | Interactive shell in the image with the same mounts a recipe run uses. |
-| `just anvil-container-rebuild` | Force a fresh pull of the image. |
+| `just anvil-container-rebuild` | Rebuild from scratch, ignoring every cached layer. |
 | `just anvil-container-down` | Remove this repo's cache volumes. The image is left in place. |
+
+You rarely need `anvil-container-up`: every recipe that needs the image resolves it first, and builds it if it is
+missing.
+
+### Staying current
+
+When the image is built locally, its tag **is** a hash of the inputs that define it:
+
+```text
+anvil-<repo>:<16 hex characters>
+```
+
+Change a pinned tool version, the toolchain, or the Dockerfile, and the tag changes to one that cannot already exist —
+so the next run builds it. Change nothing, and the tag resolves instantly. There is no staleness check because there is
+nothing to check: an image that is present is, by construction, an image built from the current inputs.
+
+The inputs are deliberately narrow — the Dockerfile and its ignore file, `rust-toolchain.toml`,
+`justfiles/anvil/versions.just`, the resolved `build-args`, and anything listed in `hash-inputs`. Editing an unrelated
+check recipe does **not** cost you a rebuild.
+
+| Variable | Effect |
+| --- | --- |
+| `ANVIL_CONTAINER_BASE_IMAGE` | Build on a different base. Must be digest-pinned (`image@sha256:…`); participates in the hash. |
+| `ANVIL_CONTAINER_NO_REBUILD=1` | Fail instead of building when the image is missing. Distinguishes a cache miss from a build failure in CI. |
+| `ANVIL_CONTAINER_NO_CACHE=1` | Rebuild even when the tag resolves. This is what `anvil-container-rebuild` sets. |
+
+Build secrets are excluded from the hash: a secret's value must never influence a tag.
 
 The tier and group recipes (`anvil-pr`, `anvil-scheduled`, `anvil-full`, and each `anvil-pr-*` / `anvil-scheduled-*`
 group) gain a re-entry guard, so the command you already use is unchanged:
@@ -110,7 +140,11 @@ Because `image-output-dir` is a bare key, TOML requires it to appear **before** 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Master switch for containerized execution. |
-| `image` | string | — | Image to run recipes in. Required when `enabled = true`. |
+| `image` | string | — | Pre-built image to pull and run recipes in. Mutually exclusive with `dockerfile`. |
+| `dockerfile` | string | — | Repo-relative Dockerfile to build the image from. Mutually exclusive with `image`. |
+| `build-args` | table | `{}` | `--build-arg` pairs for the build. Part of the image identity. |
+| `build-secrets` | array | `[]` | BuildKit `--secret` specifications. Excluded from the image identity. |
+| `hash-inputs` | array | `[]` | Extra files that define the image identity — anything the Dockerfile `COPY`s. |
 | `engine` | `auto` \| `docker` \| `podman` | `auto` | `auto` probes for `docker`, then `podman`. |
 | `name` | string | directory name | Repo identity; prefixes cache-volume names so repos on one host do not collide. |
 | `workdir` | string | `/workspaces/<name>` | Mount point for the repo root inside the container. |
@@ -119,6 +153,13 @@ Because `image-output-dir` is a bare key, TOML requires it to appear **before** 
 | `devcontainer` | bool | `false` | Also emit `.devcontainer/devcontainer.json` from the same settings. |
 | `native-when` | table | — | Host match that runs natively instead of containerizing. |
 
+Setting neither `image` nor `dockerfile` is the ordinary case: anvil generates
+`justfiles/anvil/container/Dockerfile` and builds it. Setting both is an error — "pull this" and "build that" cannot
+both be the answer, and quietly preferring one would hide the mistake.
+
+Choosing either one replaces the choice wholesale rather than merging with it, so a catalog default naming a pre-built
+image cannot collide with a repository that decides to build its own.
+
 `native-when` accepts `os-release-id` and `version-id`, matched against `/etc/os-release`. When the host matches, recipes
 run directly — useful when the host already *is* the target environment.
 
@@ -126,13 +167,20 @@ Cache volume names map to conventional in-container paths: `cargo` and `rustup` 
 `CARGO_HOME` and `RUSTUP_HOME`, `target` to `<workdir>/target`, and any other name to `/anvil-cache/<name>`.
 
 ```toml
+# Build our own image, from our own Dockerfile.
 [container]
 enabled = true
-image = "docker.io/library/rust:1.85"
+dockerfile = "ci/anvil.Dockerfile"
+build-args = { RUST_CHANNEL = "1.93" }
+build-secrets = ["id=feed_token,env=FEED_TOKEN"]
+hash-inputs = ["ci/install-tools.sh"]
 cache-volumes = ["cargo", "rustup", "target"]
 forward-env = ["CARGO_*", "RUST_LOG"]
-devcontainer = true
 ```
+
+A repository that brings its own Dockerfile should keep `ARG BASE_IMAGE` at the top and pin it by digest, so
+`ANVIL_CONTAINER_BASE_IMAGE` keeps working and the identity hash stays meaningful. Anvil does not emit its own
+Dockerfile in that case: a generated file nothing reads is an invitation to edit the wrong one.
 
 ### `[[image]]` — locally built OCI images
 
@@ -281,11 +329,13 @@ Effective settings come from three layers, each overriding the previous **field 
 
 1. Built-in defaults.
 2. Catalog defaults, if you consume a downstream tool built on anvil's engine (see
-   [extensibility.md](./design/extensibility.md)). An organization can ship a fork that pre-fills `image` so its
-   repositories only need `enabled = true`.
+   [extensibility.md](./design/extensibility.md)). An organization can ship a fork that pre-fills `dockerfile` and its
+   build inputs so its repositories only need `enabled = true`.
 3. Your `anvil.toml`.
 
-A value you set wins for that field only; every unset field falls through.
+A value you set wins for that field only; every unset field falls through. The one exception is the pair
+`image` / `dockerfile`: naming either one replaces the whole choice of where the image comes from, so a catalog default
+cannot leave a stale `image` behind when a repository decides to build its own.
 
 ### The re-entry guard
 
@@ -305,11 +355,24 @@ fast local check on the host instead of paying container start-up for it.
 
 ### What the shim does
 
-`_anvil-container-run` mounts the repo root at `workdir`, maps your current working directory to its in-container
-equivalent so relative paths keep working, mounts the configured cache volumes, forwards environment variables matching
-`forward-env`, and propagates the exit code faithfully.
+`_anvil-container-run` resolves the image (building it if needed), mounts the repo root at `workdir`, maps your current
+working directory to its in-container equivalent so relative paths keep working, mounts the configured cache volumes,
+forwards environment variables matching `forward-env`, and propagates the exit code faithfully. It runs with
+`--pull=never`: a locally-built tag names local content, so a miss is a bug to surface rather than an invitation to
+fetch something unrelated.
 
-Credentials are never mounted. If a recipe needs a token inside the container, forward it through `forward-env`.
+Credentials are never mounted. If a recipe needs a token inside the container, forward it through `forward-env`. If the
+*build* needs one, declare it in `build-secrets`, where BuildKit keeps it out of every layer.
+
+### The generated image
+
+`justfiles/anvil/container/Dockerfile` starts from a digest-pinned Debian base, installs `just`, rustup and PowerShell
+against published checksums, then runs `just anvil-setup`.
+
+That last step is the point: the image installs its tools by running the same recipe the checks use, from the same
+generated pins. There is no second list of tools to keep in step with the first, so "the image has the right tools" is
+true by construction rather than by discipline. It is also why a tool-pin bump changes the image identity —
+`versions.just` is both what the image installs and part of what names it.
 
 ### CI
 
@@ -349,9 +412,16 @@ harness. The four escape valves described in the crate README apply here too.
 
 - A container engine on the host: Docker is the supported path. Podman is detected best-effort by the same `engine`
   knob; there are no podman-specific recipe variants.
+- On Windows, the engine must be reachable from the shell running `just`. Docker installed inside WSL is the tested
+  configuration; Docker Desktop is not required.
+- A repository-owned `rust-toolchain.toml`. It is both what the image installs and part of what names it, so building
+  the exec image without one is not supported.
+- The first build of the exec image is expected to take several minutes: it installs a toolchain and the whole pinned
+  tool catalog. Later runs reuse it until an input changes.
 - The cluster harness additionally needs `kind`, `kubectl`, and `helm`. Run `just anvil-cluster-preflight` to check, or
   `just anvil-cluster-bootstrap` to install pinned, checksum-verified versions.
 - Images destined for the cluster must be built without provenance attestations. The generated recipes already do this;
   a hand-rolled build that emits a multi-manifest artifact will be silently refused by the cluster loader.
-- No registry integration: no push, no authentication, no promotion. Images are built and consumed locally.
+- No registry integration for the exec image: no push, no authentication, no promotion. It is built and consumed
+  locally, which is why it needs no published artifact to exist.
 - The cluster harness targets Kind. Other Kubernetes distributions are out of scope.

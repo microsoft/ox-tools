@@ -187,10 +187,16 @@
 //! ```toml
 //! [container]
 //! enabled = true
-//! image = "docker.io/library/rust:1.85"
 //! ```
 //!
-//! With that in place, `just anvil-pr` transparently runs in the container;
+//! With that in place, `just anvil-pr` transparently runs in the container.
+//! No image needs to exist first: anvil generates a Dockerfile that installs
+//! the toolchain and tools this repo already pins, and builds it on first
+//! use. The image is tagged with a hash of its inputs, so bumping a pinned
+//! tool version selects an image that cannot already exist and rebuilds,
+//! while an unrelated edit reuses the cached one. Set `image` to pull a
+//! pre-built reference instead, or `dockerfile` to build your own.
+//!
 //! `[[image]]` and `[cluster]` sections add the image-build and cluster
 //! recipes. A repo with no `anvil.toml` is byte-for-byte unchanged.
 //!

@@ -250,6 +250,198 @@ fn devcontainer_requires_explicit_flag() {
     assert!(!root.join(".devcontainer/devcontainer.json").exists());
 }
 
+/// The default exec image: with neither `image` nor `dockerfile` set, anvil
+/// must supply the Dockerfile itself, so a repository can adopt container
+/// execution without owning any image plumbing. This is what "self-sustained"
+/// means in practice — the bottom rung of the ladder exists.
+#[test]
+fn default_exec_image_is_generated_and_built() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), "[container]\nenabled = true\n");
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    let dockerfile = root.join("justfiles/anvil/container/Dockerfile");
+    assert!(dockerfile.is_file(), "anvil must generate its own exec Dockerfile");
+    assert!(root.join("justfiles/anvil/container/Dockerfile.dockerignore").is_file());
+
+    // Tools come from the generated catalog, not a second hand-kept list.
+    let body = std::fs::read_to_string(&dockerfile).unwrap();
+    assert!(body.contains("just anvil-setup"), "the image installs the pinned catalog");
+    assert!(
+        body.contains("@sha256:"),
+        "the base image must be digest-pinned or the content hash means nothing"
+    );
+
+    let shim = std::fs::read_to_string(root.join("justfiles/anvil/container.just")).unwrap();
+    assert!(shim.contains(r#"anvil_container_image_source := "build""#));
+    assert!(shim.contains(r#"anvil_container_dockerfile := "justfiles/anvil/container/Dockerfile""#));
+    assert!(shim.contains(r#"anvil_container_image_name := "anvil-repo""#));
+}
+
+/// A locally-built image exists only on the machine that built it, so a CI
+/// job-level container cannot reference it — the runner resolves that before
+/// the job starts and has no way to run the generated recipes. Injecting it
+/// anyway spliced an empty reference: rejected outright by ADO, and silently
+/// non-containerized on GitHub, which is worse than an error.
+#[test]
+fn build_mode_does_not_inject_a_ci_container() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), "[container]\nenabled = true\n");
+    run_update(&container_catalog(), &ado_apply(), &root).unwrap();
+
+    let job = std::fs::read_to_string(root.join(".pipelines/anvil/steps/job.yml")).unwrap();
+    assert!(!job.contains("container:"), "no job container without a resolvable image");
+    for name in ["anvil-pr.yml", "anvil-scheduled.yml"] {
+        let pipeline = std::fs::read_to_string(root.join(".pipelines").join(name)).unwrap();
+        assert!(
+            !pipeline.contains("image: \"\""),
+            "{name} must never declare an empty container image"
+        );
+    }
+
+    let (_tmp2, root2) = named_workspace("repo");
+    write(&root2.join("anvil.toml"), "[container]\nenabled = true\n");
+    run_update(&container_catalog(), &github_apply(), &root2).unwrap();
+    for name in ["anvil-pr.yml", "anvil-scheduled.yml"] {
+        let workflow = std::fs::read_to_string(root2.join(".github/workflows").join(name)).unwrap();
+        assert!(
+            !workflow.contains("container_image:"),
+            "{name} must not claim a container it cannot obtain"
+        );
+    }
+}
+
+/// The editor resolves the devcontainer descriptor itself and cannot call the
+/// generated recipes, so a locally-built image has to be expressed as a build
+/// rather than as a reference that does not exist yet.
+#[test]
+fn devcontainer_describes_a_build_when_the_image_is_built() {
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "[container]\nenabled = true\ndevcontainer = true\nbuild-args = { RUST_CHANNEL = \"1.93\" }\n",
+    );
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    let descriptor = std::fs::read_to_string(root.join(".devcontainer/devcontainer.json")).unwrap();
+    assert!(!descriptor.contains(r#""image": """#), "an empty image is an invalid descriptor");
+    assert!(descriptor.contains(r#""dockerfile": "justfiles/anvil/container/Dockerfile""#));
+    assert!(descriptor.contains(r#""RUST_CHANNEL": "1.93""#), "build args reach the descriptor");
+    // Cheap well-formedness guard: the substitution splices a JSON fragment,
+    // so an unbalanced brace would be the likely failure mode.
+    assert_eq!(
+        descriptor.matches('{').count(),
+        descriptor.matches('}').count(),
+        "descriptor braces must balance: {descriptor}"
+    );
+}
+
+/// The identity inputs must cover everything that changes the image. The
+/// image installs its tools by running `just anvil-setup`, whose dependency
+/// chain reaches the tier, group, check and tool recipes — so the recipe tree
+/// is hashed too, at run time. Only the files that drive the container from
+/// the host are held back, and excluding `container.just` is load-bearing: it
+/// is the file that computes the hash.
+#[test]
+fn exec_image_identity_covers_what_changes_the_image() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), "[container]\nenabled = true\n");
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    let shim = std::fs::read_to_string(root.join("justfiles/anvil/container.just")).unwrap();
+    let declared = shim
+        .lines()
+        .find(|l| l.contains("$hashInputs ="))
+        .expect("the shim declares its literal hash inputs");
+
+    for expected in [
+        "justfiles/anvil/container/Dockerfile",
+        "justfiles/anvil/container/Dockerfile.dockerignore",
+        "rust-toolchain.toml",
+    ] {
+        assert!(declared.contains(expected), "{expected} must define image identity: {declared}");
+    }
+
+    // The recipe tree is added by a run-time sweep, minus an explicit denylist.
+    assert!(
+        shim.contains("Get-ChildItem -LiteralPath $recipeRoot -Recurse -File -Filter '*.just'"),
+        "the recipe tree must participate in image identity"
+    );
+    let excluded = shim
+        .lines()
+        .find(|l| l.contains("$excluded ="))
+        .expect("the shim declares its exclusions");
+    assert!(
+        excluded.contains("justfiles/anvil/container.just"),
+        "the driver must be excluded or the tag would depend on itself: {excluded}"
+    );
+}
+
+/// The cluster and image-build recipes cannot change what `anvil-setup`
+/// installs, so editing them must not force a multi-minute image rebuild.
+#[test]
+fn cluster_recipes_are_excluded_from_exec_image_identity() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), image_cluster_toml());
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    let shim = std::fs::read_to_string(root.join("justfiles/anvil/container.just")).unwrap();
+    let excluded = shim.lines().find(|l| l.contains("$excluded =")).unwrap();
+    for path in [
+        "justfiles/anvil/container.just",
+        "justfiles/anvil/container-images.just",
+        "justfiles/anvil/cluster.just",
+        "justfiles/anvil/cluster-bootstrap.just",
+    ] {
+        assert!(excluded.contains(path), "{path} must not define image identity: {excluded}");
+    }
+}
+
+/// A repository that brings its own Dockerfile keeps full control of the
+/// image, and its extra build inputs participate in the identity hash. Anvil
+/// must not emit its own Dockerfile in that case: a generated file nothing
+/// reads is an invitation to edit the wrong one.
+#[test]
+fn repo_dockerfile_replaces_the_generated_one() {
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "[container]\n\
+         enabled = true\n\
+         dockerfile = \"ci/anvil.Dockerfile\"\n\
+         build-args = { RUST_CHANNEL = \"ms-prod-1.95\" }\n\
+         build-secrets = [\"id=tok,env=TOK\"]\n\
+         hash-inputs = [\"ci/install-tools.sh\"]\n",
+    );
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    assert!(!root.join("justfiles/anvil/container/Dockerfile").exists());
+
+    let shim = std::fs::read_to_string(root.join("justfiles/anvil/container.just")).unwrap();
+    assert!(shim.contains(r#"anvil_container_dockerfile := "ci/anvil.Dockerfile""#));
+    assert!(shim.contains(r#"$buildArgs = @('RUST_CHANNEL=ms-prod-1.95')"#));
+    assert!(shim.contains(r#"$buildSecrets = @('id=tok,env=TOK')"#));
+    assert!(shim.contains("ci/install-tools.sh"), "declared hash inputs reach the shim");
+    // A secret's value must never influence a tag.
+    let hash_line = shim.lines().find(|l| l.contains("$hashInputs =")).unwrap();
+    assert!(!hash_line.contains("TOK"), "build secrets must stay out of the identity");
+}
+
+/// A pre-built image is still just pulled: a repository that opted into an
+/// image whose contents it does not describe has nothing for anvil to hash,
+/// and must keep working exactly as before.
+#[test]
+fn configured_image_still_pulls() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), "[container]\nenabled = true\nimage = \"img:1\"\n");
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    assert!(!root.join("justfiles/anvil/container/Dockerfile").exists());
+    let shim = std::fs::read_to_string(root.join("justfiles/anvil/container.just")).unwrap();
+    assert!(shim.contains(r#"anvil_container_image_source := "pull""#));
+    assert!(shim.contains(r#"$hashInputs = @()"#), "nothing to hash in pull mode");
+}
+
 /// After applying with container mode enabled, a second dry-run must report no
 /// changes — the enabled transforms are deterministic and the regenerate-check
 /// stays green.

@@ -1,6 +1,6 @@
 {
   "name": "anvil-container",
-  "image": "__IMAGE__",
+  __IMAGE_OR_BUILD__,
   "workspaceFolder": "__WORKDIR__",
   "workspaceMount": "source=${localWorkspaceFolder},target=__WORKDIR__,type=bind",
   "mounts": __MOUNTS_JSON__,
