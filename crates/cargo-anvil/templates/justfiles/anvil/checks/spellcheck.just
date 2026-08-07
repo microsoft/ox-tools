@@ -24,6 +24,18 @@
 [script("pwsh", "-NoProfile")]
 anvil-spellcheck: anvil-spellcheck-validate-prereqs
     $ErrorActionPreference = 'Stop'
+    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) {
+        if ('{{cargo_spellcheck_version}}' -ne '0.15.1') {
+            Write-Error 'cargo-spellcheck pin changed; re-evaluate and remove or update the ARM64 compatibility guard'
+            exit 2
+        }
+        if ($env:ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64 -eq 'true') {
+            Write-Host 'anvil-spellcheck: ARM64 -- workflow-authorized skip (cargo-spellcheck 0.15.1 incompatibility)'
+            exit 0
+        }
+        Write-Error 'cargo-spellcheck 0.15.1 is unsupported on ARM64; run spellcheck on x64, or set ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64=true to accept the skip (the generated GitHub pr-fast workflow sets it on ARM legs where x64 legs provide coverage)'
+        exit 2
+    }
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') {
         Write-Host 'anvil-spellcheck: no modified packages; skipping'
         exit 0

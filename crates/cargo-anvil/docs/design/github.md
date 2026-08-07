@@ -128,6 +128,7 @@ flowchart LR
     sadv_job["scheduled-advisories<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     srun_job["scheduled-runtime-analysis<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     sexh_job["scheduled-exhaustive<br/>matrix: linux, windows"]:::job
+    publish_job["publish-failure<br/>upsert incident issue"]:::job
     stest_setup[".github/actions/<br/>anvil-setup"]:::action
     sadv_setup[".github/actions/<br/>anvil-setup"]:::action
     srun_setup[".github/actions/<br/>anvil-setup"]:::action
@@ -137,6 +138,7 @@ flowchart LR
     srun_act[".github/actions/<br/>anvil-scheduled-runtime-analysis"]:::action
     sexh_act[".github/actions/<br/>anvil-scheduled-exhaustive"]:::action
     codecov_act["codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f<br/>v7.0.0"]:::external
+    github_issues["GitHub Issues"]:::external
     stest_just["just anvil-scheduled-test"]:::recipe
     stest_setup_just["just anvil-setup"]:::recipe
     sadv_just["just anvil-scheduled-advisories"]:::recipe
@@ -150,22 +152,32 @@ flowchart LR
     sched_root -. uses .-> sched_impl
     sched_impl --> stest_job
     sched_impl --> sadv_job
+    sched_impl --> srun_job
     sched_impl --> sexh_job
+    stest_job --> publish_job
+    sadv_job --> publish_job
+    srun_job --> publish_job
+    sexh_job --> publish_job
 
     stest_job ==> stest_act
     stest_job ==> codecov_act
     sadv_job ==> sadv_act
+    srun_job ==> srun_act
     sexh_job ==> sexh_act
+    publish_job ==> github_issues
 
     stest_act ==> stest_setup
     stest_act ==> stest_just
     sadv_act ==> sadv_setup
     sadv_act ==> sadv_just
+    srun_act ==> srun_setup
+    srun_act ==> srun_just
     sexh_act ==> sexh_setup
     sexh_act ==> sexh_just
 
     stest_setup ==> stest_setup_just
     sadv_setup ==> sadv_setup_just
+    srun_setup ==> srun_setup_just
     sexh_setup ==> sexh_setup_just
 
     classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
@@ -421,6 +433,16 @@ jobs:
         os: [linux, windows]
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}
     steps: [ { uses: actions/checkout }, { uses: ./.github/actions/anvil-scheduled-exhaustive } ]
+
+  publish-failure:
+    needs: [scheduled-test, scheduled-advisories, scheduled-runtime-analysis, scheduled-exhaustive]
+    if: ${{ always() && vars.ANVIL_PUBLISH_FAILURE_ISSUE != 'false'
+      && contains(needs.*.result, 'failure') }}
+    runs-on: ${{ inputs.linux_runner }}
+    permissions: { contents: read, issues: write }
+    steps:
+      - uses: actions/github-script
+        # Upsert the stable "[Anvil] Scheduled checks failed" issue.
 ```
 
 Scheduled composite actions don't receive any `include_*` inputs at all — their inputs
@@ -645,8 +667,16 @@ Recommended root workflow shape:
 
 - `permissions: contents: read` at the workflow level. anvil's default ships with
   this.
-- No `pull-requests: write` (the PR-title check only needs the title from the event
-  payload, which is already in `${{ github.event.pull_request.title }}`).
+- The scheduled reusable-workflow call grants `issues: write` at job scope so its
+  publisher can create or comment on the failure issue. The called workflow resets its
+  default permissions to `contents: read`, then restores `issues: write` only on the
+  publishing job; scheduled check jobs do not inherit write access. The PR workflow
+  never receives this permission.
+- The PR reusable-workflow call grants `pull-requests: write` for advisory comments.
+  The called workflow resets its default permissions to `contents: read`, then restores
+  `pull-requests: write` only on `pr-fast`, where the sticky-comment steps run. Other PR
+  jobs do not inherit write access. The PR-title check itself reads the title from the
+  event payload and does not use the write permission.
 - Scheduled-tier secrets, if any, live on `anvil-scheduled.yml` only — never on `anvil-pr.yml`.
 - All cargo-tool installs done by the catalog setup recipes use `--locked` (with
   `cargo install` or `cargo binstall` depending on `installer`).
@@ -692,7 +722,56 @@ anvil does not gate the PR on coverage. The lcov upload is informational; Codeco
 own status check is the gating layer when the adopter wants one (configured in Codecov,
 visible as a separate required check in branch protection).
 
-## 11. Advisory PR comments
+## 11. Scheduled failure issues
+
+The GitHub scheduled reusable workflow publishes a failure as a repository issue by
+default. The publisher depends on every scheduled group and uses `always()` so it can
+inspect their terminal results even when one or more groups fail. It runs only when at
+least one result is `failure`; successful, skipped, and cancelled runs do not create
+issues.
+
+The issue title is `[Anvil] Scheduled checks failed`, while the stable hidden marker
+`<!-- anvil scheduled failure -->` identifies an issue owned by the publisher. The
+publisher makes one repository-scoped Search API request for open issues whose bodies
+match the marker terms, then verifies the exact marker client-side:
+
+- If none exists, it creates one containing the failed group names and a link to the
+  workflow run.
+- If one exists, it adds the new failure details as a comment instead of creating a
+  duplicate.
+
+This is a best-effort upsert: GitHub's search index is eventually consistent and the
+single request considers at most 100 results, so closely overlapping failures can
+occasionally create duplicate incident issues. Marker-based identity prevents a
+human-authored issue with the same title from being reused and survives a maintainer
+renaming an Anvil incident.
+
+No label is required because repositories can remove or rename their default labels.
+The issue remains open until a maintainer resolves the underlying failure and closes it.
+If a later run fails after closure, the publisher creates a new incident issue.
+
+The publisher uses the workflow's short-lived `GITHUB_TOKEN`. The scheduled root call
+allows `issues: write`, while the reusable workflow defaults to `contents: read` and
+grants `issues: write` only to the publishing job. Scheduled check jobs therefore retain
+read-only access. The publisher does not receive repository contents beyond read access
+and does not forward logs or environment data into the issue. This narrow GitHub-native
+path also lets GitHub's Teams app relay issue notifications without an external webhook
+or additional secret.
+
+The generated root and implementation workflows must be updated together. A repository
+that has taken ownership of the root workflow must retain `issues: write` on the reusable
+workflow call (or apply the generated `.anvil-proposed` update) when adopting this job.
+Repositories with Issues disabled cannot publish failure incidents. Missing permission or
+disabled Issues deliberately fails the publishing job rather than silently losing the
+notification; the original failing scheduled jobs remain visible alongside that error.
+
+Repositories that do not want issue publication set the
+`ANVIL_PUBLISH_FAILURE_ISSUE` Actions repository variable to `false`. This configuration
+lives in repository settings instead of an Anvil-owned workflow, so the root workflow
+stays on the automatic update path. The scheduled call retains `issues: write`; the
+publisher's condition prevents use of that permission when publication is disabled.
+
+## 12. Advisory PR comments
 
 Recipes that surface non-blocking findings exit 0 and write a markdown body to
 `target/anvil/comments/<NAME>.md` (see [checks.md §6](./checks.md#6-advisory-pr-comments)
@@ -735,9 +814,9 @@ Conditions explained:
   `pull-requests: write` to fork-PR workflow runs by default, so the action would 403.
 
 Permissions: the reusable workflow's caller (`anvil-pr.yml`) declares
-`pull-requests: write` on the `anvil-pr` job that calls `anvil-pr-impl.yml`. The
-top-level `permissions:` block stays at `contents: read` so unrelated reads in the same
-workflow are still least-privilege.
+`pull-requests: write` on the `anvil-pr` job that calls `anvil-pr-impl.yml`. The called
+workflow resets its default to `contents: read` and restores `pull-requests: write` only
+on `pr-fast`, where the sticky-comment steps run. Other called jobs remain read-only.
 
 Adding a new advisory check is a two-step change: the recipe writes
 `target/anvil/comments/<NEW>.md` (and removes it on a clean run); the workflow gains

@@ -31,6 +31,9 @@ on:
           configured at Codecov; required for private repos.
         required: false
 
+permissions:
+  contents: read
+
 # Note on matrices: every multi-OS job below hardcodes its OS axis as
 # an inline YAML array. Per-leg runner *labels* are inputs (so adopters
 # can swap in self-hosted runners), but the OS axis itself is part of
@@ -77,6 +80,14 @@ jobs:
         uses: ./.github/actions/anvil-impact
 
   pr-fast:
+    permissions:
+      contents: read
+      pull-requests: write
+    env:
+      # cargo-spellcheck 0.15.1 is unusable on ARM64. This workflow may
+      # skip it there because the same architecture-independent check
+      # runs on both x64 legs; direct ARM64 recipe invocations fail.
+      ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64: ${{ endsWith(matrix.os, '-arm') && 'true' || 'false' }}
     # Cross-OS / cross-arch because pr-fast contains compile-sensitive
     # checks (clippy, doc-build, udeps, semver-check, external-types)
     # whose results can differ across host for crates that use

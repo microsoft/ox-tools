@@ -165,7 +165,7 @@ that provided the strongest version of the check.
 | `ensure-no-default-features`   | `cargo ensure-no-default-features --workspace`            | oxidizer-github |
 | `doc-build`                    | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps` | oxidizer-github |
 | `readme-check`                 | `cargo doc2readme --check` for each crate that opts in (presence of a `[package.metadata.doc2readme]` table) | oxidizer-github |
-| `spellcheck`                   | `cargo spellcheck check --code 1`                         | oxidizer-github |
+| `spellcheck`                   | `cargo spellcheck check --code 1`. The generated mixed-architecture GitHub workflow explicitly sets `ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64=true` on ARM64 because cargo-spellcheck 0.15.1 cannot compile on Linux ARM64 and its Windows ARM64 binary crashes; both x64 legs retain the architecture-independent check. Direct ARM64 recipe invocations fail unless that skip policy is explicitly set. | oxidizer-github |
 | `pr-title`                     | Repository policy regex applied to the title in the `PR_TITLE` env var. The accepted types (`feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `build`, `ci`, `perf`, `revert`) are a deliberate subset of Conventional Commits, not the complete grammar. The title must occupy a single line, so trailing content after the description is rejected. A rejected title reports the accepted title formats and the case-insensitive type names, so the author can correct the title from the check output alone. Skipped only outside a pull request context, where `PR_TITLE` is unset or empty (local runs and cloud builds that are not pull request builds); an invalid title or failure to retrieve a known PR's title fails loudly. GitHub supplies the event title directly. ADO resolves it through the REST API because `System.PullRequest.Title` does not exist. | oxidizer-github |
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
@@ -338,6 +338,12 @@ Each catalog check is tagged with one of four buckets:
 | affected  | `ANVIL_INCLUDE_AFFECTED`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
 | required  | `ANVIL_INCLUDE_REQUIRED`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
 | unscoped  | *(none)*                       | Always run.                                                                  | Always run.                          |
+
+`ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64=true` is a separate temporary policy:
+it permits cargo-spellcheck 0.15.1 setup, validation, and execution to no-op on
+ARM64. The generated GitHub `pr-fast` workflow sets it only on ARM legs because
+the same workflow retains x64 spellcheck coverage. ARM64-only callers must opt in
+explicitly after arranging equivalent x64 coverage.
 
 Bucket assignments per check:
 

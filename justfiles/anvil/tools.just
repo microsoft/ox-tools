@@ -173,9 +173,9 @@ anvil-tool-pwsh-validate-prereqs:
 # or no-op if it is already installed at or above that version. The
 # `installer` parameter selects between:
 #   - "install"  (cargo install --locked, pure-source). Default.
-#   - "binstall" (cargo binstall --no-confirm --locked, with cargo install
-#                 fallback if binstall fails). Bootstraps cargo-binstall
-#                 itself if not on PATH.
+#   - "binstall" (cargo binstall --no-confirm --locked with binstall's compile
+#                 strategy disabled, followed by a controlled cargo install
+#                 fallback). Bootstraps cargo-binstall itself if not on PATH.
 # `source_prereq`, when set, runs immediately before a source installation,
 # including a binstall fallback.
 [script("pwsh", "-NoProfile")]
@@ -223,7 +223,15 @@ _install-tool name version installer source_prereq="":
                 exit $LASTEXITCODE
             }
         }
-        cargo binstall --no-confirm --locked $name --version "=$version"
+        # Keep source builds behind Anvil's prerequisite check instead of
+        # allowing binstall to compile before that check can run. Tools with
+        # no source prerequisite may still use binstall's compile strategy.
+        $binstallArgs = @('binstall', '--no-confirm', '--locked')
+        if ($sourcePrereq) {
+            $binstallArgs += @('--disable-strategies', 'compile')
+        }
+        $binstallArgs += @($name, '--version', "=$version")
+        cargo @binstallArgs
         if ($LASTEXITCODE -eq 0) { exit 0 }
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
     }
@@ -716,13 +724,49 @@ anvil-tool-cargo-sort-install installer="install": (_install-tool "cargo-sort" c
 [group("anvil-setup")]
 anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_version)
 
+# cargo-spellcheck 0.15.1 is not usable on ARM64: its source dependency
+# ra_ap_stdx no longer compiles with current Rust, and its Windows ARM64 binary
+# segfaults. The generated mixed-architecture GitHub workflow explicitly
+# permits ARM64 to skip because its x64 legs perform the same check. Direct
+# ARM64 invocations fail loudly instead of reporting success without coverage.
+
 # Install the pinned `cargo-spellcheck` tool.
 [group("anvil-setup")]
-anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer "anvil-tool-cargo-spellcheck-source-deps-check")
+[script("pwsh", "-NoProfile")]
+anvil-tool-cargo-spellcheck-install installer="install":
+    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) {
+        if ('{{cargo_spellcheck_version}}' -ne '0.15.1') {
+            Write-Error 'cargo-spellcheck pin changed; re-evaluate and remove or update the ARM64 compatibility guard'
+            exit 2
+        }
+        if ($env:ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64 -eq 'true') {
+            Write-Host 'anvil-tool-cargo-spellcheck-install: ARM64 -- workflow-authorized skip (cargo-spellcheck 0.15.1 incompatibility)'
+            exit 0
+        }
+        Write-Error 'cargo-spellcheck 0.15.1 is unsupported on ARM64; run spellcheck on x64, or set ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64=true to accept the skip (the generated GitHub pr-fast workflow sets it on ARM legs where x64 legs provide coverage)'
+        exit 2
+    }
+    & "{{just_executable()}}" _install-tool cargo-spellcheck {{cargo_spellcheck_version}} {{installer}} anvil-tool-cargo-spellcheck-source-deps-check
+    exit $LASTEXITCODE
 
 # Validate that the pinned `cargo-spellcheck` tool is available.
 [group("anvil-setup")]
-anvil-tool-cargo-spellcheck-validate-prereqs: (_check-tool "cargo-spellcheck" cargo_spellcheck_version)
+[script("pwsh", "-NoProfile")]
+anvil-tool-cargo-spellcheck-validate-prereqs:
+    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) {
+        if ('{{cargo_spellcheck_version}}' -ne '0.15.1') {
+            Write-Error 'cargo-spellcheck pin changed; re-evaluate and remove or update the ARM64 compatibility guard'
+            exit 2
+        }
+        if ($env:ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64 -eq 'true') {
+            Write-Host 'anvil-tool-cargo-spellcheck-validate-prereqs: ARM64 -- workflow-authorized skip (cargo-spellcheck 0.15.1 incompatibility)'
+            exit 0
+        }
+        Write-Error 'cargo-spellcheck 0.15.1 is unsupported on ARM64; run spellcheck on x64, or set ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64=true to accept the skip (the generated GitHub pr-fast workflow sets it on ARM legs where x64 legs provide coverage)'
+        exit 2
+    }
+    & "{{just_executable()}}" _check-tool cargo-spellcheck {{cargo_spellcheck_version}}
+    exit $LASTEXITCODE
 
 # Install the pinned `cargo-udeps` tool.
 [group("anvil-setup")]

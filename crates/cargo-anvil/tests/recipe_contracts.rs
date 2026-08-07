@@ -20,43 +20,12 @@ const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
 const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.just");
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
+#[cfg(target_arch = "aarch64")]
+const SPELLCHECK: &str = include_str!("../templates/justfiles/anvil/checks/spellcheck.just");
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
+const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
-
-fn write(path: &Path, contents: &str) {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
-    }
-    std::fs::write(path, contents).unwrap();
-}
-
-fn tools_available() -> bool {
-    Command::new("just").arg("--version").output().is_ok() && Command::new("pwsh").arg("--version").output().is_ok()
-}
-
-fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
-    let tmp = TempDir::new().unwrap();
-    let mut justfile = String::from("set unstable\n\nrust_nightly := \"nightly-test\"\n\n");
-    for (name, contents) in imports {
-        write(&tmp.path().join(name), contents);
-        writeln!(justfile, "import '{name}'").unwrap();
-    }
-    justfile.push('\n');
-    for recipe in dependency_recipes {
-        justfile.push_str(recipe);
-        justfile.push_str(":\n\n");
-    }
-    write(&tmp.path().join("Justfile"), &justfile);
-    write(
-        &tmp.path().join("Cargo.toml"),
-        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
-    );
-
-    let bin = tmp.path().join("fake-bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    write(
-        &bin.join("cargo.ps1"),
-        r#"
+const FAKE_CARGO_PS1: &str = r#"
 $joined = $args -join ' '
 if ($env:FAKE_CARGO_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value $joined
@@ -123,9 +92,50 @@ if ($args -contains 'nextest') {
     }
     exit [int]$env:FAKE_NEXTEST_EXIT
 }
+if ($args -contains 'binstall') {
+    exit [int]$env:FAKE_BINSTALL_EXIT
+}
+if ($args -contains 'install' -and $args -contains '--version') {
+    exit [int]$env:FAKE_INSTALL_EXIT
+}
 exit 0
-"#,
+"#;
+
+fn write(path: &Path, contents: &str) {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, contents).unwrap();
+}
+
+fn tools_available() -> bool {
+    Command::new("just").arg("--version").output().is_ok() && Command::new("pwsh").arg("--version").output().is_ok()
+}
+
+fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
+    let tmp = TempDir::new().unwrap();
+    let mut justfile = String::from("set unstable\n\n");
+    if !imports.iter().any(|(name, _)| *name == "versions.just") {
+        justfile.push_str("rust_nightly := \"nightly-test\"\n\n");
+    }
+    for (name, contents) in imports {
+        write(&tmp.path().join(name), contents);
+        writeln!(justfile, "import '{name}'").unwrap();
+    }
+    justfile.push('\n');
+    for recipe in dependency_recipes {
+        justfile.push_str(recipe);
+        justfile.push_str(":\n\n");
+    }
+    write(&tmp.path().join("Justfile"), &justfile);
+    write(
+        &tmp.path().join("Cargo.toml"),
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
     );
+
+    let bin = tmp.path().join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    write(&bin.join("cargo.ps1"), FAKE_CARGO_PS1);
     write(&bin.join("git.ps1"), "exit 0\n");
     tmp
 }
@@ -141,6 +151,7 @@ fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> 
     command.args(["--justfile", "Justfile"]).args(arguments).current_dir(root);
     command.env("PATH", path_with_fake_bin(root));
     command.env("FAKE_WORKSPACE_ROOT", root);
+    command.env_remove("ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64");
     for &(key, value) in environment {
         command.env(key, value);
     }
@@ -153,6 +164,55 @@ fn assert_failed(output: &Output, context: &str) {
         "{context} unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[cfg(target_arch = "aarch64")]
+fn assert_arm_spellcheck_recipes_fail(root: &Path, environment: &[(&str, &OsStr)], expected: &str) {
+    for recipe in [
+        "anvil-tool-cargo-spellcheck-install",
+        "anvil-tool-cargo-spellcheck-validate-prereqs",
+        "anvil-spellcheck",
+    ] {
+        let output = run_just(root, &[recipe], environment);
+        assert_failed(&output, recipe);
+        let diagnostics = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            diagnostics.contains(expected),
+            "{recipe} did not emit expected diagnostic '{expected}':\n{diagnostics}"
+        );
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[test]
+fn arm_spellcheck_skip_is_explicit_and_version_coupled() {
+    if !tools_available() {
+        return;
+    }
+    let unsupported = fixture(
+        &[("versions.just", VERSIONS), ("tools.just", TOOLS), ("spellcheck.just", SPELLCHECK)],
+        &[],
+    );
+    assert_arm_spellcheck_recipes_fail(unsupported.path(), &[], "ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64=true");
+
+    let changed_versions = VERSIONS.replace("cargo_spellcheck_version := \"0.15.1\"", "cargo_spellcheck_version := \"0.15.2\"");
+    let changed_pin = fixture(
+        &[
+            ("versions.just", &changed_versions),
+            ("tools.just", TOOLS),
+            ("spellcheck.just", SPELLCHECK),
+        ],
+        &[],
+    );
+    assert_arm_spellcheck_recipes_fail(
+        changed_pin.path(),
+        &[("ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64", OsStr::new("true"))],
+        "cargo-spellcheck pin changed; re-evaluate",
     );
 }
 
@@ -367,6 +427,96 @@ fn semver_exit_code_contract_is_executed() {
         );
         assert_failed(&failed, &format!("cargo-semver-checks exit {exit}"));
     }
+}
+
+#[test]
+fn install_tool_controls_source_fallback_and_prerequisite_ordering() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
+    let justfile_path = tmp.path().join("Justfile");
+    let mut justfile = std::fs::read_to_string(&justfile_path).unwrap();
+    justfile.push_str(
+        r#"
+[script("pwsh", "-NoProfile")]
+source-prereq:
+    Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value 'source-prereq'
+    exit [int]$env:FAKE_PREREQ_EXIT
+"#,
+    );
+    write(&justfile_path, &justfile);
+    let log = tmp.path().join("cargo.log");
+
+    let fallback = run_just(
+        tmp.path(),
+        &["_install-tool", "cargo-spellcheck", "0.15.1", "binstall", "source-prereq"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_BINSTALL_EXIT", OsStr::new("7")),
+            ("FAKE_PREREQ_EXIT", OsStr::new("0")),
+            ("FAKE_INSTALL_EXIT", OsStr::new("0")),
+        ],
+    );
+    assert!(
+        fallback.status.success(),
+        "controlled source fallback should succeed:\n{}",
+        String::from_utf8_lossy(&fallback.stderr)
+    );
+    let log_contents = std::fs::read_to_string(&log).unwrap();
+    let lines = log_contents.lines().collect::<Vec<_>>();
+    let binstall = lines
+        .iter()
+        .position(|line| line.contains("binstall --no-confirm --locked --disable-strategies compile"))
+        .expect("source-prerequisite tools must disable binstall compilation");
+    let prerequisite = lines
+        .iter()
+        .position(|line| *line == "source-prereq")
+        .expect("source prerequisite must run after binary installation fails");
+    let source_install = lines
+        .iter()
+        .position(|line| line.contains("install --locked cargo-spellcheck --version =0.15.1"))
+        .expect("Anvil must perform the controlled source install");
+    assert!(binstall < prerequisite && prerequisite < source_install);
+
+    std::fs::remove_file(&log).unwrap();
+    let prerequisite_failure = run_just(
+        tmp.path(),
+        &["_install-tool", "cargo-spellcheck", "0.15.1", "binstall", "source-prereq"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_BINSTALL_EXIT", OsStr::new("7")),
+            ("FAKE_PREREQ_EXIT", OsStr::new("9")),
+        ],
+    );
+    assert_failed(&prerequisite_failure, "source prerequisite failure");
+    let failed_log = std::fs::read_to_string(&log).unwrap();
+    assert!(failed_log.contains("source-prereq"));
+    assert!(
+        !failed_log.contains("install --locked cargo-spellcheck --version =0.15.1"),
+        "source installation must not run after prerequisite failure"
+    );
+
+    std::fs::remove_file(&log).unwrap();
+    let ordinary_tool = run_just(
+        tmp.path(),
+        &["_install-tool", "cargo-other", "1.2.3", "binstall", ""],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_BINSTALL_EXIT", OsStr::new("7")),
+            ("FAKE_INSTALL_EXIT", OsStr::new("0")),
+        ],
+    );
+    assert!(ordinary_tool.status.success());
+    let ordinary_log = std::fs::read_to_string(&log).unwrap();
+    let ordinary_binstall = ordinary_log
+        .lines()
+        .find(|line| line.contains("binstall --no-confirm --locked"))
+        .expect("ordinary tool must attempt binstall");
+    assert!(
+        !ordinary_binstall.contains("--disable-strategies compile"),
+        "tools without source prerequisites retain binstall's compile strategy"
+    );
 }
 
 #[test]
