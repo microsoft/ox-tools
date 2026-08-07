@@ -177,6 +177,26 @@
 //!    region. The next `update` detects the dirt and writes a
 //!    `.anvil-proposed` sibling instead of overwriting.
 //!
+//! ## Containers
+//!
+//! anvil can optionally run the generated recipes inside a container, build
+//! OCI images, and stand up a throwaway Kind cluster for integration tests.
+//! All three are opt-in and independent, configured in an `anvil.toml` at the
+//! repo root:
+//!
+//! ```toml
+//! [container]
+//! enabled = true
+//! image = "docker.io/library/rust:1.85"
+//! ```
+//!
+//! With that in place, `just anvil-pr` transparently runs in the container;
+//! `[[image]]` and `[cluster]` sections add the image-build and cluster
+//! recipes. A repo with no `anvil.toml` is byte-for-byte unchanged.
+//!
+//! See `docs/containers.md` for usage, the full configuration reference, and
+//! the technical overview.
+//!
 //! ## In-tree tool customization
 //!
 //! anvil follows a few source-level and `Cargo.toml` conventions so you
@@ -306,6 +326,7 @@
 //! - `ado.md` — Azure DevOps Pipelines emission.
 //!
 //! And `docs/verification.md` for the continuous-validation strategy.
+//! User-facing container documentation lives in `docs/containers.md`.
 
 #![deny(unsafe_code)]
 

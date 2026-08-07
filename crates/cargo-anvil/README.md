@@ -177,6 +177,26 @@ Four escape valves, in increasing severity:
    region. The next `update` detects the dirt and writes a
    `.anvil-proposed` sibling instead of overwriting.
 
+### Containers
+
+anvil can optionally run the generated recipes inside a container, build
+OCI images, and stand up a throwaway Kind cluster for integration tests.
+All three are opt-in and independent, configured in an `anvil.toml` at the
+repo root:
+
+```toml
+[container]
+enabled = true
+image = "docker.io/library/rust:1.85"
+```
+
+With that in place, `just anvil-pr` transparently runs in the container;
+`[[image]]` and `[cluster]` sections add the image-build and cluster
+recipes. A repo with no `anvil.toml` is byte-for-byte unchanged.
+
+See `docs/containers.md` for usage, the full configuration reference, and
+the technical overview.
+
 ### In-tree tool customization
 
 anvil follows a few source-level and `Cargo.toml` conventions so you
@@ -305,6 +325,7 @@ See `docs/design/` for the full architecture:
 * `ado.md` — Azure DevOps Pipelines emission.
 
 And `docs/verification.md` for the continuous-validation strategy.
+User-facing container documentation lives in `docs/containers.md`.
 
 
 <hr/>
@@ -312,14 +333,14 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbI_VKBuSOMRUbfx_41ISPNUAbU-pof2TAXRkbObPMDStfcEhhZIGDa2NhcmdvLWFudmlsZTAuMy4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbWyr46vz1O5wbM6MJJL3MVL8bgThIjbr3XQ4bEYD-_SDz9mlhZIGDa2NhcmdvLWFudmlsZTAuMy4xa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate
- [__link3]: https://docs.rs/cargo-anvil/0.3.0/cargo_anvil/?search=Catalog
- [__link4]: https://docs.rs/cargo-anvil/0.3.0/cargo_anvil/?search=Catalog::anvil
- [__link5]: https://docs.rs/cargo-anvil/0.3.0/cargo_anvil/?search=CliMeta
- [__link6]: https://docs.rs/cargo-anvil/0.3.0/cargo_anvil/?search=CatalogBuilder::with_artifact
- [__link7]: https://docs.rs/cargo-anvil/0.3.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
- [__link8]: https://docs.rs/cargo-anvil/0.3.0/cargo_anvil/?search=CatalogBuilder::without_artifact
- [__link9]: https://docs.rs/cargo-anvil/0.3.0/cargo_anvil/?search=artifacts
+ [__link3]: https://docs.rs/cargo-anvil/0.3.1/cargo_anvil/?search=Catalog
+ [__link4]: https://docs.rs/cargo-anvil/0.3.1/cargo_anvil/?search=Catalog::anvil
+ [__link5]: https://docs.rs/cargo-anvil/0.3.1/cargo_anvil/?search=CliMeta
+ [__link6]: https://docs.rs/cargo-anvil/0.3.1/cargo_anvil/?search=CatalogBuilder::with_artifact
+ [__link7]: https://docs.rs/cargo-anvil/0.3.1/cargo_anvil/?search=CatalogBuilder::replace_artifact
+ [__link8]: https://docs.rs/cargo-anvil/0.3.1/cargo_anvil/?search=CatalogBuilder::without_artifact
+ [__link9]: https://docs.rs/cargo-anvil/0.3.1/cargo_anvil/?search=artifacts

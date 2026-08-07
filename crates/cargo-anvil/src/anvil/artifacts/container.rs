@@ -7,13 +7,13 @@
 //! recipe tree gains a shim (`justfiles/anvil/container.just`) and the tier
 //! and group recipes gain a re-entry guard that runs the same `just` target
 //! inside the container. All of this is applied at plan time from the
-//! [`ResolvedContainer`] settings, so the artifact bodies stored in the
+//! `ResolvedContainer` settings, so the artifact bodies stored in the
 //! catalog stay repository-independent (the catalog checksum is stable) and
 //! an absent / disabled config is byte-for-byte identical to a no-container
 //! build.
 //!
-//! The token-substitution approach mirrors
-//! [`super::github::render_group_action`]: templates carry `__TOKEN__`
+//! The token-substitution approach mirrors the `github` module's
+//! `render_group_action`: templates carry `__TOKEN__`
 //! placeholders that are replaced here with the resolved settings.
 
 use std::borrow::Cow;
@@ -88,7 +88,7 @@ const CLUSTER_BOOTSTRAP_JUST: &str = include_str!("../../../templates/justfiles/
 /// Register it with
 /// [`CatalogBuilder::with_container_artifact`](crate::CatalogBuilder::with_container_artifact)
 /// so it is emitted only when container mode is enabled. The body is a
-/// template; [`render_owned_body`] fills in the resolved settings at plan
+/// template; `render_owned_body` fills in the resolved settings at plan
 /// time.
 #[must_use]
 pub fn container_just() -> Artifact {
@@ -99,8 +99,7 @@ pub fn container_just() -> Artifact {
 ///
 /// Register it with
 /// [`CatalogBuilder::with_container_artifact`](crate::CatalogBuilder::with_container_artifact);
-/// it is additionally suppressed unless `devcontainer = true` (see
-/// [`emits_devcontainer`]).
+/// it is additionally suppressed unless `devcontainer = true`.
 #[must_use]
 pub fn devcontainer() -> Artifact {
     Artifact::owned_file(DEVCONTAINER_PATH, DEVCONTAINER_JSON)
@@ -120,7 +119,7 @@ pub(crate) fn emits_devcontainer(container: &ResolvedContainer) -> bool {
 /// Register it with
 /// [`CatalogBuilder::with_container_artifact`](crate::CatalogBuilder::with_container_artifact).
 /// It is additionally suppressed unless at least one `[[image]]` is
-/// configured (see [`secondary_gate_open`]).
+/// configured.
 #[must_use]
 pub fn container_images_just() -> Artifact {
     Artifact::owned_file(CONTAINER_IMAGES_JUST_PATH, CONTAINER_IMAGES_JUST)
@@ -132,7 +131,7 @@ pub fn container_images_just() -> Artifact {
 /// Register it with
 /// [`CatalogBuilder::with_container_artifact`](crate::CatalogBuilder::with_container_artifact).
 /// It is additionally suppressed unless a `[cluster]` section is
-/// configured (see [`secondary_gate_open`]).
+/// configured.
 #[must_use]
 pub fn cluster_just() -> Artifact {
     Artifact::owned_file(CLUSTER_JUST_PATH, CLUSTER_JUST)

@@ -369,12 +369,12 @@ impl Default for ClusterConfig {
 /// The `[container]`-exec fields (`enabled`, `image`, `engine`, …) come from
 /// the `[container]` section. The `images`, `image_output_dir` and `cluster`
 /// fields carry the **top-level sibling** sections (`[[image]]`, the
-/// `image-output-dir` key, and `[cluster]`); [`parse`] folds them in here so a
+/// `image-output-dir` key, and `[cluster]`); parsing folds them in here so a
 /// single value drives resolution and rendering.
 ///
 /// Every field is `Option` so the catalog default layer and the user's
 /// `anvil.toml` can be merged field-by-field ([`Self::overlay`]) before the
-/// built-in defaults are applied ([`Self::resolve`]).
+/// built-in defaults are applied by resolution.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContainerConfig {
     /// Opt into container execution. Built-in default: `false`.
