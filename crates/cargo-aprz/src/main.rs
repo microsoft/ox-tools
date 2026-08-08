@@ -17,6 +17,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 pub struct RealHost;
 
 #[cfg_attr(coverage_nightly, coverage(off))]
+#[mutants::skip] // Process-boundary glue (stdout/stderr handles, `std::process::exit`); nothing to assert on.
 impl Host for RealHost {
     fn output(&mut self) -> impl Write {
         stdout()
@@ -33,7 +34,7 @@ impl Host for RealHost {
 
 #[tokio::main]
 #[cfg_attr(coverage_nightly, coverage(off))]
-#[cfg_attr(test, mutants::skip)] // thin wrapper, tested via integration tests on `run()`
+#[mutants::skip] // Entry point: thin wrapper, tested via integration tests on `run()`.
 async fn main() {
     run(&mut RealHost, std::env::args()).await;
 }

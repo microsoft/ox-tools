@@ -30,6 +30,22 @@ allowed_external_types = []
 # public rustdoc for cargo-doc2readme to turn into a README.
 disable = true
 
+# Coverage threshold below the repo-wide 100% default.
+#
+# The uncovered code is concentrated in the network-backed fact providers
+# (`facts/crates`, `facts/advisories`, `facts/collector`, `facts/codebase`).
+# The tests that exercise them are marked `#[ignore]` because they download
+# the ~1.5 GB crates.io database dump and call the live GitHub API, which is
+# too slow and too rate-limit-prone to run on every PR. With those tests the
+# crate measures 89.8%; without them, 74.6%.
+#
+# TODO: ratchet this toward 100% by converting the ignored network tests into
+# offline tests backed by wiremock and recorded fixtures, as the `docs` and
+# `coverage` providers in this crate already do. Raise this number as coverage
+# improves; it should only ever go up.
+[package.metadata.coverage-gate]
+min-lines-percent = 74.0
+
 [dependencies]
 bytes = { workspace = true }
 camino = { workspace = true }
