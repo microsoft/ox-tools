@@ -106,6 +106,32 @@ bug_labels = ["bug", "crash", "defect", "regression"]
 # version = "^2.0"
 # ----------------------------------------------------------------------------
 
+# Reviewed 2026-08-08: `paste` is unmaintained (RUSTSEC-2024-0436) but has no safe
+# upgrade. It reaches us only transitively through `cel-interpreter`, which
+# `cargo-aprz` uses to evaluate appraisal expressions. Revisit when
+# `cel-interpreter` moves to `pastey` (which this workspace already uses directly).
+# This mirrors the matching exemption in `deny.toml`.
+[[allow_list]]
+name = "paste"
+version = "=1.0.15"
+
+# TODO: remove once a cargo-aprz release containing the withdrawn-advisory fix
+# is pinned in `justfiles/anvil/versions.just`.
+#
+# Reviewed 2026-08-08: `directories` and `humantime` are flagged only because
+# cargo-aprz 1.1.0 counts RustSec advisories that have since been *withdrawn*
+# (RUSTSEC-2020-0054, withdrawn 2021-04-19, and RUSTSEC-2025-0014, withdrawn
+# 2025-03-12 -- both crates are maintained again). `cargo-aprz-lib` in this
+# repository already skips withdrawn advisories; these entries bridge the gap
+# until that fix ships.
+[[allow_list]]
+name = "directories"
+version = "=6.0.0"
+
+[[allow_list]]
+name = "humantime"
+version = "=2.4.0"
+
 # ----------------------------------------------------------------------------
 # Expressions
 #

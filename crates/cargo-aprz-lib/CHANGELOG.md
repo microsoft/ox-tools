@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+
+- Advisories that RustSec has withdrawn are no longer counted, so crates cleared by a retracted
+  advisory (for example `directories` and `humantime`) are no longer flagged as unmaintained
+
+### Changed
+
+- `MPL-2.0` is now part of the default allowed-license list, matching the file-level copyleft
+  licenses commonly accepted alongside permissive ones
+
 ## 1.1.0 - 2026-08-07
 
 ### Added

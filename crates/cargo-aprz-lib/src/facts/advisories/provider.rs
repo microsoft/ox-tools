@@ -92,6 +92,12 @@ where
     log::info!(target: LOG_TARGET, "Querying the advisory database for {crate_count} crate(s)");
 
     for advisory in database.iter() {
+        // Withdrawn advisories were retracted by RustSec and no longer describe a real
+        // problem, so counting them would penalize crates that have since been cleared.
+        if advisory.metadata.withdrawn.is_some() {
+            continue;
+        }
+
         advisories_checked += 1;
 
         if let Some(crate_entries) = crate_map.get_mut(advisory.metadata.package.as_str()) {
@@ -169,4 +175,66 @@ where
     let elapsed = start_time.elapsed();
     log::debug!(target: LOG_TARGET, "Finished {success_verb} the advisory database in {:.3}s", elapsed.as_secs_f64());
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn write_advisory(root: &Path, package: &str, id: &str, withdrawn: Option<&str>) {
+        let dir = root.join("crates").join(package);
+        fs::create_dir_all(&dir).unwrap();
+
+        let withdrawn_line = withdrawn.map_or_else(String::new, |date| format!("withdrawn = \"{date}\"\n"));
+        let content = format!(
+            "```toml\n\
+             [advisory]\n\
+             id = \"{id}\"\n\
+             package = \"{package}\"\n\
+             date = \"2020-01-01\"\n\
+             informational = \"unmaintained\"\n\
+             {withdrawn_line}\
+             \n\
+             [versions]\n\
+             patched = []\n\
+             ```\n\
+             \n\
+             # {package} is unmaintained\n\
+             \n\
+             Body text.\n"
+        );
+
+        fs::write(dir.join(format!("{id}.md")), content).unwrap();
+    }
+
+    #[test]
+    fn scan_advisories_ignores_withdrawn_advisories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        write_advisory(root, "active-crate", "RUSTSEC-2020-0001", None);
+        write_advisory(root, "cleared-crate", "RUSTSEC-2020-0002", Some("2021-01-01"));
+
+        let database = Database::open(root).unwrap();
+
+        let crates = vec![
+            CrateSpec::from_arcs("active-crate".into(), Arc::new("1.0.0".parse().unwrap())),
+            CrateSpec::from_arcs("cleared-crate".into(), Arc::new("1.0.0".parse().unwrap())),
+        ];
+
+        let results: HashMap<String, AdvisoryData> = scan_advisories(&database, crates)
+            .map(|(spec, result)| {
+                let ProviderResult::Found(data) = result else {
+                    panic!("expected found");
+                };
+                (spec.name().to_string(), data)
+            })
+            .collect();
+
+        assert_eq!(results["active-crate"].per_version.unmaintained_warning_count, 1);
+        assert_eq!(results["active-crate"].total.unmaintained_warning_count, 1);
+        assert_eq!(results["cleared-crate"].per_version.unmaintained_warning_count, 0);
+        assert_eq!(results["cleared-crate"].total.unmaintained_warning_count, 0);
+    }
 }
