@@ -3,17 +3,21 @@
 
 [package]
 name = "cargo-ensure-no-cyclic-deps"
+description = "A cargo subcommand to detect cyclic dependencies in workspace crates"
 version = "0.2.0"
+readme = "README.md"
+keywords = ["oxidizer", "cargo", "subcommand", "dependencies", "cycles"]
+categories = ["development-tools::cargo-plugins"]
+
 edition.workspace = true
 rust-version.workspace = true
+authors.workspace = true
 license.workspace = true
-authors = ["Martin Kolinek"]
-description = "A cargo subcommand to detect cyclic dependencies in workspace crates"
-readme = "README.md"
+homepage.workspace = true
 repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ensure-no-cyclic-deps"
-homepage = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ensure-no-cyclic-deps"
-keywords = ["cargo", "subcommand", "dependencies", "cycles"]
-categories = ["development-tools::cargo-plugins"]
+
+[package.metadata.docs.rs]
+all-features = true
 
 [package.metadata.cargo_check_external_types]
 # TODO: remove when anyhow is replaced by ohno, or cargo doc does not fail with bin-only crates.
@@ -25,14 +29,14 @@ name = "cargo-ensure-no-cyclic-deps"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = { version = "1.0.100", default-features = false }
-cargo_metadata = { version = "0.23", default-features = false }
-clap = { version = "4.5", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
-petgraph = { version = "0.8", default-features = false }
+anyhow = { workspace = true, features = ["std"] }
+cargo_metadata = { workspace = true }
+clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+petgraph = { workspace = true, features = ["std", "graphmap"] }
 
 [dev-dependencies]
-assert_cmd = { version = "2.0", default-features = false }
-predicates = { version = "3.1", default-features = false }
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
 
 # >>> anvil-managed: anvil-lints
 [lints]

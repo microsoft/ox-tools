@@ -40,6 +40,7 @@ After installing the Rust toolchain, we setup repository-specific tooling:
 
 2. Switch to the `ox-tools` directory: `cd ox-tools`.
 2. Execute `git config --local include.path ./.gitconfig` to attach the repo-specific Git configuration.
+2. Execute `git lfs install --local` to enable Git LFS for this clone. Binary assets (logos, icons, and compressed test fixtures) are stored in LFS; without this step they are checked out as pointer files and tests that read them will fail.
 2. Execute `just install-tools` to install all necessary Rust toolchain versions and development tooling.
 2. Open `.vscode/settings.template.jsonc` and save a copy as `.vscode/settings.json` to apply repo-specific settings for Visual Studio Code. Part of this file should be the same for everyone but the rest you can customize - refer to inline comments.
 

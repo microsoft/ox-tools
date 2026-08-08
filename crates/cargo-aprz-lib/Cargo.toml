@@ -1,0 +1,196 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-aprz-lib"
+description = "Internal library for cargo-aprz"
+version = "1.1.0"
+readme = "README.md"
+keywords = ["oxidizer", "cargo", "dependencies", "analysis", "quality"]
+categories = ["development-tools"]
+exclude = ["tests/fixtures/*.tar.gz", "tests/fixtures/*.zst", "tests/fixtures/*.svg"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-aprz-lib"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.cargo_check_external_types]
+# This crate is `#![doc(hidden)]` and exists solely to hold the `cargo-aprz`
+# implementation, so its public surface is deliberately tiny and leaks nothing.
+allowed_external_types = []
+
+[package.metadata.ox-gen-readme]
+# Implementation detail of `cargo-aprz`: the crate is `#![doc(hidden)]`, so there is no
+# public rustdoc for cargo-doc2readme to turn into a README.
+disable = true
+
+# Coverage threshold slightly below the repo-wide 100% default.
+#
+# On Linux this crate is at 100%: every network-backed provider is driven against a
+# mock server or a local fixture, so the whole crate is exercised offline.
+#
+# Windows lands a little lower for one reason that no test can remove: a handful of
+# I/O-failure branches (an unreadable workflow file, a directory that cannot be walked,
+# a file that cannot be stat'ed or read) are provoked by clearing Unix permission bits.
+# Windows has no std-only equivalent, so those tests are `#[cfg(unix)]` and the branches
+# they cover go unexercised there.
+#
+# Prefer making a test cross-platform over lowering this number.
+[package.metadata.coverage-gate]
+min-lines-percent = 99.5
+
+[features]
+# Re-exports the crate internals under `internals` so the crate's own integration tests can reach
+# them. Not intended for any other consumer.
+#
+# It is deliberately not a default feature: the module tree is private precisely so that dead-code
+# analysis stays honest, and turning this on makes every internal item publicly reachable again.
+# The integration tests below opt in through `required-features`, which is also why this is not a
+# dev-dependency on self - that would form a dependency cycle, which `cargo-ensure-no-cyclic-deps`
+# rejects.
+internals = []
+
+[dependencies]
+bytes = { workspace = true }
+camino = { workspace = true }
+cargo_metadata = { workspace = true }
+cel-interpreter = { workspace = true, features = ["chrono"] }
+chrono = { workspace = true, features = ["serde", "clock", "std", "now"] }
+clap = { workspace = true, features = [
+    "std",
+    "derive",
+    "color",
+    "help",
+    "error-context",
+    "usage",
+    "suggestions",
+    "env",
+    "wrap_help",
+] }
+compact_str = { workspace = true, features = ["std", "serde"] }
+csv = { workspace = true }
+directories = { workspace = true }
+env_logger = { workspace = true }
+flate2 = { workspace = true, features = ["zlib-rs"] }
+futures = { workspace = true }
+futures-util = { workspace = true }
+humantime-serde = { workspace = true }
+indicatif = { workspace = true }
+layered = { workspace = true }
+log = { workspace = true }
+mmap-rs = { workspace = true }
+mutants = { workspace = true }
+ohno = { workspace = true, features = ["app-err"] }
+owo-colors = { workspace = true }
+pastey = { workspace = true }
+percent-encoding = { workspace = true, features = ["alloc"] }
+ra_ap_syntax = { workspace = true }
+regex = { workspace = true, features = ["std", "unicode-case", "unicode-perl"] }
+reqwest = { workspace = true, features = ["json", "rustls", "stream"] }
+rmp-serde = { workspace = true }
+rust_xlsxwriter = { workspace = true, features = ["zlib"] }
+rustc-hash = { workspace = true, features = ["std"] }
+rustdoc-types-v50 = { workspace = true }
+rustdoc-types-v51 = { workspace = true }
+rustdoc-types-v52 = { workspace = true }
+rustdoc-types-v53 = { workspace = true }
+rustdoc-types-v54 = { workspace = true }
+rustdoc-types-v55 = { workspace = true }
+rustdoc-types-v56 = { workspace = true }
+rustdoc-types-v57 = { workspace = true }
+rustsec = { workspace = true, features = ["git", "gix-reqwest"] }
+seatbelt = { workspace = true, features = ["retry", "timeout"] }
+semver = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["derive", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+strsim = { workspace = true }
+strum = { workspace = true, features = ["derive"] }
+tar = { workspace = true }
+terminal_size = { workspace = true }
+tick = { workspace = true, features = ["tokio"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "process", "time"] }
+toml = { workspace = true, features = ["parse", "serde", "display"] }
+url = { workspace = true }
+vlen = { workspace = true }
+walkdir = { workspace = true }
+zstd = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true, features = [
+    "Win32_Storage_FileSystem",
+    "Win32_Foundation",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_Security",
+] }
+
+[dev-dependencies]
+insta = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+wiremock = { workspace = true }
+
+# Every integration test reaches into the crate through the `internals` facade, directly or
+# through `tests/support`, so they are all gated on that feature.
+[[test]]
+name = "advisory_provider_integration"
+required-features = ["internals"]
+
+[[test]]
+name = "collector_integration"
+required-features = ["internals"]
+
+[[test]]
+name = "color_mode_integration"
+required-features = ["internals"]
+
+[[test]]
+name = "config_expressions_test"
+required-features = ["internals"]
+
+[[test]]
+name = "coverage_provider_integration"
+required-features = ["internals"]
+
+[[test]]
+name = "crates_command_integration"
+required-features = ["internals"]
+
+[[test]]
+name = "crates_provider_integration"
+required-features = ["internals"]
+
+[[test]]
+name = "deps_command_integration"
+required-features = ["internals"]
+
+[[test]]
+name = "docs_provider_integration"
+required-features = ["internals"]
+
+[[test]]
+name = "hosting_provider_integration"
+required-features = ["internals"]
+
+[[test]]
+name = "init_command_integration"
+required-features = ["internals"]
+
+[[test]]
+name = "process_globals_integration"
+required-features = ["internals"]
+
+[[test]]
+name = "validate_command_integration"
+required-features = ["internals"]
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints

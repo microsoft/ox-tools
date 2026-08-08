@@ -1,0 +1,14 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# Stand-in for the crates.io crate of the same name. It is a path dependency so
+# `cargo metadata` never reaches the network; the facts reported for it come from
+# the synthetic database dump in `tests/support/dump.rs`.
+
+[package]
+name = "miniz_oxide"
+version = "0.8.9"
+edition = "2024"
+
+[dependencies]
+adler2 = { path = "../adler2" }

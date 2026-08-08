@@ -1,0 +1,526 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+use core::time::Duration;
+use std::{fs, io};
+
+use camino::{Utf8Path, Utf8PathBuf};
+use ohno::{IntoAppError, app_err};
+use semver::{Version, VersionReq};
+use serde::{Deserialize, Serialize};
+
+use crate::Result;
+use crate::expr::Expression;
+use crate::facts::BugLabelMatcher;
+
+/// The default configuration TOML content, embedded from `default_config.toml`
+pub const DEFAULT_CONFIG_TOML: &str = include_str!("../../default_config.toml");
+
+/// An entry in the allow list that exempts a specific crate+version from triggering
+/// error exit codes when using `--error-if-medium-risk` or `--error-if-high-risk`.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AllowListEntry {
+    /// The crate name to allow
+    pub name: String,
+
+    /// A semver version requirement (e.g. `"^1.0"`, `">=2.0, <3.0"`, `"=1.2.3"`, `"*"`)
+    pub version: VersionReq,
+}
+
+impl AllowListEntry {
+    /// Check if this entry matches the given crate name and version.
+    #[must_use]
+    pub fn matches(&self, name: &str, version: &Version) -> bool {
+        self.name == name && self.version.matches(version)
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    /// Crates that are exempt from triggering error exit codes with `--error-if-medium-risk` or `--error-if-high-risk`
+    #[serde(default)]
+    pub allow_list: Vec<AllowListEntry>,
+
+    /// Expressions that must ALL evaluate to true for the crate to avoid being flagged as high risk
+    #[serde(default)]
+    pub high_risk: Vec<Expression>,
+
+    /// Expressions that must ALL evaluate to true for the crate to be accepted
+    #[serde(default)]
+    pub eval: Vec<Expression>,
+
+    /// Issue label patterns that mark an issue as a bug. Patterns are case-insensitive regular
+    /// expressions matched anywhere within the label, so `bug` also matches labels such as
+    /// `C-bug` and `type: bug`. Anchor a pattern with `^` and `$` to require an exact match.
+    /// An empty list disables bug classification, leaving all bug metrics at zero.
+    #[serde(default = "default_bug_labels")]
+    pub bug_labels: Vec<String>,
+
+    /// Score threshold below which a crate is considered medium risk (0..100)
+    #[serde(default = "default_medium_risk_threshold")]
+    pub medium_risk_threshold: f64,
+    /// Score threshold at or above which a crate is considered low risk (0..100)
+    #[serde(default = "default_low_risk_threshold")]
+    pub low_risk_threshold: f64,
+
+    /// Duration to keep crates.io cache data before re-downloading
+    #[serde(default = "default_cache_ttl", with = "humantime_serde")]
+    pub crates_cache_ttl: Duration,
+
+    /// Duration to keep hosting cache data before re-fetching
+    #[serde(default = "default_cache_ttl", with = "humantime_serde")]
+    pub hosting_cache_ttl: Duration,
+
+    /// Duration to keep cached codebases before re-fetching
+    #[serde(default = "default_cache_ttl", with = "humantime_serde")]
+    pub codebase_cache_ttl: Duration,
+
+    /// Duration to keep cached coverage data before re-fetching
+    #[serde(default = "default_cache_ttl", with = "humantime_serde")]
+    pub coverage_cache_ttl: Duration,
+
+    /// Duration to keep the advisory database cached before re-downloading
+    #[serde(default = "default_cache_ttl", with = "humantime_serde")]
+    pub advisories_cache_ttl: Duration,
+}
+
+/// Default label patterns that identify an issue as a bug.
+fn default_bug_labels() -> Vec<String> {
+    vec![
+        "bug".to_string(),
+        "crash".to_string(),
+        "defect".to_string(),
+        "regression".to_string(),
+    ]
+}
+
+const fn default_medium_risk_threshold() -> f64 {
+    30.0
+}
+const fn default_low_risk_threshold() -> f64 {
+    70.0
+}
+
+const fn default_cache_ttl() -> Duration {
+    Duration::from_hours(24 * 7)
+}
+
+impl Config {
+    /// Check if a crate is on the allow list.
+    #[must_use]
+    pub fn is_allowed(&self, name: &str, version: &Version) -> bool {
+        self.allow_list.iter().any(|entry| entry.matches(name, version))
+    }
+
+    /// Compile the configured bug label patterns into a matcher.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any pattern is not a valid regular expression.
+    pub fn bug_label_matcher(&self) -> Result<BugLabelMatcher> {
+        BugLabelMatcher::new(&self.bug_labels)
+    }
+
+    /// Load configuration from a file or use defaults
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read or parsed
+    pub fn load(workspace_root: &Utf8Path, config_path: Option<&Utf8PathBuf>) -> Result<Self> {
+        let (final_path, text) = if let Some(path) = config_path {
+            let text = fs::read_to_string(path).into_app_err_with(|| format!("reading cargo-aprz configuration file '{path}'"))?;
+            (path.clone(), text)
+        } else {
+            // Look for aprz.toml
+            let path = workspace_root.join("aprz.toml");
+            match fs::read_to_string(&path) {
+                Ok(text) => (path, text),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    // No config file found, use defaults
+                    return Ok(Self::default());
+                }
+                Err(e) => return Err(e).into_app_err_with(|| format!("reading cargo-aprz configuration file '{path}'")),
+            }
+        };
+
+        let config: Self = toml::from_str(&text).into_app_err_with(|| format!("parsing configuration file '{final_path}'"))?;
+        config.validate()?;
+
+        Ok(config)
+    }
+
+    /// Save the default configuration to a TOML file
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be written
+    pub fn save_default(output_path: &Utf8Path) -> Result<()> {
+        fs::write(output_path, DEFAULT_CONFIG_TOML).into_app_err_with(|| format!("writing default configuration to {output_path}"))?;
+        Ok(())
+    }
+
+    /// Validate configuration values
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if threshold values are out of range or inconsistent
+    fn validate(&self) -> Result<()> {
+        // Compiling the patterns here reports invalid regular expressions when the
+        // configuration is loaded rather than when issues are first classified.
+        let _ = self.bug_label_matcher()?;
+
+        if !(0.0..=100.0).contains(&self.medium_risk_threshold) {
+            return Err(app_err!(
+                "medium_risk_threshold must be between 0 and 100, got {}",
+                self.medium_risk_threshold
+            ));
+        }
+
+        if !(0.0..=100.0).contains(&self.low_risk_threshold) {
+            return Err(app_err!(
+                "low_risk_threshold must be between 0 and 100, got {}",
+                self.low_risk_threshold
+            ));
+        }
+
+        if self.medium_risk_threshold >= self.low_risk_threshold {
+            return Err(app_err!(
+                "medium_risk_threshold ({}) must be less than low_risk_threshold ({})",
+                self.medium_risk_threshold,
+                self.low_risk_threshold
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        toml::from_str(DEFAULT_CONFIG_TOML).expect("default_config.toml should be valid TOML that deserializes to Config")
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(miri))]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_default_config_is_valid() {
+        let config = Config::default();
+        config.validate().unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_default_config_pins_thresholds_and_cache_ttl() {
+        let config = Config::default();
+
+        assert!((config.medium_risk_threshold - 30.0).abs() < f64::EPSILON);
+        assert!((config.low_risk_threshold - 70.0).abs() < f64::EPSILON);
+        assert_eq!(config.crates_cache_ttl, Duration::from_hours(24 * 7));
+        assert_eq!(config.hosting_cache_ttl, Duration::from_hours(24 * 7));
+        assert_eq!(config.codebase_cache_ttl, Duration::from_hours(24 * 7));
+        assert_eq!(config.coverage_cache_ttl, Duration::from_hours(24 * 7));
+        assert_eq!(config.advisories_cache_ttl, Duration::from_hours(24 * 7));
+    }
+
+    #[test]
+    fn test_serde_defaults_pin_thresholds_and_cache_ttl_when_absent() {
+        let config: Config = toml::from_str("").unwrap();
+
+        assert!((config.medium_risk_threshold - 30.0).abs() < f64::EPSILON);
+        assert!((config.low_risk_threshold - 70.0).abs() < f64::EPSILON);
+        assert_eq!(config.crates_cache_ttl, Duration::from_hours(24 * 7));
+        assert_eq!(config.hosting_cache_ttl, Duration::from_hours(24 * 7));
+        assert_eq!(config.codebase_cache_ttl, Duration::from_hours(24 * 7));
+        assert_eq!(config.coverage_cache_ttl, Duration::from_hours(24 * 7));
+        assert_eq!(config.advisories_cache_ttl, Duration::from_hours(24 * 7));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_validate_medium_risk_out_of_range_low() {
+        let config = Config {
+            medium_risk_threshold: -1.0,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_validate_medium_risk_out_of_range_high() {
+        let config = Config {
+            medium_risk_threshold: 101.0,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_validate_low_risk_out_of_range_low() {
+        let config = Config {
+            low_risk_threshold: -1.0,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_validate_low_risk_out_of_range_high() {
+        let config = Config {
+            low_risk_threshold: 101.0,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_validate_medium_ge_low_risk() {
+        let config = Config {
+            medium_risk_threshold: 80.0,
+            low_risk_threshold: 70.0,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_validate_medium_equals_low_risk() {
+        let config = Config {
+            medium_risk_threshold: 70.0,
+            low_risk_threshold: 70.0,
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_validate_valid_thresholds() {
+        let config = Config {
+            medium_risk_threshold: 30.0,
+            low_risk_threshold: 70.0,
+            ..Config::default()
+        };
+        config.validate().unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_validate_boundary_values() {
+        let config = Config {
+            medium_risk_threshold: 0.0,
+            low_risk_threshold: 100.0,
+            ..Config::default()
+        };
+        config.validate().unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_save_default_and_load() {
+        let tmp = tempfile::tempdir().unwrap();
+        let output_path = Utf8PathBuf::try_from(tmp.path().join("aprz.toml")).unwrap();
+        Config::save_default(&output_path).unwrap();
+        let loaded = Config::load(&Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap(), Some(&output_path)).unwrap();
+        loaded.validate().unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_load_missing_config_uses_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace_root = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
+        let config = Config::load(&workspace_root, None).unwrap();
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn test_default_config_toml_is_not_empty() {
+        assert!(!DEFAULT_CONFIG_TOML.is_empty());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_default_config_has_empty_allow_list() {
+        let config = Config::default();
+        assert!(config.allow_list.is_empty());
+    }
+
+    #[test]
+    fn test_allow_list_entry_matches_exact_version() {
+        let entry = AllowListEntry {
+            name: "foo".to_string(),
+            version: VersionReq::parse("=1.2.3").unwrap(),
+        };
+        assert!(entry.matches("foo", &Version::new(1, 2, 3)));
+        assert!(!entry.matches("foo", &Version::new(1, 2, 4)));
+        assert!(!entry.matches("bar", &Version::new(1, 2, 3)));
+    }
+
+    #[test]
+    fn test_allow_list_entry_matches_caret_range() {
+        let entry = AllowListEntry {
+            name: "foo".to_string(),
+            version: VersionReq::parse("^1.0").unwrap(),
+        };
+        assert!(entry.matches("foo", &Version::new(1, 0, 0)));
+        assert!(entry.matches("foo", &Version::new(1, 9, 9)));
+        assert!(!entry.matches("foo", &Version::new(2, 0, 0)));
+    }
+
+    #[test]
+    fn test_allow_list_entry_matches_wildcard() {
+        let entry = AllowListEntry {
+            name: "foo".to_string(),
+            version: VersionReq::parse("*").unwrap(),
+        };
+        assert!(entry.matches("foo", &Version::new(0, 0, 1)));
+        assert!(entry.matches("foo", &Version::new(99, 99, 99)));
+        assert!(!entry.matches("bar", &Version::new(1, 0, 0)));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_is_allowed_matches() {
+        let mut config = Config::default();
+        config.allow_list.push(AllowListEntry {
+            name: "foo".to_string(),
+            version: VersionReq::parse("^1.0").unwrap(),
+        });
+        assert!(config.is_allowed("foo", &Version::new(1, 2, 3)));
+        assert!(!config.is_allowed("foo", &Version::new(2, 0, 0)));
+        assert!(!config.is_allowed("bar", &Version::new(1, 0, 0)));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_is_allowed_empty_list() {
+        let config = Config::default();
+        assert!(!config.is_allowed("foo", &Version::new(1, 0, 0)));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_load_config_with_allow_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = Utf8PathBuf::try_from(tmp.path().join("aprz.toml")).unwrap();
+        let toml_content = r#"
+medium_risk_threshold = 30.0
+low_risk_threshold = 70.0
+
+[[allow_list]]
+name = "some-crate"
+version = "=1.2.3"
+
+[[allow_list]]
+name = "another-crate"
+version = "^2.0"
+"#;
+        fs::write(&config_path, toml_content).unwrap();
+        let workspace_root = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
+        let config = Config::load(&workspace_root, Some(&config_path)).unwrap();
+        assert_eq!(config.allow_list.len(), 2);
+        assert!(config.is_allowed("some-crate", &Version::new(1, 2, 3)));
+        assert!(!config.is_allowed("some-crate", &Version::new(1, 2, 4)));
+        assert!(config.is_allowed("another-crate", &Version::new(2, 5, 0)));
+        assert!(!config.is_allowed("another-crate", &Version::new(1, 0, 0)));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_bug_labels_default_when_absent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = Utf8PathBuf::try_from(tmp.path().join("aprz.toml")).unwrap();
+        fs::write(&config_path, "medium_risk_threshold = 30.0\n").unwrap();
+
+        let workspace_root = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
+        let config = Config::load(&workspace_root, Some(&config_path)).unwrap();
+
+        assert_eq!(config.bug_labels, vec!["bug", "crash", "defect", "regression"]);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_bug_labels_can_be_customized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = Utf8PathBuf::try_from(tmp.path().join("aprz.toml")).unwrap();
+        fs::write(&config_path, "bug_labels = [\"crash\", \"C-bug\"]\n").unwrap();
+
+        let workspace_root = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
+        let config = Config::load(&workspace_root, Some(&config_path)).unwrap();
+
+        assert_eq!(config.bug_labels, vec!["crash", "C-bug"]);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_bug_labels_can_be_emptied() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = Utf8PathBuf::try_from(tmp.path().join("aprz.toml")).unwrap();
+        fs::write(&config_path, "bug_labels = []\n").unwrap();
+
+        let workspace_root = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
+        let config = Config::load(&workspace_root, Some(&config_path)).unwrap();
+
+        assert!(config.bug_labels.is_empty());
+    }
+
+    #[test]
+    fn test_default_config_has_expected_bug_labels() {
+        let config: Config = toml::from_str(DEFAULT_CONFIG_TOML).unwrap();
+        assert_eq!(config.bug_labels, vec!["bug", "crash", "defect", "regression"]);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_invalid_bug_label_regex_is_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = Utf8PathBuf::try_from(tmp.path().join("aprz.toml")).unwrap();
+        fs::write(&config_path, "bug_labels = [\"bug(\"]\n").unwrap();
+
+        let workspace_root = Utf8PathBuf::try_from(tmp.path().to_path_buf()).unwrap();
+        let err = Config::load(&workspace_root, Some(&config_path)).unwrap_err();
+
+        assert!(format!("{err}").contains("bug("), "unexpected error: {err}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "parses the embedded default configuration, which is prohibitively slow under Miri")]
+    fn test_regex_bug_labels_are_compiled() {
+        let config = Config {
+            bug_labels: vec!["^c-bug$".to_string()],
+            ..Config::default()
+        };
+        let matcher = config.bug_label_matcher().unwrap();
+
+        assert!(matcher.is_match("C-bug"));
+        assert!(!matcher.is_match("type: bug"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_load_reports_a_non_missing_read_error() {
+        let dir = tempfile::tempdir().expect("creating a temp dir");
+        let root = Utf8Path::from_path(dir.path()).expect("temp dir paths are UTF-8");
+
+        // A directory named `aprz.toml` makes the read fail with something other than `NotFound`.
+        fs::create_dir(root.join("aprz.toml")).expect("creating the decoy directory");
+
+        let err = Config::load(root, None).expect_err("reading a directory as a file must fail");
+        assert!(
+            format!("{err}").contains("reading cargo-aprz configuration file"),
+            "unexpected error: {err}"
+        );
+    }
+}
