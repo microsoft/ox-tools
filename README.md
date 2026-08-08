@@ -23,10 +23,19 @@ This repository contains a set of tools  that help you build robust highly scala
 
 ## Crates
 
-These are the primary crates built out of this repo:
+These are the crates built out of this repo:
 
+- [`cargo-anvil`](./crates/cargo-anvil/README.md) - Opinionated, unified Rust build and cloud-workflow scaffolding for GitHub Actions and Azure DevOps
+- [`cargo-aprz`](./crates/cargo-aprz/README.md) - A cargo subcommand that appraises the quality of Rust dependencies
 - [`cargo-coverage-gate`](./crates/cargo-coverage-gate/README.md) - A cargo subcommand that gates pull requests on per-package line coverage measured by cargo-llvm-cov
-- [`cargo-heather`](./crates/cargo-heather/README.md) -  A cargo sub-command to validate license headers in Rust, TOML, PowerShell, Just, and env source files
+- [`cargo-each`](./crates/cargo-each/README.md) - A cargo subcommand that runs a command over a cargo-style selection of workspace members
+- [`cargo-ensure-no-cyclic-deps`](./crates/cargo-ensure-no-cyclic-deps/README.md) - A cargo subcommand to detect cyclic dependencies in workspace crates
+- [`cargo-ensure-no-default-features`](./crates/cargo-ensure-no-default-features/README.md) - A cargo subcommand that ensures dependencies are declared with default-features = false
+- [`cargo-heather`](./crates/cargo-heather/README.md) - A cargo subcommand to validate license headers in Rust, TOML, PowerShell, Just, and env source files
+
+Two further crates exist to support the above and are not meant to be used directly:
+[`cargo-aprz-lib`](./crates/cargo-aprz-lib/README.md) holds the `cargo-aprz` implementation, and
+[`automation`](./crates/automation/README.md) holds shared code for this repo's Rust scripts.
 
 ## About this Repo
 

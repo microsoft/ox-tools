@@ -1,0 +1,276 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+use crate::Result;
+use chrono::{DateTime, Utc};
+use ohno::{IntoAppError, app_err, bail};
+use semver::Version;
+use std::io::Write;
+use url::Url;
+
+#[derive(Debug)]
+pub struct RowWriter<'a, W: Write> {
+    buffer: Vec<u8>,
+    writer: &'a mut W,
+    row_count: u64,
+}
+
+impl<'a, W: Write> RowWriter<'a, W> {
+    pub fn new(writer: &'a mut W) -> Self {
+        Self {
+            buffer: Vec::with_capacity(256),
+            writer,
+            row_count: 0,
+        }
+    }
+
+    #[must_use]
+    pub const fn row_count(&self) -> u64 {
+        self.row_count
+    }
+
+    pub fn row_done(&mut self) -> Result<()> {
+        self.writer.write_all(&self.buffer)?;
+        self.buffer.clear();
+        self.row_count += 1;
+        Ok(())
+    }
+
+    #[inline]
+    pub fn write_byte(&mut self, byte: u8) {
+        self.buffer.push(byte);
+    }
+
+    #[inline]
+    pub fn write_u64(&mut self, value: u64) {
+        let mut buf = [0u8; 9];
+        let bytes_written = vlen::encode_u64(&mut buf, value);
+        self.buffer.extend_from_slice(&buf[..bytes_written]);
+    }
+
+    pub fn write_str(&mut self, s: &str) {
+        self.write_u64(s.len() as u64);
+        self.buffer.extend_from_slice(s.as_bytes());
+    }
+
+    #[inline]
+    pub fn write_bool(&mut self, value: bool) {
+        self.buffer.push(u8::from(value));
+    }
+
+    pub fn write_optional_u64(&mut self, value: Option<u64>) {
+        if let Some(v) = value {
+            self.write_byte(1);
+            self.write_u64(v);
+        } else {
+            self.write_byte(0);
+        }
+    }
+
+    #[cfg(all_fields)]
+    pub fn write_optional_str(&mut self, s: &str) {
+        if s.is_empty() {
+            self.write_byte(0);
+        } else {
+            self.write_byte(1);
+            self.write_str(s);
+        }
+    }
+
+    #[cfg(all_fields)]
+    pub fn write_optional_bool(&mut self, value: Option<bool>) {
+        let byte = match value {
+            None => 0,
+            Some(false) => 1,
+            Some(true) => 2,
+        };
+        self.buffer.push(byte);
+    }
+
+    pub fn write_str_as_u64(&mut self, s: &str) -> Result<()> {
+        let value = s.parse::<u64>().into_app_err_with(|| format!("parsing u64 from '{s}'"))?;
+        self.write_u64(value);
+        Ok(())
+    }
+
+    #[cfg(all_fields)]
+    pub fn write_str_as_byte(&mut self, s: &str) -> Result<()> {
+        let value = s.parse().into_app_err_with(|| format!("parsing u8 from '{s}'"))?;
+        self.write_byte(value);
+        Ok(())
+    }
+
+    pub fn write_str_as_datetime(&mut self, s: &str) -> Result<()> {
+        let timestamp = parse_pg_timestamp(s)?;
+        self.write_u64(timestamp);
+        Ok(())
+    }
+
+    pub fn write_str_as_date(&mut self, s: &str) -> Result<()> {
+        let timestamp = parse_pg_date(s)?;
+        self.write_u64(timestamp);
+        Ok(())
+    }
+
+    pub fn write_str_as_url(&mut self, s: &str) -> Result<()> {
+        if s.is_empty() {
+            self.write_str(s);
+            return Ok(());
+        }
+
+        // Try parsing the URL as-is
+        if Url::parse(s).is_ok() {
+            self.write_str(s);
+            return Ok(());
+        }
+
+        // If that fails, try prepending https://
+        let with_https = format!("https://{s}");
+        if Url::parse(&with_https).is_ok() {
+            self.write_str(&with_https);
+            return Ok(());
+        }
+
+        // Both attempts failed, return error
+        bail!("unable to parse URL from '{s}'");
+    }
+
+    pub fn write_optional_str_as_u64(&mut self, s: &str) -> Result<()> {
+        if s.is_empty() {
+            self.write_byte(0);
+            return Ok(());
+        }
+
+        let v = s.parse::<u64>().into_app_err_with(|| format!("parsing u64 from '{s}'"))?;
+        self.write_optional_u64(Some(v));
+        Ok(())
+    }
+
+    pub fn write_str_as_bool(&mut self, s: &str) -> Result<()> {
+        let value = match s {
+            "t" | "true" => true,
+            "f" | "false" | "" => false,
+            _ => bail!("invalid boolean value: expected 't', 'true', 'f', 'false', or empty, got '{s}'"),
+        };
+
+        self.write_bool(value);
+        Ok(())
+    }
+
+    pub fn write_str_as_version(&mut self, s: &str) -> Result<()> {
+        let version = Version::parse(s).into_app_err_with(|| format!("parsing version '{s}'"))?;
+        self.write_u64(version.major);
+        self.write_u64(version.minor);
+        self.write_u64(version.patch);
+        self.write_str(version.pre.as_str());
+        self.write_str(version.build.as_str());
+        Ok(())
+    }
+
+    #[cfg(all_fields)]
+    pub fn write_pg_array_as_str_vec(&mut self, s: &str) -> Result<()> {
+        let inner = s
+            .strip_prefix('{')
+            .and_then(|s| s.strip_suffix('}'))
+            .ok_or_else(|| app_err!("invalid PostgreSQL array format: expected '{{...}}', got '{s}'"))?;
+
+        let elements = parse_pg_array_elements(inner)?;
+        self.write_u64(elements.len() as u64);
+        for element in &elements {
+            self.write_str(element);
+        }
+        Ok(())
+    }
+}
+
+/// Split the body of a `PostgreSQL` array literal into its elements.
+///
+/// Elements may be double-quoted, in which case they can contain commas, braces, escaped
+/// quotes, and escaped backslashes. Splitting on every comma would corrupt such elements and
+/// report the wrong element count.
+#[cfg(any(all_fields, test))]
+fn parse_pg_array_elements(inner: &str) -> Result<Vec<String>> {
+    let mut elements = Vec::new();
+
+    if inner.is_empty() {
+        return Ok(elements);
+    }
+
+    let mut current = String::new();
+    let mut chars = inner.chars();
+    let mut quoted = false;
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => quoted = !quoted,
+            '\\' => {
+                let escaped = chars
+                    .next()
+                    .ok_or_else(|| app_err!("invalid PostgreSQL array format: trailing escape in '{inner}'"))?;
+                current.push(escaped);
+            }
+            ',' if !quoted => {
+                elements.push(core::mem::take(&mut current));
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if quoted {
+        bail!("invalid PostgreSQL array format: unterminated quote in '{inner}'");
+    }
+
+    elements.push(current);
+    Ok(elements)
+}
+
+fn parse_pg_timestamp(s: &str) -> Result<u64> {
+    let dt = DateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f%#z")
+        .or_else(|_| DateTime::parse_from_rfc3339(s))
+        .into_app_err_with(|| format!("parsing timestamp '{s}'"))?
+        .with_timezone(&Utc);
+    Ok(dt.timestamp().max(0).cast_unsigned())
+}
+
+fn parse_pg_date(s: &str) -> Result<u64> {
+    Ok(u64::from(
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+            .into_app_err_with(|| format!("parsing date '{s}'"))?
+            .to_epoch_days()
+            .max(0)
+            .cast_unsigned(),
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_empty_array() {
+        assert!(parse_pg_array_elements("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn parses_unquoted_elements() {
+        assert_eq!(parse_pg_array_elements("a,b,c").unwrap(), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn quoted_elements_may_contain_separators() {
+        assert_eq!(parse_pg_array_elements(r#"a,"b,c",d"#).unwrap(), vec!["a", "b,c", "d"]);
+        assert_eq!(parse_pg_array_elements(r#""{nested},value""#).unwrap(), vec!["{nested},value"]);
+    }
+
+    #[test]
+    fn escapes_are_unwrapped() {
+        assert_eq!(parse_pg_array_elements(r#""a\"b""#).unwrap(), vec![r#"a"b"#]);
+        assert_eq!(parse_pg_array_elements(r#""a\\b""#).unwrap(), vec![r"a\b"]);
+    }
+
+    #[test]
+    fn rejects_malformed_arrays() {
+        let _ = parse_pg_array_elements(r#""unterminated"#).unwrap_err();
+        let _ = parse_pg_array_elements(r"trailing\").unwrap_err();
+    }
+}

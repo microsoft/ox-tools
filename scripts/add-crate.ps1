@@ -167,7 +167,7 @@ if ($crateName -notlike "*_macros*") {
 # Update root CHANGELOG.md
 $changelogPath = Join-Path $repoRoot "CHANGELOG.md"
 $changelogLines = Get-Content $changelogPath
-$changelogCrates = @()
+$changelogCrates = @{}
 $changelogInsertionIndex = -1
 $changelogEndIndex = -1
 
@@ -176,7 +176,10 @@ for ($i = 0; $i -lt $changelogLines.Length; $i++) {
         if($changelogInsertionIndex -eq -1) {
             $changelogInsertionIndex = $i
         }
-        $changelogCrates += $Matches[1]
+        # Keep the existing line verbatim: if a crate's directory name ever diverges
+        # from its package name, rebuilding the path from the package name would turn
+        # a working link into a dead one.
+        $changelogCrates[$Matches[1]] = $changelogLines[$i]
         $changelogEndIndex = $i
     }
     elseif ($changelogInsertionIndex -ne -1) {
@@ -187,13 +190,13 @@ for ($i = 0; $i -lt $changelogLines.Length; $i++) {
     }
 }
 
-$changelogCrates += $crateName
-$changelogCrates = $changelogCrates | Sort-Object
+$changelogCrates[$crateName] = ('- [`{0}`](./crates/{0}/CHANGELOG.md)' -f $crateName)
+$sortedChangelogCrateNames = $changelogCrates.Keys | Sort-Object
 
 if ($changelogInsertionIndex -ne -1) {
     $newLines = @()
-    foreach ($name in $changelogCrates) {
-        $newLines += ('- [`{0}`](./crates/{0}/CHANGELOG.md)' -f $name)
+    foreach ($name in $sortedChangelogCrateNames) {
+        $newLines += $changelogCrates[$name]
     }
     $pre = $changelogLines[0..($changelogInsertionIndex-1)]
     $post = $changelogLines[($changelogEndIndex+1)..$changelogLines.Length]

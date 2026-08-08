@@ -36,6 +36,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Test fixtures (e.g. compressed rustdoc JSON) are stored in Git LFS;
+          # without this they are checked out as pointer files.
+          lfs: true
       - name: Build cargo-anvil
         run: cargo build --locked -p cargo-anvil
       - name: Verify in-tree state matches templates

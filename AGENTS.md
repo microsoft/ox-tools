@@ -33,7 +33,7 @@ lockstep with the code (as pioneered by `cargo-anvil` and
 This is prospective, not a retroactive invariant: new crates land with a
 design doc (see [New features and new crates](#new-features-and-new-crates)),
 and pre-existing crates without one (e.g. `automation`, `cargo-heather`,
-`cargo_ensure_no_cyclic_deps`) are brought into compliance opportunistically
+`cargo-ensure-no-cyclic-deps`) are brought into compliance opportunistically
 when substantially changed — not in a single sweep.
 
 ### Layout

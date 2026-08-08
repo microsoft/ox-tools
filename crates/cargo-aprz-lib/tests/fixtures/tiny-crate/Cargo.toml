@@ -1,0 +1,18 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "tiny-crate"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[features]
+default = ["extra"]
+extra = ["dep:once_cell"]
+
+[dependencies]
+itoa = "1"
+miniz_oxide = "0.8"
+once_cell = { version = "1", optional = true }
