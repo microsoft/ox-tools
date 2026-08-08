@@ -58,6 +58,10 @@ jobs:
     steps:
     - name: Checkout repository
       uses: actions/checkout@v6.0.3
+      with:
+        # Test fixtures (e.g. compressed rustdoc JSON) are stored in Git LFS;
+        # without this they are checked out as pointer files.
+        lfs: true
 
     # Add any setup steps before running the `github/codeql-action/init` action.
     # This includes steps like installing compilers or runtimes (`actions/setup-node`

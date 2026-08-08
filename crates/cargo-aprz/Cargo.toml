@@ -1,0 +1,50 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-aprz"
+description = "A cargo subcommand that appraises the quality of Rust dependencies"
+version = "1.1.0"
+readme = "README.md"
+keywords = ["oxidizer", "cargo", "subcommand", "dependencies", "quality"]
+categories = ["command-line-utilities", "development-tools::cargo-plugins"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-aprz"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.ox-gen-readme]
+# Binary-only crate: no library rustdoc to generate a README from, so the
+# README is hand-maintained rather than produced by cargo-doc2readme.
+disable = true
+
+# Coverage opt-out. `cargo-aprz` is a thin binary over `cargo-aprz-lib`:
+# every item in `main.rs` is annotated `#[cfg_attr(coverage_nightly,
+# coverage(off))]`, and the package has no test target, so under the nightly
+# anvil-llvm-cov run it produces no instrumented regions. Without this
+# opt-out cargo-coverage-gate classifies it as NO DATA (exit 2). The
+# behaviour it wraps is covered through `cargo-aprz-lib::run`.
+[package.metadata.coverage-gate]
+min-lines-percent = 0.0
+
+[[bin]]
+name = "cargo-aprz"
+path = "src/main.rs"
+
+[dependencies]
+cargo-aprz-lib = { workspace = true }
+mimalloc = { workspace = true }
+mutants = { workspace = true }
+ohno = { workspace = true, features = ["app-err"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints

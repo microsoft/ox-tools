@@ -17,6 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.3
         with:
+          # Test fixtures (e.g. compressed rustdoc JSON) are stored in Git LFS;
+          # without this they are checked out as pointer files.
+          lfs: true
           fetch-depth: 0
 
       - name: Check for changes in last 24 hours
@@ -40,6 +43,10 @@ jobs:
       # prep
       - name: Checkout
         uses: actions/checkout@v6.0.3
+        with:
+          # Test fixtures (e.g. compressed rustdoc JSON) are stored in Git LFS;
+          # without this they are checked out as pointer files.
+          lfs: true
       - name: Setup
         uses: ./.github/actions/setup
         with:

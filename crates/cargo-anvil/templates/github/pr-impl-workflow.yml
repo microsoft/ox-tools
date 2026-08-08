@@ -59,6 +59,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Test fixtures (e.g. compressed rustdoc JSON) are stored in Git LFS;
+          # without this they are checked out as pointer files.
+          lfs: true
           fetch-depth: 0
       - id: delta
         uses: ./.github/actions/anvil-impact
@@ -72,6 +75,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Test fixtures (e.g. compressed rustdoc JSON) are stored in Git LFS;
+          # without this they are checked out as pointer files.
+          lfs: true
           fetch-depth: 0
       - id: delta
         uses: ./.github/actions/anvil-impact
@@ -93,6 +99,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Test fixtures (e.g. compressed rustdoc JSON) are stored in Git LFS;
+          # without this they are checked out as pointer files.
+          lfs: true
           # anvil-semver-check compares the affected crates' current API
           # against the PR's target branch (origin/<base>) via
           # `cargo semver-checks --baseline-rev`. That resolves the
@@ -149,6 +158,10 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Test fixtures (e.g. compressed rustdoc JSON) are stored in Git LFS;
+          # without this they are checked out as pointer files.
+          lfs: true
       - uses: ./.github/actions/anvil-pr-test
         with:
           free-disk-space: true
@@ -194,6 +207,10 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Test fixtures (e.g. compressed rustdoc JSON) are stored in Git LFS;
+          # without this they are checked out as pointer files.
+          lfs: true
       - uses: ./.github/actions/anvil-pr-runtime-analysis
         with:
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
@@ -218,6 +235,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Test fixtures (e.g. compressed rustdoc JSON) are stored in Git LFS;
+          # without this they are checked out as pointer files.
+          lfs: true
           fetch-depth: 0
       - uses: ./.github/actions/anvil-pr-mutants
         with:

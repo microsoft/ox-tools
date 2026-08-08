@@ -1,0 +1,475 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Integration test for the `crates` command.
+//!
+//! This test exercises the full end-to-end `crates` workflow: collect facts from
+//! live data sources, flatten to metrics, and generate reports.
+//!
+//! These tests reach out to the network, so they are marked `#[ignore]` and skipped by
+//! default. Run them explicitly with:
+//! ```sh
+//! cargo nextest run -p cargo-aprz-lib --test crates_command_integration --run-ignored all
+//! ```
+
+use std::io::Cursor;
+
+use cargo_aprz_lib::Host;
+
+/// Test host that captures output to in-memory buffers.
+struct TestHost {
+    output_buf: Vec<u8>,
+    error_buf: Vec<u8>,
+    exit_code: Option<i32>,
+}
+
+impl TestHost {
+    const fn new() -> Self {
+        Self {
+            output_buf: Vec::new(),
+            error_buf: Vec::new(),
+            exit_code: None,
+        }
+    }
+
+    fn output_str(&self) -> String {
+        String::from_utf8_lossy(&self.output_buf).into_owned()
+    }
+
+    fn error_str(&self) -> String {
+        String::from_utf8_lossy(&self.error_buf).into_owned()
+    }
+}
+
+impl Host for TestHost {
+    fn output(&mut self) -> impl std::io::Write {
+        Cursor::new(&mut self.output_buf)
+    }
+
+    fn error(&mut self) -> impl std::io::Write {
+        Cursor::new(&mut self.error_buf)
+    }
+
+    fn exit(&mut self, code: i32) {
+        self.exit_code = Some(code);
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires network access; run with --run-ignored all"]
+#[cfg_attr(miri, ignore = "Miri cannot call mkdir")]
+async fn test_crates_command_all_report_types() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let json_path = temp_dir.path().join("report.json");
+    let csv_path = temp_dir.path().join("report.csv");
+    let html_path = temp_dir.path().join("report.html");
+    let excel_path = temp_dir.path().join("report.xlsx");
+
+    let mut host = TestHost::new();
+    cargo_aprz_lib::run(
+        &mut host,
+        [
+            "cargo",
+            "aprz",
+            "crates",
+            "serde@1.0.200",
+            "--json",
+            json_path.to_str().expect("valid path"),
+            "--csv",
+            csv_path.to_str().expect("valid path"),
+            "--html",
+            html_path.to_str().expect("valid path"),
+            "--excel",
+            excel_path.to_str().expect("valid path"),
+            "--console",
+            "--color",
+            "never",
+        ],
+    )
+    .await;
+
+    assert!(host.error_str().is_empty(), "crates command failed: {}", host.error_str());
+
+    // JSON report
+    assert!(json_path.exists(), "JSON report file should be created");
+    let json_content = std::fs::read_to_string(&json_path).expect("read JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&json_content).expect("valid JSON");
+    let crates = parsed["crates"].as_array().expect("crates array");
+    assert_eq!(crates.len(), 1);
+    let entry = &crates[0];
+    assert_eq!(entry["name"].as_str(), Some("serde"));
+    assert_eq!(entry["version"].as_str(), Some("1.0.200"));
+    let metrics = entry["metrics"].as_object().expect("metrics object");
+    assert!(!metrics.is_empty(), "should have metrics");
+
+    // CSV report
+    assert!(csv_path.exists(), "CSV report file should be created");
+    let csv_content = std::fs::read_to_string(&csv_path).expect("read CSV");
+    let csv_lines: Vec<&str> = csv_content.lines().collect();
+    assert!(csv_lines.len() >= 2, "CSV should have header + data rows");
+    assert!(csv_lines[0].starts_with("Metric"), "CSV header should start with 'Metric'");
+    assert!(csv_content.contains("serde"), "CSV should contain crate name");
+
+    // HTML report
+    assert!(html_path.exists(), "HTML report file should be created");
+    let html_content = std::fs::read_to_string(&html_path).expect("read HTML");
+    assert!(html_content.contains("<html"), "HTML report should contain html tag");
+    assert!(html_content.contains("serde"), "HTML report should mention crate name");
+
+    // Excel report
+    assert!(excel_path.exists(), "Excel report file should be created");
+    let excel_size = std::fs::metadata(&excel_path).expect("excel metadata").len();
+    assert!(excel_size > 0, "Excel report should not be empty");
+
+    // Console output
+    let console_output = host.output_str();
+    assert!(console_output.contains("serde"), "console output should mention the crate name");
+}
+
+#[tokio::test]
+#[ignore = "requires network access; run with --run-ignored all"]
+#[cfg_attr(miri, ignore = "Miri cannot call mkdir")]
+async fn test_crates_command_csv_output() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let csv_path = temp_dir.path().join("report.csv");
+
+    let mut host = TestHost::new();
+    cargo_aprz_lib::run(
+        &mut host,
+        [
+            "cargo",
+            "aprz",
+            "crates",
+            "itoa@1.0.14",
+            "--csv",
+            csv_path.to_str().expect("valid path"),
+            "--color",
+            "never",
+        ],
+    )
+    .await;
+
+    assert!(host.error_str().is_empty(), "crates command failed: {}", host.error_str());
+    assert!(csv_path.exists(), "CSV report file should be created");
+
+    let csv_content = std::fs::read_to_string(&csv_path).expect("read CSV");
+    // CSV format: header row starts with "Metric", data rows follow
+    let lines: Vec<&str> = csv_content.lines().collect();
+    assert!(lines.len() >= 2, "CSV should have header + data, got {} lines", lines.len());
+    assert!(
+        lines[0].starts_with("Metric"),
+        "first row should be the header starting with 'Metric'"
+    );
+    assert!(csv_content.contains("itoa"), "CSV should contain crate name");
+}
+
+#[tokio::test]
+#[ignore = "requires network access; run with --run-ignored all"]
+#[cfg_attr(miri, ignore = "Miri cannot call mkdir")]
+async fn test_crates_command_console_output() {
+    let mut host = TestHost::new();
+    cargo_aprz_lib::run(
+        &mut host,
+        ["cargo", "aprz", "crates", "serde@1.0.200", "--color", "never", "--console"],
+    )
+    .await;
+
+    assert!(host.error_str().is_empty(), "crates command failed: {}", host.error_str());
+
+    let output = host.output_str();
+    assert!(output.contains("serde"), "console output should mention the crate name");
+}
+
+#[tokio::test]
+#[ignore = "requires network access; run with --run-ignored all"]
+#[cfg_attr(miri, ignore = "Miri cannot call mkdir")]
+async fn test_crates_command_multiple_crates() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let json_path = temp_dir.path().join("report.json");
+
+    let mut host = TestHost::new();
+    cargo_aprz_lib::run(
+        &mut host,
+        [
+            "cargo",
+            "aprz",
+            "crates",
+            "serde@1.0.200",
+            "itoa@1.0.14",
+            "--json",
+            json_path.to_str().expect("valid path"),
+            "--color",
+            "never",
+        ],
+    )
+    .await;
+
+    assert!(host.error_str().is_empty(), "crates command failed: {}", host.error_str());
+
+    let json_content = std::fs::read_to_string(&json_path).expect("read JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&json_content).expect("valid JSON");
+
+    let crates = parsed["crates"].as_array().expect("crates array");
+    assert_eq!(crates.len(), 2, "should have 2 crate entries");
+
+    let names: Vec<&str> = crates.iter().filter_map(|c| c["name"].as_str()).collect();
+    assert!(names.contains(&"serde"), "should contain serde");
+    assert!(names.contains(&"itoa"), "should contain itoa");
+}
+
+#[tokio::test]
+#[ignore = "requires network access; run with --run-ignored all"]
+#[cfg_attr(miri, ignore = "Miri cannot call mkdir")]
+async fn test_crates_command_nonexistent_crate() {
+    let mut host = TestHost::new();
+    cargo_aprz_lib::run(
+        &mut host,
+        [
+            "cargo",
+            "aprz",
+            "crates",
+            "this-crate-definitely-does-not-exist-xyz-98765@0.0.1",
+            "--color",
+            "never",
+            "--console",
+        ],
+    )
+    .await;
+
+    // Should succeed (non-existent crates are reported, not fatal)
+    assert!(
+        host.exit_code.is_none(),
+        "crates command should not fail for unknown crates: {}",
+        host.error_str()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Line 245: CrateNotFound with non-empty suggestions ("Did you mean ...?")
+// Uses a misspelled name close to a real crate so suggestions are returned.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires network access; run with --run-ignored all"]
+#[cfg_attr(miri, ignore = "Miri cannot call mkdir")]
+async fn test_crates_command_misspelled_crate_shows_suggestions() {
+    let mut host = TestHost::new();
+    cargo_aprz_lib::run(
+        &mut host,
+        ["cargo", "aprz", "crates", "serdee@1.0.0", "--color", "never", "--console"],
+    )
+    .await;
+
+    // The command itself succeeds; the crate is reported as not found
+
+    let error_output = host.error_str();
+    assert!(
+        error_output.contains("Did you mean"),
+        "error output should contain suggestions, got: {error_output}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Line 262: VersionNotFound — real crate with a nonexistent version
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires network access; run with --run-ignored all"]
+#[cfg_attr(miri, ignore = "Miri cannot call mkdir")]
+async fn test_crates_command_nonexistent_version() {
+    let mut host = TestHost::new();
+    cargo_aprz_lib::run(
+        &mut host,
+        ["cargo", "aprz", "crates", "serde@99.99.99", "--color", "never", "--console"],
+    )
+    .await;
+
+    let error_output = host.error_str();
+    assert!(
+        error_output.contains("Could not find information on version"),
+        "error output should mention missing version, got: {error_output}"
+    );
+    assert!(
+        error_output.contains("serde"),
+        "error output should mention the crate name, got: {error_output}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Line 310: should_eval branch — --error-if-high-risk triggers expression
+// evaluation and produces ReportableCrate with an evaluation result.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires network access; run with --run-ignored all"]
+#[cfg_attr(miri, ignore = "Miri cannot call mkdir")]
+async fn test_crates_command_with_error_if_high_risk_flag() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let json_path = temp_dir.path().join("report.json");
+
+    let mut host = TestHost::new();
+    cargo_aprz_lib::run(
+        &mut host,
+        [
+            "cargo",
+            "aprz",
+            "crates",
+            "serde@1.0.200",
+            "--error-if-high-risk",
+            "--json",
+            json_path.to_str().expect("valid path"),
+            "--color",
+            "never",
+        ],
+    )
+    .await;
+
+    // --error-if-high-risk with no expressions means evaluation succeeds (nothing to deny)
+    assert!(
+        host.error_str().is_empty(),
+        "crates --error-if-high-risk should succeed: {}",
+        host.error_str()
+    );
+
+    let json_content = std::fs::read_to_string(&json_path).expect("read JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&json_content).expect("valid JSON");
+
+    let crates = parsed["crates"].as_array().expect("crates array");
+    assert_eq!(crates.len(), 1);
+    assert_eq!(crates[0]["name"].as_str(), Some("serde"));
+
+    // With --error-if-high-risk, the appraisal field should be present
+    let eval = &crates[0]["appraisal"];
+    assert!(!eval.is_null(), "appraisal should be present when --error-if-high-risk is used");
+}
+
+// ---------------------------------------------------------------------------
+// Allow list integration tests — verify that allow_list entries in the config
+// prevent error exit codes from --error-if-high-risk / --error-if-medium-risk.
+// ---------------------------------------------------------------------------
+
+/// Config with an always-failing `high_risk` gate so every crate is flagged high risk.
+const ALWAYS_FAIL_CONFIG: &str = r#"
+medium_risk_threshold = 30.0
+low_risk_threshold = 70.0
+
+[[high_risk]]
+name = "Always Fail"
+description = "Always flags crate as high risk"
+expression = "false"
+"#;
+
+#[tokio::test]
+#[ignore = "requires network access; run with --run-ignored all"]
+#[cfg_attr(miri, ignore = "Miri cannot call mkdir")]
+async fn test_error_if_high_risk_triggers_without_allow_list() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let config_path = temp_dir.path().join("aprz.toml");
+    std::fs::write(&config_path, ALWAYS_FAIL_CONFIG).expect("write config");
+
+    let mut host = TestHost::new();
+    cargo_aprz_lib::run(
+        &mut host,
+        [
+            "cargo",
+            "aprz",
+            "crates",
+            "serde@1.0.200",
+            "--error-if-high-risk",
+            "--config",
+            config_path.to_str().expect("valid path"),
+            "--color",
+            "never",
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        host.exit_code,
+        Some(1),
+        "should exit with code 1 when high risk crate is not on allow list"
+    );
+    let error = host.error_str();
+    assert!(error.contains("- serde v1.0.200"));
+    assert!(error.contains("    - FAILED: Always Fail; expected: Always flags crate as high risk"));
+    assert!(error.contains("[[allow_list]]"));
+}
+
+#[tokio::test]
+#[ignore = "requires network access; run with --run-ignored all"]
+#[cfg_attr(miri, ignore = "Miri cannot call mkdir")]
+async fn test_error_if_high_risk_bypassed_by_allow_list() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let config_content = format!(
+        r#"{ALWAYS_FAIL_CONFIG}
+[[allow_list]]
+name = "serde"
+version = "=1.0.200"
+"#
+    );
+    let config_path = temp_dir.path().join("aprz.toml");
+    std::fs::write(&config_path, &config_content).expect("write config");
+
+    let mut host = TestHost::new();
+    cargo_aprz_lib::run(
+        &mut host,
+        [
+            "cargo",
+            "aprz",
+            "crates",
+            "serde@1.0.200",
+            "--error-if-high-risk",
+            "--config",
+            config_path.to_str().expect("valid path"),
+            "--color",
+            "never",
+        ],
+    )
+    .await;
+
+    assert!(
+        host.exit_code.is_none(),
+        "should not exit with error when crate is on allow list, but got exit code {:?}: {}",
+        host.exit_code,
+        host.error_str()
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires network access; run with --run-ignored all"]
+#[cfg_attr(miri, ignore = "Miri cannot call mkdir")]
+async fn test_error_if_high_risk_allow_list_wrong_version_still_fails() {
+    let temp_dir = tempfile::tempdir().expect("Failed to create temp dir");
+    let config_content = format!(
+        r#"{ALWAYS_FAIL_CONFIG}
+[[allow_list]]
+name = "serde"
+version = "=999.0.0"
+"#
+    );
+    let config_path = temp_dir.path().join("aprz.toml");
+    std::fs::write(&config_path, &config_content).expect("write config");
+
+    let mut host = TestHost::new();
+    cargo_aprz_lib::run(
+        &mut host,
+        [
+            "cargo",
+            "aprz",
+            "crates",
+            "serde@1.0.200",
+            "--error-if-high-risk",
+            "--config",
+            config_path.to_str().expect("valid path"),
+            "--color",
+            "never",
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        host.exit_code,
+        Some(1),
+        "should exit with code 1 when allow list version doesn't match"
+    );
+}

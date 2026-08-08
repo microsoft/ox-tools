@@ -53,6 +53,13 @@
 //!
 //! The tool will exit with code 0 if no cycles are found, or code 1 if cycles are detected.
 
+#![doc(
+    html_logo_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-ensure-no-cyclic-deps/logo.png"
+)]
+#![doc(
+    html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-ensure-no-cyclic-deps/favicon.ico"
+)]
+
 use std::collections::HashMap;
 use std::process::ExitCode;
 

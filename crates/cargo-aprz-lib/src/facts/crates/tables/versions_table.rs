@@ -1,0 +1,319 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+use super::super::rust_edition::RustEdition;
+#[cfg(all_fields)]
+use super::UserId;
+use super::{CrateId, VersionId, define_rows, define_table};
+use crate::Result;
+use chrono::{DateTime, Utc};
+use compact_str::CompactString;
+use ohno::IntoAppError;
+use semver::Version;
+use std::collections::BTreeMap;
+use url::Url;
+
+/// Log target for versions table
+const LOG_TARGET: &str = "    crates";
+
+define_rows! {
+    VersionRow<'a> {
+        pub id: VersionId,
+        #[allow(dead_code)]
+        pub crate_id: CrateId,
+        // Read via `get_query` during scanning; the full row is only used for enrichment.
+        #[allow(dead_code)]
+        pub num: Version,
+        pub downloads: u64,
+        edition: Option<u64>,
+        pub created_at: DateTime<Utc>,
+        pub updated_at: DateTime<Utc>,
+        pub description: &'a str,
+        features: &'a str,
+        pub license: &'a str,
+        pub rust_version: &'a str,
+        pub yanked: bool,
+        documentation: &'a str,
+        homepage: &'a str,
+        #[cfg(all_fields)]
+        categories: Vec<&'a str>,
+        #[cfg(all_fields)]
+        keywords: Vec<&'a str>,
+        #[cfg(all_fields)]
+        repository: &'a str,
+        #[cfg(all_fields)]
+        pub links: &'a str,
+        #[cfg(all_fields)]
+        pub bin_names: &'a str,
+        #[cfg(all_fields)]
+        pub checksum: &'a str,
+        #[cfg(all_fields)]
+        pub crate_size: Option<u64>,
+        #[cfg(all_fields)]
+        pub published_by: Option<UserId>,
+        #[cfg(all_fields)]
+        pub has_lib: bool,
+    }
+}
+
+impl VersionRow<'_> {
+    /// # Panics
+    ///
+    /// Panics if the features JSON in the database is malformed
+    #[must_use]
+    pub fn features(&self) -> BTreeMap<CompactString, Vec<CompactString>> {
+        serde_json::from_str(self.features).expect("invalid data in features field")
+    }
+
+    #[cfg(all_fields)]
+    pub fn categories(&self) -> Vec<String> {
+        todo!()
+    }
+
+    #[cfg(all_fields)]
+    pub fn keywords(&self) -> Vec<String> {
+        todo!()
+    }
+
+    #[cfg(all_fields)]
+    #[must_use]
+    pub fn repository(&self) -> Option<Url> {
+        if self.repository.is_empty() {
+            None
+        } else {
+            Some(Url::parse(self.repository).expect("invalid URL in repository field"))
+        }
+    }
+
+    /// # Panics
+    ///
+    /// Panics if the homepage URL in the database is malformed
+    #[must_use]
+    pub fn homepage(&self) -> Option<Url> {
+        if self.homepage.is_empty() {
+            None
+        } else {
+            Some(Url::parse(self.homepage).expect("invalid URL in homepage field"))
+        }
+    }
+
+    /// # Panics
+    ///
+    /// Panics if the documentation URL in the database is malformed
+    #[must_use]
+    pub fn documentation(&self) -> Option<Url> {
+        if self.documentation.is_empty() {
+            None
+        } else {
+            Some(Url::parse(self.documentation).expect("invalid URL in documentation field"))
+        }
+    }
+
+    #[must_use]
+    pub const fn edition(&self) -> Option<RustEdition> {
+        match self.edition {
+            None => None,
+            Some(2015) => Some(RustEdition::Edition2015),
+            Some(2018) => Some(RustEdition::Edition2018),
+            Some(2021) => Some(RustEdition::Edition2021),
+            Some(2024) => Some(RustEdition::Edition2024),
+            _ => Some(RustEdition::Unknown),
+        }
+    }
+}
+
+define_table! {
+    versions {
+        fn write_row(csv_row: &CsvVersionRow<'a>, writer: &mut RowWriter<impl Write>) -> Result<()> {
+            let _ = serde_json::from_str::<BTreeMap<CompactString, Vec<CompactString>>>(csv_row.features).into_app_err("parsing feature map")?;
+
+            writer.write_str_as_u64(csv_row.id)?;
+            writer.write_str_as_u64(csv_row.crate_id)?;
+            writer.write_str_as_version(csv_row.num)?;
+            writer.write_str_as_u64(csv_row.downloads)?;
+            writer.write_optional_str_as_u64(csv_row.edition)?;
+            writer.write_str_as_datetime(csv_row.created_at)?;
+            writer.write_str_as_datetime(csv_row.updated_at)?;
+            writer.write_str(csv_row.description);
+            writer.write_str(csv_row.features);
+            writer.write_str(csv_row.license);
+            writer.write_str(csv_row.rust_version);
+            writer.write_str_as_bool(csv_row.yanked)?;
+
+            if let Err(e) = writer.write_str_as_url(csv_row.documentation) {
+                log::debug!(target: LOG_TARGET,
+                    "invalid documentation URL in versions table for version {} (crate '{}'): {}",
+                    csv_row.num,
+                    csv_row.crate_id,
+                    e
+                );
+                writer.write_str("");
+            }
+
+            if let Err(e) = writer.write_str_as_url(csv_row.homepage) {
+                log::debug!(target: LOG_TARGET,
+                    "invalid homepage URL in versions table for version {} (crate '{}'): {}",
+                    csv_row.num,
+                    csv_row.crate_id,
+                    e
+                );
+                writer.write_str("");
+            }
+
+            #[cfg(all_fields)]
+            {
+                writer.write_pg_array_as_str_vec(csv_row.categories)?;
+                writer.write_pg_array_as_str_vec(csv_row.keywords)?;
+                if let Err(e) = writer.write_str_as_url(csv_row.repository) {
+                    log::debug!(target: LOG_TARGET,
+                        "invalid repository URL in versions table for version {} (crate '{}'): {}",
+                        csv_row.num,
+                        csv_row.crate_id,
+                        e
+                    );
+                    writer.write_str("");
+                }
+                writer.write_optional_str(csv_row.links);
+                writer.write_str(csv_row.bin_names);
+                writer.write_optional_str(csv_row.checksum);
+                writer.write_optional_str_as_u64(csv_row.crate_size)?;
+                writer.write_optional_str_as_u64(csv_row.published_by)?;
+                writer.write_str_as_bool(csv_row.has_lib)?;
+            }
+
+            Ok(())
+        }
+
+        fn read_row<'a>(reader: &mut RowReader<'a>) -> VersionRow<'a> {
+            VersionRow {
+                id: VersionId(reader.read_u64()),
+                crate_id: CrateId(reader.read_u64()),
+                num: reader.read_version(),
+                downloads: reader.read_u64(),
+                edition: reader.read_optional_u64(),
+                created_at: reader.read_datetime(),
+                updated_at: reader.read_datetime(),
+                description: reader.read_str(),
+                features: reader.read_str(),
+                license: reader.read_str(),
+                rust_version: reader.read_str(),
+                yanked: reader.read_bool(),
+                documentation: reader.read_str(),
+                homepage: reader.read_str(),
+                #[cfg(all_fields)]
+                categories: reader.read_str_vec(),
+                #[cfg(all_fields)]
+                keywords: reader.read_str_vec(),
+                #[cfg(all_fields)]
+                repository: reader.read_str(),
+                #[cfg(all_fields)]
+                links: reader.read_str(),
+                #[cfg(all_fields)]
+                bin_names: reader.read_str(),
+                #[cfg(all_fields)]
+                checksum: reader.read_str(),
+                #[cfg(all_fields)]
+                crate_size: reader.read_optional_u64(),
+                #[cfg(all_fields)]
+                published_by: reader.read_optional_u64().map(UserId),
+                #[cfg(all_fields)]
+                has_lib: reader.read_bool(),
+            }
+        }
+    }
+}
+
+/// Lean version row containing only the fields needed for phase 4 scanning.
+///
+/// The full `VersionRow` has 14+ fields including large strings (description, features JSON, etc.)
+/// that require expensive UTF-8 validation. This lean variant reads only `id` and `crate_id`,
+/// skipping all other fields. For the ~0.1% of rows belonging to queried crates, the caller
+/// uses `get(index)` to do a full read.
+#[derive(Debug, Clone, Copy)]
+pub struct VersionRowLean {
+    pub id: VersionId,
+    pub crate_id: CrateId,
+}
+
+/// Reads only `id` and `crate_id` from a version row, skipping all remaining fields.
+fn read_row_lean(reader: &mut super::RowReader<'_>) -> VersionRowLean {
+    let id = VersionId(reader.read_u64());
+    let crate_id = CrateId(reader.read_u64());
+    reader.skip_version(); // num
+    reader.skip_u64(); // downloads
+    reader.skip_optional_u64(); // edition
+    reader.skip_datetime(); // created_at
+    reader.skip_datetime(); // updated_at
+    reader.skip_str(); // description
+    reader.skip_str(); // features
+    reader.skip_str(); // license
+    reader.skip_str(); // rust_version
+    reader.skip_bool(); // yanked
+    reader.skip_str(); // documentation
+    reader.skip_str(); // homepage
+    #[cfg(all_fields)]
+    {
+        reader.skip_str_vec(); // categories
+        reader.skip_str_vec(); // keywords
+        reader.skip_str(); // repository
+        reader.skip_str(); // links
+        reader.skip_str(); // bin_names
+        reader.skip_str(); // checksum
+        reader.skip_optional_u64(); // crate_size
+        reader.skip_optional_u64(); // published_by
+        reader.skip_bool(); // has_lib
+    }
+    VersionRowLean { id, crate_id }
+}
+
+/// Version row holding only the fields phase 4 needs from a row it has matched.
+///
+/// A full read validates and returns every string field, including the `features` JSON, which
+/// can run to kilobytes per row. Phase 4 matches a row on its crate and then only looks at the
+/// version number, creation time and yanked flag, so it reads just those.
+#[derive(Debug, Clone)]
+pub struct VersionRowQuery {
+    pub num: Version,
+    pub created_at: DateTime<Utc>,
+    pub yanked: bool,
+}
+
+/// Reads the query fields of a version row, skipping the rest.
+///
+/// The field order must match `read_row`.
+fn read_row_query(reader: &mut super::RowReader<'_>) -> VersionRowQuery {
+    reader.skip_u64(); // id
+    reader.skip_u64(); // crate_id
+    let num = reader.read_version();
+    reader.skip_u64(); // downloads
+    reader.skip_optional_u64(); // edition
+    let created_at = reader.read_datetime();
+    reader.skip_datetime(); // updated_at
+    reader.skip_str(); // description
+    reader.skip_str(); // features
+    reader.skip_str(); // license
+    reader.skip_str(); // rust_version
+    let yanked = reader.read_bool();
+
+    VersionRowQuery { num, created_at, yanked }
+}
+
+impl VersionsTable {
+    /// Reads only the fields needed while scanning for matches.
+    ///
+    /// See [`VersionRowQuery`] for why this exists.
+    pub fn get_query(&self, index: VersionsTableIndex) -> VersionRowQuery {
+        let mut reader = super::RowReader::new(&self.mmap[super::TABLE_HEADER_SIZE + index.0..]);
+        read_row_query(&mut reader)
+    }
+
+    /// Returns a lean iterator that only deserializes `id` and `crate_id` per row,
+    /// skipping all string fields (no UTF-8 validation) and version parsing.
+    pub fn iter_lean(&self) -> impl Iterator<Item = (VersionRowLean, VersionsTableIndex)> {
+        super::RowIter::new(
+            super::RowReader::new(&self.mmap[super::TABLE_HEADER_SIZE..]),
+            read_row_lean,
+            self.count,
+        )
+    }
+}
