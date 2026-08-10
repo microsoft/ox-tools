@@ -159,14 +159,14 @@ Because `image-output-dir` is a bare key, TOML requires it to appear **before** 
 | `image` | string | — | Pre-built image to pull and run recipes in. |
 | `dockerfile` | string | — | Repo-relative Dockerfile that **replaces** anvil's and builds the image alone. |
 | `extends` | string | — | Repo-relative Dockerfile layered **on top of** anvil's image. |
-| `build-args` | table | `{}` | `--build-arg` pairs for the build. Part of the image identity. |
-| `build-secrets` | array | `[]` | BuildKit `--secret` specifications. Excluded from the image identity. |
+| `build-args` | table | `{}` | `--build-arg` pairs for the build. Part of the image identity. **Never put a credential here** — see below. |
+| `build-secrets` | array | `[]` | BuildKit `--secret` specifications. Excluded from the image identity. Anvil refuses to build when a declared source is unset or empty. |
 | `hash-inputs` | array | `[]` | Extra files that define the image identity — anything the Dockerfile `COPY`s. |
 | `engine` | `auto` \| `docker` \| `podman` | `auto` | `auto` probes for `docker`, then `podman`. |
 | `name` | string | directory name | Repo identity; prefixes cache-volume names so repos on one host do not collide. |
 | `workdir` | string | `/workspaces/<name>` | Mount point for the repo root inside the container. |
 | `cache-volumes` | array | `["cargo", "rustup"]` | Named volumes to persist across runs. |
-| `forward-env` | array | `[]` | Glob patterns; matching host environment variables are forwarded in. |
+| `forward-env` | array | `[]` | Glob patterns; matching host environment variables are forwarded in. Forwarded **by name** — the engine copies the value, so it never reaches a command line. The matched names are printed to stderr on each run. |
 | `devcontainer` | bool | `false` | Also emit `.devcontainer/devcontainer.json` from the same settings. |
 | `native-when` | table | — | Host match that runs natively instead of containerizing. |
 
@@ -187,6 +187,44 @@ quietly preferring one would hide the mistake.
 Prefer `extends` over `dockerfile` whenever the OS is the same. `dockerfile` makes you
 re-implement the toolchain, tool catalog and PowerShell install, and re-do it on every
 anvil upgrade; `extends` inherits all of that.
+
+#### Credentials
+
+A private feed needs a credential in two places: during the image build, to install the
+tool catalog, and at run time, to fetch the workspace's own dependencies.
+
+**Build time — use `build-secrets`, never `build-args`.** A build-arg value is folded into
+the image identity and written verbatim into files your repository commits: the generated
+`container.just`, and `.devcontainer/devcontainer.json` when `devcontainer = true`. A
+credential placed there ends up in git. Anvil rejects build-arg *names* that look like
+credentials (`*TOKEN*`, `*SECRET*`, `*PASSWORD*`, `*CRED*`, `*PAT`), but that is a guard
+against the obvious mistake, not a control — it cannot know that `FEED_AUTH` holds a
+bearer.
+
+Anvil refuses to build when a `build-secrets` entry names an environment variable or file
+that is unset or empty. BuildKit does not: it mounts an empty file and the build proceeds,
+which would install a reduced tool set and tag the result with the *same* content hash a
+credentialed build produces — so every later run would reuse the broken image. Also write
+`required=true` on the mount, which closes the same hole from the Dockerfile's side:
+
+```dockerfile
+RUN --mount=type=secret,id=feed_token,required=true \
+    TOKEN="$(cat /run/secrets/feed_token)" ... 
+```
+
+Anything the build *writes* with a secret is ordinary content. Anvil's own Dockerfile
+deletes `credentials.toml` and `.netrc` in the same layer as the install; a Dockerfile you
+own must do the same, or the credential is baked into a layer.
+
+**Run time — use `forward-env`.** Matching variables are forwarded by name, so the engine
+copies the value out of the environment it already inherits and the credential never
+appears in a host command line. The matched names are printed to stderr so a broad pattern
+does not silently hand extra variables to a process that runs third-party build scripts.
+
+What this does **not** do: everything inside the container runs as one user in one mount
+namespace, so a forwarded credential is reachable by any code the checks execute,
+including dependency build scripts and proc macros. Keep `forward-env` patterns narrow,
+and keep the token short-lived.
 
 Choosing any one of them replaces the choice wholesale rather than merging with it, so a
 catalog default naming a pre-built image cannot collide with a repository that decides to

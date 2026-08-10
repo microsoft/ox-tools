@@ -74,12 +74,19 @@ RUN curl --proto '=https' --tlsv1.2 -fsSLo /tmp/rustup-init \
 # catalog. Only the files `just anvil-setup` needs are copied, so an unrelated
 # source edit does not invalidate this layer. The synthetic Justfile avoids
 # pulling in repository-specific imports that may not exist yet.
+#
+# The credential files are removed in the same layer as the install. A build
+# secret is mounted, never committed to a layer, but anything the install
+# *writes* with it is ordinary content -- and the `chmod` on the next line
+# would otherwise publish it world-readable. Deleting them in a later `RUN`
+# would not help: the earlier layer still carries the file.
 WORKDIR /opt/anvil
 COPY justfiles ./justfiles
 COPY rust-toolchain.toml ./
 RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
     && just anvil-setup \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
+    && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME}/.netrc" \
     && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
 
 # Consumed by the re-entry guard in the generated tier and group recipes: a

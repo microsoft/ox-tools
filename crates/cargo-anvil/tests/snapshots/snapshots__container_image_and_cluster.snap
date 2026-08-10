@@ -3886,6 +3886,34 @@ _anvil-container-image:
     $hashInputs = @()
     $extending = '{{anvil_container_image_source}}' -eq 'extend'
 
+    # A declared secret whose source is missing must stop the build.
+    #
+    # BuildKit does not: `--secret id=x,env=UNSET` succeeds and mounts an empty
+    # file, so a Dockerfile without `required=true` installs a reduced tool set
+    # and exits 0. That degraded image is then tagged with the *same* content
+    # hash a fully-credentialed build would produce -- secret values are
+    # deliberately not hashed -- so every later run resolves the tag and reuses
+    # the broken image. Failing here keeps "the tag is present" meaning "the
+    # contents are current".
+    foreach ($secret in $userBuildSecrets) {
+        foreach ($field in ($secret -split ',')) {
+            $pair = $field.Trim()
+            if ($pair -match '^env=(.+)$') {
+                if (-not [Environment]::GetEnvironmentVariable($Matches[1])) {
+                    Write-Error "anvil: build secret '$secret' names environment variable '$($Matches[1])', which is unset or empty"
+                    exit 1
+                }
+            } elseif ($pair -match '^src=(.+)$') {
+                $path = $Matches[1]
+                if (-not [System.IO.Path]::IsPathRooted($path)) { $path = Join-Path $repoRoot $path }
+                if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -eq 0) {
+                    Write-Error "anvil: build secret '$secret' names file '$($Matches[1])', which is missing or empty"
+                    exit 1
+                }
+            }
+        }
+    }
+
     # The image installs its tools by running `just anvil-setup`, whose
     # dependency chain reaches the tier, group, check and tool recipes. All of
     # them therefore define what ends up in the image and must be hashed; only
@@ -4072,15 +4100,28 @@ _anvil-container-run target:
     }
 
     $runArgs += @('-e', 'ANVIL_IN_CONTAINER=1')
+    # Forward by NAME, never as NAME=VALUE: the engine copies the value from the
+    # environment it inherits, so a credential never appears in the host's
+    # process command line, where endpoint telemetry records and retains it for
+    # far longer than a short-lived token is meant to live.
+    #
+    # The matched names are reported because these are globs with no deny-list:
+    # a broad pattern silently hands extra variables to a process that runs
+    # third-party build scripts and proc macros. Names only -- never values.
     $patterns = @()
     if ($patterns.Count -gt 0) {
+        $forwarded = @()
         foreach ($entry in Get-ChildItem Env:) {
             foreach ($pattern in $patterns) {
                 if ($entry.Name -like $pattern) {
-                    $runArgs += @('-e', "$($entry.Name)=$($entry.Value)")
+                    $runArgs += @('-e', $entry.Name)
+                    $forwarded += $entry.Name
                     break
                 }
             }
+        }
+        if ($forwarded.Count -gt 0) {
+            [Console]::Error.WriteLine("anvil: forwarding env: $($forwarded -join ', ')")
         }
     }
 

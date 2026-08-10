@@ -607,13 +607,35 @@ impl ContainerConfig {
             );
         }
 
+        // A build arg's value is not a secret-safe channel. It is folded into
+        // the image identity hash and written verbatim into two files the
+        // consuming repository commits: the generated `container.just` and, when
+        // enabled, `.devcontainer/devcontainer.json`. A credential put here
+        // therefore lands in git.
+        //
+        // This is a footgun guard, not a security control: it catches the
+        // obvious names and cannot know that `FEED_AUTH` holds a bearer. The
+        // author being protected is the author writing the config, so there is
+        // no adversary to evade it.
+        let build_args = self.build_args.clone().unwrap_or_default();
+        for (name, _) in &build_args {
+            if is_credential_shaped(name) {
+                bail!(
+                    "[container] build-args `{name}` looks like a credential, and build-arg \
+                     values are written into generated files that are committed. Pass it as a \
+                     `build-secrets` entry instead (e.g. \"id={}, env={name}\")",
+                    name.to_ascii_lowercase()
+                );
+            }
+        }
+
         Ok(ResolvedContainer {
             enabled,
             image,
             dockerfile,
             extends,
             image_source,
-            build_args: self.build_args.clone().unwrap_or_default(),
+            build_args,
             build_secrets: self.build_secrets.clone().unwrap_or_default(),
             hash_inputs: self.hash_inputs.clone().unwrap_or_default(),
             engine: self.engine.unwrap_or_default(),
@@ -676,6 +698,15 @@ fn context_under_output_dir(context: &str, output_dir: &str) -> bool {
     }
     // Reject any `..` segment so the context cannot climb back out.
     !normalized.split('/').any(|segment| segment == "..")
+}
+
+/// Whether a build-arg name looks like it holds a credential.
+///
+/// `KEY` is deliberately absent: it matches `SSH_KEY_PATH` and `API_KEY_NAME`,
+/// and a guard that cries wolf is a guard people learn to route around.
+fn is_credential_shaped(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    ["TOKEN", "SECRET", "PASSWORD", "CRED"].iter().any(|needle| upper.contains(needle)) || upper.ends_with("PAT")
 }
 
 /// Whether `name` is a valid `just` recipe token: `[A-Za-z][A-Za-z0-9_-]*`.
@@ -1359,6 +1390,34 @@ version-id = "22.04"
         let resolved = repo.overlay(&base).resolve("repo").unwrap();
         assert_eq!(resolved.image_source, ExecImageSource::BuildRepo);
         assert!(resolved.image.is_empty());
+    }
+
+    #[test]
+    /// A build-arg value is committed twice over — into the generated
+    /// `container.just` and the devcontainer descriptor — so a credential put
+    /// there lands in git. Catch the obvious names at generation time.
+    #[test]
+    fn credential_shaped_build_args_are_rejected() {
+        for name in ["FEED_TOKEN", "my_secret", "NUGET_PASSWORD", "ADO_PAT", "GIT_CREDENTIAL"] {
+            let toml = format!("[container]\nenabled = true\nbuild-args = {{ {name} = \"x\" }}\n");
+            let err = parse(&toml).unwrap().container.resolve("repo").unwrap_err().to_string();
+            assert!(err.contains("looks like a credential"), "{name} should be rejected: {err}");
+            assert!(err.contains("build-secrets"), "{name} should name the alternative: {err}");
+        }
+    }
+
+    /// The guard must not cry wolf: a name people legitimately use as a build
+    /// arg has to keep working, or the guard is the thing that gets removed.
+    #[test]
+    fn ordinary_build_args_are_accepted() {
+        for name in ["RUST_CHANNEL", "SSH_KEY_PATH", "API_KEY_NAME", "TARGETS", "PATCH_LEVEL"] {
+            let toml = format!("[container]\nenabled = true\nbuild-args = {{ {name} = \"x\" }}\n");
+            parse(&toml)
+                .unwrap()
+                .container
+                .resolve("repo")
+                .unwrap_or_else(|e| panic!("{name} should be accepted: {e}"));
+        }
     }
 
     #[test]

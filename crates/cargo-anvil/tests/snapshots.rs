@@ -397,6 +397,56 @@ fn cluster_recipes_are_excluded_from_exec_image_identity() {
     }
 }
 
+/// A credential must never reach the engine's command line. `-e NAME=VALUE`
+/// puts it in host process argv, where endpoint telemetry records and retains
+/// it far beyond the life of a short-lived token; `-e NAME` makes the engine
+/// copy the value from the environment it already inherits.
+#[test]
+fn forwarded_env_never_carries_values_on_the_command_line() {
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "[container]\nenabled = true\nimage = \"img:1\"\nforward-env = [\"MSRUSTUP_*\"]\n",
+    );
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    let shim = std::fs::read_to_string(root.join("justfiles/anvil/container.just")).unwrap();
+    assert!(
+        shim.contains("$runArgs += @('-e', $entry.Name)"),
+        "the name alone must be forwarded"
+    );
+    assert!(
+        !shim.contains("$($entry.Name)=$($entry.Value)"),
+        "a forwarded value must never be built into an engine argument"
+    );
+    // Globs have no deny-list, so the developer needs to see what crossed.
+    assert!(shim.contains("anvil: forwarding env:"), "matched names are reported");
+    assert!(!shim.contains("$($entry.Value)"), "values must never be printed either");
+}
+
+/// BuildKit accepts `--secret id=x,env=UNSET` and mounts an empty file, so a
+/// Dockerfile without `required=true` silently builds a degraded image — and
+/// tags it with the same content hash a credentialed build would produce,
+/// because secret values are deliberately not hashed. The shim has to refuse.
+#[test]
+fn declared_build_secrets_are_checked_before_the_build() {
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "[container]\nenabled = true\ndockerfile = \"ci/D\"\n\
+         build-secrets = [\"id=tok,env=FEED_TOKEN\"]\n",
+    );
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    let shim = std::fs::read_to_string(root.join("justfiles/anvil/container.just")).unwrap();
+    assert!(shim.contains("is unset or empty"), "an env-sourced secret is checked");
+    assert!(shim.contains("is missing or empty"), "a file-sourced secret is checked");
+    // The check must precede the build, not follow it.
+    let check = shim.find("unset or empty").expect("check present");
+    let build = shim.find("'build', '--file'").expect("build present");
+    assert!(check < build, "the secret check must run before the engine is invoked");
+}
+
 /// A repository that brings its own Dockerfile keeps full control of the
 /// image, and its extra build inputs participate in the identity hash. Anvil
 /// must not emit its own Dockerfile in that case: a generated file nothing
