@@ -20,14 +20,22 @@ anvil_container_engine := "__ENGINE__"
 anvil_container_workdir := "__WORKDIR__"
 anvil_container_repo := "__REPO__"
 
-# How the exec image is obtained: "pull" a pre-built reference, or "build" it
-# locally. When building, the tag is a hash of the image's declared inputs, so
-# the presence of a tag *is* proof that its contents are current: a changed
-# tool pin selects a tag that cannot already exist, and a build follows. There
-# is no staleness check because there is no staleness to detect.
+# How the exec image is obtained: "pull" a pre-built reference, "build" one
+# locally, or "extend" -- build anvil's image and then layer the repository's
+# own on top of it. When building, the tag is a hash of the image's declared
+# inputs, so the presence of a tag *is* proof that its contents are current: a
+# changed tool pin selects a tag that cannot already exist, and a build
+# follows. There is no staleness check because there is no staleness to detect.
+#
+# Extending splits that into two tags. The base carries the toolchain and the
+# tool catalog and changes rarely; the extension carries the repository's own
+# additions and changes often. A change to the cheap half therefore rebuilds
+# only the cheap half, instead of the whole stack.
 anvil_container_image_source := "__IMAGE_SOURCE__"
 anvil_container_image_name := "__IMAGE_NAME__"
 anvil_container_dockerfile := "__DOCKERFILE__"
+anvil_container_ext_image_name := "__EXT_IMAGE_NAME__"
+anvil_container_ext_dockerfile := "__EXT_DOCKERFILE__"
 
 # Turns the re-entry guard on. The source of truth is anvil.toml; users never
 # set this by hand.
@@ -68,6 +76,12 @@ _anvil-container-engine:
 # tree: editing an unrelated check must not cost a multi-minute rebuild. Just
 # as deliberately not the build secrets, whose values must never reach a tag.
 #
+# In "extend" mode that happens twice: anvil's base image first, then the
+# repository's own layered on top with the resolved base injected as the
+# ANVIL_BASE_IMAGE build arg. The base tag is pinned into the extension's hash,
+# so a rebuilt base always renames the extension, while a change confined to
+# the extension leaves the expensive base cached.
+#
 # Set ANVIL_CONTAINER_NO_REBUILD=1 to fail instead of building, which is how a
 # cache miss is told apart from a build failure in CI.
 
@@ -100,9 +114,10 @@ _anvil-container-image:
     }
 
     $repoRoot = '{{justfile_directory()}}'
-    $buildArgs = __BUILD_ARGS_ARRAY__
-    $buildSecrets = __BUILD_SECRETS_ARRAY__
+    $userBuildArgs = __BUILD_ARGS_ARRAY__
+    $userBuildSecrets = __BUILD_SECRETS_ARRAY__
     $hashInputs = __HASH_INPUTS_ARRAY__
+    $extending = '{{anvil_container_image_source}}' -eq 'extend'
 
     # The image installs its tools by running `just anvil-setup`, whose
     # dependency chain reaches the tier, group, check and tool recipes. All of
@@ -124,75 +139,114 @@ _anvil-container-image:
     # tag that claims to name fixed content, which would make every cached
     # image a potential lie. The Dockerfile's own default needs no such check:
     # it is hashed as file content.
+    $baseArgs = @()
     $baseImage = $env:ANVIL_CONTAINER_BASE_IMAGE
     if ($baseImage) {
         if ($baseImage -notmatch '@sha256:[0-9a-fA-F]{64}$') {
             Write-Error "ANVIL_CONTAINER_BASE_IMAGE must be digest-pinned (image@sha256:<64 hex>), got '$baseImage'"
             exit 1
         }
-        $buildArgs += "BASE_IMAGE=$baseImage"
+        $baseArgs += "BASE_IMAGE=$baseImage"
     }
-
-    # Hash a tagged stream rather than raw concatenation, so no rearrangement
-    # of names and contents can collide. Line endings are normalized once, here,
-    # so a CRLF checkout and an LF checkout agree on the tag.
-    $stream = [System.Text.StringBuilder]::new()
-    foreach ($arg in $buildArgs) {
-        [void]$stream.Append("arg`n").Append($arg).Append("`n")
-    }
-    # Ordinal sort and dedup: `Sort-Object -Unique` compares case-insensitively,
-    # which would silently drop one of two inputs differing only in case on the
-    # case-sensitive filesystem where the image is actually built.
-    $ordered = [System.Collections.Generic.SortedSet[string]]::new(
-        [string[]]$hashInputs, [System.StringComparer]::Ordinal)
-    foreach ($rel in $ordered) {
-        $path = Join-Path $repoRoot $rel
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            Write-Error "container image input is missing: $rel"
-            exit 1
-        }
-        $text = [System.IO.File]::ReadAllText($path) -replace "`r`n", "`n"
-        [void]$stream.Append("file`n").Append($rel).Append("`n").Append($text).Append("`n")
-    }
-    $digest = [System.Security.Cryptography.SHA256]::HashData(
-        [System.Text.Encoding]::UTF8.GetBytes($stream.ToString()))
-    # 16 hex characters (64 bits) is far past any practical collision risk for
-    # a local image set, and keeps `docker images` readable.
-    $imageId = -join ($digest[0..7] | ForEach-Object { $_.ToString('x2') })
-    $image = '{{anvil_container_image_name}}' + ':' + $imageId
 
     # ANVIL_CONTAINER_NO_CACHE forces a rebuild of a tag that already resolves,
     # for the cases a content hash cannot see: a moved upstream package or a
     # base layer that changed behind its digest.
     $noCache = $env:ANVIL_CONTAINER_NO_CACHE -eq '1'
-    if (-not $noCache) {
-        & $engine image inspect $image *> $null
-        if ($LASTEXITCODE -eq 0) {
-            Write-Output $image
-            exit 0
+
+    # One image: hash its inputs, reuse the tag if it resolves, build if not.
+    # Used once for a plain build, and twice when extending -- the base and the
+    # layer on top follow identical rules, and `$pinned` is what ties them
+    # together: the extension folds the resolved base tag into its own hash, so
+    # a rebuilt base necessarily renames the extension.
+    function Resolve-AnvilImage {
+        param(
+            [string]$Name, [string]$Dockerfile, [string[]]$Inputs,
+            [string[]]$BuildArgs, [string[]]$Secrets, [string[]]$Pinned
+        )
+
+        # Hash a tagged stream rather than raw concatenation, so no rearrangement
+        # of names and contents can collide. Line endings are normalized once,
+        # here, so a CRLF checkout and an LF checkout agree on the tag.
+        $stream = [System.Text.StringBuilder]::new()
+        foreach ($value in $Pinned) {
+            [void]$stream.Append("pin`n").Append($value).Append("`n")
         }
-        if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {
-            # Still report the reference: a caller that asked not to build is
-            # usually asking *which* image is missing.
-            Write-Output $image
-            [Console]::Error.WriteLine("anvil: $image is not present and ANVIL_CONTAINER_NO_REBUILD=1")
-            exit 1
+        foreach ($arg in $BuildArgs) {
+            [void]$stream.Append("arg`n").Append($arg).Append("`n")
         }
+        # Ordinal sort and dedup: `Sort-Object -Unique` compares case-insensitively,
+        # which would silently drop one of two inputs differing only in case on the
+        # case-sensitive filesystem where the image is actually built.
+        $ordered = [System.Collections.Generic.SortedSet[string]]::new(
+            [string[]]$Inputs, [System.StringComparer]::Ordinal)
+        foreach ($rel in $ordered) {
+            $path = Join-Path $repoRoot $rel
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                Write-Error "container image input is missing: $rel"
+                exit 1
+            }
+            $text = [System.IO.File]::ReadAllText($path) -replace "`r`n", "`n"
+            [void]$stream.Append("file`n").Append($rel).Append("`n").Append($text).Append("`n")
+        }
+        $digest = [System.Security.Cryptography.SHA256]::HashData(
+            [System.Text.Encoding]::UTF8.GetBytes($stream.ToString()))
+        # 16 hex characters (64 bits) is far past any practical collision risk for
+        # a local image set, and keeps `docker images` readable.
+        $imageId = -join ($digest[0..7] | ForEach-Object { $_.ToString('x2') })
+        $image = $Name + ':' + $imageId
+
+        if (-not $noCache) {
+            & $engine image inspect $image *> $null
+            if ($LASTEXITCODE -eq 0) { return $image }
+            if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {
+                # Still report the reference: a caller that asked not to build is
+                # usually asking *which* image is missing.
+                Write-Output $image
+                [Console]::Error.WriteLine("anvil: $image is not present and ANVIL_CONTAINER_NO_REBUILD=1")
+                exit 1
+            }
+        }
+
+        # Progress goes to stderr: callers capture this recipe's stdout to learn
+        # the image reference, so anything else written there becomes part of it.
+        [Console]::Error.WriteLine("anvil: building $image (inputs changed or first run)")
+        $buildCmd = @('build', '--file', (Join-Path $repoRoot $Dockerfile), '--tag', $image)
+        if ($noCache) { $buildCmd += '--no-cache' }
+        foreach ($arg in $BuildArgs) { $buildCmd += @('--build-arg', $arg) }
+        foreach ($secret in $Secrets) { $buildCmd += @('--secret', $secret) }
+        $buildCmd += $repoRoot
+        # BuildKit is required for --secret; docker enables it by default from
+        # 23.0 but an older daemon silently ignores the flag, so ask explicitly.
+        $env:DOCKER_BUILDKIT = '1'
+        & $engine @buildCmd | ForEach-Object { [Console]::Error.WriteLine($_) }
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        return $image
     }
 
-    # Progress goes to stderr: callers capture this recipe's stdout to learn the
-    # image reference, so anything else written there becomes part of the value.
-    [Console]::Error.WriteLine("anvil: building $image (inputs changed or first run)")
-    $buildCmd = @('build', '--file', (Join-Path $repoRoot '{{anvil_container_dockerfile}}'), '--tag', $image)
-    if ($noCache) { $buildCmd += '--no-cache' }
-    foreach ($arg in $buildArgs) { $buildCmd += @('--build-arg', $arg) }
-    foreach ($secret in $buildSecrets) { $buildCmd += @('--secret', $secret) }
-    $buildCmd += $repoRoot
-    # BuildKit is required for --secret; docker enables it by default from 23.0
-    # but an older daemon silently ignores the flag, so ask for it explicitly.
-    $env:DOCKER_BUILDKIT = '1'
-    & $engine @buildCmd | ForEach-Object { [Console]::Error.WriteLine($_) }
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    # When extending, the repository's build inputs describe the layer it owns,
+    # not anvil's base underneath: applying them to the base would rebuild the
+    # expensive half for changes that only concern the cheap one.
+    $image = Resolve-AnvilImage `
+        -Name '{{anvil_container_image_name}}' `
+        -Dockerfile '{{anvil_container_dockerfile}}' `
+        -Inputs $hashInputs `
+        -BuildArgs ($extending ? $baseArgs : ($baseArgs + $userBuildArgs)) `
+        -Secrets ($extending ? @() : $userBuildSecrets)
+
+    if ($extending) {
+        # The base reference is not knowable until it is resolved, so it is
+        # injected rather than written into the Dockerfile, and pinned into the
+        # extension's hash so the two can never drift apart.
+        $image = Resolve-AnvilImage `
+            -Name '{{anvil_container_ext_image_name}}' `
+            -Dockerfile '{{anvil_container_ext_dockerfile}}' `
+            -Inputs __EXT_HASH_INPUTS_ARRAY__ `
+            -BuildArgs (@("ANVIL_BASE_IMAGE=$image") + $userBuildArgs) `
+            -Secrets $userBuildSecrets `
+            -Pinned @($image)
+    }
+
     Write-Output $image
 
 # THE single indirection point. Runs `just TARGET` inside the container with
@@ -346,6 +400,9 @@ anvil-container-status:
     }
 
     Write-Output "dockerfile: {{anvil_container_dockerfile}}"
+    if ('{{anvil_container_image_source}}' -eq 'extend') {
+        Write-Output "extends:    {{anvil_container_ext_dockerfile}}"
+    }
     # NO_REBUILD turns the resolve into a pure query: report the state instead
     # of silently spending several minutes building from a status command.
     $env:ANVIL_CONTAINER_NO_REBUILD = '1'
@@ -354,6 +411,12 @@ anvil-container-status:
     if ($image) { Write-Output "image:   $image" }
     if ($present) {
         Write-Output "status:  present and current"
+    } elseif ('{{anvil_container_image_source}}' -eq 'extend') {
+        # Which layer is missing decides how long the next run takes, so say
+        # so: a missing base is a full toolchain build, a missing extension is
+        # only the delta on top of one that is already cached.
+        $layer = $image.StartsWith('{{anvil_container_ext_image_name}}:') ? 'extension' : 'base'
+        Write-Output "status:  $layer image missing (run 'just anvil-container-up')"
     } else {
         Write-Output "status:  no image matches the current inputs (run 'just anvil-container-up')"
     }

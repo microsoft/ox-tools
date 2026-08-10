@@ -419,12 +419,55 @@ fn repo_dockerfile_replaces_the_generated_one() {
 
     let shim = std::fs::read_to_string(root.join("justfiles/anvil/container.just")).unwrap();
     assert!(shim.contains(r#"anvil_container_dockerfile := "ci/anvil.Dockerfile""#));
-    assert!(shim.contains(r#"$buildArgs = @('RUST_CHANNEL=ms-prod-1.95')"#));
-    assert!(shim.contains(r#"$buildSecrets = @('id=tok,env=TOK')"#));
+    assert!(shim.contains(r#"$userBuildArgs = @('RUST_CHANNEL=ms-prod-1.95')"#));
+    assert!(shim.contains(r#"$userBuildSecrets = @('id=tok,env=TOK')"#));
     assert!(shim.contains("ci/install-tools.sh"), "declared hash inputs reach the shim");
     // A secret's value must never influence a tag.
     let hash_line = shim.lines().find(|l| l.contains("$hashInputs =")).unwrap();
     assert!(!hash_line.contains("TOK"), "build secrets must stay out of the identity");
+}
+
+/// Extending keeps anvil's Dockerfile as the base and layers the repository's
+/// on top. The point is that the expensive half stays cached: the repository's
+/// own build inputs describe the layer it owns, so a change there must not
+/// touch the base's identity.
+#[test]
+fn extends_layers_on_anvils_image() {
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "[container]\n\
+         enabled = true\n\
+         extends = \"ci/substrate.Dockerfile\"\n\
+         build-args = { FEED = \"internal\" }\n\
+         build-secrets = [\"id=tok,env=TOK\"]\n\
+         hash-inputs = [\"ci/install-tools.sh\"]\n",
+    );
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    // The base is anvil's, so it is still generated -- unlike `dockerfile`,
+    // which replaces it.
+    assert!(root.join(".anvil/container/Dockerfile").is_file());
+
+    let shim = std::fs::read_to_string(root.join("justfiles/anvil/container.just")).unwrap();
+    assert!(shim.contains(r#"anvil_container_image_source := "extend""#));
+    assert!(shim.contains(r#"anvil_container_dockerfile := ".anvil/container/Dockerfile""#));
+    assert!(shim.contains(r#"anvil_container_ext_dockerfile := "ci/substrate.Dockerfile""#));
+    assert!(shim.contains(r#"anvil_container_ext_image_name := "anvil-repo-ext""#));
+
+    // The base reference is injected, because its content tag is not knowable
+    // until it is resolved.
+    assert!(shim.contains("ANVIL_BASE_IMAGE=$image"));
+
+    // The repository's inputs belong to the extension, not the base.
+    let base_inputs = shim.lines().find(|l| l.contains("$hashInputs =")).unwrap();
+    assert!(
+        !base_inputs.contains("ci/install-tools.sh") && !base_inputs.contains("substrate"),
+        "the base must not depend on the extension's inputs: {base_inputs}"
+    );
+    let ext_inputs = shim.lines().find(|l| l.contains("-Inputs @(")).unwrap();
+    assert!(ext_inputs.contains("ci/substrate.Dockerfile"));
+    assert!(ext_inputs.contains("ci/install-tools.sh"));
 }
 
 /// A pre-built image is still just pulled: a repository that opted into an

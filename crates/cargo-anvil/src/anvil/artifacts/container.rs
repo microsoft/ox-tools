@@ -198,7 +198,7 @@ pub(crate) fn secondary_gate_open(path: &str, container: &ResolvedContainer) -> 
         DEVCONTAINER_PATH => emits_devcontainer(container),
         CONTAINER_IMAGES_JUST_PATH => !container.images.is_empty(),
         CLUSTER_JUST_PATH | CLUSTER_BOOTSTRAP_JUST_PATH => container.cluster.is_some(),
-        EXEC_DOCKERFILE_PATH | EXEC_DOCKERIGNORE_PATH => container.image_source == ExecImageSource::BuildDefault,
+        EXEC_DOCKERFILE_PATH | EXEC_DOCKERIGNORE_PATH => container.image_source.builds_anvil_base(),
         _ => true,
     }
 }
@@ -266,9 +266,13 @@ pub(crate) fn render_owned_body<'a>(path: &str, body: &'a str, container: &Resol
     }
 }
 
-/// Recipe-visible name for the exec-image source: `pull` or `build`.
+/// Recipe-visible name for the exec-image source.
 const fn image_source_token(container: &ResolvedContainer) -> &'static str {
-    if container.image_source.builds() { "build" } else { "pull" }
+    match container.image_source {
+        ExecImageSource::Pull => "pull",
+        ExecImageSource::BuildDefault | ExecImageSource::BuildRepo => "build",
+        ExecImageSource::BuildExtended => "extend",
+    }
 }
 
 /// Repository part of a locally-built exec image. The tag is appended at run
@@ -300,15 +304,35 @@ fn sanitize_image_name(repo_name: &str) -> String {
     if out.is_empty() { "repo".to_owned() } else { out }
 }
 
-/// Dockerfile that builds the exec image: the repository's own when it named
-/// one, otherwise the copy anvil generates. Empty in pull mode, where nothing
-/// is built.
+/// Dockerfile for the image anvil builds first: the repository's own when it
+/// replaced anvil's, otherwise the copy anvil generates. In `extends` mode
+/// this is anvil's — the base the extension is layered onto. Empty in pull
+/// mode, where nothing is built.
 fn exec_dockerfile_path(container: &ResolvedContainer) -> String {
     match container.image_source {
         ExecImageSource::Pull => String::new(),
-        ExecImageSource::BuildDefault => EXEC_DOCKERFILE_PATH.to_owned(),
+        ExecImageSource::BuildDefault | ExecImageSource::BuildExtended => EXEC_DOCKERFILE_PATH.to_owned(),
         ExecImageSource::BuildRepo => container.dockerfile.clone(),
     }
+}
+
+/// Dockerfile layered on top of the base. Empty outside `extends` mode.
+fn extension_dockerfile_path(container: &ResolvedContainer) -> String {
+    match container.image_source {
+        ExecImageSource::BuildExtended => container.extends.clone(),
+        _ => String::new(),
+    }
+}
+
+/// Whether the repository's own `build-args`, `build-secrets` and
+/// `hash-inputs` describe the extension rather than the base.
+///
+/// In `extends` mode the base is anvil's own image: the repository never
+/// declared it, so its build inputs cannot apply to it. Feeding them there
+/// would also defeat the point — the base would rebuild for changes that only
+/// concern the layer above it.
+const fn inputs_describe_extension(container: &ResolvedContainer) -> bool {
+    matches!(container.image_source, ExecImageSource::BuildExtended)
 }
 
 /// `--build-arg` pairs as `KEY=VALUE`, in declaration order.
@@ -316,7 +340,7 @@ fn build_arg_pairs(container: &ResolvedContainer) -> Vec<String> {
     container.build_args.iter().map(|(key, value)| format!("{key}={value}")).collect()
 }
 
-/// Files whose contents define the exec image's identity.
+/// Files whose contents define the base image's identity.
 ///
 /// This is the *literal* half of the list: the Dockerfile, its context filter,
 /// the pinned toolchain, and whatever the repository declared. The generated
@@ -329,11 +353,30 @@ fn hash_inputs(container: &ResolvedContainer) -> Vec<String> {
         return Vec::new();
     }
     let mut inputs = vec![exec_dockerfile_path(container), "rust-toolchain.toml".to_owned()];
-    if container.image_source == ExecImageSource::BuildDefault {
+    if container.image_source.builds_anvil_base() {
         // The ignore file decides what reaches the daemon, so it changes the
         // build as surely as the Dockerfile does.
         inputs.push(EXEC_DOCKERIGNORE_PATH.to_owned());
     }
+    if !inputs_describe_extension(container) {
+        inputs.extend(container.hash_inputs.iter().cloned());
+    }
+    inputs.sort_unstable();
+    inputs.dedup();
+    inputs
+}
+
+/// Files whose contents define the extension image's identity, on top of the
+/// resolved base reference the recipe folds in at run time.
+///
+/// Only the extension Dockerfile and the repository's declared inputs: the
+/// base is represented by its tag, which already summarises everything
+/// underneath. Empty outside `extends` mode.
+fn extension_hash_inputs(container: &ResolvedContainer) -> Vec<String> {
+    if !inputs_describe_extension(container) {
+        return Vec::new();
+    }
+    let mut inputs = vec![container.extends.clone()];
     inputs.extend(container.hash_inputs.iter().cloned());
     inputs.sort_unstable();
     inputs.dedup();
@@ -382,10 +425,13 @@ fn render_container_just(template: &str, container: &ResolvedContainer) -> Strin
         .replace("__IMAGE__", &container.image)
         .replace("__IMAGE_SOURCE__", image_source_token(container))
         .replace("__IMAGE_NAME__", &built_image_name(&container.repo_name))
+        .replace("__EXT_IMAGE_NAME__", &format!("{}-ext", built_image_name(&container.repo_name)))
         .replace("__DOCKERFILE__", &exec_dockerfile_path(container))
+        .replace("__EXT_DOCKERFILE__", &extension_dockerfile_path(container))
         .replace("__BUILD_ARGS_ARRAY__", &ps_array(&build_arg_pairs(container)))
         .replace("__BUILD_SECRETS_ARRAY__", &ps_array(&container.build_secrets))
         .replace("__HASH_INPUTS_ARRAY__", &ps_array(&hash_inputs(container)))
+        .replace("__EXT_HASH_INPUTS_ARRAY__", &ps_array(&extension_hash_inputs(container)))
         .replace("__HASH_EXCLUDE_ARRAY__", &ps_array(&hash_excludes(container)))
         .replace("__ENGINE__", container.engine.as_str())
         .replace("__WORKDIR__", &container.workdir)
@@ -1268,6 +1314,77 @@ mod tests {
 
         // Pull mode describes no build, so there is nothing to hash.
         assert!(hash_inputs(&enabled("repo")).is_empty());
+    }
+
+    /// Extending splits the identity in two. The base keeps anvil's own inputs
+    /// so it stays shareable and rarely rebuilt; the repository's declared
+    /// inputs describe the layer it actually owns. Putting them on the base
+    /// would rebuild the expensive half for a change to the cheap one, which
+    /// is the whole reason `extends` exists.
+    #[test]
+    fn extending_splits_the_identity_in_two() {
+        let extended = ContainerConfig {
+            enabled: Some(true),
+            extends: Some("ci/ext.Dockerfile".to_owned()),
+            hash_inputs: Some(vec!["ci/tools.sh".to_owned()]),
+            ..ContainerConfig::default()
+        }
+        .resolve("repo")
+        .unwrap();
+
+        let base = hash_inputs(&extended);
+        assert!(base.contains(&EXEC_DOCKERFILE_PATH.to_owned()), "the base is anvil's image");
+        assert!(
+            !base.contains(&"ci/tools.sh".to_owned()) && !base.contains(&"ci/ext.Dockerfile".to_owned()),
+            "the repository's inputs must not reach the base: {base:?}"
+        );
+
+        let extension = extension_hash_inputs(&extended);
+        assert_eq!(extension, vec!["ci/ext.Dockerfile", "ci/tools.sh"]);
+
+        // The two Dockerfiles are distinct files with distinct roles.
+        assert_eq!(exec_dockerfile_path(&extended), EXEC_DOCKERFILE_PATH);
+        assert_eq!(extension_dockerfile_path(&extended), "ci/ext.Dockerfile");
+    }
+
+    /// Only `extends` has a second layer; every other mode must leave the
+    /// extension surface empty so the generated recipe never tries to build one.
+    #[test]
+    fn only_extending_has_an_extension_layer() {
+        for container in [
+            enabled("repo"),
+            ContainerConfig {
+                enabled: Some(true),
+                ..ContainerConfig::default()
+            }
+            .resolve("repo")
+            .unwrap(),
+            ContainerConfig {
+                enabled: Some(true),
+                dockerfile: Some("ci/own.Dockerfile".to_owned()),
+                ..ContainerConfig::default()
+            }
+            .resolve("repo")
+            .unwrap(),
+        ] {
+            assert!(extension_dockerfile_path(&container).is_empty());
+            assert!(extension_hash_inputs(&container).is_empty());
+        }
+    }
+
+    /// A repository that replaces anvil's Dockerfile gets no generated one;
+    /// a repository that extends it does, because that is the base being built.
+    #[test]
+    fn generated_dockerfile_follows_the_base() {
+        let extended = ContainerConfig {
+            enabled: Some(true),
+            extends: Some("ci/ext.Dockerfile".to_owned()),
+            ..ContainerConfig::default()
+        }
+        .resolve("repo")
+        .unwrap();
+        assert!(secondary_gate_open(EXEC_DOCKERFILE_PATH, &extended));
+        assert!(secondary_gate_open(EXEC_DOCKERIGNORE_PATH, &extended));
     }
 
     /// The cluster and image-build recipes never affect what `anvil-setup`

@@ -146,13 +146,22 @@ function Invoke-Just {
 }
 
 function Get-BuiltImages {
+    # Base images only. `docker images <name>` matches the repository exactly,
+    # so the `-ext` extension images do not appear here.
     return @(Invoke-Engine -Arguments @('images', $imageName, '--format', '{{.Repository}}:{{.Tag}}')) |
         Where-Object { $_ }
 }
 
+function Get-ExtensionImages {
+    return @(Invoke-Engine -Arguments @('images', "$imageName-ext", '--format', '{{.Repository}}:{{.Tag}}')) |
+        Where-Object { $_ }
+}
+
 function Remove-TestImages {
-    $ids = @(Invoke-Engine -Arguments @('images', $imageName, '--quiet')) | Where-Object { $_ }
-    if ($ids) { Invoke-Engine -Arguments (@('image', 'rm', '--force') + $ids) | Out-Null }
+    foreach ($name in @($imageName, "$imageName-ext")) {
+        $ids = @(Invoke-Engine -Arguments @('images', $name, '--quiet')) | Where-Object { $_ }
+        if ($ids) { Invoke-Engine -Arguments (@('image', 'rm', '--force') + $ids) | Out-Null }
+    }
     foreach ($volume in @('cargo', 'rustup')) {
         Invoke-Engine -Arguments @('volume', 'rm', '--force', "$repoName-$volume") | Out-Null
     }
@@ -176,7 +185,8 @@ if (Test-Path -LiteralPath $WorkspacePath) {
     Write-Host "  removed $WorkspacePath"
 }
 Remove-TestImages
-Assert-That ((Get-BuiltImages).Count -eq 0) 'starting with no image, as a new adopter would'
+Assert-That (((Get-BuiltImages).Count + (Get-ExtensionImages).Count) -eq 0) `
+    'starting with no image, as a new adopter would'
 
 # ---------------------------------------------------------------------------
 # 2. A repository that wants containerized checks
@@ -197,7 +207,9 @@ function Write-RepoFile([string]$RelativePath, [string]$Content) {
     # rustfmt and the license-header check both object to a missing one.
     $normalized = ($Content -replace "`r`n", "`n")
     if (-not $normalized.EndsWith("`n")) { $normalized += "`n" }
-    [System.IO.File]::WriteAllText((Join-Path $WorkspacePath $RelativePath), $normalized)
+    $path = Join-Path $WorkspacePath $RelativePath
+    New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
+    [System.IO.File]::WriteAllText($path, $normalized)
 }
 
 $license = "# Copyright (c) Microsoft Corporation.`n# Licensed under the MIT License.`n`n"
@@ -361,10 +373,61 @@ else {
     Assert-That ($images.Count -eq 2) `
         "the previous image is still there for other branches ($($images.Count) present)"
     Assert-That ($stale.ExitCode -eq 0) "'$Recipe' passed against the rebuilt image"
+
+    # -----------------------------------------------------------------------
+    # 6. Extend the image. The base is reused; only the layer on top is built.
+    # -----------------------------------------------------------------------
+
+    Write-Step 'Adding an extension Dockerfile (expect only the top layer to build)'
+
+    # A downstream repository adds its own tools on top of anvil's image
+    # instead of rebuilding the whole stack. The base is whatever the previous
+    # step just built, so it must be reused untouched.
+    Write-RepoFile 'ci/ext.Dockerfile' @'
+ARG ANVIL_BASE_IMAGE
+FROM ${ANVIL_BASE_IMAGE}
+RUN printf 'downstream\n' > /etc/anvil-extension
+'@
+    $anvilToml = Join-Path $WorkspacePath 'anvil.toml'
+    [System.IO.File]::WriteAllText(
+        $anvilToml,
+        [System.IO.File]::ReadAllText($anvilToml) + "extends = `"ci/ext.Dockerfile`"`n")
+
+    $baseCount = (Get-BuiltImages).Count
+    $extStart = Get-Date
+    $extended = Invoke-Just -RecipeName $Recipe
+    $extSeconds = ((Get-Date) - $extStart).TotalSeconds
+
+    Assert-That ($extended.ExitCode -eq 0) "'$Recipe' passed in the extended image"
+    Assert-That ((Get-ExtensionImages).Count -eq 1) 'an extension image was built'
+    Assert-That ((Get-BuiltImages).Count -eq $baseCount) `
+        'the base was reused, not rebuilt'
+    # The base takes minutes to build; the extension is one RUN on top of it.
+    # If this is slow, the layering is not actually reusing the base.
+    Assert-That ($extSeconds -lt 180) `
+        ("only the top layer was built ({0:N0}s)" -f $extSeconds)
+
+    Write-Step 'Editing only the extension (expect the base to stay untouched)'
+
+    Write-RepoFile 'ci/ext.Dockerfile' @'
+ARG ANVIL_BASE_IMAGE
+FROM ${ANVIL_BASE_IMAGE}
+RUN printf 'downstream-v2\n' > /etc/anvil-extension
+'@
+    $editStart = Get-Date
+    $edited = Invoke-Just -RecipeName $Recipe
+    $editSeconds = ((Get-Date) - $editStart).TotalSeconds
+
+    Assert-That ($edited.ExitCode -eq 0) "'$Recipe' passed after the extension changed"
+    Assert-That ((Get-ExtensionImages).Count -eq 2) 'the changed extension selected a new tag'
+    Assert-That ((Get-BuiltImages).Count -eq $baseCount) `
+        'an extension-only change left the base alone'
+    Assert-That ($editSeconds -lt 180) `
+        ("an extension-only change is cheap ({0:N0}s)" -f $editSeconds)
 }
 
 # ---------------------------------------------------------------------------
-# 6. Clean up
+# 7. Clean up
 # ---------------------------------------------------------------------------
 
 Write-Step 'Cleaning up'

@@ -365,27 +365,44 @@ impl Default for ClusterConfig {
 
 /// Where the exec image comes from.
 ///
-/// The three variants are selected by which of `[container] image` and
-/// `[container] dockerfile` are set — see [`ContainerConfig::resolve`]. Setting
-/// both is rejected, because "pull this" and "build that" cannot both be the
-/// answer and silently preferring one would hide a config mistake.
+/// The four variants are selected by which of `[container] image`,
+/// `dockerfile` and `extends` are set — see [`ContainerConfig::resolve`].
+/// Setting more than one is rejected, because "pull this", "build that" and
+/// "build on top of mine" cannot all be the answer, and silently preferring
+/// one would hide a config mistake.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExecImageSource {
-    /// `image` set, `dockerfile` unset: pull the reference verbatim. The
-    /// reference carries its own tag, so there is nothing to hash.
+    /// `image` set: pull the reference verbatim. The reference carries its own
+    /// tag, so there is nothing to hash.
     Pull,
-    /// Neither set: build from the Dockerfile anvil generates. This is what
+    /// Nothing set: build from the Dockerfile anvil generates. This is what
     /// makes a repository self-sustaining with no image configuration at all.
     BuildDefault,
-    /// `dockerfile` set: build from that repo-owned Dockerfile.
+    /// `dockerfile` set: build from that repo-owned Dockerfile, instead of
+    /// anvil's. Use when the base OS itself has to differ.
     BuildRepo,
+    /// `extends` set: build anvil's own image, then build the repository's
+    /// Dockerfile `FROM` it. Two images, two tags.
+    ///
+    /// The reason this is not just [`Self::BuildRepo`] with a hand-written
+    /// `FROM`: the base is content-tagged, so its reference is not knowable
+    /// until it is resolved. Anvil resolves it and injects it as a build arg.
+    /// Layering also keeps the expensive half — toolchain and tool catalog —
+    /// cached across changes to the cheap half.
+    BuildExtended,
 }
 
 impl ExecImageSource {
-    /// Whether this source builds the image locally rather than pulling it.
+    /// Whether this source builds an image locally rather than pulling one.
     /// Only built images have a content-derived tag.
     pub(crate) const fn builds(self) -> bool {
-        matches!(self, Self::BuildDefault | Self::BuildRepo)
+        matches!(self, Self::BuildDefault | Self::BuildRepo | Self::BuildExtended)
+    }
+
+    /// Whether anvil's own Dockerfile is built as part of this source. True
+    /// for the default image and for the base underneath an extension.
+    pub(crate) const fn builds_anvil_base(self) -> bool {
+        matches!(self, Self::BuildDefault | Self::BuildExtended)
     }
 }
 
@@ -406,11 +423,19 @@ pub struct ContainerConfig {
     /// Opt into container execution. Built-in default: `false`.
     pub enabled: Option<bool>,
     /// Pre-built exec image reference to pull. Mutually exclusive with
-    /// [`Self::dockerfile`]; see [`ExecImageSource`] for the selection rule.
+    /// [`Self::dockerfile`] and [`Self::extends`]; see [`ExecImageSource`] for
+    /// the selection rule.
     pub image: Option<String>,
-    /// Repo-root-relative Dockerfile that builds the exec image locally.
-    /// Mutually exclusive with [`Self::image`].
+    /// Repo-root-relative Dockerfile that replaces anvil's and builds the exec
+    /// image on its own. Mutually exclusive with [`Self::image`] and
+    /// [`Self::extends`].
     pub dockerfile: Option<String>,
+    /// Repo-root-relative Dockerfile layered *on top of* anvil's image. It
+    /// receives the resolved base reference as the `ANVIL_BASE_IMAGE` build
+    /// arg, which it is expected to `FROM`.
+    ///
+    /// Mutually exclusive with [`Self::image`] and [`Self::dockerfile`].
+    pub extends: Option<String>,
     /// `--build-arg` pairs for the exec-image build, in declaration order.
     /// Part of the image identity hash. Built-in default: empty.
     pub build_args: Option<Vec<(String, String)>>,
@@ -466,22 +491,23 @@ impl ContainerConfig {
     /// over the catalog defaults (`base`).
     #[must_use]
     pub fn overlay(self, base: &Self) -> Self {
-        // `image` and `dockerfile` are mutually exclusive, so they overlay as
-        // a single slot rather than field-by-field: if `self` names either
-        // one, it owns the choice of source and inherits neither. Merging them
-        // independently would let a catalog default `image` collide with a
-        // repository's `dockerfile` and fail resolution with an ambiguity the
-        // author never wrote.
-        let overrides_source = self.image.is_some() || self.dockerfile.is_some();
-        let (image, dockerfile) = if overrides_source {
-            (self.image, self.dockerfile)
+        // `image`, `dockerfile` and `extends` are mutually exclusive, so they
+        // overlay as a single slot rather than field-by-field: if `self` names
+        // any one of them, it owns the choice of source and inherits none.
+        // Merging them independently would let a catalog default `image`
+        // collide with a repository's `extends` and fail resolution with an
+        // ambiguity the author never wrote.
+        let overrides_source = self.image.is_some() || self.dockerfile.is_some() || self.extends.is_some();
+        let (image, dockerfile, extends) = if overrides_source {
+            (self.image, self.dockerfile, self.extends)
         } else {
-            (base.image.clone(), base.dockerfile.clone())
+            (base.image.clone(), base.dockerfile.clone(), base.extends.clone())
         };
         Self {
             enabled: self.enabled.or(base.enabled),
             image,
             dockerfile,
+            extends,
             build_args: self.build_args.or_else(|| base.build_args.clone()),
             build_secrets: self.build_secrets.or_else(|| base.build_secrets.clone()),
             hash_inputs: self.hash_inputs.or_else(|| base.hash_inputs.clone()),
@@ -519,6 +545,7 @@ impl ContainerConfig {
         let enabled = self.enabled.unwrap_or(false);
         let image = self.image.clone().unwrap_or_default();
         let dockerfile = self.dockerfile.clone().unwrap_or_default();
+        let extends = self.extends.clone().unwrap_or_default();
         let repo_name = self.name.clone().unwrap_or_else(|| dir_name.to_owned());
         let workdir = self.workdir.clone().unwrap_or_else(|| format!("/workspaces/{repo_name}"));
         let cache_volumes = self
@@ -536,31 +563,55 @@ impl ContainerConfig {
             validate_cluster(cluster, &images)?;
         }
 
-        // Select the exec-image source. `image` means pull a pre-built
-        // reference; `dockerfile` means build one locally; neither means build
-        // from the Dockerfile anvil generates, which is what lets a repository
-        // adopt container execution without owning any image plumbing.
+        // Select the exec-image source. `image` pulls a pre-built reference;
+        // `dockerfile` builds one in place of anvil's; `extends` builds anvil's
+        // and then layers on top of it; nothing at all builds the Dockerfile
+        // anvil generates, which is what lets a repository adopt container
+        // execution without owning any image plumbing.
         //
         // An explicitly empty value clears the slot rather than erroring, so a
-        // repository whose catalog pre-fills `image` can select the default
-        // build with `image = ""`. Rejecting it would leave no way to opt out:
-        // deleting the key just re-inherits the catalog's value.
-        let has_image = !image.trim().is_empty();
-        let has_dockerfile = !dockerfile.trim().is_empty();
-        let image_source = match (has_image, has_dockerfile) {
-            (true, true) => bail!(
-                "[container] sets both `image` and `dockerfile`; keep `image` to pull a \
-                 pre-built image, or `dockerfile` to build one locally"
+        // repository whose catalog pre-fills one of these can select the
+        // default build with `image = ""`. Rejecting it would leave no way to
+        // opt out: deleting the key just re-inherits the catalog's value.
+        let set: Vec<&str> = [
+            (!image.trim().is_empty()).then_some("image"),
+            (!dockerfile.trim().is_empty()).then_some("dockerfile"),
+            (!extends.trim().is_empty()).then_some("extends"),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let image_source = match set.as_slice() {
+            [] => ExecImageSource::BuildDefault,
+            ["image"] => ExecImageSource::Pull,
+            ["dockerfile"] => ExecImageSource::BuildRepo,
+            ["extends"] => ExecImageSource::BuildExtended,
+            several => bail!(
+                "[container] sets {}; these are alternatives, so keep exactly one: \
+                 `image` to pull a pre-built image, `dockerfile` to build one in place of \
+                 anvil's, or `extends` to build on top of anvil's",
+                several.join(" and ")
             ),
-            (true, false) => ExecImageSource::Pull,
-            (false, true) => ExecImageSource::BuildRepo,
-            (false, false) => ExecImageSource::BuildDefault,
         };
+
+        // A devcontainer descriptor names one image or one build. It cannot
+        // express "build the base, then build this FROM it", and the extension
+        // alone is unbuildable without the base reference anvil injects. Say so
+        // rather than emit a descriptor the editor will fail to open.
+        let devcontainer = self.devcontainer.unwrap_or(false);
+        if devcontainer && image_source == ExecImageSource::BuildExtended {
+            bail!(
+                "[container] `devcontainer` cannot be combined with `extends`: a devcontainer \
+                 descriptor cannot express a two-stage build. Publish the extended image and \
+                 point `image` at it, or drop `devcontainer`"
+            );
+        }
 
         Ok(ResolvedContainer {
             enabled,
             image,
             dockerfile,
+            extends,
             image_source,
             build_args: self.build_args.clone().unwrap_or_default(),
             build_secrets: self.build_secrets.clone().unwrap_or_default(),
@@ -569,7 +620,7 @@ impl ContainerConfig {
             workdir,
             cache_volumes,
             forward_env,
-            devcontainer: self.devcontainer.unwrap_or(false),
+            devcontainer,
             native_when: self.native_when.clone(),
             repo_name,
             images,
@@ -731,6 +782,9 @@ pub(crate) struct ResolvedContainer {
     /// Repo-owned Dockerfile path; empty unless `image_source` is
     /// [`ExecImageSource::BuildRepo`].
     pub dockerfile: String,
+    /// Repo-owned Dockerfile layered on anvil's image; empty unless
+    /// `image_source` is [`ExecImageSource::BuildExtended`].
+    pub extends: String,
     /// How the exec image is obtained.
     pub image_source: ExecImageSource,
     /// `--build-arg` pairs for the exec-image build, in declaration order.
@@ -861,6 +915,7 @@ fn parse_container(item: &Item) -> Result<ContainerConfig, AppError> {
             ),
             "image" => config.image = Some(as_string(key, value)?),
             "dockerfile" => config.dockerfile = Some(as_string(key, value)?),
+            "extends" => config.extends = Some(as_string(key, value)?),
             "build-args" => config.build_args = Some(parse_string_map(key, value)?),
             "build-secrets" => config.build_secrets = Some(as_string_array(key, value)?),
             "hash-inputs" => config.hash_inputs = Some(as_string_array(key, value)?),
@@ -881,8 +936,8 @@ fn parse_container(item: &Item) -> Result<ContainerConfig, AppError> {
             ),
             other => bail!(
                 "unknown key '[container] {other}' (valid keys: enabled, image, dockerfile, \
-                 build-args, build-secrets, hash-inputs, engine, name, workdir, cache-volumes, \
-                 forward-env, devcontainer, native-when)"
+                 extends, build-args, build-secrets, hash-inputs, engine, name, workdir, \
+                 cache-volumes, forward-env, devcontainer, native-when)"
             ),
         }
     }
@@ -1253,7 +1308,43 @@ version-id = "22.04"
     fn image_and_dockerfile_together_are_an_error() {
         let config = parse("[container]\nenabled = true\nimage = \"a:1\"\ndockerfile = \"D\"\n").unwrap();
         let err = config.container.resolve("repo").unwrap_err().to_string();
-        assert!(err.contains("both `image` and `dockerfile`"), "got: {err}");
+        assert!(err.contains("sets image and dockerfile"), "got: {err}");
+    }
+
+    #[test]
+    fn extends_alone_selects_an_extended_build() {
+        let config = parse("[container]\nenabled = true\nextends = \"ci/ext.Dockerfile\"\n").unwrap();
+        let resolved = config.container.resolve("repo").unwrap();
+        assert_eq!(resolved.image_source, ExecImageSource::BuildExtended);
+        assert_eq!(resolved.extends, "ci/ext.Dockerfile");
+        // The base underneath is still anvil's own, so its Dockerfile is
+        // emitted and both halves are built.
+        assert!(resolved.image_source.builds());
+        assert!(resolved.image_source.builds_anvil_base());
+    }
+
+    /// Every pair of source keys is an error, not just the first one written.
+    #[test]
+    fn any_two_sources_together_are_an_error() {
+        for (a, b) in [
+            ("image = \"a:1\"", "dockerfile = \"D\""),
+            ("image = \"a:1\"", "extends = \"E\""),
+            ("dockerfile = \"D\"", "extends = \"E\""),
+        ] {
+            let config = parse(&format!("[container]\nenabled = true\n{a}\n{b}\n")).unwrap();
+            let err = config.container.resolve("repo").unwrap_err().to_string();
+            assert!(err.contains("alternatives"), "expected a conflict for {a} + {b}, got: {err}");
+        }
+    }
+
+    /// A devcontainer descriptor names one image or one build, so it cannot
+    /// describe a base plus a layer on top. Rejecting the combination beats
+    /// emitting a descriptor the editor cannot open.
+    #[test]
+    fn extends_with_devcontainer_is_an_error() {
+        let config = parse("[container]\nenabled = true\nextends = \"E\"\ndevcontainer = true\n").unwrap();
+        let err = config.container.resolve("repo").unwrap_err().to_string();
+        assert!(err.contains("cannot be combined with `extends`"), "got: {err}");
     }
 
     /// A catalog default naming a pre-built image must not collide with a

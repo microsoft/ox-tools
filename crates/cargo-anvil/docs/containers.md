@@ -69,9 +69,20 @@ Change a pinned tool version, the toolchain, or the Dockerfile, and the tag chan
 so the next run builds it. Change nothing, and the tag resolves instantly. There is no staleness check because there is
 nothing to check: an image that is present is, by construction, an image built from the current inputs.
 
-The inputs are deliberately narrow — the Dockerfile and its ignore file, `rust-toolchain.toml`,
-`justfiles/anvil/versions.just`, the resolved `build-args`, and anything listed in `hash-inputs`. Editing an unrelated
-check recipe does **not** cost you a rebuild.
+The inputs are the Dockerfile and its ignore file, `rust-toolchain.toml`, the resolved `build-args`, anything listed in
+`hash-inputs`, and the generated recipe tree — because the image installs its tools by running `just anvil-setup`,
+whose dependency chain reaches the tier, group, check and tool files. Only the recipes that drive the container from
+the host are held back, `container.just` above all: it is the file that computes the hash.
+
+With `extends` there are two tags, and only the one you changed rebuilds:
+
+```text
+anvil-<repo>:<hash>        base       toolchain + tool catalog   minutes to build
+anvil-<repo>-ext:<hash>    extension  your additions             seconds to build
+```
+
+The base tag is folded into the extension's hash, so a rebuilt base always renames the extension. `anvil-container-status`
+reports which of the two is missing, since that decides how long the next run takes.
 
 | Variable | Effect |
 | --- | --- |
@@ -145,8 +156,9 @@ Because `image-output-dir` is a bare key, TOML requires it to appear **before** 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `enabled` | bool | `false` | Master switch for containerized execution. |
-| `image` | string | — | Pre-built image to pull and run recipes in. Mutually exclusive with `dockerfile`. |
-| `dockerfile` | string | — | Repo-relative Dockerfile to build the image from. Mutually exclusive with `image`. |
+| `image` | string | — | Pre-built image to pull and run recipes in. |
+| `dockerfile` | string | — | Repo-relative Dockerfile that **replaces** anvil's and builds the image alone. |
+| `extends` | string | — | Repo-relative Dockerfile layered **on top of** anvil's image. |
 | `build-args` | table | `{}` | `--build-arg` pairs for the build. Part of the image identity. |
 | `build-secrets` | array | `[]` | BuildKit `--secret` specifications. Excluded from the image identity. |
 | `hash-inputs` | array | `[]` | Extra files that define the image identity — anything the Dockerfile `COPY`s. |
@@ -158,12 +170,27 @@ Because `image-output-dir` is a bare key, TOML requires it to appear **before** 
 | `devcontainer` | bool | `false` | Also emit `.devcontainer/devcontainer.json` from the same settings. |
 | `native-when` | table | — | Host match that runs natively instead of containerizing. |
 
-Setting neither `image` nor `dockerfile` is the ordinary case: anvil generates
-`.anvil/container/Dockerfile` and builds it. Setting both is an error — "pull this" and "build that" cannot
-both be the answer, and quietly preferring one would hide the mistake.
+#### Choosing where the image comes from
 
-Choosing either one replaces the choice wholesale rather than merging with it, so a catalog default naming a pre-built
-image cannot collide with a repository that decides to build its own.
+`image`, `dockerfile` and `extends` are alternatives. Setting none is the ordinary case:
+anvil generates `.anvil/container/Dockerfile` and builds it. Setting two is an error —
+"pull this", "build that" and "build on top of mine" cannot all be the answer, and
+quietly preferring one would hide the mistake.
+
+| You want | Use | Anvil's Dockerfile |
+| --- | --- | --- |
+| The default environment | *(nothing)* | generated and built |
+| An image you already publish | `image` | not emitted |
+| Anvil's tools **plus your own** | `extends` | generated, built, and used as the base |
+| A different base OS entirely | `dockerfile` | not emitted |
+
+Prefer `extends` over `dockerfile` whenever the OS is the same. `dockerfile` makes you
+re-implement the toolchain, tool catalog and PowerShell install, and re-do it on every
+anvil upgrade; `extends` inherits all of that.
+
+Choosing any one of them replaces the choice wholesale rather than merging with it, so a
+catalog default naming a pre-built image cannot collide with a repository that decides to
+build its own.
 
 `native-when` accepts `os-release-id` and `version-id`, matched against `/etc/os-release`. When the host matches, recipes
 run directly — useful when the host already *is* the target environment.
@@ -171,8 +198,48 @@ run directly — useful when the host already *is* the target environment.
 Cache volume names map to conventional in-container paths: `cargo` and `rustup` to the official Rust image's
 `CARGO_HOME` and `RUSTUP_HOME`, `target` to `<workdir>/target`, and any other name to `/anvil-cache/<name>`.
 
+#### `extends` — add tools to anvil's image
+
 ```toml
-# Build our own image, from our own Dockerfile.
+[container]
+enabled = true
+extends = "ci/substrate.Dockerfile"
+build-secrets = ["id=feed_token,env=FEED_TOKEN"]
+hash-inputs = ["ci/install-internal-tools.sh"]
+```
+
+```dockerfile
+ARG ANVIL_BASE_IMAGE          # injected by anvil; do not give it a default
+FROM ${ANVIL_BASE_IMAGE}
+
+RUN --mount=type=secret,id=feed_token ./ci/install-internal-tools.sh
+```
+
+Anvil resolves and builds its own image first, then builds yours with the resolved
+reference injected as `ANVIL_BASE_IMAGE`. You cannot write that reference yourself: it is
+a content tag, so it is not knowable until it is computed.
+
+This produces **two** images with **two** identities:
+
+| Image | Changes when | Cost |
+| --- | --- | --- |
+| `anvil-<name>:<hash>` | the toolchain, tool pins or anvil's Dockerfile change | minutes |
+| `anvil-<name>-ext:<hash>` | your Dockerfile, `build-args` or `hash-inputs` change | seconds |
+
+The base tag is folded into the extension's hash, so a rebuilt base always renames the
+extension — the two can never drift apart. The reverse does not hold: editing your layer
+leaves the expensive base cached, which is the point.
+
+`build-args`, `build-secrets` and `hash-inputs` describe **your** layer, not the base.
+Applying them to the base would rebuild the expensive half for a change that only
+concerns the cheap one.
+
+`devcontainer = true` is rejected with `extends`: a descriptor names one image or one
+build, and cannot express a base plus a layer.
+
+#### `dockerfile` — replace anvil's image
+
+```toml
 [container]
 enabled = true
 dockerfile = "ci/anvil.Dockerfile"
@@ -183,9 +250,13 @@ cache-volumes = ["cargo", "rustup", "target"]
 forward-env = ["CARGO_*", "RUST_LOG"]
 ```
 
-A repository that brings its own Dockerfile should keep `ARG BASE_IMAGE` at the top and pin it by digest, so
-`ANVIL_CONTAINER_BASE_IMAGE` keeps working and the identity hash stays meaningful. Anvil does not emit its own
-Dockerfile in that case: a generated file nothing reads is an invitation to edit the wrong one.
+Reach for this only when the base OS itself has to differ — a different package
+ecosystem cannot be layered onto Debian with `extends`.
+
+Keep `ARG BASE_IMAGE` at the top and pin it by digest, so `ANVIL_CONTAINER_BASE_IMAGE`
+keeps working and the identity hash stays meaningful. Anvil does not emit its own
+Dockerfile in this mode: a generated file nothing reads is an invitation to edit the
+wrong one.
 
 ### `[[image]]` — locally built OCI images
 

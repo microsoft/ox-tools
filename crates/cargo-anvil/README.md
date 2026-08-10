@@ -194,8 +194,13 @@ No image needs to exist first: anvil generates a Dockerfile that installs
 the toolchain and tools this repo already pins, and builds it on first
 use. The image is tagged with a hash of its inputs, so bumping a pinned
 tool version selects an image that cannot already exist and rebuilds,
-while an unrelated edit reuses the cached one. Set `image` to pull a
-pre-built reference instead, or `dockerfile` to build your own.
+while an unrelated edit reuses the cached one.
+
+Set `extends` to add your own tools on top of that image — anvil builds
+its base first and injects the reference, so the expensive half stays
+cached while your layer rebuilds in seconds. Set `image` to pull a
+pre-built reference instead, or `dockerfile` to replace anvil’s entirely
+when the base OS has to differ.
 
 `[[image]]` and `[cluster]` sections add the image-build and cluster
 recipes. A repo with no `anvil.toml` is byte-for-byte unchanged.
@@ -339,7 +344,7 @@ User-facing container documentation lives in `docs/containers.md`.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQb40VX80fssEUbpwlckrx9Cbsb8x5VuNpaNiIbNaif6384QmZhZIGDa2NhcmdvLWFudmlsZTAuMy4xa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbe_AeIujv4oEbNSVWmB8InAgbVRzMtWZUa-wbhjxNk2uueqJhZIGDa2NhcmdvLWFudmlsZTAuMy4xa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate
