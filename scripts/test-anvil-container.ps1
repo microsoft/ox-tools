@@ -289,8 +289,20 @@ finally {
 
 Assert-That (Test-Path -LiteralPath (Join-Path $WorkspacePath 'justfiles/anvil/container.just')) `
     'the container recipes were generated'
-Assert-That (Test-Path -LiteralPath (Join-Path $WorkspacePath 'justfiles/anvil/container/Dockerfile')) `
+Assert-That (Test-Path -LiteralPath (Join-Path $WorkspacePath '.anvil/container/Dockerfile')) `
     'a Dockerfile was generated, so no image has to exist anywhere first'
+Assert-That (Test-Path -LiteralPath (Join-Path $WorkspacePath '.anvil/container/Dockerfile.dockerignore')) `
+    'the build-context filter sits beside the Dockerfile, where BuildKit looks for it'
+
+# `justfiles/` carries just recipes and nothing else; container assets live
+# under `.anvil/`. Asserted here because only a real generation run can catch a
+# new artifact being emitted into the wrong tree.
+$strays = @(
+    Get-ChildItem -LiteralPath (Join-Path $WorkspacePath 'justfiles') -Recurse -File |
+        Where-Object { $_.Extension -ne '.just' }
+)
+Assert-That ($strays.Count -eq 0) `
+    ("justfiles/ contains only .just files (found: {0})" -f (($strays | ForEach-Object { $_.Name }) -join ', '))
 
 if ($SkipBuild) {
     Write-Step 'Stopping before the build (-SkipBuild)'
