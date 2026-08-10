@@ -260,9 +260,9 @@ fn default_exec_image_is_generated_and_built() {
     write(&root.join("anvil.toml"), "[container]\nenabled = true\n");
     run_update(&container_catalog(), &github_apply(), &root).unwrap();
 
-    let dockerfile = root.join("justfiles/anvil/container/Dockerfile");
+    let dockerfile = root.join(".anvil/container/Dockerfile");
     assert!(dockerfile.is_file(), "anvil must generate its own exec Dockerfile");
-    assert!(root.join("justfiles/anvil/container/Dockerfile.dockerignore").is_file());
+    assert!(root.join(".anvil/container/Dockerfile.dockerignore").is_file());
 
     // Tools come from the generated catalog, not a second hand-kept list.
     let body = std::fs::read_to_string(&dockerfile).unwrap();
@@ -274,7 +274,7 @@ fn default_exec_image_is_generated_and_built() {
 
     let shim = std::fs::read_to_string(root.join("justfiles/anvil/container.just")).unwrap();
     assert!(shim.contains(r#"anvil_container_image_source := "build""#));
-    assert!(shim.contains(r#"anvil_container_dockerfile := "justfiles/anvil/container/Dockerfile""#));
+    assert!(shim.contains(r#"anvil_container_dockerfile := ".anvil/container/Dockerfile""#));
     assert!(shim.contains(r#"anvil_container_image_name := "anvil-repo""#));
 }
 
@@ -325,7 +325,7 @@ fn devcontainer_describes_a_build_when_the_image_is_built() {
 
     let descriptor = std::fs::read_to_string(root.join(".devcontainer/devcontainer.json")).unwrap();
     assert!(!descriptor.contains(r#""image": """#), "an empty image is an invalid descriptor");
-    assert!(descriptor.contains(r#""dockerfile": "justfiles/anvil/container/Dockerfile""#));
+    assert!(descriptor.contains(r#""dockerfile": ".anvil/container/Dockerfile""#));
     assert!(descriptor.contains(r#""RUST_CHANNEL": "1.93""#), "build args reach the descriptor");
     // Cheap well-formedness guard: the substitution splices a JSON fragment,
     // so an unbalanced brace would be the likely failure mode.
@@ -355,8 +355,8 @@ fn exec_image_identity_covers_what_changes_the_image() {
         .expect("the shim declares its literal hash inputs");
 
     for expected in [
-        "justfiles/anvil/container/Dockerfile",
-        "justfiles/anvil/container/Dockerfile.dockerignore",
+        ".anvil/container/Dockerfile",
+        ".anvil/container/Dockerfile.dockerignore",
         "rust-toolchain.toml",
     ] {
         assert!(declared.contains(expected), "{expected} must define image identity: {declared}");
@@ -415,7 +415,7 @@ fn repo_dockerfile_replaces_the_generated_one() {
     );
     run_update(&container_catalog(), &github_apply(), &root).unwrap();
 
-    assert!(!root.join("justfiles/anvil/container/Dockerfile").exists());
+    assert!(!root.join(".anvil/container/Dockerfile").exists());
 
     let shim = std::fs::read_to_string(root.join("justfiles/anvil/container.just")).unwrap();
     assert!(shim.contains(r#"anvil_container_dockerfile := "ci/anvil.Dockerfile""#));
@@ -436,7 +436,7 @@ fn configured_image_still_pulls() {
     write(&root.join("anvil.toml"), "[container]\nenabled = true\nimage = \"img:1\"\n");
     run_update(&container_catalog(), &github_apply(), &root).unwrap();
 
-    assert!(!root.join("justfiles/anvil/container/Dockerfile").exists());
+    assert!(!root.join(".anvil/container/Dockerfile").exists());
     let shim = std::fs::read_to_string(root.join("justfiles/anvil/container.just")).unwrap();
     assert!(shim.contains(r#"anvil_container_image_source := "pull""#));
     assert!(shim.contains(r#"$hashInputs = @()"#), "nothing to hash in pull mode");
@@ -533,6 +533,48 @@ fn base_catalog_supports_image_and_cluster() {
     assert!(root.join("justfiles/anvil/container-images.just").is_file());
     assert!(root.join("justfiles/anvil/cluster.just").is_file());
     assert!(root.join("justfiles/anvil/cluster-bootstrap.just").is_file());
+}
+
+/// Every image is built by identical logic, so the emitted file carries one
+/// recipe body and a table of per-image data. Emitting a recipe per image
+/// repeated ~35 lines of body per entry and left N copies free to drift.
+#[test]
+fn images_share_one_recipe_body() {
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "image-output-dir = \"out\"\n\n\
+         [container]\nenabled = true\nimage = \"img:1\"\n\n\
+         [[image]]\nname = \"alpha\"\ndockerfile = \"a.Dockerfile\"\ncontext = \"out/a\"\n\n\
+         [[image]]\nname = \"beta\"\nrepository = \"acme/beta\"\ndockerfile = \"b.Dockerfile\"\n\
+         context = \"out/b\"\ntarget = \"runtime\"\ndepends-on = [\"alpha\"]\n",
+    );
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    let images = std::fs::read_to_string(root.join("justfiles/anvil/container-images.just")).unwrap();
+
+    // One parameterized recipe, not one per image.
+    assert_eq!(images.matches("\nanvil-image name=").count(), 1);
+    assert!(!images.contains("anvil-image-alpha"), "no per-image recipe should be emitted");
+    assert!(!images.contains("anvil-image-beta"), "no per-image recipe should be emitted");
+    assert_eq!(
+        images.matches("& $engine @cmd").count(),
+        1,
+        "the build body must appear exactly once"
+    );
+
+    // Per-image data still reaches the table, including the repository override
+    // and an absent optional field.
+    assert!(images.contains("'alpha' = @{"));
+    assert!(images.contains("'beta' = @{"));
+    assert!(images.contains("repository = 'acme/beta'"));
+    assert!(images.contains("target     = 'runtime'"));
+    assert!(images.contains("target     = $null"));
+
+    // The aggregate drives the shared recipe in dependency order.
+    let alpha = images.find("just anvil-image 'alpha'").expect("alpha is built");
+    let beta = images.find("just anvil-image 'beta'").expect("beta is built");
+    assert!(alpha < beta, "depends-on must order the aggregate");
 }
 
 /// With `[container] enabled = false`, even a container-capable catalog emits a

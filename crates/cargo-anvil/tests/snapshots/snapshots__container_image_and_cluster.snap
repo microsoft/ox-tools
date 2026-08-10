@@ -3661,16 +3661,22 @@ anvil-cluster-clean mode="cluster" tag="dev" registry="local":
 # Generic OCI image build recipes. Emitted only when `[container] enabled =
 # true` and at least one `[[image]]` is configured in anvil.toml.
 #
+# `anvil-image <name>` builds one image; `anvil-images` builds them all in
+# dependency order. Every image is built by the same logic, so there is one
+# recipe body and a generated spec table -- the per-image data (dockerfile,
+# context, target, stage-artifacts, build-args, repository) lives in `$specs`.
+# Run `just anvil-image` with no name to list the configured images.
+#
 # Every image is built from a STAGED context (never the repo root): its
 # prebuilt binaries are copied into the context by `stage-artifacts` before the
-# build — nothing is compiled in-image. The per-image recipe refuses a context
-# outside the configured image output dir so the whole repo can never be sent
-# to the engine as build context.
+# build — nothing is compiled in-image. The recipe refuses a context outside
+# the configured image output dir so the whole repo can never be sent to the
+# engine as build context.
 #
 # There is deliberately no registry push, no ACR, no auth, and no promotion:
 # images are built locally and loaded into the Kind cluster (see cluster.just).
 #
-# Recipe parameters shared by every recipe below:
+# Recipe parameters shared by both recipes:
 #   profile   selects the staged binaries ({profile} token); default "debug".
 #   tag       image tag and {tag} token; default "dev".
 #   registry  image registry prefix; default "local" (podman normalizes an
@@ -3679,17 +3685,47 @@ anvil-cluster-clean mode="cluster" tag="dev" registry="local":
 # The `_anvil-container-engine` helper (docker/podman resolution) is provided
 # by container.just, imported alongside this file.
 
+# Build one image by name. `just anvil-image` with no name lists them.
 [group("anvil-image")]
 [script("pwsh")]
-anvil-image-base-image profile="debug" tag="dev" registry="local":
+anvil-image name="" profile="debug" tag="dev" registry="local":
     $ErrorActionPreference = 'Stop'
+    # Generated from [[image]]; every entry is built by the body below.
+    $specs = [ordered]@{
+        'base-image' = @{
+            repository = 'base-image'
+            dockerfile = 'containers/base/Dockerfile'
+            context    = 'out/base'
+            target     = $null
+            stages     = @()
+            buildArgs  = @(@{ name = 'BASE_IMAGE'; value = 'mcr.example/base:3.0' })
+        }
+        'my-service' = @{
+            repository = 'my-service'
+            dockerfile = 'containers/svc/Dockerfile'
+            context    = 'out/svc'
+            target     = 'runtime'
+            stages     = @(@{ from = 'target/{profile}/my-svc'; to = 'bin/my-svc' })
+            buildArgs  = @()
+        }
+    }
+    $name = '{{name}}'
+    if (-not $name) {
+        Write-Output "anvil: images: $($specs.Keys -join ', ')"
+        exit 0
+    }
+    if (-not $specs.Contains($name)) {
+        Write-Error "anvil: unknown image '$name' (valid: $($specs.Keys -join ', '))"
+        exit 1
+    }
+    $spec = $specs[$name]
     $repoRoot = '{{justfile_directory()}}'
     $profile = '{{profile}}'
     $tag = '{{tag}}'
     $registry = '{{registry}}'
     function Expand-Tokens($s) { $s.Replace('{profile}', $profile).Replace('{tag}', $tag) }
     $outFull = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'out'))
-    $context = Expand-Tokens 'out/base'
+    $context = Expand-Tokens $spec.context
     $ctxFull = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $context))
     $sep = [System.IO.Path]::DirectorySeparatorChar
     if ($ctxFull -ne $outFull -and -not $ctxFull.StartsWith($outFull + $sep)) {
@@ -3697,8 +3733,7 @@ anvil-image-base-image profile="debug" tag="dev" registry="local":
         exit 1
     }
     New-Item -ItemType Directory -Force -Path $ctxFull | Out-Null
-    $stages = @()
-    foreach ($s in $stages) {
+    foreach ($s in $spec.stages) {
         $src = Join-Path $repoRoot (Expand-Tokens $s.from)
         $dst = Join-Path $ctxFull (Expand-Tokens $s.to)
         New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
@@ -3706,50 +3741,11 @@ anvil-image-base-image profile="debug" tag="dev" registry="local":
     }
     $engine = just _anvil-container-engine
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $ref = "${registry}/base-image:${tag}"
+    $ref = "${registry}/$($spec.repository):${tag}"
     if ($engine -eq 'podman' -and $registry -notmatch '[.:/]' -and $registry -ne 'localhost') { $ref = "localhost/$ref" }
-    $buildArgs = @(@{ name = 'BASE_IMAGE'; value = 'mcr.example/base:3.0' })
-    $cmd = @('build', '-f', (Join-Path $repoRoot 'containers/base/Dockerfile'), '-t', $ref)
-    foreach ($b in $buildArgs) { $cmd += @('--build-arg', "$($b.name)=$(Expand-Tokens $b.value)") }
-    $cmd += $ctxFull
-    if ($engine -eq 'docker') { $cmd = @($cmd[0]) + @('--provenance=false') + $cmd[1..($cmd.Length - 1)] }
-    Write-Output "anvil: building $ref"
-    & $engine @cmd
-    exit $LASTEXITCODE
-
-[group("anvil-image")]
-[script("pwsh")]
-anvil-image-my-service profile="debug" tag="dev" registry="local":
-    $ErrorActionPreference = 'Stop'
-    $repoRoot = '{{justfile_directory()}}'
-    $profile = '{{profile}}'
-    $tag = '{{tag}}'
-    $registry = '{{registry}}'
-    function Expand-Tokens($s) { $s.Replace('{profile}', $profile).Replace('{tag}', $tag) }
-    $outFull = [System.IO.Path]::GetFullPath((Join-Path $repoRoot 'out'))
-    $context = Expand-Tokens 'out/svc'
-    $ctxFull = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $context))
-    $sep = [System.IO.Path]::DirectorySeparatorChar
-    if ($ctxFull -ne $outFull -and -not $ctxFull.StartsWith($outFull + $sep)) {
-        Write-Error "anvil: image context '$context' is outside the image output dir 'out'"
-        exit 1
-    }
-    New-Item -ItemType Directory -Force -Path $ctxFull | Out-Null
-    $stages = @(@{ from = 'target/{profile}/my-svc'; to = 'bin/my-svc' })
-    foreach ($s in $stages) {
-        $src = Join-Path $repoRoot (Expand-Tokens $s.from)
-        $dst = Join-Path $ctxFull (Expand-Tokens $s.to)
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
-        Copy-Item -Recurse -Force -Path $src -Destination $dst
-    }
-    $engine = just _anvil-container-engine
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $ref = "${registry}/my-service:${tag}"
-    if ($engine -eq 'podman' -and $registry -notmatch '[.:/]' -and $registry -ne 'localhost') { $ref = "localhost/$ref" }
-    $buildArgs = @()
-    $cmd = @('build', '-f', (Join-Path $repoRoot 'containers/svc/Dockerfile'), '-t', $ref)
-    $cmd += @('--target', 'runtime')
-    foreach ($b in $buildArgs) { $cmd += @('--build-arg', "$($b.name)=$(Expand-Tokens $b.value)") }
+    $cmd = @('build', '-f', (Join-Path $repoRoot $spec.dockerfile), '-t', $ref)
+    if ($spec.target) { $cmd += @('--target', $spec.target) }
+    foreach ($b in $spec.buildArgs) { $cmd += @('--build-arg', "$($b.name)=$(Expand-Tokens $b.value)") }
     $cmd += $ctxFull
     if ($engine -eq 'docker') { $cmd = @($cmd[0]) + @('--provenance=false') + $cmd[1..($cmd.Length - 1)] }
     Write-Output "anvil: building $ref"
@@ -3760,9 +3756,9 @@ anvil-image-my-service profile="debug" tag="dev" registry="local":
 [script("pwsh")]
 anvil-images profile="debug" tag="dev" registry="local":
     $ErrorActionPreference = 'Stop'
-    just anvil-image-base-image '{{profile}}' '{{tag}}' '{{registry}}'
+    just anvil-image 'base-image' '{{profile}}' '{{tag}}' '{{registry}}'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    just anvil-image-my-service '{{profile}}' '{{tag}}' '{{registry}}'
+    just anvil-image 'my-service' '{{profile}}' '{{tag}}' '{{registry}}'
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Write-Output "anvil: built 2 image(s)"
     exit 0

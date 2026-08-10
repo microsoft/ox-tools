@@ -38,10 +38,16 @@ pub(crate) const CLUSTER_JUST_PATH: &str = "justfiles/anvil/cluster.just";
 pub(crate) const CLUSTER_BOOTSTRAP_JUST_PATH: &str = "justfiles/anvil/cluster-bootstrap.just";
 
 /// Repo-root-relative path of the generated default exec-image Dockerfile.
-pub(crate) const EXEC_DOCKERFILE_PATH: &str = "justfiles/anvil/container/Dockerfile";
+///
+/// Container *assets* live under `.anvil/`, not in the recipe tree:
+/// `justfiles/` holds `just` recipe files and nothing else.
+pub(crate) const EXEC_DOCKERFILE_PATH: &str = ".anvil/container/Dockerfile";
 
 /// Repo-root-relative path of the exec-image build-context filter.
-pub(crate) const EXEC_DOCKERIGNORE_PATH: &str = "justfiles/anvil/container/Dockerfile.dockerignore";
+///
+/// Must sit beside [`EXEC_DOCKERFILE_PATH`]: BuildKit resolves the filter as
+/// `<dockerfile>.dockerignore`, so the two move together.
+pub(crate) const EXEC_DOCKERIGNORE_PATH: &str = ".anvil/container/Dockerfile.dockerignore";
 
 /// Path of the recipe-tree entry point (kept in sync with
 /// [`super::justfile`]).
@@ -161,7 +167,7 @@ pub fn cluster_bootstrap_just() -> Artifact {
     Artifact::owned_file(CLUSTER_BOOTSTRAP_JUST_PATH, CLUSTER_BOOTSTRAP_JUST)
 }
 
-/// `justfiles/anvil/container/Dockerfile` — the default exec image.
+/// `.anvil/container/Dockerfile` — the default exec image.
 ///
 /// Register it with
 /// [`CatalogBuilder::with_container_artifact`](crate::CatalogBuilder::with_container_artifact).
@@ -174,7 +180,7 @@ pub fn exec_dockerfile() -> Artifact {
     Artifact::owned_file(EXEC_DOCKERFILE_PATH, EXEC_DOCKERFILE)
 }
 
-/// `justfiles/anvil/container/Dockerfile.dockerignore` — build-context filter
+/// `.anvil/container/Dockerfile.dockerignore` — build-context filter
 /// for [`exec_dockerfile`]. Gated identically.
 #[must_use]
 pub fn exec_dockerignore() -> Artifact {
@@ -434,53 +440,95 @@ fn json_escape(value: &str) -> String {
 // Pillar 2 — generic OCI image build recipes
 // ---------------------------------------------------------------------------
 
-/// Fill in `container-images.just` by generating one self-contained pwsh
-/// recipe per `[[image]]` plus an `anvil-images` aggregate that
-/// drives them in deterministic dependency order.
+/// Fill in `container-images.just` with one `anvil-image` recipe driven by a
+/// generated spec table, plus an `anvil-images` aggregate that walks it in
+/// dependency order.
 fn render_container_images(template: &str, container: &ResolvedContainer) -> String {
     template.replace("__IMAGE_RECIPES__", &image_recipes(container))
 }
 
-/// Generate every per-image recipe followed by the `anvil-images` aggregate.
+/// The image spec table, the single build recipe, and the aggregate.
 fn image_recipes(container: &ResolvedContainer) -> String {
     let mut out = String::new();
-    for image in &container.images {
-        out.push_str(&image_recipe(image, &container.image_output_dir));
-        out.push('\n');
-    }
+    out.push_str(&image_recipe(&container.images, &container.image_output_dir));
+    out.push('\n');
     out.push_str(&images_aggregate(&container.image_build_order));
     out
 }
 
-/// A single self-contained `anvil-image-<name>` recipe: stage the prebuilt
-/// artifacts into the context, guard the context path, then build the image.
-fn image_recipe(image: &ImageSpec, output_dir: &str) -> String {
-    let stages = if image.stage_artifacts.is_empty() {
-        "@()".to_owned()
-    } else {
-        let items: Vec<String> = image
-            .stage_artifacts
-            .iter()
-            .map(|s| format!("@{{ from = {}; to = {} }}", ps_lit(&s.from), ps_lit(&s.to)))
-            .collect();
-        format!("@({})", items.join(", "))
-    };
-    let build_args = if image.build_args.is_empty() {
-        "@()".to_owned()
-    } else {
-        let items: Vec<String> = image
-            .build_args
-            .iter()
-            .map(|(k, v)| format!("@{{ name = {}; value = {} }}", ps_lit(k), ps_lit(v)))
-            .collect();
-        format!("@({})", items.join(", "))
-    };
-
+/// One PowerShell hashtable entry per `[[image]]`.
+///
+/// Every image is built by identical logic, so only the *data* is generated
+/// per image: emitting a whole recipe each time would repeat ~35 lines of body
+/// for every entry and leave N copies to drift apart.
+fn image_spec_entries(images: &[ImageSpec]) -> String {
     let mut out = String::new();
+    for image in images {
+        let stages = if image.stage_artifacts.is_empty() {
+            "@()".to_owned()
+        } else {
+            let items: Vec<String> = image
+                .stage_artifacts
+                .iter()
+                .map(|s| format!("@{{ from = {}; to = {} }}", ps_lit(&s.from), ps_lit(&s.to)))
+                .collect();
+            format!("@({})", items.join(", "))
+        };
+        let build_args = if image.build_args.is_empty() {
+            "@()".to_owned()
+        } else {
+            let items: Vec<String> = image
+                .build_args
+                .iter()
+                .map(|(k, v)| format!("@{{ name = {}; value = {} }}", ps_lit(k), ps_lit(v)))
+                .collect();
+            format!("@({})", items.join(", "))
+        };
+        let target = image.target.as_deref().map_or_else(|| "$null".to_owned(), ps_lit);
+
+        let _ = writeln!(out, "        {} = @{{", ps_lit(&image.name));
+        let _ = writeln!(
+            out,
+            "            repository = {}",
+            ps_lit(image.repository.as_deref().unwrap_or(&image.name))
+        );
+        let _ = writeln!(out, "            dockerfile = {}", ps_lit(&image.dockerfile));
+        let _ = writeln!(out, "            context    = {}", ps_lit(&image.context));
+        let _ = writeln!(out, "            target     = {target}");
+        let _ = writeln!(out, "            stages     = {stages}");
+        let _ = writeln!(out, "            buildArgs  = {build_args}");
+        let _ = writeln!(out, "        }}");
+    }
+    out
+}
+
+/// The single `anvil-image <name>` recipe: look the name up in the spec table,
+/// stage the prebuilt artifacts into the context, guard the context path, then
+/// build the image.
+fn image_recipe(images: &[ImageSpec], output_dir: &str) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Build one image by name. `just anvil-image` with no name lists them.");
     let _ = writeln!(out, "[group(\"anvil-image\")]");
     let _ = writeln!(out, "[script(\"pwsh\")]");
-    let _ = writeln!(out, "anvil-image-{} profile=\"debug\" tag=\"dev\" registry=\"local\":", image.name);
+    let _ = writeln!(out, "anvil-image name=\"\" profile=\"debug\" tag=\"dev\" registry=\"local\":");
     let _ = writeln!(out, "    $ErrorActionPreference = 'Stop'");
+    let _ = writeln!(out, "    # Generated from [[image]]; every entry is built by the body below.");
+    let _ = writeln!(out, "    $specs = [ordered]@{{");
+    out.push_str(&image_spec_entries(images));
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    $name = '{{{{name}}}}'");
+    let _ = writeln!(out, "    if (-not $name) {{");
+    let _ = writeln!(out, "        Write-Output \"anvil: images: $($specs.Keys -join ', ')\"");
+    let _ = writeln!(out, "        exit 0");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    if (-not $specs.Contains($name)) {{");
+    let _ = writeln!(
+        out,
+        "        Write-Error \"anvil: unknown image '$name' (valid: $($specs.Keys -join ', '))\""
+    );
+    let _ = writeln!(out, "        exit 1");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    $spec = $specs[$name]");
     let _ = writeln!(out, "    $repoRoot = '{{{{justfile_directory()}}}}'");
     let _ = writeln!(out, "    $profile = '{{{{profile}}}}'");
     let _ = writeln!(out, "    $tag = '{{{{tag}}}}'");
@@ -494,7 +542,7 @@ fn image_recipe(image: &ImageSpec, output_dir: &str) -> String {
         "    $outFull = [System.IO.Path]::GetFullPath((Join-Path $repoRoot {}))",
         ps_lit(output_dir)
     );
-    let _ = writeln!(out, "    $context = Expand-Tokens {}", ps_lit(&image.context));
+    let _ = writeln!(out, "    $context = Expand-Tokens $spec.context");
     let _ = writeln!(out, "    $ctxFull = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $context))");
     let _ = writeln!(out, "    $sep = [System.IO.Path]::DirectorySeparatorChar");
     let _ = writeln!(
@@ -509,8 +557,7 @@ fn image_recipe(image: &ImageSpec, output_dir: &str) -> String {
     let _ = writeln!(out, "        exit 1");
     let _ = writeln!(out, "    }}");
     let _ = writeln!(out, "    New-Item -ItemType Directory -Force -Path $ctxFull | Out-Null");
-    let _ = writeln!(out, "    $stages = {stages}");
-    let _ = writeln!(out, "    foreach ($s in $stages) {{");
+    let _ = writeln!(out, "    foreach ($s in $spec.stages) {{");
     let _ = writeln!(out, "        $src = Join-Path $repoRoot (Expand-Tokens $s.from)");
     let _ = writeln!(out, "        $dst = Join-Path $ctxFull (Expand-Tokens $s.to)");
     let _ = writeln!(
@@ -521,27 +568,19 @@ fn image_recipe(image: &ImageSpec, output_dir: &str) -> String {
     let _ = writeln!(out, "    }}");
     let _ = writeln!(out, "    $engine = just _anvil-container-engine");
     let _ = writeln!(out, "    if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}");
-    let _ = writeln!(
-        out,
-        "    $ref = \"${{registry}}/{}:${{tag}}\"",
-        image.repository.as_deref().unwrap_or(&image.name)
-    );
+    let _ = writeln!(out, "    $ref = \"${{registry}}/$($spec.repository):${{tag}}\"");
     let _ = writeln!(
         out,
         "    if ($engine -eq 'podman' -and $registry -notmatch '[.:/]' -and $registry -ne 'localhost') {{ $ref = \"localhost/$ref\" }}"
     );
-    let _ = writeln!(out, "    $buildArgs = {build_args}");
     let _ = writeln!(
         out,
-        "    $cmd = @('build', '-f', (Join-Path $repoRoot {}), '-t', $ref)",
-        ps_lit(&image.dockerfile)
+        "    $cmd = @('build', '-f', (Join-Path $repoRoot $spec.dockerfile), '-t', $ref)"
     );
-    if let Some(target) = &image.target {
-        let _ = writeln!(out, "    $cmd += @('--target', {})", ps_lit(target));
-    }
+    let _ = writeln!(out, "    if ($spec.target) {{ $cmd += @('--target', $spec.target) }}");
     let _ = writeln!(
         out,
-        "    foreach ($b in $buildArgs) {{ $cmd += @('--build-arg', \"$($b.name)=$(Expand-Tokens $b.value)\") }}"
+        "    foreach ($b in $spec.buildArgs) {{ $cmd += @('--build-arg', \"$($b.name)=$(Expand-Tokens $b.value)\") }}"
     );
     let _ = writeln!(out, "    $cmd += $ctxFull");
     // A BuildKit build defaults to attaching a provenance attestation, which
@@ -569,7 +608,8 @@ fn images_aggregate(order: &[String]) -> String {
     for name in order {
         let _ = writeln!(
             out,
-            "    just anvil-image-{name} '{{{{profile}}}}' '{{{{tag}}}}' '{{{{registry}}}}'"
+            "    just anvil-image {} '{{{{profile}}}}' '{{{{tag}}}}' '{{{{registry}}}}'",
+            ps_lit(name)
         );
         let _ = writeln!(out, "    if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}");
     }

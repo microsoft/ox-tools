@@ -31,7 +31,7 @@ just anvil-pr                # builds the image on first use, then runs inside i
 ```
 
 That is the whole adoption story for containerized execution: no image to publish, no registry to reach, no Dockerfile
-to write. Anvil generates `justfiles/anvil/container/Dockerfile`, which installs the toolchain and tools this repository
+to write. Anvil generates `.anvil/container/Dockerfile`, which installs the toolchain and tools this repository
 already pins, and builds it the first time it is needed.
 
 Point `image` at a pre-built reference to pull one instead, or `dockerfile` at your own to build something else — see
@@ -97,13 +97,18 @@ Emitted when at least one `[[image]]` is declared.
 
 | Recipe | Purpose |
 | --- | --- |
-| `just anvil-image-<name>` | Build one declared image. |
+| `just anvil-image <name>` | Build one declared image. With no name, list the declared images. |
 | `just anvil-images` | Build every declared image in dependency order. |
 
-Both take the same three optional parameters:
+Every image is built by the same logic, so the generated file holds **one** recipe body plus a table of per-image data
+(`dockerfile`, `context`, `target`, `stage-artifacts`, `build-args`, `repository`). An unknown name is rejected with the
+valid list.
+
+Both take the same three optional parameters, after the name where there is one:
 
 ```bash
-just anvil-images <profile> <tag> <registry>    # defaults: debug dev local
+just anvil-image <name> <profile> <tag> <registry>   # defaults: debug dev local
+just anvil-images       <profile> <tag> <registry>
 ```
 
 `profile` selects which prebuilt binaries are staged, `tag` is the image tag, and `registry` is the ref prefix. The final
@@ -154,7 +159,7 @@ Because `image-output-dir` is a bare key, TOML requires it to appear **before** 
 | `native-when` | table | — | Host match that runs natively instead of containerizing. |
 
 Setting neither `image` nor `dockerfile` is the ordinary case: anvil generates
-`justfiles/anvil/container/Dockerfile` and builds it. Setting both is an error — "pull this" and "build that" cannot
+`.anvil/container/Dockerfile` and builds it. Setting both is an error — "pull this" and "build that" cannot
 both be the answer, and quietly preferring one would hide the mistake.
 
 Choosing either one replaces the choice wholesale rather than merging with it, so a catalog default naming a pre-built
@@ -188,8 +193,8 @@ Repeat the table once per image.
 
 | Key | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `name` | string | — | Required. Must match `[A-Za-z][A-Za-z0-9_-]*` — it becomes a recipe name. |
-| `repository` | string | `name` | Published path when it differs from the recipe name (a recipe name cannot contain `/`). |
+| `name` | string | — | Required. Must match `[A-Za-z][A-Za-z0-9_-]*` — it selects the image in `just anvil-image <name>`. |
+| `repository` | string | `name` | Published path when it differs from the name (a `just` argument is fine with `/`, but the name is also the default repository). |
 | `dockerfile` | string | — | Required. Path to the Dockerfile. |
 | `target` | string | — | Build stage to target in a multi-stage Dockerfile. |
 | `context` | string | — | Build context. Must be nested under `image-output-dir`. |
@@ -366,7 +371,7 @@ Credentials are never mounted. If a recipe needs a token inside the container, f
 
 ### The generated image
 
-`justfiles/anvil/container/Dockerfile` starts from a digest-pinned Debian base, installs `just`, rustup and PowerShell
+`.anvil/container/Dockerfile` starts from a digest-pinned Debian base, installs `just`, rustup and PowerShell
 against published checksums, then runs `just anvil-setup`.
 
 That last step is the point: the image installs its tools by running the same recipe the checks use, from the same
