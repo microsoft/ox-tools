@@ -219,6 +219,11 @@ Anvil resolves and builds its own image first, then builds yours with the resolv
 reference injected as `ANVIL_BASE_IMAGE`. You cannot write that reference yourself: it is
 a content tag, so it is not knowable until it is computed.
 
+Leave `ARG ANVIL_BASE_IMAGE` without a default. BuildKit warns about that
+(`InvalidDefaultArgInFrom`), and the warning is expected: a default would let the build
+quietly succeed against the wrong base if the injection ever failed, which is worse than
+a noisy line.
+
 This produces **two** images with **two** identities:
 
 | Image | Changes when | Cost |
