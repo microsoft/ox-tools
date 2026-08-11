@@ -182,7 +182,8 @@
 //! anvil can optionally run the generated recipes inside a container, build
 //! OCI images, and stand up a throwaway Kind cluster for integration tests.
 //! All three are opt-in and gated on `[container] enabled`, configured in an
-//! `anvil.toml` at the repo root://!
+//! `anvil.toml` at the repo root:
+//!
 //! ```toml
 //! [container]
 //! enabled = true

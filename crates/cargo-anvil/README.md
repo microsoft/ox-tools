@@ -182,8 +182,8 @@ Four escape valves, in increasing severity:
 
 anvil can optionally run the generated recipes inside a container, build
 OCI images, and stand up a throwaway Kind cluster for integration tests.
-All three are opt-in and independent, configured in an `anvil.toml` at the
-repo root:
+All three are opt-in and gated on `[container] enabled`, configured in an
+`anvil.toml` at the repo root:
 
 ```toml
 [container]
@@ -345,7 +345,7 @@ User-facing container documentation lives in `docs/containers.md`.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbbUgNTANE08wbaevooU56EiAbpzXfkS_Jpt0bk_SnRkUoJXVhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQb13Zj8yUr6acbqh2L1-leVc4bb709WcuuAWgbVuJoI2hGXXVhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate
