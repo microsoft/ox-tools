@@ -13,6 +13,8 @@ user-visible shape of the tool. Detail lives in companion documents:
 - [extensibility.md](./extensibility.md) — how downstream tools ship their own brand + catalog.
 - [github.md](./github.md) — GitHub Actions emission, example workflows, impact wiring.
 - [ado.md](./ado.md) — Azure DevOps Pipelines emission, 1ESPT/msrustup composition.
+- [../containers.md](../containers.md) — containerized execution: the content-addressed
+  exec image, configuration reference, and credential handling.
 - [../verification.md](../verification.md) — continuous-validation strategy: dogfooding,
   fixture tests, schema validation.
 
