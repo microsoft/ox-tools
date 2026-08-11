@@ -239,7 +239,12 @@ _anvil-container-image:
         # Progress goes to stderr: callers capture this recipe's stdout to learn
         # the image reference, so anything else written there becomes part of it.
         [Console]::Error.WriteLine("anvil: building $image (inputs changed or first run)")
-        $buildCmd = @('build', '--file', (Join-Path $repoRoot $Dockerfile), '--tag', $image)
+        # Pinned, not inferred from the host. The Dockerfile installs amd64
+        # toolchains and verifies amd64 checksums, so an arm host would resolve the
+        # multi-arch base to arm64 and fail late with an exec-format error. It also
+        # keeps the identity scheme honest: without this, two hosts of different
+        # architecture compute the same tag for genuinely different images.
+        $buildCmd = @('build', '--platform', 'linux/amd64', '--file', (Join-Path $repoRoot $Dockerfile), '--tag', $image)
         if ($noCache) { $buildCmd += '--no-cache' }
         foreach ($arg in $BuildArgs) { $buildCmd += @('--build-arg', $arg) }
         foreach ($secret in $Secrets) { $buildCmd += @('--secret', $secret) }
@@ -326,8 +331,17 @@ _anvil-container-run target:
         $containerCwd = '{{anvil_container_workdir}}/' + $rel
     }
 
-    $runArgs = @('run', '--rm', '-i')
+    $runArgs = @('run', '--rm', '-i', '--platform', 'linux/amd64')
     $runArgs += @('-v', "${repoRoot}:{{anvil_container_workdir}}")
+    # Match the caller's uid/gid on Linux. Without this everything the run
+    # writes under the bind mount -- target/, generated files -- lands as root
+    # on the host, and the next native cargo build or git clean fails with
+    # EACCES a long way from the cause. Docker Desktop on Windows and macOS
+    # already maps ownership, and id is not there to ask.
+    if (-not $IsWindows -and -not $IsMacOS) {
+        $hostUid = (id -u); $hostGid = (id -g)
+        if ($LASTEXITCODE -eq 0 -and $hostUid -ne '0') { $runArgs += @('--user', "${hostUid}:${hostGid}") }
+    }
     foreach ($vol in __CACHE_MOUNTS_ARRAY__) {
         $runArgs += @('-v', $vol)
     }
@@ -405,8 +419,17 @@ anvil-container-shell:
     $image = (just _anvil-container-image) | Select-Object -Last 1
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $repoRoot = '{{justfile_directory()}}'
-    $runArgs = @('run', '--rm', '-it')
+    $runArgs = @('run', '--rm', '-it', '--platform', 'linux/amd64')
     $runArgs += @('-v', "${repoRoot}:{{anvil_container_workdir}}")
+    # Match the caller's uid/gid on Linux. Without this everything the run
+    # writes under the bind mount -- target/, generated files -- lands as root
+    # on the host, and the next native cargo build or git clean fails with
+    # EACCES a long way from the cause. Docker Desktop on Windows and macOS
+    # already maps ownership, and id is not there to ask.
+    if (-not $IsWindows -and -not $IsMacOS) {
+        $hostUid = (id -u); $hostGid = (id -g)
+        if ($LASTEXITCODE -eq 0 -and $hostUid -ne '0') { $runArgs += @('--user', "${hostUid}:${hostGid}") }
+    }
     foreach ($vol in __CACHE_MOUNTS_ARRAY__) {
         $runArgs += @('-v', $vol)
     }

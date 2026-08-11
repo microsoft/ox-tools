@@ -1304,6 +1304,22 @@ mod tests {
         assert!(GH_JOB_CONTAINER_SUFFIX.contains("matrix.os == 'linux' &&"));
     }
 
+    /// The Dockerfile installs amd64 toolchains and verifies amd64 checksums,
+    /// so the platform is pinned rather than inferred from the host -- which
+    /// also stops two hosts of different architecture computing one tag for
+    /// two different images. And the run maps the caller's uid on Linux, or
+    /// everything written through the bind mount lands as root on the host.
+    #[test]
+    fn the_container_pins_its_platform_and_maps_the_caller() {
+        assert_eq!(
+            CONTAINER_JUST.matches("'--platform', 'linux/amd64'").count(),
+            3,
+            "build and both run paths"
+        );
+        assert_eq!(CONTAINER_JUST.matches("'--user'").count(), 2, "both run paths map the caller");
+        assert!(CONTAINER_JUST.contains("-not $IsWindows -and -not $IsMacOS"));
+    }
+
     #[test]
     fn ado_root_declares_container_resource() {
         let container = enabled("repo");

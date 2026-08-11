@@ -432,7 +432,7 @@ fn declared_build_secrets_are_checked_before_the_build() {
     assert!(shim.contains("is missing or empty"), "a file-sourced secret is checked");
     // The check must precede the build, not follow it.
     let check = shim.find("unset or empty").expect("check present");
-    let build = shim.find("'build', '--file'").expect("build present");
+    let build = shim.find("'build', '--platform'").expect("build present");
     assert!(check < build, "the secret check must run before the engine is invoked");
 }
 
