@@ -43,12 +43,6 @@ const HELPERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/help
 /// Repo-root-relative path of the shared-helpers recipe file.
 const HELPERS_JUST_PATH: &str = "justfiles/anvil/helpers.just";
 
-/// Contents of `justfiles/anvil/runner.just` baked into the binary.
-const RUNNER_JUST: &str = include_str!("../../../templates/justfiles/anvil/runner.just");
-
-/// Repo-root-relative path of the tier execution router.
-const RUNNER_JUST_PATH: &str = "justfiles/anvil/runner.just";
-
 /// Emits `(path, include_str!)` pairs for a set of split recipe files that
 /// live under a subdirectory of `justfiles/anvil/`. Each file is one owned
 /// artifact, so the recipe tree is one file per check / per group rather
@@ -62,36 +56,6 @@ macro_rules! split_recipe_files {
             ),
         )*]
     };
-}
-
-#[test]
-fn runner_routes_tiers_and_guards_recursion() {
-    assert!(RUNNER_JUST.contains("[windows]"));
-    assert!(RUNNER_JUST.contains("[script(\"pwsh\", \"-NoProfile\")]"));
-    assert!(RUNNER_JUST.contains("[unix]"));
-    assert!(RUNNER_JUST.contains("[script(\"bash\")]"));
-    assert_eq!(RUNNER_JUST.matches("[no-exit-message]").count(), 2);
-    assert!(RUNNER_JUST.contains("if ($env:ANVIL_IN_CONTAINER)"));
-    assert!(RUNNER_JUST.contains("if [[ -n \"${ANVIL_IN_CONTAINER:-}\" ]]"));
-    assert!(RUNNER_JUST.contains("replace(just_executable(), \"'\", \"''\")"));
-    assert!(RUNNER_JUST.contains("replace(justfile(), \"'\", \"''\")"));
-    assert!(RUNNER_JUST.contains("replace(tier, \"'\", \"''\")"));
-    assert!(RUNNER_JUST.contains("replace(runner, \"'\", \"''\")"));
-    assert!(RUNNER_JUST.contains("& $just --justfile $justfile anvil-container $nativeTier"));
-    assert!(RUNNER_JUST.contains("exec \"$just_path\" --justfile \"$justfile\" anvil-container \"$native_tier\""));
-    assert_eq!(RUNNER_JUST.matches("expected 'native' or 'container'").count(), 2);
-}
-
-#[test]
-fn aprz_uses_the_container_secret_and_fails_fast_without_it() {
-    let aprz = CHECK_FILES
-        .iter()
-        .find_map(|(path, body)| path.ends_with("/aprz.just").then_some(*body))
-        .expect("aprz.just is registered in CHECK_FILES below");
-    assert!(aprz.contains("if ($env:ANVIL_IN_CONTAINER)"));
-    assert!(aprz.contains("ANVIL_APRZ_ALREADY_RAN"));
-    assert!(aprz.contains("/run/secrets/anvil-github-token"));
-    assert!(aprz.contains("Run `gh auth login` on the host"));
 }
 
 /// One `justfiles/anvil/checks/<check>.just` file per catalog check
@@ -155,11 +119,6 @@ const TIERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tiers.
 /// Repo-root-relative path of the tier aggregator file.
 const TIERS_JUST_PATH: &str = "justfiles/anvil/tiers.just";
 
-#[cfg(test)]
-pub(crate) fn dependency_recipe_sources() -> impl Iterator<Item = &'static str> {
-    std::iter::once(TIERS_JUST).chain(GROUP_FILES.iter().map(|(_, body)| *body))
-}
-
 /// Embedded body of the `anvil-imports` region in the user's Justfile.
 pub(crate) const JUSTFILE_IMPORTS_BODY: &str = include_str!("../../../templates/regions/justfile-imports.just");
 
@@ -198,12 +157,6 @@ pub fn helpers() -> Artifact {
     Artifact::owned_file(HELPERS_JUST_PATH, HELPERS_JUST)
 }
 
-/// `justfiles/anvil/runner.just` — native/container tier routing.
-#[must_use]
-pub fn runner() -> Artifact {
-    Artifact::owned_file(RUNNER_JUST_PATH, RUNNER_JUST)
-}
-
 /// The `justfiles/anvil/checks/<check>.just` files — one owned artifact
 /// per catalog check.
 #[must_use]
@@ -231,7 +184,7 @@ mod tests {
 
     #[test]
     fn tools_just_template_is_not_empty() {
-        assert!(TOOLS_JUST.contains("anvil-tool-cargo-spellcheck-source-deps-check"));
+        assert!(TOOLS_JUST.contains("anvil-system-deps-check"));
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-deny-install"));
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-deny-validate-prereqs"));
         assert!(TOOLS_JUST.contains("anvil-component-default-clippy-install"));
@@ -265,47 +218,6 @@ mod tests {
         ] {
             assert!(checks.contains(needle), "checks tree missing recipe '{needle}'");
         }
-    }
-
-    #[test]
-    fn checks_fail_closed_and_preserve_opted_out_tests() {
-        let checks = all_check_bodies();
-        for needle in [
-            "anvil-bolero: target discovery failed",
-            "anvil-readme-check: cargo metadata failed",
-            "running tests without coverage for opted-out packages",
-            "all affected packages opted out of coverage",
-            "could not resolve the cargo-careful executable",
-            "anvil-mutants-full: aarch64-pc-windows-msvc",
-            "cargo-semver-checks exit 101",
-            "unexpected cargo-semver-checks exit code",
-        ] {
-            assert!(checks.contains(needle), "checks tree missing safety behavior '{needle}'");
-        }
-        assert!(
-            checks.contains("bolero list --profile release --package $packageName"),
-            "bolero discovery must use the execution profile once per affected package"
-        );
-        assert!(
-            !checks.contains("bolero list @bareArgs"),
-            "bolero discovery must not pass repeated --package arguments"
-        );
-        assert!(!checks.contains("bolero list failed; assuming no targets"));
-    }
-
-    #[test]
-    fn spellcheck_checks_source_prerequisites_before_source_builds() {
-        assert!(
-            TOOLS_JUST.contains(
-                "_install-tool \"cargo-spellcheck\" cargo_spellcheck_version installer \"anvil-tool-cargo-spellcheck-source-deps-check\""
-            ),
-            "spellcheck installer must run libclang validation before source builds"
-        );
-        let checks = all_check_bodies();
-        assert!(
-            !checks.contains("anvil-spellcheck-setup installer=\"install\": anvil-tool-cargo-spellcheck-source-deps-check"),
-            "spellcheck setup must not require libclang before binstall"
-        );
     }
 
     #[test]
@@ -382,22 +294,15 @@ mod tests {
 
     #[test]
     fn tiers_just_template_has_three_tiers() {
-        for needle in [
-            "anvil-pr:",
-            "anvil-scheduled:",
-            "anvil-full:",
-            "_anvil-pr:",
-            "_anvil-scheduled:",
-            "_anvil-full:",
-        ] {
+        for needle in ["anvil-pr:", "anvil-scheduled:", "anvil-full:"] {
             assert!(TIERS_JUST.contains(needle), "tiers.just missing '{needle}'");
         }
         // Each tier runs its validate-prereqs aggregate first so a missing
         // tool fails up front rather than mid-run.
         for needle in [
-            "anvil-pr: (_anvil-run \"pr\" anvil_runner)",
-            "anvil-scheduled: (_anvil-run \"scheduled\" anvil_runner)",
-            "anvil-full: (_anvil-run \"full\" anvil_runner)",
+            "anvil-pr: anvil-pr-validate-prereqs",
+            "anvil-scheduled: anvil-scheduled-validate-prereqs",
+            "anvil-full: anvil-full-validate-prereqs",
         ] {
             assert!(
                 TIERS_JUST.contains(needle),
@@ -447,10 +352,8 @@ mod tests {
             "import 'helpers.just'",
             "import 'checks/fmt.just'",
             "import 'checks/miri.just'",
-            "import 'container/container.just'",
             "import 'groups/pr-fast.just'",
             "import 'groups/scheduled-exhaustive.just'",
-            "import 'runner.just'",
             "import 'tiers.just'",
             "import 'tools.just'",
             "import 'versions.just'",

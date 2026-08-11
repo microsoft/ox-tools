@@ -26,8 +26,6 @@ AppError
 aprz
 args
 argv
-ARM64
-auth
 AspNet
 async
 auditable
@@ -187,7 +185,6 @@ interoperate
 invariants
 IOCP
 IP
-io
 jitter
 JSON
 JSON's
@@ -451,17 +448,3 @@ READMEs
 RUSTSEC
 UB
 subdirectory
-dep
-io
-deps
-fmt
-justfile
-readme
-templating
-udeps
-unscoped
-backtracker
-prerelease
-versioned
-Containerfile
-WSL

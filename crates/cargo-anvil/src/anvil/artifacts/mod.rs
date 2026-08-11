@@ -19,7 +19,6 @@
 //! key/content split. See [`extensibility.md §4.1`](../../../docs/design/extensibility.md).
 
 pub mod ado;
-pub mod container;
 pub mod github;
 pub mod justfile;
 pub mod region;
@@ -37,10 +36,8 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
         justfile::tools(),
         justfile::versions(),
         justfile::helpers(),
-        justfile::runner(),
         justfile::tiers(),
         region::justfile_imports(),
-        region::justfile_runner(),
         region::workspace_lints(),
         region::single_crate_lints(),
         region::member_lints(),
@@ -58,7 +55,6 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
     // One owned file per check and per group (the split recipe tree).
     out.extend(justfile::check_files());
     out.extend(justfile::group_files());
-    out.extend(container::all());
 
     // Backend files (gated); both backends present, filtered by gate at plan time.
     out.extend(github::all());
@@ -83,10 +79,8 @@ mod tests {
             justfile::versions(),
             justfile::tools(),
             justfile::helpers(),
-            justfile::runner(),
             justfile::tiers(),
             region::justfile_imports(),
-            region::justfile_runner(),
             region::workspace_lints(),
             region::single_crate_lints(),
             region::member_lints(),
@@ -126,9 +120,6 @@ mod tests {
 
         for artifact in justfile::check_files().iter().chain(justfile::group_files().iter()) {
             assert!(present(artifact), "split recipe file is not in Catalog::anvil(): {artifact:?}");
-        }
-        for artifact in container::all() {
-            assert!(present(&artifact), "container artifact is not in Catalog::anvil(): {artifact:?}");
         }
     }
 }
