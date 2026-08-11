@@ -119,6 +119,11 @@ const TIERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tiers.
 /// Repo-root-relative path of the tier aggregator file.
 const TIERS_JUST_PATH: &str = "justfiles/anvil/tiers.just";
 
+#[cfg(test)]
+pub(crate) fn dependency_recipe_sources() -> impl Iterator<Item = &'static str> {
+    std::iter::once(TIERS_JUST).chain(GROUP_FILES.iter().map(|(_, body)| *body))
+}
+
 /// Embedded body of the `anvil-imports` region in the user's Justfile.
 pub(crate) const JUSTFILE_IMPORTS_BODY: &str = include_str!("../../../templates/regions/justfile-imports.just");
 
@@ -184,7 +189,7 @@ mod tests {
 
     #[test]
     fn tools_just_template_is_not_empty() {
-        assert!(TOOLS_JUST.contains("anvil-system-deps-check"));
+        assert!(TOOLS_JUST.contains("anvil-tool-cargo-spellcheck-source-deps-check"));
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-deny-install"));
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-deny-validate-prereqs"));
         assert!(TOOLS_JUST.contains("anvil-component-default-clippy-install"));
@@ -218,6 +223,47 @@ mod tests {
         ] {
             assert!(checks.contains(needle), "checks tree missing recipe '{needle}'");
         }
+    }
+
+    #[test]
+    fn checks_fail_closed_and_preserve_opted_out_tests() {
+        let checks = all_check_bodies();
+        for needle in [
+            "anvil-bolero: target discovery failed",
+            "anvil-readme-check: cargo metadata failed",
+            "running tests without coverage for opted-out packages",
+            "all affected packages opted out of coverage",
+            "could not resolve the cargo-careful executable",
+            "anvil-mutants-full: aarch64-pc-windows-msvc",
+            "cargo-semver-checks exit 101",
+            "unexpected cargo-semver-checks exit code",
+        ] {
+            assert!(checks.contains(needle), "checks tree missing safety behavior '{needle}'");
+        }
+        assert!(
+            checks.contains("bolero list --profile release --package $packageName"),
+            "bolero discovery must use the execution profile once per affected package"
+        );
+        assert!(
+            !checks.contains("bolero list @bareArgs"),
+            "bolero discovery must not pass repeated --package arguments"
+        );
+        assert!(!checks.contains("bolero list failed; assuming no targets"));
+    }
+
+    #[test]
+    fn spellcheck_checks_source_prerequisites_before_source_builds() {
+        assert!(
+            TOOLS_JUST.contains(
+                "_install-tool \"cargo-spellcheck\" cargo_spellcheck_version installer \"anvil-tool-cargo-spellcheck-source-deps-check\""
+            ),
+            "spellcheck installer must run libclang validation before source builds"
+        );
+        let checks = all_check_bodies();
+        assert!(
+            !checks.contains("anvil-spellcheck-setup installer=\"install\": anvil-tool-cargo-spellcheck-source-deps-check"),
+            "spellcheck setup must not require libclang before binstall"
+        );
     }
 
     #[test]

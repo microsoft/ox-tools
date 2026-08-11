@@ -1392,7 +1392,6 @@ version-id = "22.04"
         assert!(resolved.image.is_empty());
     }
 
-    #[test]
     /// A build-arg value is committed twice over — into the generated
     /// `container.just` and the devcontainer descriptor — so a credential put
     /// there lands in git. Catch the obvious names at generation time.

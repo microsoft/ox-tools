@@ -28,8 +28,8 @@ you want to upgrade the opinionated baseline.
 
 Each run of `cargo anvil` writes:
 
-* The `justfiles/anvil/` recipe tree (`tools.just`, `checks.just`,
-  `groups.just`, `tiers.just`) — owned files.
+* The owned `justfiles/anvil/` recipe tree (`tools.just`, `checks/`,
+  `groups/`, `tiers.just`).
 * A managed region in your `Justfile` that imports them.
 * A managed region in your workspace `Cargo.toml` carrying
   `[workspace.lints]` in dotted-key form, plus a `[lints] workspace = true` region in each workspace member.
@@ -66,7 +66,8 @@ Flags:
 * `--no-backends` — emit only local files; skip every cloud-workflow backend.
   Mutually exclusive with `--backend`.
 * `--dry-run` — analyze without writing. Exits 1 if anything would be
-  written or proposed.
+  written or proposed, or if Anvil refuses to manage an artifact it
+  cannot safely inspect.
 * `--force` — override the single-tool guard and switch the repository to
   this tool, then run a normal update. A repo is managed by exactly one
   anvil-family tool (recorded as `tool` in `.anvil.lock`); without
@@ -327,7 +328,7 @@ See `docs/design/extensibility.md`.
 
 See `docs/design/` for the full architecture:
 
-* `design.md` — overall principles and CLI shape.
+* `README.md` — overall principles and CLI shape.
 * `checks.md` — the opinionated check catalog.
 * `local.md` — the `justfiles/anvil/` tree.
 * `updates.md` — the drift-detection algorithm.
@@ -344,14 +345,14 @@ User-facing container documentation lives in `docs/containers.md`.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbe_AeIujv4oEbNSVWmB8InAgbVRzMtWZUa-wbhjxNk2uueqJhZIGDa2NhcmdvLWFudmlsZTAuMy4xa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbbUgNTANE08wbaevooU56EiAbpzXfkS_Jpt0bk_SnRkUoJXVhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate
- [__link3]: https://docs.rs/cargo-anvil/0.3.1/cargo_anvil/?search=Catalog
- [__link4]: https://docs.rs/cargo-anvil/0.3.1/cargo_anvil/?search=Catalog::anvil
- [__link5]: https://docs.rs/cargo-anvil/0.3.1/cargo_anvil/?search=CliMeta
- [__link6]: https://docs.rs/cargo-anvil/0.3.1/cargo_anvil/?search=CatalogBuilder::with_artifact
- [__link7]: https://docs.rs/cargo-anvil/0.3.1/cargo_anvil/?search=CatalogBuilder::replace_artifact
- [__link8]: https://docs.rs/cargo-anvil/0.3.1/cargo_anvil/?search=CatalogBuilder::without_artifact
- [__link9]: https://docs.rs/cargo-anvil/0.3.1/cargo_anvil/?search=artifacts
+ [__link3]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=Catalog
+ [__link4]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=Catalog::anvil
+ [__link5]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CliMeta
+ [__link6]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CatalogBuilder::with_artifact
+ [__link7]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
+ [__link8]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CatalogBuilder::without_artifact
+ [__link9]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts
