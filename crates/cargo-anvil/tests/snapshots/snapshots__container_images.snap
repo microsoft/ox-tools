@@ -917,7 +917,7 @@ jobs:
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
-    container: ${{ inputs.container_image != '' && inputs.container_image || null }}
+    container: ${{ inputs.container_image != '' && matrix.os == 'linux' && inputs.container_image || null }}
     env:
       ANVIL_IN_CONTAINER: '1'
     steps:
@@ -977,7 +977,7 @@ jobs:
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
-    container: ${{ inputs.container_image != '' && inputs.container_image || null }}
+    container: ${{ inputs.container_image != '' && matrix.os == 'linux' && inputs.container_image || null }}
     env:
       ANVIL_IN_CONTAINER: '1'
     steps:
@@ -1025,7 +1025,7 @@ jobs:
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
-    container: ${{ inputs.container_image != '' && inputs.container_image || null }}
+    container: ${{ inputs.container_image != '' && matrix.os == 'linux' && inputs.container_image || null }}
     env:
       ANVIL_IN_CONTAINER: '1'
     steps:
@@ -1051,7 +1051,7 @@ jobs:
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
-    container: ${{ inputs.container_image != '' && inputs.container_image || null }}
+    container: ${{ inputs.container_image != '' && matrix.os == 'linux' && inputs.container_image || null }}
     env:
       ANVIL_IN_CONTAINER: '1'
     steps:
@@ -1152,7 +1152,7 @@ jobs:
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
-    container: ${{ inputs.container_image != '' && inputs.container_image || null }}
+    container: ${{ inputs.container_image != '' && matrix.os == 'linux' && inputs.container_image || null }}
     env:
       ANVIL_IN_CONTAINER: '1'
     steps:
@@ -1186,7 +1186,7 @@ jobs:
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
-    container: ${{ inputs.container_image != '' && inputs.container_image || null }}
+    container: ${{ inputs.container_image != '' && matrix.os == 'linux' && inputs.container_image || null }}
     env:
       ANVIL_IN_CONTAINER: '1'
     steps:
@@ -1212,7 +1212,7 @@ jobs:
       || matrix.os == 'windows' && inputs.windows_runner
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
-    container: ${{ inputs.container_image != '' && inputs.container_image || null }}
+    container: ${{ inputs.container_image != '' && matrix.os == 'linux' && inputs.container_image || null }}
     env:
       ANVIL_IN_CONTAINER: '1'
     steps:
@@ -1228,7 +1228,7 @@ jobs:
       matrix:
         os: [linux, windows]
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}
-    container: ${{ inputs.container_image != '' && inputs.container_image || null }}
+    container: ${{ inputs.container_image != '' && matrix.os == 'linux' && inputs.container_image || null }}
     env:
       ANVIL_IN_CONTAINER: '1'
     steps:
@@ -3405,12 +3405,15 @@ anvil-image name="" profile="debug" tag="dev" registry="local":
         Write-Error "anvil: image context '$context' is outside the image output dir 'out'"
         exit 1
     }
+    if (Test-Path -LiteralPath $ctxFull) { Remove-Item -Recurse -Force -LiteralPath $ctxFull }
     New-Item -ItemType Directory -Force -Path $ctxFull | Out-Null
     foreach ($s in $spec.stages) {
         $src = Join-Path $repoRoot (Expand-Tokens $s.from)
         $dst = Join-Path $ctxFull (Expand-Tokens $s.to)
-        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null
-        Copy-Item -Recurse -Force -Path $src -Destination $dst
+        $dstFull = [System.IO.Path]::GetFullPath($dst)
+        if (-not $dstFull.StartsWith($ctxFull + $sep)) { Write-Error "anvil: staged path '$($s.to)' escapes the build context after token expansion"; exit 1 }
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dstFull) | Out-Null
+        Copy-Item -Recurse -Force -LiteralPath $src -Destination $dstFull
     }
     $engine = just _anvil-container-engine
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -3483,7 +3486,7 @@ export ANVIL_CONTAINER := "1"
 
 # Resolve the engine: honor an explicit `engine`, else auto-detect docker then podman.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _anvil-container-engine:
     $ErrorActionPreference = 'Stop'
     $configured = '{{anvil_container_engine}}'
@@ -3527,7 +3530,7 @@ _anvil-container-engine:
 
 # Resolve the exec image reference, building it if it is not already present.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _anvil-container-image:
     $ErrorActionPreference = 'Stop'
     $engine = just _anvil-container-engine
@@ -3679,7 +3682,12 @@ _anvil-container-image:
         # Progress goes to stderr: callers capture this recipe's stdout to learn
         # the image reference, so anything else written there becomes part of it.
         [Console]::Error.WriteLine("anvil: building $image (inputs changed or first run)")
-        $buildCmd = @('build', '--file', (Join-Path $repoRoot $Dockerfile), '--tag', $image)
+        # Pinned, not inferred from the host. The Dockerfile installs amd64
+        # toolchains and verifies amd64 checksums, so an arm host would resolve the
+        # multi-arch base to arm64 and fail late with an exec-format error. It also
+        # keeps the identity scheme honest: without this, two hosts of different
+        # architecture compute the same tag for genuinely different images.
+        $buildCmd = @('build', '--platform', 'linux/amd64', '--file', (Join-Path $repoRoot $Dockerfile), '--tag', $image)
         if ($noCache) { $buildCmd += '--no-cache' }
         foreach ($arg in $BuildArgs) { $buildCmd += @('--build-arg', $arg) }
         foreach ($secret in $Secrets) { $buildCmd += @('--secret', $secret) }
@@ -3725,7 +3733,7 @@ _anvil-container-image:
 
 # Run `just TARGET` inside the container. The single indirection point.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _anvil-container-run target:
     $ErrorActionPreference = 'Stop'
 
@@ -3766,9 +3774,18 @@ _anvil-container-run target:
         $containerCwd = '{{anvil_container_workdir}}/' + $rel
     }
 
-    $runArgs = @('run', '--rm', '-i')
+    $runArgs = @('run', '--rm', '-i', '--platform', 'linux/amd64')
     $runArgs += @('-v', "${repoRoot}:{{anvil_container_workdir}}")
-    foreach ($vol in @('repo-cargo:/usr/local/cargo', 'repo-rustup:/usr/local/rustup')) {
+    # Match the caller's uid/gid on Linux. Without this everything the run
+    # writes under the bind mount -- target/, generated files -- lands as root
+    # on the host, and the next native cargo build or git clean fails with
+    # EACCES a long way from the cause. Docker Desktop on Windows and macOS
+    # already maps ownership, and id is not there to ask.
+    if (-not $IsWindows -and -not $IsMacOS) {
+        $hostUid = (id -u); $hostGid = (id -g)
+        if ($LASTEXITCODE -eq 0 -and $hostUid -ne '0') { $runArgs += @('--user', "${hostUid}:${hostGid}") }
+    }
+    foreach ($vol in @('repo-cargo:/usr/local/cargo/registry', 'repo-rustup:/usr/local/rustup/downloads')) {
         $runArgs += @('-v', $vol)
     }
 
@@ -3809,7 +3826,7 @@ _anvil-container-run target:
 
 # Make the exec image available so a subsequent run starts warm.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-container-up:
     $ErrorActionPreference = 'Stop'
     if ('{{anvil_container_image_source}}' -eq 'pull') {
@@ -3825,7 +3842,7 @@ anvil-container-up:
 
 # Remove the named cache volumes for this repo. The image is left in place.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-container-down:
     $ErrorActionPreference = 'Stop'
     $engine = just _anvil-container-engine
@@ -3837,7 +3854,7 @@ anvil-container-down:
 
 # Open an interactive shell in the image, with the same mounts a recipe run uses.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-container-shell:
     $ErrorActionPreference = 'Stop'
     $engine = just _anvil-container-engine
@@ -3845,9 +3862,18 @@ anvil-container-shell:
     $image = (just _anvil-container-image) | Select-Object -Last 1
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $repoRoot = '{{justfile_directory()}}'
-    $runArgs = @('run', '--rm', '-it')
+    $runArgs = @('run', '--rm', '-it', '--platform', 'linux/amd64')
     $runArgs += @('-v', "${repoRoot}:{{anvil_container_workdir}}")
-    foreach ($vol in @('repo-cargo:/usr/local/cargo', 'repo-rustup:/usr/local/rustup')) {
+    # Match the caller's uid/gid on Linux. Without this everything the run
+    # writes under the bind mount -- target/, generated files -- lands as root
+    # on the host, and the next native cargo build or git clean fails with
+    # EACCES a long way from the cause. Docker Desktop on Windows and macOS
+    # already maps ownership, and id is not there to ask.
+    if (-not $IsWindows -and -not $IsMacOS) {
+        $hostUid = (id -u); $hostGid = (id -g)
+        if ($LASTEXITCODE -eq 0 -and $hostUid -ne '0') { $runArgs += @('--user', "${hostUid}:${hostGid}") }
+    }
+    foreach ($vol in @('repo-cargo:/usr/local/cargo/registry', 'repo-rustup:/usr/local/rustup/downloads')) {
         $runArgs += @('-v', $vol)
     }
     $runArgs += @('-e', 'ANVIL_IN_CONTAINER=1', '--pull=never', '-w', '{{anvil_container_workdir}}', $image)
@@ -3860,7 +3886,7 @@ anvil-container-shell:
 
 # Report the engine, the exec image, and whether it is present and current.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-container-status:
     $ErrorActionPreference = 'Stop'
     $engine = just _anvil-container-engine
@@ -3911,7 +3937,7 @@ anvil-container-status:
 
 # Rebuild the exec image from scratch, ignoring every cached layer.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-container-rebuild:
     $ErrorActionPreference = 'Stop'
     if ('{{anvil_container_image_source}}' -eq 'pull') {
@@ -3937,7 +3963,7 @@ anvil-container-rebuild:
 
 # Run the fast pull request checks.
 [group("anvil")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-pr-fast:
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_CONTAINER -eq '1' -and $env:ANVIL_IN_CONTAINER -ne '1') {
@@ -4004,7 +4030,7 @@ anvil-pr-fast-validate-prereqs: \
 
 # Run the pull request mutation tests.
 [group("anvil")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-pr-mutants:
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_CONTAINER -eq '1' -and $env:ANVIL_IN_CONTAINER -ne '1') {
@@ -4033,7 +4059,7 @@ anvil-pr-mutants-validate-prereqs: anvil-mutants-diff-validate-prereqs
 
 # Run the pull request runtime analysis.
 [group("anvil")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-pr-runtime-analysis:
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_CONTAINER -eq '1' -and $env:ANVIL_IN_CONTAINER -ne '1') {
@@ -4088,7 +4114,7 @@ anvil-pr-runtime-analysis-validate-prereqs: \
 
 # Run the slow pull request checks.
 [group("anvil")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-pr-slow:
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_CONTAINER -eq '1' -and $env:ANVIL_IN_CONTAINER -ne '1') {
@@ -4123,7 +4149,7 @@ anvil-pr-slow-validate-prereqs: \
 
 # Run the pull request tests.
 [group("anvil")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-pr-test:
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_CONTAINER -eq '1' -and $env:ANVIL_IN_CONTAINER -ne '1') {
@@ -4158,7 +4184,7 @@ anvil-pr-test-validate-prereqs: \
 
 # Run the scheduled advisory checks.
 [group("anvil")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-scheduled-advisories:
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_CONTAINER -eq '1' -and $env:ANVIL_IN_CONTAINER -ne '1') {
@@ -4195,7 +4221,7 @@ anvil-scheduled-advisories-validate-prereqs: \
 
 # Run the scheduled exhaustive checks.
 [group("anvil")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-scheduled-exhaustive:
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_CONTAINER -eq '1' -and $env:ANVIL_IN_CONTAINER -ne '1') {
@@ -4236,7 +4262,7 @@ anvil-scheduled-exhaustive-validate-prereqs: \
 
 # Run the scheduled runtime analysis.
 [group("anvil")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-scheduled-runtime-analysis:
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_CONTAINER -eq '1' -and $env:ANVIL_IN_CONTAINER -ne '1') {
@@ -4275,7 +4301,7 @@ anvil-scheduled-runtime-analysis-validate-prereqs: \
 
 # Run the scheduled tests.
 [group("anvil")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-scheduled-test:
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_CONTAINER -eq '1' -and $env:ANVIL_IN_CONTAINER -ne '1') {
@@ -4668,7 +4694,7 @@ alias anvil := anvil-pr
 
 # Run all pull request checks.
 [group("anvil")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-pr:
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_CONTAINER -eq '1' -and $env:ANVIL_IN_CONTAINER -ne '1') {
@@ -4685,7 +4711,7 @@ anvil-pr:
 
 # Run all scheduled checks.
 [group("anvil")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-scheduled:
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_CONTAINER -eq '1' -and $env:ANVIL_IN_CONTAINER -ne '1') {
@@ -4697,7 +4723,7 @@ anvil-scheduled:
 
 # Full tier: PR + scheduled, end-to-end. Useful before tagging a release.
 [group("anvil")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-full:
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_CONTAINER -eq '1' -and $env:ANVIL_IN_CONTAINER -ne '1') {

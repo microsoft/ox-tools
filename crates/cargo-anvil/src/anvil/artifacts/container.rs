@@ -567,15 +567,32 @@ fn image_recipe(images: &[ImageSpec], output_dir: &str) -> String {
     );
     let _ = writeln!(out, "        exit 1");
     let _ = writeln!(out, "    }}");
+    // Staging is a fresh copy every time. Without the wipe, a file staged by
+    // an earlier run survives after its stage-artifacts entry is renamed or
+    // removed, and a directory `COPY` in the Dockerfile ships it -- the same
+    // inputs producing a different image. Safe because the context is
+    // required to live under the image output dir, which is build output.
+    let _ = writeln!(
+        out,
+        "    if (Test-Path -LiteralPath $ctxFull) {{ Remove-Item -Recurse -Force -LiteralPath $ctxFull }}"
+    );
     let _ = writeln!(out, "    New-Item -ItemType Directory -Force -Path $ctxFull | Out-Null");
     let _ = writeln!(out, "    foreach ($s in $spec.stages) {{");
     let _ = writeln!(out, "        $src = Join-Path $repoRoot (Expand-Tokens $s.from)");
     let _ = writeln!(out, "        $dst = Join-Path $ctxFull (Expand-Tokens $s.to)");
+    // The generation-time check cannot see this: `to` is validated before
+    // `{profile}`/`{tag}` expand, and those come from the caller. A tag of
+    // `../../..` would otherwise write outside the staged context entirely.
+    let _ = writeln!(out, "        $dstFull = [System.IO.Path]::GetFullPath($dst)");
     let _ = writeln!(
         out,
-        "        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null"
+        "        if (-not $dstFull.StartsWith($ctxFull + $sep)) {{ Write-Error \"anvil: staged path '$($s.to)' escapes the build context after token expansion\"; exit 1 }}"
     );
-    let _ = writeln!(out, "        Copy-Item -Recurse -Force -Path $src -Destination $dst");
+    let _ = writeln!(
+        out,
+        "        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dstFull) | Out-Null"
+    );
+    let _ = writeln!(out, "        Copy-Item -Recurse -Force -LiteralPath $src -Destination $dstFull");
     let _ = writeln!(out, "    }}");
     let _ = writeln!(out, "    $engine = just _anvil-container-engine");
     let _ = writeln!(out, "    if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}");

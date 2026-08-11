@@ -511,18 +511,31 @@ impl ContainerConfig {
 /// Validate the image set: unique, well-formed names; `depends-on` targets
 /// that exist; non-empty dockerfile; and a context under `output_dir`.
 fn validate_images(images: &[ImageSpec], output_dir: &str) -> Result<(), AppError> {
+    validate_image_output_dir(output_dir)?;
     let mut seen = std::collections::BTreeSet::new();
     for image in images {
         if !is_recipe_token(&image.name) {
             bail!("invalid [[image]] name '{}' (must match [A-Za-z][A-Za-z0-9_-]*)", image.name);
         }
-        if !seen.insert(image.name.as_str()) {
-            bail!("duplicate [[image]] name '{}'", image.name);
+        // Case-insensitively: the names become keys in a generated PowerShell
+        // hash literal, and those are case-insensitive. Two names differing
+        // only in case are a duplicate key, which is a parse error that takes
+        // every image recipe offline rather than reporting the collision.
+        if !seen.insert(image.name.to_ascii_lowercase()) {
+            bail!("duplicate [[image]] name '{}' (names are compared case-insensitively)", image.name);
         }
     }
     for image in images {
         if image.dockerfile.trim().is_empty() {
             bail!("[[image]] '{}' requires a non-empty `dockerfile`", image.name);
+        }
+        reject_unsafe_recipe_value(&image.name, "dockerfile", &image.dockerfile)?;
+        reject_unsafe_recipe_value(&image.name, "context", &image.context)?;
+        if let Some(repository) = &image.repository {
+            reject_unsafe_recipe_value(&image.name, "repository", repository)?;
+        }
+        if let Some(target) = &image.target {
+            reject_unsafe_recipe_value(&image.name, "target", target)?;
         }
         if !context_under_output_dir(&image.context, output_dir) {
             bail!(
@@ -533,6 +546,46 @@ fn validate_images(images: &[ImageSpec], output_dir: &str) -> Result<(), AppErro
                 output_dir
             );
         }
+        for artifact in &image.stage_artifacts {
+            reject_unsafe_recipe_value(&image.name, "stage-artifacts from", &artifact.from)?;
+            reject_unsafe_recipe_value(&image.name, "stage-artifacts to", &artifact.to)?;
+            // `to` is joined onto the staged context at run time. Without this
+            // a `..` walks out of the context and writes anywhere the user can
+            // -- and it happens before the engine is even consulted, so an
+            // `anvil-image` run on a host with no engine still writes.
+            if !stays_within_parent(&artifact.to) {
+                bail!(
+                    "[[image]] '{}' stage-artifacts `to` '{}' must stay inside the staged context \
+                     (no leading '/' and no '..' segment)",
+                    image.name,
+                    artifact.to
+                );
+            }
+            if !stays_within_parent(&artifact.from) {
+                bail!(
+                    "[[image]] '{}' stage-artifacts `from` '{}' must stay inside the repository \
+                     (no leading '/' and no '..' segment)",
+                    image.name,
+                    artifact.from
+                );
+            }
+        }
+        for (name, value) in &image.build_args {
+            reject_unsafe_recipe_value(&image.name, "build-args name", name)?;
+            reject_unsafe_recipe_value(&image.name, "build-args value", value)?;
+            // Same reasoning as `[container] build-args`: the value is written
+            // verbatim into a generated file the repository commits, and an
+            // image build arg is additionally recoverable from `docker
+            // history`.
+            if is_credential_shaped(name) {
+                bail!(
+                    "[[image]] '{}' build-arg '{}' looks like a credential; build args are written \
+                     into committed generated files and into image history",
+                    image.name,
+                    name
+                );
+            }
+        }
         for dep in &image.depends_on {
             if !images.iter().any(|other| other.name == *dep) {
                 bail!("[[image]] '{}' depends-on '{}' names no image", image.name, dep);
@@ -542,13 +595,72 @@ fn validate_images(images: &[ImageSpec], output_dir: &str) -> Result<(), AppErro
     Ok(())
 }
 
-/// Whether `context` is a repo-relative path nested under `output_dir` and not
-/// the output dir itself, an absolute path, or an escaping `..` path.
+/// Characters an `[[image]]` string value may not contain.
+///
+/// The value crosses two layers: `just` substitutes it textually into a
+/// `[script("pwsh")]` body, and PowerShell then parses the result. Escaping
+/// for one says nothing about the other.
+///
+/// A newline is the worst of them: an unindented line ends the recipe as far
+/// as `just` is concerned, so the rest of the file parses as top-level items
+/// and *every* recipe in the repository dies, not merely this one. `{{` is a
+/// `just` interpolation, expanded before PowerShell sees it — which either
+/// fails the parse or, for something like `{{justfile_directory()}}`,
+/// silently substitutes a path.
+fn reject_unsafe_recipe_value(image: &str, field: &str, value: &str) -> Result<(), AppError> {
+    if let Some(bad) = value.chars().find(|c| c.is_control() || matches!(c, '\'' | '"' | '$' | '`')) {
+        bail!("[[image]] '{image}' {field} may not contain {bad:?} (it is interpolated into a generated recipe)");
+    }
+    if value.contains("{{") {
+        bail!("[[image]] '{image}' {field} may not contain '{{{{' (just would expand it as an interpolation)");
+    }
+    Ok(())
+}
+
+/// Whether a relative path stays inside the directory it is joined onto.
+fn stays_within_parent(path: &str) -> bool {
+    let normalized = path.replace('\\', "/");
+    !normalized.starts_with('/')
+        && !normalized.split('/').any(|segment| segment == "..")
+        // A Windows drive-qualified path is absolute too, and `starts_with('/')`
+        // does not catch it.
+        && !normalized.chars().nth(1).is_some_and(|c| c == ':')
+}
+
+/// Validate `image-output-dir` itself: it is the anchor every context is
+/// checked against, so `.` would make the repo root a legal build context —
+/// exactly what the check exists to prevent.
+fn validate_image_output_dir(output_dir: &str) -> Result<(), AppError> {
+    let normalized = output_dir.replace('\\', "/");
+    let trimmed = normalized.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed == "." {
+        bail!("`image-output-dir` must be a relative directory below the repo root, not '{output_dir}'");
+    }
+    if !stays_within_parent(trimmed) {
+        bail!("`image-output-dir` '{output_dir}' must be relative and may not contain a '..' segment");
+    }
+    Ok(())
+}
+
+/// Whether `context` is a repo-relative path strictly nested under
+/// `output_dir` — not the output dir itself, not absolute, not escaping via
+/// `..`.
+///
+/// Strictness matters: `out/.` is not `..`-bearing and does start with `out/`,
+/// so a looser check accepts it, and with `image-output-dir = "."` that makes
+/// the repository root a legal build context.
 fn context_under_output_dir(context: &str, output_dir: &str) -> bool {
     let normalized = context.replace('\\', "/");
-    let output = output_dir.trim_end_matches('/');
+    // Normalize both sides: checking a forward-slashed context against a
+    // backslashed output dir rejects a legitimate pairing.
+    let output = output_dir.replace('\\', "/");
+    let output = output.trim_end_matches('/');
     let prefix = format!("{output}/");
-    if !normalized.starts_with(&prefix) {
+    let Some(rest) = normalized.strip_prefix(&prefix) else {
+        return false;
+    };
+    // `out/.` and `out/` both resolve back to the output dir itself.
+    if rest.split('/').all(|segment| segment.is_empty() || segment == ".") {
         return false;
     }
     // Reject any `..` segment so the context cannot climb back out.
@@ -1416,6 +1528,75 @@ stage-artifacts = [
     #[test]
     fn image_context_equal_to_output_dir_is_rejected() {
         resolve_body("image-output-dir = \"out\"\n\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"out\"\n").unwrap_err();
+        // `out/.` is neither `..`-bearing nor unprefixed, so a looser check
+        // accepts it and the context resolves back to the output dir.
+        resolve_body("image-output-dir = \"out\"\n\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"out/.\"\n").unwrap_err();
+    }
+
+    /// `image-output-dir = "."` would make every context a descendant of the
+    /// repo root, so the root itself becomes a legal build context -- the one
+    /// thing the staged-context rule exists to prevent.
+    #[test]
+    fn image_output_dir_must_not_be_the_repo_root() {
+        let err = resolve_body("image-output-dir = \".\"\n\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"./a\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("image-output-dir"), "got: {err}");
+    }
+
+    /// The names become keys in a generated PowerShell hash literal, and those
+    /// are case-insensitive: a collision is a parse error that takes every
+    /// image recipe offline instead of naming the problem.
+    #[test]
+    fn image_names_collide_case_insensitively() {
+        let err = resolve_body(
+            "\n[[image]]\nname = \"foo\"\ndockerfile = \"D\"\ncontext = \"out/a\"\n\n\
+             [[image]]\nname = \"Foo\"\ndockerfile = \"D\"\ncontext = \"out/b\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("duplicate"), "got: {err}");
+    }
+
+    /// `to` is joined onto the staged context at run time, so a `..` writes
+    /// outside it -- and the copy happens before the engine is consulted, so
+    /// it lands even on a host with no container engine.
+    #[test]
+    fn stage_artifact_destination_may_not_escape_the_context() {
+        let err = resolve_body(
+            "\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"out/a\"\n\
+             stage-artifacts = [{ from = \"target/x\", to = \"../../../escaped.txt\" }]\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("stay inside the staged context"), "got: {err}");
+    }
+
+    /// A newline ends the recipe as far as `just` is concerned, so the rest of
+    /// the file parses as top-level items and every recipe in the repository
+    /// dies -- not merely this one.
+    #[test]
+    fn image_values_may_not_break_out_of_the_generated_recipe() {
+        for body in [
+            "\n[[image]]\nname = \"a\"\ndockerfile = \"c/a\\nb/D\"\ncontext = \"out/a\"\n",
+            "\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"out/a\"\ntarget = \"r'x\"\n",
+            "\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"out/a\"\nbuild-args = { V = \"{{justfile_directory()}}\" }\n",
+        ] {
+            let err = resolve_body(body).unwrap_err().to_string();
+            assert!(err.contains("may not contain"), "accepted: {err}");
+        }
+    }
+
+    /// The same rule `[container] build-args` already enforces: the value is
+    /// written into a committed generated file, and an image build arg is also
+    /// recoverable from `docker history`.
+    #[test]
+    fn image_build_args_reject_credential_shaped_names() {
+        let err =
+            resolve_body("\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"out/a\"\nbuild-args = { NUGET_TOKEN = \"x\" }\n")
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("looks like a credential"), "got: {err}");
     }
 
     #[test]

@@ -261,12 +261,10 @@ image-output-dir = "out"
 enabled = true
 name = "anvil-images-e2e"
 
-[[image]]
-name = "base"
-dockerfile = "containers/base/Dockerfile"
-context = "out/base"
-build-args = { FLAVOUR = "{tag}" }
-
+# `svc` is declared FIRST and depends on `base`, so declaration order is the
+# reverse of dependency order. An implementation that ignored `depends-on` and
+# simply built in source order would fail the ordering check below -- which it
+# would not if the two were declared the other way round.
 [[image]]
 name = "svc"
 repository = "acme/renamed"
@@ -275,6 +273,12 @@ context = "out/svc"
 target = "runtime"
 depends-on = ["base"]
 stage-artifacts = [{ from = "target/{profile}/my-svc", to = "bin/my-svc" }]
+
+[[image]]
+name = "base"
+dockerfile = "containers/base/Dockerfile"
+context = "out/base"
+build-args = { FLAVOUR = "{tag}" }
 '@)
 
 Push-Location $WorkspacePath
@@ -331,6 +335,27 @@ Assert-That ($escaped.ExitCode -ne 0) 'a context outside the output dir is refus
 Assert-That ($escaped.Output -match 'must live under the image output dir') `
     'the refusal explains the context must live under the output dir'
 Assert-That ((Get-ImageTags 'base').Count -eq 0) 'nothing was built from the rejected context'
+
+[System.IO.File]::WriteAllText($anvilToml, $original)
+Invoke-Anvil | Out-Null
+
+Write-Step 'Expanding a token into an escape at run time (expect a refusal)'
+
+# The generator validates `to` before `{profile}`/`{tag}` expand, and those
+# come from the caller -- so this path is reachable only at run time, and only
+# the recipe's own guard can catch it.
+[System.IO.File]::WriteAllText(
+    $anvilToml,
+    ($original -replace 'to = "bin/my-svc"', 'to = "{tag}/my-svc"'))
+Invoke-Anvil | Out-Null
+
+$escapeAtRuntime = Invoke-Just -Arguments @('anvil-image', 'svc', 'debug', '../../../anvil-escaped', $registry)
+
+Assert-That ($escapeAtRuntime.ExitCode -ne 0) 'a token expanding to an escape is refused at run time'
+Assert-That ($escapeAtRuntime.Output -match 'escapes the build context') `
+    'the refusal explains the staged path escaped the context'
+Assert-That (-not (Test-Path -LiteralPath (Join-Path (Split-Path -Parent $WorkspacePath) 'anvil-escaped'))) `
+    'nothing was written outside the workspace'
 
 [System.IO.File]::WriteAllText($anvilToml, $original)
 Invoke-Anvil | Out-Null

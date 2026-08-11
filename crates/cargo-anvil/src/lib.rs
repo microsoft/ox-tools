@@ -180,8 +180,8 @@
 //! ## Containers
 //!
 //! anvil can optionally run the generated recipes inside a container and
-//! build OCI images. Both are opt-in and independent, configured in an
-//! `anvil.toml` at the repo root:
+//! build OCI images. Both are opt-in and gated on `[container] enabled`,
+//! configured in an `anvil.toml` at the repo root:
 //!
 //! ```toml
 //! [container]
