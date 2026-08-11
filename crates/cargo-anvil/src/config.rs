@@ -866,11 +866,58 @@ fn topo_order(images: &[ImageSpec]) -> Result<Vec<String>, AppError> {
     Ok(ordered)
 }
 
+/// Characters a `[cluster]` string value may not contain.
+///
+/// Every cluster value crosses two layers: `just` substitutes it textually
+/// into a `[script("pwsh")]` body, and PowerShell then parses that body.
+/// Escaping for one layer says nothing about the other, so the values that
+/// cannot be made safe in both are rejected outright rather than escaped.
+///
+/// * `'` and `"` terminate the generated string literal.
+/// * `$` and `` ` `` are live inside a double-quoted PowerShell literal.
+/// * A newline ends the recipe as far as `just` is concerned: the remainder
+///   parses as top-level items, which breaks *every* anvil recipe in the
+///   repository, not merely this one.
+/// * `{{` is a `just` interpolation, expanded before PowerShell ever sees it.
+///
+/// None of these can appear in a legitimate kubectl, helm or Kind argument.
+fn reject_unsafe_cluster_value(field: &str, value: &str) -> Result<(), AppError> {
+    if let Some(bad) = value.chars().find(|c| matches!(c, '\'' | '"' | '$' | '`' | '\n' | '\r')) {
+        bail!("[cluster] {field} may not contain {bad:?} (it is interpolated into a generated recipe)");
+    }
+    if value.contains("{{") {
+        bail!("[cluster] {field} may not contain '{{{{' (just would expand it as an interpolation)");
+    }
+    Ok(())
+}
+
+/// Whether `name` is a DNS-1123 label: `[a-z0-9]([-a-z0-9]*[a-z0-9])?`.
+///
+/// Kind requires this of a cluster name regardless; validating here only
+/// moves an existing failure earlier, to where it names the offending key.
+fn is_dns_1123_label(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 63
+        && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && !name.starts_with('-')
+        && !name.ends_with('-')
+}
+
 /// Validate the cluster section against the image set: every `load-images`
-/// entry must name a declared image.
+/// entry must name a declared image, and no value may carry a character that
+/// would break out of the recipe it is generated into.
 fn validate_cluster(cluster: &ClusterConfig, images: &[ImageSpec]) -> Result<(), AppError> {
     if cluster.name.trim().is_empty() {
         bail!("[cluster] requires a non-empty `name`");
+    }
+    if !is_dns_1123_label(&cluster.name) {
+        bail!(
+            "invalid [cluster] name '{}' (must be a DNS-1123 label: [a-z0-9]([-a-z0-9]*[a-z0-9])?)",
+            cluster.name
+        );
+    }
+    if let Some(node_image) = &cluster.node_image {
+        reject_unsafe_cluster_value("node-image", node_image)?;
     }
     for wanted in &cluster.load_images {
         if !images.iter().any(|image| image.name == *wanted) {
@@ -884,6 +931,21 @@ fn validate_cluster(cluster: &ClusterConfig, images: &[ImageSpec]) -> Result<(),
         if chart.path.trim().is_empty() {
             bail!("[[cluster.chart]] '{}' requires a non-empty `path`", chart.name);
         }
+        reject_unsafe_cluster_value("chart name", &chart.name)?;
+        reject_unsafe_cluster_value("chart path", &chart.path)?;
+        if let Some(namespace) = &chart.namespace {
+            reject_unsafe_cluster_value("chart namespace", namespace)?;
+        }
+        if let Some(crds) = &chart.crds {
+            reject_unsafe_cluster_value("chart crds", crds)?;
+        }
+        for (key, value) in &chart.set {
+            reject_unsafe_cluster_value("chart set key", key)?;
+            reject_unsafe_cluster_value("chart set value", value)?;
+        }
+        for target in &chart.wait {
+            reject_unsafe_cluster_value("chart wait target", target)?;
+        }
     }
     for dependency in &cluster.dependencies {
         if dependency.name.trim().is_empty() {
@@ -891,6 +953,31 @@ fn validate_cluster(cluster: &ClusterConfig, images: &[ImageSpec]) -> Result<(),
         }
         if dependency.manifest.trim().is_empty() {
             bail!("[[cluster.dependency]] '{}' requires a non-empty `manifest`", dependency.name);
+        }
+        reject_unsafe_cluster_value("dependency name", &dependency.name)?;
+        reject_unsafe_cluster_value("dependency manifest", &dependency.manifest)?;
+        if let Some(version) = &dependency.version {
+            reject_unsafe_cluster_value("dependency version", version)?;
+        }
+        if let Some(namespace) = &dependency.namespace {
+            reject_unsafe_cluster_value("dependency namespace", namespace)?;
+        }
+        for image in &dependency.preload_images {
+            reject_unsafe_cluster_value("dependency preload-images entry", image)?;
+        }
+        for target in &dependency.wait {
+            reject_unsafe_cluster_value("dependency wait target", target)?;
+        }
+    }
+    if let Some(diagnostics) = &cluster.diagnostics {
+        if let Some(namespace) = &diagnostics.namespace {
+            reject_unsafe_cluster_value("diagnostics namespace", namespace)?;
+        }
+        for resource in &diagnostics.resources {
+            reject_unsafe_cluster_value("diagnostics resource", resource)?;
+        }
+        for target in &diagnostics.logs {
+            reject_unsafe_cluster_value("diagnostics log target", target)?;
         }
     }
     if cluster.retry.attempts == 0 {
@@ -2147,6 +2234,50 @@ pre-install = "cosmic-native-auth"
             .unwrap_err()
             .to_string();
         assert!(err.contains("attempts must be >= 1"), "got: {err}");
+    }
+
+    /// A cluster value crosses `just` before PowerShell parses it, so a quote
+    /// terminates the generated string literal. `just` then reads the
+    /// remainder as source: a recipe silently disappears, or an injected
+    /// command runs. Kind requires a DNS-1123 label anyway, so rejecting here
+    /// only reports the failure earlier and by name.
+    #[test]
+    fn cluster_name_must_be_a_dns_label() {
+        for name in ["evil'; Write-Output PWNED; $x='", "kdollar$(whoami)", "it's-mine", "UPPER", "-lead"] {
+            let err = resolve_body(&format!("\n[cluster]\nname = \"{}\"\n", name.replace('"', "\\\"")))
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("DNS-1123") || err.contains("may not contain"),
+                "{name} was accepted: {err}"
+            );
+        }
+        assert!(resolve_body("\n[cluster]\nname = \"anvil-kind-1\"\n").is_ok());
+    }
+
+    /// A newline is worse than a broken recipe: an unindented line ends the
+    /// recipe as far as `just` is concerned, so the rest of the file parses as
+    /// top-level items and *every* anvil recipe in the repo breaks.
+    #[test]
+    fn cluster_values_may_not_carry_recipe_breaking_characters() {
+        let cases = [
+            (
+                "\n[cluster]\nname = \"k\"\n\n[[cluster.chart]]\nname = \"a\"\npath = \"p\"\nwait = [\"deployment/multi\\nline\"]\n",
+                "wait target",
+            ),
+            (
+                "\n[cluster]\nname = \"k\"\n\n[[cluster.chart]]\nname = \"a\"\npath = \"p\"\nnamespace = \"ns'x\"\n",
+                "namespace",
+            ),
+            (
+                "\n[cluster]\nname = \"k\"\n\n[[cluster.chart]]\nname = \"a\"\npath = \"p\"\nset = { k = \"{{justfile_directory()}}\" }\n",
+                "set value",
+            ),
+        ];
+        for (body, what) in cases {
+            let err = resolve_body(body).unwrap_err().to_string();
+            assert!(err.contains("may not contain"), "{what} was accepted: {err}");
+        }
     }
 
     #[test]

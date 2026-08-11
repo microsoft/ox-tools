@@ -1203,7 +1203,48 @@ mod tests {
                 build_args: Vec::new(),
                 depends_on: Vec::new(),
             }]),
-            cluster: Some(crate::config::ClusterConfig::default()),
+            // Populated, not `default()`: an empty cluster renders every array
+            // placeholder as a bare `@()`, so the nested hashtable literals
+            // carrying user data -- the only non-trivial PowerShell this
+            // generates -- would never be parsed by the test meant to catch
+            // exactly that.
+            cluster: Some(crate::config::ClusterConfig {
+                name: "anvil-kind".to_owned(),
+                node_image: Some("kindest/node:v1.31.0".to_owned()),
+                workers: 1,
+                load_images: vec!["svc".to_owned()],
+                dependencies: vec![crate::config::ClusterDependency {
+                    name: "cert-manager".to_owned(),
+                    manifest: "https://example.invalid/cert-manager.yaml".to_owned(),
+                    version: Some("v1.14.5".to_owned()),
+                    namespace: Some("cert-manager".to_owned()),
+                    preload_images: vec!["quay.io/jetstack/cert-manager-controller:v1.14.5".to_owned()],
+                    wait: vec!["deployment/cert-manager".to_owned()],
+                }],
+                charts: vec![crate::config::ClusterChart {
+                    name: "api".to_owned(),
+                    path: "charts/api".to_owned(),
+                    namespace: Some("svc".to_owned()),
+                    crds: Some("charts/api/crds".to_owned()),
+                    set: vec![("image.reference".to_owned(), "{registry}/svc:{tag}".to_owned())],
+                    wait: vec!["deployment/api".to_owned()],
+                }],
+                diagnostics: Some(crate::config::ClusterDiagnostics {
+                    resources: vec!["pods -n svc".to_owned()],
+                    logs: vec!["deployment/api".to_owned()],
+                    namespace: Some("svc".to_owned()),
+                }),
+                retry: crate::config::ClusterRetry {
+                    attempts: 2,
+                    delay_seconds: 1,
+                },
+                hooks: crate::config::ClusterHooks {
+                    pre_install: Some("my-pre-install".to_owned()),
+                    post_install: Some("my-post-install".to_owned()),
+                    pre_test: Some("my-pre-test".to_owned()),
+                    on_failure: Some("my-on-failure".to_owned()),
+                },
+            }),
             ..ContainerConfig::default()
         }
         .resolve("repo")

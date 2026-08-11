@@ -135,6 +135,9 @@ anvil-cluster-load profile="debug" tag="dev" registry="local":
         }
         Write-Warning "kind load image-archive failed for $ref; falling back to per-node ctr import"
         $nodes = @(kind get nodes --name $cluster)
+        if ($LASTEXITCODE -ne 0 -or $nodes.Count -eq 0) {
+            throw "cannot load ${ref}: no nodes found for cluster '$cluster', so the image would silently not be imported"
+        }
         foreach ($node in $nodes) {
             & $engine cp $archive "${node}:/tmp/anvil-image.tar"
             if ($LASTEXITCODE -ne 0) { throw "failed to copy $ref archive into node $node" }
@@ -179,7 +182,11 @@ anvil-cluster-deploy profile="debug" tag="dev" registry="local":
     $ctx = "kind-$cluster"
     $profile = '{{profile}}'
     $tag = '{{tag}}'
-    function Expand-Tokens($s) { $s.Replace('{profile}', $profile).Replace('{tag}', $tag) }
+    $registry = '{{registry}}'
+    # `{registry}` matters here as much as the other two: a chart that pins an
+    # image reference has to name the registry the images were actually loaded
+    # under, or the pod pulls a reference nothing built.
+    function Expand-Tokens($s) { $s.Replace('{profile}', $profile).Replace('{tag}', $tag).Replace('{registry}', $registry) }
     function Wait-Targets($ctx, $targets, $namespace) {
         foreach ($t in $targets) {
             $nsArgs = @(); if ($namespace -ne '') { $nsArgs = @('-n', $namespace) }
@@ -232,7 +239,10 @@ anvil-cluster-deploy profile="debug" tag="dev" registry="local":
 [script("pwsh")]
 anvil-cluster-diagnostics:
     $ErrorActionPreference = 'Continue'
-    $ctx = "kind-{{anvil_cluster_name}}"
+    # Via a single-quoted assignment, not straight into a double-quoted
+    # literal: the latter would make `$` and backticks in the name live.
+    $cluster = '{{anvil_cluster_name}}'
+    $ctx = "kind-$cluster"
     foreach ($r in __DIAG_RESOURCES_ARRAY__) {
         Write-Output "=== kubectl get $r ==="
         $parts = $r -split '\s+'

@@ -370,6 +370,13 @@ reliably rather than racing a webhook that is not yet serving.
 enclosing dependency's or chart's `namespace`. Set that `namespace` — without it the wait resolves against `default` and
 will appear to pass while the real workload is still starting.
 
+`[cluster.diagnostics] namespace` applies to `logs` only. `resources` entries are passed to `kubectl get` verbatim, so
+each one carries its own `-n <namespace>` or `-A` — that is what lets a single dump span namespaces, and it is why
+`resources = ["pods"]` reports on `default` rather than on the namespace above it.
+
+Recipe parameters expand inside `set` values and dependency fields as `{profile}`, `{tag}` and `{registry}`, so a chart
+can pin the exact reference that `anvil-cluster-load` put into the cluster.
+
 ```toml
 [cluster]
 name = "svc-test"
@@ -394,7 +401,7 @@ delay-seconds = 10
 
 [cluster.diagnostics]
 namespace = "svc"
-resources = ["pods", "events"]
+resources = ["pods -n svc", "events -n svc"]
 logs = ["deployment/api"]
 ```
 
