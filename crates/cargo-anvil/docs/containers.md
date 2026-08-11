@@ -1,9 +1,10 @@
 # Containers
 
-`cargo-anvil` can run your generated `just` recipes inside a container.
+`cargo-anvil` can run your generated `just` recipes inside a container and build OCI images.
 
-The feature is configured in `anvil.toml` at the repo root, which is itself optional. A repository with no `anvil.toml`
-regenerates byte-for-byte identically to a build with no container support at all, so adopting nothing costs nothing.
+Both are **opt-in and independent**. They are configured in a single file — `anvil.toml` at the repo root — which is
+itself optional. A repository with no `anvil.toml` regenerates byte-for-byte identically to a build with no container
+support at all, so adopting nothing costs nothing.
 
 - [1. Quick start](#1-quick-start)
 - [2. Usage](#2-usage)
@@ -32,7 +33,7 @@ to write. Anvil generates `.anvil/container/Dockerfile`, which installs the tool
 already pins, and builds it the first time it is needed.
 
 Point `image` at a pre-built reference to pull one instead, or `dockerfile` at your own to build something else — see
-[`[container]`](#container--containerized-execution).
+[`[container]`](#container--containerized-execution). Product image builds are added by declaring `[[image]]` sections.
 
 ## 2. Usage
 
@@ -98,10 +99,35 @@ just anvil-pr      # transparently re-invoked inside the container
 Set `ANVIL_IN_CONTAINER=1` on the host to force a single invocation to run natively — the escape hatch when you need to
 bypass the container without editing config.
 
+### Image builds
+
+Emitted when at least one `[[image]]` is declared.
+
+| Recipe | Purpose |
+| --- | --- |
+| `just anvil-image <name>` | Build one declared image. With no name, list the declared images. |
+| `just anvil-images` | Build every declared image in dependency order. |
+
+Every image is built by the same logic, so the generated file holds **one** recipe body plus a table of per-image data
+(`dockerfile`, `context`, `target`, `stage-artifacts`, `build-args`, `repository`). An unknown name is rejected with the
+valid list.
+
+Both take the same three optional parameters, after the name where there is one:
+
+```bash
+just anvil-image <name> <profile> <tag> <registry>   # defaults: debug dev local
+just anvil-images       <profile> <tag> <registry>
+```
+
+`profile` selects which prebuilt binaries are staged, `tag` is the image tag, and `registry` is the ref prefix. The final
+reference is `<registry>/<name|repository>:<tag>`.
+
 ## 3. Configuration reference
 
-`anvil.toml` has an optional `[container]` section and an optional `[anvil]` section. Unknown keys are a hard error, so a
-typo is reported rather than silently ignored.
+`anvil.toml` has three sibling top-level sections plus one bare key. Each is independently optional. Unknown keys are a
+hard error, so a typo is reported rather than silently ignored.
+
+Because `image-output-dir` is a bare key, TOML requires it to appear **before** any `[section]` header.
 
 ### `[container]` — containerized execution
 
@@ -253,6 +279,47 @@ keeps working and the identity hash stays meaningful. Anvil does not emit its ow
 Dockerfile in this mode: a generated file nothing reads is an invitation to edit the
 wrong one.
 
+### `[[image]]` — locally built OCI images
+
+Repeat the table once per image.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | — | Required. Must match `[A-Za-z][A-Za-z0-9_-]*` — it selects the image in `just anvil-image <name>`. |
+| `repository` | string | `name` | Published path when it differs from the name (a `just` argument is fine with `/`, but the name is also the default repository). |
+| `dockerfile` | string | — | Required. Path to the Dockerfile. |
+| `target` | string | — | Build stage to target in a multi-stage Dockerfile. |
+| `context` | string | — | Build context. Must be nested under `image-output-dir`. |
+| `stage-artifacts` | array of tables | `[]` | `{ from, to }` copies made into the staged context before the build. |
+| `build-args` | table | `{}` | Build arguments, in declaration order. |
+| `depends-on` | array | `[]` | Other image names that must build first. |
+
+Set the guard root with the bare `image-output-dir` key (default `out`).
+
+Every image is built from a **staged context**, never the repo root: prebuilt binaries are copied in by
+`stage-artifacts`, and nothing is compiled in-image. A `context` outside `image-output-dir` is rejected, so the whole
+repository can never be sent to the engine as build context.
+
+`stage-artifacts` and `build-args` values may use the `{profile}` and `{tag}` tokens, expanded from the recipe
+parameters at run time.
+
+`depends-on` is validated: unknown targets and cycles are hard errors, and the build order is a deterministic
+topological sort with declaration order breaking ties.
+
+There is deliberately **no registry push, no authentication, and no promotion**. Images are built locally and consumed
+locally.
+
+```toml
+image-output-dir = "out"
+
+[[image]]
+name = "api"
+dockerfile = "docker/service.Dockerfile"
+context = "out/api"
+build-args = { RUST_PROFILE = "{profile}" }
+stage-artifacts = [{ from = "target/{profile}/api", to = "api" }]
+```
+
 ### `[anvil]` — partial adoption
 
 By default anvil manages every artifact in its catalog. The `artifacts` allow-list narrows that to named groups:
@@ -285,11 +352,12 @@ group is selected *and* its own gate is open.
 ### Everything is baked at generation time
 
 `cargo anvil` resolves your configuration and writes the resulting values directly into the emitted recipes. Nothing
-re-reads `anvil.toml` at run time, so the shim and devcontainer descriptor cannot drift from the file that produced
-them. Changing configuration means re-running the generator.
+re-reads `anvil.toml` at run time, so the shim, the image recipes, and the devcontainer descriptor cannot drift from each
+other or from the file that produced them. Changing configuration means re-running the generator.
 
 ```text
 anvil.toml ──► cargo anvil ──► justfiles/anvil/container.just         (the shim)
+                               justfiles/anvil/container-images.just  (per-image recipes)
                                .devcontainer/devcontainer.json        (optional)
                                ── plus a re-entry guard spliced into
                                   the tier and group recipes
@@ -367,5 +435,6 @@ same image, same workdir, same volumes — so the editor and the command line ca
   the exec image without one is not supported.
 - The first build of the exec image is expected to take several minutes: it installs a toolchain and the whole pinned
   tool catalog. Later runs reuse it until an input changes.
+
 - No registry integration for the exec image: no push, no authentication, no promotion. It is built and consumed
   locally, which is why it needs no published artifact to exist.

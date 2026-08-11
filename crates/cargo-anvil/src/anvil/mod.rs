@@ -19,12 +19,12 @@ use crate::catalog::{Catalog, CliMeta};
 impl Catalog {
     /// The built-in base catalog: the `anvil` CLI identity, the full built-in
     /// artifact set, and the container-gated artifacts (the container-execution
-    /// shim, default image assets, and devcontainer descriptor).
+    /// shim, devcontainer, and image-build recipes).
     ///
     /// Containerization ships in the box but is opt-in: the container artifacts
     /// are registered *container-gated*, so they are emitted only when
-    /// `anvil.toml` turns them on (`[container] enabled = true`). With
-    /// containerization
+    /// `anvil.toml` turns them on (`[container] enabled = true`, plus any
+    /// relevant `[[image]]` sections). With containerization
     /// absent or disabled the emitted tree is byte-identical to a build that
     /// registered no container artifacts at all.
     #[must_use]

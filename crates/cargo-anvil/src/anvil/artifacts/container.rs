@@ -20,13 +20,16 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use crate::catalog::Artifact;
-use crate::config::{ExecImageSource, NativeWhen, ResolvedContainer};
+use crate::config::{ExecImageSource, ImageSpec, NativeWhen, ResolvedContainer};
 
 /// Repo-root-relative path of the container shim recipe file.
 pub(crate) const CONTAINER_JUST_PATH: &str = "justfiles/anvil/container.just";
 
 /// Repo-root-relative path of the emitted devcontainer descriptor.
 pub(crate) const DEVCONTAINER_PATH: &str = ".devcontainer/devcontainer.json";
+
+/// Repo-root-relative path of the generic OCI image build recipes (pillar 2).
+pub(crate) const CONTAINER_IMAGES_JUST_PATH: &str = "justfiles/anvil/container-images.just";
 
 /// Repo-root-relative path of the generated default exec-image Dockerfile.
 ///
@@ -79,6 +82,10 @@ const CONTAINER_JUST: &str = include_str!("../../../templates/justfiles/anvil/co
 /// placeholders).
 const DEVCONTAINER_JSON: &str = include_str!("../../../templates/devcontainer/devcontainer.json");
 
+/// Embedded body of the OCI image build recipes (with the `__IMAGE_RECIPES__`
+/// generation marker).
+const CONTAINER_IMAGES_JUST: &str = include_str!("../../../templates/justfiles/anvil/container-images.just");
+
 /// Embedded body of the default exec-image Dockerfile (with `__TOKEN__`
 /// placeholders).
 const EXEC_DOCKERFILE: &str = include_str!("../../../templates/container/Dockerfile");
@@ -116,6 +123,18 @@ pub(crate) fn emits_devcontainer(container: &ResolvedContainer) -> bool {
     container.enabled && container.devcontainer
 }
 
+/// `justfiles/anvil/container-images.just` — the generic OCI image build
+/// recipes (pillar 2).
+///
+/// Register it with
+/// [`CatalogBuilder::with_container_artifact`](crate::CatalogBuilder::with_container_artifact).
+/// It is additionally suppressed unless at least one `[[image]]` is
+/// configured.
+#[must_use]
+pub fn container_images_just() -> Artifact {
+    Artifact::owned_file(CONTAINER_IMAGES_JUST_PATH, CONTAINER_IMAGES_JUST)
+}
+
 /// `.anvil/container/Dockerfile` — the default exec image.
 ///
 /// Register it with
@@ -137,12 +156,15 @@ pub fn exec_dockerignore() -> Artifact {
 }
 
 /// Secondary emission gate for container-gated artifacts whose emission
-/// depends on more than the container flag. Every other path is unconstrained
-/// (`true`).
+/// depends on more than the container flag: the devcontainer descriptor needs
+/// `devcontainer = true`, the image recipes need at least one
+/// `[[image]]`. Every other path is unconstrained (`true`).
 #[must_use]
 pub(crate) fn secondary_gate_open(path: &str, container: &ResolvedContainer) -> bool {
     match path {
         DEVCONTAINER_PATH => emits_devcontainer(container),
+        CONTAINER_IMAGES_JUST_PATH => !container.images.is_empty(),
+
         EXEC_DOCKERFILE_PATH | EXEC_DOCKERIGNORE_PATH => container.image_source.builds_anvil_base(),
         _ => true,
     }
@@ -161,7 +183,10 @@ pub(crate) fn render_owned_body<'a>(path: &str, body: &'a str, container: &Resol
         // fill in their templates.
         CONTAINER_JUST_PATH => Cow::Owned(render_container_just(body, container)),
         DEVCONTAINER_PATH => Cow::Owned(render_devcontainer(body, container)),
-
+        // The image recipes are generated from `[[image]]`. They are
+        // container-gated and additionally secondary-gated, so they only reach
+        // here when enabled + configured.
+        CONTAINER_IMAGES_JUST_PATH => Cow::Owned(render_container_images(body, container)),
         // The default Dockerfile carries one placeholder (the in-container
         // workdir); the ignore file is fully static.
         EXEC_DOCKERFILE_PATH => Cow::Owned(body.replace("__WORKDIR__", &container.workdir)),
@@ -324,11 +349,18 @@ fn extension_hash_inputs(container: &ResolvedContainer) -> Vec<String> {
 
 /// Recipe files excluded from the image identity.
 ///
-/// `container.just` drives the container from the host, so it cannot change
-/// what `just anvil-setup` installs. It must be excluded on pain of circularity:
-/// it is the file that computes the hash.
-fn hash_excludes(_container: &ResolvedContainer) -> Vec<String> {
-    vec![CONTAINER_JUST_PATH.to_owned()]
+/// Each one drives the container *from the host*, so none can change what
+/// `just anvil-setup` installs. `container.just` in
+/// particular must be excluded on pain of circularity: it is the file that
+/// computes the hash.
+fn hash_excludes(container: &ResolvedContainer) -> Vec<String> {
+    let mut excluded = vec![CONTAINER_JUST_PATH.to_owned()];
+    if !container.images.is_empty() {
+        excluded.push(CONTAINER_IMAGES_JUST_PATH.to_owned());
+    }
+
+    excluded.sort_unstable();
+    excluded
 }
 
 /// Fill in the container shim template from the resolved settings.
@@ -415,15 +447,211 @@ fn json_escape(value: &str) -> String {
     value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+// ---------------------------------------------------------------------------
+// Pillar 2 — generic OCI image build recipes
+// ---------------------------------------------------------------------------
+
+/// Fill in `container-images.just` with one `anvil-image` recipe driven by a
+/// generated spec table, plus an `anvil-images` aggregate that walks it in
+/// dependency order.
+fn render_container_images(template: &str, container: &ResolvedContainer) -> String {
+    template.replace("__IMAGE_RECIPES__", &image_recipes(container))
+}
+
+/// The image spec table, the single build recipe, and the aggregate.
+fn image_recipes(container: &ResolvedContainer) -> String {
+    let mut out = String::new();
+    out.push_str(&image_recipe(&container.images, &container.image_output_dir));
+    out.push('\n');
+    out.push_str(&images_aggregate(&container.image_build_order));
+    out
+}
+
+/// One PowerShell hashtable entry per `[[image]]`.
+///
+/// Every image is built by identical logic, so only the *data* is generated
+/// per image: emitting a whole recipe each time would repeat ~35 lines of body
+/// for every entry and leave N copies to drift apart.
+fn image_spec_entries(images: &[ImageSpec]) -> String {
+    let mut out = String::new();
+    for image in images {
+        let stages = if image.stage_artifacts.is_empty() {
+            "@()".to_owned()
+        } else {
+            let items: Vec<String> = image
+                .stage_artifacts
+                .iter()
+                .map(|s| format!("@{{ from = {}; to = {} }}", ps_lit(&s.from), ps_lit(&s.to)))
+                .collect();
+            format!("@({})", items.join(", "))
+        };
+        let build_args = if image.build_args.is_empty() {
+            "@()".to_owned()
+        } else {
+            let items: Vec<String> = image
+                .build_args
+                .iter()
+                .map(|(k, v)| format!("@{{ name = {}; value = {} }}", ps_lit(k), ps_lit(v)))
+                .collect();
+            format!("@({})", items.join(", "))
+        };
+        let target = image.target.as_deref().map_or_else(|| "$null".to_owned(), ps_lit);
+
+        let _ = writeln!(out, "        {} = @{{", ps_lit(&image.name));
+        let _ = writeln!(
+            out,
+            "            repository = {}",
+            ps_lit(image.repository.as_deref().unwrap_or(&image.name))
+        );
+        let _ = writeln!(out, "            dockerfile = {}", ps_lit(&image.dockerfile));
+        let _ = writeln!(out, "            context    = {}", ps_lit(&image.context));
+        let _ = writeln!(out, "            target     = {target}");
+        let _ = writeln!(out, "            stages     = {stages}");
+        let _ = writeln!(out, "            buildArgs  = {build_args}");
+        let _ = writeln!(out, "        }}");
+    }
+    out
+}
+
+/// The single `anvil-image <name>` recipe: look the name up in the spec table,
+/// stage the prebuilt artifacts into the context, guard the context path, then
+/// build the image.
+fn image_recipe(images: &[ImageSpec], output_dir: &str) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "# Build one image by name. `just anvil-image` with no name lists them.");
+    let _ = writeln!(out, "[group(\"anvil-image\")]");
+    let _ = writeln!(out, "[script(\"pwsh\")]");
+    let _ = writeln!(out, "anvil-image name=\"\" profile=\"debug\" tag=\"dev\" registry=\"local\":");
+    let _ = writeln!(out, "    $ErrorActionPreference = 'Stop'");
+    let _ = writeln!(out, "    # Generated from [[image]]; every entry is built by the body below.");
+    let _ = writeln!(out, "    $specs = [ordered]@{{");
+    out.push_str(&image_spec_entries(images));
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    $name = '{{{{name}}}}'");
+    let _ = writeln!(out, "    if (-not $name) {{");
+    let _ = writeln!(out, "        Write-Output \"anvil: images: $($specs.Keys -join ', ')\"");
+    let _ = writeln!(out, "        exit 0");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    if (-not $specs.Contains($name)) {{");
+    let _ = writeln!(
+        out,
+        "        Write-Error \"anvil: unknown image '$name' (valid: $($specs.Keys -join ', '))\""
+    );
+    let _ = writeln!(out, "        exit 1");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    $spec = $specs[$name]");
+    let _ = writeln!(out, "    $repoRoot = '{{{{justfile_directory()}}}}'");
+    let _ = writeln!(out, "    $profile = '{{{{profile}}}}'");
+    let _ = writeln!(out, "    $tag = '{{{{tag}}}}'");
+    let _ = writeln!(out, "    $registry = '{{{{registry}}}}'");
+    let _ = writeln!(
+        out,
+        "    function Expand-Tokens($s) {{ $s.Replace('{{profile}}', $profile).Replace('{{tag}}', $tag) }}"
+    );
+    let _ = writeln!(
+        out,
+        "    $outFull = [System.IO.Path]::GetFullPath((Join-Path $repoRoot {}))",
+        ps_lit(output_dir)
+    );
+    let _ = writeln!(out, "    $context = Expand-Tokens $spec.context");
+    let _ = writeln!(out, "    $ctxFull = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $context))");
+    let _ = writeln!(out, "    $sep = [System.IO.Path]::DirectorySeparatorChar");
+    let _ = writeln!(
+        out,
+        "    if ($ctxFull -ne $outFull -and -not $ctxFull.StartsWith($outFull + $sep)) {{"
+    );
+    let _ = writeln!(
+        out,
+        "        Write-Error \"anvil: image context '$context' is outside the image output dir {}\"",
+        ps_dq(output_dir)
+    );
+    let _ = writeln!(out, "        exit 1");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    New-Item -ItemType Directory -Force -Path $ctxFull | Out-Null");
+    let _ = writeln!(out, "    foreach ($s in $spec.stages) {{");
+    let _ = writeln!(out, "        $src = Join-Path $repoRoot (Expand-Tokens $s.from)");
+    let _ = writeln!(out, "        $dst = Join-Path $ctxFull (Expand-Tokens $s.to)");
+    let _ = writeln!(
+        out,
+        "        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dst) | Out-Null"
+    );
+    let _ = writeln!(out, "        Copy-Item -Recurse -Force -Path $src -Destination $dst");
+    let _ = writeln!(out, "    }}");
+    let _ = writeln!(out, "    $engine = just _anvil-container-engine");
+    let _ = writeln!(out, "    if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}");
+    let _ = writeln!(out, "    $ref = \"${{registry}}/$($spec.repository):${{tag}}\"");
+    let _ = writeln!(
+        out,
+        "    if ($engine -eq 'podman' -and $registry -notmatch '[.:/]' -and $registry -ne 'localhost') {{ $ref = \"localhost/$ref\" }}"
+    );
+    let _ = writeln!(
+        out,
+        "    $cmd = @('build', '-f', (Join-Path $repoRoot $spec.dockerfile), '-t', $ref)"
+    );
+    let _ = writeln!(out, "    if ($spec.target) {{ $cmd += @('--target', $spec.target) }}");
+    let _ = writeln!(
+        out,
+        "    foreach ($b in $spec.buildArgs) {{ $cmd += @('--build-arg', \"$($b.name)=$(Expand-Tokens $b.value)\") }}"
+    );
+    let _ = writeln!(out, "    $cmd += $ctxFull");
+    // A BuildKit build defaults to attaching a provenance attestation, which
+    // turns the result into an index that local container runtimes may not
+    // resolve. Suppress the attestation on engines that understand the flag.
+    let _ = writeln!(
+        out,
+        "    if ($engine -eq 'docker') {{ $cmd = @($cmd[0]) + @('--provenance=false') + $cmd[1..($cmd.Length - 1)] }}"
+    );
+    let _ = writeln!(out, "    Write-Output \"anvil: building $ref\"");
+    let _ = writeln!(out, "    & $engine @cmd");
+    let _ = writeln!(out, "    exit $LASTEXITCODE");
+    out
+}
+
+/// The `anvil-images` aggregate: build every image in dependency order.
+fn images_aggregate(order: &[String]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "[group(\"anvil-image\")]");
+    let _ = writeln!(out, "[script(\"pwsh\")]");
+    let _ = writeln!(out, "anvil-images profile=\"debug\" tag=\"dev\" registry=\"local\":");
+    let _ = writeln!(out, "    $ErrorActionPreference = 'Stop'");
+    for name in order {
+        let _ = writeln!(
+            out,
+            "    just anvil-image {} '{{{{profile}}}}' '{{{{tag}}}}' '{{{{registry}}}}'",
+            ps_lit(name)
+        );
+        let _ = writeln!(out, "    if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}");
+    }
+    let _ = writeln!(out, "    Write-Output \"anvil: built {} image(s)\"", order.len());
+    let _ = writeln!(out, "    exit 0");
+    out
+}
+
+/// A single-quoted `PowerShell` literal (escaping embedded quotes).
+fn ps_lit(value: &str) -> String {
+    format!("'{}'", ps_escape(value))
+}
+
+/// Escaping for a value spliced inside a double-quoted `PowerShell` string.
+fn ps_dq(value: &str) -> String {
+    format!("'{}'", value.replace('`', "``").replace('"', "`\"").replace('$', "`$"))
+}
+
 /// Splice the container `import?` lines into the entry point next to the other
 /// imports. Optional (`import?`) so a manually-removed shim does not break
 /// `just`. Placed right after `import 'versions.just'`.
 ///
-/// The shim is always imported when container mode is on.
-fn add_container_imports(body: &str, _container: &ResolvedContainer) -> String {
+/// Only imports that correspond to emitted files are added: the shim is always
+/// imported (container mode is on), and the image recipes only when at least
+/// one `[[image]]` exists. This keeps the entry point byte-identical for a
+/// container build that does not define images.
+fn add_container_imports(body: &str, container: &ResolvedContainer) -> String {
     const ANCHOR: &str = "import 'versions.just'\n";
 
-    let imports = "import? 'container.just'\n";
+    let mut imports = String::from("import? 'container.just'\n");
+    if !container.images.is_empty() {
+        imports.push_str("import? 'container-images.just'\n");
+    }
 
     if let Some(pos) = body.find(ANCHOR) {
         let insert_at = pos + ANCHOR.len();
@@ -591,7 +819,7 @@ fn ps_escape(value: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// CI job-level container injection
+// CI job-level container injection (Pillar 6)
 //
 // The transforms below add a job-level container to the generated CI so that,
 // when container mode is enabled, each check-group job runs inside the pinned
@@ -774,23 +1002,44 @@ mod tests {
     /// Every `[script("pwsh")]` recipe body must actually parse as PowerShell.
     ///
     /// A parse error is not local to the offending line: PowerShell rejects the
-    /// whole script, so one bad token disables an entire recipe.
+    /// whole script, so one bad token disables an entire recipe. This shipped
+    /// once already (`*>&2`, which is not valid redirection syntax) and was
+    /// invisible to every Rust-level test, because the generator's job is to
+    /// emit text — it never runs what it writes.
     #[test]
     fn generated_powershell_recipes_parse() {
         let Some(pwsh) = which_pwsh() else {
+            // Not installed here; the recipes themselves already require it, so
+            // any machine that can run them will run this check.
             return;
         };
 
+        // Render with images configured: the image template keeps its
+        // placeholders when the section is absent, and in that case it is never
+        // emitted at all.
         let container = ContainerConfig {
             enabled: Some(true),
+            images: Some(vec![ImageSpec {
+                name: "svc".to_owned(),
+                repository: None,
+                dockerfile: "svc/Dockerfile".to_owned(),
+                target: None,
+                context: "out/svc".to_owned(),
+                stage_artifacts: Vec::new(),
+                build_args: Vec::new(),
+                depends_on: Vec::new(),
+            }]),
+
             ..ContainerConfig::default()
         }
         .resolve("repo")
         .unwrap();
 
-        let rendered = super::render_owned_body(CONTAINER_JUST_PATH, CONTAINER_JUST, &container).into_owned();
-        for (recipe, body) in pwsh_recipe_bodies(&rendered) {
-            assert_powershell_parses(&pwsh, "container.just", &recipe, &body);
+        for (name, template) in [("container.just", CONTAINER_JUST), ("container-images.just", CONTAINER_IMAGES_JUST)] {
+            let rendered = super::render_owned_body(&format!("justfiles/anvil/{name}"), template, &container).into_owned();
+            for (recipe, body) in pwsh_recipe_bodies(&rendered) {
+                assert_powershell_parses(&pwsh, name, &recipe, &body);
+            }
         }
     }
 
@@ -946,9 +1195,10 @@ mod tests {
 
     /// The image installs its tools through `just anvil-setup`, whose
     /// dependency chain reaches the tier, group, check and tool recipes — so
-    /// the recipe tree defines image contents and is hashed at run time.
-    /// Excluding `container.just` is load-bearing: it is the file that
-    /// computes the hash.
+    /// the recipe tree defines image contents and is hashed at run time. Only
+    /// the files that drive the container from the host are held back.
+    /// Excluding `container.just` is load-bearing: it
+    /// is the file that computes the hash.
     #[test]
     fn only_host_side_recipes_are_excluded_from_identity() {
         let default_build = ContainerConfig {
@@ -1040,6 +1290,35 @@ mod tests {
         assert!(secondary_gate_open(EXEC_DOCKERFILE_PATH, &extended));
         assert!(secondary_gate_open(EXEC_DOCKERIGNORE_PATH, &extended));
     }
+
+    /// The image-build recipes never affect what `anvil-setup` installs, so
+    /// they must not force an image rebuild when they change.
+    #[test]
+    fn image_recipes_do_not_define_image_identity() {
+        let container = ContainerConfig {
+            enabled: Some(true),
+            images: Some(vec![ImageSpec {
+                name: "svc".to_owned(),
+                repository: None,
+                dockerfile: "svc/Dockerfile".to_owned(),
+                target: None,
+                context: "out/svc".to_owned(),
+                stage_artifacts: Vec::new(),
+                build_args: Vec::new(),
+                depends_on: Vec::new(),
+            }]),
+
+            ..ContainerConfig::default()
+        }
+        .resolve("repo")
+        .unwrap();
+
+        let excluded = hash_excludes(&container);
+        for path in [CONTAINER_JUST_PATH, CONTAINER_IMAGES_JUST_PATH] {
+            assert!(excluded.contains(&path.to_owned()), "{path} must not define image identity");
+        }
+    }
+
     /// The generated Dockerfile is emitted only when it is the one being built.
     /// Shipping it alongside a repository's own would invite edits to a file
     /// nothing reads.
@@ -1074,7 +1353,7 @@ mod tests {
     /// by a blank line, so it is not part of the doc block.
     #[test]
     fn recipe_doc_comments_are_single_line() {
-        let templates = [("container.just", CONTAINER_JUST)];
+        let templates = [("container.just", CONTAINER_JUST), ("container-images.just", CONTAINER_IMAGES_JUST)];
 
         for (name, body) in templates {
             let lines: Vec<&str> = body.lines().collect();

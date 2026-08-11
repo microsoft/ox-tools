@@ -5,9 +5,18 @@
 //!
 //! `anvil.toml` (repo root) is anvil's first user-facing config file. It is
 //! **optional**: an absent file means byte-identical behavior to a build with
-//! no container support at all. The optional `[container]` section opts a
-//! repository into running the generated `just` recipes inside a container.
+//! no container support at all. Three **sibling** top-level items are defined,
+//! each independently optional:
 //!
+//! * `[container]` — opt a repository into running the generated `just`
+//!   recipes inside a container (pillar 1).
+//! * `[[image]]` — locally-built OCI images (pillar 2).
+//! * `image-output-dir` — a top-level key naming the staged-context guard root
+//!   for `[[image]]` builds (default `out`). As a bare top-level key it must
+//!   appear **before** any `[section]` header, per TOML.
+//!
+//! Image builds are siblings of containerized execution, not sub-concerns of
+//! it, so they live at the top level rather than nested under `[container]`.
 //! The parser rejects unknown keys loudly (typo protection) while keeping the
 //! top-level dispatch trivial to extend.
 //!
@@ -80,8 +89,8 @@ pub(crate) enum ArtifactGroup {
     Config,
     /// The backend-gated cloud-workflow CI files (GitHub / ADO).
     Backends,
-    /// The container-gated artifacts (`container.just`, its default image
-    /// assets, and the devcontainer descriptor).
+    /// The container-gated artifacts (`container.just`, devcontainer, and
+    /// image recipes).
     Container,
 }
 
@@ -169,6 +178,56 @@ pub struct NativeWhen {
     pub version_id: Option<String>,
 }
 
+/// One `stage-artifacts` entry: copy `from` (repo-relative) into `to`
+/// (staged-context-relative) before the image build. Binaries are always
+/// copied in prebuilt — never compiled in-image.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StageArtifact {
+    /// Repo-root-relative source path. May contain `{profile}`/`{tag}` tokens.
+    pub from: String,
+    /// Staged-context-relative destination path. May contain `{profile}`/`{tag}`
+    /// tokens.
+    pub to: String,
+}
+
+/// One `[[image]]` entry: a locally-built OCI image.
+///
+/// The image is built from a staged context (never the repo root) with its
+/// binaries copied in prebuilt. There is deliberately no registry push, no
+/// ACR, no auth, and no promotion — images are built locally.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageSpec {
+    /// Image name; drives the `anvil-image-<name>` recipe. Unique within the
+    /// image set and restricted to a valid `just` recipe token
+    /// (`[A-Za-z][A-Za-z0-9_-]*`).
+    pub name: String,
+    /// Image repository path, appended to the registry to form the reference
+    /// `<registry>/<repository>:<tag>`. Defaults to [`Self::name`].
+    ///
+    /// Needed whenever the published path differs from the recipe name — a
+    /// repository that groups its images under a namespace publishes
+    /// `local/cosmic-sandbox/cs-agent` while the recipe must stay
+    /// `anvil-image-cs-agent`, because `/` is not a valid `just` recipe token.
+    /// Getting this wrong is invisible until a pod tries to pull.
+    pub repository: Option<String>,
+    /// Repo-root-relative path to the Dockerfile.
+    pub dockerfile: String,
+    /// Optional multi-stage build target.
+    pub target: Option<String>,
+    /// Staged build-context directory. Must live under the image output dir
+    /// (see [`ContainerConfig::image_output_dir`]) — the recipe refuses a
+    /// context outside it, guarding against sending the whole repo.
+    pub context: String,
+    /// Files copied from the repo into the staged context before the build.
+    pub stage_artifacts: Vec<StageArtifact>,
+    /// `--build-arg` pairs, in declaration order. Values may contain
+    /// `{profile}`/`{tag}` tokens.
+    pub build_args: Vec<(String, String)>,
+    /// Names of images that must be built before this one. Every entry must
+    /// name another `[[image]]`; cycles are rejected at resolve.
+    pub depends_on: Vec<String>,
+}
+
 /// Where the exec image comes from.
 ///
 /// The four variants are selected by which of `[container] image`,
@@ -214,6 +273,12 @@ impl ExecImageSource {
 
 /// The resolved container-feature configuration, as a set of **optional**
 /// overrides.
+///
+/// The `[container]`-exec fields (`enabled`, `image`, `engine`, …) come from
+/// the `[container]` section. The `images` and `image_output_dir` fields carry
+/// the **top-level sibling** items (`[[image]]` and the `image-output-dir`
+/// key); parsing folds them in here so a single value drives resolution and
+/// rendering.
 ///
 /// Every field is `Option` so the catalog default layer and the user's
 /// `anvil.toml` can be merged field-by-field ([`Self::overlay`]) before the
@@ -273,6 +338,13 @@ pub struct ContainerConfig {
     pub devcontainer: Option<bool>,
     /// Optional native-execution host match.
     pub native_when: Option<NativeWhen>,
+    /// OCI images to build locally (the top-level `[[image]]` sections).
+    /// Built-in default: empty.
+    pub images: Option<Vec<ImageSpec>>,
+    /// Root directory under which every image build context must live (the
+    /// top-level `image-output-dir` key). The image recipes refuse a context
+    /// outside it. Built-in default: `out`.
+    pub image_output_dir: Option<String>,
 }
 
 impl ContainerConfig {
@@ -308,6 +380,8 @@ impl ContainerConfig {
             forward_env: self.forward_env.or_else(|| base.forward_env.clone()),
             devcontainer: self.devcontainer.or(base.devcontainer),
             native_when: self.native_when.or_else(|| base.native_when.clone()),
+            images: self.images.or_else(|| base.images.clone()),
+            image_output_dir: self.image_output_dir.or_else(|| base.image_output_dir.clone()),
         }
     }
 
@@ -323,8 +397,10 @@ impl ContainerConfig {
     /// # Errors
     ///
     /// Returns an error if `enabled` resolves to `true` but the exec image
-    /// source is ambiguous (more than one of `image`, `dockerfile`, and
-    /// `extends` is set).
+    /// source is ambiguous (both `image` and `dockerfile` set) or ill-formed
+    /// (an empty `image` or `dockerfile`), or if the image sections are
+    /// invalid (duplicate/ill-named images, a `depends-on` cycle, or a context
+    /// outside the image output dir).
     pub(crate) fn resolve(&self, dir_name: &str) -> Result<ResolvedContainer, AppError> {
         let enabled = self.enabled.unwrap_or(false);
         let image = self.image.clone().unwrap_or_default();
@@ -337,6 +413,11 @@ impl ContainerConfig {
             .clone()
             .unwrap_or_else(|| vec!["cargo".to_owned(), "rustup".to_owned()]);
         let forward_env = self.forward_env.clone().unwrap_or_default();
+
+        let images = self.images.clone().unwrap_or_default();
+        let image_output_dir = self.image_output_dir.clone().unwrap_or_else(|| "out".to_owned());
+        validate_images(&images, &image_output_dir)?;
+        let image_build_order = topo_order(&images)?;
 
         // Select the exec-image source. `image` pulls a pre-built reference;
         // `dockerfile` builds one in place of anvil's; `extends` builds anvil's
@@ -420,8 +501,58 @@ impl ContainerConfig {
             devcontainer,
             native_when: self.native_when.clone(),
             repo_name,
+            images,
+            image_output_dir,
+            image_build_order,
         })
     }
+}
+
+/// Validate the image set: unique, well-formed names; `depends-on` targets
+/// that exist; non-empty dockerfile; and a context under `output_dir`.
+fn validate_images(images: &[ImageSpec], output_dir: &str) -> Result<(), AppError> {
+    let mut seen = std::collections::BTreeSet::new();
+    for image in images {
+        if !is_recipe_token(&image.name) {
+            bail!("invalid [[image]] name '{}' (must match [A-Za-z][A-Za-z0-9_-]*)", image.name);
+        }
+        if !seen.insert(image.name.as_str()) {
+            bail!("duplicate [[image]] name '{}'", image.name);
+        }
+    }
+    for image in images {
+        if image.dockerfile.trim().is_empty() {
+            bail!("[[image]] '{}' requires a non-empty `dockerfile`", image.name);
+        }
+        if !context_under_output_dir(&image.context, output_dir) {
+            bail!(
+                "[[image]] '{}' context '{}' must live under the image output dir '{}' \
+                 (a staged context, never the repo root)",
+                image.name,
+                image.context,
+                output_dir
+            );
+        }
+        for dep in &image.depends_on {
+            if !images.iter().any(|other| other.name == *dep) {
+                bail!("[[image]] '{}' depends-on '{}' names no image", image.name, dep);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `context` is a repo-relative path nested under `output_dir` and not
+/// the output dir itself, an absolute path, or an escaping `..` path.
+fn context_under_output_dir(context: &str, output_dir: &str) -> bool {
+    let normalized = context.replace('\\', "/");
+    let output = output_dir.trim_end_matches('/');
+    let prefix = format!("{output}/");
+    if !normalized.starts_with(&prefix) {
+        return false;
+    }
+    // Reject any `..` segment so the context cannot climb back out.
+    !normalized.split('/').any(|segment| segment == "..")
 }
 
 /// Whether a build-arg name looks like it holds a credential.
@@ -433,11 +564,57 @@ fn is_credential_shaped(name: &str) -> bool {
     ["TOKEN", "SECRET", "PASSWORD", "CRED"].iter().any(|needle| upper.contains(needle)) || upper.ends_with("PAT")
 }
 
+/// Whether `name` is a valid `just` recipe token: `[A-Za-z][A-Za-z0-9_-]*`.
+fn is_recipe_token(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphabetic() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Deterministic topological order of the image build graph (declaration
+/// order breaks ties). Returns an error naming the members of a `depends-on`
+/// cycle.
+fn topo_order(images: &[ImageSpec]) -> Result<Vec<String>, AppError> {
+    let mut ordered: Vec<String> = Vec::with_capacity(images.len());
+    let mut emitted = std::collections::BTreeSet::new();
+    // Repeatedly emit, in declaration order, any image whose dependencies are
+    // all already emitted. A full pass that emits nothing means a cycle.
+    loop {
+        let mut progressed = false;
+        for image in images {
+            if emitted.contains(image.name.as_str()) {
+                continue;
+            }
+            if image.depends_on.iter().all(|dep| emitted.contains(dep.as_str())) {
+                ordered.push(image.name.clone());
+                emitted.insert(image.name.as_str());
+                progressed = true;
+            }
+        }
+        if ordered.len() == images.len() {
+            break;
+        }
+        if !progressed {
+            let cycle: Vec<&str> = images
+                .iter()
+                .map(|image| image.name.as_str())
+                .filter(|name| !emitted.contains(name))
+                .collect();
+            bail!("[[image]] depends-on cycle among: {}", cycle.join(", "));
+        }
+    }
+    Ok(ordered)
+}
+
 /// The parsed `anvil.toml` document.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AnvilConfig {
-    /// The container-feature configuration from the optional `[container]`
-    /// section.
+    /// The container-feature configuration: the `[container]` section plus the
+    /// top-level `[[image]]` and `image-output-dir` siblings, folded together
+    /// by [`parse`].
     pub container: ContainerConfig,
     /// The `[anvil] artifacts` allow-list of catalog-artifact groups to
     /// manage, or `None` when the `artifacts` key is omitted (every group
@@ -476,6 +653,12 @@ pub(crate) struct ResolvedContainer {
     pub devcontainer: bool,
     pub native_when: Option<NativeWhen>,
     pub repo_name: String,
+    /// Images to build, in declaration order.
+    pub images: Vec<ImageSpec>,
+    /// Root dir every image context must live under.
+    pub image_output_dir: String,
+    /// Image names in deterministic dependency (build) order.
+    pub image_build_order: Vec<String>,
 }
 
 /// Load `anvil.toml` from the repo root, returning defaults when it is absent.
@@ -498,18 +681,33 @@ pub(crate) fn load(repo_root: &Path) -> Result<AnvilConfig, AppError> {
 pub(crate) fn parse(text: &str) -> Result<AnvilConfig, AppError> {
     let doc: DocumentMut = text.parse::<DocumentMut>().into_app_err("not valid TOML")?;
 
-    // Top-level dispatch: `[container]` and the `[anvil]` meta-section are
-    // defined today. New sections are added by extending this match — an
-    // unknown table is a typo.
+    // Top-level dispatch: `[container]`, its image siblings, and the `[anvil]`
+    // meta-section are defined today. New sections are added by
+    // extending this match — an unknown table is a typo.
     let mut container = ContainerConfig::default();
+    let mut images: Option<Vec<ImageSpec>> = None;
+    let mut image_output_dir: Option<String> = None;
+
     let mut artifacts: Option<BTreeSet<ArtifactGroup>> = None;
     for (key, item) in doc.as_table() {
         match key {
             "container" => container = parse_container(item)?,
+            "image" => images = Some(parse_images(item)?),
+            "image-output-dir" => image_output_dir = Some(as_string(key, item)?),
+
             "anvil" => artifacts = parse_anvil_section(item)?,
-            other => bail!("unknown top-level key '{other}' (valid top-level items: [anvil], [container])"),
+            other => bail!(
+                "unknown top-level key '{other}' (valid top-level items: [anvil], [container], \
+                 [[image]], image-output-dir)"
+            ),
         }
     }
+    // `[[image]]` and `image-output-dir` are top-level siblings of
+    // `[container]`, but resolve alongside the container settings, so fold them
+    // into the container config here.
+    container.images = images;
+    container.image_output_dir = image_output_dir;
+
     Ok(AnvilConfig { container, artifacts })
 }
 
@@ -559,6 +757,13 @@ fn parse_container(item: &Item) -> Result<ContainerConfig, AppError> {
     for (key, value) in table.iter() {
         match key {
             "enabled" => config.enabled = Some(as_bool(key, value)?),
+            // Image builds moved to the top-level `[[image]]` array; give a
+            // pointed error rather than a generic type mismatch when a stale
+            // nested `[[container.image]]` is encountered.
+            "image" if value.is_array_of_tables() => bail!(
+                "nested [[container.image]] is no longer supported; declare image builds at the \
+                 top level as [[image]]"
+            ),
             "image" => config.image = Some(as_string(key, value)?),
             "dockerfile" => config.dockerfile = Some(as_string(key, value)?),
             "extends" => config.extends = Some(as_string(key, value)?),
@@ -572,6 +777,11 @@ fn parse_container(item: &Item) -> Result<ContainerConfig, AppError> {
             "forward-env" => config.forward_env = Some(as_string_array(key, value)?),
             "devcontainer" => config.devcontainer = Some(as_bool(key, value)?),
             "native-when" => config.native_when = Some(parse_native_when(value)?),
+
+            "image-output-dir" => bail!(
+                "[container] image-output-dir is no longer supported; set image-output-dir as a \
+                 top-level key"
+            ),
             other => bail!(
                 "unknown key '[container] {other}' (valid keys: enabled, image, dockerfile, \
                  extends, build-args, build-secrets, hash-inputs, engine, name, workdir, \
@@ -580,6 +790,81 @@ fn parse_container(item: &Item) -> Result<ContainerConfig, AppError> {
         }
     }
     Ok(config)
+}
+
+/// Parse `[[image]]` (an array of tables).
+fn parse_images(item: &Item) -> Result<Vec<ImageSpec>, AppError> {
+    let array = item
+        .as_array_of_tables()
+        .ok_or_else(|| app_err!("[[image]] must be an array of tables"))?;
+    let mut images = Vec::with_capacity(array.len());
+    for table in array {
+        images.push(parse_image(table)?);
+    }
+    Ok(images)
+}
+
+fn parse_image(table: &toml_edit::Table) -> Result<ImageSpec, AppError> {
+    let mut name = None;
+    let mut repository = None;
+    let mut dockerfile = None;
+    let mut target = None;
+    let mut context = None;
+    let mut stage_artifacts = Vec::new();
+    let mut build_args = Vec::new();
+    let mut depends_on = Vec::new();
+    for (key, value) in table {
+        match key {
+            "name" => name = Some(as_string(key, value)?),
+            "repository" => repository = Some(as_string(key, value)?),
+            "dockerfile" => dockerfile = Some(as_string(key, value)?),
+            "target" => target = Some(as_string(key, value)?),
+            "context" => context = Some(as_string(key, value)?),
+            "stage-artifacts" => stage_artifacts = parse_stage_artifacts(value)?,
+            "build-args" => build_args = parse_string_map(key, value)?,
+            "depends-on" => depends_on = as_string_array(key, value)?,
+            other => bail!(
+                "unknown key '[[image]] {other}' (valid keys: name, repository, dockerfile, \
+                 target, context, stage-artifacts, build-args, depends-on)"
+            ),
+        }
+    }
+    Ok(ImageSpec {
+        name: name.ok_or_else(|| app_err!("[[image]] requires a `name`"))?,
+        repository,
+        dockerfile: dockerfile.ok_or_else(|| app_err!("[[image]] requires a `dockerfile`"))?,
+        target,
+        context: context.ok_or_else(|| app_err!("[[image]] requires a `context`"))?,
+        stage_artifacts,
+        build_args,
+        depends_on,
+    })
+}
+
+fn parse_stage_artifacts(item: &Item) -> Result<Vec<StageArtifact>, AppError> {
+    let array = item
+        .as_array()
+        .ok_or_else(|| app_err!("'stage-artifacts' must be an array of {{ from, to }} tables"))?;
+    let mut out = Vec::with_capacity(array.len());
+    for value in array {
+        let table = value
+            .as_inline_table()
+            .ok_or_else(|| app_err!("each 'stage-artifacts' entry must be a {{ from, to }} table"))?;
+        let mut from = None;
+        let mut to = None;
+        for (key, entry) in table {
+            match key {
+                "from" => from = Some(inline_string(key, entry)?),
+                "to" => to = Some(inline_string(key, entry)?),
+                other => bail!("unknown key 'stage-artifacts {other}' (valid keys: from, to)"),
+            }
+        }
+        out.push(StageArtifact {
+            from: from.ok_or_else(|| app_err!("'stage-artifacts' entry requires `from`"))?,
+            to: to.ok_or_else(|| app_err!("'stage-artifacts' entry requires `to`"))?,
+        });
+    }
+    Ok(out)
 }
 
 fn parse_native_when(item: &Item) -> Result<NativeWhen, AppError> {
@@ -600,6 +885,14 @@ fn parse_native_when(item: &Item) -> Result<NativeWhen, AppError> {
 
 fn as_bool(key: &str, item: &Item) -> Result<bool, AppError> {
     item.as_bool().ok_or_else(|| app_err!("'{key}' must be a boolean"))
+}
+
+/// A string value from an inline-table entry (a `&Value`, not an `&Item`).
+fn inline_string(key: &str, value: &toml_edit::Value) -> Result<String, AppError> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| app_err!("'{key}' must be a string"))
 }
 
 /// Parse an inline table of string→string pairs, preserving declaration order
@@ -909,6 +1202,28 @@ version-id = "22.04"
     }
 
     #[test]
+    fn top_level_image_and_output_dir_are_accepted() {
+        // The image sibling items parse at the top level, next to
+        // `[container]`, without the old collision.
+        let text = "image-output-dir = \"out\"\n\n\
+             [container]\nenabled = true\nimage = \"img:1\"\n\n\
+             [[image]]\nname = \"svc\"\ndockerfile = \"D\"\ncontext = \"out/svc\"\n";
+        let resolved = parse(text).unwrap().container.resolve("repo").unwrap();
+        assert!(resolved.enabled);
+        assert_eq!(resolved.image, "img:1");
+        assert_eq!(resolved.image_output_dir, "out");
+        assert_eq!(resolved.images.len(), 1);
+    }
+
+    #[test]
+    fn nested_image_array_is_rejected_with_migration_hint() {
+        let err = parse("[container]\nenabled = true\n\n[[container.image]]\nname = \"a\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("top level as [[image]]"), "got: {err}");
+    }
+
+    #[test]
     fn unknown_container_key_errors() {
         let err = parse("[container]\nenabledd = true\n").unwrap_err().to_string();
         assert!(err.contains("unknown key '[container] enabledd'"), "got: {err}");
@@ -974,6 +1289,54 @@ version-id = "22.04"
         assert!(resolved.cache_volumes.is_empty(), "explicit [] overrides the default");
     }
 
+    // -----------------------------------------------------------------------
+    // Pillar 2 — [[image]]
+    // -----------------------------------------------------------------------
+
+    const IMAGES_TOML: &str = r#"
+image-output-dir = "out"
+
+[[image]]
+name = "base-image"
+dockerfile = "containers/base/Dockerfile"
+context = "out/base"
+
+[[image]]
+name = "my-service"
+dockerfile = "containers/svc/Dockerfile"
+target = "runtime"
+context = "out/svc"
+build-args = { BASE_IMAGE = "mcr.example/base:1" }
+depends-on = ["base-image"]
+stage-artifacts = [
+  { from = "target/{profile}/my-svc", to = "bin/my-svc" },
+]
+"#;
+
+    #[test]
+    fn image_section_parses_all_fields() {
+        let resolved = parse(IMAGES_TOML).unwrap().container.resolve("repo").unwrap();
+        assert_eq!(resolved.images.len(), 2);
+        let svc = &resolved.images[1];
+        assert_eq!(svc.name, "my-service");
+        assert_eq!(svc.dockerfile, "containers/svc/Dockerfile");
+        assert_eq!(svc.target.as_deref(), Some("runtime"));
+        assert_eq!(svc.context, "out/svc");
+        assert_eq!(svc.build_args, vec![("BASE_IMAGE".to_owned(), "mcr.example/base:1".to_owned())]);
+        assert_eq!(svc.depends_on, vec!["base-image".to_owned()]);
+        assert_eq!(svc.stage_artifacts.len(), 1);
+        assert_eq!(svc.stage_artifacts[0].from, "target/{profile}/my-svc");
+        assert_eq!(svc.stage_artifacts[0].to, "bin/my-svc");
+    }
+
+    /// Resolve from a top-level `[[image]]`/`image-output-dir` body with no
+    /// `[container]` section. Container execution stays disabled, so the
+    /// exec-image requirement never fires — image validation runs on its own,
+    /// independent of pillar 1.
+    fn resolve_body(body: &str) -> Result<ResolvedContainer, AppError> {
+        parse(body).unwrap().container.resolve("repo")
+    }
+
     /// Without `[container] name`, identity falls back to the repo-root
     /// directory name. This is convenient but *not* stable across checkouts.
     #[test]
@@ -1013,5 +1376,119 @@ version-id = "22.04"
         let resolved = parse(body).unwrap().container.resolve("dir").unwrap();
         assert_eq!(resolved.repo_name, "x");
         assert_eq!(resolved.workdir, "/src");
+    }
+
+    /// A published image path can differ from the recipe name: `/` is not a
+    /// valid `just` recipe token, so a repository grouping its images under a
+    /// namespace needs `repository` to carry the real path.
+    #[test]
+    fn image_repository_overrides_the_reference_path() {
+        let body = "\n[[image]]\nname = \"cs-agent\"\nrepository = \"cosmic-sandbox/cs-agent\"\n\
+                    dockerfile = \"D\"\ncontext = \"out/a\"\n";
+        let resolved = resolve_body(body).unwrap();
+        assert_eq!(resolved.images[0].repository.as_deref(), Some("cosmic-sandbox/cs-agent"));
+        // The recipe name stays a valid just token even though the path is nested.
+        assert_eq!(resolved.images[0].name, "cs-agent");
+    }
+
+    /// Omitting `repository` keeps the previous behaviour: path == name.
+    #[test]
+    fn image_repository_defaults_to_the_name() {
+        let body = "\n[[image]]\nname = \"svc\"\ndockerfile = \"D\"\ncontext = \"out/a\"\n";
+        let resolved = resolve_body(body).unwrap();
+        assert_eq!(resolved.images[0].repository, None);
+    }
+
+    #[test]
+    fn image_defaults_context_output_dir_to_out() {
+        let resolved = resolve_body("\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"out/a\"\n").unwrap();
+        assert_eq!(resolved.image_output_dir, "out");
+    }
+
+    #[test]
+    fn image_context_outside_output_dir_is_rejected() {
+        let err = resolve_body("image-output-dir = \"out\"\n\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"src/a\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must live under the image output dir"), "got: {err}");
+    }
+
+    #[test]
+    fn image_context_equal_to_output_dir_is_rejected() {
+        resolve_body("image-output-dir = \"out\"\n\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"out\"\n").unwrap_err();
+    }
+
+    #[test]
+    fn image_context_escaping_dotdot_is_rejected() {
+        resolve_body("image-output-dir = \"out\"\n\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"out/../src\"\n").unwrap_err();
+    }
+
+    #[test]
+    fn image_invalid_name_is_rejected() {
+        let err = resolve_body("\n[[image]]\nname = \"1bad\"\ndockerfile = \"D\"\ncontext = \"out/x\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must match [A-Za-z]"), "got: {err}");
+    }
+
+    #[test]
+    fn image_duplicate_name_is_rejected() {
+        let err = resolve_body("\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"out/a\"\n\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"out/a2\"\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn image_empty_dockerfile_is_rejected() {
+        resolve_body("\n[[image]]\nname = \"a\"\ndockerfile = \"\"\ncontext = \"out/a\"\n").unwrap_err();
+    }
+
+    #[test]
+    fn image_depends_on_unknown_is_rejected() {
+        let err = resolve_body("\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"out/a\"\ndepends-on = [\"ghost\"]\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("names no image"), "got: {err}");
+    }
+
+    #[test]
+    fn image_unknown_key_is_rejected() {
+        let text = "[container]\nenabled = true\n\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\nbogus = 1\n";
+        parse(text).unwrap_err();
+    }
+
+    #[test]
+    fn topo_order_is_deterministic_and_respects_deps() {
+        // c depends on b, b depends on a; declared out of order.
+        let resolved = resolve_body(
+            "\n[[image]]\nname = \"c\"\ndockerfile = \"D\"\ncontext = \"out/c\"\ndepends-on = [\"b\"]\n\n\
+             [[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"out/a\"\n\n\
+             [[image]]\nname = \"b\"\ndockerfile = \"D\"\ncontext = \"out/b\"\ndepends-on = [\"a\"]\n",
+        )
+        .unwrap();
+        assert_eq!(resolved.image_build_order, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn topo_order_breaks_ties_by_declaration_order() {
+        // Two roots then a dependent: order is declaration order for the roots.
+        let resolved = resolve_body(
+            "\n[[image]]\nname = \"z\"\ndockerfile = \"D\"\ncontext = \"out/z\"\n\n\
+             [[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"out/a\"\n",
+        )
+        .unwrap();
+        assert_eq!(resolved.image_build_order, vec!["z", "a"]);
+    }
+
+    #[test]
+    fn depends_on_cycle_is_rejected() {
+        let err = resolve_body(
+            "\n[[image]]\nname = \"a\"\ndockerfile = \"D\"\ncontext = \"out/a\"\ndepends-on = [\"b\"]\n\n\
+             [[image]]\nname = \"b\"\ndockerfile = \"D\"\ncontext = \"out/b\"\ndepends-on = [\"a\"]\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("cycle"), "got: {err}");
     }
 }

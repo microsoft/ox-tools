@@ -386,6 +386,21 @@ fn exec_image_identity_covers_what_changes_the_image() {
     );
 }
 
+/// The image-build recipes cannot change what `anvil-setup` installs, so
+/// editing them must not force a multi-minute image rebuild.
+#[test]
+fn image_recipes_are_excluded_from_exec_image_identity() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), image_toml());
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    let shim = std::fs::read_to_string(root.join("justfiles/anvil/container.just")).unwrap();
+    let excluded = shim.lines().find(|l| l.contains("$excluded =")).unwrap();
+    for path in ["justfiles/anvil/container.just", "justfiles/anvil/container-images.just"] {
+        assert!(excluded.contains(path), "{path} must not define image identity: {excluded}");
+    }
+}
+
 /// A credential must never reach the engine's command line. `-e NAME=VALUE`
 /// puts it in host process argv, where endpoint telemetry records and retains
 /// it far beyond the life of a short-lived token; `-e NAME` makes the engine
@@ -596,6 +611,66 @@ fn base_catalog_supports_container_mode() {
     assert!(mod_just.contains("container.just"), "mod.just must import the container shim");
 }
 
+/// The stock catalog must also drive pillar 2 with no fork: a config that
+/// enables container execution and adds `[[image]]` emits the image-build
+/// recipes alongside the shim.
+#[test]
+fn base_catalog_supports_images() {
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "[container]\nenabled = true\nimage = \"img:1\"\n\n\
+         [[image]]\nname = \"svc\"\ndockerfile = \"D\"\ncontext = \"out/svc\"\n",
+    );
+
+    run_update(&cargo_anvil::Catalog::anvil(), &github_apply(), &root).unwrap();
+
+    assert!(root.join("justfiles/anvil/container.just").is_file());
+    assert!(root.join("justfiles/anvil/container-images.just").is_file());
+}
+
+/// Every image is built by identical logic, so the emitted file carries one
+/// recipe body and a table of per-image data. Emitting a recipe per image
+/// repeated ~35 lines of body per entry and left N copies free to drift.
+#[test]
+fn images_share_one_recipe_body() {
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "image-output-dir = \"out\"\n\n\
+         [container]\nenabled = true\nimage = \"img:1\"\n\n\
+         [[image]]\nname = \"alpha\"\ndockerfile = \"a.Dockerfile\"\ncontext = \"out/a\"\n\n\
+         [[image]]\nname = \"beta\"\nrepository = \"acme/beta\"\ndockerfile = \"b.Dockerfile\"\n\
+         context = \"out/b\"\ntarget = \"runtime\"\ndepends-on = [\"alpha\"]\n",
+    );
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    let images = std::fs::read_to_string(root.join("justfiles/anvil/container-images.just")).unwrap();
+
+    // One parameterized recipe, not one per image.
+    assert_eq!(images.matches("\nanvil-image name=").count(), 1);
+    assert!(!images.contains("anvil-image-alpha"), "no per-image recipe should be emitted");
+    assert!(!images.contains("anvil-image-beta"), "no per-image recipe should be emitted");
+    assert_eq!(
+        images.matches("& $engine @cmd").count(),
+        1,
+        "the build body must appear exactly once"
+    );
+
+    // Per-image data still reaches the table, including the repository override
+    // and an absent optional field.
+    assert!(images.contains("'alpha' = @{"));
+    assert!(images.contains("'beta' = @{"));
+    assert!(images.contains("repository = 'acme/beta'"));
+    assert!(images.contains("target     = 'runtime'"));
+    assert!(images.contains("target     = $null"));
+
+    // The aggregate drives the shared recipe in dependency order.
+    let alpha = images.find("just anvil-image 'alpha'").expect("alpha is built");
+    let beta = images.find("just anvil-image 'beta'").expect("beta is built");
+    assert!(alpha < beta, "depends-on must order the aggregate");
+}
+
 /// With `[container] enabled = false`, even a container-capable catalog emits a
 /// tree byte-identical to the base catalog's — the disabled path is inert.
 #[test]
@@ -617,4 +692,103 @@ fn disabled_container_is_byte_identical_to_base() {
         render_tree_excluding(&root_b, "anvil.toml"),
         "disabled container mode must not alter the emitted tree"
     );
+}
+
+/// A generic anvil.toml exercising the image pillar together with containerized
+/// recipe execution: a multi-image build with deps, staged artifacts,
+/// build-args and a target. Snapshot the whole tree so the generated image
+/// recipes are reviewable byte-for-byte.
+fn image_toml() -> &'static str {
+    "image-output-dir = \"out\"\n\
+     \n\
+     [container]\n\
+     enabled = true\n\
+     image = \"ghcr.io/acme/rust-dev:1.2.3\"\n\
+     engine = \"docker\"\n\
+     \n\
+     [[image]]\n\
+     name = \"base-image\"\n\
+     dockerfile = \"containers/base/Dockerfile\"\n\
+     context = \"out/base\"\n\
+     build-args = { BASE_IMAGE = \"mcr.example/base:3.0\" }\n\
+     \n\
+     [[image]]\n\
+     name = \"my-service\"\n\
+     dockerfile = \"containers/svc/Dockerfile\"\n\
+     target = \"runtime\"\n\
+     context = \"out/svc\"\n\
+     depends-on = [\"base-image\"]\n\
+     stage-artifacts = [\n\
+       { from = \"target/{profile}/my-svc\", to = \"bin/my-svc\" },\n\
+     ]\n"
+}
+
+#[test]
+fn container_images_tree() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), image_toml());
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+    insta::assert_snapshot!("container_images", render_tree(&root));
+}
+
+/// The generated image recipes must have every `__TOKEN__` placeholder
+/// substituted — no generation marker may survive into the output.
+#[test]
+fn rendered_container_files_have_no_unsubstituted_tokens() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), image_toml());
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    for rel in ["justfiles/anvil/container-images.just", "justfiles/anvil/container.just"] {
+        let body = std::fs::read_to_string(root.join(rel)).unwrap();
+        assert!(!body.contains("__"), "{rel} still contains a `__TOKEN__` placeholder:\n{body}");
+    }
+}
+
+/// Pillar 2 is additive: a container-enabled config that configures neither
+/// `[[image]]` must not emit the new file, and `mod.just` must not import it —
+/// so a plain pillar-1 container build is byte-identical whether or not the
+/// new artifact is registered.
+#[test]
+fn image_files_absent_when_unconfigured() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), "[container]\nenabled = true\nimage = \"img:1\"\n");
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    assert!(!root.join("justfiles/anvil/container-images.just").exists());
+    let mod_just = std::fs::read_to_string(root.join("justfiles/anvil/mod.just")).unwrap();
+    assert!(!mod_just.contains("container-images.just"));
+}
+
+/// Configured images emit the image recipes and their import.
+#[test]
+fn images_emit_image_recipes() {
+    let (_tmp, root) = named_workspace("repo");
+    write(
+        &root.join("anvil.toml"),
+        "[container]\nenabled = true\nimage = \"img:1\"\n\n[[image]]\nname = \"svc\"\ndockerfile = \"D\"\ncontext = \"out/svc\"\n",
+    );
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    assert!(root.join("justfiles/anvil/container-images.just").is_file());
+    let mod_just = std::fs::read_to_string(root.join("justfiles/anvil/mod.just")).unwrap();
+    assert!(mod_just.contains("import? 'container-images.just'"));
+}
+
+/// After applying an image config, a second dry-run must report no changes —
+/// the generated recipes are deterministic.
+#[test]
+fn image_apply_then_dry_run_is_clean() {
+    let (_tmp, root) = named_workspace("repo");
+    write(&root.join("anvil.toml"), image_toml());
+    run_update(&container_catalog(), &github_apply(), &root).unwrap();
+
+    let dry = Cli {
+        backends: vec!["github".to_owned()],
+        no_backends: false,
+        dry_run: true,
+        force: false,
+    };
+    let outcome = run_update(&container_catalog(), &dry, &root).unwrap();
+    assert!(!outcome.plan.has_changes(), "second dry-run after apply must be clean");
 }

@@ -245,10 +245,9 @@ fn build_plan(
                 let backend_ok = spec.gate.is_none_or(|backend| backends.contains(&backend));
                 // Some container-gated owned files need more than the
                 // container flag to emit: the devcontainer descriptor needs
-                // `devcontainer = true`, and generated Dockerfile assets are
-                // needed only when anvil's base image is built.
-                // `secondary_gate_open` encodes those per-path conditions;
-                // every other path is unconstrained.
+                // `devcontainer = true`, and the image recipes need at least
+                // one `[[image]]`. `secondary_gate_open` encodes those
+                // per-path conditions; every other path is unconstrained.
                 let secondary_ok = container::secondary_gate_open(spec.path, container);
                 if backend_ok && secondary_ok {
                     let body = container::render_owned_body(spec.path, &spec.body, container);

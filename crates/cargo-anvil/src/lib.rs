@@ -179,8 +179,9 @@
 //!
 //! ## Containers
 //!
-//! anvil can optionally run the generated recipes inside a container,
-//! configured in an `anvil.toml` at the repo root:
+//! anvil can optionally run the generated recipes inside a container and
+//! build OCI images. Both are opt-in and independent, configured in an
+//! `anvil.toml` at the repo root:
 //!
 //! ```toml
 //! [container]
@@ -200,7 +201,8 @@
 //! pre-built reference instead, or `dockerfile` to replace anvil's entirely
 //! when the base OS has to differ.
 //!
-//! A repo with no `anvil.toml` is byte-for-byte unchanged.
+//! `[[image]]` sections add the image-build recipes. A repo with no
+//! `anvil.toml` is byte-for-byte unchanged.
 //!
 //! See `docs/containers.md` for usage, the full configuration reference, and
 //! the technical overview.
@@ -390,7 +392,7 @@ use std::process::ExitCode;
 pub use anvil::artifacts;
 pub use backend::Backend;
 pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec};
-pub use config::{ContainerConfig, Engine, NativeWhen};
+pub use config::{ContainerConfig, Engine, ImageSpec, NativeWhen, StageArtifact};
 pub use region::CommentSyntax;
 
 /// One-call entry point for a tool built on the anvil engine.
