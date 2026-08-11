@@ -325,7 +325,16 @@ fn devcontainer_describes_a_build_when_the_image_is_built() {
 
     let descriptor = std::fs::read_to_string(root.join(".devcontainer/devcontainer.json")).unwrap();
     assert!(!descriptor.contains(r#""image": """#), "an empty image is an invalid descriptor");
-    assert!(descriptor.contains(r#""dockerfile": ".anvil/container/Dockerfile""#));
+    // Relative to this file, which lives in `.devcontainer/` -- a repo-relative
+    // path would resolve to `.devcontainer/.anvil/...` and name nothing.
+    assert!(descriptor.contains(r#""dockerfile": "../.anvil/container/Dockerfile""#));
+    assert!(
+        root.join(".devcontainer")
+            .join("../.anvil/container/Dockerfile")
+            .canonicalize()
+            .is_ok(),
+        "the descriptor's dockerfile path must resolve from .devcontainer/"
+    );
     assert!(descriptor.contains(r#""RUST_CHANNEL": "1.93""#), "build args reach the descriptor");
     // Cheap well-formedness guard: the substitution splices a JSON fragment,
     // so an unbalanced brace would be the likely failure mode.

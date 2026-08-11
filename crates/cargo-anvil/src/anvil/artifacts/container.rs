@@ -65,6 +65,10 @@ const ADO_JOB_PATH: &str = ".pipelines/anvil/steps/job.yml";
 const ADO_PR_ROOT_PATH: &str = ".pipelines/anvil-pr.yml";
 const ADO_SCHEDULED_ROOT_PATH: &str = ".pipelines/anvil-scheduled.yml";
 
+/// The two stages templates that invoke the job wrapper per pool.
+const ADO_PR_STAGES_PATH: &str = ".pipelines/anvil/pr.yml";
+const ADO_SCHEDULED_STAGES_PATH: &str = ".pipelines/anvil/scheduled.yml";
+
 /// The three tier recipes that receive the re-entry guard.
 const TIER_RECIPES: &[&str] = &["anvil-pr", "anvil-scheduled", "anvil-full"];
 
@@ -191,6 +195,9 @@ pub(crate) fn render_owned_body<'a>(path: &str, body: &'a str, container: &Resol
             Cow::Owned(inject_github_root(body, container))
         }
         ADO_JOB_PATH if container.image_source == ExecImageSource::Pull => Cow::Owned(inject_ado_job(body)),
+        ADO_PR_STAGES_PATH | ADO_SCHEDULED_STAGES_PATH if container.image_source == ExecImageSource::Pull => {
+            Cow::Owned(inject_ado_stages(body))
+        }
         ADO_PR_ROOT_PATH | ADO_SCHEDULED_ROOT_PATH if container.image_source == ExecImageSource::Pull => {
             Cow::Owned(inject_ado_root(body, container))
         }
@@ -381,7 +388,11 @@ fn render_devcontainer(template: &str, container: &ResolvedContainer) -> String 
 fn devcontainer_source_json(container: &ResolvedContainer) -> String {
     if container.image_source.builds() {
         let mut out = format!(
-            "\"build\": {{\n    \"dockerfile\": \"{}\",\n    \"context\": \"..\"",
+            // Relative to this file, not to the repository root: the descriptor
+            // lives in `.devcontainer/`, so a repo-relative path resolves to
+            // `.devcontainer/<path>` and names a file that does not exist.
+            // `context` is `..` for the same reason.
+            "\"build\": {{\n    \"dockerfile\": \"../{}\",\n    \"context\": \"..\"",
             json_escape(&exec_dockerfile_path(container))
         );
         if !container.build_args.is_empty() {
@@ -479,7 +490,7 @@ fn containerize_recipe(body: &str, name: &str) -> String {
         out.push_str(attr);
         out.push('\n');
     }
-    out.push_str("[script(\"pwsh\")]\n");
+    out.push_str("[script(\"pwsh\", \"-NoProfile\")]\n");
     out.push_str(name);
     out.push_str(":\n");
     out.push_str("    $ErrorActionPreference = 'Stop'\n");
@@ -499,13 +510,22 @@ fn containerize_recipe(body: &str, name: &str) -> String {
 }
 
 /// Conventional in-container mount point for a named cache volume. Generic and
-/// documented: `cargo`/`rustup` map to the official rust image's
-/// `CARGO_HOME`/`RUSTUP_HOME`, `target` lives under the workspace, and any
-/// other name gets a stable path under `/anvil-cache`.
+/// documented: `cargo`/`rustup` map to the *download* caches inside the
+/// official rust image's `CARGO_HOME`/`RUSTUP_HOME`, `target` lives under the
+/// workspace, and any other name gets a stable path under `/anvil-cache`.
+///
+/// Deliberately not `CARGO_HOME`/`RUSTUP_HOME` themselves. Docker seeds a
+/// named volume from the image only while the volume is empty, so mounting one
+/// over a tool root masks that root with the *first* image's contents for
+/// every later image. The tag would keep its promise while the running
+/// container silently ran last month's toolchain and tool pins — the exact
+/// staleness the content hash exists to make impossible. The subpaths below
+/// hold only re-downloadable state, which the image build already deletes to
+/// keep itself small, so there is nothing of the image's to shadow.
 fn cache_target(name: &str, workdir: &str) -> String {
     match name {
-        "cargo" => "/usr/local/cargo".to_owned(),
-        "rustup" => "/usr/local/rustup".to_owned(),
+        "cargo" => "/usr/local/cargo/registry".to_owned(),
+        "rustup" => "/usr/local/rustup/downloads".to_owned(),
         "target" => format!("{workdir}/target"),
         other => format!("/anvil-cache/{other}"),
     }
@@ -607,9 +627,19 @@ const GH_RUNS_ON_4LEG: &str = "    runs-on: ${{ matrix.os == 'linux' && inputs.l
 const GH_RUNS_ON_2LEG: &str = "    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}\n";
 
 /// Job-level `container:`/`env:` block appended after a group job's `runs-on`.
-/// `container_image != '' && ... || null` yields the image when set and `null`
-/// (no container) otherwise, so the block is inert when the input is empty.
-const GH_JOB_CONTAINER_SUFFIX: &str = "    container: ${{ inputs.container_image != '' && inputs.container_image || null }}
+///
+/// The `container:` is additionally gated on the leg being Linux. GitHub
+/// Actions supports job containers on Linux runners only, and the image anvil
+/// builds is a Linux amd64 image, so a Windows or arm leg either fails
+/// outright with "Container operation is only supported on Linux" or would run
+/// the wrong architecture. Every job carrying this block has a `matrix.os`.
+///
+/// `ANVIL_IN_CONTAINER` stays unconditional on purpose. On a leg that gets no
+/// container it is exactly right: it tells the re-entry guard to run the
+/// recipe natively rather than try to launch a container the runner cannot
+/// host.
+const GH_JOB_CONTAINER_SUFFIX: &str =
+    "    container: ${{ inputs.container_image != '' && matrix.os == 'linux' && inputs.container_image || null }}
     env:
       ANVIL_IN_CONTAINER: '1'\n";
 
@@ -661,6 +691,26 @@ fn inject_ado_job(body: &str) -> String {
         1,
     );
     with_param.replacen(ADO_JOB_POOL_ANCHOR, &format!("{ADO_JOB_POOL_ANCHOR}{ADO_JOB_CONTAINER_SUFFIX}"), 1)
+}
+
+/// A Windows job's `pool:` line in a stages template, and the opt-out that has
+/// to follow it.
+const ADO_WINDOWS_POOL_LINE: &str = "          pool: ${{ parameters.windowsPool }}\n";
+const ADO_WINDOWS_CONTAINER_OPT_OUT: &str = "          container: ''\n";
+
+/// Opt every Windows job out of the container.
+///
+/// The job wrapper defaults `container` to the `anvil_container` alias so
+/// Linux jobs need forward nothing, which leaves Windows jobs opted *in* by
+/// omission. ADO requires a container's OS to match the agent's, and the image
+/// anvil builds is Linux, so those jobs would fail. Only applied when the
+/// wrapper actually gained the parameter, or the templates would pass one that
+/// does not exist.
+fn inject_ado_stages(body: &str) -> String {
+    body.replace(
+        ADO_WINDOWS_POOL_LINE,
+        &format!("{ADO_WINDOWS_POOL_LINE}{ADO_WINDOWS_CONTAINER_OPT_OUT}"),
+    )
 }
 
 /// Declare the `anvil_container` container resource (pinned to the configured
@@ -1080,7 +1130,7 @@ mod tests {
         let container = enabled("repo");
         let body = "# doc\n[group(\"anvil\")]\nanvil-pr: anvil-pr-validate-prereqs \\\n    anvil-pr-fast \\\n    anvil-pr-slow\n";
         let out = render_owned_body(TIERS_JUST_PATH, body, &container).into_owned();
-        assert!(out.contains("[group(\"anvil\")]\n[script(\"pwsh\")]\nanvil-pr:\n"));
+        assert!(out.contains("[group(\"anvil\")]\n[script(\"pwsh\", \"-NoProfile\")]\nanvil-pr:\n"));
         assert!(out.contains("just _anvil-container-run anvil-pr"));
         assert!(out.contains("just anvil-pr-validate-prereqs anvil-pr-fast anvil-pr-slow"));
         assert!(out.contains("# doc\n"));
@@ -1108,7 +1158,7 @@ mod tests {
         assert!(!out.contains("__CACHE_VOLUME_NAMES_ARRAY__"));
         assert!(!out.contains("__FORWARD_ENV_ARRAY__"));
         assert!(out.contains("ghcr.io/acme/rust-dev:1"));
-        assert!(out.contains("@('myrepo-cargo:/usr/local/cargo', 'myrepo-rustup:/usr/local/rustup')"));
+        assert!(out.contains("@('myrepo-cargo:/usr/local/cargo/registry', 'myrepo-rustup:/usr/local/rustup/downloads')"));
         assert!(out.contains("@{}"));
     }
 
@@ -1119,14 +1169,14 @@ mod tests {
         assert!(!out.contains("__IMAGE__"));
         assert!(!out.contains("__MOUNTS_JSON__"));
         assert!(out.contains("ghcr.io/acme/rust-dev:1"));
-        assert!(out.contains("source=myrepo-cargo,target=/usr/local/cargo,type=volume"));
-        assert!(out.contains("source=myrepo-rustup,target=/usr/local/rustup,type=volume"));
+        assert!(out.contains("source=myrepo-cargo,target=/usr/local/cargo/registry,type=volume"));
+        assert!(out.contains("source=myrepo-rustup,target=/usr/local/rustup/downloads,type=volume"));
     }
 
     #[test]
     fn cache_target_maps_known_names() {
-        assert_eq!(cache_target("cargo", "/w"), "/usr/local/cargo");
-        assert_eq!(cache_target("rustup", "/w"), "/usr/local/rustup");
+        assert_eq!(cache_target("cargo", "/w"), "/usr/local/cargo/registry");
+        assert_eq!(cache_target("rustup", "/w"), "/usr/local/rustup/downloads");
         assert_eq!(cache_target("target", "/w"), "/w/target");
         assert_eq!(cache_target("sccache", "/w"), "/anvil-cache/sccache");
     }
@@ -1164,6 +1214,8 @@ mod tests {
     const GH_PR_ROOT: &str = include_str!("../../../templates/github/pr-root-workflow.yml");
     const ADO_JOB: &str = include_str!("../../../templates/ado/steps/job.yml");
     const ADO_PR_ROOT: &str = include_str!("../../../templates/ado/pr-root-pipeline.yml");
+    const ADO_PR_STAGES: &str = include_str!("../../../templates/ado/pr-stages.yml");
+    const ADO_SCHEDULED_STAGES: &str = include_str!("../../../templates/ado/scheduled-stages.yml");
 
     #[test]
     fn github_impl_gains_input_and_job_container() {
@@ -1208,6 +1260,48 @@ mod tests {
         assert!(out.contains("  - name: container\n    type: string\n    default: anvil_container\n"));
         assert!(out.contains("${{ if ne(parameters.container, '') }}:\n      container: ${{ parameters.container }}\n"));
         assert!(out.contains("variables:\n      ANVIL_IN_CONTAINER: '1'\n"));
+    }
+
+    /// ADO requires a container's OS to match the agent's, and the wrapper
+    /// opts every job in by default -- so a Windows job that forwards nothing
+    /// would be handed the Linux image and fail.
+    #[test]
+    fn ado_stages_opt_windows_jobs_out_of_the_container() {
+        let container = enabled("repo");
+        for (path, body) in [
+            (ADO_PR_STAGES_PATH, ADO_PR_STAGES),
+            (ADO_SCHEDULED_STAGES_PATH, ADO_SCHEDULED_STAGES),
+        ] {
+            let out = render_owned_body(path, body, &container).into_owned();
+            let windows_jobs = body.matches("          pool: ${{ parameters.windowsPool }}\n").count();
+            assert!(windows_jobs > 0, "{path} has no windows jobs to opt out");
+            assert_eq!(
+                out.matches("          pool: ${{ parameters.windowsPool }}\n          container: ''\n")
+                    .count(),
+                windows_jobs,
+                "{path} left a windows job opted in"
+            );
+            assert!(
+                !out.contains("          pool: ${{ parameters.linuxPool }}\n          container: ''\n"),
+                "{path} opted a linux job out"
+            );
+        }
+    }
+
+    /// With container mode off the wrapper never gains the parameter, so
+    /// forwarding one would be an unexpected-parameter error.
+    #[test]
+    fn ado_stages_are_untouched_without_container_mode() {
+        let container = ContainerConfig::default().resolve("repo").unwrap();
+        let out = render_owned_body(ADO_PR_STAGES_PATH, ADO_PR_STAGES, &container).into_owned();
+        assert_eq!(out, ADO_PR_STAGES);
+    }
+
+    /// GitHub Actions runs job containers on Linux only, and the image is a
+    /// Linux amd64 one, so the windows and arm matrix legs must not get it.
+    #[test]
+    fn github_job_container_is_limited_to_the_linux_leg() {
+        assert!(GH_JOB_CONTAINER_SUFFIX.contains("matrix.os == 'linux' &&"));
     }
 
     #[test]

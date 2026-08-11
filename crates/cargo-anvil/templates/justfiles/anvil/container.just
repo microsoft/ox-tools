@@ -43,7 +43,7 @@ export ANVIL_CONTAINER := "1"
 
 # Resolve the engine: honor an explicit `engine`, else auto-detect docker then podman.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _anvil-container-engine:
     $ErrorActionPreference = 'Stop'
     $configured = '{{anvil_container_engine}}'
@@ -87,7 +87,7 @@ _anvil-container-engine:
 
 # Resolve the exec image reference, building it if it is not already present.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _anvil-container-image:
     $ErrorActionPreference = 'Stop'
     $engine = just _anvil-container-engine
@@ -285,7 +285,7 @@ _anvil-container-image:
 
 # Run `just TARGET` inside the container. The single indirection point.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 _anvil-container-run target:
     $ErrorActionPreference = 'Stop'
 
@@ -369,7 +369,7 @@ _anvil-container-run target:
 
 # Make the exec image available so a subsequent run starts warm.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-container-up:
     $ErrorActionPreference = 'Stop'
     if ('{{anvil_container_image_source}}' -eq 'pull') {
@@ -385,7 +385,7 @@ anvil-container-up:
 
 # Remove the named cache volumes for this repo. The image is left in place.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-container-down:
     $ErrorActionPreference = 'Stop'
     $engine = just _anvil-container-engine
@@ -397,7 +397,7 @@ anvil-container-down:
 
 # Open an interactive shell in the image, with the same mounts a recipe run uses.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-container-shell:
     $ErrorActionPreference = 'Stop'
     $engine = just _anvil-container-engine
@@ -420,7 +420,7 @@ anvil-container-shell:
 
 # Report the engine, the exec image, and whether it is present and current.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-container-status:
     $ErrorActionPreference = 'Stop'
     $engine = just _anvil-container-engine
@@ -471,7 +471,7 @@ anvil-container-status:
 
 # Rebuild the exec image from scratch, ignoring every cached layer.
 [group("anvil-container")]
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-container-rebuild:
     $ErrorActionPreference = 'Stop'
     if ('{{anvil_container_image_source}}' -eq 'pull') {

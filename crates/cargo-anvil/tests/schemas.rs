@@ -155,14 +155,41 @@ fn just_lists_emitted_recipes() {
 #[test]
 fn emitted_powershell_scripts_disable_profiles() {
     let tmp = run_with_backend("github");
+    assert_no_profile_loading_scripts(tmp.path());
+}
+
+/// The container recipes are only emitted when `anvil.toml` opts in, so a
+/// workspace without one never renders them — which is how eight
+/// profile-loading recipes reached the tree while this invariant was green.
+#[test]
+fn emitted_container_powershell_scripts_disable_profiles() {
+    let tmp = empty_workspace();
+    std::fs::write(tmp.path().join("anvil.toml"), "[container]\nenabled = true\ndevcontainer = true\n").unwrap();
+    let args = Cli {
+        backends: vec!["github".to_owned()],
+        no_backends: false,
+        dry_run: false,
+        force: false,
+    };
+    run_update(&cargo_anvil::Catalog::anvil(), &args, tmp.path()).unwrap();
+    assert!(
+        tmp.path().join("justfiles/anvil/container.just").is_file(),
+        "container recipes were not emitted"
+    );
+    assert_no_profile_loading_scripts(tmp.path());
+}
+
+fn assert_no_profile_loading_scripts(root: &std::path::Path) {
     let mut script_count = 0;
     let mut workflow_shell_count = 0;
-    for entry in walkdir::WalkDir::new(tmp.path()) {
+    for entry in walkdir::WalkDir::new(root) {
         let entry = entry.unwrap();
         if !entry.file_type().is_file() {
             continue;
         }
-        let contents = std::fs::read_to_string(entry.path()).unwrap();
+        let Ok(contents) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
         assert!(
             !contents.contains("[script(\"pwsh\")]"),
             "{} contains a profile-loading PowerShell script attribute",
