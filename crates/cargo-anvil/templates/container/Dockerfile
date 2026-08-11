@@ -75,6 +75,10 @@ RUN curl --proto '=https' --tlsv1.2 -fsSLo /tmp/rustup-init \
 # source edit does not invalidate this layer. The synthetic Justfile avoids
 # pulling in repository-specific imports that may not exist yet.
 #
+# `binstall` matches what CI passes. It is not just a speed-up: some catalog
+# tools do not compile from source on every pinned toolchain, so a source
+# install can fail here while CI stays green.
+#
 # The credential files are removed in the same layer as the install. A build
 # secret is mounted, never committed to a layer, but anything the install
 # *writes* with it is ordinary content -- and the `chmod` on the next line
@@ -84,7 +88,7 @@ WORKDIR /opt/anvil
 COPY justfiles ./justfiles
 COPY rust-toolchain.toml ./
 RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
-    && just anvil-setup \
+    && just anvil-setup binstall \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME}/.netrc" \
     && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"

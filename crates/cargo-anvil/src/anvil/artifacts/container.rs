@@ -1289,6 +1289,18 @@ mod tests {
         );
     }
 
+    /// The image must install tools the way CI does. `binstall` is not merely
+    /// a speed-up here: a source install of a pinned tool can fail on a
+    /// toolchain CI never source-builds on, which turns a toolchain bump into
+    /// a broken image while CI stays green.
+    #[test]
+    fn the_image_installs_tools_the_way_ci_does() {
+        assert!(
+            EXEC_DOCKERFILE.contains("just anvil-setup binstall"),
+            "the exec Dockerfile must pass `binstall` to anvil-setup"
+        );
+    }
+
     /// The image installs its tools through `just anvil-setup`, whose
     /// dependency chain reaches the tier, group, check and tool recipes — so
     /// the recipe tree defines image contents and is hashed at run time. Only

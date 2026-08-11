@@ -145,6 +145,17 @@ function Invoke-Just {
     return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = (@($captured) -join "`n") }
 }
 
+function Invoke-Anvil {
+    # Config changes only reach the recipes through the generator, exactly as a
+    # user edits anvil.toml and re-runs `cargo anvil`.
+    Push-Location $WorkspacePath
+    try {
+        & $exe anvil --no-backends | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw 'cargo anvil failed' }
+    }
+    finally { Pop-Location }
+}
+
 function Get-BuiltImages {
     # Base images only. `docker images <name>` matches the repository exactly,
     # so the `-ext` extension images do not appear here.
@@ -392,6 +403,7 @@ RUN printf 'downstream\n' > /etc/anvil-extension
     [System.IO.File]::WriteAllText(
         $anvilToml,
         [System.IO.File]::ReadAllText($anvilToml) + "extends = `"ci/ext.Dockerfile`"`n")
+    Invoke-Anvil
 
     $baseCount = (Get-BuiltImages).Count
     $extStart = Get-Date
