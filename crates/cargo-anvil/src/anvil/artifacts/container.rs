@@ -20,7 +20,7 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 
 use crate::catalog::Artifact;
-use crate::config::{ExecImageSource, ImageSpec, NativeWhen, ResolvedContainer};
+use crate::config::{ClusterChart, ClusterConfig, ClusterDependency, ExecImageSource, ImageSpec, NativeWhen, ResolvedContainer};
 
 /// Repo-root-relative path of the container shim recipe file.
 pub(crate) const CONTAINER_JUST_PATH: &str = "justfiles/anvil/container.just";
@@ -30,6 +30,12 @@ pub(crate) const DEVCONTAINER_PATH: &str = ".devcontainer/devcontainer.json";
 
 /// Repo-root-relative path of the generic OCI image build recipes (pillar 2).
 pub(crate) const CONTAINER_IMAGES_JUST_PATH: &str = "justfiles/anvil/container-images.just";
+
+/// Repo-root-relative path of the Kind cluster harness recipes (pillar 3).
+pub(crate) const CLUSTER_JUST_PATH: &str = "justfiles/anvil/cluster.just";
+
+/// Repo-root-relative path of the cluster host bootstrap + preflight recipes.
+pub(crate) const CLUSTER_BOOTSTRAP_JUST_PATH: &str = "justfiles/anvil/cluster-bootstrap.just";
 
 /// Repo-root-relative path of the generated default exec-image Dockerfile.
 ///
@@ -86,6 +92,13 @@ const DEVCONTAINER_JSON: &str = include_str!("../../../templates/devcontainer/de
 /// generation marker).
 const CONTAINER_IMAGES_JUST: &str = include_str!("../../../templates/justfiles/anvil/container-images.just");
 
+/// Embedded body of the Kind cluster harness (with `__TOKEN__` placeholders).
+const CLUSTER_JUST: &str = include_str!("../../../templates/justfiles/anvil/cluster.just");
+
+/// Embedded body of the cluster host bootstrap + preflight (fully static —
+/// pinned, checksum-verified tooling; no placeholders).
+const CLUSTER_BOOTSTRAP_JUST: &str = include_str!("../../../templates/justfiles/anvil/cluster-bootstrap.just");
+
 /// Embedded body of the default exec-image Dockerfile (with `__TOKEN__`
 /// placeholders).
 const EXEC_DOCKERFILE: &str = include_str!("../../../templates/container/Dockerfile");
@@ -135,6 +148,29 @@ pub fn container_images_just() -> Artifact {
     Artifact::owned_file(CONTAINER_IMAGES_JUST_PATH, CONTAINER_IMAGES_JUST)
 }
 
+/// `justfiles/anvil/cluster.just` — the generic Kind cluster harness
+/// (pillar 3).
+///
+/// Register it with
+/// [`CatalogBuilder::with_container_artifact`](crate::CatalogBuilder::with_container_artifact).
+/// It is additionally suppressed unless a `[cluster]` section is
+/// configured.
+#[must_use]
+pub fn cluster_just() -> Artifact {
+    Artifact::owned_file(CLUSTER_JUST_PATH, CLUSTER_JUST)
+}
+
+/// `justfiles/anvil/cluster-bootstrap.just` — host bootstrap + preflight for
+/// the cluster harness.
+///
+/// Register it with
+/// [`CatalogBuilder::with_container_artifact`](crate::CatalogBuilder::with_container_artifact).
+/// Suppressed unless a `[cluster]` section is configured.
+#[must_use]
+pub fn cluster_bootstrap_just() -> Artifact {
+    Artifact::owned_file(CLUSTER_BOOTSTRAP_JUST_PATH, CLUSTER_BOOTSTRAP_JUST)
+}
+
 /// `.anvil/container/Dockerfile` — the default exec image.
 ///
 /// Register it with
@@ -158,13 +194,14 @@ pub fn exec_dockerignore() -> Artifact {
 /// Secondary emission gate for container-gated artifacts whose emission
 /// depends on more than the container flag: the devcontainer descriptor needs
 /// `devcontainer = true`, the image recipes need at least one
-/// `[[image]]`. Every other path is unconstrained (`true`).
+/// `[[image]]`, and the cluster files need a `[cluster]`
+/// section. Every other path is unconstrained (`true`).
 #[must_use]
 pub(crate) fn secondary_gate_open(path: &str, container: &ResolvedContainer) -> bool {
     match path {
         DEVCONTAINER_PATH => emits_devcontainer(container),
         CONTAINER_IMAGES_JUST_PATH => !container.images.is_empty(),
-
+        CLUSTER_JUST_PATH | CLUSTER_BOOTSTRAP_JUST_PATH => container.cluster.is_some(),
         EXEC_DOCKERFILE_PATH | EXEC_DOCKERIGNORE_PATH => container.image_source.builds_anvil_base(),
         _ => true,
     }
@@ -183,10 +220,16 @@ pub(crate) fn render_owned_body<'a>(path: &str, body: &'a str, container: &Resol
         // fill in their templates.
         CONTAINER_JUST_PATH => Cow::Owned(render_container_just(body, container)),
         DEVCONTAINER_PATH => Cow::Owned(render_devcontainer(body, container)),
-        // The image recipes are generated from `[[image]]`. They are
-        // container-gated and additionally secondary-gated, so they only reach
-        // here when enabled + configured.
+        // The image recipes are generated from `[[image]]`; the
+        // cluster harness is filled from `[cluster]`; the bootstrap
+        // file is fully static. All three are container-gated and additionally
+        // secondary-gated, so they only reach here when enabled + configured.
         CONTAINER_IMAGES_JUST_PATH => Cow::Owned(render_container_images(body, container)),
+        CLUSTER_JUST_PATH => match &container.cluster {
+            Some(cluster) => Cow::Owned(render_cluster(body, cluster, container)),
+            None => Cow::Borrowed(body),
+        },
+        CLUSTER_BOOTSTRAP_JUST_PATH => Cow::Borrowed(body),
         // The default Dockerfile carries one placeholder (the in-container
         // workdir); the ignore file is fully static.
         EXEC_DOCKERFILE_PATH => Cow::Owned(body.replace("__WORKDIR__", &container.workdir)),
@@ -349,8 +392,8 @@ fn extension_hash_inputs(container: &ResolvedContainer) -> Vec<String> {
 
 /// Recipe files excluded from the image identity.
 ///
-/// Each one drives the container *from the host*, so none can change what
-/// `just anvil-setup` installs. `container.just` in
+/// Each one drives the container *from the host* or targets the cluster, so
+/// none can change what `just anvil-setup` installs. `container.just` in
 /// particular must be excluded on pain of circularity: it is the file that
 /// computes the hash.
 fn hash_excludes(container: &ResolvedContainer) -> Vec<String> {
@@ -358,7 +401,10 @@ fn hash_excludes(container: &ResolvedContainer) -> Vec<String> {
     if !container.images.is_empty() {
         excluded.push(CONTAINER_IMAGES_JUST_PATH.to_owned());
     }
-
+    if container.cluster.is_some() {
+        excluded.push(CLUSTER_JUST_PATH.to_owned());
+        excluded.push(CLUSTER_BOOTSTRAP_JUST_PATH.to_owned());
+    }
     excluded.sort_unstable();
     excluded
 }
@@ -612,8 +658,10 @@ fn image_recipe(images: &[ImageSpec], output_dir: &str) -> String {
     );
     let _ = writeln!(out, "    $cmd += $ctxFull");
     // A BuildKit build defaults to attaching a provenance attestation, which
-    // turns the result into an index that local container runtimes may not
-    // resolve. Suppress the attestation on engines that understand the flag.
+    // turns the result into an index whose attestation content `kind load`
+    // cannot resolve ("content digest not found" under ctr --all-platforms).
+    // Images built here exist to be loaded into a local cluster, so suppress
+    // the attestation on engines that understand the flag.
     let _ = writeln!(
         out,
         "    if ($engine -eq 'docker') {{ $cmd = @($cmd[0]) + @('--provenance=false') + $cmd[1..($cmd.Length - 1)] }}"
@@ -644,6 +692,105 @@ fn images_aggregate(order: &[String]) -> String {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Pillar 3 — generic Kind cluster harness
+// ---------------------------------------------------------------------------
+
+/// Fill in `cluster.just` from the resolved `[cluster]` section.
+fn render_cluster(template: &str, cluster: &ClusterConfig, container: &ResolvedContainer) -> String {
+    let diagnostics = cluster.diagnostics.clone().unwrap_or_default();
+    // `load-images` names images; the cluster loads them by *reference*, so map
+    // each name through its repository override before emitting.
+    let load_refs: Vec<String> = cluster
+        .load_images
+        .iter()
+        .map(|name| {
+            container
+                .images
+                .iter()
+                .find(|image| &image.name == name)
+                .and_then(|image| image.repository.clone())
+                .unwrap_or_else(|| name.clone())
+        })
+        .collect();
+    template
+        .replace("__CLUSTER_NAME__", &just_dq(&cluster.name))
+        .replace("__NODE_IMAGE__", &ps_escape(cluster.node_image.as_deref().unwrap_or("")))
+        .replace("__WORKERS__", &cluster.workers.to_string())
+        .replace("__RETRY_ATTEMPTS__", &cluster.retry.attempts.to_string())
+        .replace("__RETRY_DELAY__", &cluster.retry.delay_seconds.to_string())
+        .replace(
+            "__HOOK_PRE_INSTALL__",
+            &ps_escape(cluster.hooks.pre_install.as_deref().unwrap_or("")),
+        )
+        .replace(
+            "__HOOK_POST_INSTALL__",
+            &ps_escape(cluster.hooks.post_install.as_deref().unwrap_or("")),
+        )
+        .replace("__HOOK_PRE_TEST__", &ps_escape(cluster.hooks.pre_test.as_deref().unwrap_or("")))
+        .replace("__HOOK_ON_FAILURE__", &ps_escape(cluster.hooks.on_failure.as_deref().unwrap_or("")))
+        .replace("__LOAD_IMAGES_ARRAY__", &ps_array(&load_refs))
+        .replace("__DEPENDENCIES_PWSH__", &deps_pwsh(&cluster.dependencies))
+        .replace("__CHARTS_PWSH__", &charts_pwsh(&cluster.charts))
+        .replace("__DIAG_RESOURCES_ARRAY__", &ps_array(&diagnostics.resources))
+        .replace("__DIAG_LOGS_ARRAY__", &ps_array(&diagnostics.logs))
+        .replace("__DIAG_NAMESPACE__", &ps_escape(diagnostics.namespace.as_deref().unwrap_or("")))
+}
+
+/// The cluster dependencies as a `PowerShell` array of hashtables.
+fn deps_pwsh(deps: &[ClusterDependency]) -> String {
+    if deps.is_empty() {
+        return "@()".to_owned();
+    }
+    let items: Vec<String> = deps
+        .iter()
+        .map(|d| {
+            format!(
+                "@{{ name = {}; manifest = {}; version = {}; namespace = {}; preload = {}; wait = {} }}",
+                ps_lit(&d.name),
+                ps_lit(&d.manifest),
+                ps_lit(d.version.as_deref().unwrap_or("")),
+                ps_lit(d.namespace.as_deref().unwrap_or("")),
+                ps_array(&d.preload_images),
+                ps_array(&d.wait),
+            )
+        })
+        .collect();
+    format!("@({})", items.join(", "))
+}
+
+/// The cluster charts as a `PowerShell` array of hashtables.
+fn charts_pwsh(charts: &[ClusterChart]) -> String {
+    if charts.is_empty() {
+        return "@()".to_owned();
+    }
+    let items: Vec<String> = charts
+        .iter()
+        .map(|c| {
+            let set = if c.set.is_empty() {
+                "@()".to_owned()
+            } else {
+                let pairs: Vec<String> = c
+                    .set
+                    .iter()
+                    .map(|(k, v)| format!("@{{ k = {}; v = {} }}", ps_lit(k), ps_lit(v)))
+                    .collect();
+                format!("@({})", pairs.join(", "))
+            };
+            format!(
+                "@{{ name = {}; path = {}; namespace = {}; crds = {}; set = {}; wait = {} }}",
+                ps_lit(&c.name),
+                ps_lit(&c.path),
+                ps_lit(c.namespace.as_deref().unwrap_or("")),
+                ps_lit(c.crds.as_deref().unwrap_or("")),
+                set,
+                ps_array(&c.wait),
+            )
+        })
+        .collect();
+    format!("@({})", items.join(", "))
+}
+
 /// A single-quoted `PowerShell` literal (escaping embedded quotes).
 fn ps_lit(value: &str) -> String {
     format!("'{}'", ps_escape(value))
@@ -654,20 +801,30 @@ fn ps_dq(value: &str) -> String {
     format!("'{}'", value.replace('`', "``").replace('"', "`\"").replace('$', "`$"))
 }
 
+/// Escaping for a value spliced inside a `just` double-quoted string.
+fn just_dq(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 /// Splice the container `import?` lines into the entry point next to the other
 /// imports. Optional (`import?`) so a manually-removed shim does not break
 /// `just`. Placed right after `import 'versions.just'`.
 ///
 /// Only imports that correspond to emitted files are added: the shim is always
-/// imported (container mode is on), and the image recipes only when at least
-/// one `[[image]]` exists. This keeps the entry point byte-identical for a
-/// container build that does not define images.
+/// imported (container mode is on), the image recipes only when at least one
+/// `[[image]]` exists, and the cluster files only when a
+/// `[cluster]` section exists. This keeps the entry point
+/// byte-identical for a container build that uses neither pillar 2 nor 3.
 fn add_container_imports(body: &str, container: &ResolvedContainer) -> String {
     const ANCHOR: &str = "import 'versions.just'\n";
 
     let mut imports = String::from("import? 'container.just'\n");
     if !container.images.is_empty() {
         imports.push_str("import? 'container-images.just'\n");
+    }
+    if container.cluster.is_some() {
+        imports.push_str("import? 'cluster.just'\n");
+        imports.push_str("import? 'cluster-bootstrap.just'\n");
     }
 
     if let Some(pos) = body.find(ANCHOR) {
@@ -1031,9 +1188,9 @@ mod tests {
             return;
         };
 
-        // Render with images configured: the image template keeps its
-        // placeholders when the section is absent, and in that case it is never
-        // emitted at all.
+        // Render with every section configured: the cluster and image
+        // templates keep their placeholders when their section is absent, and
+        // in that case they are never emitted at all.
         let container = ContainerConfig {
             enabled: Some(true),
             images: Some(vec![ImageSpec {
@@ -1046,13 +1203,18 @@ mod tests {
                 build_args: Vec::new(),
                 depends_on: Vec::new(),
             }]),
-
+            cluster: Some(crate::config::ClusterConfig::default()),
             ..ContainerConfig::default()
         }
         .resolve("repo")
         .unwrap();
 
-        for (name, template) in [("container.just", CONTAINER_JUST), ("container-images.just", CONTAINER_IMAGES_JUST)] {
+        for (name, template) in [
+            ("container.just", CONTAINER_JUST),
+            ("container-images.just", CONTAINER_IMAGES_JUST),
+            ("cluster.just", CLUSTER_JUST),
+            ("cluster-bootstrap.just", CLUSTER_BOOTSTRAP_JUST),
+        ] {
             let rendered = super::render_owned_body(&format!("justfiles/anvil/{name}"), template, &container).into_owned();
             for (recipe, body) in pwsh_recipe_bodies(&rendered) {
                 assert_powershell_parses(&pwsh, name, &recipe, &body);
@@ -1213,8 +1375,8 @@ mod tests {
     /// The image installs its tools through `just anvil-setup`, whose
     /// dependency chain reaches the tier, group, check and tool recipes — so
     /// the recipe tree defines image contents and is hashed at run time. Only
-    /// the files that drive the container from the host are held back.
-    /// Excluding `container.just` is load-bearing: it
+    /// the files that drive the container from the host, or target the
+    /// cluster, are held back. Excluding `container.just` is load-bearing: it
     /// is the file that computes the hash.
     #[test]
     fn only_host_side_recipes_are_excluded_from_identity() {
@@ -1308,10 +1470,10 @@ mod tests {
         assert!(secondary_gate_open(EXEC_DOCKERIGNORE_PATH, &extended));
     }
 
-    /// The image-build recipes never affect what `anvil-setup` installs, so
-    /// they must not force an image rebuild when they change.
+    /// The cluster and image-build recipes never affect what `anvil-setup`
+    /// installs, so they must not force an image rebuild when they change.
     #[test]
-    fn image_recipes_do_not_define_image_identity() {
+    fn cluster_and_image_recipes_do_not_define_image_identity() {
         let container = ContainerConfig {
             enabled: Some(true),
             images: Some(vec![ImageSpec {
@@ -1324,14 +1486,19 @@ mod tests {
                 build_args: Vec::new(),
                 depends_on: Vec::new(),
             }]),
-
+            cluster: Some(crate::config::ClusterConfig::default()),
             ..ContainerConfig::default()
         }
         .resolve("repo")
         .unwrap();
 
         let excluded = hash_excludes(&container);
-        for path in [CONTAINER_JUST_PATH, CONTAINER_IMAGES_JUST_PATH] {
+        for path in [
+            CONTAINER_JUST_PATH,
+            CONTAINER_IMAGES_JUST_PATH,
+            CLUSTER_JUST_PATH,
+            CLUSTER_BOOTSTRAP_JUST_PATH,
+        ] {
             assert!(excluded.contains(&path.to_owned()), "{path} must not define image identity");
         }
     }
@@ -1370,7 +1537,12 @@ mod tests {
     /// by a blank line, so it is not part of the doc block.
     #[test]
     fn recipe_doc_comments_are_single_line() {
-        let templates = [("container.just", CONTAINER_JUST), ("container-images.just", CONTAINER_IMAGES_JUST)];
+        let templates = [
+            ("container.just", CONTAINER_JUST),
+            ("container-images.just", CONTAINER_IMAGES_JUST),
+            ("cluster.just", CLUSTER_JUST),
+            ("cluster-bootstrap.just", CLUSTER_BOOTSTRAP_JUST),
+        ];
 
         for (name, body) in templates {
             let lines: Vec<&str> = body.lines().collect();

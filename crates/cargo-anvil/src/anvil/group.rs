@@ -132,5 +132,6 @@ mod tests {
         assert_eq!(g(&artifacts::github::pr_root_workflow()), ArtifactGroup::Backends);
         assert_eq!(g(&artifacts::ado::pr_root_pipeline()), ArtifactGroup::Backends);
         assert_eq!(g(&artifacts::container::container_just()), ArtifactGroup::Container);
+        assert_eq!(g(&artifacts::container::cluster_just()), ArtifactGroup::Container);
     }
 }

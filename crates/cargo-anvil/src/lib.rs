@@ -179,10 +179,10 @@
 //!
 //! ## Containers
 //!
-//! anvil can optionally run the generated recipes inside a container and
-//! build OCI images. Both are opt-in and gated on `[container] enabled`,
-//! configured in an `anvil.toml` at the repo root:
-//!
+//! anvil can optionally run the generated recipes inside a container, build
+//! OCI images, and stand up a throwaway Kind cluster for integration tests.
+//! All three are opt-in and gated on `[container] enabled`, configured in an
+//! `anvil.toml` at the repo root://!
 //! ```toml
 //! [container]
 //! enabled = true
@@ -201,8 +201,8 @@
 //! pre-built reference instead, or `dockerfile` to replace anvil's entirely
 //! when the base OS has to differ.
 //!
-//! `[[image]]` sections add the image-build recipes. A repo with no
-//! `anvil.toml` is byte-for-byte unchanged.
+//! `[[image]]` and `[cluster]` sections add the image-build and cluster
+//! recipes. A repo with no `anvil.toml` is byte-for-byte unchanged.
 //!
 //! See `docs/containers.md` for usage, the full configuration reference, and
 //! the technical overview.
@@ -392,7 +392,10 @@ use std::process::ExitCode;
 pub use anvil::artifacts;
 pub use backend::Backend;
 pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec};
-pub use config::{ContainerConfig, Engine, ImageSpec, NativeWhen, StageArtifact};
+pub use config::{
+    ClusterChart, ClusterConfig, ClusterDependency, ClusterDiagnostics, ClusterHooks, ClusterRetry, ContainerConfig, Engine, ImageSpec,
+    NativeWhen, StageArtifact,
+};
 pub use region::CommentSyntax;
 
 /// One-call entry point for a tool built on the anvil engine.

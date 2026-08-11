@@ -1,8 +1,9 @@
 # Containers
 
-`cargo-anvil` can run your generated `just` recipes inside a container and build OCI images.
+`cargo-anvil` can run your generated `just` recipes inside a container, build OCI images, and stand up a throwaway
+Kubernetes cluster for integration tests.
 
-Both are **opt-in and independent**. They are configured in a single file — `anvil.toml` at the repo root — which is
+All three are **opt-in and independent**. They are configured in a single file — `anvil.toml` at the repo root — which is
 itself optional. A repository with no `anvil.toml` regenerates byte-for-byte identically to a build with no container
 support at all, so adopting nothing costs nothing.
 
@@ -10,7 +11,8 @@ support at all, so adopting nothing costs nothing.
 - [2. Usage](#2-usage)
 - [3. Configuration reference](#3-configuration-reference)
 - [4. How it works](#4-how-it-works)
-- [5. Prerequisites and limits](#5-prerequisites-and-limits)
+- [5. Extension points](#5-extension-points)
+- [6. Prerequisites and limits](#6-prerequisites-and-limits)
 
 ## 1. Quick start
 
@@ -33,8 +35,8 @@ to write. Anvil generates `.anvil/container/Dockerfile`, which installs the tool
 already pins, and builds it the first time it is needed.
 
 Point `image` at a pre-built reference to pull one instead, or `dockerfile` at your own to build something else — see
-[`[container]`](#container--containerized-execution). Product image builds are added by declaring `[[image]]` sections
-alongside `[container] enabled = true` — the image recipes are container-gated, so `[[image]]` on its own emits nothing.
+[`[container]`](#container--containerized-execution). Image builds and the cluster harness are added by declaring
+`[[image]]` and `[cluster]` sections.
 
 ## 2. Usage
 
@@ -123,9 +125,28 @@ just anvil-images       <profile> <tag> <registry>
 `profile` selects which prebuilt binaries are staged, `tag` is the image tag, and `registry` is the ref prefix. The final
 reference is `<registry>/<name|repository>:<tag>`.
 
+### Cluster harness
+
+Emitted when a `[cluster]` section is declared.
+
+| Recipe | Purpose |
+| --- | --- |
+| `just anvil-cluster-preflight` | Verify the engine and `kind` / `kubectl` / `helm` are present. Installs nothing. |
+| `just anvil-cluster-bootstrap` | Install the pinned, checksum-verified cluster tooling on the host. |
+| `just anvil-cluster-up` | Create the cluster if absent. Idempotent. |
+| `just anvil-cluster-load` | Load the declared images into the cluster. |
+| `just anvil-cluster-deploy` | Apply dependencies, then install or upgrade the declared charts. |
+| `just anvil-cluster-test` | The full flow with bounded retries — the one CI calls. |
+| `just anvil-cluster-diagnostics` | Dump the configured resources and logs. Runs automatically on failure. |
+| `just anvil-cluster-down` | Delete the cluster. |
+| `just anvil-cluster-clean` | `mode=cluster` deletes the cluster; `mode=full` also removes the built images. |
+
+`up`, `load`, `deploy`, and `test` take the same `profile` / `tag` / `registry` parameters as the image recipes, so the
+references loaded into the cluster always match the references built.
+
 ## 3. Configuration reference
 
-`anvil.toml` has three sibling top-level sections plus one bare key. Each is independently optional. Unknown keys are a
+`anvil.toml` has four sibling top-level sections plus one bare key. Each is independently optional. Unknown keys are a
 hard error, so a typo is reported rather than silently ignored.
 
 Because `image-output-dir` is a bare key, TOML requires it to appear **before** any `[section]` header.
@@ -321,6 +342,61 @@ build-args = { RUST_PROFILE = "{profile}" }
 stage-artifacts = [{ from = "target/{profile}/api", to = "api" }]
 ```
 
+### `[cluster]` — ephemeral Kubernetes cluster
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `name` | string | `anvil-kind` | Cluster name. |
+| `node-image` | string | — | Pin the Kind node image. |
+| `workers` | integer | `0` | Worker nodes in addition to the control plane. |
+| `load-images` | array | `[]` | Which declared `[[image]]` names to load. Validated against the image set. |
+
+Sub-tables:
+
+| Table | Repeats | Keys |
+| --- | --- | --- |
+| `[[cluster.dependency]]` | yes | `name`, `manifest`, `version`, `namespace`, `preload-images`, `wait` |
+| `[[cluster.chart]]` | yes | `name`, `path`, `namespace`, `crds`, `set`, `wait` |
+| `[cluster.diagnostics]` | no | `resources`, `logs`, `namespace` |
+| `[cluster.retry]` | no | `attempts` (default `1`), `delay-seconds` (default `0`) |
+| `[cluster.hooks]` | no | `pre-install`, `post-install`, `pre-test`, `on-failure` |
+
+Dependencies are external, pinned charts or manifests applied **before** your own charts. A chart's `crds` path is
+installed and established before the chart itself, which is what makes a chart that depends on a custom resource install
+reliably rather than racing a webhook that is not yet serving.
+
+`wait` entries are readiness targets, passed to `kubectl rollout status` after the item is applied and resolved in the
+enclosing dependency's or chart's `namespace`. Set that `namespace` — without it the wait resolves against `default` and
+will appear to pass while the real workload is still starting.
+
+```toml
+[cluster]
+name = "svc-test"
+load-images = ["api"]
+
+[[cluster.dependency]]
+name = "cert-manager"
+manifest = "https://github.com/cert-manager/cert-manager/releases/download/v1.16.1/cert-manager.yaml"
+namespace = "cert-manager"
+wait = ["deployment/cert-manager-webhook"]
+
+[[cluster.chart]]
+name = "api"
+path = "charts/api"
+namespace = "svc"
+set = { "image.tag" = "dev" }
+wait = ["deployment/api"]
+
+[cluster.retry]
+attempts = 3
+delay-seconds = 10
+
+[cluster.diagnostics]
+namespace = "svc"
+resources = ["pods", "events"]
+logs = ["deployment/api"]
+```
+
 ### `[anvil]` — partial adoption
 
 By default anvil manages every artifact in its catalog. The `artifacts` allow-list narrows that to named groups:
@@ -353,12 +429,14 @@ group is selected *and* its own gate is open.
 ### Everything is baked at generation time
 
 `cargo anvil` resolves your configuration and writes the resulting values directly into the emitted recipes. Nothing
-re-reads `anvil.toml` at run time, so the shim, the image recipes, and the devcontainer descriptor cannot drift from each
-other or from the file that produced them. Changing configuration means re-running the generator.
+re-reads `anvil.toml` at run time, so the shim, the image recipes, the cluster harness, and the devcontainer descriptor
+cannot drift from each other or from the file that produced them. Changing configuration means re-running the generator.
 
 ```text
 anvil.toml ──► cargo anvil ──► justfiles/anvil/container.just         (the shim)
                                justfiles/anvil/container-images.just  (per-image recipes)
+                               justfiles/anvil/cluster.just           (cluster harness)
+                               justfiles/anvil/cluster-bootstrap.just (host tooling)
                                .devcontainer/devcontainer.json        (optional)
                                ── plus a re-entry guard spliced into
                                   the tier and group recipes
@@ -426,7 +504,30 @@ without container support.
 With `devcontainer = true`, the emitted `.devcontainer/devcontainer.json` is rendered from the same resolved settings —
 same image, same workdir, same volumes — so the editor and the command line cannot disagree.
 
-## 5. Prerequisites and limits
+## 5. Extension points
+
+No generic harness fits every repository. `[cluster.hooks]` names ordinary `just` recipes that anvil invokes at fixed
+points, without ever modelling what they do:
+
+| Hook | When |
+| --- | --- |
+| `pre-install` | Before the charts are installed. |
+| `post-install` | After the charts are installed. |
+| `pre-test` | After deploy, before the readiness re-check. |
+| `on-failure` | On a failed attempt, before diagnostics are dumped. |
+
+An absent hook means no invocation. A failing hook fails the step.
+
+```toml
+[cluster.hooks]
+pre-install = "discover-issuer"
+on-failure = "dump-extra-state"
+```
+
+Because a hook lives in your own `.just` file, it survives regeneration — you never edit a generated file to extend the
+harness. The four escape valves described in the crate README apply here too.
+
+## 6. Prerequisites and limits
 
 - A container engine on the host: Docker is the supported path. Podman is detected best-effort by the same `engine`
   knob; there are no podman-specific recipe variants.
@@ -436,6 +537,10 @@ same image, same workdir, same volumes — so the editor and the command line ca
   the exec image without one is not supported.
 - The first build of the exec image is expected to take several minutes: it installs a toolchain and the whole pinned
   tool catalog. Later runs reuse it until an input changes.
-
+- The cluster harness additionally needs `kind`, `kubectl`, and `helm`. Run `just anvil-cluster-preflight` to check, or
+  `just anvil-cluster-bootstrap` to install pinned, checksum-verified versions.
+- Images destined for the cluster must be built without provenance attestations. The generated recipes already do this;
+  a hand-rolled build that emits a multi-manifest artifact will be silently refused by the cluster loader.
 - No registry integration for the exec image: no push, no authentication, no promotion. It is built and consumed
   locally, which is why it needs no published artifact to exist.
+- The cluster harness targets Kind. Other Kubernetes distributions are out of scope.

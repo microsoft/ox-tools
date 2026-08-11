@@ -65,13 +65,14 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
 }
 
 /// The container-gated built-in artifacts: the container-execution shim, its
-/// default exec image, and the devcontainer descriptor (pillar 1), plus the
-/// OCI image-build recipes (pillar 2).
+/// default exec image, and the devcontainer descriptor (pillar 1), the OCI
+/// image-build recipes (pillar 2), and the Kind cluster harness plus its host
+/// bootstrap (pillar 3).
 ///
 /// These ship in the base [`Catalog::anvil`](crate::Catalog::anvil) but are
 /// registered *container-gated*, so `build_plan` skips them entirely unless
-/// `anvil.toml` opts in (`[container] enabled = true`, plus any relevant
-/// `[[image]]` sections). With containerization off the emitted
+/// `anvil.toml` opts in (`[container] enabled = true`, plus the relevant
+/// `[[image]]` / `[cluster]` sections). With containerization off the emitted
 /// tree is therefore byte-identical to a build that never registered them.
 /// A fork can still register *additional* container artifacts via
 /// [`CatalogBuilder::with_container_artifact`](crate::CatalogBuilder::with_container_artifact).
@@ -83,6 +84,8 @@ pub(crate) fn anvil_container_artifacts() -> Vec<Artifact> {
         container::exec_dockerignore(),
         container::devcontainer(),
         container::container_images_just(),
+        container::cluster_just(),
+        container::cluster_bootstrap_just(),
     ]
 }
 

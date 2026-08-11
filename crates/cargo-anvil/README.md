@@ -180,9 +180,10 @@ Four escape valves, in increasing severity:
 
 ### Containers
 
-anvil can optionally run the generated recipes inside a container and
-build OCI images. Both are opt-in and gated on `[container] enabled`,
-configured in an `anvil.toml` at the repo root:
+anvil can optionally run the generated recipes inside a container, build
+OCI images, and stand up a throwaway Kind cluster for integration tests.
+All three are opt-in and independent, configured in an `anvil.toml` at the
+repo root:
 
 ```toml
 [container]
@@ -202,8 +203,8 @@ cached while your layer rebuilds in seconds. Set `image` to pull a
 pre-built reference instead, or `dockerfile` to replace anvil’s entirely
 when the base OS has to differ.
 
-`[[image]]` sections add the image-build recipes. A repo with no
-`anvil.toml` is byte-for-byte unchanged.
+`[[image]]` and `[cluster]` sections add the image-build and cluster
+recipes. A repo with no `anvil.toml` is byte-for-byte unchanged.
 
 See `docs/containers.md` for usage, the full configuration reference, and
 the technical overview.
@@ -344,7 +345,7 @@ User-facing container documentation lives in `docs/containers.md`.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbzQgpDPeuungbp1MhPdLQOUUb1JXXtjI8cvUbF4pZS6xXS5RhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbbUgNTANE08wbaevooU56EiAbpzXfkS_Jpt0bk_SnRkUoJXVhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

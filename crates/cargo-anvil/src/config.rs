@@ -5,20 +5,21 @@
 //!
 //! `anvil.toml` (repo root) is anvil's first user-facing config file. It is
 //! **optional**: an absent file means byte-identical behavior to a build with
-//! no container support at all. Three **sibling** top-level items are defined,
-//! each independently optional:
+//! no container support at all. Four **sibling** top-level sections are
+//! defined, each independently optional:
 //!
 //! * `[container]` — opt a repository into running the generated `just`
 //!   recipes inside a container (pillar 1).
 //! * `[[image]]` — locally-built OCI images (pillar 2).
+//! * `[cluster]` — a generic Kind cluster harness (pillar 3).
 //! * `image-output-dir` — a top-level key naming the staged-context guard root
 //!   for `[[image]]` builds (default `out`). As a bare top-level key it must
 //!   appear **before** any `[section]` header, per TOML.
 //!
-//! Image builds are siblings of containerized execution, not sub-concerns of
-//! it, so they live at the top level rather than nested under `[container]`.
-//! The parser rejects unknown keys loudly (typo protection) while keeping the
-//! top-level dispatch trivial to extend.
+//! Building images and running a cluster are siblings of containerized
+//! execution, not sub-concerns of it, so they live at the top level rather
+//! than nested under `[container]`. The parser rejects unknown keys loudly
+//! (typo protection) while keeping the top-level dispatch trivial to extend.
 //!
 //! ## Layering
 //!
@@ -89,8 +90,8 @@ pub(crate) enum ArtifactGroup {
     Config,
     /// The backend-gated cloud-workflow CI files (GitHub / ADO).
     Backends,
-    /// The container-gated artifacts (`container.just`, devcontainer, and
-    /// image recipes).
+    /// The container-gated artifacts (`container.just`, devcontainer, image
+    /// recipes, cluster harness and its bootstrap).
     Container,
 }
 
@@ -194,7 +195,8 @@ pub struct StageArtifact {
 ///
 /// The image is built from a staged context (never the repo root) with its
 /// binaries copied in prebuilt. There is deliberately no registry push, no
-/// ACR, no auth, and no promotion — images are built locally.
+/// ACR, no auth, and no promotion — images are built locally and loaded into
+/// the Kind cluster ([`ClusterConfig`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageSpec {
     /// Image name; drives the `anvil-image-<name>` recipe. Unique within the
@@ -226,6 +228,139 @@ pub struct ImageSpec {
     /// Names of images that must be built before this one. Every entry must
     /// name another `[[image]]`; cycles are rejected at resolve.
     pub depends_on: Vec<String>,
+}
+
+/// One `[[cluster.dependency]]`: an external, pinned chart/manifest
+/// applied to the cluster before the repo's own charts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterDependency {
+    /// Human-readable dependency name (used in log output).
+    pub name: String,
+    /// URL or repo-relative path of the pinned manifest to apply.
+    pub manifest: String,
+    /// Optional pinned version (informational; recorded in log output).
+    pub version: Option<String>,
+    /// Namespace the dependency installs into. Rollout targets in `wait` are
+    /// resolved against it, so a dependency that creates its own namespace
+    /// (cert-manager, ingress-nginx, …) must set this or the wait looks in
+    /// `default` and fails.
+    pub namespace: Option<String>,
+    /// Images to pre-pull on the host and `kind load` before applying the
+    /// manifest (Kind node containerd can inherit an unreachable DNS proxy).
+    pub preload_images: Vec<String>,
+    /// Rollout targets to wait for after applying the manifest.
+    pub wait: Vec<String>,
+}
+
+/// One `[[cluster.chart]]`: a repo-local Helm chart to install.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterChart {
+    /// Chart name; drives the release name.
+    pub name: String,
+    /// Repo-root-relative path to the chart directory.
+    pub path: String,
+    /// Optional target namespace (created if missing).
+    pub namespace: Option<String>,
+    /// Optional directory of CRDs applied server-side **before**
+    /// `helm upgrade --install` (Helm skips CRDs on upgrade).
+    pub crds: Option<String>,
+    /// `--set key=value` overrides, in declaration order. Values may contain
+    /// `{tag}`/`{profile}` tokens.
+    pub set: Vec<(String, String)>,
+    /// Rollout targets to wait for after install.
+    pub wait: Vec<String>,
+}
+
+/// The `[cluster.diagnostics]` table: what to dump when a deploy or
+/// test step fails.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClusterDiagnostics {
+    /// `kubectl get <entry>` invocations to dump.
+    pub resources: Vec<String>,
+    /// Deployments whose logs to tail.
+    pub logs: Vec<String>,
+    /// Namespace the `logs` targets live in. Without it the targets resolve
+    /// in `default`, so a chart installed into its own namespace yields
+    /// "not found" instead of logs — exactly when the diagnostics matter most.
+    pub namespace: Option<String>,
+}
+
+/// The `[cluster.retry]` table: bounded retries around the deploy +
+/// test flow, with a readiness re-check between attempts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterRetry {
+    /// Total attempts (>= 1). Built-in default: `1` (no retry).
+    pub attempts: u32,
+    /// Delay in seconds between attempts. Built-in default: `0`.
+    pub delay_seconds: u32,
+}
+
+impl Default for ClusterRetry {
+    fn default() -> Self {
+        Self {
+            attempts: 1,
+            delay_seconds: 0,
+        }
+    }
+}
+
+/// The `[cluster.hooks]` table: names of user-defined `just` recipes
+/// invoked at fixed extension points.
+///
+/// Anvil never models what a hook does — it only invokes the named recipe when
+/// set, so a repository can inject bespoke wiring without anvil learning any
+/// domain concept.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClusterHooks {
+    /// Invoked after the cluster is up but before charts are installed.
+    pub pre_install: Option<String>,
+    /// Invoked after all charts are installed.
+    pub post_install: Option<String>,
+    /// Invoked before the test phase.
+    pub pre_test: Option<String>,
+    /// Invoked when a phase fails (before diagnostics).
+    pub on_failure: Option<String>,
+}
+
+/// The `[cluster]` section: a generic Kind cluster harness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClusterConfig {
+    /// Kind cluster name. Built-in default: `anvil-kind`.
+    pub name: String,
+    /// Pinned Kind node image (digest encouraged). `None` uses the Kind
+    /// binary's built-in default.
+    pub node_image: Option<String>,
+    /// Number of worker nodes. Built-in default: `0` (control-plane only).
+    pub workers: u32,
+    /// Names of `[[image]]` entries to `kind load` into the cluster.
+    pub load_images: Vec<String>,
+    /// External pinned chart/manifest dependencies, applied in order before
+    /// the repo's own charts.
+    pub dependencies: Vec<ClusterDependency>,
+    /// Repo-local Helm charts to install, in order.
+    pub charts: Vec<ClusterChart>,
+    /// Failure diagnostics.
+    pub diagnostics: Option<ClusterDiagnostics>,
+    /// Bounded-retry policy.
+    pub retry: ClusterRetry,
+    /// Extension hooks.
+    pub hooks: ClusterHooks,
+}
+
+impl Default for ClusterConfig {
+    fn default() -> Self {
+        Self {
+            name: "anvil-kind".to_owned(),
+            node_image: None,
+            workers: 0,
+            load_images: Vec::new(),
+            dependencies: Vec::new(),
+            charts: Vec::new(),
+            diagnostics: None,
+            retry: ClusterRetry::default(),
+            hooks: ClusterHooks::default(),
+        }
+    }
 }
 
 /// Where the exec image comes from.
@@ -275,10 +410,10 @@ impl ExecImageSource {
 /// overrides.
 ///
 /// The `[container]`-exec fields (`enabled`, `image`, `engine`, …) come from
-/// the `[container]` section. The `images` and `image_output_dir` fields carry
-/// the **top-level sibling** items (`[[image]]` and the `image-output-dir`
-/// key); parsing folds them in here so a single value drives resolution and
-/// rendering.
+/// the `[container]` section. The `images`, `image_output_dir` and `cluster`
+/// fields carry the **top-level sibling** sections (`[[image]]`, the
+/// `image-output-dir` key, and `[cluster]`); parsing folds them in here so a
+/// single value drives resolution and rendering.
 ///
 /// Every field is `Option` so the catalog default layer and the user's
 /// `anvil.toml` can be merged field-by-field ([`Self::overlay`]) before the
@@ -345,6 +480,9 @@ pub struct ContainerConfig {
     /// top-level `image-output-dir` key). The image recipes refuse a context
     /// outside it. Built-in default: `out`.
     pub image_output_dir: Option<String>,
+    /// The Kind cluster harness (the top-level `[cluster]` section). Built-in
+    /// default: absent (no cluster recipes emitted).
+    pub cluster: Option<ClusterConfig>,
 }
 
 impl ContainerConfig {
@@ -382,6 +520,7 @@ impl ContainerConfig {
             native_when: self.native_when.or_else(|| base.native_when.clone()),
             images: self.images.or_else(|| base.images.clone()),
             image_output_dir: self.image_output_dir.or_else(|| base.image_output_dir.clone()),
+            cluster: self.cluster.or_else(|| base.cluster.clone()),
         }
     }
 
@@ -398,9 +537,10 @@ impl ContainerConfig {
     ///
     /// Returns an error if `enabled` resolves to `true` but the exec image
     /// source is ambiguous (both `image` and `dockerfile` set) or ill-formed
-    /// (an empty `image` or `dockerfile`), or if the image sections are
-    /// invalid (duplicate/ill-named images, a `depends-on` cycle, or a context
-    /// outside the image output dir).
+    /// (an empty `image` or `dockerfile`), or if the image/cluster sections
+    /// are invalid (duplicate/ill-named images, a `depends-on` cycle, a
+    /// context outside the image output dir, or a `load-images` entry naming
+    /// no image).
     pub(crate) fn resolve(&self, dir_name: &str) -> Result<ResolvedContainer, AppError> {
         let enabled = self.enabled.unwrap_or(false);
         let image = self.image.clone().unwrap_or_default();
@@ -418,6 +558,10 @@ impl ContainerConfig {
         let image_output_dir = self.image_output_dir.clone().unwrap_or_else(|| "out".to_owned());
         validate_images(&images, &image_output_dir)?;
         let image_build_order = topo_order(&images)?;
+        let cluster = self.cluster.clone();
+        if let Some(cluster) = &cluster {
+            validate_cluster(cluster, &images)?;
+        }
 
         // Select the exec-image source. `image` pulls a pre-built reference;
         // `dockerfile` builds one in place of anvil's; `extends` builds anvil's
@@ -504,6 +648,7 @@ impl ContainerConfig {
             images,
             image_output_dir,
             image_build_order,
+            cluster,
         })
     }
 }
@@ -721,12 +866,45 @@ fn topo_order(images: &[ImageSpec]) -> Result<Vec<String>, AppError> {
     Ok(ordered)
 }
 
+/// Validate the cluster section against the image set: every `load-images`
+/// entry must name a declared image.
+fn validate_cluster(cluster: &ClusterConfig, images: &[ImageSpec]) -> Result<(), AppError> {
+    if cluster.name.trim().is_empty() {
+        bail!("[cluster] requires a non-empty `name`");
+    }
+    for wanted in &cluster.load_images {
+        if !images.iter().any(|image| image.name == *wanted) {
+            bail!("[cluster] load-images entry '{}' names no [[image]]", wanted);
+        }
+    }
+    for chart in &cluster.charts {
+        if chart.name.trim().is_empty() {
+            bail!("[[cluster.chart]] requires a non-empty `name`");
+        }
+        if chart.path.trim().is_empty() {
+            bail!("[[cluster.chart]] '{}' requires a non-empty `path`", chart.name);
+        }
+    }
+    for dependency in &cluster.dependencies {
+        if dependency.name.trim().is_empty() {
+            bail!("[[cluster.dependency]] requires a non-empty `name`");
+        }
+        if dependency.manifest.trim().is_empty() {
+            bail!("[[cluster.dependency]] '{}' requires a non-empty `manifest`", dependency.name);
+        }
+    }
+    if cluster.retry.attempts == 0 {
+        bail!("[cluster.retry] attempts must be >= 1");
+    }
+    Ok(())
+}
+
 /// The parsed `anvil.toml` document.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AnvilConfig {
     /// The container-feature configuration: the `[container]` section plus the
-    /// top-level `[[image]]` and `image-output-dir` siblings, folded together
-    /// by [`parse`].
+    /// top-level `[[image]]`, `image-output-dir` and `[cluster]` siblings,
+    /// folded together by [`parse`].
     pub container: ContainerConfig,
     /// The `[anvil] artifacts` allow-list of catalog-artifact groups to
     /// manage, or `None` when the `artifacts` key is omitted (every group
@@ -771,6 +949,8 @@ pub(crate) struct ResolvedContainer {
     pub image_output_dir: String,
     /// Image names in deterministic dependency (build) order.
     pub image_build_order: Vec<String>,
+    /// The Kind cluster harness, if configured.
+    pub cluster: Option<ClusterConfig>,
 }
 
 /// Load `anvil.toml` from the repo root, returning defaults when it is absent.
@@ -793,33 +973,33 @@ pub(crate) fn load(repo_root: &Path) -> Result<AnvilConfig, AppError> {
 pub(crate) fn parse(text: &str) -> Result<AnvilConfig, AppError> {
     let doc: DocumentMut = text.parse::<DocumentMut>().into_app_err("not valid TOML")?;
 
-    // Top-level dispatch: `[container]`, its image siblings, and the `[anvil]`
-    // meta-section are defined today. New sections are added by
+    // Top-level dispatch: `[container]`, the container siblings, and the
+    // `[anvil]` meta-section are defined today. New sections are added by
     // extending this match — an unknown table is a typo.
     let mut container = ContainerConfig::default();
     let mut images: Option<Vec<ImageSpec>> = None;
     let mut image_output_dir: Option<String> = None;
-
+    let mut cluster: Option<ClusterConfig> = None;
     let mut artifacts: Option<BTreeSet<ArtifactGroup>> = None;
     for (key, item) in doc.as_table() {
         match key {
             "container" => container = parse_container(item)?,
             "image" => images = Some(parse_images(item)?),
             "image-output-dir" => image_output_dir = Some(as_string(key, item)?),
-
+            "cluster" => cluster = Some(parse_cluster(item)?),
             "anvil" => artifacts = parse_anvil_section(item)?,
             other => bail!(
                 "unknown top-level key '{other}' (valid top-level items: [anvil], [container], \
-                 [[image]], image-output-dir)"
+                 [[image]], [cluster], image-output-dir)"
             ),
         }
     }
-    // `[[image]]` and `image-output-dir` are top-level siblings of
+    // `[[image]]`, `[cluster]` and `image-output-dir` are top-level siblings of
     // `[container]`, but resolve alongside the container settings, so fold them
     // into the container config here.
     container.images = images;
     container.image_output_dir = image_output_dir;
-
+    container.cluster = cluster;
     Ok(AnvilConfig { container, artifacts })
 }
 
@@ -889,7 +1069,10 @@ fn parse_container(item: &Item) -> Result<ContainerConfig, AppError> {
             "forward-env" => config.forward_env = Some(as_string_array(key, value)?),
             "devcontainer" => config.devcontainer = Some(as_bool(key, value)?),
             "native-when" => config.native_when = Some(parse_native_when(value)?),
-
+            "cluster" => bail!(
+                "nested [container.cluster] is no longer supported; declare the cluster at the \
+                 top level as [cluster]"
+            ),
             "image-output-dir" => bail!(
                 "[container] image-output-dir is no longer supported; set image-output-dir as a \
                  top-level key"
@@ -979,6 +1162,153 @@ fn parse_stage_artifacts(item: &Item) -> Result<Vec<StageArtifact>, AppError> {
     Ok(out)
 }
 
+/// Parse the `[cluster]` table.
+fn parse_cluster(item: &Item) -> Result<ClusterConfig, AppError> {
+    let table = item.as_table_like().ok_or_else(|| app_err!("[cluster] must be a table"))?;
+    let mut cluster = ClusterConfig::default();
+    for (key, value) in table.iter() {
+        match key {
+            "name" => cluster.name = as_string(key, value)?,
+            "node-image" => cluster.node_image = Some(as_string(key, value)?),
+            "workers" => cluster.workers = as_u32(key, value)?,
+            "load-images" => cluster.load_images = as_string_array(key, value)?,
+            "dependency" => cluster.dependencies = parse_dependencies(value)?,
+            "chart" => cluster.charts = parse_charts(value)?,
+            "diagnostics" => cluster.diagnostics = Some(parse_diagnostics(value)?),
+            "retry" => cluster.retry = parse_retry(value)?,
+            "hooks" => cluster.hooks = parse_hooks(value)?,
+            other => bail!(
+                "unknown key '[cluster] {other}' (valid keys: name, node-image, \
+                 workers, load-images, dependency, chart, diagnostics, retry, hooks)"
+            ),
+        }
+    }
+    Ok(cluster)
+}
+
+fn parse_dependencies(item: &Item) -> Result<Vec<ClusterDependency>, AppError> {
+    let array = item
+        .as_array_of_tables()
+        .ok_or_else(|| app_err!("[[cluster.dependency]] must be an array of tables"))?;
+    let mut out = Vec::with_capacity(array.len());
+    for table in array {
+        let mut name = None;
+        let mut manifest = None;
+        let mut version = None;
+        let mut namespace = None;
+        let mut preload_images = Vec::new();
+        let mut wait = Vec::new();
+        for (key, value) in table {
+            match key {
+                "name" => name = Some(as_string(key, value)?),
+                "manifest" => manifest = Some(as_string(key, value)?),
+                "version" => version = Some(as_string(key, value)?),
+                "namespace" => namespace = Some(as_string(key, value)?),
+                "preload-images" => preload_images = as_string_array(key, value)?,
+                "wait" => wait = as_string_array(key, value)?,
+                other => bail!(
+                    "unknown key '[[cluster.dependency]] {other}' (valid keys: name, \
+                     manifest, version, namespace, preload-images, wait)"
+                ),
+            }
+        }
+        out.push(ClusterDependency {
+            name: name.ok_or_else(|| app_err!("[[cluster.dependency]] requires a `name`"))?,
+            manifest: manifest.ok_or_else(|| app_err!("[[cluster.dependency]] requires a `manifest`"))?,
+            version,
+            namespace,
+            preload_images,
+            wait,
+        });
+    }
+    Ok(out)
+}
+
+fn parse_charts(item: &Item) -> Result<Vec<ClusterChart>, AppError> {
+    let array = item
+        .as_array_of_tables()
+        .ok_or_else(|| app_err!("[[cluster.chart]] must be an array of tables"))?;
+    let mut out = Vec::with_capacity(array.len());
+    for table in array {
+        let mut name = None;
+        let mut path = None;
+        let mut namespace = None;
+        let mut crds = None;
+        let mut set = Vec::new();
+        let mut wait = Vec::new();
+        for (key, value) in table {
+            match key {
+                "name" => name = Some(as_string(key, value)?),
+                "path" => path = Some(as_string(key, value)?),
+                "namespace" => namespace = Some(as_string(key, value)?),
+                "crds" => crds = Some(as_string(key, value)?),
+                "set" => set = parse_string_map(key, value)?,
+                "wait" => wait = as_string_array(key, value)?,
+                other => bail!(
+                    "unknown key '[[cluster.chart]] {other}' (valid keys: name, path, \
+                     namespace, crds, set, wait)"
+                ),
+            }
+        }
+        out.push(ClusterChart {
+            name: name.ok_or_else(|| app_err!("[[cluster.chart]] requires a `name`"))?,
+            path: path.ok_or_else(|| app_err!("[[cluster.chart]] requires a `path`"))?,
+            namespace,
+            crds,
+            set,
+            wait,
+        });
+    }
+    Ok(out)
+}
+
+fn parse_diagnostics(item: &Item) -> Result<ClusterDiagnostics, AppError> {
+    let table = item
+        .as_table_like()
+        .ok_or_else(|| app_err!("[cluster.diagnostics] must be a table"))?;
+    let mut diagnostics = ClusterDiagnostics::default();
+    for (key, value) in table.iter() {
+        match key {
+            "resources" => diagnostics.resources = as_string_array(key, value)?,
+            "logs" => diagnostics.logs = as_string_array(key, value)?,
+            "namespace" => diagnostics.namespace = Some(as_string(key, value)?),
+            other => bail!("unknown key '[cluster.diagnostics] {other}' (valid keys: resources, logs, namespace)"),
+        }
+    }
+    Ok(diagnostics)
+}
+
+fn parse_retry(item: &Item) -> Result<ClusterRetry, AppError> {
+    let table = item.as_table_like().ok_or_else(|| app_err!("[cluster.retry] must be a table"))?;
+    let mut retry = ClusterRetry::default();
+    for (key, value) in table.iter() {
+        match key {
+            "attempts" => retry.attempts = as_u32(key, value)?,
+            "delay-seconds" => retry.delay_seconds = as_u32(key, value)?,
+            other => bail!("unknown key '[cluster.retry] {other}' (valid keys: attempts, delay-seconds)"),
+        }
+    }
+    Ok(retry)
+}
+
+fn parse_hooks(item: &Item) -> Result<ClusterHooks, AppError> {
+    let table = item.as_table_like().ok_or_else(|| app_err!("[cluster.hooks] must be a table"))?;
+    let mut hooks = ClusterHooks::default();
+    for (key, value) in table.iter() {
+        match key {
+            "pre-install" => hooks.pre_install = Some(as_string(key, value)?),
+            "post-install" => hooks.post_install = Some(as_string(key, value)?),
+            "pre-test" => hooks.pre_test = Some(as_string(key, value)?),
+            "on-failure" => hooks.on_failure = Some(as_string(key, value)?),
+            other => bail!(
+                "unknown key '[cluster.hooks] {other}' (valid keys: pre-install, \
+                 post-install, pre-test, on-failure)"
+            ),
+        }
+    }
+    Ok(hooks)
+}
+
 fn parse_native_when(item: &Item) -> Result<NativeWhen, AppError> {
     let table = item
         .as_table_like()
@@ -999,6 +1329,11 @@ fn as_bool(key: &str, item: &Item) -> Result<bool, AppError> {
     item.as_bool().ok_or_else(|| app_err!("'{key}' must be a boolean"))
 }
 
+fn as_u32(key: &str, item: &Item) -> Result<u32, AppError> {
+    let value = item.as_integer().ok_or_else(|| app_err!("'{key}' must be an integer"))?;
+    u32::try_from(value).map_err(|_err| app_err!("'{key}' must be a non-negative integer that fits in u32"))
+}
+
 /// A string value from an inline-table entry (a `&Value`, not an `&Item`).
 fn inline_string(key: &str, value: &toml_edit::Value) -> Result<String, AppError> {
     value
@@ -1008,7 +1343,7 @@ fn inline_string(key: &str, value: &toml_edit::Value) -> Result<String, AppError
 }
 
 /// Parse an inline table of string→string pairs, preserving declaration order
-/// (used for `build-args`).
+/// (used for `build-args` and chart `set`).
 fn parse_string_map(key: &str, item: &Item) -> Result<Vec<(String, String)>, AppError> {
     let table = item
         .as_table_like()
@@ -1314,17 +1649,19 @@ version-id = "22.04"
     }
 
     #[test]
-    fn top_level_image_and_output_dir_are_accepted() {
-        // The image sibling items parse at the top level, next to
+    fn top_level_image_cluster_and_output_dir_are_accepted() {
+        // The three new sibling sections parse at the top level, next to
         // `[container]`, without the old collision.
         let text = "image-output-dir = \"out\"\n\n\
              [container]\nenabled = true\nimage = \"img:1\"\n\n\
-             [[image]]\nname = \"svc\"\ndockerfile = \"D\"\ncontext = \"out/svc\"\n";
+             [[image]]\nname = \"svc\"\ndockerfile = \"D\"\ncontext = \"out/svc\"\n\n\
+             [cluster]\nname = \"k\"\n";
         let resolved = parse(text).unwrap().container.resolve("repo").unwrap();
         assert!(resolved.enabled);
         assert_eq!(resolved.image, "img:1");
         assert_eq!(resolved.image_output_dir, "out");
         assert_eq!(resolved.images.len(), 1);
+        assert!(resolved.cluster.is_some());
     }
 
     #[test]
@@ -1441,10 +1778,10 @@ stage-artifacts = [
         assert_eq!(svc.stage_artifacts[0].to, "bin/my-svc");
     }
 
-    /// Resolve from a top-level `[[image]]`/`image-output-dir` body with no
-    /// `[container]` section. Container execution stays disabled, so the
-    /// exec-image requirement never fires — image validation runs on its own,
-    /// independent of pillar 1.
+    /// Resolve from a top-level `[[image]]`/`[cluster]`/`image-output-dir` body
+    /// with no `[container]` section. Container execution stays disabled, so
+    /// the exec-image requirement never fires — image/cluster validation runs
+    /// on its own, independent of pillar 1.
     fn resolve_body(body: &str) -> Result<ResolvedContainer, AppError> {
         parse(body).unwrap().container.resolve("repo")
     }
@@ -1490,13 +1827,53 @@ stage-artifacts = [
         assert_eq!(resolved.workdir, "/src");
     }
 
+    /// A dependency that installs into its own namespace must be able to say
+    /// so: its `wait` rollout targets are resolved against that namespace.
+    /// Without it, waiting on `deployment/cert-manager-webhook` looks in
+    /// `default` and fails, so the charts install before the dependency's
+    /// webhook is serving and Helm dies calling it.
+    #[test]
+    fn dependency_namespace_is_parsed_for_wait_resolution() {
+        let body = "\n[cluster]\nname = \"c\"\n\n[[cluster.dependency]]\nname = \"cert-manager\"\n\
+                    manifest = \"https://example/cert-manager.yaml\"\nnamespace = \"cert-manager\"\n\
+                    wait = [\"deployment/cert-manager-webhook\"]\n";
+        let resolved = resolve_body(body).unwrap();
+        let dep = &resolved.cluster.as_ref().unwrap().dependencies[0];
+        assert_eq!(dep.namespace.as_deref(), Some("cert-manager"));
+        assert_eq!(dep.wait, vec!["deployment/cert-manager-webhook".to_owned()]);
+    }
+
+    /// The namespace is optional; omitting it keeps the previous shape.
+    #[test]
+    fn dependency_namespace_is_optional() {
+        let body = "\n[cluster]\nname = \"c\"\n\n[[cluster.dependency]]\nname = \"d\"\nmanifest = \"m\"\n";
+        let resolved = resolve_body(body).unwrap();
+        assert_eq!(resolved.cluster.as_ref().unwrap().dependencies[0].namespace, None);
+    }
+
+    /// Diagnostics log targets are namespaced too: without a namespace they
+    /// resolve in `default` and report "not found" instead of logs, precisely
+    /// when a failure has occurred and the logs are most needed.
+    #[test]
+    fn diagnostics_namespace_is_parsed() {
+        let body = "\n[cluster]\nname = \"c\"\n\n[cluster.diagnostics]\n\
+                    logs = [\"deployment/demo\"]\nnamespace = \"demo-system\"\n";
+        let resolved = resolve_body(body).unwrap();
+        let diag = resolved.cluster.as_ref().unwrap().diagnostics.as_ref().unwrap();
+        assert_eq!(diag.namespace.as_deref(), Some("demo-system"));
+        assert_eq!(diag.logs, vec!["deployment/demo".to_owned()]);
+    }
+
     /// A published image path can differ from the recipe name: `/` is not a
     /// valid `just` recipe token, so a repository grouping its images under a
-    /// namespace needs `repository` to carry the real path.
+    /// namespace needs `repository` to carry the real path. The cluster loader
+    /// must resolve `load-images` names through it, or the images land in the
+    /// nodes under a reference no pod ever requests.
     #[test]
     fn image_repository_overrides_the_reference_path() {
         let body = "\n[[image]]\nname = \"cs-agent\"\nrepository = \"cosmic-sandbox/cs-agent\"\n\
-                    dockerfile = \"D\"\ncontext = \"out/a\"\n";
+                    dockerfile = \"D\"\ncontext = \"out/a\"\n\n[cluster]\nname = \"c\"\n\
+                    load-images = [\"cs-agent\"]\n";
         let resolved = resolve_body(body).unwrap();
         assert_eq!(resolved.images[0].repository.as_deref(), Some("cosmic-sandbox/cs-agent"));
         // The recipe name stays a valid just token even though the path is nested.
@@ -1671,5 +2048,216 @@ stage-artifacts = [
         .unwrap_err()
         .to_string();
         assert!(err.contains("cycle"), "got: {err}");
+    }
+
+    // -----------------------------------------------------------------------
+    // Pillar 3 — [cluster]
+    // -----------------------------------------------------------------------
+
+    const CLUSTER_TOML: &str = r#"
+[[image]]
+name = "my-service"
+dockerfile = "containers/svc/Dockerfile"
+context = "out/svc"
+
+[cluster]
+name = "anvil-kind"
+node-image = "kindest/node:v1.31.0"
+workers = 2
+load-images = ["my-service"]
+
+[[cluster.dependency]]
+name = "cert-manager"
+manifest = "https://example.com/cert-manager.yaml"
+version = "v1.16.1"
+preload-images = ["quay.io/jetstack/cert-manager-controller:v1.16.1"]
+wait = ["deployment/cert-manager-webhook"]
+
+[[cluster.chart]]
+name = "svc"
+path = "charts/svc"
+namespace = "svc-system"
+crds = "charts/svc/crds"
+set = { "image.tag" = "{tag}" }
+wait = ["deployment/svc-controller"]
+
+[cluster.diagnostics]
+resources = ["pods -A -o wide", "events"]
+logs = ["deployment/svc-controller"]
+
+[cluster.retry]
+attempts = 2
+delay-seconds = 10
+
+[cluster.hooks]
+pre-install = "cosmic-native-auth"
+"#;
+
+    #[test]
+    fn cluster_section_parses_all_fields() {
+        let resolved = parse(CLUSTER_TOML).unwrap().container.resolve("repo").unwrap();
+        let cluster = resolved.cluster.expect("cluster configured");
+        assert_eq!(cluster.name, "anvil-kind");
+        assert_eq!(cluster.node_image.as_deref(), Some("kindest/node:v1.31.0"));
+        assert_eq!(cluster.workers, 2);
+        assert_eq!(cluster.load_images, vec!["my-service".to_owned()]);
+        assert_eq!(cluster.dependencies.len(), 1);
+        let dep = &cluster.dependencies[0];
+        assert_eq!(dep.name, "cert-manager");
+        assert_eq!(dep.version.as_deref(), Some("v1.16.1"));
+        assert_eq!(
+            dep.preload_images,
+            vec!["quay.io/jetstack/cert-manager-controller:v1.16.1".to_owned()]
+        );
+        assert_eq!(dep.wait, vec!["deployment/cert-manager-webhook".to_owned()]);
+        assert_eq!(cluster.charts.len(), 1);
+        let chart = &cluster.charts[0];
+        assert_eq!(chart.name, "svc");
+        assert_eq!(chart.namespace.as_deref(), Some("svc-system"));
+        assert_eq!(chart.crds.as_deref(), Some("charts/svc/crds"));
+        assert_eq!(chart.set, vec![("image.tag".to_owned(), "{tag}".to_owned())]);
+        let diag = cluster.diagnostics.expect("diagnostics configured");
+        assert_eq!(diag.resources, vec!["pods -A -o wide".to_owned(), "events".to_owned()]);
+        assert_eq!(cluster.retry.attempts, 2);
+        assert_eq!(cluster.retry.delay_seconds, 10);
+        assert_eq!(cluster.hooks.pre_install.as_deref(), Some("cosmic-native-auth"));
+        assert!(cluster.hooks.post_install.is_none());
+    }
+
+    #[test]
+    fn cluster_defaults_apply() {
+        let resolved = resolve_body("\n[cluster]\n").unwrap();
+        let cluster = resolved.cluster.unwrap();
+        assert_eq!(cluster.name, "anvil-kind");
+        assert_eq!(cluster.workers, 0);
+        assert!(cluster.node_image.is_none());
+        assert_eq!(cluster.retry.attempts, 1, "retry defaults to a single attempt");
+        assert_eq!(cluster.retry.delay_seconds, 0);
+    }
+
+    #[test]
+    fn cluster_load_images_must_name_an_image() {
+        let err = resolve_body("\n[cluster]\nload-images = [\"ghost\"]\n").unwrap_err().to_string();
+        assert!(err.contains("names no [[image]]"), "got: {err}");
+    }
+
+    #[test]
+    fn cluster_retry_zero_attempts_is_rejected() {
+        let err = resolve_body("\n[cluster]\n\n[cluster.retry]\nattempts = 0\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("attempts must be >= 1"), "got: {err}");
+    }
+
+    #[test]
+    fn cluster_chart_requires_name_and_path() {
+        resolve_body("\n[cluster]\n\n[[cluster.chart]]\nname = \"svc\"\npath = \"\"\n").unwrap_err();
+    }
+
+    #[test]
+    fn cluster_dependency_requires_manifest() {
+        resolve_body("\n[cluster]\n\n[[cluster.dependency]]\nname = \"dep\"\nmanifest = \"\"\n").unwrap_err();
+    }
+
+    #[test]
+    fn cluster_unknown_key_is_rejected() {
+        let text = "[container]\nenabled = true\n\n[cluster]\nbogus = 1\n";
+        parse(text).unwrap_err();
+    }
+
+    #[test]
+    fn cluster_hooks_unknown_key_is_rejected() {
+        let text = "[container]\nenabled = true\nimage = \"img:1\"\n\n[cluster]\n\n[cluster.hooks]\nmid-install = \"x\"\n";
+        parse(text).unwrap_err();
+    }
+
+    // -----------------------------------------------------------------------
+    // All three pillars together — the customer's shape
+    // -----------------------------------------------------------------------
+
+    /// The primary use case: containerized recipe execution (`[container]`),
+    /// two image builds with a `depends-on` edge (`[[image]]`), and a full Kind
+    /// cluster harness (`[cluster]`) — all in one config. This shape was
+    /// previously inexpressible (the exec `image` string collided with the
+    /// nested `[[container.image]]` array); with the sections promoted to the
+    /// top level it parses and resolves cleanly.
+    #[test]
+    fn all_three_sections_resolve_together() {
+        let text = r#"
+image-output-dir = "out"
+
+[container]
+enabled = true
+image = "ghcr.io/acme/rust-dev:1.2.3"
+engine = "docker"
+
+[[image]]
+name = "base-image"
+dockerfile = "containers/base/Dockerfile"
+context = "out/base"
+
+[[image]]
+name = "my-service"
+dockerfile = "containers/svc/Dockerfile"
+target = "runtime"
+context = "out/svc"
+depends-on = ["base-image"]
+stage-artifacts = [
+  { from = "target/{profile}/my-svc", to = "bin/my-svc" },
+]
+
+[cluster]
+name = "anvil-kind"
+workers = 2
+load-images = ["my-service"]
+
+[[cluster.dependency]]
+name = "cert-manager"
+manifest = "https://example.com/cert-manager.yaml"
+preload-images = ["quay.io/jetstack/cert-manager-controller:v1.16.1"]
+wait = ["deployment/cert-manager-webhook"]
+
+[[cluster.chart]]
+name = "svc"
+path = "charts/svc"
+crds = "charts/svc/crds"
+set = { "image.tag" = "{tag}" }
+wait = ["deployment/svc-controller"]
+
+[cluster.diagnostics]
+resources = ["pods -A -o wide"]
+logs = ["deployment/svc-controller"]
+
+[cluster.retry]
+attempts = 2
+delay-seconds = 10
+
+[cluster.hooks]
+pre-install = "cosmic-native-auth"
+on-failure = "collect-support-bundle"
+"#;
+        let resolved = parse(text).unwrap().container.resolve("repo").unwrap();
+
+        // Pillar 1: exec container is enabled with its own image.
+        assert!(resolved.enabled);
+        assert_eq!(resolved.image, "ghcr.io/acme/rust-dev:1.2.3");
+        assert_eq!(resolved.engine, Engine::Docker);
+
+        // Pillar 2: two images, resolved in dependency order.
+        assert_eq!(resolved.images.len(), 2);
+        assert_eq!(resolved.image_output_dir, "out");
+        assert_eq!(resolved.image_build_order, vec!["base-image", "my-service"]);
+
+        // Pillar 3: the cluster cross-references a declared image and carries
+        // its dependency, chart, diagnostics, retry and hooks.
+        let cluster = resolved.cluster.expect("cluster configured");
+        assert_eq!(cluster.load_images, vec!["my-service".to_owned()]);
+        assert_eq!(cluster.dependencies.len(), 1);
+        assert_eq!(cluster.charts.len(), 1);
+        assert_eq!(cluster.charts[0].crds.as_deref(), Some("charts/svc/crds"));
+        assert!(cluster.diagnostics.is_some());
+        assert_eq!(cluster.retry.attempts, 2);
+        assert_eq!(cluster.hooks.pre_install.as_deref(), Some("cosmic-native-auth"));
+        assert_eq!(cluster.hooks.on_failure.as_deref(), Some("collect-support-bundle"));
     }
 }

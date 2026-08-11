@@ -20,7 +20,7 @@
 # engine as build context.
 #
 # There is deliberately no registry push, no ACR, no auth, and no promotion:
-# images are built locally.
+# images are built locally and loaded into the Kind cluster (see cluster.just).
 #
 # Recipe parameters shared by both recipes:
 #   profile   selects the staged binaries ({profile} token); default "debug".

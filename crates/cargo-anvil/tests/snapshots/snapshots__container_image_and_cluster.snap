@@ -1383,6 +1383,41 @@ stage-artifacts = [
 { from = "target/{profile}/my-svc", to = "bin/my-svc" },
 ]
 
+[cluster]
+name = "anvil-kind"
+node-image = "kindest/node:v1.31.0"
+workers = 2
+load-images = ["my-service"]
+
+[[cluster.dependency]]
+name = "cert-manager"
+manifest = "https://example.com/cert-manager.yaml"
+version = "v1.16.1"
+preload-images = ["quay.io/jetstack/cert-manager-controller:v1.16.1"]
+wait = ["deployment/cert-manager-webhook"]
+
+[[cluster.chart]]
+name = "svc"
+path = "charts/svc"
+namespace = "svc-system"
+crds = "charts/svc/crds"
+set = { "image.tag" = "{tag}" }
+wait = ["deployment/svc-controller"]
+
+[cluster.diagnostics]
+resources = ["pods -A -o wide", "events --sort-by=.lastTimestamp"]
+logs = ["deployment/svc-controller"]
+
+[cluster.retry]
+attempts = 2
+delay-seconds = 10
+
+[cluster.hooks]
+pre-install = "cosmic-native-auth"
+post-install = "record-issuer"
+pre-test = "seed-data"
+on-failure = "collect-support-bundle"
+
 === clippy.toml ===
 # >>> anvil-managed: anvil-clippy
 # Fine-tuning settings for clippy lints. These cannot be expressed in
@@ -3324,6 +3359,443 @@ anvil-udeps-setup installer="install": anvil-toolchain-nightly-install (anvil-to
 [group("anvil-setup")]
 anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-tool-cargo-udeps-validate-prereqs
 
+=== justfiles/anvil/cluster-bootstrap.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+#
+# Host bootstrap + preflight for the Kind cluster harness. Emitted only when
+# `[container] enabled = true` and a `[cluster]` section is
+# configured in anvil.toml.
+#
+# Docker-in-WSL is the supported engine. Podman may be detected best-effort by
+# the shared engine abstraction, but there are deliberately no podman-specific
+# recipe variants — the single `engine` knob covers it.
+
+# Pinned, checksum-verified tool versions (Linux amd64).
+kind_version := "v0.24.0"
+kind_sha256 := "b89aada5a39d620da3fcd16435b7f28d858927dd53f92cbac77686b0588b600d"
+kubectl_version := "v1.31.0"
+kubectl_sha256 := "7c27adc64a84d1c0cc3dcf7bf4b6e916cc00f3f576a2dbac51b318d926032437"
+helm_version := "v3.16.0"
+helm_sha256 := "327cfbc7ddc5a3eb644039ceb0cff66394628654c4f5a76bf715ed15b893983b"
+
+# Verify the engine/daemon and kind/kubectl/helm are present. Installs nothing.
+[group("anvil-cluster")]
+[script("pwsh")]
+anvil-cluster-preflight:
+    $ErrorActionPreference = 'Stop'
+    $missing = @()
+    $engine = $null
+    foreach ($c in @('docker', 'podman')) {
+        if (Get-Command $c -ErrorAction SilentlyContinue) { $engine = $c; break }
+    }
+    if ($null -eq $engine) {
+        $missing += 'a container engine (docker or podman) — install Docker in WSL'
+    } else {
+        & $engine info *> $null
+        if ($LASTEXITCODE -ne 0) {
+            $missing += "$engine is installed but its daemon is not reachable — start the engine"
+        }
+    }
+    foreach ($tool in @('kind', 'kubectl', 'helm')) {
+        if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+            $missing += "$tool not on PATH — run 'just anvil-cluster-bootstrap'"
+        }
+    }
+    if ($missing.Count -gt 0) {
+        Write-Error ("preflight failed:`n  - " + ($missing -join "`n  - "))
+        exit 1
+    }
+    Write-Output "anvil: preflight OK (engine=$engine; kind, kubectl, helm present)"
+    exit 0
+
+# Install pinned kind/kubectl/helm and tune WSL limits. Linux/WSL only.
+[group("anvil-cluster")]
+[script("pwsh")]
+anvil-cluster-bootstrap:
+    $ErrorActionPreference = 'Stop'
+    if ($IsWindows) {
+        Write-Error "anvil-cluster-bootstrap installs Linux tooling; run it inside WSL / the Linux engine host"
+        exit 1
+    }
+    # Prefer a directory already on PATH so the tools are usable immediately.
+    # ~/.local/bin is the correct non-root fallback, but it is not on the
+    # default PATH for a root shell, which silently leaves the tools invisible
+    # right after a successful bootstrap.
+    $bin = '/usr/local/bin'
+    if (-not (Test-Path $bin) -or -not (& sh -c 'test -w /usr/local/bin && echo writable')) {
+        $bin = Join-Path $HOME '.local/bin'
+    }
+    $onPath = ($env:PATH -split ':') -contains $bin
+    New-Item -ItemType Directory -Force -Path $bin | Out-Null
+
+    function Install-Pinned($name, $url, $sha256, $dest, $isArchive, $archiveMember) {
+        if (Get-Command $name -ErrorAction SilentlyContinue) {
+            Write-Output "anvil: $name already installed; skipping"
+            return
+        }
+        $tmp = New-TemporaryFile
+        Write-Output "anvil: downloading $name from $url"
+        curl -sSL -o $tmp $url
+        if ($LASTEXITCODE -ne 0) { throw "download failed for $name" }
+        $actual = (Get-FileHash -Algorithm SHA256 -Path $tmp).Hash.ToLower()
+        if ($actual -ne $sha256) { throw "$name checksum mismatch: expected $sha256, got $actual" }
+        if ($isArchive) {
+            $extract = Join-Path ([System.IO.Path]::GetTempPath()) "anvil-$name"
+            New-Item -ItemType Directory -Force -Path $extract | Out-Null
+            tar -xzf $tmp -C $extract
+            Copy-Item -Force (Join-Path $extract $archiveMember) $dest
+        } else {
+            Copy-Item -Force $tmp $dest
+        }
+        chmod +x $dest
+        Remove-Item -Force $tmp -ErrorAction SilentlyContinue
+        Write-Output "anvil: installed $name -> $dest"
+    }
+
+    Install-Pinned 'kind' "https://github.com/kubernetes-sigs/kind/releases/download/{{kind_version}}/kind-linux-amd64" '{{kind_sha256}}' (Join-Path $bin 'kind') $false ''
+    Install-Pinned 'kubectl' "https://dl.k8s.io/release/{{kubectl_version}}/bin/linux/amd64/kubectl" '{{kubectl_sha256}}' (Join-Path $bin 'kubectl') $false ''
+    Install-Pinned 'helm' "https://get.helm.sh/helm-{{helm_version}}-linux-amd64.tar.gz" '{{helm_sha256}}' (Join-Path $bin 'helm') $true 'linux-amd64/helm'
+
+    # WSL tuning: Kind needs generous inotify limits; the low WSL defaults make
+    # node containers hang with 'too many open files'.
+    if (Test-Path '/proc/sys/fs/inotify/max_user_instances') {
+        sudo sysctl -w fs.inotify.max_user_instances=8192 *> $null
+        sudo sysctl -w fs.inotify.max_user_watches=1048576 *> $null
+    }
+    # Kind's kube-proxy needs bridged traffic to traverse iptables.
+    $bridge = (Get-Content /proc/sys/net/bridge/bridge-nf-call-iptables -ErrorAction SilentlyContinue)
+    if ($bridge -ne '1') {
+        Write-Warning "bridge-nf-call-iptables is not 1; load br_netfilter and set net.bridge.bridge-nf-call-iptables=1"
+    }
+    if ($onPath) {
+        Write-Output "anvil: bootstrap complete; tools installed to $bin"
+    } else {
+        Write-Output "anvil: bootstrap complete; tools installed to $bin"
+        Write-Output "anvil: $bin is NOT on PATH — add it with:"
+        Write-Output "         export PATH=`"`$PATH:$bin`""
+    }
+    exit 0
+
+=== justfiles/anvil/cluster.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+#
+# Generic Kind cluster harness. Emitted only when `[container] enabled = true`
+# and a `[cluster]` section is configured in anvil.toml.
+#
+# Every value below is baked from anvil.toml at generation time. The recipes
+# implement a set of hard-won workarounds for running Kind as a sibling
+# container on a host engine (docker-outside-of-docker), for rootless podman,
+# and for Kind node containerd inheriting an unreachable DNS proxy. Do not
+# assume a plain local Kind — the ladders and repairs are deliberate.
+#
+# Shared recipe parameters:
+#   profile / tag / registry  match the image build (see container-images.just)
+#                             so the refs loaded here equal the refs built.
+#
+# Extension hooks: when a hook name is configured it is invoked as a plain
+# `just <name>` recipe at the relevant point, so a repository can inject
+# bespoke wiring (issuer discovery, extra --set flags, …) without anvil ever
+# modelling what it does. Absent hook = no invocation.
+#
+# The `_anvil-container-engine` helper is provided by container.just.
+
+anvil_cluster_name := "anvil-kind"
+
+# Create the cluster if absent, then repair the apiserver endpoint. Idempotent.
+[group("anvil-cluster")]
+[script("pwsh")]
+anvil-cluster-up profile="debug" tag="dev" registry="local":
+    $ErrorActionPreference = 'Stop'
+    $cluster = '{{anvil_cluster_name}}'
+    $engine = just _anvil-container-engine
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($engine -eq 'podman') { $env:KIND_EXPERIMENTAL_PROVIDER = 'podman' }
+
+    function Test-ClusterExists($engine, $cluster) {
+        $names = @(kind get clusters 2>$null)
+        if ($LASTEXITCODE -eq 0 -and ($names -contains $cluster)) { return $true }
+        # Label fallback: rootless / podman cannot always be listed by `kind
+        # get clusters`, so look for the node containers by Kind's own label.
+        $ids = @(& $engine ps -a --filter "label=io.x-k8s.kind.cluster=$cluster" -q 2>$null)
+        return $ids.Count -gt 0
+    }
+
+    if (Test-ClusterExists $engine $cluster) {
+        Write-Output "anvil: cluster '$cluster' already exists"
+    } else {
+        $nodeImage = 'kindest/node:v1.31.0'
+        $configLines = @('kind: Cluster', 'apiVersion: kind.x-k8s.io/v1alpha4', 'nodes:', '  - role: control-plane')
+        if ($nodeImage -ne '') { $configLines += "    image: $nodeImage" }
+        for ($i = 0; $i -lt 2; $i++) {
+            $configLines += '  - role: worker'
+            if ($nodeImage -ne '') { $configLines += "    image: $nodeImage" }
+        }
+        $configPath = Join-Path ([System.IO.Path]::GetTempPath()) "anvil-kind-$cluster.yaml"
+        ($configLines -join "`n") | Set-Content -Path $configPath -Encoding ascii
+        kind create cluster --name $cluster --config $configPath
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+
+    # Docker-outside-of-docker apiserver repair: when we are a sibling
+    # container on the host engine, the default kubeconfig endpoint
+    # (127.0.0.1:PORT) is unreachable. Connect ourselves to the `kind`
+    # network and re-export the kubeconfig with the container-internal
+    # endpoint.
+    kubectl cluster-info --context "kind-$cluster" *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "anvil: apiserver endpoint unreachable; attempting docker-outside-of-docker repair"
+        $self = $env:HOSTNAME
+        if ([string]::IsNullOrEmpty($self)) { $self = [System.Net.Dns]::GetHostName() }
+        & $engine network connect kind $self *> $null
+        kind export kubeconfig --name $cluster --internal
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
+    Write-Output "anvil: cluster '$cluster' is up"
+    exit 0
+
+# Delete the cluster. Idempotent — a missing cluster is not an error.
+[group("anvil-cluster")]
+[script("pwsh")]
+anvil-cluster-down:
+    $ErrorActionPreference = 'Stop'
+    $engine = just _anvil-container-engine
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($engine -eq 'podman') { $env:KIND_EXPERIMENTAL_PROVIDER = 'podman' }
+    kind delete cluster --name '{{anvil_cluster_name}}'
+    exit 0
+
+# Load configured and dependency images into the cluster via the load ladder.
+[group("anvil-cluster")]
+[script("pwsh")]
+anvil-cluster-load profile="debug" tag="dev" registry="local":
+    $ErrorActionPreference = 'Stop'
+    $cluster = '{{anvil_cluster_name}}'
+    $engine = just _anvil-container-engine
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($engine -eq 'podman') { $env:KIND_EXPERIMENTAL_PROVIDER = 'podman' }
+
+    function Resolve-Ref($engine, $registry, $name, $tag) {
+        $ref = "${registry}/${name}:${tag}"
+        # podman qualifies an unqualified "local/..." ref as "localhost/local/...".
+        if ($engine -eq 'podman' -and $registry -notmatch '[.:/]' -and $registry -ne 'localhost') {
+            $ref = "localhost/$ref"
+        }
+        return $ref
+    }
+
+    # Image load ladder: (1) kind load docker-image; on failure (2) save to an
+    # OCI archive and kind load image-archive; on failure (3) copy the archive
+    # to each node and ctr import under the k8s.io namespace.
+    #
+    # `--platform` matters on rung 2: with the containerd image store a pulled
+    # multi-arch image is kept as an index carrying attestation manifests whose
+    # content is not all present locally, and the resulting archive fails to
+    # import with "content digest not found". Selecting one platform produces a
+    # flat, importable archive. Engines that predate the flag fall back to a
+    # plain save.
+    function Import-Image($engine, $cluster, $ref) {
+        kind load docker-image --name $cluster $ref
+        if ($LASTEXITCODE -eq 0) { return }
+        Write-Warning "kind load docker-image failed for $ref; falling back to image-archive"
+        $safe = ($ref -replace '[^A-Za-z0-9]', '_')
+        $archive = Join-Path ([System.IO.Path]::GetTempPath()) "anvil-$safe.tar"
+        & $engine save --platform linux/amd64 -o $archive $ref 2>$null
+        if ($LASTEXITCODE -ne 0) { & $engine save -o $archive $ref }
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $archive)) {
+            kind load image-archive --name $cluster $archive
+            if ($LASTEXITCODE -eq 0) { Remove-Item -Force $archive -ErrorAction SilentlyContinue; return }
+        }
+        if (-not (Test-Path $archive)) {
+            throw "cannot load ${ref}: '$engine save' produced no archive, so there is nothing to import into the nodes"
+        }
+        Write-Warning "kind load image-archive failed for $ref; falling back to per-node ctr import"
+        $nodes = @(kind get nodes --name $cluster)
+        foreach ($node in $nodes) {
+            & $engine cp $archive "${node}:/tmp/anvil-image.tar"
+            if ($LASTEXITCODE -ne 0) { throw "failed to copy $ref archive into node $node" }
+            & $engine exec $node ctr --namespace=k8s.io images import /tmp/anvil-image.tar
+            if ($LASTEXITCODE -ne 0) { throw "failed to import $ref into node $node" }
+        }
+        Remove-Item -Force $archive -ErrorAction SilentlyContinue
+    }
+
+    foreach ($name in @('my-service')) {
+        $ref = Resolve-Ref $engine '{{registry}}' $name '{{tag}}'
+        Write-Output "anvil: loading $ref"
+        Import-Image $engine $cluster $ref
+    }
+
+    # Dependency preload images can inherit an unreachable WSL DNS proxy inside
+    # Kind node containerd, so pull them on the host and kind load them.
+    # Pull one platform explicitly: a multi-arch pull lands as an index that
+    # `kind load docker-image` cannot consume, forcing the slower archive path.
+    foreach ($dep in @(@{ name = 'cert-manager'; manifest = 'https://example.com/cert-manager.yaml'; version = 'v1.16.1'; namespace = ''; preload = @('quay.io/jetstack/cert-manager-controller:v1.16.1'); wait = @('deployment/cert-manager-webhook') })) {
+        foreach ($img in $dep.preload) {
+            Write-Output "anvil: pre-pulling $img for dependency $($dep.name)"
+            & $engine pull --platform linux/amd64 $img 2>$null
+            if ($LASTEXITCODE -ne 0) { & $engine pull $img }
+            if ($LASTEXITCODE -ne 0) { Write-Warning "pull failed for $img (continuing)"; continue }
+            Import-Image $engine $cluster $img
+        }
+    }
+    exit 0
+
+# Apply dependencies then install the repo's charts. CRDs are applied
+# server-side BEFORE `helm upgrade --install` because Helm skips CRDs on
+# upgrade. Invokes the pre-install and post-install hooks around the charts.
+
+# Apply dependencies and install the repo's charts, CRDs first.
+[group("anvil-cluster")]
+[script("pwsh")]
+anvil-cluster-deploy profile="debug" tag="dev" registry="local":
+    $ErrorActionPreference = 'Stop'
+    $repoRoot = '{{justfile_directory()}}'
+    $cluster = '{{anvil_cluster_name}}'
+    $ctx = "kind-$cluster"
+    $profile = '{{profile}}'
+    $tag = '{{tag}}'
+    function Expand-Tokens($s) { $s.Replace('{profile}', $profile).Replace('{tag}', $tag) }
+    function Wait-Targets($ctx, $targets, $namespace) {
+        foreach ($t in $targets) {
+            $nsArgs = @(); if ($namespace -ne '') { $nsArgs = @('-n', $namespace) }
+            kubectl --context $ctx @nsArgs rollout status $t --timeout=300s
+            if ($LASTEXITCODE -ne 0) { throw "rollout wait failed for $t" }
+        }
+    }
+
+    $preInstall = 'cosmic-native-auth'
+    if ($preInstall -ne '') {
+        Write-Output "anvil: pre-install hook '$preInstall'"
+        just $preInstall
+        if ($LASTEXITCODE -ne 0) { throw "pre-install hook '$preInstall' failed" }
+    }
+
+    foreach ($dep in @(@{ name = 'cert-manager'; manifest = 'https://example.com/cert-manager.yaml'; version = 'v1.16.1'; namespace = ''; preload = @('quay.io/jetstack/cert-manager-controller:v1.16.1'); wait = @('deployment/cert-manager-webhook') })) {
+        Write-Output "anvil: applying dependency $($dep.name) $($dep.version)"
+        kubectl --context $ctx apply -f $dep.manifest
+        if ($LASTEXITCODE -ne 0) { throw "failed to apply dependency $($dep.name)" }
+        Wait-Targets $ctx $dep.wait $dep.namespace
+    }
+
+    foreach ($chart in @(@{ name = 'svc'; path = 'charts/svc'; namespace = 'svc-system'; crds = 'charts/svc/crds'; set = @(@{ k = 'image.tag'; v = '{tag}' }); wait = @('deployment/svc-controller') })) {
+        $ns = $chart.namespace
+        if ($chart.crds -ne '') {
+            Write-Output "anvil: applying CRDs for chart $($chart.name)"
+            kubectl --context $ctx apply --server-side -f (Join-Path $repoRoot $chart.crds)
+            if ($LASTEXITCODE -ne 0) { throw "failed to apply CRDs for $($chart.name)" }
+        }
+        $helmArgs = @('upgrade', '--install', $chart.name, (Join-Path $repoRoot $chart.path), '--kube-context', $ctx)
+        if ($ns -ne '') { $helmArgs += @('--namespace', $ns, '--create-namespace') }
+        foreach ($kv in $chart.set) { $helmArgs += @('--set', "$($kv.k)=$(Expand-Tokens $kv.v)") }
+        $helmArgs += '--wait'
+        Write-Output "anvil: helm upgrade --install $($chart.name)"
+        helm @helmArgs
+        if ($LASTEXITCODE -ne 0) { throw "helm install failed for $($chart.name)" }
+        Wait-Targets $ctx $chart.wait $ns
+    }
+
+    $postInstall = 'record-issuer'
+    if ($postInstall -ne '') {
+        Write-Output "anvil: post-install hook '$postInstall'"
+        just $postInstall
+        if ($LASTEXITCODE -ne 0) { throw "post-install hook '$postInstall' failed" }
+    }
+    exit 0
+
+# Dump diagnostic resources and deployment logs. Best-effort, never fails.
+[group("anvil-cluster")]
+[script("pwsh")]
+anvil-cluster-diagnostics:
+    $ErrorActionPreference = 'Continue'
+    $ctx = "kind-{{anvil_cluster_name}}"
+    foreach ($r in @('pods -A -o wide', 'events --sort-by=.lastTimestamp')) {
+        Write-Output "=== kubectl get $r ==="
+        $parts = $r -split '\s+'
+        kubectl --context $ctx get @parts
+    }
+    $diagNs = @(); if ('' -ne '') { $diagNs = @('-n', '') }
+    foreach ($d in @('deployment/svc-controller')) {
+        Write-Output "=== logs $d ==="
+        kubectl --context $ctx @diagNs logs $d --all-containers --tail=200
+    }
+    exit 0
+
+# Full flow with bounded retries: up -> load -> deploy -> pre-test hook ->
+# readiness re-check. On failure, run the on-failure hook and dump
+# diagnostics, wait the configured delay, and retry. A retry that eventually
+# passes emits a FLAKY warning.
+
+# Full cluster flow with bounded retries and flaky reporting.
+[group("anvil-cluster")]
+[script("pwsh")]
+anvil-cluster-test profile="debug" tag="dev" registry="local":
+    $ErrorActionPreference = 'Stop'
+    $cluster = '{{anvil_cluster_name}}'
+    $attempts = 2
+    $delay = 10
+    $preTest = 'seed-data'
+    $onFailure = 'collect-support-bundle'
+    $attempt = 0
+    $passed = $false
+    while ($attempt -lt $attempts) {
+        $attempt++
+        Write-Output "anvil: cluster test attempt $attempt of $attempts"
+        try {
+            just anvil-cluster-up '{{profile}}' '{{tag}}' '{{registry}}'
+            if ($LASTEXITCODE -ne 0) { throw "cluster up failed" }
+            just anvil-cluster-load '{{profile}}' '{{tag}}' '{{registry}}'
+            if ($LASTEXITCODE -ne 0) { throw "cluster load failed" }
+            just anvil-cluster-deploy '{{profile}}' '{{tag}}' '{{registry}}'
+            if ($LASTEXITCODE -ne 0) { throw "cluster deploy failed" }
+            if ($preTest -ne '') {
+                just $preTest
+                if ($LASTEXITCODE -ne 0) { throw "pre-test hook '$preTest' failed" }
+            }
+            kubectl --context "kind-$cluster" get nodes *> $null
+            if ($LASTEXITCODE -ne 0) { throw "readiness re-check failed" }
+            $passed = $true
+            break
+        } catch {
+            Write-Warning "attempt $attempt failed: $_"
+            if ($onFailure -ne '') { just $onFailure }
+            just anvil-cluster-diagnostics
+            if ($attempt -lt $attempts) { Start-Sleep -Seconds $delay }
+        }
+    }
+    if (-not $passed) {
+        Write-Error "cluster test failed after $attempts attempt(s)"
+        exit 1
+    }
+    if ($attempt -gt 1) { Write-Warning "FLAKY: cluster test passed on attempt $attempt of $attempts" }
+    Write-Output "anvil: cluster test passed"
+    exit 0
+
+# Tear down: `cluster` deletes the Kind cluster, `full` also removes built images.
+[group("anvil-cluster")]
+[script("pwsh")]
+anvil-cluster-clean mode="cluster" tag="dev" registry="local":
+    $ErrorActionPreference = 'Stop'
+    $engine = just _anvil-container-engine
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ($engine -eq 'podman') { $env:KIND_EXPERIMENTAL_PROVIDER = 'podman' }
+    kind delete cluster --name '{{anvil_cluster_name}}'
+    if ('{{mode}}' -eq 'full') {
+        foreach ($name in @('my-service')) {
+            $ref = "{{registry}}/${name}:{{tag}}"
+            & $engine rmi -f $ref *> $null
+        }
+        Write-Output "anvil: removed locally built images"
+    }
+    exit 0
+
 === justfiles/anvil/container-images.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
@@ -3347,7 +3819,7 @@ anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-too
 # engine as build context.
 #
 # There is deliberately no registry push, no ACR, no auth, and no promotion:
-# images are built locally.
+# images are built locally and loaded into the Kind cluster (see cluster.just).
 #
 # Recipe parameters shared by both recipes:
 #   profile   selects the staged binaries ({profile} token); default "debug".
@@ -3597,7 +4069,7 @@ _anvil-container-image:
     # (hashing it would make the tag depend on the tag). For a consuming
     # repository this tree is generated, so it changes on a cargo-anvil upgrade
     # -- which is exactly when the image should be rebuilt.
-    $excluded = @('justfiles/anvil/container-images.just', 'justfiles/anvil/container.just')
+    $excluded = @('justfiles/anvil/cluster-bootstrap.just', 'justfiles/anvil/cluster.just', 'justfiles/anvil/container-images.just', 'justfiles/anvil/container.just')
     $recipeRoot = Join-Path $repoRoot 'justfiles/anvil'
     if (Test-Path -LiteralPath $recipeRoot) {
         foreach ($file in Get-ChildItem -LiteralPath $recipeRoot -Recurse -File -Filter '*.just') {
@@ -4675,6 +5147,8 @@ import 'tools.just'
 import 'versions.just'
 import? 'container.just'
 import? 'container-images.just'
+import? 'cluster.just'
+import? 'cluster-bootstrap.just'
 
 # Friendly default: `just anvil` runs the PR tier.
 alias anvil := anvil-pr
