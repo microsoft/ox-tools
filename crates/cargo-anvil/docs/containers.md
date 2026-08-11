@@ -36,7 +36,8 @@ already pins, and builds it the first time it is needed.
 
 Point `image` at a pre-built reference to pull one instead, or `dockerfile` at your own to build something else — see
 [`[container]`](#container--containerized-execution). Image builds and the cluster harness are added by declaring
-`[[image]]` and `[cluster]` sections.
+`[[image]]` and `[cluster]` sections alongside `[container] enabled = true` — both are container-gated, so either
+section on its own emits nothing.
 
 ## 2. Usage
 
