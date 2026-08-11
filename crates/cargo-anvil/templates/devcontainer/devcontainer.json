@@ -1,0 +1,17 @@
+{
+  "name": "anvil-container",
+  __IMAGE_OR_BUILD__,
+  "workspaceFolder": "__WORKDIR__",
+  "workspaceMount": "source=${localWorkspaceFolder},target=__WORKDIR__,type=bind",
+  "mounts": __MOUNTS_JSON__,
+  "containerEnv": {
+    "ANVIL_IN_CONTAINER": "1"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer"
+      ]
+    }
+  }
+}

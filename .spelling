@@ -249,6 +249,7 @@ non-mockable
 ns
 nuget
 NUMA
+OCI
 observability
 ohno
 ok
@@ -448,3 +449,19 @@ READMEs
 RUSTSEC
 UB
 subdirectory
+BuildKit
+Dockerfile
+ARM64
+auth
+io
+dep
+io
+deps
+fmt
+templating
+unscoped
+backtracker
+prerelease
+versioned
+Containerfile
+WSL

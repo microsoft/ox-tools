@@ -177,6 +177,34 @@
 //!    region. The next `update` detects the dirt and writes a
 //!    `.anvil-proposed` sibling instead of overwriting.
 //!
+//! ## Containers
+//!
+//! anvil can optionally run the generated recipes inside a container,
+//! configured in an `anvil.toml` at the repo root:
+//!
+//! ```toml
+//! [container]
+//! enabled = true
+//! ```
+//!
+//! With that in place, `just anvil-pr` transparently runs in the container.
+//! No image needs to exist first: anvil generates a Dockerfile that installs
+//! the toolchain and tools this repo already pins, and builds it on first
+//! use. The image is tagged with a hash of its inputs, so bumping a pinned
+//! tool version selects an image that cannot already exist and rebuilds,
+//! while an unrelated edit reuses the cached one.
+//!
+//! Set `extends` to add your own tools on top of that image — anvil builds
+//! its base first and injects the reference, so the expensive half stays
+//! cached while your layer rebuilds in seconds. Set `image` to pull a
+//! pre-built reference instead, or `dockerfile` to replace anvil's entirely
+//! when the base OS has to differ.
+//!
+//! A repo with no `anvil.toml` is byte-for-byte unchanged.
+//!
+//! See `docs/containers.md` for usage, the full configuration reference, and
+//! the technical overview.
+//!
 //! ## In-tree tool customization
 //!
 //! anvil follows a few source-level and `Cargo.toml` conventions so you
@@ -306,6 +334,7 @@
 //! - `ado.md` — Azure DevOps Pipelines emission.
 //!
 //! And `docs/verification.md` for the continuous-validation strategy.
+//! User-facing container documentation lives in `docs/containers.md`.
 
 #![deny(unsafe_code)]
 
@@ -314,6 +343,7 @@ pub(crate) mod backend;
 pub(crate) mod catalog;
 pub(crate) mod checksum;
 pub(crate) mod cli;
+pub(crate) mod config;
 pub(crate) mod decision;
 pub(crate) mod emit;
 pub(crate) mod io;
@@ -360,6 +390,7 @@ use std::process::ExitCode;
 pub use anvil::artifacts;
 pub use backend::Backend;
 pub use catalog::{Artifact, Catalog, CatalogBuilder, CliMeta, HostSelector, OwnedFileSpec, RegionId, RegionSpec};
+pub use config::{ContainerConfig, Engine, NativeWhen};
 pub use region::CommentSyntax;
 
 /// One-call entry point for a tool built on the anvil engine.

@@ -10,17 +10,26 @@
 //! — there is no anvil-specific reconciliation in the plan path.
 
 pub mod artifacts;
+pub mod group;
 
-pub(crate) use artifacts::anvil_artifacts;
+pub(crate) use artifacts::{anvil_artifacts, anvil_container_artifacts};
 
 use crate::catalog::{Catalog, CliMeta};
 
 impl Catalog {
-    /// The built-in base catalog: the `anvil` CLI identity and the full
-    /// built-in artifact set.
+    /// The built-in base catalog: the `anvil` CLI identity, the full built-in
+    /// artifact set, and the container-gated artifacts (the container-execution
+    /// shim, default image assets, and devcontainer descriptor).
+    ///
+    /// Containerization ships in the box but is opt-in: the container artifacts
+    /// are registered *container-gated*, so they are emitted only when
+    /// `anvil.toml` turns them on (`[container] enabled = true`). With
+    /// containerization
+    /// absent or disabled the emitted tree is byte-identical to a build that
+    /// registered no container artifacts at all.
     #[must_use]
     pub fn anvil() -> Self {
-        Self::from_parts(anvil_cli_meta(), anvil_artifacts())
+        Self::from_parts_with_container(anvil_cli_meta(), anvil_artifacts(), anvil_container_artifacts())
     }
 }
 
