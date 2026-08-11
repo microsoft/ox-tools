@@ -13,8 +13,7 @@ if [[ ! -f "$toolchain_path" ]]; then
     exit 1
 fi
 
-container_dir="$repo_root/.anvil/container"
-container_recipe="justfiles/anvil/container.just"
+container_dir="$repo_root/justfiles/anvil/container"
 default_base_image="$(sed -n 's/^ARG BASE_IMAGE=//p' "$container_dir/Containerfile" | head -n 1)"
 if [[ -z "$default_base_image" ]]; then
     echo 'anvil-container: Containerfile must define ARG BASE_IMAGE=<digest-pinned-image>.' >&2
@@ -27,18 +26,13 @@ if [[ ! "$base_image" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
 fi
 inputs=(rust-toolchain.toml)
 while IFS= read -r path; do
-    relative="${path#"$repo_root"/}"
-    # The container entry recipe drives execution on the host; it is not
-    # image content, so it must not participate in image identity.
-    if [[ "$relative" != "$container_recipe" ]]; then
-        inputs+=("$relative")
-    fi
-done < <(find "$repo_root/justfiles/anvil" -type f -name '*.just' -print)
+    inputs+=("${path#"$repo_root"/}")
+done < <(find "$repo_root/justfiles/anvil" -type f -name '*.just' ! -path "$container_dir/*" -print)
 
 for path in "$container_dir"/*; do
     [[ -f "$path" ]] || continue
     case "${path##*/}" in
-        image-id.ps1 | image-id.sh | README.md \
+        container.just | image-id.ps1 | image-id.sh | README.md \
             | run-in-container.ps1 | run-in-container.sh \
             | customize.sh | customize.ps1) continue ;;
     esac

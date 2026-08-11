@@ -11,7 +11,7 @@
 //! Driver-level verification of the `customize.ps1` runtime contract from
 //! [`containers.md`](../docs/design/containers.md#8-container-customization).
 //!
-//! Generates the real `.anvil/container/` tree with
+//! Generates the real `justfiles/anvil/container/` tree with
 //! [`cargo_anvil::test_support::run_update`], then runs the generated
 //! `run-in-container.ps1` against a fake `wsl` on `PATH` so the driver's
 //! own process, argument construction, and validation execute for real.
@@ -65,7 +65,7 @@ fn repo_with_container() -> TempDir {
     write(&root.join("rust-toolchain.toml"), "channel = \"1.93\"\n");
     run_update(&Catalog::anvil(), &local(), root).unwrap();
     assert!(
-        !root.join(".anvil/container/customize.ps1").exists(),
+        !root.join("justfiles/anvil/container/customize.ps1").exists(),
         "the public catalog must not emit customize.ps1 by default"
     );
     let status = Command::new("git")
@@ -162,21 +162,8 @@ fn run_driver(root: &Path, customize_ps1_body: &str, recipe: &str, env: &[(&str,
 }
 
 fn run_driver_args(root: &Path, customize_ps1_body: &str, recipe_args: &[&str], env: &[(&str, &str)]) -> DriverRun {
-    run_driver_maybe_customized(root, Some(customize_ps1_body), recipe_args, env)
-}
-
-/// Runs the driver with no `customize.ps1` at the current location, so the
-/// stranded-legacy-file detection is observable.
-fn run_driver_without_customization(root: &Path, recipe: &str, env: &[(&str, &str)]) -> DriverRun {
-    run_driver_maybe_customized(root, None, &[recipe], env)
-}
-
-fn run_driver_maybe_customized(root: &Path, customize_ps1_body: Option<&str>, recipe_args: &[&str], env: &[(&str, &str)]) -> DriverRun {
-    let customize = root.join(".anvil/container/customize.ps1");
-    match customize_ps1_body {
-        Some(body) => write(&customize, body),
-        None => drop(std::fs::remove_file(&customize)),
-    }
+    let container_dir = root.join("justfiles/anvil/container");
+    write(&container_dir.join("customize.ps1"), customize_ps1_body);
 
     let bin_dir = root.join("fake-bin");
     install_fake_wsl(&bin_dir);
@@ -197,7 +184,7 @@ fn run_driver_maybe_customized(root: &Path, customize_ps1_body: Option<&str>, re
 
     let mut command = Command::new("pwsh");
     command
-        .args(["-NoProfile", "-File", ".anvil/container/run-in-container.ps1"])
+        .args(["-NoProfile", "-File", "justfiles/anvil/container/run-in-container.ps1"])
         .args(recipe_args)
         .current_dir(root)
         .env("PATH", path)
@@ -225,62 +212,6 @@ fn run_driver_maybe_customized(root: &Path, customize_ps1_body: Option<&str>, re
             .map(Into::into)
             .collect(),
     }
-}
-
-#[test]
-fn a_customization_file_stranded_at_the_pre_move_path_is_reported_and_not_sourced() {
-    // Container assets moved from justfiles/anvil/container/ to
-    // .anvil/container/. A hand-authored customization file is not
-    // catalog-tracked, so `cargo anvil` cannot relocate it; the driver must
-    // say so instead of silently running without it.
-    let tmp = repo_with_container();
-    write(
-        &tmp.path().join("justfiles/anvil/container/customize.ps1"),
-        "$AnvilContainerRunArgs = @('--label', 'stranded=1')\n",
-    );
-
-    let run = run_driver_without_customization(tmp.path(), "anvil-clippy", &[("FAKE_DOCKER_IMAGE_EXISTS", "1")]);
-
-    assert!(run.status.success(), "the run must still proceed: stderr={}", run.stderr);
-    assert!(
-        run.stderr.contains("justfiles/anvil/container/customize.ps1") && run.stderr.contains(".anvil/container/customize.ps1"),
-        "the stranded file and its new home must both be named: stderr={}",
-        run.stderr
-    );
-    assert!(
-        !run.docker_log.contains("stranded=1"),
-        "the stranded file must not be sourced: docker.log={}",
-        run.docker_log
-    );
-}
-
-#[test]
-fn a_customization_file_at_the_current_path_wins_without_a_migration_warning() {
-    let tmp = repo_with_container();
-    // A stale copy at the old path must be inert, not a second source.
-    write(
-        &tmp.path().join("justfiles/anvil/container/customize.ps1"),
-        "throw 'the pre-move path must never be sourced'\n",
-    );
-
-    let run = run_driver(
-        tmp.path(),
-        "$AnvilContainerRunArgs = @('--label', 'current=1')\n",
-        "anvil-clippy",
-        &[("FAKE_DOCKER_IMAGE_EXISTS", "1")],
-    );
-
-    assert!(run.status.success(), "the run must succeed: stderr={}", run.stderr);
-    assert!(
-        !run.stderr.contains("justfiles/anvil/container/customize.ps1"),
-        "no migration warning is due when the current path is populated: stderr={}",
-        run.stderr
-    );
-    assert!(
-        run.docker_log.contains("current=1"),
-        "the current customization must take effect: docker.log={}",
-        run.docker_log
-    );
 }
 
 #[test]
@@ -497,7 +428,7 @@ fn powershell_just_dispatch_treats_interpolated_values_as_data() {
     );
 
     write(
-        &root.join(".anvil/container/run-in-container.ps1"),
+        &root.join("justfiles/anvil/container/run-in-container.ps1"),
         "param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Recipe)\nWrite-Output 'DRIVER_OK'\n",
     );
     let recipe_output = Command::new("just")
@@ -527,7 +458,7 @@ Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "exists=$AnvilContainerImageE
 Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "recipes=$($AnvilContainerRequestedRecipes -join ',')"
 Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "windows=$AnvilContainerHostIsWindows"
 Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "repo-is-dir=$(Test-Path -LiteralPath $AnvilContainerRepoRoot -PathType Container)"
-Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "dir-is-container-dir=$($AnvilContainerDir -eq (Join-Path $AnvilContainerRepoRoot '.anvil/container'))"
+Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "dir-is-container-dir=$($AnvilContainerDir -eq (Join-Path $AnvilContainerRepoRoot 'justfiles/anvil/container'))"
 Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "repo-wsl=$AnvilContainerRepoRootWsl"
 Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value "dir-wsl=$AnvilContainerDirWsl"
 $AnvilContainerBuildArgs = @('--secret', 'id=build-marker,src=fake')
@@ -555,7 +486,7 @@ $AnvilContainerCleanup = { Add-Content -LiteralPath $env:FAKE_TEST_LOG -Value 'c
     );
     assert!(run.test_log.contains(&format!("repo-wsl={fake_wsl_repo}")), "log: {}", run.test_log);
     assert!(
-        run.test_log.contains(&format!("dir-wsl={fake_wsl_repo}/.anvil/container")),
+        run.test_log.contains(&format!("dir-wsl={fake_wsl_repo}/justfiles/anvil/container")),
         "log: {}",
         run.test_log
     );

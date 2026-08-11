@@ -20,53 +20,41 @@ repo/
 │   # <<< anvil-managed: anvil-imports
 │   …user content…
 │
-├── justfiles/anvil/                               owned (one checksum per file)
-│   ├── mod.just            entry point: imports the sibling files and defines
-│   │                       `alias anvil := anvil-pr`. The user's Justfile
-│   │                       region pulls in this single file; everything else is
-│   │                       reached transitively.
-│   ├── helpers.just        shared helper recipes (_anvil-base-ref,
-│   │                       _anvil-impact-format) and the impact env-var contract
-│   │                       that the per-check recipes rely on.
-│   ├── checks/             one file per check: checks/<check>.just holds the
-│   │                       `anvil-<check>` recipe plus its paired `*-setup` and
-│   │                       `*-validate-prereqs` recipes (anvil-fmt, anvil-clippy,
-│   │                       anvil-llvm-cov, anvil-miri, …).
-│   ├── groups/             one file per group: groups/<group>.just holds the
-│   │                       `anvil-<group>` recipe plus its `*-setup` /
-│   │                       `*-validate-prereqs` (anvil-pr-fast, anvil-pr-test,
-│   │                       anvil-pr-runtime-analysis, anvil-pr-mutants,
-│   │                       anvil-scheduled-test, …). `anvil-pr-slow` is a
-│   │                       convenience umbrella over the three pr-slow sub-groups.
-│   ├── container.just      optional container entry recipe (`anvil-container`).
-│   ├── tiers.just          tier aggregators (anvil-pr, anvil-scheduled, anvil-full).
-│   ├── tools.just          tool/component/toolchain install + validate-prereqs recipes,
-│   │                       plus the cargo-spellcheck source-deps check and
-│   │                       anvil-validate-prereqs.
-│   └── versions.just       catalog nightly toolchains and cargo-subcommand minimum versions
-│                           as plain just variables (rust_nightly, cargo_nextest_version, …).
-│                           Read by recipes via `{{ var }}` interpolation. See §3.
-│
-└── .anvil/container/                              optional non-recipe container assets
-    ├── Containerfile
-    ├── Containerfile.dockerignore
-    ├── README.md
-    ├── entrypoint.sh
-    ├── image-id.ps1
-    ├── image-id.sh
-    ├── run-in-container.ps1
-    └── run-in-container.sh
+└── justfiles/anvil/                               owned (one checksum per file)
+    ├── mod.just            entry point: imports the sibling files and defines
+    │                       `alias anvil := anvil-pr`. The user's Justfile
+    │                       region pulls in this single file; everything else is
+    │                       reached transitively.
+    ├── helpers.just        shared helper recipes (_anvil-base-ref,
+    │                       _anvil-impact-format) and the impact env-var contract
+    │                       that the per-check recipes rely on.
+    ├── checks/             one file per check: checks/<check>.just holds the
+    │                       `anvil-<check>` recipe plus its paired `*-setup` and
+    │                       `*-validate-prereqs` recipes (anvil-fmt, anvil-clippy,
+    │                       anvil-llvm-cov, anvil-miri, …).
+    ├── groups/             one file per group: groups/<group>.just holds the
+    │                       `anvil-<group>` recipe plus its `*-setup` /
+    │                       `*-validate-prereqs` (anvil-pr-fast, anvil-pr-test,
+    │                       anvil-pr-runtime-analysis, anvil-pr-mutants,
+    │                       anvil-scheduled-test, …). `anvil-pr-slow` is a
+    │                       convenience umbrella over the three pr-slow sub-groups.
+    ├── tiers.just          tier aggregators (anvil-pr, anvil-scheduled, anvil-full).
+    ├── tools.just          tool/component/toolchain install + validate-prereqs recipes,
+    │                       plus anvil-system-deps-check and anvil-validate-prereqs.
+    └── versions.just       pinned nightly toolchains and pinned cargo-subcommand versions
+                            as plain just variables (rust_nightly, cargo_nextest_version, …).
+                            Read by recipes via `{{ var }}` interpolation.
+                            Single source of truth for all version pins. See §3.
 ```
 
 The Justfile region is the only file anvil adds to that the user co-owns, and it's
-a single `import` line. Generated recipes live inside `justfiles/anvil/`; optional
-non-recipe container assets live inside `.anvil/container/`. Generated files in
-both directories are tool-owned (tracked by full-file checksum in the sidecar
-manifest). If the user wants to add project-specific recipes, they add them to
-the top-level `Justfile` outside the managed region, or to their own additional
+a single `import` line — everything anvil-specific lives inside `justfiles/anvil/`.
+All files under that directory are tool-owned (tracked by full-file checksum in
+the sidecar manifest). If the user wants to add project-specific recipes, they add them
+to the top-level `Justfile` outside the managed region, or to their own additional
 imported `.just` files. The alias `anvil := anvil-pr` lives in `mod.just`, not in
-the user's `Justfile`, so renaming or retargeting the alias is a template update
-with no managed-region churn.
+the user's `Justfile`, so renaming or retargeting the alias is a template update with
+no managed-region churn.
 
 Recipes in the `groups/`, `tiers.just`, and `checks/` files that actually *run* checks
 are annotated with `[group("anvil")]`. The install/validate-prereqs/setup recipes
@@ -74,12 +62,11 @@ in `tools.just` (and the per-check/group/tier setup recipes colocated in the sam
 files) are annotated with `[group("anvil-setup")]`. `just --groups` therefore shows
 two clean clusters: one for "run checks", one for "install prereqs".
 
-> **Optional container backend.** When a catalog includes the opt-in container
-> backend, `justfiles/anvil/container.just` adds the
-> `anvil-container <recipe>` command and `.anvil/container/` contains its
-> non-recipe assets. It runs any recipe below inside a pinned Linux image
-> (Linux-on-Windows parity, distro pinning) instead of against the host
-> toolchain. The recipe bodies are unchanged; see [containers.md](./containers.md).
+> **Optional container backend.** When a catalog includes the opt-in container backend, an
+> additional `justfiles/anvil/container/` subtree adds one more recipe — `anvil-container <recipe>`
+> — that runs any of the recipes below inside a pinned Linux image (Linux-on-Windows parity, distro
+> pinning) instead of against the host toolchain. The recipe bodies are unchanged; see
+> [containers.md](./containers.md).
 
 ## 2. Recipe layers
 
@@ -131,13 +118,11 @@ anvil-pr-fast: anvil-fmt anvil-clippy anvil-cargo-sort anvil-license-headers \
 
 anvil-pr-slow: anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants
 anvil-pr-test: anvil-llvm-cov anvil-doc-test anvil-examples
-anvil-pr-runtime-analysis: anvil-miri anvil-careful anvil-loom anvil-bolero
+anvil-pr-runtime-analysis: anvil-miri anvil-careful
 anvil-pr-mutants: anvil-mutants-diff
 
 anvil-scheduled-test: anvil-llvm-cov anvil-doc-test anvil-examples
 anvil-scheduled-advisories: anvil-deny anvil-audit anvil-aprz anvil-clippy
-anvil-scheduled-runtime-analysis: anvil-miri anvil-miri-tree-borrows \
-                                  anvil-miri-strict-provenance anvil-miri-race-coverage
 anvil-scheduled-exhaustive: anvil-mutants-full anvil-cargo-hack anvil-bench
 ```
 
@@ -148,9 +133,8 @@ in a deterministic order:
 
 ```just
 anvil-pr: anvil-pr-validate-prereqs anvil-pr-fast anvil-pr-slow
-anvil-scheduled: anvil-scheduled-validate-prereqs anvil-scheduled-test \
-                 anvil-scheduled-advisories anvil-scheduled-runtime-analysis \
-                 anvil-scheduled-exhaustive
+anvil-scheduled: anvil-scheduled-validate-prereqs anvil-scheduled-test anvil-scheduled-advisories \
+               anvil-scheduled-exhaustive
 anvil-full: anvil-pr anvil-scheduled
 ```
 
@@ -158,10 +142,10 @@ anvil-full: anvil-pr anvil-scheduled
 
 `tools.just` houses six layers of recipes:
 
-1. **`anvil-tool-cargo-spellcheck-source-deps-check`** — probe for `libclang`, which
-   `cargo-spellcheck` needs when built from source. Best-effort presence check; on
-   missing deps emits per-OS install hints and exits non-zero. No auto-install. See
-   §3.3.1.
+1. **`anvil-system-deps-check`** — probe for system-level libs that catalog tools need to
+   build from source (currently: `libclang` for `cargo-spellcheck`). Best-effort presence
+   check; on missing deps emits per-OS install hints and exits non-zero. No auto-install.
+   See §3.3.1.
 2. **Private helpers** (`_install-tool`, `_check-tool`, `_install-toolchain`,
    `_check-toolchain`, `_install-component`, `_check-component`) — the single
    implementation point for "install this thing at the pinned version" and
@@ -189,8 +173,8 @@ The full tool-version policy these recipes implement is detailed in §3 below.
 
 ### 3.1 Policy
 
-The catalog records, for each cargo subcommand, a **catalog version** (e.g.
-`cargo_nextest_version := "0.9.137"`). The pin is used two different ways:
+The catalog records, for each cargo subcommand, a **pinned version** (e.g.
+`cargo_nextest_version := "0.9.122"`). The pin is used two different ways:
 
 - **On install** (`anvil-tool-<bin>-install` writing into `~/.cargo/bin`): the recipe
   installs *exactly* that version (`--version '={{ pin }}'`), never `>=`. Pulling
@@ -209,13 +193,6 @@ This asymmetry -- "install exact, accept newer if already present" -- gives clou
 reproducibility *and* leaves the user in control. Bumping a pin is a deliberate
 catalog edit (changing a variable in `versions.just`), not an upstream-release-triggered
 surprise.
-
-`cargo-binstall` and `just` are bootstrap utilities rather than catalog checks.
-When absent, setup installs the latest compatible release available at that time;
-when present, setup accepts it. They are intentionally outside the catalog's exact
-installation guarantee so the bootstrap does not recursively require a versioned
-installer. Their versions can therefore vary across cold environments, while every
-tool that determines a catalog check's verdict remains catalog-controlled.
 
 ### 3.2 Detecting installed versions
 
@@ -304,13 +281,11 @@ install recipe can run:
 - **`just`** itself -- bootstrap with `cargo install just --locked` once, or use a
   system package. Every backend's setup composite/template installs it via cargo as
   a one-shot before calling any catalog recipe.
-- **`pwsh`** (PowerShell Core) -- used by every
-  `[script("pwsh", "-NoProfile")]` recipe in the catalog. Disabling profiles
-  keeps machine-readable output and exit behavior independent of user or system
-  startup scripts. PowerShell is preinstalled on every relevant cloud-workflow
-  runner (GH-hosted Linux/Windows/macOS, Microsoft-hosted ADO agents). On a
-  developer machine without pwsh, `anvil-tool-pwsh-validate-prereqs` fails with
-  a per-OS install hint pointing at <https://github.com/PowerShell/PowerShell>.
+- **`pwsh`** (PowerShell Core) -- used by every `[script("pwsh")]` recipe in the
+  catalog. Preinstalled on every relevant cloud-workflow runner (GH-hosted
+  Linux/Windows/macOS, Microsoft-hosted ADO agents). On a developer machine
+  without pwsh, `anvil-tool-pwsh-validate-prereqs` fails with a per-OS install
+  hint pointing at <https://github.com/PowerShell/PowerShell>.
 
 Trade-off acknowledged: `cargo install --locked` is slow on a cold cache (several
 minutes for the full catalog). It is also the most reliable mechanism in restricted
@@ -331,22 +306,20 @@ requires. anvil is not a general-purpose dev-env doctor. Repository-specific
 system deps (e.g. `openssl-devel`, `symcrypt` for the adopter's own crates) belong
 in the adopter's `setup.yml` customization, not in the anvil catalog.
 
-Detection (`anvil-tool-cargo-spellcheck-source-deps-check`) uses presence-only probes -- file existence
+Detection (`anvil-system-deps-check`) uses presence-only probes -- file existence
 in standard install dirs plus the `LIBCLANG_PATH` env var override. No version
 checks: system libs upgrade independently of the catalog and any reasonably modern
 libclang satisfies clang-sys.
 
 On a missing dep the recipe prints per-OS install hints (apt-get / tdnf / brew /
 scoop / winget) and exits non-zero. **No auto-install** -- admin/sudo decisions and
-package-manager choice stay with the user. The cargo-spellcheck install recipe passes
-`anvil-tool-cargo-spellcheck-source-deps-check` to `_install-tool` as its source prerequisite.
-The prerequisite runs for an explicit source-build `install` backend and when `binstall`
-cannot provide a binary and falls back to a source build, so missing libclang surfaces as a
-clear hint instead of a cryptic clang-sys build error 10 minutes into the install.
+package-manager choice stay with the user. Tool-install recipes that need a system
+lib depend on `anvil-system-deps-check` (only on the source-build `install`
+backend), so missing system libs surface as a clear hint instead of a cryptic
+clang-sys build error 10 minutes into the install.
 
-Each tool with a source-build system dependency owns a tool-specific prerequisite recipe and
-wires it into `_install-tool`. Catalog changes propagate to adopters via `cargo anvil` like
-any other template edit.
+Adding a new system dep is a one-block catalog change in `tools.just`; it
+propagates to adopters via `cargo anvil` like any other catalog edit.
 
 ### 3.4 Per-check warnings
 
@@ -484,31 +457,12 @@ their values.
 
 ### 4.2 Local impact-scoped runs
 
-Not the default. To preview what cloud workflows would skip, run the same configured
-snapshot/impact flow as the cloud action and export the env vars:
+Not the default. To preview what cloud workflows would skip, run cargo-delta manually and export the
+env vars:
 
 ```sh
-base="$(just _anvil-base-ref)"
-delta_config="$PWD/.delta.toml"
-active_toolchain="$(rustup show active-toolchain | head -n1 | cut -d' ' -f1)"
-tmp="$(mktemp -d)"
-trap 'git worktree remove --force "$tmp/baseline" 2>/dev/null || true; rm -rf "$tmp"' EXIT
-
-cargo delta --config "$delta_config" snapshot > "$tmp/current.json"
-git worktree add --detach "$tmp/baseline" "$base"
-( cd "$tmp/baseline" &&
-  RUSTUP_TOOLCHAIN="$active_toolchain" cargo delta --config "$delta_config" snapshot ) \
-    > "$tmp/baseline.json"
-git worktree remove --force "$tmp/baseline"
-cargo delta --config "$delta_config" impact \
-    --baseline "$tmp/baseline.json" \
-    --current "$tmp/current.json" \
-    --format json \
-    > "$tmp/impact.json"
-
-export ANVIL_INCLUDE_MODIFIED="$(just _anvil-impact-format modified "$tmp/impact.json")"
-export ANVIL_INCLUDE_AFFECTED="$(just _anvil-impact-format affected "$tmp/impact.json")"
-export ANVIL_INCLUDE_REQUIRED="$(just _anvil-impact-format required "$tmp/impact.json")"
+# Compute the affected-tier include list (--package … form) against origin/main.
+export ANVIL_INCLUDE_AFFECTED="$(cargo delta impact --base origin/main --format cargo-args --affected)"
 just anvil-pr-test
 ```
 
