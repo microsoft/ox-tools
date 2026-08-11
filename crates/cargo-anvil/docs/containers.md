@@ -33,7 +33,8 @@ to write. Anvil generates `.anvil/container/Dockerfile`, which installs the tool
 already pins, and builds it the first time it is needed.
 
 Point `image` at a pre-built reference to pull one instead, or `dockerfile` at your own to build something else — see
-[`[container]`](#container--containerized-execution). Product image builds are added by declaring `[[image]]` sections.
+[`[container]`](#container--containerized-execution). Product image builds are added by declaring `[[image]]` sections
+alongside `[container] enabled = true` — the image recipes are container-gated, so `[[image]]` on its own emits nothing.
 
 ## 2. Usage
 
