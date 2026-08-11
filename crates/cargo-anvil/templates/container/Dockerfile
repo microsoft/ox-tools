@@ -30,6 +30,8 @@ ARG POWERSHELL_VERSION=7.6.3
 ARG POWERSHELL_SHA256=856d0765d2332377f9d7a4aea76efdfde4de51446e7738dde2dfda41dba9e2a7
 ARG RUSTUP_VERSION=1.29.0
 ARG RUSTUP_SHA256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
+ARG CARGO_BINSTALL_VERSION=1.21.1
+ARG CARGO_BINSTALL_SHA256=630c8f8803a686aa6779497f0f0fb51d49822fb5fc3c514d8ced33b34e338e6e
 
 ENV DEBIAN_FRONTEND=noninteractive \
     CARGO_HOME=/usr/local/cargo \
@@ -69,6 +71,18 @@ RUN curl --proto '=https' --tlsv1.2 -fsSLo /tmp/rustup-init \
     && chmod 755 /tmp/rustup-init \
     && /tmp/rustup-init -y --profile minimal --default-toolchain none --no-modify-path \
     && rm /tmp/rustup-init
+
+# Without this, the first `_install-tool` that needs binstall bootstraps it by
+# compiling it from source, which costs minutes on every image build and is one
+# more source build a toolchain bump can break. CI installs the prebuilt binary
+# for the same reason.
+RUN curl -fsSLo /tmp/cargo-binstall.tgz \
+        "https://github.com/cargo-bins/cargo-binstall/releases/download/v${CARGO_BINSTALL_VERSION}/cargo-binstall-x86_64-unknown-linux-musl.tgz" \
+    && echo "${CARGO_BINSTALL_SHA256}  /tmp/cargo-binstall.tgz" | sha256sum -c - \
+    && mkdir -p "${CARGO_HOME}/bin" \
+    && tar -xzf /tmp/cargo-binstall.tgz -C "${CARGO_HOME}/bin" cargo-binstall \
+    && chmod 755 "${CARGO_HOME}/bin/cargo-binstall" \
+    && rm /tmp/cargo-binstall.tgz
 
 # Install the pinned toolchain and cargo subcommands from the generated
 # catalog. Only the files `just anvil-setup` needs are copied, so an unrelated

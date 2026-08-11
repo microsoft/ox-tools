@@ -1299,6 +1299,10 @@ mod tests {
             EXEC_DOCKERFILE.contains("just anvil-setup binstall"),
             "the exec Dockerfile must pass `binstall` to anvil-setup"
         );
+        assert!(
+            EXEC_DOCKERFILE.contains("cargo-binstall"),
+            "the exec Dockerfile must ship binstall, or every build compiles it"
+        );
     }
 
     /// The image installs its tools through `just anvil-setup`, whose
