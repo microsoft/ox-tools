@@ -23,3 +23,5 @@ updates:
     interval: "monthly"
   commit-message:
     prefix: "chore: "
+  cooldown:
+    default-days: 7
