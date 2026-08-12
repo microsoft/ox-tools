@@ -29,12 +29,21 @@ anvil_container_workdir := "/workspace"
 # container image references allow.
 anvil_container_name := "anvil-" + replace_regex(lowercase(file_name(justfile_directory())), '[^a-z0-9._-]', "-")
 
-# Resolve the engine. There is deliberately no probe: presence is not
+# Resolve how to invoke the engine, as a pipe-separated command.
+#
+# There is deliberately no probe *between* engines: presence is not
 # reachability, `podman-docker` aliases `docker` onto podman, and a silent
 # choice between two installed engines means two image stores and an
 # unexplained rebuild. We check that the requested binary exists and let every
 # other failure surface the engine's own diagnostic, which is more accurate
 # than anything repeated here.
+#
+# The one fallback is Windows-specific and unambiguous: when the engine is not
+# on the Windows PATH, try it inside the default WSL distribution. Installing
+# Docker in WSL without Docker Desktop is a documented, common setup, and it
+# leaves no Windows CLI behind -- so without this the engine we told the user to
+# install would be unreachable. Docker Desktop and Podman both ship a Windows
+# CLI and are found on PATH, so they never take this path.
 [private]
 [script("pwsh", "-NoProfile")]
 _anvil-container-engine:
@@ -44,11 +53,46 @@ _anvil-container-engine:
         Write-Error "anvil: ANVIL_CONTAINER_ENGINE must be 'docker' or 'podman', got '$engine'"
         exit 1
     }
-    if (-not (Get-Command $engine -ErrorAction SilentlyContinue)) {
-        Write-Error "anvil: '$engine' was not found on PATH. Install it, or set ANVIL_CONTAINER_ENGINE to the other engine. Setup: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/containers.md"
+    if (Get-Command $engine -ErrorAction SilentlyContinue) {
+        Write-Output $engine
+        exit 0
+    }
+    if ($IsWindows -and (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+        & wsl.exe -- $engine --version *> $null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Output "wsl.exe|--|$engine"
+            exit 0
+        }
+    }
+    Write-Error "anvil: '$engine' was not found on PATH, and is not usable in the default WSL distribution. Install it, or set ANVIL_CONTAINER_ENGINE to the other engine. Setup: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/containers.md"
+    exit 1
+
+# Translate a host path into what the engine sees.
+#
+# Identical when the engine runs on this host. When it runs in WSL, a Windows
+# path has to become its /mnt/... form or the daemon silently bind-mounts an
+# empty directory -- a failure that surfaces much later, as a missing file
+# inside the container.
+[private]
+[script("pwsh", "-NoProfile")]
+_anvil-container-path host_path:
+    $ErrorActionPreference = 'Stop'
+    $engine = (just _anvil-container-engine).Trim()
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if (-not $engine.StartsWith('wsl.exe|')) {
+        Write-Output '{{host_path}}'
+        exit 0
+    }
+    # Pass the path with forward slashes: arguments cross into WSL through a
+    # shell that would otherwise consume the backslashes, leaving wslpath to
+    # translate a mangled path. wslpath accepts either separator.
+    $hostPath = '{{host_path}}' -replace '\\', '/'
+    $translated = & wsl.exe -- wslpath -a -u $hostPath
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "anvil: could not translate '{{host_path}}' for the engine running in WSL"
         exit 1
     }
-    Write-Output $engine
+    Write-Output $translated.Trim()
 
 # Resolve the exec image reference, building it if it is not already present.
 #
@@ -67,8 +111,11 @@ _anvil-container-engine:
 [script("pwsh", "-NoProfile")]
 _anvil-container-image:
     $ErrorActionPreference = 'Stop'
-    $engine = just _anvil-container-engine
+    $engine = (just _anvil-container-engine).Trim()
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $engineCmd = $engine -split '\|'
+    $engineExe = $engineCmd[0]
+    $enginePrefix = @($engineCmd | Select-Object -Skip 1)
 
     $repoRoot = '{{justfile_directory()}}'
     $dockerfile = '.anvil/container/Dockerfile'
@@ -115,7 +162,7 @@ _anvil-container-image:
     $image = '{{anvil_container_name}}:' + $imageId
 
     if ($env:ANVIL_CONTAINER_NO_CACHE -ne '1') {
-        & $engine image inspect $image *> $null
+        & $engineExe @enginePrefix image inspect $image *> $null
         if ($LASTEXITCODE -eq 0) {
             Write-Output $image
             exit 0
@@ -164,19 +211,29 @@ _anvil-container-image:
         # Progress goes to stderr: callers capture this recipe's stdout to learn
         # the image reference, so anything else written there becomes part of it.
         [Console]::Error.WriteLine("anvil: building $image (inputs changed or first run)")
+        # The engine may not share this host's filesystem view, so the context
+        # and the Dockerfile are given in its terms rather than ours.
+        $engineRoot = (just _anvil-container-path $repoRoot).Trim()
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         # Pinned, not inferred from the host. The Dockerfile installs amd64
         # toolchains and verifies amd64 checksums, so an arm host would resolve
         # the multi-arch base to arm64 and fail late with an exec-format error.
         # It also keeps the identity scheme honest: without this, two hosts of
         # different architecture compute the same tag for different images.
-        $buildCmd = @('build', '--platform', 'linux/amd64', '--file', (Join-Path $repoRoot $dockerfile), '--tag', $image)
+        $buildCmd = @('build', '--platform', 'linux/amd64', '--file', "$engineRoot/$dockerfile", '--tag', $image)
         if ($env:ANVIL_CONTAINER_NO_CACHE -eq '1') { $buildCmd += '--no-cache' }
         foreach ($secret in $secretArgs) { $buildCmd += @('--secret', $secret) }
-        $buildCmd += $repoRoot
+        $buildCmd += $engineRoot
         # BuildKit is required for --secret; docker enables it by default from
         # 23.0 but an older daemon silently ignores the flag, so ask explicitly.
         $env:DOCKER_BUILDKIT = '1'
-        & $engine @buildCmd | ForEach-Object { [Console]::Error.WriteLine($_) }
+        # WSLENV exports the named variables into the WSL environment, which is
+        # where the engine reads a secret's value from when it runs there.
+        if ($engineExe -eq 'wsl.exe') {
+            $bridged = @('DOCKER_BUILDKIT/u') + ($secretEnv | ForEach-Object { "$_/u" })
+            $env:WSLENV = (@($env:WSLENV) + $bridged | Where-Object { $_ }) -join ':'
+        }
+        & $engineExe @enginePrefix @buildCmd | ForEach-Object { [Console]::Error.WriteLine($_) }
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     } finally {
         foreach ($name in $secretEnv) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
@@ -192,6 +249,8 @@ _anvil-container-image:
 #
 # ANVIL_IN_CONTAINER is set inside the image, so a nested invocation runs
 # natively and the work happens exactly once.
+
+# Run any anvil recipe inside the pinned Linux image (no argument: a shell).
 [group("anvil-container")]
 [script("pwsh", "-NoProfile")]
 anvil-container *target:
@@ -203,12 +262,17 @@ anvil-container *target:
         exit $LASTEXITCODE
     }
 
-    $engine = just _anvil-container-engine
+    $engine = (just _anvil-container-engine).Trim()
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $engineCmd = $engine -split '\|'
+    $engineExe = $engineCmd[0]
+    $enginePrefix = @($engineCmd | Select-Object -Skip 1)
     $image = (just _anvil-container-image) | Select-Object -Last 1
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     $repoRoot = '{{justfile_directory()}}'
+    $engineRoot = (just _anvil-container-path $repoRoot).Trim()
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     # Map the caller's working directory to its in-container equivalent so
     # relative paths keep working from a subdirectory.
@@ -222,7 +286,7 @@ anvil-container *target:
     $interactive = [string]::IsNullOrWhiteSpace($target)
     $runArgs = @('run', '--rm', '--platform', 'linux/amd64')
     $runArgs += $interactive ? '-it' : '-i'
-    $runArgs += @('-v', "${repoRoot}:{{anvil_container_workdir}}")
+    $runArgs += @('-v', "${engineRoot}:{{anvil_container_workdir}}")
     # Cargo and rustup homes live in named volumes: the hot write path never
     # crosses the host boundary, and the host's own toolchain is untouched.
     $runArgs += @('-v', '{{anvil_container_name}}-cargo:/usr/local/cargo')
@@ -273,7 +337,12 @@ anvil-container *target:
         # to surface rather than an invitation to fetch something unrelated.
         $runArgs += @('--pull=never', '-w', $containerCwd, $image)
         if (-not $interactive) { $runArgs += @('just', $target) }
-        & $engine @runArgs
+        # WSLENV exports the forwarded names into the WSL environment, which is
+        # where the engine reads their values from when it runs there.
+        if ($engineExe -eq 'wsl.exe' -and $hookEnv.Count -gt 0) {
+            $env:WSLENV = (@($env:WSLENV) + ($hookEnv | ForEach-Object { "$_/u" }) | Where-Object { $_ }) -join ':'
+        }
+        & $engineExe @enginePrefix @runArgs
         exit $LASTEXITCODE
     } finally {
         foreach ($name in $hookEnv) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
@@ -283,13 +352,15 @@ anvil-container *target:
 #
 # The tag embeds the hash of the image's inputs, so "absent" and "out of date"
 # are the same condition and are reported as one.
+
+# Report the engine, the exec image, and whether it is present and current.
 [group("anvil-container")]
 [script("pwsh", "-NoProfile")]
 anvil-container-status:
     $ErrorActionPreference = 'Stop'
-    $engine = just _anvil-container-engine
+    $engine = (just _anvil-container-engine).Trim()
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    Write-Output "engine:  $engine"
+    Write-Output ("engine:  " + ($engine -replace '\|', ' '))
     Write-Output "workdir: {{anvil_container_workdir}}"
 
     # NO_REBUILD turns the resolve into a pure query: report the state instead
@@ -310,6 +381,8 @@ anvil-container-status:
 # The ordinary path already rebuilds whenever an input changes, so this is for
 # the cases a content hash cannot see: a moved upstream package, a stale base
 # layer, or a build that is suspected of being wrong.
+
+# Rebuild the exec image from scratch, ignoring every cached layer.
 [group("anvil-container")]
 [script("pwsh", "-NoProfile")]
 anvil-container-rebuild:
@@ -325,9 +398,12 @@ anvil-container-rebuild:
 [script("pwsh", "-NoProfile")]
 anvil-container-down:
     $ErrorActionPreference = 'Stop'
-    $engine = just _anvil-container-engine
+    $engine = (just _anvil-container-engine).Trim()
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $engineCmd = $engine -split '\|'
+    $engineExe = $engineCmd[0]
+    $enginePrefix = @($engineCmd | Select-Object -Skip 1)
     foreach ($vol in @('{{anvil_container_name}}-cargo', '{{anvil_container_name}}-rustup')) {
-        & $engine volume rm -f $vol
+        & $engineExe @enginePrefix volume rm -f $vol
     }
     exit 0
