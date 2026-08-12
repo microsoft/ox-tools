@@ -463,5 +463,11 @@ unscoped
 backtracker
 prerelease
 versioned
-Containerfile
+BuildKit
+Dockerfile
+dockerignore
+Podman
+podman
+toolset
+ARM64
 WSL

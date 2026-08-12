@@ -43,12 +43,6 @@ const HELPERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/help
 /// Repo-root-relative path of the shared-helpers recipe file.
 const HELPERS_JUST_PATH: &str = "justfiles/anvil/helpers.just";
 
-/// Contents of `justfiles/anvil/runner.just` baked into the binary.
-const RUNNER_JUST: &str = include_str!("../../../templates/justfiles/anvil/runner.just");
-
-/// Repo-root-relative path of the tier execution router.
-const RUNNER_JUST_PATH: &str = "justfiles/anvil/runner.just";
-
 /// Emits `(path, include_str!)` pairs for a set of split recipe files that
 /// live under a subdirectory of `justfiles/anvil/`. Each file is one owned
 /// artifact, so the recipe tree is one file per check / per group rather
@@ -65,33 +59,17 @@ macro_rules! split_recipe_files {
 }
 
 #[test]
-fn runner_routes_tiers_and_guards_recursion() {
-    assert!(RUNNER_JUST.contains("[windows]"));
-    assert!(RUNNER_JUST.contains("[script(\"pwsh\", \"-NoProfile\")]"));
-    assert!(RUNNER_JUST.contains("[unix]"));
-    assert!(RUNNER_JUST.contains("[script(\"bash\")]"));
-    assert_eq!(RUNNER_JUST.matches("[no-exit-message]").count(), 2);
-    assert!(RUNNER_JUST.contains("if ($env:ANVIL_IN_CONTAINER)"));
-    assert!(RUNNER_JUST.contains("if [[ -n \"${ANVIL_IN_CONTAINER:-}\" ]]"));
-    assert!(RUNNER_JUST.contains("replace(just_executable(), \"'\", \"''\")"));
-    assert!(RUNNER_JUST.contains("replace(justfile(), \"'\", \"''\")"));
-    assert!(RUNNER_JUST.contains("replace(tier, \"'\", \"''\")"));
-    assert!(RUNNER_JUST.contains("replace(runner, \"'\", \"''\")"));
-    assert!(RUNNER_JUST.contains("& $just --justfile $justfile anvil-container $nativeTier"));
-    assert!(RUNNER_JUST.contains("exec \"$just_path\" --justfile \"$justfile\" anvil-container \"$native_tier\""));
-    assert_eq!(RUNNER_JUST.matches("expected 'native' or 'container'").count(), 2);
-}
-
-#[test]
-fn aprz_uses_the_container_secret_and_fails_fast_without_it() {
+fn aprz_borrows_a_token_and_degrades_with_instructions() {
     let aprz = CHECK_FILES
         .iter()
         .find_map(|(path, body)| path.ends_with("/aprz.just").then_some(*body))
         .expect("aprz.just is registered in CHECK_FILES below");
-    assert!(aprz.contains("if ($env:ANVIL_IN_CONTAINER)"));
-    assert!(aprz.contains("ANVIL_APRZ_ALREADY_RAN"));
-    assert!(aprz.contains("/run/secrets/anvil-github-token"));
-    assert!(aprz.contains("Run `gh auth login` on the host"));
+    assert!(aprz.contains("gh auth token --hostname github.com"));
+    assert!(aprz.contains("GITHUB_TOKEN is not set"));
+    // Nothing container-specific: inside the image a credential arrives as an
+    // ordinary environment variable, from the hook or from CI.
+    assert!(!aprz.contains("ANVIL_IN_CONTAINER"));
+    assert!(!aprz.contains("/run/secrets/"));
 }
 
 /// One `justfiles/anvil/checks/<check>.just` file per catalog check
@@ -196,12 +174,6 @@ pub fn tools() -> Artifact {
 #[must_use]
 pub fn helpers() -> Artifact {
     Artifact::owned_file(HELPERS_JUST_PATH, HELPERS_JUST)
-}
-
-/// `justfiles/anvil/runner.just` — native/container tier routing.
-#[must_use]
-pub fn runner() -> Artifact {
-    Artifact::owned_file(RUNNER_JUST_PATH, RUNNER_JUST)
 }
 
 /// The `justfiles/anvil/checks/<check>.just` files — one owned artifact
@@ -382,22 +354,19 @@ mod tests {
 
     #[test]
     fn tiers_just_template_has_three_tiers() {
-        for needle in [
-            "anvil-pr:",
-            "anvil-scheduled:",
-            "anvil-full:",
-            "_anvil-pr:",
-            "_anvil-scheduled:",
-            "_anvil-full:",
-        ] {
+        for needle in ["anvil-pr:", "anvil-scheduled:", "anvil-full:"] {
             assert!(TIERS_JUST.contains(needle), "tiers.just missing '{needle}'");
         }
+        // Tiers depend on their work directly: there is no routing seam, so
+        // `just anvil-pr` always runs natively and containerized execution is
+        // reached only through the explicit `anvil-container` recipe.
+        assert!(!TIERS_JUST.contains("_anvil-run"), "tiers must not route through an execution seam");
         // Each tier runs its validate-prereqs aggregate first so a missing
         // tool fails up front rather than mid-run.
         for needle in [
-            "anvil-pr: (_anvil-run \"pr\" anvil_runner)",
-            "anvil-scheduled: (_anvil-run \"scheduled\" anvil_runner)",
-            "anvil-full: (_anvil-run \"full\" anvil_runner)",
+            "anvil-pr: anvil-pr-validate-prereqs",
+            "anvil-scheduled: anvil-scheduled-validate-prereqs",
+            "anvil-full: anvil-full-validate-prereqs",
         ] {
             assert!(
                 TIERS_JUST.contains(needle),
@@ -450,7 +419,6 @@ mod tests {
             "import 'container.just'",
             "import 'groups/pr-fast.just'",
             "import 'groups/scheduled-exhaustive.just'",
-            "import 'runner.just'",
             "import 'tiers.just'",
             "import 'tools.just'",
             "import 'versions.just'",

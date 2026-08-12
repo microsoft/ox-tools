@@ -1,0 +1,15 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
+# crate unless the change is repository-specific.
+#
+# BuildKit reads `<dockerfile>.dockerignore` in preference to a root
+# `.dockerignore`, so this scopes the exec-image build context without the
+# repository having to own a root ignore file or having one silently overridden.
+#
+# The build context is the repository root but the image only needs two things.
+# Excluding everything else keeps a cold build from streaming the whole
+# worktree (and every stale `target/`) to the daemon.
+*
+!justfiles
+!rust-toolchain.toml
