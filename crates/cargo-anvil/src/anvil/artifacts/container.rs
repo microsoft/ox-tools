@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn dockerfile_body_can_be_replaced_by_a_fork() {
         let replaced = dockerfile().with_body("FROM example.invalid/base\n");
-        assert_eq!(paths(&[replaced.clone()]), [DOCKERFILE_PATH]);
+        assert_eq!(paths(std::slice::from_ref(&replaced)), [DOCKERFILE_PATH]);
         assert_eq!(replaced.body(), "FROM example.invalid/base\n");
     }
 }
