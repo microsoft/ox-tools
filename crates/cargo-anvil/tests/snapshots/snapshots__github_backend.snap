@@ -3627,6 +3627,12 @@ _anvil-container-image:
         # It also keeps the identity scheme honest: without this, two hosts of
         # different architecture compute the same tag for different images.
         $buildCmd = @('build', '--platform', 'linux/amd64', '--file', "$engineRoot/$dockerfile", '--tag', $image)
+        # BuildKit reads `<dockerfile>.dockerignore` on its own; buildah reads
+        # only a context-root ignore file and needs to be pointed at ours. Named
+        # rather than probed, because the flag is rejected outright by the engine
+        # that does not take it, and an unscoped context streams the whole
+        # worktree -- `target/` included -- on every build.
+        if ($engineCmd[-1] -eq 'podman') { $buildCmd += @('--ignorefile', "$engineRoot/$dockerfile.dockerignore") }
         if ($env:ANVIL_CONTAINER_NO_CACHE -eq '1') { $buildCmd += '--no-cache' }
         foreach ($secret in $secretArgs) { $buildCmd += @('--secret', $secret) }
         $buildCmd += $engineRoot
