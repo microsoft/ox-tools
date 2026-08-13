@@ -116,10 +116,16 @@ function Anvil-PreRun {
 }
 ```
 
-Both functions are optional. `Secrets` become BuildKit `--secret` mounts at build time; `Env` becomes `-e NAME` at
-run time. In both cases the value is handed over **by environment variable name**, so it never appears in the host's
-process command line — where endpoint telemetry records and retains it far longer than a short-lived token is meant
-to live — and BuildKit keeps build secrets out of every image layer.
+Both functions are optional. `Secrets` become `--secret id=…,src=…` mounts at build time; `Env` becomes
+`-e NAME` at run time. Neither value ever appears as a command-line argument: a build secret is written to a
+private temp file that is removed as soon as the build ends, and a run-time value is forwarded **by name**, so the
+engine copies it from the environment it already inherits. Command lines are recorded by endpoint telemetry and
+retained far longer than a short-lived token is meant to live. The engine also keeps build secrets out of every
+image layer.
+
+`src=` is used rather than `env=` because it is the form both engines implement. Podman for Windows translates the
+build context into its machine's view and then composes the `env=` temp path with a Windows separator, producing a
+path it cannot open; a file anvil creates itself has no such step.
 
 The corresponding `RUN` should declare the mount as required, which closes the same hole from the Dockerfile's side:
 
@@ -154,15 +160,29 @@ page recommends unusable.
 
 | | Docker | Podman |
 | --- | --- | --- |
-| Status | **supported** — what the e2e validates and what CI uses | best-effort, **untested** |
+| Status | **supported** — what the e2e validates and what CI uses | works, with one exception below |
 | Selected by | default | `ANVIL_CONTAINER_ENGINE=podman` |
 | Builder | BuildKit | buildah |
 
-Podman is wired up and expected to work, but nothing has verified it. The credential path in
-§5 is the specific risk: buildah is not BuildKit, so `# syntax=docker/dockerfile:1`,
-`--mount=type=secret,required=true`, and the fail-closed-on-empty-secret behaviour are all
-unconfirmed there. Rootless uid mapping differs too (`--userns keep-id` rather than
-`--user $(id -u)`). Treat a podman failure as "not yet supported", not as a regression.
+Podman has been run through the same end-to-end test as docker: it builds the image, computes and
+reuses the content-addressed tag, and runs recipes. Rootless uid mapping differs (`--userns
+keep-id` rather than `--user $(id -u)`), which anvil does not currently set for podman.
+
+**Build secrets do not work on podman for Windows.** Podman composes its own temp path from the
+build context after translating it into its machine's view, and joins it with a Windows
+separator, so any `--secret` fails before the build starts:
+
+```text
+Error: creating temp file: open /mnt/c/Users/…/repo\podman-build-secret-4085781963
+```
+
+This is not something anvil can work around — `src=` and `env=` fail identically, and a
+four-line Dockerfile reproduces it with no anvil involved. It affects only a repository that
+supplies `Anvil-PreBuild` (§5); the public catalog ships no hook, so ordinary use is unaffected.
+Use docker if you need build-time credentials on Windows.
+
+Docker also carries more mileage: it is what CI uses and what the e2e runs by default. Prefer it
+if you have no reason not to.
 
 ### 6.1 Docker
 

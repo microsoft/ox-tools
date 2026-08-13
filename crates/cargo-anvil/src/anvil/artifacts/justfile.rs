@@ -133,11 +133,6 @@ const TIERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tiers.
 /// Repo-root-relative path of the tier aggregator file.
 const TIERS_JUST_PATH: &str = "justfiles/anvil/tiers.just";
 
-#[cfg(test)]
-pub(crate) fn dependency_recipe_sources() -> impl Iterator<Item = &'static str> {
-    std::iter::once(TIERS_JUST).chain(GROUP_FILES.iter().map(|(_, body)| *body))
-}
-
 /// Embedded body of the `anvil-imports` region in the user's Justfile.
 pub(crate) const JUSTFILE_IMPORTS_BODY: &str = include_str!("../../../templates/regions/justfile-imports.just");
 

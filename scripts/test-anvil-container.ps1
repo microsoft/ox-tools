@@ -209,13 +209,15 @@ function Test-ImagePresent([string]$Reference) {
 
 function Remove-AnvilImages([string]$Prefix) {
     $images = Invoke-Engine -Arguments @('images', '--format', '{{.Repository}}:{{.Tag}}') -AllowFailure
-    $matching = ($images.StdOut -split "`r?`n") | Where-Object { $_ -like "$Prefix*" }
+    # Podman reports images fully qualified (`localhost/anvil-…`), docker does
+    # not, so match anywhere in the reference rather than at the start.
+    $matching = ($images.StdOut -split "`r?`n") | Where-Object { $_ -like "*$Prefix*" }
     foreach ($image in $matching) {
         Write-Step "removing image $image"
         Invoke-Engine -Arguments @('rmi', '-f', $image) -AllowFailure | Out-Null
     }
     $volumes = Invoke-Engine -Arguments @('volume', 'ls', '--format', '{{.Name}}') -AllowFailure
-    $matchingVolumes = ($volumes.StdOut -split "`r?`n") | Where-Object { $_ -like "$Prefix*" }
+    $matchingVolumes = ($volumes.StdOut -split "`r?`n") | Where-Object { $_ -like "*$Prefix*" }
     foreach ($volume in $matchingVolumes) {
         Write-Step "removing volume $volume"
         Invoke-Engine -Arguments @('volume', 'rm', '-f', $volume) -AllowFailure | Out-Null
@@ -419,6 +421,16 @@ Assert-Equal 'restoring the Dockerfile restores the tag' $reference (Get-ImageRe
 
 Write-Section '7. The credential hook reaches build and run'
 
+# podman on Windows cannot mount a build secret at all: it composes its own temp
+# path from the already-translated build context and joins it with a Windows
+# separator. That is an engine defect with no client-side workaround, documented
+# in docs/design/containers.md. Reporting it as a failure every run would train
+# the reader to ignore red, so it is called out and skipped.
+$buildSecretsSupported = -not ($Engine -eq 'podman' -and $IsWindows)
+if (-not $buildSecretsSupported) {
+    Write-Step 'skipping the hook sections: podman on Windows cannot mount build secrets'
+    Write-Step 'everything above is engine-agnostic and has already run'
+} else {
 # A user writes this file by hand; the public catalog does not emit one.
 Write-Fixture $hooks @'
 function Anvil-PreBuild {
@@ -509,13 +521,18 @@ $mutatedValue = Get-ImageReference -Repo $repo
 Assert-That 'a changed hook body still changes the tag' ($mutatedValue -ne $secretReference) `
     'the hook file is a hashed input'
 
+}   # end of the build-secret sections (7-9)
+
 # ------------------------------------------------------ 10. no nested runs ---
 
 Write-Section '10. Recipes run natively inside the image'
 
+# Sections 7-9 build the image that carries the secret stanza; without them the
+# current reference is the plain one.
+$nestedReference = if ($buildSecretsSupported) { $secretReference } else { Get-ImageReference -Repo $repo }
 $nested = Invoke-Engine -Arguments @(
     'run', '--rm', '-e', 'ANVIL_IN_CONTAINER=1', '-v', "$(ConvertTo-EnginePath $repo):/workspace", '-w', '/workspace',
-    $secretReference, 'just', 'anvil-container', 'anvil-fmt'
+    $nestedReference, 'just', 'anvil-container', 'anvil-fmt'
 ) -AllowFailure
 Assert-Equal 'anvil-container passes through inside the image' 0 $nested.ExitCode
 Assert-That 'no engine was invoked from inside the container' `

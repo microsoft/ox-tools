@@ -234,7 +234,19 @@ _anvil-container-image:
             $env:WSLENV = (@($env:WSLENV) + $bridged | Where-Object { $_ }) -join ':'
         }
         & $engineExe @enginePrefix @buildCmd | ForEach-Object { [Console]::Error.WriteLine($_) }
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        if ($LASTEXITCODE -ne 0) {
+            # Build secrets are the part of this path engines implement least
+            # consistently -- podman on Windows cannot mount one at all, and
+            # fails with a path error that names neither the secret nor the
+            # engine. Say so once, rather than leaving that to be rediscovered.
+            if ($secretArgs.Count -gt 0) {
+                [Console]::Error.WriteLine(
+                    "anvil: the build passed $($secretArgs.Count) secret(s) from $hookRel. " +
+                    "If the failure above is about a temp file or a path, the engine may not support " +
+                    "build secrets on this host; see docs/design/containers.md.")
+            }
+            exit $LASTEXITCODE
+        }
     } finally {
         foreach ($name in $secretEnv) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
     }
