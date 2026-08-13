@@ -216,7 +216,7 @@ mod tests {
         // BuildKit finds `<dockerfile>.dockerignore` itself; buildah reads only
         // a context-root file, so without this the whole worktree is the build
         // context.
-        assert!(RECIPE.contains(r#"if ($engineCmd[-1] -eq 'podman') { $buildCmd += @('--ignorefile'"#));
+        assert!(RECIPE.contains(r"if ($engineCmd[-1] -eq 'podman') { $buildCmd += @('--ignorefile'"));
     }
 
     #[test]
