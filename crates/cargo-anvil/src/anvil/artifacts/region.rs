@@ -20,7 +20,7 @@ const WORKSPACE_LINTS_REGION_ID: &str = "anvil-workspace-lints";
 /// Region id for crate-scope lints — used both for single-crate repos (full
 /// catalog) and for each member of a multi-crate workspace (`workspace =
 /// true`).
-pub(crate) const CRATE_LINTS_REGION_ID: &str = "anvil-lints";
+const CRATE_LINTS_REGION_ID: &str = "anvil-lints";
 
 /// Embedded body of the lint catalog, in dotted-key form (no table header).
 const LINTS_BODY: &str = include_str!("../../../templates/regions/cargo-lints-body.toml");
