@@ -26,7 +26,7 @@
       6. Editing the Dockerfile is preserved by a re-run of the generator.
       7. A credential hook reaches both the build and the run.
       8. A hook returning an empty value fails closed.
-      9. A hook's output does not change the tag; its file content does.
+      9. A hook's returned value does not change the tag; its file content does.
      10. The recipes run natively inside the image (no nesting).
 
 .PARAMETER Engine
@@ -194,9 +194,10 @@ function Invoke-Just {
     Invoke-Native -Command 'just' -Arguments $Arguments -WorkingDirectory $Repo -Environment $env -AllowFailure:$AllowFailure
 }
 
-function Get-ImageReference([string]$Repo) {
+function Get-ImageReference {
+    param([Parameter(Mandatory)][string]$Repo, [hashtable]$Environment = @{})
     # anvil-container-status reports the reference without building it.
-    $status = Invoke-Just -Repo $Repo -Arguments @('anvil-container-status') -AllowFailure
+    $status = Invoke-Just -Repo $Repo -Arguments @('anvil-container-status') -Environment $Environment -AllowFailure
     $line = ($status.StdOut -split "`r?`n") | Where-Object { $_ -match '^\s*image:\s*(\S+)' } | Select-Object -First 1
     if ($line -match '^\s*image:\s*(\S+)') { return $Matches[1] }
     ''
@@ -507,19 +508,32 @@ function Anvil-PreRun {
 '@
 Assert-Equal 'restoring the hook restores the tag' $secretReference (Get-ImageReference -Repo $repo)
 
-# Same file length, different minted value: the tag must not move.
+# The invariant that matters: a *minted* credential must never influence the
+# tag, or two developers holding different tokens would compute different
+# images from identical inputs -- and a rotated token would force a rebuild.
+# Proving it needs the hook file to be byte-identical while what it returns
+# differs, so the value is read from the environment rather than written into
+# the file. Changing the file instead would only re-prove that file content is
+# hashed, which section 7 already covers.
 Write-Fixture $hooks @'
 function Anvil-PreBuild {
-    @{ Secrets = @{ e2e_token = 'BUILD-SECRET-VALUE' } }
+    @{ Secrets = @{ e2e_token = $env:ANVIL_E2E_MINT } }
 }
 
 function Anvil-PreRun {
     @{ Env = @{ ANVIL_E2E_RUNTIME = 'run-value' } }
 }
 '@
-$mutatedValue = Get-ImageReference -Repo $repo
-Assert-That 'a changed hook body still changes the tag' ($mutatedValue -ne $secretReference) `
-    'the hook file is a hashed input'
+$mintedA = Get-ImageReference -Repo $repo -Environment @{ ANVIL_E2E_MINT = 'first-minted-value' }
+$mintedB = Get-ImageReference -Repo $repo -Environment @{ ANVIL_E2E_MINT = 'a-completely-different-second-value' }
+Assert-That 'the tag is stable across two different minted values' `
+    ($mintedA -and $mintedA -eq $mintedB) "first: $mintedA`nsecond: $mintedB"
+
+# ...while the file that produces those values is itself hashed, so a changed
+# hook still renames the image.
+$hookBodyChanged = $mintedA -ne $secretReference
+Assert-That 'a changed hook body still changes the tag' $hookBodyChanged `
+    "the hook file is a hashed input; before: $secretReference, after: $mintedA"
 
 }   # end of the build-secret sections (7-9)
 
