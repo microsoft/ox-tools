@@ -167,9 +167,10 @@
 //! ### Customizing the image
 //!
 //! `.anvil/container/Dockerfile` is an ordinary owned file: edit it in place
-//! and anvil's drift handling preserves it. A downstream catalog that targets
-//! a different base OS or toolchain source replaces the artifact instead — see
-//! [`artifacts::container::dockerfile`].
+//! for extra packages, and anvil's drift handling preserves the change. A
+//! downstream catalog that needs a different base OS or toolchain source for
+//! every repository it manages replaces the artifact instead — see
+//! [`artifacts::container`] and the design doc.
 //!
 //! ## Checks and tiers
 //!

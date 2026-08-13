@@ -17,6 +17,8 @@ wraps, and [extensibility.md](./extensibility.md) for the catalog seam a downstr
 - [4. Image identity](#4-image-identity)
 - [5. Credentials — the hook](#5-credentials--the-hook)
 - [6. Host setup](#6-host-setup)
+  - [6.1 Docker](#61-docker)
+  - [6.2 Podman](#62-podman)
 - [7. Customizing the image](#7-customizing-the-image)
 - [8. Limits](#8-limits)
 
@@ -140,11 +142,37 @@ macros. Keep the set narrow and the token short-lived.
 
 ## 6. Host setup
 
-The engine must be callable from the shell that runs `just`. Docker is the supported path; podman is best-effort and
-currently untested — it uses buildah rather than BuildKit, so the secret semantics above are unverified there.
+anvil installs nothing. It calls the engine you selected and lets that engine's own diagnostics
+surface when something is wrong — the one exception is a missing binary, which is reported with
+the variable to set and a pointer here.
 
-anvil installs nothing. On Windows, either use an engine that ships a Windows CLI (Docker Desktop, podman), or run
-Docker inside WSL and point a Windows `docker` CLI at it:
+The engine must be **callable from the shell that runs `just`**. On Windows there is one
+exception, and it is automatic: if the engine is not on `PATH`, anvil retries it inside the
+default WSL distribution and translates the repository path with `wslpath`. That exists because
+Docker installed in WSL leaves no Windows CLI behind, which would otherwise make the setup this
+page recommends unusable.
+
+| | Docker | Podman |
+| --- | --- | --- |
+| Status | **supported** — what the e2e validates and what CI uses | best-effort, **untested** |
+| Selected by | default | `ANVIL_CONTAINER_ENGINE=podman` |
+| Builder | BuildKit | buildah |
+
+Podman is wired up and expected to work, but nothing has verified it. The credential path in
+§5 is the specific risk: buildah is not BuildKit, so `# syntax=docker/dockerfile:1`,
+`--mount=type=secret,required=true`, and the fail-closed-on-empty-secret behaviour are all
+unconfirmed there. Rootless uid mapping differs too (`--userns keep-id` rather than
+`--user $(id -u)`). Treat a podman failure as "not yet supported", not as a regression.
+
+### 6.1 Docker
+
+**Linux.** Install Docker Engine from your distribution or `get.docker.com`, add yourself to the
+`docker` group, and you are done.
+
+**Windows — Docker Desktop.** Nothing to configure. `docker` is on `PATH`, so anvil calls it
+directly.
+
+**Windows — Docker Engine in WSL** (no Docker Desktop, no licence question):
 
 ```powershell
 wsl --install -d Ubuntu-24.04
@@ -155,22 +183,61 @@ wsl --shutdown
 wsl -d Ubuntu-24.04 -- docker version     # verify
 ```
 
-With that arrangement the daemon is Linux-side, so `DOCKER_HOST` must reach its socket and the repository must be
-bind-mountable at a path the daemon understands.
+That is the whole setup: no Windows `docker` CLI is needed, because anvil reaches the engine
+through `wsl.exe` when it finds none on `PATH`. `just` and `pwsh` stay on Windows — the
+distribution needs only Docker.
 
-For podman, `podman machine init` provisions and manages its own WSL2 virtual machine; set
-`ANVIL_CONTAINER_ENGINE=podman`.
+If you *do* install a Windows `docker` CLI and point `DOCKER_HOST` at the WSL socket, anvil uses
+it directly and the WSL fallback never engages. In that arrangement the daemon is Linux-side, so
+the repository must be bind-mountable at a path that daemon understands.
+
+### 6.2 Podman
+
+**Linux.** Install podman and set `ANVIL_CONTAINER_ENGINE=podman`.
+
+**Windows.** `podman machine init` provisions and manages its own WSL2 virtual machine, and
+`podman.exe` is on `PATH`, so anvil calls it directly and the WSL fallback never engages.
+
+```powershell
+winget install RedHat.Podman-Desktop   # or the podman CLI alone
+podman machine init
+podman machine start
+$env:ANVIL_CONTAINER_ENGINE = 'podman'
+```
 
 ## 7. Customizing the image
 
-| You want | Do this |
-| --- | --- |
-| Extra packages in one repository | Edit `.anvil/container/Dockerfile`; the drift flow preserves it |
-| A different base OS or toolchain source for a whole organization | `replace_artifact(artifacts::container::dockerfile().with_body(…))` in a downstream catalog |
-| Credentials | Add `hooks.ps1`, by hand or via `with_artifact(artifacts::container::hooks(…))` |
+Two audiences, three levers. A **repository** owns its own copy of the emitted files; a
+**downstream catalog** (an anvil fork — see [extensibility.md](./extensibility.md)) changes what
+every repository it manages receives.
 
-A catalog that replaces the Dockerfile with one that copies more of the tree must replace
-`artifacts::container::dockerignore()` too, since the build context is scoped by that file.
+| You want | Do this | Who |
+| --- | --- | --- |
+| Extra packages, one repository | Edit `.anvil/container/Dockerfile` in place; the drift flow preserves it | repository |
+| A different base OS or toolchain source, everywhere | `replace_artifact(artifacts::container::dockerfile().with_body(…))` | catalog |
+| Credentials | Write `.anvil/container/hooks.ps1`, or ship one with `with_artifact(artifacts::container::hooks(…))` | either |
+| No container support at all | `without_artifact` each of the three artifacts | catalog |
+
+Editing the Dockerfile in a single repository is supported but noisy: anvil keeps proposing its
+own version against a file it can see has diverged. A fork that wants the change everywhere
+should replace the artifact instead.
+
+The hook is loaded by path, not by provenance: `container.just` sources
+`.anvil/container/hooks.ps1` whenever it exists, so a hand-written file and one shipped by a
+catalog behave identically. That is deliberate — it lets a repository try a credential flow
+before anyone commits to forking the catalog for it.
+
+**Coupled artifacts.** The Dockerfile and its ignore file move together. A replacement that
+`COPY`s more of the tree must also replace `artifacts::container::dockerignore()`, or the extra
+files are excluded from the build context and the build fails on a missing path. The recipe
+tree needs no such care: the image identity hashes every `*.just` under `justfiles/anvil/`
+recursively, so a catalog that adds a recipe directory gets it hashed automatically — but the
+same widening rule applies before it can be copied.
+
+**What a fork does *not* touch.** The recipe, the identity hash, the cache volumes, the mounts
+and the uid mapping are inherited unchanged. Substrate is the worked example: a different base
+OS and a different toolchain source, expressed as one Dockerfile replacement plus one hook, and
+nothing else.
 
 Keep `ARG BASE_IMAGE` digest-pinned. A floating tag can change underneath a tag that claims to name fixed content,
 which would make every cached image a potential lie.

@@ -464,42 +464,24 @@ the relevant `OwnedFile` (e.g. `checks.just`) wholesale rather than editing indi
 This is a modest, low-risk refactor: it data-drives the artifact list (§4) without disturbing the
 engine internals or the template format.
 
-### 6.1 Containerized execution
+### 6.1 Placement: `justfiles/` holds recipes only
 
-The base catalog emits three files: the `anvil-container` recipe at
-`justfiles/anvil/container.just`, and the image definition at
-`.anvil/container/Dockerfile` with its `Dockerfile.dockerignore`. Native
-`just anvil-*` execution is unaffected — the container is reached only through
-the explicit recipe.
+One placement rule is enforced rather than left to discovery, because getting it
+wrong fails in a confusing place. `justfiles/anvil/` may contain `.just` recipes
+and nothing else: [`CatalogBuilder::build`](#4-the-shape-of-a-catalog) rejects
+any other owned file under that prefix, so a derived catalog fails loudly at
+construction instead of shipping a file whose absence is only noticed later.
 
-A downstream catalog customizes exactly two things:
+The reason is containerized execution. The image identity hashes every `*.just`
+under `justfiles/anvil/` recursively, and the build context admits that tree,
+so a non-recipe file placed there would be silently dropped from the image while
+still appearing to be managed. Non-recipe assets belong in a tool-owned
+directory of their own, such as `.anvil/`.
 
-- `replace_artifact(artifacts::container::dockerfile().with_body(...))` to build
-  on a different base OS or install the toolchain from a different source. The
-  recipe, the image-identity hash, the cache volumes and the mounts are
-  inherited unchanged.
-- `with_artifact(artifacts::container::hooks(...))` to supply credentials. The
-  recipe loads `.anvil/container/hooks.ps1` whenever it is present, so the
-  contract is ownership-neutral: a regular repository can commit the same path
-  directly, without a derived catalog, and behavior is identical.
-
-A catalog that replaces the Dockerfile with one that copies more of the tree
-must also replace `artifacts::container::dockerignore()`, since the build
-context is scoped by that file. The image identity hashes every `*.just` under
-`justfiles/anvil/` recursively, so a catalog that adds a recipe directory gets
-it hashed automatically, but must widen the ignore file for it to be copied.
-
-`justfiles/` holds `.just` recipes only.
-[`CatalogBuilder::build`](#4-the-shape-of-a-catalog) rejects any other owned
-file placed there; non-recipe assets belong in a tool-owned directory such as
-`.anvil/`.
-
-The hook is trusted host code: the recipe dot-sources it into its own process
-before the build and before the run, so it executes with the invoking
-developer's permissions and outside the container sandbox. See
-[containers.md §5](./containers.md#5-credentials--the-hook) for the full
-interface and trust boundary.
-
+Containerized execution is itself an ordinary artifact group, customized with
+the same `replace_artifact` / `with_artifact` / `without_artifact` levers as
+anything else; the artifacts it exposes and the contract each one carries are
+specified in [containers.md](./containers.md#7-customizing-the-image).
 
 The public engine contains no environment-specific image, registry, cloud, or
 credential-provider details.

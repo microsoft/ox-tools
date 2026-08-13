@@ -168,9 +168,10 @@ container isolation. Only run one from a repository or catalog you trust.
 #### Customizing the image
 
 `.anvil/container/Dockerfile` is an ordinary owned file: edit it in place
-and anvil’s drift handling preserves it. A downstream catalog that targets
-a different base OS or toolchain source replaces the artifact instead — see
-[`artifacts::container::dockerfile`][__link1].
+for extra packages, and anvil’s drift handling preserves the change. A
+downstream catalog that needs a different base OS or toolchain source for
+every repository it manages replaces the artifact instead — see
+[`artifacts::container`][__link1] and the design doc.
 
 ### Checks and tiers
 
@@ -390,9 +391,9 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQblC_Wpqk8Z8wbXSVrNQ_nt0AbkrIITLnNqNIbWqbEpmD_DbhhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbIHyE2bP5dGcbfv5a5XBW8mUbpBv2VBT_2G0bCUddUAFHBklhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
- [__link1]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts::container::dockerfile
+ [__link1]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts
  [__link2]: https://crates.io/crates/cargo-spellcheck
  [__link3]: https://crates.io/crates/cargo-coverage-gate
