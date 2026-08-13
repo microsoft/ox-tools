@@ -9,8 +9,8 @@ just anvil-container anvil-pr       # the whole PR tier
 just anvil-container                # interactive shell
 ```
 
-The feature consists of two generated artifacts and one optional hook. There is no configuration file, and no
-invocation is routed into a container implicitly.
+The feature consists of three generated artifacts and one optional hook file. Containerized execution is opt-in per
+invocation: recipes run natively unless you ask for a container by name. There is no configuration file.
 
 See [README.md](./README.md) for the overall design principles, [local.md](./local.md) for the recipe surface this
 wraps, and [extensibility.md](./extensibility.md) for the catalog seam a downstream fork uses.
@@ -77,8 +77,8 @@ their own agents. The image is pinned to resemble that environment, not to repro
 
 ## 3. Execution model
 
-One container is created per `anvil-container` invocation, not one per check. The container is removed on exit
-(`--rm`).
+One container is created per `anvil-container` invocation, however many checks the requested recipe runs. It is
+removed on exit (`--rm`).
 
 ### 3.1 Engine resolution
 
@@ -94,23 +94,23 @@ Resolution proceeds in a fixed order:
    If the probe succeeds, every subsequent engine call is prefixed with `wsl.exe --`.
 3. Otherwise the invocation fails with a message naming the variable and linking to this document.
 
-anvil does not probe for an engine other than the one requested. Presence is not reachability; `podman-docker` aliases
-`docker` onto podman; and silently selecting between two installed engines yields two image stores and an unexplained
-rebuild. Every failure other than a missing binary surfaces the engine's own diagnostic unmodified.
+anvil uses the engine you select and never falls back to the other one. If `ANVIL_CONTAINER_ENGINE` names an engine
+that is not usable, the invocation fails rather than substituting a different one. Apart from a missing binary, anvil
+does not interpret engine failures: the engine's own diagnostic is shown unchanged.
 
-Step 2 exists because installing Docker Engine inside WSL without Docker Desktop leaves no Windows CLI on `PATH`, and
-that setup is the one this repository's own development guide describes. Docker Desktop and Podman both install a
-Windows CLI, are found in step 1, and never reach step 2.
+Automatic detection is avoided deliberately. A binary on `PATH` does not prove a reachable daemon, and choosing
+silently between two installed engines would split the image cache across two stores, producing rebuilds with no
+visible cause.
+
+Step 2 accommodates Docker Engine installed inside WSL without Docker Desktop, which leaves no Windows CLI on `PATH`.
+Docker Desktop and Podman both install one, so they resolve at step 1 and never reach it.
 
 ### 3.2 Path translation
 
 When the engine is reached through WSL it does not share the Windows filesystem view, so host paths are translated
-with `wslpath -a -u` before they are passed as a bind-mount source, a build context, or a `--file` argument. An
-untranslated Windows path is not rejected by the daemon: it is bind-mounted as an empty directory, and the failure
-surfaces much later as a missing file inside the container.
-
-Paths are converted to forward slashes before translation, because arguments crossing into WSL pass through a shell
-that would otherwise consume the backslashes. `wslpath` accepts either separator.
+with `wslpath -a -u` before they are passed as a bind-mount source, a build context, or a `--file` argument. A path
+that is not translated is not rejected by the engine — it silently resolves to an empty directory — so the
+translation is applied to every path anvil hands over.
 
 ### 3.3 Mounts and working directory
 
@@ -244,13 +244,16 @@ compose: `anvil-container-status` sets both `NO_REBUILD` and `NO_RESOLVE`, and a
 
 ## 7. The hook
 
-`.anvil/container/hooks.ps1` supplies the two things anvil cannot derive: credentials, and where a prebuilt image
-might be obtained. The file is optional and is not emitted by default — crates.io requires no credentials, and an
-empty script would be one more generated file to review.
+`.anvil/container/hooks.ps1` is a single optional PowerShell script supplying the two things anvil cannot derive:
+credentials, and where a published image might be obtained. It is not emitted by default — crates.io requires no
+credentials, and an empty script would be one more generated file to review.
 
 It is loaded by path rather than by provenance: the recipe dot-sources it whenever the file exists, whether a
 repository wrote it or a catalog shipped it. A repository can therefore adopt a credential flow without forking the
 catalog.
+
+The script may define up to three independent functions, each invoked at a different point. All are optional, and each
+is called only if the loaded script defined it.
 
 | Function | Invoked | Returns |
 | --- | --- | --- |
@@ -396,19 +399,17 @@ podman machine start
 $env:ANVIL_CONTAINER_ENGINE = 'podman'
 ```
 
-Three differences from Docker are known and unresolved:
+Podman differs from Docker in three respects:
 
-- **Build secrets are unavailable on podman for Windows.** Podman derives a temporary path from the build context
-  after translating it into the machine's view, then joins it using a Windows separator, so any `--secret` fails
-  before the build begins:
+- **Build secrets are not supported on Windows.** A build that mounts one fails before it starts, with an error
+  naming a temporary file:
 
   ```text
   Error: creating temp file: open /mnt/c/Users/…/repo\podman-build-secret-4085781963
   ```
 
-  The defect is in podman, and no form of the flag avoids it. It affects only a repository whose hook defines
-  `Anvil-PreBuild` (§7.1); building, running, and tag reuse are unaffected. Use Docker if you need build-time
-  credentials on Windows.
+  This affects only a repository whose hook defines `Anvil-PreBuild` (§7.1); building, running, and tag reuse are
+  unaffected. Use Docker if you need build-time credentials on Windows.
 
 - **The ignore file is passed explicitly.** buildah honours only an ignore file at the context root, so anvil passes
   `--ignorefile` on podman. Without it the entire worktree, including `target/`, is streamed to the daemon on every

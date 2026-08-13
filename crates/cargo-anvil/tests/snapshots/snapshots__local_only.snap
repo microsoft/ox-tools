@@ -2251,11 +2251,10 @@ anvil_container_name := "anvil-" + replace_regex(lowercase(file_name(justfile_di
 # Resolve how to invoke the engine, as a pipe-separated command.
 #
 # There is deliberately no probe *between* engines: presence is not
-# reachability, `podman-docker` aliases `docker` onto podman, and a silent
-# choice between two installed engines means two image stores and an
-# unexplained rebuild. We check that the requested binary exists and let every
-# other failure surface the engine's own diagnostic, which is more accurate
-# than anything repeated here.
+# reachability, and a silent choice between two installed engines means two
+# image stores and an unexplained rebuild. We check that the requested binary
+# exists and let every other failure surface the engine's own diagnostic, which
+# is more accurate than anything repeated here.
 #
 # The one fallback is Windows-specific and unambiguous: when the engine is not
 # on the Windows PATH, try it inside the default WSL distribution. Installing
