@@ -276,6 +276,14 @@ mod tests {
     }
 
     #[test]
+    fn podman_is_pointed_at_the_ignore_file() {
+        // BuildKit finds `<dockerfile>.dockerignore` itself; buildah reads only
+        // a context-root file, so without this the whole worktree is the build
+        // context.
+        assert!(RECIPE.contains(r"if ($engineCmd[-1] -eq 'podman') { $buildCmd += @('--ignorefile'"));
+    }
+
+    #[test]
     fn no_rebuild_is_honoured_even_with_no_cache_set() {
         // The two controls compose: NO_REBUILD must not be skipped just
         // because NO_CACHE is exported, or `anvil-container-status` spends

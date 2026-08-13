@@ -232,14 +232,12 @@ four-line Dockerfile reproduces it with no anvil involved. It affects only a rep
 supplies `Anvil-PreBuild` (§5); the public catalog ships no hook, so ordinary use is unaffected.
 Use docker if you need build-time credentials on Windows.
 
-**Podman also ignores the build-context ignore file.** Anvil emits
+**Podman needs to be pointed at the ignore file.** Anvil emits
 `.anvil/container/Dockerfile.dockerignore`, which BuildKit reads in preference to a root
-`.dockerignore`. Podman and buildah only honour `.containerignore` or `.dockerignore` at the
-*context root*, so on podman the whole worktree — `target/` included — is streamed to the
-daemon on every build, and a consumer repository that owns a root `.dockerignore` has that one
-obeyed instead. Neither breaks the build unless the repository's own ignore file excludes
-`justfiles/` or `rust-toolchain.toml`; the cost is transfer time. Passing `--ignorefile` would
-fix it, but only podman accepts that flag, so the recipe does not.
+`.dockerignore`. Podman and buildah honour only `.containerignore` or `.dockerignore` at the
+*context root*, so the recipe passes `--ignorefile` explicitly when the engine is podman. Without
+it the whole worktree — `target/` included — would be streamed to the daemon on every build, and
+a consumer repository owning a root `.dockerignore` would have that one obeyed instead.
 
 Docker also carries more mileage: it is what CI uses and what the e2e runs by default. Prefer it
 if you have no reason not to.
