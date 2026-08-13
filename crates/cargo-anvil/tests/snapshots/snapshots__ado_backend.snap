@@ -3573,7 +3573,7 @@ _anvil-container-path host_path:
     }
     Write-Output $translated.Trim()
 
-# Resolve the exec image reference, building it if it is not already present.
+# Print the exec image reference for the current inputs, without building it.
 #
 # The tag is a SHA-256 over the image's declared inputs: the Dockerfile and its
 # ignore file, the pinned toolchain, the optional hook, and the generated
@@ -3582,20 +3582,17 @@ _anvil-container-path host_path:
 # tool recipes. Only this driver is excluded, since hashing it would make the
 # tag depend on the tag.
 #
-# ANVIL_CONTAINER_NO_REBUILD=1 fails instead of building, which is how a cache
-# miss is told apart from a build failure. ANVIL_CONTAINER_NO_CACHE=1 rebuilds
-# a tag that already resolves, for the cases a content hash cannot see: a moved
-# upstream package, or a base layer that changed behind its digest.
-[private]
-[script("pwsh", "-NoProfile")]
-_anvil-container-image:
-    $ErrorActionPreference = 'Stop'
-    $engine = (just _anvil-container-engine).Trim()
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $engineCmd = $engine -split '\|'
-    $engineExe = $engineCmd[0]
-    $enginePrefix = @($engineCmd | Select-Object -Skip 1)
+# This is the only recipe that computes the reference; everything else asks it.
+# It is public because a publisher needs the tag before there is an image to
+# inspect: a pipeline that builds the image tags the result with exactly the
+# reference a consumer will later compute, which is what lets presence be
+# checked without a second source of truth.
 
+# Print the exec image reference for the current inputs, without building it.
+[group("anvil-container")]
+[script("pwsh", "-NoProfile")]
+anvil-container-tag:
+    $ErrorActionPreference = 'Stop'
     $repoRoot = '{{ replace(justfile_directory(), "'", "''") }}'
     $dockerfile = '.anvil/container/Dockerfile'
     $hookRel = '.anvil/container/hooks.ps1'
@@ -3638,13 +3635,91 @@ _anvil-container-image:
     # 16 hex characters (64 bits) is far past any practical collision risk for a
     # local image set, and keeps `docker images` readable.
     $imageId = -join ($digest[0..7] | ForEach-Object { $_.ToString('x2') })
-    $image = '{{anvil_container_name}}:' + $imageId
+    Write-Output ('{{anvil_container_name}}:' + $imageId)
+
+# Resolve the exec image, building it if it is neither present nor resolvable.
+#
+# Three steps, in order: a local image under the computed tag, then the
+# optional `Anvil-ResolveImage` hook (a registry, typically), then a build.
+# Resolution comes before the NO_REBUILD guard because fetching a published
+# image is not building one.
+#
+# ANVIL_CONTAINER_NO_REBUILD=1 fails instead of building, which is how a cache
+# miss is told apart from a build failure. ANVIL_CONTAINER_NO_RESOLVE=1 skips
+# the hook, so a query stays a query -- resolving can mean pulling gigabytes.
+# ANVIL_CONTAINER_NO_CACHE=1 rebuilds a tag that already resolves, for the cases
+# a content hash cannot see: a moved upstream package, or a base layer that
+# changed behind its digest. It skips the hook too -- "ignore what is cached"
+# has to mean the remote cache as well, or a rebuild would be undone by the
+# next pull.
+[private]
+[script("pwsh", "-NoProfile")]
+_anvil-container-image:
+    $ErrorActionPreference = 'Stop'
+    $engine = (just _anvil-container-engine).Trim()
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $engineCmd = $engine -split '\|'
+    $engineExe = $engineCmd[0]
+    $enginePrefix = @($engineCmd | Select-Object -Skip 1)
+
+    $repoRoot = '{{ replace(justfile_directory(), "'", "''") }}'
+    $dockerfile = '.anvil/container/Dockerfile'
+    $hookRel = '.anvil/container/hooks.ps1'
+
+    $image = (just anvil-container-tag).Trim()
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     if ($env:ANVIL_CONTAINER_NO_CACHE -ne '1') {
         & $engineExe @enginePrefix image inspect $image *> $null
         if ($LASTEXITCODE -eq 0) {
             Write-Output $image
             exit 0
+        }
+
+        # Nothing local. Give the optional hook a chance to fetch a published
+        # image built from these same inputs -- a registry, typically.
+        #
+        # The hook returns the reference it made available, and we run that
+        # reference rather than re-tagging it to the local name: a local tag
+        # asserts "built here from these inputs", and a fetched image only
+        # *claims* that, since the hash is over source files and cannot be
+        # re-derived from layers. Whether that claim holds is a property of the
+        # registry (immutable tags, restricted push), not of anything this
+        # recipe can check, so the reference stays honest about where it came
+        # from.
+        #
+        # Every failure here is non-fatal: a missing image, an expired
+        # credential and a broken hook all fall through to a build, which is
+        # slower but always correct. A publisher that has not yet caught up
+        # with a change must not stop the developer who made it.
+        $hookPath = Join-Path $repoRoot $hookRel
+        if ($env:ANVIL_CONTAINER_NO_RESOLVE -ne '1' -and (Test-Path -LiteralPath $hookPath -PathType Leaf)) {
+            . $hookPath
+            if (Get-Command Anvil-ResolveImage -CommandType Function -ErrorAction SilentlyContinue) {
+                [Console]::Error.WriteLine("anvil: running Anvil-ResolveImage from $hookRel")
+                $resolved = $null
+                try {
+                    $resolved = @(Anvil-ResolveImage $image | Where-Object { $_ }) | Select-Object -Last 1
+                } catch {
+                    [Console]::Error.WriteLine("anvil: Anvil-ResolveImage failed: $($_.Exception.Message)")
+                    $resolved = $null
+                }
+                if (-not [string]::IsNullOrWhiteSpace($resolved)) {
+                    $resolved = ([string]$resolved).Trim()
+                    # Verify rather than trust: the run is `--pull=never`, so a
+                    # reference the hook reported but did not actually fetch
+                    # would fail later, further from the cause.
+                    & $engineExe @enginePrefix image inspect $resolved *> $null
+                    if ($LASTEXITCODE -eq 0) {
+                        [Console]::Error.WriteLine("anvil: resolved $resolved")
+                        Write-Output $resolved
+                        exit 0
+                    }
+                    [Console]::Error.WriteLine(
+                        "anvil: Anvil-ResolveImage reported '$resolved' but no such image is present locally")
+                }
+                [Console]::Error.WriteLine("anvil: nothing resolved; building locally")
+            }
         }
     }
 
@@ -3834,8 +3909,9 @@ anvil-container *target:
     }
 
     try {
-        # --pull=never: the tag names locally-built content, so a miss is a bug
-        # to surface rather than an invitation to fetch something unrelated.
+        # --pull=never: the reference names content that is already here, either
+        # built locally or fetched by the resolve hook, so a miss is a bug to
+        # surface rather than an invitation to fetch something unrelated.
         $runArgs += @('--pull=never', '-w', $containerCwd, $image)
         if (-not $interactive) { $runArgs += @('just') + $targetParts }
         # WSLENV exports the forwarded names into the WSL environment, which is
@@ -3866,14 +3942,17 @@ anvil-container-status:
 
     # NO_REBUILD turns the resolve into a pure query: report the state instead
     # of silently spending several minutes building from a status command.
+    # NO_RESOLVE is the same argument applied to the hook, which would otherwise
+    # pull gigabytes to answer a question about the local machine.
     $env:ANVIL_CONTAINER_NO_REBUILD = '1'
+    $env:ANVIL_CONTAINER_NO_RESOLVE = '1'
     $image = (just _anvil-container-image 2>$null) | Select-Object -Last 1
     $present = $LASTEXITCODE -eq 0
     if ($image) { Write-Output "image:   $image" }
     if ($present) {
         Write-Output "status:  present and current"
     } else {
-        Write-Output "status:  no image matches the current inputs (it will be built on the next run)"
+        Write-Output "status:  not present locally (the next run resolves or builds it)"
     }
     exit 0
 

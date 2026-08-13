@@ -71,6 +71,7 @@ names it.
 | Recipe | Purpose |
 | --- | --- |
 | `just anvil-container <recipe>` | Run any anvil recipe in the image. No argument opens an interactive shell. |
+| `just anvil-container-tag` | Print the image reference for the current inputs, without building it. |
 | `just anvil-container-status` | Report the engine, the image reference, and whether it is present. |
 | `just anvil-container-rebuild` | Rebuild ignoring every cached layer. |
 | `just anvil-container-down` | Remove this repository's cache volumes. The image is left in place. |
@@ -90,21 +91,46 @@ Hashed: the `Dockerfile`, its ignore file, `rust-toolchain.toml`, `hooks.ps1` wh
 `justfiles/anvil/` except `container.just` itself — hashing the driver would make the tag depend on the tag.
 
 Change any of them and the tag names an image that cannot already exist, so a build follows. Change nothing and the
-tag resolves instantly. There is no staleness check because there is nothing to check: an image that is present is,
-by construction, built from the current inputs.
+tag resolves instantly. There is no staleness check because there is nothing to check.
+
+What "present" proves depends on where the image came from:
+
+- **Built here** — presence implies the current inputs, by construction. Nothing else could have produced that tag on
+  this machine.
+- **Resolved through the hook** (§5.1) — the image only *claims* those inputs. The hash is over source files and
+  cannot be re-derived from layers, so the claim rests on the registry it came from: immutable tags, and push
+  restricted to the identity that builds them. A registry where anyone can overwrite a tag makes the tag meaningless.
+
+`just anvil-container-tag` prints the reference without building it. It is the single place the hash is computed —
+everything else asks it — which is what lets a publisher tag an image with exactly the reference a consumer will
+later look up.
 
 | Variable | Effect |
 | --- | --- |
 | `ANVIL_CONTAINER_ENGINE` | `docker` (default) or `podman`. |
 | `ANVIL_CONTAINER_NO_REBUILD=1` | Fail instead of building when the image is missing. Distinguishes a cache miss from a build failure. |
-| `ANVIL_CONTAINER_NO_CACHE=1` | Rebuild even when the tag resolves. What `anvil-container-rebuild` sets. |
+| `ANVIL_CONTAINER_NO_RESOLVE=1` | Skip the resolve hook. What `anvil-container-status` sets, so a query never pulls. |
+| `ANVIL_CONTAINER_NO_CACHE=1` | Rebuild even when the tag resolves, and ignore the hook. What `anvil-container-rebuild` sets. |
 
 The hook's *output* is deliberately not hashed: a credential must never influence a tag.
 
-## 5. Credentials — the hook
+## 5. The hook
 
-crates.io needs none, so nothing is emitted by default. A repository or a downstream catalog that needs credentials
-adds `.anvil/container/hooks.ps1`, which the recipe loads whenever it is present, regardless of who put it there:
+`.anvil/container/hooks.ps1` is optional and loaded by path, not by provenance: the recipe sources it whenever it is
+present, whether a repository wrote it or a downstream catalog shipped it. It supplies the two things the engine
+cannot know — credentials, and where a prebuilt image might come from.
+
+| Function | When | Returns |
+| --- | --- | --- |
+| `Anvil-PreBuild` | before a build | `@{ Secrets = @{ id = value } }` |
+| `Anvil-PreRun` | before a run | `@{ Env = @{ NAME = value } }` |
+| `Anvil-ResolveImage $tag` | before a build, after the local check | an image reference, or nothing |
+
+All three are optional.
+
+### 5.1 Credentials
+
+crates.io needs none, so nothing is emitted by default:
 
 ```powershell
 function Anvil-PreBuild {
@@ -116,7 +142,7 @@ function Anvil-PreRun {
 }
 ```
 
-Both functions are optional. `Secrets` become `--secret id=…,env=…` mounts at build time; `Env` becomes `-e NAME`
+`Secrets` become `--secret id=…,env=…` mounts at build time; `Env` becomes `-e NAME`
 at run time. In both cases the value is handed over **by environment variable name**, so it never appears in the
 host's process command line — where endpoint telemetry records and retains it far longer than a short-lived token is
 meant to live — and never touches disk. The engine keeps build secrets out of every image layer. When the engine is
@@ -141,6 +167,35 @@ produces — and every later run would reuse the broken image.
 from a repository or catalog you trust. Everything inside the container then runs as one user in one mount namespace,
 so a forwarded credential is reachable by anything the checks execute, including dependency build scripts and proc
 macros. Keep the set narrow and the token short-lived.
+
+### 5.2 Resolving a prebuilt image
+
+When nothing local matches the tag, `Anvil-ResolveImage` is offered the reference before a build starts. A catalog
+that publishes images implements it; everyone else does not, and the build proceeds exactly as before.
+
+```powershell
+function Anvil-ResolveImage($tag) {
+    $remote = "myregistry.azurecr.io/anvil:$($tag.Split(':')[-1])"
+    az acr login --name myregistry | Out-Null
+    docker pull $remote | Out-Null
+    if ($LASTEXITCODE -eq 0) { $remote }
+}
+```
+
+Three properties, none of them incidental:
+
+- **It returns the reference it fetched; it does not re-tag to the local name.** A local tag asserts "built here from
+  these inputs"; a fetched image only claims that (§4). Keeping the registry reference keeps the run honest about
+  where its image came from.
+- **The reference is verified before use.** The run is `--pull=never`, so a hook that reported an image it did not
+  actually fetch would otherwise fail later and further from the cause.
+- **Every failure is non-fatal.** A missing image, an expired credential, a broken hook — all fall through to a local
+  build, with the reason printed. A publisher that has not yet caught up must never block the developer whose change
+  it has not caught up with.
+
+Because the tag is content-addressed, a publisher and a consumer arrive at the same reference independently: no
+`latest`, no digest pin to maintain, and no coordination beyond the naming scheme.
+`ANVIL_CONTAINER_NO_RESOLVE=1` skips this step entirely.
 
 ## 6. Host setup
 
@@ -270,8 +325,8 @@ which would make every cached image a potential lie.
 ## 8. Limits
 
 - Linux-only, `linux/amd64`. On ARM64 hosts the image is emulated and is substantially slower.
-- Local-only: no registry integration, no push, no promotion. The image is built and consumed locally, which is why
-  it needs no published artifact to exist.
+- The engine never pushes and never promotes: it builds, and it may accept an image a hook fetched (§5.2). Publishing
+  is somebody else's job, and a repository that implements no hook needs no published artifact to exist.
 - A repository-owned `rust-toolchain.toml` is required — it is both what the image installs and part of what names it.
 - The first build takes several minutes: it installs a toolchain and the whole pinned tool catalog. Later runs reuse
   it until an input changes.

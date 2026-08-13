@@ -130,10 +130,17 @@ are substantially slower.
 
 The tag *is* a SHA-256 over the inputs that define the image: the
 Dockerfile and its ignore file, `rust-toolchain.toml`, the optional
-credential hook, and the generated recipe tree. Presence therefore implies
-freshness — a changed tool pin names a tag that cannot already exist, so a
-build follows. There is no staleness check because there is nothing to
-check.
+hook, and the generated recipe tree. A changed tool pin names a tag that
+cannot already exist, so a build follows. There is no staleness check
+because there is nothing to check: an image built here is, by
+construction, built from the current inputs. An image *fetched* by the
+resolve hook only claims as much — the hash is over source files and
+cannot be re-derived from layers — so that claim rests on the registry it
+came from having immutable tags and restricted push.
+
+`anvil-container-tag` prints the reference without building it, and is the
+single place the hash is computed, so a publisher can tag an image with
+exactly the reference a consumer will later look up.
 
 #### Controls
 
@@ -141,21 +148,24 @@ check.
 |--------|------|
 |`ANVIL_CONTAINER_ENGINE`|`docker` (default) or `podman`. A host property; never committed.|
 |`ANVIL_CONTAINER_NO_REBUILD=1`|Fail when the image is missing instead of building it, which distinguishes a cache miss from a build failure.|
-|`ANVIL_CONTAINER_NO_CACHE=1`|Rebuild a tag that already resolves.|
+|`ANVIL_CONTAINER_NO_RESOLVE=1`|Skip the resolve hook, so a query never pulls.|
+|`ANVIL_CONTAINER_NO_CACHE=1`|Rebuild a tag that already resolves, ignoring the hook.|
 |`ANVIL_IN_CONTAINER=1`|Set inside the image; makes a nested invocation run natively.|
 
-Supporting recipes: `anvil-container-status`, `anvil-container-rebuild`,
-and `anvil-container-down` (removes this repository’s cache volumes).
+Supporting recipes: `anvil-container-tag`, `anvil-container-status`,
+`anvil-container-rebuild`, and `anvil-container-down` (removes this
+repository’s cache volumes).
 
-#### Credentials
+#### The hook
 
-crates.io needs none, so the public catalog emits no credential plumbing.
+crates.io needs none of this, so the public catalog emits no hook at all.
 A repository or a downstream catalog that needs one adds
 `.anvil/container/hooks.ps1`, which the recipe loads when present:
 
 ```powershell
-function Anvil-PreBuild { @{ Secrets = @{ feed = (mint-a-token) } } }
-function Anvil-PreRun   { @{ Env     = @{ FEED_TOKEN = (mint-a-token) } } }
+function Anvil-PreBuild     { @{ Secrets = @{ feed = (mint-a-token) } } }
+function Anvil-PreRun       { @{ Env     = @{ FEED_TOKEN = (mint-a-token) } } }
+function Anvil-ResolveImage { param($tag) (fetch-a-prebuilt-image $tag) }
 ```
 
 Build secrets are passed to `BuildKit` by environment variable name, so a
@@ -164,6 +174,13 @@ run-time values are forwarded into the container by name for the same
 reason. An empty value is a hard error, because a build that quietly
 proceeded without its credential would install a reduced tool set and then
 be tagged with the hash a credentialed build produces.
+
+`Anvil-ResolveImage` is offered the tag when nothing local matches, and
+returns the reference it made available — a registry reference, not a
+local re-tag, so the run stays honest about where the image came from. It
+is verified before use and every failure falls through to a local build:
+a publisher that has not caught up must not block the change it has not
+caught up with.
 
 The hook runs on the host with the developer’s permissions, before any
 container isolation. Only run one from a repository or catalog you trust.
@@ -394,7 +411,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQb80OmqCpM-PEb7-L3mxqzrXcbqBEF0vC0wXgbCT_rJDiFv7RhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQb1zZ5432Pir4bA1QzrWQmGqEbunlSb9PrlecbuUcof8dw9UJhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts

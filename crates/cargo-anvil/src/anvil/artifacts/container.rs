@@ -161,12 +161,76 @@ mod tests {
     fn recipe_exposes_the_documented_surface() {
         for expected in [
             "anvil-container *target:",
+            "anvil-container-tag:",
             "anvil-container-status:",
             "anvil-container-rebuild:",
             "anvil-container-down:",
         ] {
             assert!(RECIPE.contains(expected), "missing recipe: {expected}");
         }
+    }
+
+    #[test]
+    fn the_tag_is_computed_in_exactly_one_place() {
+        // `anvil-container-tag` is public so a publisher can name the image it
+        // is about to build. That only holds while it is the same computation
+        // the consumer performs: a second copy of the hash would let the two
+        // drift and turn a published tag into a claim nobody checks.
+        assert_eq!(
+            RECIPE.matches("SHA256]::HashData").count(),
+            1,
+            "the content hash must be computed once, by anvil-container-tag"
+        );
+        assert!(
+            RECIPE.contains("$image = (just anvil-container-tag).Trim()"),
+            "the resolver must ask anvil-container-tag rather than recompute"
+        );
+    }
+
+    #[test]
+    fn resolution_is_attempted_before_building_and_never_fatal() {
+        // Order: local image, then the hook, then a build. Resolving sits
+        // inside the cache guard (NO_CACHE must defeat a remote cache too) and
+        // before the NO_REBUILD guard, because fetching is not building.
+        let inspect = RECIPE.find("image inspect $image").expect("the local check must exist");
+        let resolve = RECIPE.find("Anvil-ResolveImage $image").expect("the resolve call must exist");
+        let build = RECIPE.find("anvil: building $image").expect("the build must exist");
+        assert!(
+            inspect < resolve && resolve < build,
+            "resolve belongs between the local check and the build"
+        );
+
+        let no_rebuild = RECIPE
+            .find("if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {")
+            .expect("the no-rebuild guard must exist");
+        assert!(resolve < no_rebuild, "resolving is not building, so NO_REBUILD must not block it");
+
+        // A publisher that has not caught up must not stop the developer who
+        // made the change, so every failure falls through to a build.
+        assert!(RECIPE.contains("anvil: Anvil-ResolveImage failed:"));
+        assert!(RECIPE.contains("anvil: nothing resolved; building locally"));
+    }
+
+    #[test]
+    fn a_resolved_reference_is_verified_before_it_is_used() {
+        // The run is `--pull=never`, so a hook that reports a reference it did
+        // not actually fetch would fail later and further from the cause.
+        let resolve = RECIPE.find("Anvil-ResolveImage $image").expect("the resolve call must exist");
+        let verify = RECIPE[resolve..]
+            .find("image inspect $resolved")
+            .expect("a resolved reference must be inspected before use");
+        let accept = RECIPE[resolve..]
+            .find("Write-Output $resolved")
+            .expect("a resolved reference must be returned");
+        assert!(verify < accept, "verify the resolved reference before returning it");
+    }
+
+    #[test]
+    fn a_query_never_pulls() {
+        // Resolving can mean pulling gigabytes; `anvil-container-status` asks
+        // about this machine and must not reach a registry to answer.
+        assert!(RECIPE.contains("$env:ANVIL_CONTAINER_NO_RESOLVE = '1'"));
+        assert!(RECIPE.contains("$env:ANVIL_CONTAINER_NO_RESOLVE -ne '1'"));
     }
 
     #[test]
