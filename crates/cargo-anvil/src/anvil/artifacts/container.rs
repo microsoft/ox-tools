@@ -170,8 +170,66 @@ mod tests {
     }
 
     #[test]
+    fn every_interpolation_into_powershell_is_escaped() {
+        // A `just` value pasted raw into a '…' literal ends the string on an
+        // apostrophe: a repository path containing one breaks every recipe
+        // here, and `target` would let the remainder run as host PowerShell.
+        // The deleted runner.just escaped every interpolation; this guards
+        // against losing that again.
+        //
+        // Two variables are exempt and checked explicitly below: the image name
+        // is regex-sanitized at definition, and the workdir is a literal.
+        const EXEMPT: [&str; 2] = ["{{anvil_container_name}}", "{{anvil_container_workdir}}"];
+        for (index, _) in RECIPE.match_indices("'{{") {
+            let tail = &RECIPE[index + 1..];
+            let escaped = tail.starts_with("{{ replace(");
+            assert!(
+                escaped || EXEMPT.iter().any(|exempt| tail.starts_with(exempt)),
+                "unescaped interpolation into a PowerShell literal at byte {index}: {}",
+                &tail[..tail.len().min(60)]
+            );
+        }
+        // And the escaping that is present uses just's own doubling form.
+        assert!(RECIPE.contains(r#"replace(justfile_directory(), "'", "''")"#));
+        assert!(RECIPE.contains(r#"replace(invocation_directory(), "'", "''")"#));
+        assert!(RECIPE.contains(r#"replace(target, "'", "''")"#));
+    }
+
+    #[test]
+    fn the_image_name_cannot_carry_an_apostrophe() {
+        // What makes the exemption above safe.
+        assert!(RECIPE.contains(r#"replace_regex(lowercase(file_name(justfile_directory())), '[^a-z0-9._-]', "-")"#));
+    }
+
+    #[test]
+    fn a_recipe_argument_survives_as_its_own_word() {
+        // `*target` joins with spaces, so passing it through as one string
+        // would break `anvil-container anvil-setup binstall` -- and around
+        // fifty generated recipes take a parameter.
+        assert!(RECIPE.contains(r"-split '\s+'"));
+        assert!(RECIPE.contains("just @targetParts"));
+        assert!(RECIPE.contains("@('just') + $targetParts"));
+    }
+
+    #[test]
+    fn no_rebuild_is_honoured_even_with_no_cache_set() {
+        // The two controls compose: NO_REBUILD must not be skipped just
+        // because NO_CACHE is exported, or `anvil-container-status` spends
+        // minutes building from a query.
+        let no_cache = RECIPE
+            .find("if ($env:ANVIL_CONTAINER_NO_CACHE -ne '1') {")
+            .expect("the cache guard must exist");
+        let no_rebuild = RECIPE
+            .find("if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {")
+            .expect("the no-rebuild guard must exist");
+        let guard_end = RECIPE[no_cache..].find("\n    }\n").expect("the cache guard must be closed") + no_cache;
+        assert!(no_rebuild > guard_end, "the NO_REBUILD check must sit outside the NO_CACHE guard");
+    }
+
+    #[test]
     fn engine_is_an_environment_variable_with_a_docker_default() {
         assert!(RECIPE.contains(r#"env_var_or_default("ANVIL_CONTAINER_ENGINE", "docker")"#));
+        assert!(RECIPE.contains(r#"replace(anvil_container_engine, "'", "''")"#));
     }
 
     #[test]

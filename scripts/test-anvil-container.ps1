@@ -24,7 +24,8 @@
       4. Changing a hashed input (the pinned toolchain) selects a new tag.
       5. Reverting that input returns to the original tag.
       6. Editing the Dockerfile is preserved by a re-run of the generator.
-      7. A credential hook reaches both the build and the run.
+      7. A credential hook reaches both the build and the run, and the secret
+         reaches neither a build command nor the image filesystem.
       8. A hook returning an empty value fails closed.
       9. A hook's returned value does not change the tag; its file content does.
      10. The recipes run natively inside the image (no nesting).
@@ -469,8 +470,21 @@ Assert-That 'forwarded names are reported' ($hookRun.StdErr -match 'forwarding e
 
 $secretReference = Get-ImageReference -Repo $repo
 $layers = Invoke-Engine -Arguments @('history', '--no-trunc', $secretReference) -AllowFailure
-Assert-That 'the secret value is absent from every image layer' `
-    (-not ($layers.StdOut -match 'build-secret-value')) 'a build secret must never reach a layer'
+Assert-Equal 'the image history is readable' 0 $layers.ExitCode
+Assert-That 'no build command records the secret' `
+    (-not ($layers.StdOut -match 'build-secret-value')) 'a secret must never reach a build argument'
+
+# `history` reports the command that created each layer, not its contents, so on
+# its own it cannot see a secret that was *written* into the filesystem -- which
+# is the hazard the Dockerfile guards against by deleting credential files in
+# the same layer as the install. Look at the filesystem the image actually
+# carries. grep exits 1 for "no match", which is the result we want; -s keeps an
+# unreadable path from turning into exit 2 and passing for the wrong reason.
+$leak = Invoke-Engine -Arguments @(
+    'run', '--rm', '--pull=never', $secretReference,
+    'grep', '-rsq', 'build-secret-value', '/opt/anvil', '/root', '/usr/local/cargo', '/tmp', '/run'
+) -AllowFailure
+Assert-Equal 'the secret is absent from the image filesystem' 1 $leak.ExitCode
 
 Write-Step 'checking that the forwarded value arrives inside the container'
 $showEnv = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'e2e-show-env') -AllowFailure

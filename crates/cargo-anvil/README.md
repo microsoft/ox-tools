@@ -116,7 +116,10 @@ just anvil-container                # interactive shell
 
 * A container engine callable from the shell that runs `just`: Docker
   (supported) or Podman (best-effort). On Windows that means Docker
-  Desktop, Podman, or a Windows `docker` CLI pointed at an engine in WSL.
+  Desktop, Podman, a Windows `docker` CLI pointed at an engine in WSL, or
+  Docker Engine installed only inside the default WSL distribution — no
+  Windows CLI is needed in that last case, since anvil reaches the engine
+  through `wsl.exe` when it finds none on `PATH`.
 * `just` and `PowerShell` Core (`pwsh`) on the host.
 * A repository-owned `rust-toolchain.toml`.
 
@@ -391,7 +394,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbIHyE2bP5dGcbfv5a5XBW8mUbpBv2VBT_2G0bCUddUAFHBklhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQb80OmqCpM-PEb7-L3mxqzrXcbqBEF0vC0wXgbCT_rJDiFv7RhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts

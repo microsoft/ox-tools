@@ -116,16 +116,12 @@ function Anvil-PreRun {
 }
 ```
 
-Both functions are optional. `Secrets` become `--secret id=…,src=…` mounts at build time; `Env` becomes
-`-e NAME` at run time. Neither value ever appears as a command-line argument: a build secret is written to a
-private temp file that is removed as soon as the build ends, and a run-time value is forwarded **by name**, so the
-engine copies it from the environment it already inherits. Command lines are recorded by endpoint telemetry and
-retained far longer than a short-lived token is meant to live. The engine also keeps build secrets out of every
-image layer.
-
-`src=` is used rather than `env=` because it is the form both engines implement. Podman for Windows translates the
-build context into its machine's view and then composes the `env=` temp path with a Windows separator, producing a
-path it cannot open; a file anvil creates itself has no such step.
+Both functions are optional. `Secrets` become `--secret id=…,env=…` mounts at build time; `Env` becomes `-e NAME`
+at run time. In both cases the value is handed over **by environment variable name**, so it never appears in the
+host's process command line — where endpoint telemetry records and retains it far longer than a short-lived token is
+meant to live — and never touches disk. The engine keeps build secrets out of every image layer. When the engine is
+reached through WSL (§6.1), the names are exported with `WSLENV` so the value crosses the boundary without ever
+becoming an argument.
 
 The corresponding `RUN` should declare the mount as required, which closes the same hole from the Dockerfile's side:
 
@@ -180,6 +176,15 @@ This is not something anvil can work around — `src=` and `env=` fail identical
 four-line Dockerfile reproduces it with no anvil involved. It affects only a repository that
 supplies `Anvil-PreBuild` (§5); the public catalog ships no hook, so ordinary use is unaffected.
 Use docker if you need build-time credentials on Windows.
+
+**Podman also ignores the build-context ignore file.** Anvil emits
+`.anvil/container/Dockerfile.dockerignore`, which BuildKit reads in preference to a root
+`.dockerignore`. Podman and buildah only honour `.containerignore` or `.dockerignore` at the
+*context root*, so on podman the whole worktree — `target/` included — is streamed to the
+daemon on every build, and a consumer repository that owns a root `.dockerignore` has that one
+obeyed instead. Neither breaks the build unless the repository's own ignore file excludes
+`justfiles/` or `rust-toolchain.toml`; the cost is transfer time. Passing `--ignorefile` would
+fix it, but only podman accepts that flag, so the recipe does not.
 
 Docker also carries more mileage: it is what CI uses and what the e2e runs by default. Prefer it
 if you have no reason not to.

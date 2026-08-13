@@ -10,9 +10,10 @@
 # makes "the image has the right tools" true by construction rather than by
 # convention: there is no second list to keep in step.
 #
-# BASE_IMAGE must stay digest-pinned. `_anvil-container-image` folds it into the
-# image identity hash and refuses a floating tag, because a tag that can change
-# underneath a hash makes the hash a lie.
+# BASE_IMAGE should stay digest-pinned. `_anvil-container-image` hashes this
+# file's text, so an edit here renames the image -- but it does not resolve or
+# validate the base, and a floating tag can therefore change underneath a tag
+# that claims to name fixed content.
 #
 # To build on a different base (a lower glibc baseline, or an internal
 # distribution), a downstream catalog replaces this artifact wholesale via
@@ -85,9 +86,11 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
     && rm /tmp/cargo-binstall.tgz
 
 # Install the pinned toolchain and cargo subcommands from the generated
-# catalog. Only the files `just anvil-setup` needs are copied, so an unrelated
-# source edit does not invalidate this layer. The synthetic Justfile avoids
-# pulling in repository-specific imports that may not exist yet.
+# catalog. Only `justfiles/` and the toolchain pin are copied, so an edit
+# elsewhere in the repository does not invalidate this layer -- though an edit
+# to any file under `justfiles/` does, including ones the synthetic Justfile
+# below never imports. That Justfile avoids pulling in repository-specific
+# imports that may not exist yet.
 #
 # `binstall` matches what CI passes. It is not just a speed-up: some catalog
 # tools do not compile from source on every pinned toolchain, so a source

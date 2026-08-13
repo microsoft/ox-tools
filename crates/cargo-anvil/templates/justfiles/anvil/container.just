@@ -24,9 +24,10 @@ anvil_container_engine := env_var_or_default("ANVIL_CONTAINER_ENGINE", "docker")
 # Where the repository is mounted inside the container.
 anvil_container_workdir := "/workspace"
 
-# Image and cache-volume prefix, derived from the repository directory so two
-# repositories on one host cannot collide. Sanitized to the character set
-# container image references allow.
+# Image and cache-volume prefix, derived from the repository directory name.
+# Two checkouts with the same directory name share cache volumes; that is
+# harmless (the caches are content-addressed by cargo) but worth knowing before
+# `anvil-container-down` removes volumes another checkout is also using.
 anvil_container_name := "anvil-" + replace_regex(lowercase(file_name(justfile_directory())), '[^a-z0-9._-]', "-")
 
 # Resolve how to invoke the engine, as a pipe-separated command.
@@ -48,7 +49,7 @@ anvil_container_name := "anvil-" + replace_regex(lowercase(file_name(justfile_di
 [script("pwsh", "-NoProfile")]
 _anvil-container-engine:
     $ErrorActionPreference = 'Stop'
-    $engine = '{{anvil_container_engine}}'
+    $engine = '{{ replace(anvil_container_engine, "'", "''") }}'
     if ($engine -ne 'docker' -and $engine -ne 'podman') {
         Write-Error "anvil: ANVIL_CONTAINER_ENGINE must be 'docker' or 'podman', got '$engine'"
         exit 1
@@ -80,16 +81,16 @@ _anvil-container-path host_path:
     $engine = (just _anvil-container-engine).Trim()
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     if (-not $engine.StartsWith('wsl.exe|')) {
-        Write-Output '{{host_path}}'
+        Write-Output '{{ replace(host_path, "'", "''") }}'
         exit 0
     }
     # Pass the path with forward slashes: arguments cross into WSL through a
     # shell that would otherwise consume the backslashes, leaving wslpath to
     # translate a mangled path. wslpath accepts either separator.
-    $hostPath = '{{host_path}}' -replace '\\', '/'
+    $hostPath = '{{ replace(host_path, "'", "''") }}' -replace '\\', '/'
     $translated = & wsl.exe -- wslpath -a -u $hostPath
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "anvil: could not translate '{{host_path}}' for the engine running in WSL"
+        Write-Error "anvil: could not translate '{{ replace(host_path, "'", "''") }}' for the engine running in WSL"
         exit 1
     }
     Write-Output $translated.Trim()
@@ -117,7 +118,7 @@ _anvil-container-image:
     $engineExe = $engineCmd[0]
     $enginePrefix = @($engineCmd | Select-Object -Skip 1)
 
-    $repoRoot = '{{justfile_directory()}}'
+    $repoRoot = '{{ replace(justfile_directory(), "'", "''") }}'
     $dockerfile = '.anvil/container/Dockerfile'
     $hookRel = '.anvil/container/hooks.ps1'
 
@@ -167,13 +168,19 @@ _anvil-container-image:
             Write-Output $image
             exit 0
         }
-        if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {
-            # Still report the reference: a caller that asked not to build is
-            # usually asking *which* image is missing.
-            Write-Output $image
-            [Console]::Error.WriteLine("anvil: $image is not present and ANVIL_CONTAINER_NO_REBUILD=1")
-            exit 1
-        }
+    }
+
+    # Checked outside the cache guard, so the two variables compose: a caller
+    # that has NO_CACHE exported would otherwise fall straight through to a
+    # from-scratch build, which is exactly what NO_REBUILD exists to prevent --
+    # and `anvil-container-status`, which sets it, would spend minutes building
+    # from a query.
+    if ($env:ANVIL_CONTAINER_NO_REBUILD -eq '1') {
+        # Still report the reference: a caller that asked not to build is
+        # usually asking *which* image is missing.
+        Write-Output $image
+        [Console]::Error.WriteLine("anvil: $image is not present or not current, and ANVIL_CONTAINER_NO_REBUILD=1")
+        exit 1
     }
 
     # Build-time credentials come from the optional hook, never from a committed
@@ -267,10 +274,14 @@ _anvil-container-image:
 [script("pwsh", "-NoProfile")]
 anvil-container *target:
     $ErrorActionPreference = 'Stop'
-    $target = '{{target}}'
+    # Split back into argv. `*target` joins its parts with spaces, so passing
+    # the string through as one argument would make `anvil-container anvil-setup
+    # binstall` look for a recipe literally named "anvil-setup binstall" --
+    # and around fifty generated recipes take a parameter.
+    $targetParts = @('{{ replace(target, "'", "''") }}' -split '\s+' | Where-Object { $_ })
     if ($env:ANVIL_IN_CONTAINER -eq '1') {
         # Already inside: pass straight through instead of nesting.
-        if (-not [string]::IsNullOrWhiteSpace($target)) { just $target }
+        if ($targetParts.Count -gt 0) { just @targetParts }
         exit $LASTEXITCODE
     }
 
@@ -282,20 +293,20 @@ anvil-container *target:
     $image = (just _anvil-container-image) | Select-Object -Last 1
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-    $repoRoot = '{{justfile_directory()}}'
+    $repoRoot = '{{ replace(justfile_directory(), "'", "''") }}'
     $engineRoot = (just _anvil-container-path $repoRoot).Trim()
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     # Map the caller's working directory to its in-container equivalent so
     # relative paths keep working from a subdirectory.
-    $rel = [System.IO.Path]::GetRelativePath($repoRoot, '{{invocation_directory()}}') -replace '\\', '/'
+    $rel = [System.IO.Path]::GetRelativePath($repoRoot, '{{ replace(invocation_directory(), "'", "''") }}') -replace '\\', '/'
     $containerCwd = if ($rel -eq '.' -or [string]::IsNullOrEmpty($rel)) {
         '{{anvil_container_workdir}}'
     } else {
         '{{anvil_container_workdir}}/' + $rel
     }
 
-    $interactive = [string]::IsNullOrWhiteSpace($target)
+    $interactive = $targetParts.Count -eq 0
     $runArgs = @('run', '--rm', '--platform', 'linux/amd64')
     $runArgs += $interactive ? '-it' : '-i'
     $runArgs += @('-v', "${engineRoot}:{{anvil_container_workdir}}")
@@ -348,7 +359,7 @@ anvil-container *target:
         # --pull=never: the tag names locally-built content, so a miss is a bug
         # to surface rather than an invitation to fetch something unrelated.
         $runArgs += @('--pull=never', '-w', $containerCwd, $image)
-        if (-not $interactive) { $runArgs += @('just', $target) }
+        if (-not $interactive) { $runArgs += @('just') + $targetParts }
         # WSLENV exports the forwarded names into the WSL environment, which is
         # where the engine reads their values from when it runs there.
         if ($engineExe -eq 'wsl.exe' -and $hookEnv.Count -gt 0) {

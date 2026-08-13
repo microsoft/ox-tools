@@ -473,10 +473,11 @@ any other owned file under that prefix, so a derived catalog fails loudly at
 construction instead of shipping a file whose absence is only noticed later.
 
 The reason is containerized execution. The image identity hashes every `*.just`
-under `justfiles/anvil/` recursively, and the build context admits that tree,
-so a non-recipe file placed there would be silently dropped from the image while
-still appearing to be managed. Non-recipe assets belong in a tool-owned
-directory of their own, such as `.anvil/`.
+under `justfiles/anvil/` recursively, while the build context copies the whole
+directory, so a non-recipe file placed there is copied into the image but is
+**not** part of its identity: editing it would change what the image contains
+without renaming the tag, and no rebuild would follow. Non-recipe assets belong
+in a tool-owned directory of their own, such as `.anvil/`.
 
 Containerized execution is itself an ordinary artifact group, customized with
 the same `replace_artifact` / `with_artifact` / `without_artifact` levers as

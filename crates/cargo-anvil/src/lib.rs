@@ -115,7 +115,10 @@
 //!
 //! - A container engine callable from the shell that runs `just`: Docker
 //!   (supported) or Podman (best-effort). On Windows that means Docker
-//!   Desktop, Podman, or a Windows `docker` CLI pointed at an engine in WSL.
+//!   Desktop, Podman, a Windows `docker` CLI pointed at an engine in WSL, or
+//!   Docker Engine installed only inside the default WSL distribution — no
+//!   Windows CLI is needed in that last case, since anvil reaches the engine
+//!   through `wsl.exe` when it finds none on `PATH`.
 //! - `just` and `PowerShell` Core (`pwsh`) on the host.
 //! - A repository-owned `rust-toolchain.toml`.
 //!
