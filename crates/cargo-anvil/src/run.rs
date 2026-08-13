@@ -12,7 +12,7 @@ use std::path::Path;
 use ohno::{AppError, bail};
 use tracing::info;
 
-use crate::anvil::artifacts::region::DELTA_REGION_ID;
+use crate::anvil::artifacts::region::{CRATE_LINTS_REGION_ID, DELTA_REGION_ID};
 use crate::backend::{self, Backend};
 use crate::catalog::Catalog;
 use crate::catalog::artifact::{Artifact, HostSelector, RegionSpec};
@@ -348,20 +348,17 @@ fn push_region_at(
     let host = resolve_existing_case_insensitive(repo_root, host);
     let current = hosts.get_or_read(repo_root, &host)?;
     let placement = region_placement(spec.id.as_str());
-    let body = match delta_region_body(current.as_deref(), spec) {
-        DeltaRegionBody::Managed => spec.body.as_str(),
-        DeltaRegionBody::PreserveRepositoryKey => {
-            plan.note(
-                "The repository's .delta.toml already defines top-level `trip_wire_patterns`; \
-                 the managed anvil-delta region was left empty. Remove the repository key to \
-                 adopt the managed trip-wire list.",
-            );
+    let body = match region_body(current.as_deref(), spec) {
+        RegionBody::Managed => spec.body.as_str(),
+        RegionBody::Defer(note) => {
+            plan.note(note);
             ""
         }
-        DeltaRegionBody::Malformed(reason) => {
+        RegionBody::Malformed(reason) => {
             plan.refusal(format!(
-                "Refused to manage .delta.toml [anvil-delta] because the existing host could not \
-                 be safely inspected: {reason}. Other artifacts were still planned."
+                "Refused to manage {host} [{}] because the existing host could not \
+                 be safely inspected: {reason}. Other artifacts were still planned.",
+                spec.id.as_str()
             ));
             plan.push(PlanItem::noop(
                 Target::Region {
@@ -405,34 +402,74 @@ fn region_placement(region_id: &str) -> RegionPlacement {
     }
 }
 
-enum DeltaRegionBody {
+/// How a managed region's body resolves against what the host already
+/// contains.
+enum RegionBody {
+    /// Splice the catalog's body.
     Managed,
-    PreserveRepositoryKey,
+    /// Splice an empty region, and say why. The repository already defines the
+    /// key this region would own, and emitting both produces a file the
+    /// toolchain rejects. The empty region stays tracked, so the catalog body
+    /// is adopted automatically once the repository drops its own.
+    Defer(String),
+    /// The host could not be safely inspected.
     Malformed(String),
 }
 
-fn delta_region_body(host_text: Option<&str>, spec: &RegionSpec) -> DeltaRegionBody {
-    if spec.id.as_str() != DELTA_REGION_ID {
-        return DeltaRegionBody::Managed;
+/// Resolve a region's body against its host, deferring where the repository
+/// already owns the same key.
+///
+/// Two regions can collide with repository-owned content, and in both cases a
+/// naive splice yields a file that fails to parse rather than one that merely
+/// looks odd:
+///
+/// - `anvil-delta` against a top-level `trip_wire_patterns`, which would become
+///   a duplicate TOML key.
+/// - `anvil-lints` against a crate that declares its own `[lints.*]`, which
+///   cargo rejects with "cannot override `workspace.lints` in `lints`" --
+///   taking down `cargo metadata`, and with it every check in the workspace,
+///   not just the offending crate.
+fn region_body(host_text: Option<&str>, spec: &RegionSpec) -> RegionBody {
+    let id = spec.id.as_str();
+    if id != DELTA_REGION_ID && id != CRATE_LINTS_REGION_ID {
+        return RegionBody::Managed;
     }
     let Some(host_text) = host_text else {
-        return DeltaRegionBody::Managed;
+        return RegionBody::Managed;
     };
-    let without_region = match remove_region(host_text, spec.id.as_str(), spec.syntax) {
+    // Inspect the host as it reads without anvil's own region, so a body
+    // anvil spliced on an earlier pass is never mistaken for repository
+    // content.
+    let without_region = match remove_region(host_text, id, spec.syntax) {
         Ok(without_region) => without_region,
-        Err(error) => return DeltaRegionBody::Malformed(format!("managed-region markers are malformed: {error}")),
+        Err(error) => return RegionBody::Malformed(format!("managed-region markers are malformed: {error}")),
     };
     let document = match without_region.parse::<toml_edit::DocumentMut>() {
         Ok(document) => document,
-        Err(error) => {
-            return DeltaRegionBody::Malformed(format!("invalid TOML: {error}"));
-        }
+        Err(error) => return RegionBody::Malformed(format!("invalid TOML: {error}")),
     };
-    if document.as_table().contains_key("trip_wire_patterns") {
-        DeltaRegionBody::PreserveRepositoryKey
-    } else {
-        DeltaRegionBody::Managed
+
+    if id == DELTA_REGION_ID {
+        if document.as_table().contains_key("trip_wire_patterns") {
+            return RegionBody::Defer(
+                "The repository's .delta.toml already defines top-level `trip_wire_patterns`; \
+                 the managed anvil-delta region was left empty. Remove the repository key to \
+                 adopt the managed trip-wire list."
+                    .to_owned(),
+            );
+        }
+        return RegionBody::Managed;
     }
+
+    if document.as_table().contains_key("lints") {
+        return RegionBody::Defer(
+            "This crate declares its own `[lints]`; the managed anvil-lints region was left \
+             empty. Cargo rejects a manifest carrying both, which would break `cargo metadata` \
+             for the whole workspace. Remove the crate's own lints to adopt the catalog."
+                .to_owned(),
+        );
+    }
+    RegionBody::Managed
 }
 
 /// Scan the previous manifest for entries that the active plan items
@@ -1034,6 +1071,55 @@ mod tests {
         let _ = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         let second = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
         assert!(!second.plan.has_changes());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn member_declaring_its_own_lints_opts_out_of_the_managed_catalog() {
+        // A crate carrying its own `[lints.clippy]` must not also receive
+        // `[lints] workspace = true`. Cargo rejects that combination outright
+        // ("cannot override `workspace.lints` in `lints`"), which breaks
+        // `cargo metadata` and therefore every check in the workspace -- not
+        // only the offending crate.
+        let tmp = empty_workspace();
+        let member = tmp.path().join("crates/alpha/Cargo.toml");
+        fs::write(
+            &member,
+            "[package]\nname = \"alpha\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n\
+             [lints.clippy]\npedantic = { level = \"warn\", priority = -1 }\n",
+        )
+        .unwrap();
+        let args = Cli {
+            backends: vec![],
+            no_backends: true,
+            dry_run: false,
+            force: false,
+        };
+
+        let outcome = run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+
+        let content = fs::read_to_string(&member).unwrap();
+        let document: toml_edit::DocumentMut = content.parse().expect("member manifest must remain valid TOML");
+        assert!(
+            document["lints"].get("clippy").is_some(),
+            "the crate's own lints must survive"
+        );
+        assert!(
+            document["lints"].get("workspace").is_none(),
+            "anvil must not add `workspace = true` beside the crate's own lints"
+        );
+        let region = find_region(&content, CRATE_LINTS_REGION_ID, CommentSyntax::Hash)
+            .unwrap()
+            .expect("the region stays tracked, so dropping the crate's lints adopts the catalog");
+        assert!(region.is_empty(), "a crate that owns its lints opts out of the managed body");
+        assert!(
+            outcome
+                .plan
+                .notes()
+                .iter()
+                .any(|note| note.contains("declares its own `[lints]`")),
+            "the opt-out must be visible in the plan summary"
+        );
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
