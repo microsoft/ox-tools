@@ -97,14 +97,15 @@ and run each check only over the affected packages, whereas a local
 
 ### Containerized local checks
 
-Any generated recipe can run in a content-addressed Linux container. The
-image installs the Rust toolchain and Cargo tools that this repository
-pins, by running `just anvil-setup` — the same recipe the checks use — so
-the container and the host agree on the toolset by construction.
+Any generated recipe can be executed inside a content-addressed Linux
+image. The image installs the Rust toolchain and Cargo tools this
+repository pins by running `just anvil-setup` — the same recipe the checks
+use, reading the same generated pins — so the image and the host agree on
+the toolset by construction, with no second tool list to keep in step.
 
-`just anvil-pr` and every other recipe keep running natively; the container
-is entered only through `anvil-container`, which takes any recipe name and
-its arguments.
+`just anvil-pr` and every other recipe continue to run natively. A
+container is entered only through `anvil-container`, which takes any recipe
+name and its arguments; nothing is routed into one implicitly.
 
 ```text
 just anvil-container anvil-clippy         # one check
@@ -113,6 +114,17 @@ just anvil-container anvil-setup binstall # a recipe with an argument
 just anvil-container                      # interactive shell
 ```
 
+The feature is two generated artifacts and one optional hook:
+`justfiles/anvil/container.just` drives the engine,
+`.anvil/container/Dockerfile` (with its `Dockerfile.dockerignore`) defines
+what the image contains, and `.anvil/container/hooks.ps1` supplies
+credentials when a repository needs them. There is no configuration file.
+
+One container is created per invocation, not per check. The repository is
+bind-mounted at `/workspace`, so `target/` stays visible from the host,
+while `CARGO_HOME` and `RUSTUP_HOME` live in named volumes that keep the
+write-heavy paths off the host boundary.
+
 #### Prerequisites
 
 * A container engine callable from the shell that runs `just`: Docker, or
@@ -120,40 +132,44 @@ just anvil-container                      # interactive shell
   Desktop, Podman, a Windows `docker` CLI pointed at an engine in WSL, or
   Docker Engine installed only inside the default WSL distribution — no
   Windows CLI is needed in that last case, since anvil reaches the engine
-  through `wsl.exe` when it finds none on `PATH`.
+  through `wsl.exe` when it finds none on `PATH` and translates repository
+  paths with `wslpath`.
 * `just` and `PowerShell` Core (`pwsh`) on the host.
 * A repository-owned `rust-toolchain.toml`.
 
-On ARM64 hosts the image is emulated as `linux/amd64`, so builds and checks
-are substantially slower.
+Docker is supported; Podman works on a best-effort basis, with two
+documented gaps on Windows. The image is pinned to `linux/amd64`, so on
+ARM64 hosts it is emulated and is substantially slower.
 
 #### Image identity
 
-The tag *is* a SHA-256 over the inputs that define the image: the
-Dockerfile and its ignore file, `rust-toolchain.toml`, the optional
-hook, and the generated recipe tree. A changed tool pin names a tag that
-cannot already exist, so a build follows. There is no staleness check
-because there is nothing to check: an image built here is, by
-construction, built from the current inputs. An image *fetched* by the
-resolve hook only claims as much — the hash is over source files and
-cannot be re-derived from layers — so that claim rests on the registry it
-came from having immutable tags and restricted push.
+The tag *is* a SHA-256 digest over the inputs that define the image: the
+Dockerfile and its ignore file, `rust-toolchain.toml`, the optional hook,
+and every `*.just` under `justfiles/anvil/` other than the driver itself.
+A changed tool pin names a tag that cannot already exist, so a build
+follows. There is no staleness check because there is no staleness to
+detect: a locally built image that is present was built from the inputs
+that name it. An image *fetched* by the resolve hook only claims as much —
+the digest is over source files and cannot be re-derived from layers — so
+that claim is only as strong as the registry it came from, which should
+have immutable tags and restricted push.
 
 `anvil-container-tag` prints the reference without building it, and is the
-single place the hash is computed, so a publisher can tag an image with
+single place the digest is computed, so a publisher can tag an image with
 exactly the reference a consumer will later look up.
 
 #### Controls
 
 |Variable|Effect|
 |--------|------|
-|`ANVIL_CONTAINER_ENGINE`|`docker` (default) or `podman`.|
+|`ANVIL_CONTAINER_ENGINE`|`docker` (default) or `podman`. Read at run time.|
 |`ANVIL_CONTAINER_NO_REBUILD=1`|Fail when the image is missing instead of building it, which distinguishes a cache miss from a build failure.|
 |`ANVIL_CONTAINER_NO_RESOLVE=1`|Skip the resolve hook, so a query never pulls.|
 |`ANVIL_CONTAINER_NO_CACHE=1`|Rebuild a tag that already resolves, ignoring the hook.|
 |`ANVIL_IN_CONTAINER=1`|Set inside the image; makes a nested invocation run natively.|
 
-Supporting recipes: `anvil-container-tag`, `anvil-container-status`,
+Supporting recipes: `anvil-container-tag`, `anvil-container-status`
+(reports the engine and image without building or pulling),
 `anvil-container-rebuild`, and `anvil-container-down` (removes this
 repository’s cache volumes).
 
@@ -161,38 +177,44 @@ repository’s cache volumes).
 
 crates.io needs no credentials, so no hook is emitted by default. A
 repository or a downstream catalog that needs one adds
-`.anvil/container/hooks.ps1`, which the recipe loads when present:
+`.anvil/container/hooks.ps1`, which the recipe loads by path whenever the
+file is present, whoever wrote it:
 
 ```powershell
 function Anvil-PreBuild     { @{ Secrets = @{ feed = (mint-a-token) } } }
 function Anvil-PreRun       { @{ Env     = @{ FEED_TOKEN = (mint-a-token) } } }
-function Anvil-ResolveImage { param($tag) (fetch-a-prebuilt-image $tag) }
+function Anvil-ResolveImage { param($tag) (fetch-a-published-image $tag) }
 ```
 
-Build secrets are passed to `BuildKit` by environment variable name, so a
-value never reaches a process argument and never reaches an image layer;
-run-time values are forwarded into the container by name for the same
-reason. An empty value is a hard error, because a build that quietly
-proceeded without its credential would install a reduced tool set and then
-be tagged with the hash a credentialed build produces.
+All three are optional. Build secrets are passed to `BuildKit` by
+environment variable name, so a value never reaches a process argument and
+never reaches an image layer; run-time values are forwarded into the
+container by name for the same reason. An empty value is a hard error,
+because a build that quietly proceeded without its credential would install
+a reduced tool set and then be tagged with the digest a credentialed build
+produces.
 
 `Anvil-ResolveImage` is offered the tag when nothing local matches, and
-returns the reference it made available — a registry reference, not a
-local re-tag, so the run stays honest about where the image came from. It
-is verified before use and every failure falls through to a local build:
-a publisher that has not caught up must not block the change it has not
-caught up with.
+returns the reference it made available — a registry reference, used as-is
+rather than re-tagged locally, so the run stays honest about where the
+image came from. It is verified before use, and every failure falls through
+to a local build: a publisher that has not caught up must not block the
+change it has not caught up with.
 
-The hook runs on the host with the developer’s permissions, before any
-container isolation. Only run one from a repository or catalog you trust.
+The hook executes on the host, with the invoking user’s permissions, before
+any container isolation exists. Only use one from a repository or catalog
+you trust.
 
 #### Customizing the image
 
 `.anvil/container/Dockerfile` is an ordinary owned file: edit it in place
 for extra packages, and anvil’s drift handling preserves the change. A
 downstream catalog that needs a different base OS or toolchain source for
-every repository it manages replaces the artifact instead — see
-[`artifacts::container`][__link1] and the design doc.
+every repository it manages replaces the artifact instead. A replacement
+that copies more of the tree must replace the ignore file with it, since
+the build context admits only `justfiles/` and `rust-toolchain.toml`. See
+[`artifacts::container`][__link1] and the design document for the full contract,
+the host setup for each engine, and the known limitations.
 
 ### Checks and tiers
 
@@ -412,7 +434,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbbI8J5B4oqNYbCGDbwei2JEEbJ8_ukS4Unx8b6YMW7c9a-thhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbpACaXmKNr48bH5E05_uOLpIby9m8IWn7SQMbLMeQnQJv6axhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts

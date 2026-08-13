@@ -466,14 +466,14 @@ engine internals or the template format.
 
 ### 6.1 Placement: `justfiles/` holds recipes only
 
-One placement rule is enforced rather than left to discovery, because getting it
-wrong fails in a confusing place. `justfiles/anvil/` may contain `.just` recipes
+One placement rule is enforced rather than left to discovery, because violating
+it fails in a confusing place. `justfiles/anvil/` may contain `.just` recipes
 and nothing else: [`CatalogBuilder::build`](#4-the-shape-of-a-catalog) rejects
 any other owned file under that prefix, so a derived catalog fails loudly at
-construction instead of shipping a file whose absence is only noticed later.
+construction instead of shipping a file whose absence is noticed only later.
 
 The reason is containerized execution. The image identity hashes every `*.just`
-under `justfiles/anvil/` recursively, while the build context copies the whole
+under `justfiles/anvil/` recursively, while the build context admits the whole
 directory, so a non-recipe file placed there is copied into the image but is
 **not** part of its identity: editing it would change what the image contains
 without renaming the tag, and no rebuild would follow. Non-recipe assets belong
@@ -481,8 +481,8 @@ in a tool-owned directory of their own, such as `.anvil/`.
 
 Containerized execution is itself an ordinary artifact group, customized with
 the same `replace_artifact` / `with_artifact` / `without_artifact` levers as
-anything else; the artifacts it exposes and the contract each one carries are
-specified in [containers.md](./containers.md#7-customizing-the-image).
+anything else. The artifacts it exposes and the contract each one carries are
+specified in [containers.md](./containers.md#9-customization).
 
 The public engine contains no environment-specific image, registry, cloud, or
 credential-provider details.

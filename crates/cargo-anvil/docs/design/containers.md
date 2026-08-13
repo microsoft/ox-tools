@@ -1,6 +1,7 @@
-# Containers
+# Containerized execution
 
-Any generated recipe can run inside a Linux image that carries exactly the toolchain and tools this repository pins:
+Any generated recipe can be executed inside a Linux image built from the toolchain and tool versions the repository
+pins:
 
 ```bash
 just anvil-container anvil-clippy   # one check
@@ -8,175 +9,307 @@ just anvil-container anvil-pr       # the whole PR tier
 just anvil-container                # interactive shell
 ```
 
-See also [design.md](./README.md) for the overall principles, [local.md](./local.md) for the recipe surface this
+The feature consists of two generated artifacts and one optional hook. There is no configuration file, and no
+invocation is routed into a container implicitly.
+
+See [README.md](./README.md) for the overall design principles, [local.md](./local.md) for the recipe surface this
 wraps, and [extensibility.md](./extensibility.md) for the catalog seam a downstream fork uses.
 
-- [1. Why](#1-why)
-- [2. How it runs](#2-how-it-runs)
-- [3. What it adds to a repository](#3-what-it-adds-to-a-repository)
-- [4. Image identity](#4-image-identity)
-- [5. The hook](#5-the-hook)
-- [6. Host setup](#6-host-setup)
-  - [6.1 Docker](#61-docker)
-  - [6.2 Podman](#62-podman)
-- [7. Customizing the image](#7-customizing-the-image)
-- [8. Limits](#8-limits)
+- [1. Purpose](#1-purpose)
+- [2. Command surface](#2-command-surface)
+- [3. Execution model](#3-execution-model)
+  - [3.1 Engine resolution](#31-engine-resolution)
+  - [3.2 Path translation](#32-path-translation)
+  - [3.3 Mounts and working directory](#33-mounts-and-working-directory)
+  - [3.4 Process identity](#34-process-identity)
+  - [3.5 Re-entry](#35-re-entry)
+- [4. Emitted artifacts](#4-emitted-artifacts)
+- [5. Image identity](#5-image-identity)
+  - [5.1 Hashed inputs](#51-hashed-inputs)
+  - [5.2 Digest computation](#52-digest-computation)
+  - [5.3 Guarantees](#53-guarantees)
+- [6. Environment variables](#6-environment-variables)
+- [7. The hook](#7-the-hook)
+  - [7.1 Anvil-PreBuild](#71-anvil-prebuild)
+  - [7.2 Anvil-PreRun](#72-anvil-prerun)
+  - [7.3 Anvil-ResolveImage](#73-anvil-resolveimage)
+  - [7.4 Trust boundary](#74-trust-boundary)
+- [8. Host requirements](#8-host-requirements)
+  - [8.1 Docker](#81-docker)
+  - [8.2 Podman](#82-podman)
+- [9. Customization](#9-customization)
+- [10. Limitations](#10-limitations)
 
-## 1. Why
+## 1. Purpose
 
-The local recipes assume a usable host toolchain — anvil does not install one ([design.md §3][design]: "the user owns
-it locally"). Two situations break that assumption:
+The generated recipes assume a usable host toolchain; anvil does not install one ([README.md §3][design]: "the user
+owns it locally"). Two conditions invalidate that assumption:
 
-1. **Linux-only failures on a Windows machine.** A `cfg(unix)` path, a Linux-specific lint, an `mmap`-shaped test:
-   none of them can be reproduced without a Linux environment.
-2. **Toolchain drift.** Even on Linux, the installed toolset can differ from the one the checks expect, so a green
-   local run stops being predictive of a cloud one.
+1. **Platform-specific failures.** A `cfg(unix)` code path, a Linux-only lint, or a test that depends on Linux memory
+   semantics cannot be reproduced on a Windows or macOS host.
+2. **Toolchain divergence.** The installed toolset can differ from the one the checks expect, so a passing local run
+   stops predicting a cloud result.
 
-Both are answered the same way: run the recipe in an image built from the repository's own pins.
+Both are addressed by executing the recipe unchanged inside an image constructed from the repository's own pins.
 
-## 2. How it runs
+## 2. Command surface
 
-`just anvil-pr` and every other recipe continue to run natively. The container is entered only through
-`just anvil-container`, which takes any recipe name and its arguments:
+`just anvil-pr` and every other recipe continue to execute natively. A container is entered only through
+`anvil-container`, which accepts a recipe name and its arguments:
 
 ```bash
 just anvil-container anvil-setup binstall
 ```
 
-Inside the image, `ANVIL_IN_CONTAINER=1` is set, so a recipe that reaches `anvil-container` again runs natively
-instead of nesting. The work happens once — one container per command, not one per check.
-
-The recipes themselves are identical in both cases. Nothing behaves differently depending on where it runs, and no
-wrapper shadows `just` on `PATH`.
-
-| Recipe | Purpose |
+| Recipe | Behaviour |
 | --- | --- |
-| `just anvil-container <recipe> [args…]` | Run a recipe in the image. No argument opens an interactive shell. |
-| `just anvil-container-tag` | Print the image reference for the current inputs, without building it. |
-| `just anvil-container-status` | Report the engine, the image reference, and whether it is present. |
-| `just anvil-container-rebuild` | Rebuild from scratch, ignoring every cached layer. |
-| `just anvil-container-down` | Remove this repository's cache volumes. The image is left in place. |
+| `just anvil-container <recipe> [args…]` | Execute a recipe in the image. With no argument, opens an interactive shell. |
+| `just anvil-container-tag` | Print the image reference for the current inputs. Builds nothing. |
+| `just anvil-container-status` | Print the engine, working directory, image reference, and whether it is present. Never builds or pulls. |
+| `just anvil-container-rebuild` | Rebuild the image with every layer cache disabled. |
+| `just anvil-container-down` | Remove this repository's cache volumes. The image is retained. |
 
-The repository is mounted at `/workspace`, and the working directory is mapped to its in-container equivalent so
-relative paths keep working from a subdirectory. The cargo and rustup homes live in named volumes, so the hot write
-path never crosses the host boundary and the host's own toolchain is untouched.
+All five are annotated `[group("anvil-container")]` and appear as one cluster in `just --groups`.
 
-Cloud workflows are unaffected: they run the recipes natively on their own agents. The image is pinned to resemble
-that environment, not to be it.
+Recipe bodies are identical in both execution modes. No wrapper shadows `just` on `PATH`, and no recipe behaves
+differently according to where it runs. Cloud workflows are unaffected: they execute the same recipes natively on
+their own agents. The image is pinned to resemble that environment, not to reproduce it.
 
-## 3. What it adds to a repository
+## 3. Execution model
+
+One container is created per `anvil-container` invocation, not one per check. The container is removed on exit
+(`--rm`).
+
+### 3.1 Engine resolution
+
+`ANVIL_CONTAINER_ENGINE` selects the engine and defaults to `docker`. Any value other than `docker` or `podman` is
+rejected before the engine is invoked. Because the engine is a property of the host rather than of the repository, it
+is read at run time and is never committed; a single invocation can override it with
+`just anvil_container_engine=podman anvil-container anvil-pr`.
+
+Resolution proceeds in a fixed order:
+
+1. If the named binary is on `PATH`, it is invoked directly.
+2. Otherwise, on Windows, the binary is probed inside the default WSL distribution (`wsl.exe -- <engine> --version`).
+   If the probe succeeds, every subsequent engine call is prefixed with `wsl.exe --`.
+3. Otherwise the invocation fails with a message naming the variable and linking to this document.
+
+anvil does not probe for an engine other than the one requested. Presence is not reachability; `podman-docker` aliases
+`docker` onto podman; and silently selecting between two installed engines yields two image stores and an unexplained
+rebuild. Every failure other than a missing binary surfaces the engine's own diagnostic unmodified.
+
+Step 2 exists because installing Docker Engine inside WSL without Docker Desktop leaves no Windows CLI on `PATH`, and
+that setup is the one this repository's own development guide describes. Docker Desktop and Podman both install a
+Windows CLI, are found in step 1, and never reach step 2.
+
+### 3.2 Path translation
+
+When the engine is reached through WSL it does not share the Windows filesystem view, so host paths are translated
+with `wslpath -a -u` before they are passed as a bind-mount source, a build context, or a `--file` argument. An
+untranslated Windows path is not rejected by the daemon: it is bind-mounted as an empty directory, and the failure
+surfaces much later as a missing file inside the container.
+
+Paths are converted to forward slashes before translation, because arguments crossing into WSL pass through a shell
+that would otherwise consume the backslashes. `wslpath` accepts either separator.
+
+### 3.3 Mounts and working directory
+
+| Mount | Target | Purpose |
+| --- | --- | --- |
+| repository root (bind) | `/workspace` | The worktree under test, including `target/`. |
+| `anvil-<repo>-cargo` (volume) | `/usr/local/cargo` | `CARGO_HOME`: registry cache and installed binaries. |
+| `anvil-<repo>-rustup` (volume) | `/usr/local/rustup` | `RUSTUP_HOME`: installed toolchains. |
+
+The cargo and rustup homes are named volumes rather than bind mounts, so the write-heavy paths never cross the host
+boundary and the host's own toolchain is untouched. `target/` remains on the bind mount, so build output stays visible
+from the host and is shared between native and containerized runs.
+
+The caller's working directory is mapped to its in-container equivalent, so relative paths continue to resolve when
+`anvil-container` is invoked from a subdirectory.
+
+Volume names derive from the repository directory name, lowercased with every character outside `[a-z0-9._-]`
+replaced by `-`. Two checkouts with the same directory name therefore share cache volumes. This is harmless in normal
+use, because cargo's caches are content-addressed, but `anvil-container-down` removes volumes that the other checkout
+is also using.
+
+### 3.4 Process identity
+
+On a Linux host the run passes `--user <uid>:<gid>`, matching the invoking user. Without it, everything written under
+the bind mount — `target/`, generated files — is owned by root on the host, and the next native `cargo build` or
+`git clean` fails with `EACCES` far from the cause. The flag is omitted when the invoking user is root.
+
+Docker Desktop on Windows and macOS maps ownership itself, and `id` is not available to query, so the flag is not
+passed on those hosts.
+
+### 3.5 Re-entry
+
+`ANVIL_IN_CONTAINER=1` is set in the image and passed again on each run. `anvil-container` checks it first: inside the
+image, the requested recipe is executed directly instead of launching another container. A recipe that reaches
+`anvil-container` transitively therefore performs its work exactly once.
+
+## 4. Emitted artifacts
 
 ```text
 repo/
 ├── justfiles/anvil/
 │   ├── container.just                     the anvil-container recipes
-│   └── …                                  checks, groups, tiers — run natively *inside* the image
+│   └── …                                  checks, groups, tiers — executed natively *inside* the image
 └── .anvil/container/
     ├── Dockerfile                         what the image contains
     ├── Dockerfile.dockerignore            what the build context admits
-    └── hooks.ps1                          optional; supplied by you or a catalog (§5)
+    └── hooks.ps1                          optional; not emitted by default (§7)
 ```
 
-`container.just` is generated and reconciled on every run; edits to it are replaced. The `Dockerfile` and its ignore
-file are generated too, but they are meant to be edited — anvil's drift handling preserves a repository's changes to
-them (§7).
+`container.just` is generated and reconciled on every run; local edits to it are replaced. The `Dockerfile` and its
+ignore file are generated but intended to be edited: anvil's drift handling preserves a repository's changes to them
+(§9).
 
-The image installs its tools by running `just anvil-setup`: the same recipe the checks use, reading the same
-generated pins. There is no second list of tools to keep in step, which is also why bumping a tool pin changes the
-image — `versions.just` is both what the image installs and part of what names it (§4).
+The image installs its tools by running `just anvil-setup`, the same recipe the checks use, reading the same generated
+pins. There is no second tool list to keep synchronized, which is also why a tool-pin change renames the image:
+`versions.just` is both what the image installs and part of what names it (§5).
 
-## 4. Image identity
+The build context is scoped by `Dockerfile.dockerignore`, a deny-all list that re-admits `justfiles/` and
+`rust-toolchain.toml` and nothing else. BuildKit reads `<dockerfile>.dockerignore` in preference to a root
+`.dockerignore`, so the repository does not need to own a root ignore file and cannot have one silently overridden.
 
-The tag **is** the hash of the inputs that define the image:
+## 5. Image identity
 
-```text
-anvil-<repo>:<16 hex characters>
-```
+The image reference is `anvil-<repo>:<16 hex characters>`, where the tag is a SHA-256 digest over the inputs that
+define the image. The name is derived from the repository directory as described in §3.3.
 
-Hashed: the `Dockerfile`, its ignore file, `rust-toolchain.toml`, `hooks.ps1` when present, and every `*.just` under
-`justfiles/anvil/` — except `container.just` itself, since hashing the driver would make the tag depend on the tag.
+### 5.1 Hashed inputs
 
-Change any input and the tag names an image that cannot already exist, so a build follows. Change nothing and the tag
-resolves immediately. There is no staleness check because there is no staleness: an image that is present was built
-from the inputs that name it.
+| Input | Hashed |
+| --- | --- |
+| `.anvil/container/Dockerfile` | always |
+| `.anvil/container/Dockerfile.dockerignore` | always |
+| `rust-toolchain.toml` | always |
+| `.anvil/container/hooks.ps1` | when the file exists |
+| `justfiles/anvil/**/*.just` | always, recursively, except `container.just` |
 
-That guarantee is exact for an image built locally. An image fetched by the resolve hook (§5.2) only *claims* those
-inputs — the hash is over source files and cannot be recomputed from layers — so the claim is only as good as the
-registry it came from. Publish to one with immutable tags, and restrict push to the identity that builds them.
+The recipe tree is included because the image installs its tools by running `just anvil-setup`, whose dependency chain
+reaches the tier, group, check, and tool recipes. `container.just` is excluded because hashing the driver would make
+the tag depend on the tag.
 
-`just anvil-container-tag` prints the reference without building anything. Every other recipe asks it, so a publisher
-and a consumer compute the same reference independently: no `latest`, no digest to maintain by hand.
+The hook file's **content** is an input, because it determines what the build installs. Its **output** is deliberately
+excluded: a credential must never influence a tag.
+
+A declared input that does not exist is a hard error rather than an omission from the digest.
+
+### 5.2 Digest computation
+
+Inputs are sorted by relative path using an ordinal comparison, then serialized into a single stream. Each entry
+contributes a literal `file`, its relative path, and its content, each terminated by a newline. Tagging each entry
+this way ensures no rearrangement of names and contents can produce a collision. Line endings are normalized to LF, so
+a CRLF checkout and an LF checkout compute the same tag. The ordinal sort matters because a case-insensitive one would
+silently drop one of two inputs differing only in case on the case-sensitive filesystem where the image is built.
+
+The tag is the first eight bytes of the digest, hex-encoded — 64 bits, far beyond any practical collision risk for a
+local image set, and short enough to keep `docker images` readable.
+
+`anvil-container-tag` is the only place this computation exists; every other recipe calls it. A publisher and a
+consumer therefore derive the same reference independently, with no `latest` tag and no digest maintained by hand.
+
+### 5.3 Guarantees
+
+Changing any input names a tag that cannot already exist, so a build follows. Changing nothing resolves the existing
+tag immediately. There is no staleness check because there is no staleness to detect: a locally built image that is
+present was built from the inputs that name it.
+
+That guarantee is exact only for a locally built image. An image obtained through `Anvil-ResolveImage` (§7.3) merely
+*claims* those inputs — the digest is computed over source files and cannot be re-derived from layers — so the claim
+is only as strong as the registry it came from. Publish to a registry with immutable tags, and restrict push to the
+identity that builds them.
+
+Two inputs sit outside the digest and must be pinned by other means. The base image is not resolved during hashing, so
+`ARG BASE_IMAGE` must remain digest-pinned or a floating tag can change beneath a tag that claims to name fixed
+content. The platform is pinned to `linux/amd64` on both build and run, so hosts of differing architecture cannot
+compute one tag for two different images.
+
+## 6. Environment variables
 
 | Variable | Effect |
 | --- | --- |
-| `ANVIL_CONTAINER_ENGINE` | `docker` (default) or `podman`. |
-| `ANVIL_CONTAINER_NO_REBUILD=1` | Fail instead of building when the image is missing, which distinguishes a cache miss from a build failure. |
+| `ANVIL_CONTAINER_ENGINE` | `docker` (default) or `podman`. Read at run time. |
+| `ANVIL_CONTAINER_NO_REBUILD=1` | Fail instead of building when the image is absent, distinguishing a cache miss from a build failure. |
 | `ANVIL_CONTAINER_NO_RESOLVE=1` | Skip the resolve hook, so a query never pulls. |
-| `ANVIL_CONTAINER_NO_CACHE=1` | Rebuild even when the tag resolves, ignoring the hook. |
+| `ANVIL_CONTAINER_NO_CACHE=1` | Rebuild with `--no-cache` even when the tag already resolves. Also skips the resolve hook. |
+| `ANVIL_IN_CONTAINER=1` | Set inside the image. Makes a nested invocation execute natively (§3.5). |
 
-Values a hook returns never enter the hash: a credential must not be able to influence a tag.
+`ANVIL_CONTAINER_NO_CACHE` skips the hook because "ignore what is cached" must include the remote cache; otherwise a
+rebuild would be undone by the next resolve. `ANVIL_CONTAINER_NO_REBUILD` is evaluated independently of it, so the two
+compose: `anvil-container-status` sets both `NO_REBUILD` and `NO_RESOLVE`, and answers from local state alone. When
+`NO_REBUILD` stops a build, the reference is still printed, because a caller that asked not to build is usually asking
+*which* image is missing.
 
-## 5. The hook
+## 7. The hook
 
-`.anvil/container/hooks.ps1` supplies the two things anvil cannot know — credentials for a private feed, and where a
-prebuilt image might come from. It is optional, and it is loaded by path rather than by provenance: the recipe sources
-it whenever the file exists, whether a repository wrote it or a catalog shipped it. A repository can therefore try a
-credential flow without forking anything.
+`.anvil/container/hooks.ps1` supplies the two things anvil cannot derive: credentials, and where a prebuilt image
+might be obtained. The file is optional and is not emitted by default — crates.io requires no credentials, and an
+empty script would be one more generated file to review.
 
-| Function | Called | Returns |
+It is loaded by path rather than by provenance: the recipe dot-sources it whenever the file exists, whether a
+repository wrote it or a catalog shipped it. A repository can therefore adopt a credential flow without forking the
+catalog.
+
+| Function | Invoked | Returns |
 | --- | --- | --- |
-| `Anvil-PreBuild` | before a build | `@{ Secrets = @{ id = value } }` |
-| `Anvil-PreRun` | before a run | `@{ Env = @{ NAME = value } }` |
-| `Anvil-ResolveImage $tag` | before a build, when nothing local matches | an image reference, or nothing |
+| `Anvil-PreBuild` | before a build | `@{ Secrets = @{ <id> = <value> } }` |
+| `Anvil-PreRun` | before a run | `@{ Env = @{ <NAME> = <value> } }` |
+| `Anvil-ResolveImage $tag` | before a build, when no local image matches | an image reference, or nothing |
 
-All three are optional.
+All three are optional, and each is called only if defined.
 
-### 5.1 Credentials
+Both value-returning functions **fail closed on an empty value**. This is not the engine's behaviour: BuildKit accepts
+`--secret id=t,env=UNSET`, mounts an empty secret, and exits 0. The build would install a reduced tool set, be tagged
+with the same content hash a credentialed build produces, and be reused by every later run.
 
-crates.io needs none, so the default image ships no credential plumbing. An internal feed does:
+### 7.1 Anvil-PreBuild
+
+Each returned entry becomes a BuildKit `--secret id=<id>,env=ANVIL_SECRET_<id>` mount. The value is placed in a
+process environment variable and passed **by name**, so it never appears in a command line, where endpoint telemetry
+records and retains it far longer than a short-lived token is intended to live. The variables are removed once the
+build completes. BuildKit keeps a mounted secret out of every image layer.
 
 ```powershell
 function Anvil-PreBuild {
     @{ Secrets = @{ feed_token = (az account get-access-token --resource … --query accessToken -o tsv) } }
 }
-
-function Anvil-PreRun {
-    @{ Env = @{ CARGO_REGISTRIES_INTERNAL_TOKEN = "Bearer $token" } }
-}
 ```
 
-Minting the value in a function, rather than reading it from a committed file or a declared variable, is the point: a
-short-lived token has to be acquired at the moment it is used.
+Minting the value inside a function is the point: a short-lived token must be acquired at the moment it is used, not
+read from a committed file or a declared variable.
 
-`Secrets` become `--secret id=…,env=…` mounts at build time; `Env` becomes `-e NAME` at run time. In both cases the
-value is handed to the engine **by variable name**, so it never appears in a command line — where endpoint telemetry
-records and retains it far longer than the token is meant to live — and it never touches disk. Build secrets stay out
-of every image layer. When the engine is reached through WSL (§6.1), the names are exported with `WSLENV` so the value
-crosses that boundary the same way.
-
-Declare the mount as required, which closes the same hole from the Dockerfile's side:
+Declare the mount as required in the Dockerfile, which closes the same gap from the build's side:
 
 ```dockerfile
 RUN --mount=type=secret,id=feed_token,required=true \
     TOKEN="$(cat /run/secrets/feed_token)" …
 ```
 
-Anything the build *writes* with a secret is ordinary content. Anvil's own Dockerfile deletes `credentials.toml` and
-`.netrc` in the same layer as the install; a replacement must do the same, or the credential is baked into a layer.
+Anything the build *writes* using a secret is ordinary layer content. The default Dockerfile removes
+`credentials.toml` and `.netrc` in the same `RUN` layer as the install; a replacement must do the same, or the
+credential is baked into a layer that a later deletion cannot remove.
 
-**An empty value is a hard error.** BuildKit itself is not: `--secret id=t,env=UNSET` mounts an empty secret and
-exits 0, so the build would install a reduced tool set and then be tagged with the same content hash a credentialed
-build produces — and every later run would reuse that broken image.
+When the engine is reached through WSL, the secret variable names are exported through `WSLENV` so the values cross
+that boundary.
 
-**Trust.** The hook runs on the host, with your permissions, before any container isolation. Only run one from a
-repository or catalog you trust. Inside the container everything runs as one user in one mount namespace, so a
-forwarded credential is readable by anything the checks execute, including dependency build scripts and proc macros.
-Keep the set narrow and the token short-lived.
+### 7.2 Anvil-PreRun
 
-### 5.2 Prebuilt images
+Each returned entry is forwarded into the container with `-e <NAME>`, again by name rather than as `NAME=VALUE`, for
+the reason given above. Inside the image the value is an ordinary environment variable. The forwarded names — never
+their values — are echoed to stderr, because everything executing inside the container can read them.
 
-When no local image matches the tag, `Anvil-ResolveImage` is offered that reference before a build starts. A catalog
-that publishes images implements it; without one, the build proceeds as usual.
+```powershell
+function Anvil-PreRun {
+    @{ Env = @{ CARGO_REGISTRIES_INTERNAL_TOKEN = (mint-a-token) } }
+}
+```
+
+### 7.3 Anvil-ResolveImage
+
+When no local image matches the computed tag, the reference is offered to `Anvil-ResolveImage` before a build starts.
+A catalog that publishes images implements it; without one, the build proceeds.
 
 ```powershell
 function Anvil-ResolveImage($tag) {
@@ -187,41 +320,51 @@ function Anvil-ResolveImage($tag) {
 }
 ```
 
-Three properties are worth knowing:
+Three properties are load-bearing:
 
-- **The returned reference is used as-is, not re-tagged to the local name.** A local tag asserts "built here from
-  these inputs"; a fetched image only claims it (§4). Keeping the registry reference keeps the run honest about where
-  the image came from.
-- **The reference is verified before use.** Runs are `--pull=never`, so a hook that reported an image it had not
+- **The returned reference is used as-is, never re-tagged to the local name.** A local tag asserts "built here from
+  these inputs"; a fetched image only claims it (§5.3). Retaining the registry reference keeps the run honest about
+  the image's origin.
+- **The reference is verified before use.** Runs pass `--pull=never`, so a hook that reported an image it had not
   actually fetched would otherwise fail later and further from the cause.
 - **Every failure falls through to a local build**, with the reason printed — a missing image, an expired credential,
-  a broken hook. A publisher that has not caught up with your change must never block you.
+  a hook that threw. A publisher that has not caught up with a change must not block the developer who made it.
 
-`ANVIL_CONTAINER_NO_RESOLVE=1` skips this step.
+Resolution is attempted before the `ANVIL_CONTAINER_NO_REBUILD` guard, because fetching a published image is not
+building one.
 
-## 6. Host setup
+### 7.4 Trust boundary
 
-anvil installs nothing and manages no virtual machine. It calls the engine you selected and lets that engine's own
-diagnostics surface; the one message it owns is for a missing binary, which names the variable to set and points
-here.
+The hook executes on the host, with the invoking user's permissions, before any container isolation exists. Only use
+one from a repository or catalog you trust.
 
-The engine must be **callable from the shell that runs `just`**. On Windows there is one automatic exception: if the
-engine is not on `PATH`, anvil retries it inside the default WSL distribution and translates the repository path with
-`wslpath`, which is what makes a WSL-only Docker installation work with no Windows CLI.
+Inside the container everything executes as a single user in a single mount namespace, so a forwarded credential is
+readable by anything the checks execute, including dependency build scripts and procedural macros. Keep the forwarded
+set narrow and the tokens short-lived.
+
+## 8. Host requirements
+
+anvil installs nothing and manages no virtual machine. It invokes the engine you selected and lets that engine's own
+diagnostics surface. The only failure message it owns is for a missing binary, which names the variable to set and
+links here.
+
+The engine must be callable from the shell that runs `just`, with the single Windows exception described in §3.1. The
+host also needs `just` and PowerShell Core (`pwsh`), which every generated recipe requires, and the repository must
+own a `rust-toolchain.toml`.
 
 | | Docker | Podman |
 | --- | --- | --- |
 | Selected by | default | `ANVIL_CONTAINER_ENGINE=podman` |
 | Builder | BuildKit | buildah |
-| Support | full | full, except build secrets on Windows (§6.2) |
+| Status | supported | best-effort; see §8.2 |
 
-### 6.1 Docker
+### 8.1 Docker
 
-**Linux.** Install Docker Engine from your distribution or `get.docker.com` and add yourself to the `docker` group.
+**Linux.** Install Docker Engine from your distribution or `get.docker.com`, and add your user to the `docker` group.
 
-**Windows, with Docker Desktop.** Nothing to configure: `docker` is on `PATH`.
+**Windows, with Docker Desktop.** No configuration required: `docker` is on `PATH`.
 
-**Windows, Docker Engine in WSL** — no Docker Desktop, and no Windows CLI required:
+**Windows, Docker Engine in WSL.** No Docker Desktop and no Windows CLI:
 
 ```powershell
 wsl --install -d Ubuntu-24.04
@@ -232,18 +375,19 @@ wsl --shutdown
 wsl -d Ubuntu-24.04 -- docker version     # verify
 ```
 
-That is the whole setup. `just` and `pwsh` stay on Windows; the distribution needs only Docker.
+`just` and `pwsh` remain on Windows; the distribution needs only Docker. anvil detects this configuration
+automatically (§3.1) and translates paths accordingly (§3.2).
 
-Installing a Windows `docker` CLI and pointing `DOCKER_HOST` at the WSL socket also works, and takes precedence — the
-WSL path is used only when no CLI is found. The daemon is then Linux-side, so the repository must be bind-mountable
-at a path it understands.
+Installing a Windows `docker` CLI and pointing `DOCKER_HOST` at the WSL socket also works and takes precedence, since
+the WSL path is used only when no CLI is found on `PATH`. The daemon is then Linux-side, so the repository must be
+bind-mountable at a path it can resolve.
 
-### 6.2 Podman
+### 8.2 Podman
 
 **Linux.** Install podman and set `ANVIL_CONTAINER_ENGINE=podman`.
 
-**Windows.** `podman machine init` provisions and manages its own WSL2 virtual machine, and `podman.exe` is on
-`PATH`, so anvil calls it directly.
+**Windows.** `podman machine init` provisions and manages its own WSL2 virtual machine, and `podman.exe` is placed on
+`PATH`, so anvil invokes it directly.
 
 ```powershell
 winget install RedHat.Podman-Desktop   # or the podman CLI alone
@@ -252,56 +396,68 @@ podman machine start
 $env:ANVIL_CONTAINER_ENGINE = 'podman'
 ```
 
-**Build secrets are unavailable on podman for Windows.** Podman builds its own temp path from the build context after
-translating it into the machine's view and joins it with a Windows separator, so any `--secret` fails before the
-build starts:
+Three differences from Docker are known and unresolved:
 
-```text
-Error: creating temp file: open /mnt/c/Users/…/repo\podman-build-secret-4085781963
-```
+- **Build secrets are unavailable on podman for Windows.** Podman derives a temporary path from the build context
+  after translating it into the machine's view, then joins it using a Windows separator, so any `--secret` fails
+  before the build begins:
 
-The failure is in podman rather than in anvil, and no form of the flag avoids it. It affects only a repository whose
-hook supplies `Anvil-PreBuild` (§5.1); everything else — building, running, tag reuse — works. Use docker if you need
-build-time credentials on Windows.
+  ```text
+  Error: creating temp file: open /mnt/c/Users/…/repo\podman-build-secret-4085781963
+  ```
 
-Two smaller differences: anvil passes `--ignorefile` explicitly on podman, because buildah honours only an ignore file
-at the context root, and rootless uid mapping (`--userns keep-id`) is not currently applied.
+  The defect is in podman, and no form of the flag avoids it. It affects only a repository whose hook defines
+  `Anvil-PreBuild` (§7.1); building, running, and tag reuse are unaffected. Use Docker if you need build-time
+  credentials on Windows.
 
-## 7. Customizing the image
+- **The ignore file is passed explicitly.** buildah honours only an ignore file at the context root, so anvil passes
+  `--ignorefile` on podman. Without it the entire worktree, including `target/`, is streamed to the daemon on every
+  build.
 
-A **repository** changes what its own image contains; a **downstream catalog** (an anvil fork — see
-[extensibility.md](./extensibility.md)) changes what every repository it manages receives.
+- **Rootless user-namespace mapping is not applied.** The run passes `--user` (§3.4) but not `--userns keep-id`, which
+  rootless podman requires for bind-mount ownership to map back to the invoking user.
 
-| You want | Do this | Who |
+## 9. Customization
+
+A **repository** changes what its own image contains. A **downstream catalog** — an anvil fork, see
+[extensibility.md](./extensibility.md) — changes what every repository it manages receives. Containerized execution is
+an ordinary artifact group and uses the same levers as any other.
+
+| Goal | Mechanism | Owner |
 | --- | --- | --- |
-| Extra packages, one repository | Edit `.anvil/container/Dockerfile` in place | repository |
+| Extra packages in one repository | Edit `.anvil/container/Dockerfile` in place | repository |
 | A different base OS or toolchain source, everywhere | `replace_artifact(artifacts::container::dockerfile().with_body(…))` | catalog |
-| Credentials, or a prebuilt image | Write `.anvil/container/hooks.ps1`, or ship one with `with_artifact(artifacts::container::hooks(…))` | either |
-| No container support at all | `without_artifact` each of the three artifacts | catalog |
+| Credentials, or a published image | Add `.anvil/container/hooks.ps1`, or ship `artifacts::container::hooks(…)` | either |
+| No containerized execution at all | `without_artifact` for each of the three artifacts | catalog |
 
-Editing the Dockerfile in one repository is supported, and the drift flow keeps the edit — but anvil will keep
-offering its own version against a file it can see has diverged. A change that belongs everywhere is better made in a
+Editing the Dockerfile in a single repository is supported and the drift flow preserves the edit, but anvil continues
+to offer its own version against a file it can see has diverged. A change that belongs everywhere is better made in a
 catalog.
 
-**The Dockerfile and its ignore file move together.** A replacement that `COPY`s more of the tree must also replace
-`artifacts::container::dockerignore()`, or the extra files never reach the build context and the build fails on a
-missing path. Recipes need no such care: the identity hash covers `justfiles/anvil/` recursively, so a new recipe
-directory is hashed automatically — though the same widening rule applies before it can be copied.
+**The Dockerfile and its ignore file must be replaced together.** The ignore file is a deny-all list re-admitting only
+`justfiles/` and `rust-toolchain.toml` (§4). A replacement Dockerfile that `COPY`s anything else must also replace
+`artifacts::container::dockerignore()`, or the additional paths never reach the build context and the build fails on a
+missing file. Recipes need no such care: `justfiles/` is re-admitted as a directory and hashed recursively, so a new
+recipe subdirectory is both copied and part of the identity automatically.
 
-A fork inherits the rest unchanged: the recipes, the identity hash, the cache volumes, the mounts and the uid
-mapping. A different base OS with a different toolchain source is one Dockerfile replacement plus one hook.
+`justfiles/anvil/` must contain `.just` recipes and nothing else. `CatalogBuilder::build` enforces this, because a
+non-recipe file placed there would be copied into the image without being part of its identity: editing it would
+change what the image contains without renaming the tag. Non-recipe assets belong in a tool-owned directory such as
+`.anvil/`.
 
-Keep `ARG BASE_IMAGE` digest-pinned. The identity hash covers this file's text, but it does not resolve the base, so
-a floating tag can change underneath a tag that claims to name fixed content.
+A fork inherits everything else unchanged: the recipes, the identity scheme, the cache volumes, the mounts, and the
+re-entry guard. A different base OS with a different toolchain source is one Dockerfile replacement plus one hook.
 
-## 8. Limits
+## 10. Limitations
 
-- Linux-only, `linux/amd64`. On ARM64 hosts the image is emulated and is substantially slower.
-- Anvil never pushes and never promotes an image. It builds one, and it will use one a hook fetched (§5.2);
+- Linux images only, pinned to `linux/amd64`. On ARM64 hosts the image is emulated and is substantially slower.
+- The first build takes several minutes: it installs a toolchain and the entire pinned tool catalog. Subsequent runs
+  reuse it until an input changes.
+- Any edit under `justfiles/` invalidates the install layer, including files the image's synthetic Justfile never
+  imports.
+- anvil never pushes and never promotes an image. It builds one, and it will use one a hook fetched (§7.3);
   publishing belongs to whoever owns the registry.
-- A repository-owned `rust-toolchain.toml` is required — it is both what the image installs and part of what names it.
-- The first build takes several minutes: it installs a toolchain and the whole pinned tool catalog. Later runs reuse
-  it until an input changes.
-- `target/` stays on the bind mount, so build output is visible from the host.
+- A repository-owned `rust-toolchain.toml` is required. It is both what the image installs and part of what names it.
+- Podman on Windows cannot mount build secrets (§8.2).
 
 [design]: ./README.md
