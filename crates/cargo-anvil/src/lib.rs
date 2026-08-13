@@ -101,20 +101,21 @@
 //! pins, by running `just anvil-setup` — the same recipe the checks use — so
 //! the container and the host agree on the toolset by construction.
 //!
-//! There is no configuration file and no transparent routing: `just anvil-pr`
-//! keeps running natively, and the container is reached only through the
-//! explicit recipe.
+//! `just anvil-pr` and every other recipe keep running natively; the container
+//! is entered only through `anvil-container`, which takes any recipe name and
+//! its arguments.
 //!
 //! ```text
-//! just anvil-container anvil-clippy   # one check
-//! just anvil-container anvil-pr       # the whole PR tier
-//! just anvil-container                # interactive shell
+//! just anvil-container anvil-clippy         # one check
+//! just anvil-container anvil-pr             # the whole PR tier
+//! just anvil-container anvil-setup binstall # a recipe with an argument
+//! just anvil-container                      # interactive shell
 //! ```
 //!
 //! ### Prerequisites
 //!
-//! - A container engine callable from the shell that runs `just`: Docker
-//!   (supported) or Podman (best-effort). On Windows that means Docker
+//! - A container engine callable from the shell that runs `just`: Docker, or
+//!   Podman via `ANVIL_CONTAINER_ENGINE=podman`. On Windows that means Docker
 //!   Desktop, Podman, a Windows `docker` CLI pointed at an engine in WSL, or
 //!   Docker Engine installed only inside the default WSL distribution — no
 //!   Windows CLI is needed in that last case, since anvil reaches the engine
@@ -145,7 +146,7 @@
 //!
 //! | Variable | Effect |
 //! |---|---|
-//! | `ANVIL_CONTAINER_ENGINE` | `docker` (default) or `podman`. A host property; never committed. |
+//! | `ANVIL_CONTAINER_ENGINE` | `docker` (default) or `podman`. |
 //! | `ANVIL_CONTAINER_NO_REBUILD=1` | Fail when the image is missing instead of building it, which distinguishes a cache miss from a build failure. |
 //! | `ANVIL_CONTAINER_NO_RESOLVE=1` | Skip the resolve hook, so a query never pulls. |
 //! | `ANVIL_CONTAINER_NO_CACHE=1` | Rebuild a tag that already resolves, ignoring the hook. |
@@ -157,8 +158,8 @@
 //!
 //! ### The hook
 //!
-//! crates.io needs none of this, so the public catalog emits no hook at all.
-//! A repository or a downstream catalog that needs one adds
+//! crates.io needs no credentials, so no hook is emitted by default. A
+//! repository or a downstream catalog that needs one adds
 //! `.anvil/container/hooks.ps1`, which the recipe loads when present:
 //!
 //! ```powershell
