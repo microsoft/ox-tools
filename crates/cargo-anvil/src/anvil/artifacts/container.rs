@@ -411,6 +411,20 @@ mod tests {
     }
 
     #[test]
+    fn a_linked_worktree_can_reach_its_git_directory() {
+        // A worktree's .git is a file naming a host path outside the mount, so
+        // without this the container resolves no refs at all and every check
+        // that needs history fails.
+        assert!(RECIPE.contains("git rev-parse --git-common-dir"));
+        assert!(RECIPE.contains("${engineGitCommon}:/anvil/gitdir"));
+        assert!(RECIPE.contains("GIT_DIR=/anvil/gitdir/$rel"));
+        // An ordinary clone must not take the extra mount.
+        assert!(RECIPE.contains("if ($gitDirAbs -ne $gitCommonAbs) {"));
+        // A host with a working engine but no git must not start failing here.
+        assert!(RECIPE.contains("if (Get-Command git -ErrorAction SilentlyContinue) {"));
+    }
+
+    #[test]
     fn hooks_constructor_uses_the_documented_path() {
         assert_eq!(paths(&[hooks("# body\n")]), [HOOKS_PATH]);
         assert_eq!(hooks("# body\n").body(), "# body\n");

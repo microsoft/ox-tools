@@ -23,6 +23,7 @@
       3. A second run reuses the image (the tag resolves, nothing is built),
          no cache volume masks the tools the image installed, and a host
          GITHUB_TOKEN is forwarded while an absent one is not invented.
+      3b. A recipe run from a linked worktree can still reach git history.
       4. Changing a hashed input (the pinned toolchain) selects a new tag.
       5. Reverting that input returns to the original tag.
       6. Editing the Dockerfile is preserved by a re-run of the generator.
@@ -330,9 +331,17 @@ e2e-show-env:
 # was correctly *not* forwarded would abort instead of printing empty.
 e2e-show-token:
     @echo "E2E-TOKEN:[${GITHUB_TOKEN:-}]"
+
+# Proves git resolves inside the container, which a linked worktree breaks
+# unless the driver mounts the common git directory.
+e2e-show-git:
+    @echo "E2E-GIT:[$(git rev-parse --abbrev-ref HEAD)]"
 '@
 
 Invoke-Native -Command 'git' -Arguments @('init', '-q') -WorkingDirectory $repo | Out-Null
+# Pin the newline policy: the fixture writes LF, and a developer with
+# core.autocrlf=true globally would otherwise fail to stage it.
+Invoke-Native -Command 'git' -Arguments @('config', 'core.autocrlf', 'false') -WorkingDirectory $repo | Out-Null
 
 Write-Step 'generating the anvil tree (cargo anvil --no-backends)'
 $generate = Invoke-Native -Command $anvilExe -Arguments @('anvil', '--no-backends') -WorkingDirectory $repo
@@ -426,6 +435,42 @@ $withoutToken = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'e2e-sho
     -Environment @{ GITHUB_TOKEN = '' }
 Assert-That 'no token is invented when the host has none' `
     ($withoutToken.StdOut -match 'E2E-TOKEN:\[\]') "$($withoutToken.StdOut)$($withoutToken.StdErr)"
+
+# --------------------------------------------------------- 3b. worktrees -----
+
+Write-Section '3b. A linked worktree resolves its git directory'
+
+# A linked worktree's `.git` is a file naming an absolute host path outside the
+# checkout. Bind-mounting only the worktree leaves that path unreachable, so git
+# inside the container resolves nothing -- not HEAD, not origin/* -- and every
+# check that needs history fails. This is not exotic: worktrees are the ordinary
+# way to work on two branches at once.
+#
+# The worktree is given the same directory name as the fixture so the image name
+# matches, and it checks out the same committed content, so the tag is identical
+# and no rebuild is needed.
+Invoke-Native -Command 'git' -Arguments @('add', '-A') -WorkingDirectory $repo | Out-Null
+Invoke-Native -Command 'git' -Arguments @('-c', 'user.email=e2e@example.invalid', '-c', 'user.name=e2e',
+    'commit', '-q', '-m', 'fixture') -WorkingDirectory $repo | Out-Null
+
+$worktreeParent = Join-Path $workRoot 'wt'
+$worktree = Join-Path $worktreeParent $fixtureName
+Invoke-Native -Command 'git' -Arguments @('worktree', 'add', '-q', '-b', 'e2e-worktree', $worktree) `
+    -WorkingDirectory $repo -AllowFailure | Out-Null
+Assert-That 'the fixture worktree was created' (Test-Path -LiteralPath $worktree) $worktree
+Assert-That 'its .git is a file, not a directory' `
+    (Test-Path -LiteralPath (Join-Path $worktree '.git') -PathType Leaf) 'a linked worktree stores a gitdir pointer'
+
+$wtReference = Get-ImageReference -Repo $worktree
+Assert-Equal 'the worktree selects the same image, so nothing rebuilds' $reference $wtReference
+
+$wtGit = Invoke-Just -Repo $worktree -Arguments @('anvil-container', 'e2e-show-git') -AllowFailure
+Assert-Equal 'a recipe run from a worktree succeeds' 0 $wtGit.ExitCode
+Assert-That 'git resolves the branch inside the container' `
+    ($wtGit.StdOut -match 'E2E-GIT:\[e2e-worktree\]') "$($wtGit.StdOut)$($wtGit.StdErr)"
+
+Invoke-Native -Command 'git' -Arguments @('worktree', 'remove', '--force', $worktree) `
+    -WorkingDirectory $repo -AllowFailure | Out-Null
 
 # ------------------------------------------------------ 4/5. hashed inputs ---
 

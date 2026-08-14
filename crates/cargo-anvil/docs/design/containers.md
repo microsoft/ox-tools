@@ -169,8 +169,16 @@ removed on exit (`--rm`).
 | Mount | Target | Purpose |
 | --- | --- | --- |
 | repository root (bind) | `/workspace` | The worktree under test, including `target/`. |
+| common git directory (bind, linked worktrees only) | `/anvil/gitdir` | Git history, when the checkout does not carry it. |
 | `anvil-<repo>-cargo-registry` (volume) | `/usr/local/cargo/registry` | Downloaded crate sources. |
 | `anvil-<repo>-cargo-git` (volume) | `/usr/local/cargo/git` | Git checkouts of git dependencies. |
+
+A linked worktree (`git worktree add`) keeps its git directory outside the checkout and stores an absolute host path
+in `.git`, which does not exist inside the container. Left alone, git resolves nothing — not `HEAD`, not `origin/main`
+— and every check that needs history fails somewhere far from the cause. anvil detects this by comparing
+`git rev-parse --git-dir` against `--git-common-dir`, mounts the common directory, and sets `GIT_DIR` and
+`GIT_WORK_TREE` accordingly. An ordinary clone carries its git directory inside the bind mount and takes none of this.
+No flag or variable selects the behaviour.
 
 Only cargo's content-addressed download caches are volumes, so the write-heavy download path never crosses the host
 boundary and the host's own toolchain is untouched. `$CARGO_HOME` and `$RUSTUP_HOME` themselves are **not** mounted:

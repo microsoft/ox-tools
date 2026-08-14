@@ -2626,6 +2626,37 @@ anvil-container *target:
     $runArgs = @('run', '--rm', '--platform', 'linux/amd64')
     $runArgs += $interactive ? '-it' : '-i'
     $runArgs += @('-v', "${engineRoot}:{{anvil_container_workdir}}")
+
+    # A linked worktree keeps its real git directory outside the checkout: its
+    # `.git` is a file naming an absolute host path, which does not exist inside
+    # the container. Git then resolves nothing -- not HEAD, not origin/main --
+    # and every check that needs history fails a long way from the cause. Mount
+    # the common git directory and point GIT_DIR at this worktree's entry in it;
+    # the `commondir` file there is relative, so it resolves under the mount.
+    #
+    # An ordinary clone keeps its git directory inside the checkout, where the
+    # bind mount already carries it, and takes none of this.
+    #
+    # Guarded on git being present: the run path needs it only to answer this
+    # question, and a host with a working engine but no git on PATH should keep
+    # working rather than fail on a call it did not used to make.
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $gitDir = & git rev-parse --git-dir 2>$null
+        $gitCommon = & git rev-parse --git-common-dir 2>$null
+        if ($LASTEXITCODE -eq 0 -and $gitDir -and $gitCommon) {
+            $gitDirAbs = (Resolve-Path -LiteralPath $gitDir).Path
+            $gitCommonAbs = (Resolve-Path -LiteralPath $gitCommon).Path
+            if ($gitDirAbs -ne $gitCommonAbs) {
+                $rel = [System.IO.Path]::GetRelativePath($gitCommonAbs, $gitDirAbs) -replace '\\', '/'
+                $engineGitCommon = (just _anvil-container-path $gitCommonAbs).Trim()
+                if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                $runArgs += @('-v', "${engineGitCommon}:/anvil/gitdir")
+                $runArgs += @('-e', "GIT_DIR=/anvil/gitdir/$rel")
+                $runArgs += @('-e', 'GIT_WORK_TREE={{anvil_container_workdir}}')
+            }
+        }
+    }
+
     # Cache only what is content-addressed: the downloaded registry and the git
     # checkouts. Deliberately NOT $CARGO_HOME or $RUSTUP_HOME themselves --
     # those hold the installed tools and toolchains, and a named volume is
