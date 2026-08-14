@@ -98,13 +98,13 @@
 //!
 //! Any generated recipe can be executed inside a content-addressed Linux
 //! image. The image installs the Rust toolchain and Cargo tools this
-//! repository pins by running `just anvil-setup` — the same recipe the checks
-//! use, reading the same generated pins — so the image and the host agree on
+//! repository pins by running `just anvil-setup`, the same recipe the checks
+//! use, reading the same generated pins, so the image and the host agree on
 //! the toolset by construction, with no second tool list to keep in step.
 //!
-//! `just anvil-pr` and every other recipe continue to run natively. A
-//! container is entered only through `anvil-container`, which takes any recipe
-//! name and its arguments; nothing is routed into one implicitly.
+//! Execution is opt-in per invocation: `just anvil-pr` and every other recipe
+//! continue to run natively, and a container is entered only through
+//! `anvil-container`, which takes any recipe name and its arguments.
 //!
 //! ```text
 //! just anvil-container anvil-clippy         # one check
@@ -113,23 +113,23 @@
 //! just anvil-container                      # interactive shell
 //! ```
 //!
-//! The feature is two generated artifacts and one optional hook:
-//! `justfiles/anvil/container.just` drives the engine,
-//! `.anvil/container/Dockerfile` (with its `Dockerfile.dockerignore`) defines
-//! what the image contains, and `.anvil/container/hooks.ps1` supplies
-//! credentials when a repository needs them. There is no configuration file.
+//! The feature is three generated artifacts and one optional hook script, with
+//! no configuration file: `justfiles/anvil/container.just` drives the engine,
+//! `.anvil/container/Dockerfile` and its `Dockerfile.dockerignore` define what
+//! the image contains, and `.anvil/container/hooks.ps1` supplies credentials
+//! when a repository needs them.
 //!
-//! One container is created per invocation, not per check. The repository is
-//! bind-mounted at `/workspace`, so `target/` stays visible from the host,
-//! while `CARGO_HOME` and `RUSTUP_HOME` live in named volumes that keep the
-//! write-heavy paths off the host boundary.
+//! One container is created per invocation, however many checks the requested
+//! recipe runs. The repository is bind-mounted at `/workspace`, so `target/`
+//! stays visible from the host, while `CARGO_HOME` and `RUSTUP_HOME` live in
+//! named volumes that keep the write-heavy paths off the host boundary.
 //!
 //! ### Prerequisites
 //!
 //! - A container engine callable from the shell that runs `just`: Docker, or
 //!   Podman via `ANVIL_CONTAINER_ENGINE=podman`. On Windows that means Docker
 //!   Desktop, Podman, a Windows `docker` CLI pointed at an engine in WSL, or
-//!   Docker Engine installed only inside the default WSL distribution — no
+//!   Docker Engine installed only inside the default WSL distribution. No
 //!   Windows CLI is needed in that last case, since anvil reaches the engine
 //!   through `wsl.exe` when it finds none on `PATH` and translates repository
 //!   paths with `wslpath`.
@@ -148,9 +148,9 @@
 //! A changed tool pin names a tag that cannot already exist, so a build
 //! follows. There is no staleness check because there is no staleness to
 //! detect: a locally built image that is present was built from the inputs
-//! that name it. An image *fetched* by the resolve hook only claims as much —
-//! the digest is over source files and cannot be re-derived from layers — so
-//! that claim is only as strong as the registry it came from, which should
+//! that name it. An image *fetched* by the resolve hook only claims as much,
+//! since the digest is over source files and cannot be re-derived from layers,
+//! so that claim is only as strong as the registry it came from, which should
 //! have immutable tags and restricted push.
 //!
 //! `anvil-container-tag` prints the reference without building it, and is the
@@ -194,7 +194,7 @@
 //! produces.
 //!
 //! `Anvil-ResolveImage` is offered the tag when nothing local matches, and
-//! returns the reference it made available — a registry reference, used as-is
+//! returns the reference it made available: a registry reference, used as-is
 //! rather than re-tagged locally, so the run stays honest about where the
 //! image came from. It is verified before use, and every failure falls through
 //! to a local build: a publisher that has not caught up must not block the
