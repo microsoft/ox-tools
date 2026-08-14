@@ -402,6 +402,15 @@ mod tests {
     }
 
     #[test]
+    fn the_build_context_matches_the_hashed_inputs() {
+        // A file that is copied but not hashed can change what a build
+        // produces while naming a tag that already resolves, so the change is
+        // never built.
+        assert!(DOCKERIGNORE.contains("justfiles/*\n!justfiles/anvil\n"));
+        assert!(!DOCKERIGNORE.contains("!justfiles\n!rust-toolchain.toml"));
+    }
+
+    #[test]
     fn hooks_constructor_uses_the_documented_path() {
         assert_eq!(paths(&[hooks("# body\n")]), [HOOKS_PATH]);
         assert_eq!(hooks("# body\n").body(), "# body\n");

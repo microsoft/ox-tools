@@ -435,24 +435,25 @@ guard. A different base OS with a different toolchain source is one Dockerfile r
 - On ARM64 hosts the `linux/amd64` image is emulated and is substantially slower.
 - The first build takes several minutes, installing a toolchain and the entire pinned tool catalog. Later runs reuse
   it until an input changes.
-- Any edit under `justfiles/` invalidates the install layer, including files the image's synthetic Justfile never
-  imports.
+- Any edit under `justfiles/anvil/` invalidates the install layer, including files the image's synthetic Justfile
+  never imports.
+- **The set of hashed inputs is fixed (§4.1) and a fork cannot extend it.** A replacement Dockerfile is itself
+  hashed, so changing the build recipe always renames the tag — but any *additional* file it copies is outside the
+  tag. Such a file can change what a build produces while naming a tag that already resolves, and the existing image
+  is then reused, so the change is never built. A fork that needs extra content should carry it in the Dockerfile
+  itself, or accept that edits to it require `anvil-container-rebuild`.
 - anvil never pushes or promotes an image. It builds one, and will use one a hook fetched (§7.3); publishing belongs
   to whoever owns the registry.
 
 ## 10. Verification
 
-The behaviour above needs a live daemon, so it cannot join `anvil-pr`. `scripts/test-anvil-container.ps1` covers it
-end to end against a real engine, driving only the public surface: first build then reuse, a tag that changes with
-an input and reverts, an edit surviving regeneration, a build secret that never reaches a layer, empty hook values
-failing closed, resolve-then-verify, and the re-entry guard.
+`scripts/test-anvil-container.ps1` exercises the behaviour above end to end against a real engine, driving only the
+public surface. It needs a live daemon, so it cannot join `anvil-pr`; the unit tests in `artifacts::container` and
+the emitted-tree snapshots are what run unattended.
 
 ```powershell
 ./scripts/test-anvil-container.ps1                  # docker
 ./scripts/test-anvil-container.ps1 -Engine podman   # podman
 ```
-
-What runs unattended is narrower: the unit tests in `artifacts::container` assert the driver's invariants against
-the template text, and the snapshots pin the emitted files.
 
 [design]: ./README.md

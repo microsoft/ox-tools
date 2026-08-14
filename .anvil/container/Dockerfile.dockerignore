@@ -10,6 +10,13 @@
 # The build context is the repository root but the image only needs two things.
 # Excluding everything else keeps a cold build from streaming the whole
 # worktree (and every stale `target/`) to the daemon.
+#
+# The context is narrowed to `justfiles/anvil/` rather than all of `justfiles/`
+# so that it matches what the tag hashes. A file that is copied but not hashed
+# can change what a build produces while naming a tag that already resolves --
+# so the changed file is never built, because the existing image is reused.
 *
 !justfiles
+justfiles/*
+!justfiles/anvil
 !rust-toolchain.toml

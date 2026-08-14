@@ -86,11 +86,11 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
     && rm /tmp/cargo-binstall.tgz
 
 # Install the pinned toolchain and cargo subcommands from the generated
-# catalog. Only `justfiles/` and the toolchain pin are copied, so an edit
-# elsewhere in the repository does not invalidate this layer -- though an edit
-# to any file under `justfiles/` does, including ones the synthetic Justfile
-# below never imports. That Justfile avoids pulling in repository-specific
-# imports that may not exist yet.
+# catalog. Only `justfiles/anvil/` and the toolchain pin are copied, which is
+# also exactly what the tag hashes, so the build context cannot differ from
+# the image's identity: an edit that changes what this layer produces always
+# renames the tag. The synthetic Justfile below imports only the anvil tree,
+# avoiding repository-specific imports that may not exist yet.
 #
 # `binstall` matches what CI passes. It is not just a speed-up: some catalog
 # tools do not compile from source on every pinned toolchain, so a source
