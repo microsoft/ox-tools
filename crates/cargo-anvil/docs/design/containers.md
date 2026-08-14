@@ -183,10 +183,11 @@ Tools and toolchains therefore always come from the image layer the tag names.
 The caller's working directory is mapped to its in-container equivalent, so relative paths resolve when
 `anvil-container` is invoked from a subdirectory.
 
-Image and volume names derive from the repository directory name, lowercased with every character outside
-`[a-z0-9._-]` replaced by `-`. Two checkouts with the same directory name therefore share cache volumes. That is
-harmless, since both volumes hold only content-addressed downloads, but `anvil-container-down` then removes volumes
-the other checkout is also using.
+Image and volume names derive from the repository directory name, lowercased with every run of characters outside
+`[a-z0-9]` replaced by a single `-` and any trailing `-` removed, so the result is always a valid reference: a
+checkout in `ox-tools (copy)` would otherwise end in a separator, which the engine rejects. Two checkouts with the
+same directory name therefore share cache volumes. That is harmless, since both volumes hold only content-addressed
+downloads, but `anvil-container-down` then removes volumes the other checkout is also using.
 
 ### 5.2 Process identity
 
