@@ -110,8 +110,8 @@ RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME}/.netrc" \
     && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
 
-# Consumed by the re-entry guard in the generated tier and group recipes: a
-# recipe that sees this runs natively instead of launching another container.
+# Consumed by `anvil-container` itself: a nested invocation from inside the
+# image runs the recipe natively instead of launching another container.
 ENV ANVIL_IN_CONTAINER=1
 
 WORKDIR /workspace

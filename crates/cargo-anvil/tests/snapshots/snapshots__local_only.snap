@@ -115,8 +115,8 @@ RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME}/.netrc" \
     && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
 
-# Consumed by the re-entry guard in the generated tier and group recipes: a
-# recipe that sees this runs natively instead of launching another container.
+# Consumed by `anvil-container` itself: a nested invocation from inside the
+# image runs the recipe natively instead of launching another container.
 ENV ANVIL_IN_CONTAINER=1
 
 WORKDIR /workspace
@@ -2234,9 +2234,9 @@ anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-too
 #
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/containers.md
 
-# The container engine. `docker` (supported) or `podman` (best-effort).
-# A host property, never committed: set the variable in your environment, or
-# pass `just anvil_container_engine=podman ...` for a single invocation.
+# The container engine, `docker` or `podman`. A host property, never
+# committed. Set it in your environment: a `just anvil_container_engine=...`
+# override would not reach the nested invocations that resolve the engine.
 anvil_container_engine := env_var_or_default("ANVIL_CONTAINER_ENGINE", "docker")
 
 # Where the repository is mounted inside the container.
@@ -2246,7 +2246,12 @@ anvil_container_workdir := "/workspace"
 # Two checkouts with the same directory name share cache volumes; that is
 # harmless (the caches are content-addressed by cargo) but worth knowing before
 # `anvil-container-down` removes volumes another checkout is also using.
-anvil_container_name := "anvil-" + replace_regex(lowercase(file_name(justfile_directory())), '[^a-z0-9._-]', "-")
+#
+# Every run of non-alphanumerics collapses to a single `-`, and a trailing one
+# is trimmed, because a repository name may not end in a separator or repeat
+# `.`/`_`. Without that, a checkout in `ox-tools (copy)` yields a reference the
+# engine rejects as malformed, from a directory name nobody would suspect.
+anvil_container_name := trim_end_matches("anvil-" + replace_regex(lowercase(file_name(justfile_directory())), '[^a-z0-9]+', "-"), "-")
 
 # Resolve how to invoke the engine, as a pipe-separated command.
 #
@@ -2275,10 +2280,14 @@ _anvil-container-engine:
         Write-Output $engine
         exit 0
     }
+    # --exec, not --: `wsl.exe -- <cmd>` hands the rest of the command line to
+    # the distribution's default shell, which expands $NAME, splits on ;, and
+    # eats backslashes. Every argument we forward -- the repository path and
+    # the recipe's own arguments -- would cross that boundary unquoted.
     if ($IsWindows -and (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
-        & wsl.exe -- $engine --version *> $null
+        & wsl.exe --exec $engine --version *> $null
         if ($LASTEXITCODE -eq 0) {
-            Write-Output "wsl.exe|--|$engine"
+            Write-Output "wsl.exe|--exec|$engine"
             exit 0
         }
     }
@@ -2301,13 +2310,14 @@ _anvil-container-path host_path:
         Write-Output '{{ replace(host_path, "'", "''") }}'
         exit 0
     }
-    # Pass the path with forward slashes: arguments cross into WSL through a
-    # shell that would otherwise consume the backslashes, leaving wslpath to
-    # translate a mangled path. wslpath accepts either separator.
-    $hostPath = '{{ replace(host_path, "'", "''") }}' -replace '\\', '/'
-    $translated = & wsl.exe -- wslpath -a -u $hostPath
+    # --exec for the reason given above. It matters most here: through a shell,
+    # a path holding `$` loses it, and `wslpath -a` then makes the *truncated*
+    # path absolute and exits 0, so the guard below never fires and the wrong
+    # directory is bind-mounted.
+    $hostPath = '{{ replace(host_path, "'", "''") }}'
+    $translated = & wsl.exe --exec wslpath -a -u $hostPath
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "anvil: could not translate '{{ replace(host_path, "'", "''") }}' for the engine running in WSL"
+        Write-Error "anvil: could not translate '$hostPath' for the engine running in WSL"
         exit 1
     }
     Write-Output $translated.Trim()
@@ -2608,10 +2618,14 @@ anvil-container *target:
     $runArgs = @('run', '--rm', '--platform', 'linux/amd64')
     $runArgs += $interactive ? '-it' : '-i'
     $runArgs += @('-v', "${engineRoot}:{{anvil_container_workdir}}")
-    # Cargo and rustup homes live in named volumes: the hot write path never
-    # crosses the host boundary, and the host's own toolchain is untouched.
-    $runArgs += @('-v', '{{anvil_container_name}}-cargo:/usr/local/cargo')
-    $runArgs += @('-v', '{{anvil_container_name}}-rustup:/usr/local/rustup')
+    # Cache only what is content-addressed: the downloaded registry and the git
+    # checkouts. Deliberately NOT $CARGO_HOME or $RUSTUP_HOME themselves --
+    # those hold the installed tools and toolchains, and a named volume is
+    # populated from the image only when it is first created. Mounting them
+    # would pin the first image's binaries over every later one, so a tool bump
+    # would change the tag, build a new image, and still run the old tools.
+    $runArgs += @('-v', '{{anvil_container_name}}-cargo-registry:/usr/local/cargo/registry')
+    $runArgs += @('-v', '{{anvil_container_name}}-cargo-git:/usr/local/cargo/git')
     # Match the caller's uid/gid on Linux. Without this everything the run
     # writes under the bind mount -- target/, generated files -- lands as root
     # on the host, and the next native cargo build or git clean fails with
@@ -2619,7 +2633,13 @@ anvil-container *target:
     # already maps ownership, and `id` is not there to ask.
     if (-not $IsWindows -and -not $IsMacOS) {
         $hostUid = (id -u); $hostGid = (id -g)
-        if ($LASTEXITCODE -eq 0 -and $hostUid -ne '0') { $runArgs += @('--user', "${hostUid}:${hostGid}") }
+        if ($LASTEXITCODE -eq 0 -and $hostUid -ne '0') {
+            $runArgs += @('--user', "${hostUid}:${hostGid}")
+            # That uid has no passwd entry, so the engine leaves HOME as `/`.
+            # Anything falling back to $HOME for a cache then writes to a
+            # read-only root and fails a long way from the cause.
+            $runArgs += @('-e', 'HOME=/tmp')
+        }
     }
     $runArgs += @('-e', 'ANVIL_IN_CONTAINER=1')
 
@@ -2689,12 +2709,19 @@ anvil-container-status:
     # of silently spending several minutes building from a status command.
     # NO_RESOLVE is the same argument applied to the hook, which would otherwise
     # pull gigabytes to answer a question about the local machine.
+    #
+    # Compute the tag first and let it fail loudly. It is fatal for a reason a
+    # query cannot paper over -- a declared input is missing -- and reporting
+    # that as "not present locally" would be a lie: the next run cannot build
+    # it either.
+    $image = (just anvil-container-tag) | Select-Object -Last 1
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Write-Output "image:   $image"
+
     $env:ANVIL_CONTAINER_NO_REBUILD = '1'
     $env:ANVIL_CONTAINER_NO_RESOLVE = '1'
-    $image = (just _anvil-container-image 2>$null) | Select-Object -Last 1
-    $present = $LASTEXITCODE -eq 0
-    if ($image) { Write-Output "image:   $image" }
-    if ($present) {
+    just _anvil-container-image *> $null
+    if ($LASTEXITCODE -eq 0) {
         Write-Output "status:  present and current"
     } else {
         Write-Output "status:  not present locally (the next run resolves or builds it)"
@@ -2706,8 +2733,6 @@ anvil-container-status:
 # The ordinary path already rebuilds whenever an input changes, so this is for
 # the cases a content hash cannot see: a moved upstream package, a stale base
 # layer, or a build that is suspected of being wrong.
-
-# Rebuild the exec image from scratch, ignoring every cached layer.
 [group("anvil-container")]
 [script("pwsh", "-NoProfile")]
 anvil-container-rebuild:
@@ -2719,6 +2744,10 @@ anvil-container-rebuild:
     exit 0
 
 # Remove this repository's cache volumes. The image is left in place.
+#
+# The last two names are from an earlier build of this driver, which mounted
+# the cargo and rustup homes wholesale; removing them here clears a stale
+# toolchain that would otherwise mask the image's own.
 [group("anvil-container")]
 [script("pwsh", "-NoProfile")]
 anvil-container-down:
@@ -2728,8 +2757,20 @@ anvil-container-down:
     $engineCmd = $engine -split '\|'
     $engineExe = $engineCmd[0]
     $enginePrefix = @($engineCmd | Select-Object -Skip 1)
-    foreach ($vol in @('{{anvil_container_name}}-cargo', '{{anvil_container_name}}-rustup')) {
+    # Report a teardown that did not happen. $ErrorActionPreference does not
+    # cover native commands, so a non-serving engine would otherwise print a
+    # connection error per volume and still exit 0 -- and this recipe is the
+    # only way to clear a cache volume, so a caller that scripts teardown must
+    # be able to tell that it failed. `-f` already exits 0 for a volume that
+    # does not exist, so this cannot fire spuriously.
+    $failed = @()
+    foreach ($vol in @('{{anvil_container_name}}-cargo-registry', '{{anvil_container_name}}-cargo-git', '{{anvil_container_name}}-cargo', '{{anvil_container_name}}-rustup')) {
         & $engineExe @enginePrefix volume rm -f $vol
+        if ($LASTEXITCODE -ne 0) { $failed += $vol }
+    }
+    if ($failed.Count -gt 0) {
+        Write-Error ("anvil: could not remove: " + ($failed -join ', '))
+        exit 1
     }
     exit 0
 

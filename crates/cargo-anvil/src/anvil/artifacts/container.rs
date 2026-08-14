@@ -261,8 +261,9 @@ mod tests {
 
     #[test]
     fn the_image_name_cannot_carry_an_apostrophe() {
-        // What makes the exemption above safe.
-        assert!(RECIPE.contains(r#"replace_regex(lowercase(file_name(justfile_directory())), '[^a-z0-9._-]', "-")"#));
+        // What makes the exemption above safe: the character class admits
+        // only alphanumerics, so no quote can reach a PowerShell literal.
+        assert!(RECIPE.contains(r#"replace_regex(lowercase(file_name(justfile_directory())), '[^a-z0-9]+', "-")"#));
     }
 
     #[test]
@@ -328,8 +329,59 @@ mod tests {
 
     #[test]
     fn empty_hook_values_fail_closed() {
-        assert!(RECIPE.contains("returned an empty value for secret"));
-        assert!(RECIPE.contains("returned an empty value for"));
+        // Both phases, asserted independently: "for" alone is a substring of
+        // the build-side message, so it would pass with the run-side guard
+        // deleted.
+        assert!(RECIPE.contains("Anvil-PreBuild returned an empty value for secret"));
+        assert!(RECIPE.contains("Anvil-PreRun returned an empty value for"));
+    }
+
+    #[test]
+    fn cache_volumes_never_mask_the_images_tools() {
+        // An engine seeds a named volume from the image only on first
+        // creation, so mounting a directory that holds installed binaries
+        // pins the first image's tools over every later tag.
+        assert!(RECIPE.contains("-cargo-registry:/usr/local/cargo/registry"));
+        assert!(RECIPE.contains("-cargo-git:/usr/local/cargo/git"));
+        assert!(!RECIPE.contains("-cargo:/usr/local/cargo'"));
+        assert!(!RECIPE.contains(":/usr/local/rustup"));
+    }
+
+    #[test]
+    fn wsl_calls_bypass_the_login_shell() {
+        // `wsl.exe -- <cmd>` re-parses the command line through the default
+        // shell: a path holding `$` is silently truncated (and wslpath still
+        // exits 0), and a `;` in any forwarded argument runs on the host.
+        // Matched on the invocation form so the comment explaining this may
+        // still name the broken spelling.
+        assert!(!RECIPE.contains("& wsl.exe -- "));
+        assert!(!RECIPE.contains("wsl.exe|--|"));
+        assert!(RECIPE.contains("& wsl.exe --exec "));
+        assert!(RECIPE.contains("wsl.exe|--exec|"));
+    }
+
+    #[test]
+    fn container_name_is_always_a_valid_reference() {
+        // A repository name may not end in a separator or repeat `.`/`_`, so
+        // a directory like `ox-tools (copy)` must not reach the engine as
+        // `anvil-ox-tools--copy-`.
+        assert!(RECIPE.contains(r#"replace_regex(lowercase(file_name(justfile_directory())), '[^a-z0-9]+', "-")"#));
+        assert!(RECIPE.contains(r#"trim_end_matches("anvil-" + replace_regex"#));
+    }
+
+    #[test]
+    fn teardown_reports_a_removal_that_failed() {
+        // $ErrorActionPreference does not cover native commands, and this is
+        // the only way to clear a cache volume.
+        assert!(RECIPE.contains("if ($LASTEXITCODE -ne 0) { $failed += $vol }"));
+        assert!(RECIPE.contains("anvil: could not remove: "));
+    }
+
+    #[test]
+    fn a_mapped_user_gets_a_writable_home() {
+        // A uid with no passwd entry is given HOME=/, which is not writable.
+        assert!(RECIPE.contains("$runArgs += @('--user', \"${hostUid}:${hostGid}\")"));
+        assert!(RECIPE.contains("$runArgs += @('-e', 'HOME=/tmp')"));
     }
 
     #[test]

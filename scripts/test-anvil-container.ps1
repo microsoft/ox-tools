@@ -20,7 +20,8 @@
 
       1. A generated repository carries exactly the three container artifacts.
       2. The first run builds an image and runs the recipe inside it.
-      3. A second run reuses the image (the tag resolves, nothing is built).
+      3. A second run reuses the image (the tag resolves, nothing is built),
+         and no cache volume masks the tools the image installed.
       4. Changing a hashed input (the pinned toolchain) selects a new tag.
       5. Reverting that input returns to the original tag.
       6. Editing the Dockerfile is preserved by a re-run of the generator.
@@ -152,9 +153,9 @@ function Resolve-Engine {
         return [pscustomobject]@{ Exe = $Engine; Prefix = @(); ViaWsl = $false }
     }
     if ($IsWindows -and (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
-        & wsl.exe -- $Engine --version *> $null
+        & wsl.exe --exec $Engine --version *> $null
         if ($LASTEXITCODE -eq 0) {
-            return [pscustomobject]@{ Exe = 'wsl.exe'; Prefix = @('--', $Engine); ViaWsl = $true }
+            return [pscustomobject]@{ Exe = 'wsl.exe'; Prefix = @('--exec', $Engine); ViaWsl = $true }
         }
     }
     $null
@@ -167,7 +168,9 @@ function Invoke-Engine {
 
 function ConvertTo-EnginePath([string]$Path) {
     if (-not $script:EngineViaWsl) { return $Path }
-    (& wsl.exe -- wslpath -a -u ($Path -replace '\\', '/')).Trim()
+    # --exec, not --: plain `wsl.exe --` re-parses through the login shell,
+    # which eats `$` in a path and still exits 0.
+    (& wsl.exe --exec wslpath -a -u $Path).Trim()
 }
 
 function Write-Fixture([string]$Path, [string]$Content) {
@@ -378,6 +381,32 @@ Assert-Equal 'the reference is unchanged' $reference (Get-ImageReference -Repo $
 $status = Invoke-Just -Repo $repo -Arguments @('anvil-container-status')
 Assert-That 'status reports present and current' ($status.StdOut -match 'present and current') $status.StdOut
 Assert-That 'status reports the selected engine' ($status.StdOut -match "engine:\s+.*$Engine") $status.StdOut
+
+# The image's tools must not be masked by a cache volume. An engine seeds a
+# named volume from the image only when the volume is first created, so a
+# volume over $CARGO_HOME or $RUSTUP_HOME would pin the first image's binaries
+# over every later tag -- a bumped tool would change the tag, build a new
+# image, and still run the old binary.
+$volumes = (Invoke-Engine -Arguments @('volume', 'ls', '--format', '{{.Name}}')).StdOut
+$fixtureVolumes = @($volumes -split "`r?`n" | Where-Object { $_ -like "$imagePrefix*" })
+Assert-That 'a registry cache volume exists' `
+    (@($fixtureVolumes | Where-Object { $_ -like '*-cargo-registry' }).Count -eq 1) ($fixtureVolumes -join ', ')
+Assert-That 'no volume masks CARGO_HOME or RUSTUP_HOME' `
+    (@($fixtureVolumes | Where-Object { $_ -like '*-cargo' -or $_ -like '*-rustup' }).Count -eq 0) ($fixtureVolumes -join ', ')
+
+# The positive half: a binary the image installed is still visible at run time
+# with the caches mounted, so the tools a run uses are the ones the tag names.
+# Argument vector deliberately free of spaces -- Start-Process joins
+# -ArgumentList without quoting, so `bash -c '...'` would be re-split.
+$probe = Invoke-Engine -AllowFailure -Arguments @(
+    'run', '--rm', '--platform', 'linux/amd64',
+    '-v', "$imagePrefix-cargo-registry:/usr/local/cargo/registry",
+    '-v', "$imagePrefix-cargo-git:/usr/local/cargo/git",
+    $reference, 'ls', '/usr/local/cargo/bin/cargo-binstall'
+)
+Assert-Equal 'a tool installed by the image survives the cache mounts' 0 $probe.ExitCode
+Assert-That 'the tool resolves inside the image, not a volume' `
+    ($probe.StdOut -match '/usr/local/cargo/bin/cargo-binstall') "$($probe.StdOut)$($probe.StdErr)"
 
 # ------------------------------------------------------ 4/5. hashed inputs ---
 

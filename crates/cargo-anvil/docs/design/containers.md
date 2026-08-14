@@ -166,17 +166,23 @@ removed on exit (`--rm`).
 | Mount | Target | Purpose |
 | --- | --- | --- |
 | repository root (bind) | `/workspace` | The worktree under test, including `target/`. |
-| `anvil-<repo>-cargo` (volume) | `/usr/local/cargo` | `CARGO_HOME`: registry cache and installed binaries. |
-| `anvil-<repo>-rustup` (volume) | `/usr/local/rustup` | `RUSTUP_HOME`: installed toolchains. |
+| `anvil-<repo>-cargo-registry` (volume) | `/usr/local/cargo/registry` | Downloaded crate sources. |
+| `anvil-<repo>-cargo-git` (volume) | `/usr/local/cargo/git` | Git checkouts of git dependencies. |
 
-The cargo and rustup homes are named volumes, so write-heavy paths never cross the host boundary and the host's own
-toolchain is untouched. `target/` stays on the bind mount, remaining visible from the host and shared between native
-and containerized runs. The caller's working directory is mapped to its in-container equivalent, so relative paths
-resolve when `anvil-container` is invoked from a subdirectory.
+Only cargo's content-addressed download caches are volumes, so the write-heavy download path never crosses the host
+boundary and the host's own toolchain is untouched. `$CARGO_HOME` and `$RUSTUP_HOME` themselves are **not** mounted:
+they carry the installed tools and toolchains, and an engine populates a named volume from the image only when that
+volume is first created. Mounting them would pin the first image's binaries over every later one, so a tool bump
+would change the tag, build a new image, and still run the old tools — defeating the identity guarantee in §4.
+Tools and toolchains therefore always come from the image layer the tag names.
+
+`target/` stays on the bind mount, remaining visible from the host and shared between native and containerized runs.
+The caller's working directory is mapped to its in-container equivalent, so relative paths resolve when
+`anvil-container` is invoked from a subdirectory.
 
 Image and volume names derive from the repository directory name, lowercased with every character outside
 `[a-z0-9._-]` replaced by `-`. Two checkouts with the same directory name therefore share cache volumes. That is
-harmless in normal use, since cargo's caches are content-addressed, but `anvil-container-down` then removes volumes
+harmless, since both volumes hold only content-addressed downloads, but `anvil-container-down` then removes volumes
 the other checkout is also using.
 
 ### 5.2 Process identity
@@ -206,16 +212,17 @@ anvil installs nothing and manages no virtual machine. Beyond the engine, the ho
 ### 6.1 Engine resolution
 
 `ANVIL_CONTAINER_ENGINE` defaults to `docker`, and any value other than `docker` or `podman` is rejected before the
-engine is invoked. Being a host property rather than a repository one, it is read at run time and never committed; a
-single invocation can override it with `just anvil_container_engine=podman anvil-container anvil-pr`.
+engine is invoked. Being a host property rather than a repository one, it is read at run time and never committed.
+It is the only control: the recipes resolve the engine through nested `just` invocations, which a
+`just anvil_container_engine=...` override would not reach.
 
 Resolution proceeds in a fixed order:
 
 1. If the named binary is on `PATH`, it is invoked directly.
-2. Otherwise, on Windows, the binary is probed inside the default WSL distribution (`wsl.exe -- <engine> --version`).
-   If the probe succeeds, every subsequent engine call is prefixed with `wsl.exe --`. This accommodates Docker Engine
-   installed inside WSL without Docker Desktop, which leaves no Windows CLI behind; Docker Desktop and Podman both
-   install one and resolve at step 1.
+2. Otherwise, on Windows, the binary is probed inside the default WSL distribution
+   (`wsl.exe --exec <engine> --version`). If the probe succeeds, every subsequent engine call is prefixed with
+   `wsl.exe --exec`. This accommodates Docker Engine installed inside WSL without Docker Desktop, which leaves no
+   Windows CLI behind; Docker Desktop and Podman both install one and resolve at step 1.
 3. Otherwise the invocation fails with a message naming the variable and linking to this document.
 
 anvil never falls back to the other engine: if the selected one is unusable, the invocation fails rather than
@@ -226,7 +233,10 @@ diagnostic is shown unchanged.
 
 When the engine is reached through WSL it does not share the Windows filesystem view, so anvil translates every path
 it hands over (bind-mount source, build context, `--file`) with `wslpath -a -u`. An untranslated path is not
-rejected by the engine; it silently resolves to an empty directory.
+rejected by the engine; it silently resolves to an empty directory. The `--exec` form is required rather than
+cosmetic: plain `wsl.exe --` hands the command line to the distribution's login shell, which would expand `$NAME`
+and split on `;` in repository paths and forwarded recipe arguments alike. A path holding `$` would be truncated by
+that expansion and `wslpath -a` would still exit 0, bind-mounting the wrong directory.
 
 ### 6.2 Docker
 
@@ -414,5 +424,20 @@ guard. A different base OS with a different toolchain source is one Dockerfile r
   imports.
 - anvil never pushes or promotes an image. It builds one, and will use one a hook fetched (§7.3); publishing belongs
   to whoever owns the registry.
+
+## 10. Verification
+
+The behaviour above needs a live daemon, so it cannot join `anvil-pr`. `scripts/test-anvil-container.ps1` covers it
+end to end against a real engine, driving only the public surface: first build then reuse, a tag that changes with
+an input and reverts, an edit surviving regeneration, a build secret that never reaches a layer, empty hook values
+failing closed, resolve-then-verify, and the re-entry guard.
+
+```powershell
+./scripts/test-anvil-container.ps1                  # docker
+./scripts/test-anvil-container.ps1 -Engine podman   # podman
+```
+
+What runs unattended is narrower: the unit tests in `artifacts::container` assert the driver's invariants against
+the template text, and the snapshots pin the emitted files.
 
 [design]: ./README.md
