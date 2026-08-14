@@ -25,7 +25,8 @@ wraps, and [extensibility.md](./extensibility.md) for the catalog seam a downstr
 - [5. Execution model](#5-execution-model)
   - [5.1 Mounts and working directory](#51-mounts-and-working-directory)
   - [5.2 Process identity](#52-process-identity)
-  - [5.3 Re-entry](#53-re-entry)
+  - [5.3 Environment](#53-environment)
+  - [5.4 Re-entry](#54-re-entry)
 - [6. Engines and host setup](#6-engines-and-host-setup)
   - [6.1 Engine resolution](#61-engine-resolution)
   - [6.2 Docker](#62-docker)
@@ -37,6 +38,7 @@ wraps, and [extensibility.md](./extensibility.md) for the catalog seam a downstr
   - [7.4 Trust boundary](#74-trust-boundary)
 - [8. Customization](#8-customization)
 - [9. Limitations](#9-limitations)
+- [10. Verification](#10-verification)
 
 ## 1. Purpose
 
@@ -76,7 +78,8 @@ All five are annotated `[group("anvil-container")]` and appear as one cluster in
 | `ANVIL_CONTAINER_NO_REBUILD=1` | Fail instead of building when the image is absent, separating a cache miss from a build failure. |
 | `ANVIL_CONTAINER_NO_RESOLVE=1` | Skip the resolve hook (§7.3), so a query never pulls. |
 | `ANVIL_CONTAINER_NO_CACHE=1` | Rebuild with `--no-cache` even when the tag resolves. Skips the resolve hook too (§7.3). |
-| `ANVIL_IN_CONTAINER=1` | Set inside the image. Makes a nested invocation execute natively (§5.3). |
+| `ANVIL_IN_CONTAINER=1` | Set inside the image. Makes a nested invocation execute natively (§5.4). |
+| `GITHUB_TOKEN` | Forwarded into the run when set on the host, so `anvil-aprz` is not rate-limited (§5.3). |
 
 `NO_REBUILD` is evaluated independently of `NO_CACHE`, so the two compose: `anvil-container-status` sets `NO_REBUILD`
 and `NO_RESOLVE` together and answers from local state alone. When `NO_REBUILD` stops a build the reference is still
@@ -190,9 +193,21 @@ the other checkout is also using.
 On a Linux host the run passes `--user <uid>:<gid>`, matching the invoking user, unless that user is root. Without it,
 everything written under the bind mount is owned by root on the host, and the next native `cargo build` or `git clean`
 fails with `EACCES` far from the cause. Docker Desktop on Windows and macOS maps ownership itself, and `id` is not
-available to query, so the flag is not passed there.
+available to query, so the flag is not passed there. That uid has no `passwd` entry, so `HOME` is set to `/tmp`;
+otherwise the engine leaves it as `/`, and anything falling back to `$HOME` writes to a read-only root.
 
-### 5.3 Re-entry
+### 5.3 Environment
+
+The run passes `ANVIL_IN_CONTAINER=1` (§5.4) and, when it is set on the host, forwards `GITHUB_TOKEN` by name.
+`anvil-aprz` runs in the `pr-fast` group and queries the GitHub advisory API, which allows 60 requests an hour
+unauthenticated — fewer than a full tier needs — so without the token a containerized tier degrades to warnings and
+rate limits. It is forwarded, never minted: running `gh auth token` in the driver would hand a broadly-scoped
+credential to every recipe in the container, including the ones that never see it natively, where the recipe scopes
+it to itself. A host that has not exported it gets the same unauthenticated warning it would get natively.
+
+Everything else a run needs comes from the hook (§7).
+
+### 5.4 Re-entry
 
 `ANVIL_IN_CONTAINER=1` is set in the image and passed on each run. `anvil-container` checks it first and, inside the
 image, executes the requested recipe directly instead of launching another container, so a recipe that reaches

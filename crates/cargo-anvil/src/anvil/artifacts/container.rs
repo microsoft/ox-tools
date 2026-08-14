@@ -385,6 +385,23 @@ mod tests {
     }
 
     #[test]
+    fn a_host_token_is_forwarded_by_name_never_minted() {
+        // anvil-aprz is in pr-fast, so a containerized tier hits the
+        // unauthenticated advisory-API limit without it. Forwarding by name
+        // keeps the value off the command line; minting one here would give
+        // every recipe in the container a credential it lacks natively.
+        assert!(RECIPE.contains("$forwardedEnv += 'GITHUB_TOKEN'"));
+        assert!(RECIPE.contains("$runArgs += @('-e', 'GITHUB_TOKEN')"));
+        // Forwarding by name only works if the engine can see the name, so a
+        // WSL engine needs it bridged -- otherwise `-e NAME` forwards nothing.
+        assert!(RECIPE.contains("$engineExe -eq 'wsl.exe' -and $forwardedEnv.Count -gt 0"));
+        // Invocation forms only, so the comment explaining the choice may name
+        // the command it rules out.
+        assert!(!RECIPE.contains("(gh auth token"));
+        assert!(!RECIPE.contains("& gh "));
+    }
+
+    #[test]
     fn hooks_constructor_uses_the_documented_path() {
         assert_eq!(paths(&[hooks("# body\n")]), [HOOKS_PATH]);
         assert_eq!(hooks("# body\n").body(), "# body\n");

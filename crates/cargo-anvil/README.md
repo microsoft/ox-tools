@@ -167,6 +167,7 @@ exactly the reference a consumer will later look up.
 |`ANVIL_CONTAINER_NO_RESOLVE=1`|Skip the resolve hook, so a query never pulls.|
 |`ANVIL_CONTAINER_NO_CACHE=1`|Rebuild a tag that already resolves, ignoring the hook.|
 |`ANVIL_IN_CONTAINER=1`|Set inside the image; makes a nested invocation run natively.|
+|`GITHUB_TOKEN`|Forwarded into the run when set on the host, so `anvil-aprz` is not rate-limited.|
 
 Supporting recipes: `anvil-container-tag`, `anvil-container-status`
 (reports the engine and image without building or pulling),
@@ -434,7 +435,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbAO_FZGTrWRcbQnEvdCe9uvIbIY7pQUwg99AbRwGoU1ynfVJhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbf5BkcPnaLaUbBQqw7ffBYjAbRhU4DwFqU-obm5Wjj04zV3FhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts

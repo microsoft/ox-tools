@@ -166,6 +166,7 @@
 //! | `ANVIL_CONTAINER_NO_RESOLVE=1` | Skip the resolve hook, so a query never pulls. |
 //! | `ANVIL_CONTAINER_NO_CACHE=1` | Rebuild a tag that already resolves, ignoring the hook. |
 //! | `ANVIL_IN_CONTAINER=1` | Set inside the image; makes a nested invocation run natively. |
+//! | `GITHUB_TOKEN` | Forwarded into the run when set on the host, so `anvil-aprz` is not rate-limited. |
 //!
 //! Supporting recipes: `anvil-container-tag`, `anvil-container-status`
 //! (reports the engine and image without building or pulling),

@@ -13,7 +13,8 @@
 # gh CLI's stored token (non-interactive: `gh auth token` prints the
 # active account's token for github.com and never opens a browser/auth
 # prompt). If neither is available we warn with instructions and proceed
-# unauthenticated.
+# unauthenticated. In a container the driver forwards the host's GITHUB_TOKEN
+# when it is set, so this recipe sees it the same way it does natively.
 #
 # Unscoped (consults external risk DB).
 

@@ -21,7 +21,8 @@
       1. A generated repository carries exactly the three container artifacts.
       2. The first run builds an image and runs the recipe inside it.
       3. A second run reuses the image (the tag resolves, nothing is built),
-         and no cache volume masks the tools the image installed.
+         no cache volume masks the tools the image installed, and a host
+         GITHUB_TOKEN is forwarded while an absent one is not invented.
       4. Changing a hashed input (the pinned toolchain) selects a new tag.
       5. Reverting that input returns to the original tag.
       6. Editing the Dockerfile is preserved by a re-run of the generator.
@@ -323,6 +324,12 @@ set unstable
 # A repository-owned recipe, to prove that forwarded values arrive.
 e2e-show-env:
     @echo "E2E:$ANVIL_E2E_RUNTIME"
+
+# Proves the driver forwards a host token, and invents one when it should not.
+# `:-` because just runs recipe lines under `sh -u`, where a bare $NAME that
+# was correctly *not* forwarded would abort instead of printing empty.
+e2e-show-token:
+    @echo "E2E-TOKEN:[${GITHUB_TOKEN:-}]"
 '@
 
 Invoke-Native -Command 'git' -Arguments @('init', '-q') -WorkingDirectory $repo | Out-Null
@@ -407,6 +414,18 @@ $probe = Invoke-Engine -AllowFailure -Arguments @(
 Assert-Equal 'a tool installed by the image survives the cache mounts' 0 $probe.ExitCode
 Assert-That 'the tool resolves inside the image, not a volume' `
     ($probe.StdOut -match '/usr/local/cargo/bin/cargo-binstall') "$($probe.StdOut)$($probe.StdErr)"
+
+# anvil-aprz runs in pr-fast and is rate-limited without a token, so a host
+# token has to reach the container -- but only one the host actually set.
+$withToken = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'e2e-show-token') `
+    -Environment @{ GITHUB_TOKEN = 'e2e-forwarded-token' }
+Assert-That 'a host GITHUB_TOKEN reaches a recipe in the container' `
+    ($withToken.StdOut -match 'E2E-TOKEN:\[e2e-forwarded-token\]') "$($withToken.StdOut)$($withToken.StdErr)"
+
+$withoutToken = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'e2e-show-token') `
+    -Environment @{ GITHUB_TOKEN = '' }
+Assert-That 'no token is invented when the host has none' `
+    ($withoutToken.StdOut -match 'E2E-TOKEN:\[\]') "$($withoutToken.StdOut)$($withoutToken.StdErr)"
 
 # ------------------------------------------------------ 4/5. hashed inputs ---
 

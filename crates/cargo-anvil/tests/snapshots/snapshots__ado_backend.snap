@@ -1637,7 +1637,8 @@ unknown-git = "deny"
 # gh CLI's stored token (non-interactive: `gh auth token` prints the
 # active account's token for github.com and never opens a browser/auth
 # prompt). If neither is available we warn with instructions and proceed
-# unauthenticated.
+# unauthenticated. In a container the driver forwards the host's GITHUB_TOKEN
+# when it is set, so this recipe sees it the same way it does natively.
 #
 # Unscoped (consults external risk DB).
 
@@ -3908,7 +3909,27 @@ anvil-container *target:
     # already inherits, so a credential never appears in the host's process
     # command line, where endpoint telemetry records and retains it for far
     # longer than a short-lived token is meant to live.
+    # $forwardedEnv is every name passed with -e; $hookEnv is the subset this
+    # process set, and so the subset it must unset again.
+    $forwardedEnv = @()
     $hookEnv = @()
+
+    # anvil-aprz queries the GitHub advisory API, which allows 60 requests an
+    # hour unauthenticated -- less than a full tier needs. Forward the host's
+    # token by name when it is already set, so a containerized tier
+    # authenticates exactly as the same recipe does natively, and so CI (which
+    # sets it) keeps working when it runs a tier this way.
+    #
+    # Only forwarded, never minted: running `gh auth token` here would hand a
+    # broadly-scoped credential to every recipe in the container, including
+    # ones that never see it on the host, where anvil-aprz scopes it to itself.
+    # A host that has not exported it gets the same unauthenticated warning the
+    # recipe prints natively.
+    if ($env:GITHUB_TOKEN) {
+        $forwardedEnv += 'GITHUB_TOKEN'
+        $runArgs += @('-e', 'GITHUB_TOKEN')
+    }
+
     $hookPath = Join-Path $repoRoot '.anvil/container/hooks.ps1'
     if (Test-Path -LiteralPath $hookPath -PathType Leaf) {
         . $hookPath
@@ -3923,6 +3944,7 @@ anvil-container *target:
                     }
                     Set-Item -LiteralPath "Env:$name" -Value $hook.Env[$name]
                     $hookEnv += $name
+                    $forwardedEnv += $name
                     $runArgs += @('-e', $name)
                 }
                 # Names only, never values: a hook with a broad idea of what to
@@ -3940,9 +3962,11 @@ anvil-container *target:
         $runArgs += @('--pull=never', '-w', $containerCwd, $image)
         if (-not $interactive) { $runArgs += @('just') + $targetParts }
         # WSLENV exports the forwarded names into the WSL environment, which is
-        # where the engine reads their values from when it runs there.
-        if ($engineExe -eq 'wsl.exe' -and $hookEnv.Count -gt 0) {
-            $env:WSLENV = (@($env:WSLENV) + ($hookEnv | ForEach-Object { "$_/u" }) | Where-Object { $_ }) -join ':'
+        # where the engine reads their values from when it runs there. Without
+        # it, `-e NAME` reaches an engine that cannot see NAME and forwards
+        # nothing, leaving the variable unset inside the container.
+        if ($engineExe -eq 'wsl.exe' -and $forwardedEnv.Count -gt 0) {
+            $env:WSLENV = (@($env:WSLENV) + ($forwardedEnv | ForEach-Object { "$_/u" }) | Where-Object { $_ }) -join ':'
         }
         & $engineExe @enginePrefix @runArgs
         exit $LASTEXITCODE
