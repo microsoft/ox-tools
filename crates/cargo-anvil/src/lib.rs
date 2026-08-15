@@ -121,8 +121,10 @@
 //!
 //! One container is created per invocation, however many checks the requested
 //! recipe runs. The repository is bind-mounted at `/workspace`, so `target/`
-//! stays visible from the host, while `CARGO_HOME` and `RUSTUP_HOME` live in
-//! named volumes that keep the write-heavy paths off the host boundary.
+//! stays visible from the host. Cargo's download caches are named volumes,
+//! keeping that write-heavy path off the host boundary; `CARGO_HOME` and
+//! `RUSTUP_HOME` themselves are deliberately not mounted, since a volume would
+//! pin the first image's tools over every later one.
 //!
 //! ### Prerequisites
 //!
@@ -144,7 +146,10 @@
 //!
 //! The tag *is* a SHA-256 digest over the inputs that define the image: the
 //! Dockerfile and its ignore file, `rust-toolchain.toml`, the optional hook,
-//! and every `*.just` under `justfiles/anvil/` other than the driver itself.
+//! and the tool catalog (`tools.just` and `versions.just`). The tier, group
+//! and check recipes are not inputs: they only route into the catalog, and
+//! they run from the bind mount rather than from the image, so editing one
+//! takes effect without a rebuild.
 //! A changed tool pin names a tag that cannot already exist, so a build
 //! follows. There is no staleness check because there is no staleness to
 //! detect: a locally built image that is present was built from the inputs

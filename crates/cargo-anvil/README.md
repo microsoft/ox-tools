@@ -122,8 +122,10 @@ when a repository needs them.
 
 One container is created per invocation, however many checks the requested
 recipe runs. The repository is bind-mounted at `/workspace`, so `target/`
-stays visible from the host, while `CARGO_HOME` and `RUSTUP_HOME` live in
-named volumes that keep the write-heavy paths off the host boundary.
+stays visible from the host. Cargo’s download caches are named volumes,
+keeping that write-heavy path off the host boundary; `CARGO_HOME` and
+`RUSTUP_HOME` themselves are deliberately not mounted, since a volume would
+pin the first image’s tools over every later one.
 
 #### Prerequisites
 
@@ -145,7 +147,10 @@ ARM64 hosts it is emulated and is substantially slower.
 
 The tag *is* a SHA-256 digest over the inputs that define the image: the
 Dockerfile and its ignore file, `rust-toolchain.toml`, the optional hook,
-and every `*.just` under `justfiles/anvil/` other than the driver itself.
+and the tool catalog (`tools.just` and `versions.just`). The tier, group
+and check recipes are not inputs: they only route into the catalog, and
+they run from the bind mount rather than from the image, so editing one
+takes effect without a rebuild.
 A changed tool pin names a tag that cannot already exist, so a build
 follows. There is no staleness check because there is no staleness to
 detect: a locally built image that is present was built from the inputs
@@ -435,7 +440,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbf5BkcPnaLaUbBQqw7ffBYjAbRhU4DwFqU-obm5Wjj04zV3FhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbdslbcv5wbQ8bS2Q9nS9geVobvWjkawSPj-MbJZle69zZ4fRhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts

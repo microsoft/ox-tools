@@ -1567,14 +1567,15 @@ unknown-git = "deny"
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # cargo-aprz queries the GitHub advisory API. Unauthenticated access is
-# capped at 60 requests/hour and fails on a full run; an authenticated
-# token raises the cap to 5000/hour. CI injects GITHUB_TOKEN
+# capped at 60 requests an hour, and on a full workspace it exhausts that
+# and then waits for the quota to reset rather than failing; an
+# authenticated token raises the cap to 5000/hour. CI injects GITHUB_TOKEN
 # (github.token). For local runs, if GITHUB_TOKEN is unset we borrow the
 # gh CLI's stored token (non-interactive: `gh auth token` prints the
 # active account's token for github.com and never opens a browser/auth
 # prompt). If neither is available we warn with instructions and proceed
-# unauthenticated. In a container the driver forwards the host's GITHUB_TOKEN
-# when it is set, so this recipe sees it the same way it does natively.
+# unauthenticated. In a container the driver resolves the token the same
+# way and forwards it by name, because the image has no gh CLI of its own.
 #
 # Unscoped (consults external risk DB).
 
