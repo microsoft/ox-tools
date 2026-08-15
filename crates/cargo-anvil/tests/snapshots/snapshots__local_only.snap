@@ -2648,8 +2648,18 @@ anvil-container *target:
     # `.git` is a file naming an absolute host path, which does not exist inside
     # the container. Git then resolves nothing -- not HEAD, not origin/main --
     # and every check that needs history fails a long way from the cause. Mount
-    # the common git directory and point GIT_DIR at this worktree's entry in it;
-    # the `commondir` file there is relative, so it resolves under the mount.
+    # the common git directory, and replace the checkout's `.git` file with one
+    # naming that mount; the `commondir` file in the worktree's entry is
+    # relative, so it resolves under it.
+    #
+    # Deliberately not GIT_DIR/GIT_WORK_TREE. Those are ambient: every process
+    # in the container inherits them, so a check that runs git anywhere other
+    # than the workspace gets this repository instead of the one it meant. The
+    # test suite is the case that proves it -- `git init` in a scratch
+    # directory fails with `Invalid path '/anvil'`, because git honours the
+    # inherited GIT_DIR over the directory it was told to create. Replacing the
+    # `.git` file keeps the redirection where it belongs: in the checkout, and
+    # found by ordinary discovery.
     #
     # An ordinary clone keeps its git directory inside the checkout, where the
     # bind mount already carries it, and takes none of this.
@@ -2657,6 +2667,7 @@ anvil-container *target:
     # Guarded on git being present: the run path needs it only to answer this
     # question, and a host with a working engine but no git on PATH should keep
     # working rather than fail on a call it did not used to make.
+    $gitFile = $null
     if (Get-Command git -ErrorAction SilentlyContinue) {
         $gitDir = & git rev-parse --git-dir 2>$null
         $gitCommon = & git rev-parse --git-common-dir 2>$null
@@ -2667,9 +2678,13 @@ anvil-container *target:
                 $rel = [System.IO.Path]::GetRelativePath($gitCommonAbs, $gitDirAbs) -replace '\\', '/'
                 $engineGitCommon = (just _anvil-container-path $gitCommonAbs).Trim()
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                # LF and no trailing newline: git parses this file strictly.
+                $gitFile = Join-Path ([System.IO.Path]::GetTempPath()) "anvil-gitfile-$([System.Guid]::NewGuid().ToString('N'))"
+                [System.IO.File]::WriteAllText($gitFile, "gitdir: /anvil/gitdir/$rel`n")
+                $engineGitFile = (just _anvil-container-path $gitFile).Trim()
+                if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
                 $runArgs += @('-v', "${engineGitCommon}:/anvil/gitdir")
-                $runArgs += @('-e', "GIT_DIR=/anvil/gitdir/$rel")
-                $runArgs += @('-e', 'GIT_WORK_TREE={{anvil_container_workdir}}')
+                $runArgs += @('-v', "${engineGitFile}:{{anvil_container_workdir}}/.git:ro")
             }
         }
     }
@@ -2783,6 +2798,7 @@ anvil-container *target:
         exit $LASTEXITCODE
     } finally {
         foreach ($name in $hookEnv) { Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue }
+        if ($gitFile) { Remove-Item -LiteralPath $gitFile -Force -ErrorAction SilentlyContinue }
     }
 
 # Report the engine, the exec image, and whether it is present and current.

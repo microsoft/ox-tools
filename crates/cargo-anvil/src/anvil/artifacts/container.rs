@@ -430,7 +430,17 @@ mod tests {
         // that needs history fails.
         assert!(RECIPE.contains("git rev-parse --git-common-dir"));
         assert!(RECIPE.contains("${engineGitCommon}:/anvil/gitdir"));
-        assert!(RECIPE.contains("GIT_DIR=/anvil/gitdir/$rel"));
+        // Redirected through the checkout's own .git file, never through
+        // GIT_DIR/GIT_WORK_TREE: those are ambient, so every process in the
+        // container would inherit them and any git run outside the workspace
+        // -- `git init` in a test's scratch directory, most of all -- would
+        // operate on this repository instead of its own.
+        assert!(RECIPE.contains("gitdir: /anvil/gitdir/$rel"));
+        assert!(RECIPE.contains("{{anvil_container_workdir}}/.git:ro"));
+        assert!(!RECIPE.contains("GIT_DIR="));
+        assert!(!RECIPE.contains("GIT_WORK_TREE="));
+        // The generated file is temporary and must not outlive the run.
+        assert!(RECIPE.contains("if ($gitFile) { Remove-Item -LiteralPath $gitFile"));
         // An ordinary clone must not take the extra mount.
         assert!(RECIPE.contains("if ($gitDirAbs -ne $gitCommonAbs) {"));
         // A host with a working engine but no git must not start failing here.
