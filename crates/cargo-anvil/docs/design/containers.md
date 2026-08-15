@@ -105,9 +105,10 @@ The image installs its tools by running `just anvil-setup`, the same recipe the 
 generated pins. There is no second tool list to keep synchronized, and consequently a tool-pin change renames the
 image (§4.1).
 
-`Dockerfile.dockerignore` scopes the build context to `justfiles/` and `rust-toolchain.toml`, denying everything else.
-BuildKit reads `<dockerfile>.dockerignore` in preference to a root `.dockerignore`, so the repository neither needs to
-own a root ignore file nor can have one silently override this.
+`Dockerfile.dockerignore` scopes the build context to `justfiles/anvil/` and `rust-toolchain.toml`, denying everything
+else. The whole recipe tree is copied because `just` has to parse it to run `anvil-setup`, while only the tool catalog
+within it is hashed (§4). BuildKit reads `<dockerfile>.dockerignore` in preference to a root `.dockerignore`, so the
+repository neither needs to own a root ignore file nor can have one silently override this.
 
 ## 4. Image identity
 
@@ -122,11 +123,14 @@ define the image. The name derives from the repository directory (§5.1).
 | `.anvil/container/Dockerfile.dockerignore` | always |
 | `rust-toolchain.toml` | always |
 | `.anvil/container/hooks.ps1` | when the file exists |
-| `justfiles/anvil/**/*.just` | always, recursively, except `container.just` |
+| `justfiles/anvil/tools.just` | always |
+| `justfiles/anvil/versions.just` | always |
 
-The recipe tree is an input because `just anvil-setup` decides what the image installs (§3), and its dependency chain
-reaches the tier, group, check, and tool recipes. `container.just` is excluded because hashing the driver would make
-the tag depend on the tag. A declared input that does not exist is a hard error, not an omission from the digest.
+`tools.just` and `versions.just` are the tool catalog: `just anvil-setup` installs all of it, every install recipe is
+defined in `tools.just`, and every pin lives in `versions.just`, so a tool cannot be added, removed or repinned without
+one of the two changing. The tier, group and check recipes are **not** inputs — they only route into the catalog, and
+they execute from the bind mount rather than from the image, so editing a check takes effect on the next run without a
+rebuild. A declared input that does not exist is a hard error, not an omission from the digest.
 
 The hook file's **content** is an input, since it determines what the build installs. Its **output** is deliberately
 excluded: a credential must never influence a tag.
@@ -159,13 +163,9 @@ Two properties sit outside the digest. The base image is not resolved during has
 digest-pinned; a floating tag could otherwise change beneath a tag that claims to name fixed content. The platform is
 pinned to `linux/amd64` on build and run, so hosts of differing architecture cannot compute one tag for two images.
 
-The base must also track the Linux runner the generated workflows use, currently `ubuntu-latest` (24.04). This is a
-correctness constraint rather than a preference: the image installs the catalog with `binstall`, as CI does, and those
-prebuilt binaries are linked against the runner's glibc. glibc is backward but not forward compatible, so an older base
-yields tools that install and cannot execute — on Debian bookworm (2.36) `cargo-aprz` aborts in the loader with
-`GLIBC_2.39 not found`. Matching the runner rather than merely exceeding it is what keeps the container predictive: a
-newer base would let a run pass here and fail in CI. A catalog that needs an older baseline must also install from
-source rather than with `binstall`.
+The base tracks the Linux runner the generated workflows use, `ubuntu-latest` (currently 24.04). The catalog is
+installed with `binstall`, and those prebuilt binaries require that runner's glibc, which is backward but not forward
+compatible. A catalog on an older base installs from source instead.
 
 ## 5. Execution model
 
@@ -176,17 +176,18 @@ removed on exit (`--rm`).
 
 | Mount | Target | Purpose |
 | --- | --- | --- |
-| repository root (bind) | `/workspace` | The worktree under test, including `target/`. |
+| repository root (bind) | `/workspace` | The worktree under test. |
 | common git directory (bind, linked worktrees only) | `/anvil/gitdir` | Git history, when the checkout does not carry it. |
 | `anvil-<repo>-cargo-registry` (volume) | `/usr/local/cargo/registry` | Downloaded crate sources. |
 | `anvil-<repo>-cargo-git` (volume) | `/usr/local/cargo/git` | Git checkouts of git dependencies. |
+| `anvil-<repo>-target` (volume) | `/anvil/target` | The build directory, as `CARGO_TARGET_DIR`. |
 
 A linked worktree (`git worktree add`) keeps its git directory outside the checkout and stores an absolute host path
-in `.git`, which does not exist inside the container. Left alone, git resolves nothing — not `HEAD`, not `origin/main`
-— and every check that needs history fails somewhere far from the cause. anvil detects this by comparing
-`git rev-parse --git-dir` against `--git-common-dir`, mounts the common directory, and sets `GIT_DIR` and
-`GIT_WORK_TREE` accordingly. An ordinary clone carries its git directory inside the bind mount and takes none of this.
-No flag or variable selects the behaviour.
+in `.git`, which does not exist inside the container. anvil detects this by comparing `git rev-parse --git-dir` against
+`--git-common-dir`, mounts the common directory, and bind-mounts a generated `.git` file naming that mount over the
+checkout's own, so git resolves it by ordinary discovery. The redirection is confined to the checkout: a git command
+run elsewhere in the container, such as `git init` in a scratch directory, is unaffected. An ordinary clone carries its
+git directory inside the bind mount and takes none of this. No flag or variable selects the behaviour.
 
 Only cargo's content-addressed download caches are volumes, so the write-heavy download path never crosses the host
 boundary and the host's own toolchain is untouched. `$CARGO_HOME` and `$RUSTUP_HOME` themselves are **not** mounted:
@@ -195,7 +196,12 @@ volume is first created. Mounting them would pin the first image's binaries over
 would change the tag, build a new image, and still run the old tools — defeating the identity guarantee in §4.
 Tools and toolchains therefore always come from the image layer the tag names.
 
-`target/` stays on the bind mount, remaining visible from the host and shared between native and containerized runs.
+`target/` is a volume rather than part of the bind mount. Host and containerized runs write incompatible artifacts to
+the same paths, so sharing it would make every switch between them recompile the workspace; keeping the build
+directory off the host filesystem also matters most for the write-heaviest step of a build. Recipes that emit reports
+— `target/coverage/`, `target/anvil/comments/`, `target/spelling.dic` — use literal relative paths, so those still
+land in the workspace where CI collects them. `anvil-container-down` removes the volume.
+
 The caller's working directory is mapped to its in-container equivalent, so relative paths resolve when
 `anvil-container` is invoked from a subdirectory.
 
@@ -215,19 +221,14 @@ otherwise the engine leaves it as `/`, and anything falling back to `$HOME` writ
 
 ### 5.3 Environment
 
-The run passes `ANVIL_IN_CONTAINER=1` (§5.4) and forwards `GITHUB_TOKEN` by name. `anvil-aprz` runs in the `pr-fast`
-group and queries the GitHub advisory API, which allows 60 requests an hour unauthenticated — fewer than a full tier
-needs. Unauthenticated is not a degraded-but-working mode: `cargo aprz deps` sleeps until the quota resets rather than
-failing, and offers no way to opt out, so a containerized tier blocks for up to an hour. The token is what makes the
-check terminate, not what makes it fast.
+The run passes `ANVIL_IN_CONTAINER=1` (§5.4) and forwards `GITHUB_TOKEN` by name, resolved the way the recipe resolves
+it natively: the environment first, then the gh CLI's stored token. `anvil-aprz` runs in the `pr-fast` group and
+queries the GitHub advisory API, which allows 60 requests an hour unauthenticated and then sleeps until the quota
+resets, so a tier needs the token to terminate rather than merely to run quickly.
 
-The driver resolves it exactly as the recipe does natively — the environment first, then the gh CLI's stored token
-(`gh auth token`, which is non-interactive) — so a containerized run authenticates for the same developers a native run
-does. Deriving it rather than only forwarding an exported value is deliberate: both paths have identical exposure once
-inside, since a forwarded token is readable by every recipe in the container either way, including third-party build
-scripts and proc macros. Refusing to derive it buys no boundary and only makes behaviour depend on how the developer
-happened to sign in — which is the common case, because the recipe itself recommends `gh auth login`. A derived value
-is set on the driver process, passed by name, and unset again, so it never reaches the host's command line.
+A resolved token is set on the driver process, passed by name, and unset after the run, so it never reaches a host
+command line. Inside the container it is readable by everything the run executes, including build scripts and proc
+macros.
 
 Everything else a run needs comes from the hook (§7).
 
@@ -443,9 +444,10 @@ Editing the Dockerfile in one repository is supported and the drift flow preserv
 its own version against a file it can see has diverged. A change that belongs everywhere is better made in a catalog.
 
 **The Dockerfile and its ignore file must be replaced together.** A replacement that `COPY`s anything beyond
-`justfiles/` and `rust-toolchain.toml` must also replace `artifacts::container::dockerignore()` (§3), or the added
-paths never reach the build context and the build fails on a missing file. Recipes need no such care: `justfiles/` is
-admitted as a directory and hashed recursively, so a new recipe subdirectory is copied and covered automatically.
+`justfiles/anvil/` and `rust-toolchain.toml` must also replace `artifacts::container::dockerignore()` (§3), or the
+added paths never reach the build context and the build fails on a missing file. A replacement that installs tools
+from somewhere other than `tools.just` must also add those sources to the digest, or a change to them will name a tag
+that already resolves.
 
 `justfiles/anvil/` must contain `.just` recipes and nothing else, which `CatalogBuilder::build` enforces: a non-recipe
 file there would be copied into the image without being part of its identity, so editing it would change the image's

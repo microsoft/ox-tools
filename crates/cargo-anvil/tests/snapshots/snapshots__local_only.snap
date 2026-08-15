@@ -21,20 +21,9 @@ expression: render_tree(tmp.path())
 # that claims to name fixed content.
 #
 # The base tracks the Linux runner the generated workflows use
-# (`ubuntu-latest`, currently 24.04), and that is a correctness constraint
-# rather than a preference. `anvil-setup binstall` installs the catalog as
-# prebuilt binaries, which is what CI does; those binaries are linked against
-# the glibc of the runner they were built on. glibc is backward but not
-# forward compatible, so a base older than the runner cannot run them: on
-# Debian bookworm (glibc 2.36) `cargo-aprz` 1.0.0 aborts with `version
-# GLIBC_2.39 not found`, because its published binary is built on 24.04
-# (glibc 2.39).
-#
-# Matching the runner exactly -- rather than merely picking something newer --
-# is what keeps the container predictive: a tool that cannot run here cannot
-# run in CI either, and a newer base would let the container pass where CI
-# fails. When `ubuntu-latest` moves to a newer release, this pin moves with
-# it, and the tag changes with the file.
+# (`ubuntu-latest`, currently 24.04). `anvil-setup binstall` installs the
+# catalog as prebuilt binaries, which require that runner's glibc; it is
+# backward but not forward compatible, so the pin moves when the runner does.
 #
 # To build on a different base (a lower glibc baseline, or an internal
 # distribution), a downstream catalog replaces this artifact wholesale via
@@ -108,11 +97,12 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
     && rm /tmp/cargo-binstall.tgz
 
 # Install the pinned toolchain and cargo subcommands from the generated
-# catalog. Only `justfiles/anvil/` and the toolchain pin are copied, which is
-# also exactly what the tag hashes, so the build context cannot differ from
-# the image's identity: an edit that changes what this layer produces always
-# renames the tag. The synthetic Justfile below imports only the anvil tree,
-# avoiding repository-specific imports that may not exist yet.
+# catalog. The whole recipe tree is copied because `just` has to parse it, but
+# only `tools.just` and `versions.just` decide what this layer installs, and
+# only those are hashed into the tag -- so editing a check does not rebuild the
+# image, and the check runs from the bind mount anyway. The synthetic Justfile
+# below imports only the anvil tree, avoiding repository-specific imports that
+# may not exist yet.
 #
 # `binstall` matches what CI passes. It is not just a speed-up: some catalog
 # tools do not compile from source on every pinned toolchain, so a source
@@ -131,6 +121,15 @@ RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME}/.netrc" \
     && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
+
+# The container's own build directory. A named volume is mounted here at run
+# time so host and container builds do not invalidate each other's fingerprints,
+# and so the hottest write path in a build does not cross the host boundary.
+#
+# A volume inherits its mount point's ownership from the image, so this has to
+# be world-writable: a run maps the caller's uid on Linux, and that user would
+# otherwise be unable to write to a root-owned volume.
+RUN mkdir -p /anvil/target && chmod -R a+rwX /anvil
 
 # Consumed by `anvil-container` itself: a nested invocation from inside the
 # image runs the recipe natively instead of launching another container.
@@ -154,9 +153,10 @@ CMD ["bash"]
 # worktree (and every stale `target/`) to the daemon.
 #
 # The context is narrowed to `justfiles/anvil/` rather than all of `justfiles/`
-# so that it matches what the tag hashes. A file that is copied but not hashed
-# can change what a build produces while naming a tag that already resolves --
-# so the changed file is never built, because the existing image is reused.
+# so that a cold build does not stream unrelated trees to the daemon. The
+# recipes are copied to drive `just anvil-setup`, which needs the whole tree to
+# parse; only the tool catalog within it decides what gets installed, and only
+# that is hashed.
 *
 !justfiles
 justfiles/*
@@ -2350,11 +2350,11 @@ _anvil-container-path host_path:
 # Print the exec image reference for the current inputs, without building it.
 #
 # The tag is a SHA-256 over the image's declared inputs: the Dockerfile and its
-# ignore file, the pinned toolchain, the optional hook, and the generated
-# recipe tree -- because the image installs its tools by running
-# `just anvil-setup`, whose dependency chain reaches the tier, group, check and
-# tool recipes. Only this driver is excluded, since hashing it would make the
-# tag depend on the tag.
+# ignore file, the pinned toolchain, the optional hook, and the tool catalog
+# (`tools.just` and `versions.just`) that decides what `just anvil-setup`
+# installs. The tier, group and check recipes are not inputs: they only route
+# into the catalog, and they execute from the bind mount rather than from the
+# image, so editing one takes effect on the next run without a rebuild.
 #
 # This is the only recipe that computes the reference; everything else asks it.
 # It is public because a publisher needs the tag before there is an image to
@@ -2378,13 +2378,14 @@ anvil-container-tag:
         # never hashed: a credential must not influence a tag.
         $inputs += $hookRel
     }
-    $recipeRoot = Join-Path $repoRoot 'justfiles/anvil'
-    if (Test-Path -LiteralPath $recipeRoot) {
-        foreach ($file in Get-ChildItem -LiteralPath $recipeRoot -Recurse -File -Filter '*.just') {
-            $rel = [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName) -replace '\\', '/'
-            if ($rel -cne 'justfiles/anvil/container.just') { $inputs += $rel }
-        }
-    }
+    # The tool catalog, and nothing else. `just anvil-setup` installs the whole
+    # catalog, and every install recipe is defined in tools.just against a pin
+    # in versions.just -- so a tool cannot be added, removed or repinned
+    # without one of these two changing. The tier, group and check recipes only
+    # route into them, and are read from the bind mount at run time rather than
+    # from the image, so editing a check must not cost a rebuild.
+    $inputs += 'justfiles/anvil/tools.just'
+    $inputs += 'justfiles/anvil/versions.just'
 
     # Hash a tagged stream rather than raw concatenation, so no rearrangement of
     # names and contents can collide. Line endings are normalized once, here, so
@@ -2646,20 +2647,16 @@ anvil-container *target:
 
     # A linked worktree keeps its real git directory outside the checkout: its
     # `.git` is a file naming an absolute host path, which does not exist inside
-    # the container. Git then resolves nothing -- not HEAD, not origin/main --
-    # and every check that needs history fails a long way from the cause. Mount
-    # the common git directory, and replace the checkout's `.git` file with one
+    # the container, so git resolves neither HEAD nor origin/main. Mount the
+    # common git directory and replace the checkout's `.git` file with one
     # naming that mount; the `commondir` file in the worktree's entry is
     # relative, so it resolves under it.
     #
-    # Deliberately not GIT_DIR/GIT_WORK_TREE. Those are ambient: every process
-    # in the container inherits them, so a check that runs git anywhere other
-    # than the workspace gets this repository instead of the one it meant. The
-    # test suite is the case that proves it -- `git init` in a scratch
-    # directory fails with `Invalid path '/anvil'`, because git honours the
-    # inherited GIT_DIR over the directory it was told to create. Replacing the
-    # `.git` file keeps the redirection where it belongs: in the checkout, and
-    # found by ordinary discovery.
+    # The redirection lives in the checkout rather than in GIT_DIR/GIT_WORK_TREE
+    # so that it stays scoped to it. Those variables are ambient: every process
+    # in the container inherits them, and a git command run elsewhere -- `git
+    # init` in a test's scratch directory -- would operate on this repository
+    # instead of its own.
     #
     # An ordinary clone keeps its git directory inside the checkout, where the
     # bind mount already carries it, and takes none of this.
@@ -2697,6 +2694,18 @@ anvil-container *target:
     # would change the tag, build a new image, and still run the old tools.
     $runArgs += @('-v', '{{anvil_container_name}}-cargo-registry:/usr/local/cargo/registry')
     $runArgs += @('-v', '{{anvil_container_name}}-cargo-git:/usr/local/cargo/git')
+    # The build directory, in a volume of its own rather than the one in the
+    # bind mount. Sharing `target/` with the host would mean every switch
+    # between a native and a containerized run recompiles the workspace: the
+    # two platforms write incompatible artifacts to the same paths, and cargo's
+    # fingerprints miss. It also keeps the hottest write path in a build off
+    # the host filesystem, which is what makes this bearable on Windows.
+    #
+    # Report outputs are unaffected: recipes write `target/coverage/`,
+    # `target/anvil/comments/` and `target/spelling.dic` as literal relative
+    # paths, so those still land in the workspace where CI collects them.
+    $runArgs += @('-v', '{{anvil_container_name}}-target:/anvil/target')
+    $runArgs += @('-e', 'CARGO_TARGET_DIR=/anvil/target')
     # Match the caller's uid/gid on Linux. Without this everything the run
     # writes under the bind mount -- target/, generated files -- lands as root
     # on the host, and the next native cargo build or git clean fails with
@@ -2875,7 +2884,7 @@ anvil-container-down:
     # be able to tell that it failed. `-f` already exits 0 for a volume that
     # does not exist, so this cannot fire spuriously.
     $failed = @()
-    foreach ($vol in @('{{anvil_container_name}}-cargo-registry', '{{anvil_container_name}}-cargo-git', '{{anvil_container_name}}-cargo', '{{anvil_container_name}}-rustup')) {
+    foreach ($vol in @('{{anvil_container_name}}-cargo-registry', '{{anvil_container_name}}-cargo-git', '{{anvil_container_name}}-target', '{{anvil_container_name}}-cargo', '{{anvil_container_name}}-rustup')) {
         & $engineExe @enginePrefix volume rm -f $vol
         if ($LASTEXITCODE -ne 0) { $failed += $vol }
     }

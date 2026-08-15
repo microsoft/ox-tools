@@ -47,10 +47,8 @@ pub fn recipe() -> Artifact {
 /// runner, which installs the pinned toolchain and the generated tool catalog
 /// by running `just anvil-setup`.
 ///
-/// The base must not be older than that runner. The catalog is installed as
-/// prebuilt binaries, and glibc is backward but not forward compatible, so an
-/// older base cannot run them; matching the runner also keeps the container
-/// predictive of CI rather than more permissive than it.
+/// The catalog is installed as prebuilt binaries, which require that runner's
+/// glibc. A catalog on an older base installs from source instead.
 ///
 /// A downstream catalog that needs a different base OS or toolchain source
 /// replaces the body wholesale:
@@ -312,13 +310,6 @@ mod tests {
     }
 
     #[test]
-    fn recipe_excludes_itself_from_the_image_identity() {
-        // Hashing the driver would make the tag depend on the tag.
-        assert!(RECIPE.contains("justfiles/anvil/container.just"));
-        assert!(RECIPE.contains("-cne 'justfiles/anvil/container.just'"));
-    }
-
-    #[test]
     fn hook_file_is_an_image_input_but_hook_output_is_not() {
         // A changed hook must rename the tag; a minted credential must not.
         assert!(RECIPE.contains("$inputs += $hookRel"));
@@ -351,6 +342,23 @@ mod tests {
         assert!(RECIPE.contains("-cargo-git:/usr/local/cargo/git"));
         assert!(!RECIPE.contains("-cargo:/usr/local/cargo'"));
         assert!(!RECIPE.contains(":/usr/local/rustup"));
+    }
+
+    #[test]
+    fn the_build_directory_is_not_shared_with_the_host() {
+        // Host and container write incompatible artifacts to the same paths
+        // under `target/`, so sharing it through the bind mount makes every
+        // switch between a native and a containerized run recompile the
+        // workspace.
+        assert!(RECIPE.contains("-target:/anvil/target"));
+        assert!(RECIPE.contains("'CARGO_TARGET_DIR=/anvil/target'"));
+        // A volume takes its ownership from the mount point in the image, and
+        // a run maps the caller's uid, so the directory has to be writable by
+        // a user the image has never seen.
+        assert!(DOCKERFILE.contains("mkdir -p /anvil/target && chmod -R a+rwX /anvil"));
+        // Teardown has to reach it, or the cache outlives the only recipe
+        // that can clear it.
+        assert!(RECIPE.contains("{{anvil_container_name}}-target'"));
     }
 
     #[test]
@@ -415,10 +423,23 @@ mod tests {
     }
 
     #[test]
-    fn the_build_context_matches_the_hashed_inputs() {
-        // A file that is copied but not hashed can change what a build
-        // produces while naming a tag that already resolves, so the change is
-        // never built.
+    fn only_the_tool_catalog_defines_the_image() {
+        // `just anvil-setup` installs the whole catalog, and every install
+        // recipe is defined in tools.just against a pin in versions.just, so a
+        // tool cannot be added, removed or repinned without one of the two
+        // changing. Hashing the tier/group/check recipes as well would rebuild
+        // the image for an edit that cannot change what it contains -- and
+        // those recipes run from the bind mount, not from the image.
+        assert!(RECIPE.contains("$inputs += 'justfiles/anvil/tools.just'"));
+        assert!(RECIPE.contains("$inputs += 'justfiles/anvil/versions.just'"));
+        assert!(!RECIPE.contains("-Recurse -File -Filter '*.just'"));
+    }
+
+    #[test]
+    fn the_build_context_stays_scoped_to_the_recipe_tree() {
+        // The whole tree is copied because `just` must parse it, but nothing
+        // outside it is: an unscoped context streams every stale `target/` to
+        // the daemon on each build.
         assert!(DOCKERIGNORE.contains("justfiles/*\n!justfiles/anvil\n"));
         assert!(!DOCKERIGNORE.contains("!justfiles\n!rust-toolchain.toml"));
     }

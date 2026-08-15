@@ -107,11 +107,11 @@ _anvil-container-path host_path:
 # Print the exec image reference for the current inputs, without building it.
 #
 # The tag is a SHA-256 over the image's declared inputs: the Dockerfile and its
-# ignore file, the pinned toolchain, the optional hook, and the generated
-# recipe tree -- because the image installs its tools by running
-# `just anvil-setup`, whose dependency chain reaches the tier, group, check and
-# tool recipes. Only this driver is excluded, since hashing it would make the
-# tag depend on the tag.
+# ignore file, the pinned toolchain, the optional hook, and the tool catalog
+# (`tools.just` and `versions.just`) that decides what `just anvil-setup`
+# installs. The tier, group and check recipes are not inputs: they only route
+# into the catalog, and they execute from the bind mount rather than from the
+# image, so editing one takes effect on the next run without a rebuild.
 #
 # This is the only recipe that computes the reference; everything else asks it.
 # It is public because a publisher needs the tag before there is an image to
@@ -135,13 +135,14 @@ anvil-container-tag:
         # never hashed: a credential must not influence a tag.
         $inputs += $hookRel
     }
-    $recipeRoot = Join-Path $repoRoot 'justfiles/anvil'
-    if (Test-Path -LiteralPath $recipeRoot) {
-        foreach ($file in Get-ChildItem -LiteralPath $recipeRoot -Recurse -File -Filter '*.just') {
-            $rel = [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName) -replace '\\', '/'
-            if ($rel -cne 'justfiles/anvil/container.just') { $inputs += $rel }
-        }
-    }
+    # The tool catalog, and nothing else. `just anvil-setup` installs the whole
+    # catalog, and every install recipe is defined in tools.just against a pin
+    # in versions.just -- so a tool cannot be added, removed or repinned
+    # without one of these two changing. The tier, group and check recipes only
+    # route into them, and are read from the bind mount at run time rather than
+    # from the image, so editing a check must not cost a rebuild.
+    $inputs += 'justfiles/anvil/tools.just'
+    $inputs += 'justfiles/anvil/versions.just'
 
     # Hash a tagged stream rather than raw concatenation, so no rearrangement of
     # names and contents can collide. Line endings are normalized once, here, so
@@ -403,20 +404,16 @@ anvil-container *target:
 
     # A linked worktree keeps its real git directory outside the checkout: its
     # `.git` is a file naming an absolute host path, which does not exist inside
-    # the container. Git then resolves nothing -- not HEAD, not origin/main --
-    # and every check that needs history fails a long way from the cause. Mount
-    # the common git directory, and replace the checkout's `.git` file with one
+    # the container, so git resolves neither HEAD nor origin/main. Mount the
+    # common git directory and replace the checkout's `.git` file with one
     # naming that mount; the `commondir` file in the worktree's entry is
     # relative, so it resolves under it.
     #
-    # Deliberately not GIT_DIR/GIT_WORK_TREE. Those are ambient: every process
-    # in the container inherits them, so a check that runs git anywhere other
-    # than the workspace gets this repository instead of the one it meant. The
-    # test suite is the case that proves it -- `git init` in a scratch
-    # directory fails with `Invalid path '/anvil'`, because git honours the
-    # inherited GIT_DIR over the directory it was told to create. Replacing the
-    # `.git` file keeps the redirection where it belongs: in the checkout, and
-    # found by ordinary discovery.
+    # The redirection lives in the checkout rather than in GIT_DIR/GIT_WORK_TREE
+    # so that it stays scoped to it. Those variables are ambient: every process
+    # in the container inherits them, and a git command run elsewhere -- `git
+    # init` in a test's scratch directory -- would operate on this repository
+    # instead of its own.
     #
     # An ordinary clone keeps its git directory inside the checkout, where the
     # bind mount already carries it, and takes none of this.
@@ -454,6 +451,18 @@ anvil-container *target:
     # would change the tag, build a new image, and still run the old tools.
     $runArgs += @('-v', '{{anvil_container_name}}-cargo-registry:/usr/local/cargo/registry')
     $runArgs += @('-v', '{{anvil_container_name}}-cargo-git:/usr/local/cargo/git')
+    # The build directory, in a volume of its own rather than the one in the
+    # bind mount. Sharing `target/` with the host would mean every switch
+    # between a native and a containerized run recompiles the workspace: the
+    # two platforms write incompatible artifacts to the same paths, and cargo's
+    # fingerprints miss. It also keeps the hottest write path in a build off
+    # the host filesystem, which is what makes this bearable on Windows.
+    #
+    # Report outputs are unaffected: recipes write `target/coverage/`,
+    # `target/anvil/comments/` and `target/spelling.dic` as literal relative
+    # paths, so those still land in the workspace where CI collects them.
+    $runArgs += @('-v', '{{anvil_container_name}}-target:/anvil/target')
+    $runArgs += @('-e', 'CARGO_TARGET_DIR=/anvil/target')
     # Match the caller's uid/gid on Linux. Without this everything the run
     # writes under the bind mount -- target/, generated files -- lands as root
     # on the host, and the next native cargo build or git clean fails with
@@ -632,7 +641,7 @@ anvil-container-down:
     # be able to tell that it failed. `-f` already exits 0 for a volume that
     # does not exist, so this cannot fire spuriously.
     $failed = @()
-    foreach ($vol in @('{{anvil_container_name}}-cargo-registry', '{{anvil_container_name}}-cargo-git', '{{anvil_container_name}}-cargo', '{{anvil_container_name}}-rustup')) {
+    foreach ($vol in @('{{anvil_container_name}}-cargo-registry', '{{anvil_container_name}}-cargo-git', '{{anvil_container_name}}-target', '{{anvil_container_name}}-cargo', '{{anvil_container_name}}-rustup')) {
         & $engineExe @enginePrefix volume rm -f $vol
         if ($LASTEXITCODE -ne 0) { $failed += $vol }
     }

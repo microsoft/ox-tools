@@ -16,20 +16,9 @@
 # that claims to name fixed content.
 #
 # The base tracks the Linux runner the generated workflows use
-# (`ubuntu-latest`, currently 24.04), and that is a correctness constraint
-# rather than a preference. `anvil-setup binstall` installs the catalog as
-# prebuilt binaries, which is what CI does; those binaries are linked against
-# the glibc of the runner they were built on. glibc is backward but not
-# forward compatible, so a base older than the runner cannot run them: on
-# Debian bookworm (glibc 2.36) `cargo-aprz` 1.0.0 aborts with `version
-# GLIBC_2.39 not found`, because its published binary is built on 24.04
-# (glibc 2.39).
-#
-# Matching the runner exactly -- rather than merely picking something newer --
-# is what keeps the container predictive: a tool that cannot run here cannot
-# run in CI either, and a newer base would let the container pass where CI
-# fails. When `ubuntu-latest` moves to a newer release, this pin moves with
-# it, and the tag changes with the file.
+# (`ubuntu-latest`, currently 24.04). `anvil-setup binstall` installs the
+# catalog as prebuilt binaries, which require that runner's glibc; it is
+# backward but not forward compatible, so the pin moves when the runner does.
 #
 # To build on a different base (a lower glibc baseline, or an internal
 # distribution), a downstream catalog replaces this artifact wholesale via
@@ -103,11 +92,12 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
     && rm /tmp/cargo-binstall.tgz
 
 # Install the pinned toolchain and cargo subcommands from the generated
-# catalog. Only `justfiles/anvil/` and the toolchain pin are copied, which is
-# also exactly what the tag hashes, so the build context cannot differ from
-# the image's identity: an edit that changes what this layer produces always
-# renames the tag. The synthetic Justfile below imports only the anvil tree,
-# avoiding repository-specific imports that may not exist yet.
+# catalog. The whole recipe tree is copied because `just` has to parse it, but
+# only `tools.just` and `versions.just` decide what this layer installs, and
+# only those are hashed into the tag -- so editing a check does not rebuild the
+# image, and the check runs from the bind mount anyway. The synthetic Justfile
+# below imports only the anvil tree, avoiding repository-specific imports that
+# may not exist yet.
 #
 # `binstall` matches what CI passes. It is not just a speed-up: some catalog
 # tools do not compile from source on every pinned toolchain, so a source
@@ -126,6 +116,15 @@ RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME}/.netrc" \
     && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
+
+# The container's own build directory. A named volume is mounted here at run
+# time so host and container builds do not invalidate each other's fingerprints,
+# and so the hottest write path in a build does not cross the host boundary.
+#
+# A volume inherits its mount point's ownership from the image, so this has to
+# be world-writable: a run maps the caller's uid on Linux, and that user would
+# otherwise be unable to write to a root-owned volume.
+RUN mkdir -p /anvil/target && chmod -R a+rwX /anvil
 
 # Consumed by `anvil-container` itself: a nested invocation from inside the
 # image runs the recipe natively instead of launching another container.

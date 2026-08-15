@@ -12,9 +12,10 @@
 # worktree (and every stale `target/`) to the daemon.
 #
 # The context is narrowed to `justfiles/anvil/` rather than all of `justfiles/`
-# so that it matches what the tag hashes. A file that is copied but not hashed
-# can change what a build produces while naming a tag that already resolves --
-# so the changed file is never built, because the existing image is reused.
+# so that a cold build does not stream unrelated trees to the daemon. The
+# recipes are copied to drive `just anvil-setup`, which needs the whole tree to
+# parse; only the tool catalog within it decides what gets installed, and only
+# that is hashed.
 *
 !justfiles
 justfiles/*
