@@ -31,7 +31,7 @@ anvil-aprz: anvil-aprz-validate-prereqs
             $env:GITHUB_TOKEN = $tok.Trim()
         } else {
             Write-Warning 'anvil-aprz: GITHUB_TOKEN is not set and no token could be obtained from the gh CLI.'
-            Write-Warning 'cargo-aprz will use the unauthenticated GitHub API (60 requests/hour) and may fail on a full run.'
+            Write-Warning 'cargo-aprz will use the unauthenticated GitHub API, which allows 60 requests an hour. On a full workspace it exhausts that and then WAITS, up to an hour, for the quota to reset.'
             Write-Warning 'To fix: run `gh auth login` (recommended), or set $env:GITHUB_TOKEN to a GitHub token, then re-run.'
         }
     }

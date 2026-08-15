@@ -176,11 +176,10 @@ removed on exit (`--rm`).
 
 | Mount | Target | Purpose |
 | --- | --- | --- |
-| repository root (bind) | `/workspace` | The worktree under test. |
+| repository root (bind) | `/workspace` | The worktree under test, including `target/`. |
 | common git directory (bind, linked worktrees only) | `/anvil/gitdir` | Git history, when the checkout does not carry it. |
 | `anvil-<repo>-cargo-registry` (volume) | `/usr/local/cargo/registry` | Downloaded crate sources. |
 | `anvil-<repo>-cargo-git` (volume) | `/usr/local/cargo/git` | Git checkouts of git dependencies. |
-| `anvil-<repo>-target` (volume) | `/anvil/target` | The build directory, as `CARGO_TARGET_DIR`. |
 
 A linked worktree (`git worktree add`) keeps its git directory outside the checkout and stores an absolute host path
 in `.git`, which does not exist inside the container. anvil detects this by comparing `git rev-parse --git-dir` against
@@ -196,11 +195,10 @@ volume is first created. Mounting them would pin the first image's binaries over
 would change the tag, build a new image, and still run the old tools — defeating the identity guarantee in §4.
 Tools and toolchains therefore always come from the image layer the tag names.
 
-`target/` is a volume rather than part of the bind mount. Host and containerized runs write incompatible artifacts to
-the same paths, so sharing it would make every switch between them recompile the workspace; keeping the build
-directory off the host filesystem also matters most for the write-heaviest step of a build. Recipes that emit reports
-— `target/coverage/`, `target/anvil/comments/`, `target/spelling.dic` — use literal relative paths, so those still
-land in the workspace where CI collects them. `anvil-container-down` removes the volume.
+`target/` stays on the bind mount, shared with the host and visible from it. A native run and a containerized run write
+incompatible artifacts to the same paths, so switching between them recompiles the workspace. Giving the container its
+own build directory through `CARGO_TARGET_DIR` avoids that but breaks `cargo-semver-checks`, which builds a baseline
+and the current crate and then cannot find its rustdoc output; the recompilation is the lesser cost.
 
 The caller's working directory is mapped to its in-container equivalent, so relative paths resolve when
 `anvil-container` is invoked from a subdirectory.

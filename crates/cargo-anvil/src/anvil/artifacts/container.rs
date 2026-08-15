@@ -21,8 +21,8 @@
 use crate::catalog::Artifact;
 
 const RECIPE: &str = include_str!("../../../templates/justfiles/anvil/container.just");
-const DOCKERFILE: &str = include_str!("../../../templates/container/Dockerfile");
-const DOCKERIGNORE: &str = include_str!("../../../templates/container/Dockerfile.dockerignore");
+const DOCKERFILE: &str = include_str!("../../../templates/anvil/container/Dockerfile");
+const DOCKERIGNORE: &str = include_str!("../../../templates/anvil/container/Dockerfile.dockerignore");
 
 const RECIPE_PATH: &str = "justfiles/anvil/container.just";
 const DOCKERFILE_PATH: &str = ".anvil/container/Dockerfile";
@@ -342,23 +342,6 @@ mod tests {
         assert!(RECIPE.contains("-cargo-git:/usr/local/cargo/git"));
         assert!(!RECIPE.contains("-cargo:/usr/local/cargo'"));
         assert!(!RECIPE.contains(":/usr/local/rustup"));
-    }
-
-    #[test]
-    fn the_build_directory_is_not_shared_with_the_host() {
-        // Host and container write incompatible artifacts to the same paths
-        // under `target/`, so sharing it through the bind mount makes every
-        // switch between a native and a containerized run recompile the
-        // workspace.
-        assert!(RECIPE.contains("-target:/anvil/target"));
-        assert!(RECIPE.contains("'CARGO_TARGET_DIR=/anvil/target'"));
-        // A volume takes its ownership from the mount point in the image, and
-        // a run maps the caller's uid, so the directory has to be writable by
-        // a user the image has never seen.
-        assert!(DOCKERFILE.contains("mkdir -p /anvil/target && chmod -R a+rwX /anvil"));
-        // Teardown has to reach it, or the cache outlives the only recipe
-        // that can clear it.
-        assert!(RECIPE.contains("{{anvil_container_name}}-target'"));
     }
 
     #[test]

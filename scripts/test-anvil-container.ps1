@@ -22,7 +22,8 @@
       2. The first run builds an image and runs the recipe inside it.
       3. A second run reuses the image (the tag resolves, nothing is built),
          no cache volume masks the tools the image installed, and a host
-         GITHUB_TOKEN is forwarded while an absent one is not invented.
+         GITHUB_TOKEN is forwarded — from the environment, or from the gh CLI
+         when the environment has none.
       3b. A recipe run from a linked worktree can still reach git history.
       4. Changing a hashed input (the pinned toolchain) selects a new tag.
       5. Reverting that input returns to the original tag.
@@ -424,17 +425,53 @@ Assert-Equal 'a tool installed by the image survives the cache mounts' 0 $probe.
 Assert-That 'the tool resolves inside the image, not a volume' `
     ($probe.StdOut -match '/usr/local/cargo/bin/cargo-binstall') "$($probe.StdOut)$($probe.StdErr)"
 
-# anvil-aprz runs in pr-fast and is rate-limited without a token, so a host
-# token has to reach the container -- but only one the host actually set.
+# anvil-aprz runs in pr-fast and blocks on the rate limit without a token, so a
+# host token has to reach the container. The driver resolves it the way the
+# recipe does natively: the environment first, then the gh CLI.
+#
+# Failure details are redacted: on a developer machine the value below is a real
+# credential, and a test that prints it to the terminal on failure is a leak.
+function Hide-Token([string]$Text) { $Text -replace 'E2E-TOKEN:\[[^\]]+\]', 'E2E-TOKEN:[<redacted>]' }
+
 $withToken = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'e2e-show-token') `
     -Environment @{ GITHUB_TOKEN = 'e2e-forwarded-token' }
 Assert-That 'a host GITHUB_TOKEN reaches a recipe in the container' `
-    ($withToken.StdOut -match 'E2E-TOKEN:\[e2e-forwarded-token\]') "$($withToken.StdOut)$($withToken.StdErr)"
+    ($withToken.StdOut -match 'E2E-TOKEN:\[e2e-forwarded-token\]') (Hide-Token "$($withToken.StdOut)$($withToken.StdErr)")
 
+# No environment token and no gh CLI: nothing is forwarded. gh is hidden by
+# dropping its directory from PATH, which is what the driver actually probes --
+# `GH_CONFIG_DIR` does not work here, because modern gh keeps credentials in the
+# OS keyring rather than in its config directory.
+$pathWithoutGh = $env:PATH
+$ghCommand = Get-Command gh -ErrorAction SilentlyContinue
+if ($ghCommand) {
+    $ghDir = (Split-Path $ghCommand.Source).TrimEnd('\', '/')
+    $separator = if ($IsWindows) { ';' } else { ':' }
+    $pathWithoutGh = (($env:PATH -split $separator) |
+        Where-Object { $_ -and $_.TrimEnd('\', '/') -ne $ghDir }) -join $separator
+}
 $withoutToken = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'e2e-show-token') `
-    -Environment @{ GITHUB_TOKEN = '' }
+    -Environment @{ GITHUB_TOKEN = ''; GH_TOKEN = ''; PATH = $pathWithoutGh }
 Assert-That 'no token is invented when the host has none' `
-    ($withoutToken.StdOut -match 'E2E-TOKEN:\[\]') "$($withoutToken.StdOut)$($withoutToken.StdErr)"
+    ($withoutToken.StdOut -match 'E2E-TOKEN:\[\]') (Hide-Token "$($withoutToken.StdOut)$($withoutToken.StdErr)")
+
+# The gh fallback itself, which is what keeps a containerized tier from blocking
+# for a developer who signed in with `gh auth login` and never exported a token.
+# Skipped rather than failed when the host is not signed in, since that is a
+# property of the machine running the suite.
+$hostGhToken = $null
+if (Get-Command gh -ErrorAction SilentlyContinue) {
+    try { $hostGhToken = (gh auth token --hostname github.com 2>$null) } catch { $hostGhToken = $null }
+}
+if ($hostGhToken -and $hostGhToken.Trim()) {
+    $viaGh = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'e2e-show-token') `
+        -Environment @{ GITHUB_TOKEN = '' }
+    Assert-That 'the gh CLI token is used when the environment has none' `
+        ($viaGh.StdOut -match ('E2E-TOKEN:\[' + [regex]::Escape($hostGhToken.Trim()) + '\]')) `
+        (Hide-Token "$($viaGh.StdOut)$($viaGh.StdErr)")
+} else {
+    Write-Step 'skipping the gh-fallback check: this host has no gh credential'
+}
 
 # --------------------------------------------------------- 3b. worktrees -----
 

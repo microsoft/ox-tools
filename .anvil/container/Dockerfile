@@ -117,15 +117,6 @@ RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME}/.netrc" \
     && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
 
-# The container's own build directory. A named volume is mounted here at run
-# time so host and container builds do not invalidate each other's fingerprints,
-# and so the hottest write path in a build does not cross the host boundary.
-#
-# A volume inherits its mount point's ownership from the image, so this has to
-# be world-writable: a run maps the caller's uid on Linux, and that user would
-# otherwise be unable to write to a root-owned volume.
-RUN mkdir -p /anvil/target && chmod -R a+rwX /anvil
-
 # Consumed by `anvil-container` itself: a nested invocation from inside the
 # image runs the recipe natively instead of launching another container.
 ENV ANVIL_IN_CONTAINER=1

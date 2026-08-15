@@ -6,60 +6,48 @@
     Dogfood test: run this repository's own anvil checks inside the container.
 
 .DESCRIPTION
-    `test-anvil-container.ps1` proves the container *mechanism* against a
-    throwaway fixture: artifacts, tags, drift, hooks. It deliberately generates
-    a minimal repository, so the checks it runs there are trivial.
+    `test-anvil-container.ps1` covers the container mechanism against a
+    throwaway fixture: artifacts, tags, drift, hooks. This script covers the
+    other half -- that the mechanism works on a real workspace. It runs the
+    generated recipes against `ox-tools` itself: a multi-crate workspace with
+    real dependencies, real lints, and the full pinned tool catalog.
 
-    This script proves the opposite half -- that the mechanism is actually
-    usable on a real workspace. It runs the generated recipes against
-    `ox-tools` itself: a multi-crate workspace with real dependencies, real
-    lints, and the full pinned tool catalog. A defect that only appears at that
-    scale (a tool that installs but cannot execute, a check that needs a file
-    the build context drops, a mount that hides the workspace) is invisible to
-    the fixture test and lands directly on a customer.
+    It runs against both engines by default. On Windows that also covers both
+    invocation paths, since docker is reached through the default WSL
+    distribution and podman runs natively.
 
-    It runs against **both** engines by default, which is not redundant on
-    Windows: docker is reached through the default WSL distribution, and podman
-    runs natively, so the two cover both invocation paths as well as both
-    engines.
-
-    Ordering is by cost, so a break is reported in seconds rather than after a
-    full tier:
+    Steps are ordered by cost, so a break is reported in seconds rather than
+    after a full tier:
 
       1. Preconditions -- the generated tree is current, and the container
-         artifacts are the ones the engine emits.
+         artifacts are present.
       2. The image builds from the repository's own Dockerfile.
-      3. Every pinned tool in the catalog *executes* inside the image.
-      4. `anvil-aprz` runs -- the check whose prebuilt binary first exposed an
-         ABI mismatch against the base image.
-      5. The requested tier runs to completion inside the image.
-      6. A second run reuses the image rather than rebuilding it.
+      3. Every pinned tool in the catalog executes inside the image.
+      4. `anvil-aprz` runs, exercising a prebuilt binary and the advisory API.
+      5. Only the tool catalog renames the image: editing a check, a tier or
+         the driver must not trigger a rebuild, while editing `tools.just` or
+         `versions.just` must.
+      6. The requested tier runs to completion inside the image.
+      7. A second run reuses the image rather than rebuilding it.
 
-    Step 3 is the one worth keeping cheap. `anvil-setup` installing a tool only
-    proves it downloaded; the catalog is installed as prebuilt binaries, so a
-    base image older than the runner those binaries were built on yields tools
-    that are present and unrunnable. Executing all of them costs seconds and
-    catches the whole class at once, instead of one tool at a time as tiers
-    happen to reach them.
+    Step 3 is cheap and broad: `anvil-setup` proves a tool downloaded, while
+    executing it proves the image can run it. Twenty tools cost seconds here
+    and would otherwise surface one at a time as tiers reach them.
 
 .PARAMETER Engine
-    Which engine(s) to test. 'both' (default) runs the whole suite against
-    docker and then podman, reporting them separately.
+    Which engine(s) to test. 'both' (default) runs the suite against docker and
+    then podman, reporting them separately.
 
 .PARAMETER Tier
-    Recipe(s) to run for step 5. Defaults to `anvil-pr`, the full PR tier.
-    `anvil-pr` includes `anvil-pr-slow`, which includes mutants and runtime
-    analysis, so it is measured in tens of minutes; pass `anvil-pr-fast` for a
-    quicker pass over the same plumbing.
+    Recipe(s) to run for step 5. Defaults to `anvil-pr`, the full PR tier,
+    which includes mutants and runtime analysis and is measured in tens of
+    minutes. `anvil-pr-fast` covers the same plumbing more quickly.
 
 .PARAMETER SkipTier
-    Stop after step 4. The cheap steps cover the container contract; the tier
-    is what makes a full run long.
+    Stop after step 4. The cheap steps cover the container contract.
 
 .PARAMETER KeepImages
-    Leave built images and cache volumes in place. On by default in spirit --
-    this repository's image is expensive to build, so the script never removes
-    it unless -Clean is passed.
+    Leave built images and cache volumes in place.
 
 .PARAMETER Clean
     Remove this repository's anvil images and cache volumes before starting,
@@ -317,11 +305,10 @@ function Invoke-Suite([string]$EngineName) {
 
     Write-Section "$EngineName : the catalog executes inside the image"
 
-    # `anvil-setup` proves a tool installed, not that it runs. The catalog is
-    # installed as prebuilt binaries linked against the glibc of the runner
-    # they were built on, so a base image older than that runner produces a
-    # tool that is present and unrunnable. Executing each one is the cheapest
-    # check that covers the whole class.
+    # `anvil-setup` proves a tool downloaded; executing it proves the image can
+    # run it. The catalog is installed as prebuilt binaries, so a base older
+    # than the runner they were built on yields tools that are present and
+    # unrunnable.
     #
     # This runs the engine directly rather than through `anvil-container`,
     # which dispatches `just <recipe>` and so cannot invoke a bare binary. The
@@ -348,8 +335,8 @@ function Invoke-Suite([string]$EngineName) {
 
     Write-Section "$EngineName : checks"
 
-    # The check whose prebuilt binary first exposed the base-image ABI
-    # mismatch. Kept as its own step so a regression names itself.
+    # The check whose prebuilt binary exercises both the loader and the
+    # advisory API. Kept as its own step so a regression names itself.
     $aprz = Invoke-Just -Arguments @('anvil-container', 'anvil-aprz') -AllowFailure
     Assert-Equal 'anvil-aprz runs inside the image' 0 $aprz.ExitCode
     if ($aprz.ExitCode -ne 0) { Write-Tail "$($aprz.StdOut)`n$($aprz.StdErr)" }
@@ -369,6 +356,71 @@ function Invoke-Suite([string]$EngineName) {
     Assert-That 'a later run does not rebuild the image' `
         (-not ("$($reuse.StdOut)`n$($reuse.StdErr)" -match 'building image|Step 1/|FROM ')) `
         'a rebuild happened when the tag should have resolved'
+
+    Write-Section "$EngineName : only the tool catalog renames the image"
+
+    # The recipes execute from the bind mount, so an edit to one takes effect on
+    # the next run. Rebuilding the image for it would cost a full catalog
+    # reinstall for a file the image never runs -- the difference between a
+    # feature that speeds work up and one that gets abandoned.
+    #
+    # Edits are made against a byte copy and restored from it. Never
+    # `git checkout --` on a generated file: that restores the last *commit*,
+    # not the generated state, and anvil then preserves the stale file as a
+    # user modification.
+    $baseline = Get-ImageReference
+    Assert-That 'a baseline tag is available' ([bool]$baseline)
+
+    $cases = @(
+        @{ File = 'justfiles/anvil/checks/clippy.just'; Renames = $false; Why = 'a check only routes into the catalog' }
+        @{ File = 'justfiles/anvil/container.just';     Renames = $false; Why = 'the driver computes the tag; it cannot define it' }
+        @{ File = 'justfiles/anvil/tiers.just';         Renames = $false; Why = 'a tier only routes into the catalog' }
+        @{ File = 'justfiles/anvil/versions.just';      Renames = $true;  Why = 'a pin decides which build is installed' }
+        @{ File = 'justfiles/anvil/tools.just';         Renames = $true;  Why = 'the install recipes decide what is installed' }
+    )
+
+    foreach ($case in $cases) {
+        $path = Join-Path $RepoRoot $case.File
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            Write-Skipped "$($case.File) is present" 'not emitted by this catalog'
+            continue
+        }
+        $backup = [System.IO.Path]::GetTempFileName()
+        Copy-Item -LiteralPath $path -Destination $backup -Force
+        try {
+            Add-Content -LiteralPath $path -Value "`n# dogfood scratch"
+            $edited = Get-ImageReference
+            $name = "editing $($case.File) $(if ($case.Renames) { 'renames' } else { 'does not rename' }) the image"
+            if ($case.Renames) {
+                Assert-That $name ($edited -ne $baseline) "$($case.Why); tag stayed $edited"
+            } else {
+                Assert-That $name ($edited -eq $baseline) "$($case.Why); tag moved $baseline -> $edited"
+            }
+        } finally {
+            Copy-Item -LiteralPath $backup -Destination $path -Force
+            Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Assert-Equal 'restoring every file restores the original tag' $baseline (Get-ImageReference)
+
+    # The assertions above compare references. This one proves the consequence a
+    # user actually feels: after an irrelevant edit, a run starts rather than
+    # builds.
+    $scratchCheck = Join-Path $RepoRoot 'justfiles/anvil/checks/clippy.just'
+    $scratchBackup = [System.IO.Path]::GetTempFileName()
+    Copy-Item -LiteralPath $scratchCheck -Destination $scratchBackup -Force
+    try {
+        Add-Content -LiteralPath $scratchCheck -Value "`n# dogfood scratch"
+        $afterEdit = Invoke-Just -Arguments @('anvil-container', 'anvil-fmt') -AllowFailure
+        Assert-Equal 'a run after a check edit succeeds' 0 $afterEdit.ExitCode
+        Assert-That 'a run after a check edit does not rebuild the image' `
+            (-not ("$($afterEdit.StdOut)`n$($afterEdit.StdErr)" -match 'building |Step 1/|FROM ')) `
+            'the image was rebuilt for an edit that cannot change its contents'
+    } finally {
+        Copy-Item -LiteralPath $scratchBackup -Destination $scratchCheck -Force
+        Remove-Item -LiteralPath $scratchBackup -Force -ErrorAction SilentlyContinue
+    }
 
     if ($SkipTier) {
         Write-Skipped "$EngineName : tier" '-SkipTier was passed'

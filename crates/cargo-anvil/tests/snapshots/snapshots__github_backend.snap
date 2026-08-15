@@ -122,15 +122,6 @@ RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME}/.netrc" \
     && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
 
-# The container's own build directory. A named volume is mounted here at run
-# time so host and container builds do not invalidate each other's fingerprints,
-# and so the hottest write path in a build does not cross the host boundary.
-#
-# A volume inherits its mount point's ownership from the image, so this has to
-# be world-writable: a run maps the caller's uid on Linux, and that user would
-# otherwise be unable to write to a root-owned volume.
-RUN mkdir -p /anvil/target && chmod -R a+rwX /anvil
-
 # Consumed by `anvil-container` itself: a nested invocation from inside the
 # image runs the recipe natively instead of launching another container.
 ENV ANVIL_IN_CONTAINER=1
@@ -1600,7 +1591,7 @@ anvil-aprz: anvil-aprz-validate-prereqs
             $env:GITHUB_TOKEN = $tok.Trim()
         } else {
             Write-Warning 'anvil-aprz: GITHUB_TOKEN is not set and no token could be obtained from the gh CLI.'
-            Write-Warning 'cargo-aprz will use the unauthenticated GitHub API (60 requests/hour) and may fail on a full run.'
+            Write-Warning 'cargo-aprz will use the unauthenticated GitHub API, which allows 60 requests an hour. On a full workspace it exhausts that and then WAITS, up to an hour, for the quota to reset.'
             Write-Warning 'To fix: run `gh auth login` (recommended), or set $env:GITHUB_TOKEN to a GitHub token, then re-run.'
         }
     }
@@ -3875,18 +3866,6 @@ anvil-container *target:
     # would change the tag, build a new image, and still run the old tools.
     $runArgs += @('-v', '{{anvil_container_name}}-cargo-registry:/usr/local/cargo/registry')
     $runArgs += @('-v', '{{anvil_container_name}}-cargo-git:/usr/local/cargo/git')
-    # The build directory, in a volume of its own rather than the one in the
-    # bind mount. Sharing `target/` with the host would mean every switch
-    # between a native and a containerized run recompiles the workspace: the
-    # two platforms write incompatible artifacts to the same paths, and cargo's
-    # fingerprints miss. It also keeps the hottest write path in a build off
-    # the host filesystem, which is what makes this bearable on Windows.
-    #
-    # Report outputs are unaffected: recipes write `target/coverage/`,
-    # `target/anvil/comments/` and `target/spelling.dic` as literal relative
-    # paths, so those still land in the workspace where CI collects them.
-    $runArgs += @('-v', '{{anvil_container_name}}-target:/anvil/target')
-    $runArgs += @('-e', 'CARGO_TARGET_DIR=/anvil/target')
     # Match the caller's uid/gid on Linux. Without this everything the run
     # writes under the bind mount -- target/, generated files -- lands as root
     # on the host, and the next native cargo build or git clean fails with
@@ -4065,7 +4044,7 @@ anvil-container-down:
     # be able to tell that it failed. `-f` already exits 0 for a volume that
     # does not exist, so this cannot fire spuriously.
     $failed = @()
-    foreach ($vol in @('{{anvil_container_name}}-cargo-registry', '{{anvil_container_name}}-cargo-git', '{{anvil_container_name}}-target', '{{anvil_container_name}}-cargo', '{{anvil_container_name}}-rustup')) {
+    foreach ($vol in @('{{anvil_container_name}}-cargo-registry', '{{anvil_container_name}}-cargo-git', '{{anvil_container_name}}-cargo', '{{anvil_container_name}}-rustup')) {
         & $engineExe @enginePrefix volume rm -f $vol
         if ($LASTEXITCODE -ne 0) { $failed += $vol }
     }

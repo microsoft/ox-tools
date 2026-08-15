@@ -451,18 +451,6 @@ anvil-container *target:
     # would change the tag, build a new image, and still run the old tools.
     $runArgs += @('-v', '{{anvil_container_name}}-cargo-registry:/usr/local/cargo/registry')
     $runArgs += @('-v', '{{anvil_container_name}}-cargo-git:/usr/local/cargo/git')
-    # The build directory, in a volume of its own rather than the one in the
-    # bind mount. Sharing `target/` with the host would mean every switch
-    # between a native and a containerized run recompiles the workspace: the
-    # two platforms write incompatible artifacts to the same paths, and cargo's
-    # fingerprints miss. It also keeps the hottest write path in a build off
-    # the host filesystem, which is what makes this bearable on Windows.
-    #
-    # Report outputs are unaffected: recipes write `target/coverage/`,
-    # `target/anvil/comments/` and `target/spelling.dic` as literal relative
-    # paths, so those still land in the workspace where CI collects them.
-    $runArgs += @('-v', '{{anvil_container_name}}-target:/anvil/target')
-    $runArgs += @('-e', 'CARGO_TARGET_DIR=/anvil/target')
     # Match the caller's uid/gid on Linux. Without this everything the run
     # writes under the bind mount -- target/, generated files -- lands as root
     # on the host, and the next native cargo build or git clean fails with
@@ -641,7 +629,7 @@ anvil-container-down:
     # be able to tell that it failed. `-f` already exits 0 for a volume that
     # does not exist, so this cannot fire spuriously.
     $failed = @()
-    foreach ($vol in @('{{anvil_container_name}}-cargo-registry', '{{anvil_container_name}}-cargo-git', '{{anvil_container_name}}-target', '{{anvil_container_name}}-cargo', '{{anvil_container_name}}-rustup')) {
+    foreach ($vol in @('{{anvil_container_name}}-cargo-registry', '{{anvil_container_name}}-cargo-git', '{{anvil_container_name}}-cargo', '{{anvil_container_name}}-rustup')) {
         & $engineExe @enginePrefix volume rm -f $vol
         if ($LASTEXITCODE -ne 0) { $failed += $vol }
     }
