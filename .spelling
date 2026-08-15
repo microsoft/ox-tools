@@ -160,6 +160,7 @@ getters
 GFM
 Git's
 github
+glibc
 globbing
 glommio
 grey
@@ -272,6 +273,7 @@ pp
 pre-approved
 pre-generate
 pre-heating
+prebuilt
 prefixed
 prepend
 prepended

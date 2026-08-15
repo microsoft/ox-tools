@@ -43,8 +43,14 @@ pub fn recipe() -> Artifact {
     Artifact::owned_file(RECIPE_PATH, RECIPE)
 }
 
-/// The default execution image: a digest-pinned Debian base that installs the
-/// pinned toolchain and the generated tool catalog by running `just anvil-setup`.
+/// The default execution image: a digest-pinned base tracking the Linux CI
+/// runner, which installs the pinned toolchain and the generated tool catalog
+/// by running `just anvil-setup`.
+///
+/// The base must not be older than that runner. The catalog is installed as
+/// prebuilt binaries, and glibc is backward but not forward compatible, so an
+/// older base cannot run them; matching the runner also keeps the container
+/// predictive of CI rather than more permissive than it.
 ///
 /// A downstream catalog that needs a different base OS or toolchain source
 /// replaces the body wholesale:
@@ -385,20 +391,27 @@ mod tests {
     }
 
     #[test]
-    fn a_host_token_is_forwarded_by_name_never_minted() {
-        // anvil-aprz is in pr-fast, so a containerized tier hits the
-        // unauthenticated advisory-API limit without it. Forwarding by name
-        // keeps the value off the command line; minting one here would give
-        // every recipe in the container a credential it lacks natively.
+    fn a_host_token_is_resolved_as_the_recipe_does_and_forwarded_by_name() {
+        // anvil-aprz is in pr-fast, and unauthenticated it does not merely
+        // warn: `cargo aprz deps` sleeps until the hourly quota resets, so a
+        // containerized tier blocks for up to an hour. The driver therefore
+        // resolves a token the same way the recipe does natively -- the
+        // environment first, then the gh CLI -- so both paths authenticate for
+        // the same developers.
+        assert!(RECIPE.contains("gh auth token --hostname github.com"));
         assert!(RECIPE.contains("$forwardedEnv += 'GITHUB_TOKEN'"));
         assert!(RECIPE.contains("$runArgs += @('-e', 'GITHUB_TOKEN')"));
+        // By name, never by value: `-e NAME=VALUE` would put the credential on
+        // the host's command line, where endpoint telemetry retains it.
+        assert!(!RECIPE.contains("'-e', \"GITHUB_TOKEN="));
+        // A derived token is set on this process, so it must be registered for
+        // the same cleanup the hook's variables get.
+        assert!(RECIPE.contains("$hookEnv += 'GITHUB_TOKEN'"));
+        // An exported token is left alone rather than re-derived.
+        assert!(RECIPE.contains("if (-not $env:GITHUB_TOKEN -and (Get-Command gh"));
         // Forwarding by name only works if the engine can see the name, so a
         // WSL engine needs it bridged -- otherwise `-e NAME` forwards nothing.
         assert!(RECIPE.contains("$engineExe -eq 'wsl.exe' -and $forwardedEnv.Count -gt 0"));
-        // Invocation forms only, so the comment explaining the choice may name
-        // the command it rules out.
-        assert!(!RECIPE.contains("(gh auth token"));
-        assert!(!RECIPE.contains("& gh "));
     }
 
     #[test]

@@ -15,13 +15,30 @@
 # validate the base, and a floating tag can therefore change underneath a tag
 # that claims to name fixed content.
 #
+# The base tracks the Linux runner the generated workflows use
+# (`ubuntu-latest`, currently 24.04), and that is a correctness constraint
+# rather than a preference. `anvil-setup binstall` installs the catalog as
+# prebuilt binaries, which is what CI does; those binaries are linked against
+# the glibc of the runner they were built on. glibc is backward but not
+# forward compatible, so a base older than the runner cannot run them: on
+# Debian bookworm (glibc 2.36) `cargo-aprz` 1.0.0 aborts with `version
+# GLIBC_2.39 not found`, because its published binary is built on 24.04
+# (glibc 2.39).
+#
+# Matching the runner exactly -- rather than merely picking something newer --
+# is what keeps the container predictive: a tool that cannot run here cannot
+# run in CI either, and a newer base would let the container pass where CI
+# fails. When `ubuntu-latest` moves to a newer release, this pin moves with
+# it, and the tag changes with the file.
+#
 # To build on a different base (a lower glibc baseline, or an internal
 # distribution), a downstream catalog replaces this artifact wholesale via
 # `replace_artifact(artifacts::container::dockerfile(...))`; a single
 # repository can edit this file in place, which anvil's drift handling
-# preserves.
+# preserves. A lower baseline means the catalog must also install from source
+# rather than with `binstall`.
 
-ARG BASE_IMAGE=docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
+ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 FROM ${BASE_IMAGE}
 
 ARG JUST_VERSION=1.56.0

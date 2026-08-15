@@ -20,13 +20,30 @@ expression: render_tree(tmp.path())
 # validate the base, and a floating tag can therefore change underneath a tag
 # that claims to name fixed content.
 #
+# The base tracks the Linux runner the generated workflows use
+# (`ubuntu-latest`, currently 24.04), and that is a correctness constraint
+# rather than a preference. `anvil-setup binstall` installs the catalog as
+# prebuilt binaries, which is what CI does; those binaries are linked against
+# the glibc of the runner they were built on. glibc is backward but not
+# forward compatible, so a base older than the runner cannot run them: on
+# Debian bookworm (glibc 2.36) `cargo-aprz` 1.0.0 aborts with `version
+# GLIBC_2.39 not found`, because its published binary is built on 24.04
+# (glibc 2.39).
+#
+# Matching the runner exactly -- rather than merely picking something newer --
+# is what keeps the container predictive: a tool that cannot run here cannot
+# run in CI either, and a newer base would let the container pass where CI
+# fails. When `ubuntu-latest` moves to a newer release, this pin moves with
+# it, and the tag changes with the file.
+#
 # To build on a different base (a lower glibc baseline, or an internal
 # distribution), a downstream catalog replaces this artifact wholesale via
 # `replace_artifact(artifacts::container::dockerfile(...))`; a single
 # repository can edit this file in place, which anvil's drift handling
-# preserves.
+# preserves. A lower baseline means the catalog must also install from source
+# rather than with `binstall`.
 
-ARG BASE_IMAGE=docker.io/library/debian:bookworm-slim@sha256:63a496b5d3b99214b39f5ed70eb71a61e590a77979c79cbee4faf991f8c0783e
+ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 FROM ${BASE_IMAGE}
 
 ARG JUST_VERSION=1.56.0
@@ -3874,16 +3891,32 @@ anvil-container *target:
     $hookEnv = @()
 
     # anvil-aprz queries the GitHub advisory API, which allows 60 requests an
-    # hour unauthenticated -- less than a full tier needs. Forward the host's
-    # token by name when it is already set, so a containerized tier
-    # authenticates exactly as the same recipe does natively, and so CI (which
-    # sets it) keeps working when it runs a tier this way.
+    # hour unauthenticated -- less than a full tier needs. Unauthenticated is
+    # not a degraded-but-working mode: `cargo aprz deps` sleeps until the quota
+    # resets rather than failing, so a containerized tier blocks for up to an
+    # hour with no way to opt out. Authentication is what makes the check
+    # terminate, not what makes it fast.
     #
-    # Only forwarded, never minted: running `gh auth token` here would hand a
-    # broadly-scoped credential to every recipe in the container, including
-    # ones that never see it on the host, where anvil-aprz scopes it to itself.
-    # A host that has not exported it gets the same unauthenticated warning the
-    # recipe prints natively.
+    # Resolve the token exactly as the recipe does natively -- GITHUB_TOKEN
+    # first, then the gh CLI's stored token -- so a containerized run
+    # authenticates for the same developers a native run does. Deriving it here
+    # rather than only forwarding an exported value is deliberate: the two
+    # paths have identical exposure once inside (a forwarded token is readable
+    # by every recipe in the container either way, including third-party build
+    # scripts and proc macros), so refusing to derive it buys no boundary and
+    # only makes behaviour depend on how the developer happened to sign in.
+    # `gh auth token` is non-interactive and never opens a prompt.
+    #
+    # Set here and passed by NAME, so the value never reaches the host's
+    # process command line, and unset again with the hook's variables below.
+    if (-not $env:GITHUB_TOKEN -and (Get-Command gh -ErrorAction SilentlyContinue)) {
+        $ghToken = $null
+        try { $ghToken = (gh auth token --hostname github.com 2>$null) } catch { $ghToken = $null }
+        if ($ghToken -and $ghToken.Trim()) {
+            Set-Item -LiteralPath 'Env:GITHUB_TOKEN' -Value $ghToken.Trim()
+            $hookEnv += 'GITHUB_TOKEN'
+        }
+    }
     if ($env:GITHUB_TOKEN) {
         $forwardedEnv += 'GITHUB_TOKEN'
         $runArgs += @('-e', 'GITHUB_TOKEN')

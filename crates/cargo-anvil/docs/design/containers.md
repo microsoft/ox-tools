@@ -79,7 +79,7 @@ All five are annotated `[group("anvil-container")]` and appear as one cluster in
 | `ANVIL_CONTAINER_NO_RESOLVE=1` | Skip the resolve hook (§7.3), so a query never pulls. |
 | `ANVIL_CONTAINER_NO_CACHE=1` | Rebuild with `--no-cache` even when the tag resolves. Skips the resolve hook too (§7.3). |
 | `ANVIL_IN_CONTAINER=1` | Set inside the image. Makes a nested invocation execute natively (§5.4). |
-| `GITHUB_TOKEN` | Forwarded into the run when set on the host, so `anvil-aprz` is not rate-limited (§5.3). |
+| `GITHUB_TOKEN` | Forwarded into the run. Taken from the host environment, or from the gh CLI when that is unset (§5.3). |
 
 `NO_REBUILD` is evaluated independently of `NO_CACHE`, so the two compose: `anvil-container-status` sets `NO_REBUILD`
 and `NO_RESOLVE` together and answers from local state alone. When `NO_REBUILD` stops a build the reference is still
@@ -159,6 +159,14 @@ Two properties sit outside the digest. The base image is not resolved during has
 digest-pinned; a floating tag could otherwise change beneath a tag that claims to name fixed content. The platform is
 pinned to `linux/amd64` on build and run, so hosts of differing architecture cannot compute one tag for two images.
 
+The base must also track the Linux runner the generated workflows use, currently `ubuntu-latest` (24.04). This is a
+correctness constraint rather than a preference: the image installs the catalog with `binstall`, as CI does, and those
+prebuilt binaries are linked against the runner's glibc. glibc is backward but not forward compatible, so an older base
+yields tools that install and cannot execute — on Debian bookworm (2.36) `cargo-aprz` aborts in the loader with
+`GLIBC_2.39 not found`. Matching the runner rather than merely exceeding it is what keeps the container predictive: a
+newer base would let a run pass here and fail in CI. A catalog that needs an older baseline must also install from
+source rather than with `binstall`.
+
 ## 5. Execution model
 
 One container is created per `anvil-container` invocation, however many checks the requested recipe runs, and is
@@ -207,12 +215,19 @@ otherwise the engine leaves it as `/`, and anything falling back to `$HOME` writ
 
 ### 5.3 Environment
 
-The run passes `ANVIL_IN_CONTAINER=1` (§5.4) and, when it is set on the host, forwards `GITHUB_TOKEN` by name.
-`anvil-aprz` runs in the `pr-fast` group and queries the GitHub advisory API, which allows 60 requests an hour
-unauthenticated — fewer than a full tier needs — so without the token a containerized tier degrades to warnings and
-rate limits. It is forwarded, never minted: running `gh auth token` in the driver would hand a broadly-scoped
-credential to every recipe in the container, including the ones that never see it natively, where the recipe scopes
-it to itself. A host that has not exported it gets the same unauthenticated warning it would get natively.
+The run passes `ANVIL_IN_CONTAINER=1` (§5.4) and forwards `GITHUB_TOKEN` by name. `anvil-aprz` runs in the `pr-fast`
+group and queries the GitHub advisory API, which allows 60 requests an hour unauthenticated — fewer than a full tier
+needs. Unauthenticated is not a degraded-but-working mode: `cargo aprz deps` sleeps until the quota resets rather than
+failing, and offers no way to opt out, so a containerized tier blocks for up to an hour. The token is what makes the
+check terminate, not what makes it fast.
+
+The driver resolves it exactly as the recipe does natively — the environment first, then the gh CLI's stored token
+(`gh auth token`, which is non-interactive) — so a containerized run authenticates for the same developers a native run
+does. Deriving it rather than only forwarding an exported value is deliberate: both paths have identical exposure once
+inside, since a forwarded token is readable by every recipe in the container either way, including third-party build
+scripts and proc macros. Refusing to derive it buys no boundary and only makes behaviour depend on how the developer
+happened to sign in — which is the common case, because the recipe itself recommends `gh auth login`. A derived value
+is set on the driver process, passed by name, and unset again, so it never reaches the host's command line.
 
 Everything else a run needs comes from the hook (§7).
 

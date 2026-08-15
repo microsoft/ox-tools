@@ -467,16 +467,32 @@ anvil-container *target:
     $hookEnv = @()
 
     # anvil-aprz queries the GitHub advisory API, which allows 60 requests an
-    # hour unauthenticated -- less than a full tier needs. Forward the host's
-    # token by name when it is already set, so a containerized tier
-    # authenticates exactly as the same recipe does natively, and so CI (which
-    # sets it) keeps working when it runs a tier this way.
+    # hour unauthenticated -- less than a full tier needs. Unauthenticated is
+    # not a degraded-but-working mode: `cargo aprz deps` sleeps until the quota
+    # resets rather than failing, so a containerized tier blocks for up to an
+    # hour with no way to opt out. Authentication is what makes the check
+    # terminate, not what makes it fast.
     #
-    # Only forwarded, never minted: running `gh auth token` here would hand a
-    # broadly-scoped credential to every recipe in the container, including
-    # ones that never see it on the host, where anvil-aprz scopes it to itself.
-    # A host that has not exported it gets the same unauthenticated warning the
-    # recipe prints natively.
+    # Resolve the token exactly as the recipe does natively -- GITHUB_TOKEN
+    # first, then the gh CLI's stored token -- so a containerized run
+    # authenticates for the same developers a native run does. Deriving it here
+    # rather than only forwarding an exported value is deliberate: the two
+    # paths have identical exposure once inside (a forwarded token is readable
+    # by every recipe in the container either way, including third-party build
+    # scripts and proc macros), so refusing to derive it buys no boundary and
+    # only makes behaviour depend on how the developer happened to sign in.
+    # `gh auth token` is non-interactive and never opens a prompt.
+    #
+    # Set here and passed by NAME, so the value never reaches the host's
+    # process command line, and unset again with the hook's variables below.
+    if (-not $env:GITHUB_TOKEN -and (Get-Command gh -ErrorAction SilentlyContinue)) {
+        $ghToken = $null
+        try { $ghToken = (gh auth token --hostname github.com 2>$null) } catch { $ghToken = $null }
+        if ($ghToken -and $ghToken.Trim()) {
+            Set-Item -LiteralPath 'Env:GITHUB_TOKEN' -Value $ghToken.Trim()
+            $hookEnv += 'GITHUB_TOKEN'
+        }
+    }
     if ($env:GITHUB_TOKEN) {
         $forwardedEnv += 'GITHUB_TOKEN'
         $runArgs += @('-e', 'GITHUB_TOKEN')
