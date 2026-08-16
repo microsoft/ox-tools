@@ -474,3 +474,4 @@ toolset
 natively
 ARM64
 WSL
+variadic
