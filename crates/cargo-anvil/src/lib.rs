@@ -104,7 +104,10 @@
 //!
 //! Execution is opt-in per invocation: `just anvil-pr` and every other recipe
 //! continue to run natively, and a container is entered only through
-//! `anvil-container`, which takes any recipe name and its arguments.
+//! `anvil-container`, which takes any recipe name and its arguments. Those
+//! arguments are whitespace-delimited tokens: `just` joins a variadic
+//! parameter with spaces before the recipe sees it, so an argument that itself
+//! contains a space cannot be recovered and does not survive the round trip.
 //!
 //! ```text
 //! just anvil-container anvil-clippy         # one check

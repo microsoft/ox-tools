@@ -105,7 +105,10 @@ the toolset by construction, with no second tool list to keep in step.
 
 Execution is opt-in per invocation: `just anvil-pr` and every other recipe
 continue to run natively, and a container is entered only through
-`anvil-container`, which takes any recipe name and its arguments.
+`anvil-container`, which takes any recipe name and its arguments. Those
+arguments are whitespace-delimited tokens: `just` joins a variadic
+parameter with spaces before the recipe sees it, so an argument that itself
+contains a space cannot be recovered and does not survive the round trip.
 
 ```text
 just anvil-container anvil-clippy         # one check
@@ -442,7 +445,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbkAqV7cij89Ab63nE30mvTLkbN2Wo4toYNGkb0MosdkJlO6lhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbUzxBCeTxVhgbVH3PyXajspMbraXhPJJZx38bmTnJe7clsEdhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts

@@ -62,6 +62,10 @@ own agents. The image is pinned to resemble that environment, not to reproduce i
 just anvil-container anvil-setup binstall
 ```
 
+Arguments are whitespace-delimited tokens. `just` joins a variadic `*target` with spaces before the recipe body sees
+it, so the original argv is unrecoverable and an argument containing a space does not round-trip. No catalog recipe
+takes one; a fork whose recipes do should pass them through the environment instead.
+
 | Recipe | Behaviour |
 | --- | --- |
 | `just anvil-container <recipe> [args…]` | Execute a recipe in the image. With no argument, opens an interactive shell. |

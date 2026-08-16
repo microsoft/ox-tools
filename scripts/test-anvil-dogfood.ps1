@@ -24,9 +24,11 @@
       2. The image builds from the repository's own Dockerfile.
       3. Every pinned tool in the catalog executes inside the image.
       4. `anvil-aprz` runs, exercising a prebuilt binary and the advisory API.
-      5. Only the tool catalog renames the image: editing a check, a tier or
-         the driver must not trigger a rebuild, while editing `tools.just` or
-         `versions.just` must.
+      5. Every recipe file defines the image: editing a check, a tier, the
+         driver, `tools.just` or `versions.just` must all rename it, and
+         dropping a check's `-setup` dependency from a group -- which changes
+         the installed tool set while leaving `tools.just` untouched -- must
+         rename it too.
       6. The requested tier runs to completion inside the image.
       7. A second run reuses the image rather than rebuilding it.
 
