@@ -79,7 +79,7 @@ All five are annotated `[group("anvil-container")]` and appear as one cluster in
 | `ANVIL_CONTAINER_NO_RESOLVE=1` | Skip the resolve hook (§7.3), so a query never pulls. |
 | `ANVIL_CONTAINER_NO_CACHE=1` | Rebuild with `--no-cache` even when the tag resolves. Skips the resolve hook too (§7.3). |
 | `ANVIL_IN_CONTAINER=1` | Set inside the image. Makes a nested invocation execute natively (§5.4). |
-| `GITHUB_TOKEN` | Forwarded into the run. Taken from the host environment, or from the gh CLI when that is unset (§5.3). |
+| `GITHUB_TOKEN` | Forwarded into the run. Taken from the host environment, or derived from the gh CLI for a target that reads it (§5.3). |
 
 `NO_REBUILD` is evaluated independently of `NO_CACHE`, so the two compose: `anvil-container-status` sets `NO_REBUILD`
 and `NO_RESOLVE` together and answers from local state alone. When `NO_REBUILD` stops a build the reference is still
@@ -106,8 +106,8 @@ generated pins. There is no second tool list to keep synchronized, and consequen
 image (§4.1).
 
 `Dockerfile.dockerignore` scopes the build context to `justfiles/anvil/` and `rust-toolchain.toml`, denying everything
-else. The whole recipe tree is copied because `just` has to parse it to run `anvil-setup`, while only the tool catalog
-within it is hashed (§4). BuildKit reads `<dockerfile>.dockerignore` in preference to a root `.dockerignore`, so the
+else. The whole recipe tree is copied because `just` has to parse it to run `anvil-setup`, and the whole tree is
+hashed (§4). BuildKit reads `<dockerfile>.dockerignore` in preference to a root `.dockerignore`, so the
 repository neither needs to own a root ignore file nor can have one silently override this.
 
 ## 4. Image identity
@@ -123,14 +123,21 @@ define the image. The name derives from the repository directory (§5.1).
 | `.anvil/container/Dockerfile.dockerignore` | always |
 | `rust-toolchain.toml` | always |
 | `.anvil/container/hooks.ps1` | when the file exists |
-| `justfiles/anvil/tools.just` | always |
-| `justfiles/anvil/versions.just` | always |
+| `justfiles/anvil/**/*.just` | always |
 
-`tools.just` and `versions.just` are the tool catalog: `just anvil-setup` installs all of it, every install recipe is
-defined in `tools.just`, and every pin lives in `versions.just`, so a tool cannot be added, removed or repinned without
-one of the two changing. The tier, group and check recipes are **not** inputs — they only route into the catalog, and
-they execute from the bind mount rather than from the image, so editing a check takes effect on the next run without a
-rebuild. A declared input that does not exist is a hard error, not an omission from the digest.
+The recipe tree is hashed in full. `just anvil-setup` reaches the install recipes through the tier, group and check
+recipes, so the routing decides *whether* a tool is installed just as surely as `tools.just` decides *how*: dropping an
+`anvil-<check>-setup` dependency from a group changes the installed set while `tools.just` and `versions.just` stay
+byte-identical. Hashing only the install definitions would leave that change unnamed, and the tag would claim contents
+the image does not have.
+
+`container.just` is hashed too. It is not circular — the digest is over file text, and no file contains the tag — and
+it belongs in the set because it passes the build arguments, the secret mounts and the hook's `Anvil-PreBuild` output
+into the build.
+
+The cost is that editing any recipe renames the image and the next run rebuilds it. That is the correct trade: a tag
+that can name contents the image does not have makes every guarantee below meaningless. A declared input that does not
+exist is a hard error, not an omission from the digest.
 
 The hook file's **content** is an input, since it determines what the build installs. Its **output** is deliberately
 excluded: a credential must never influence a tag.
@@ -223,6 +230,21 @@ The run passes `ANVIL_IN_CONTAINER=1` (§5.4) and forwards `GITHUB_TOKEN` by nam
 it natively: the environment first, then the gh CLI's stored token. `anvil-aprz` runs in the `pr-fast` group and
 queries the GitHub advisory API, which allows 60 requests an hour unauthenticated and then sleeps until the quota
 resets, so a tier needs the token to terminate rather than merely to run quickly.
+
+The two sources are not treated alike. An **exported** `GITHUB_TOKEN` is forwarded whatever the target is — that is
+exact parity, since a native run exposes it to every process the shell spawns too. A token **derived** from the gh CLI
+is a credential the developer never put in this environment, and PID 1's environment is inherited by every build script
+and proc macro in the container, where natively `anvil-aprz` would mint it inside its own process. So it is derived
+only when the target's plan (`just --dry-run <target>`) reads `GITHUB_TOKEN`, or when there is no target at all: an
+interactive session can run anything, and refusing there would reintroduce the stall the token exists to prevent. The
+predicate is the variable rather than the name of a check, so a catalog that adds another GitHub-authenticated check is
+covered without touching the driver.
+
+It also forwards the recipe contract's own inputs when they are set — `PR_TITLE`, `BASE_REF`, `GITHUB_BASE_REF`,
+`SYSTEM_PULLREQUEST_TARGETBRANCH` and the `ANVIL_INCLUDE_*` filters — because a check that reads one natively must read
+the same value in a container. `anvil-pr-title` is the sharp case: with `PR_TITLE` unset it exits 0 with a skip notice,
+so dropping it at the boundary would let a title a native run rejects pass in a container while the tier still reported
+green. They are forwarded by name and only when set, so an unset variable stays unset rather than arriving empty.
 
 A resolved token is set on the driver process, passed by name, and unset after the run, so it never reaches a host
 command line. Inside the container it is readable by everything the run executes, including build scripts and proc
@@ -411,10 +433,13 @@ Three properties are load-bearing:
 
 - **The returned reference is used as-is, never re-tagged locally.** A local tag asserts "built here from these
   inputs"; a fetched image only claims it (§4.3). Keeping the registry reference keeps the run honest about origin.
-- **The reference is verified before use.** Runs pass `--pull=never`, so a hook reporting an image it had not actually
-  fetched would otherwise fail later and further from the cause.
-- **Every failure falls through to a local build**, with the reason printed. A publisher that has not caught up with a
-  change must not block the developer who made it.
+- **The reference is checked for presence before use.** Runs pass `--pull=never`, so a hook reporting an image it had
+  not actually fetched would otherwise fail later and further from the cause. This is a presence check, not a
+  verification: `image inspect` proves something carries that reference, not that its contents match the digest the tag
+  claims. Trusting the publisher is the contract (§4.3).
+- **Every failure falls through to a local build**, with the reason printed — including a hook that cannot be loaded at
+  all, which is why the dot-source sits inside the same `try`. A publisher that has not caught up with a change must
+  not block the developer who made it.
 
 ### 7.4 Trust boundary
 
@@ -444,7 +469,7 @@ its own version against a file it can see has diverged. A change that belongs ev
 **The Dockerfile and its ignore file must be replaced together.** A replacement that `COPY`s anything beyond
 `justfiles/anvil/` and `rust-toolchain.toml` must also replace `artifacts::container::dockerignore()` (§3), or the
 added paths never reach the build context and the build fails on a missing file. A replacement that installs tools
-from somewhere other than `tools.just` must also add those sources to the digest, or a change to them will name a tag
+from a source outside `justfiles/anvil/` must also add that source to the digest, or a change to it will name a tag
 that already resolves.
 
 `justfiles/anvil/` must contain `.just` recipes and nothing else, which `CatalogBuilder::build` enforces: a non-recipe
@@ -459,8 +484,10 @@ guard. A different base OS with a different toolchain source is one Dockerfile r
 - On ARM64 hosts the `linux/amd64` image is emulated and is substantially slower.
 - The first build takes several minutes, installing a toolchain and the entire pinned tool catalog. Later runs reuse
   it until an input changes.
-- Any edit under `justfiles/anvil/` invalidates the install layer, including files the image's synthetic Justfile
-  never imports.
+- Any edit under `justfiles/anvil/` renames the image and rebuilds it, including edits to a check body that cannot
+  change what the image contains. Precision here would mean deriving the install closure rather than hashing the files
+  that express it; until then the digest errs towards rebuilding, because the alternative error — a tag that names
+  contents the image does not have — is silent (§4.1).
 - **The set of hashed inputs is fixed (§4.1) and a fork cannot extend it.** A replacement Dockerfile is itself
   hashed, so changing the build recipe always renames the tag — but any *additional* file it copies is outside the
   tag. Such a file can change what a build produces while naming a tag that already resolves, and the existing image
@@ -478,6 +505,17 @@ the emitted-tree snapshots are what run unattended.
 ```powershell
 ./scripts/test-anvil-container.ps1                  # docker
 ./scripts/test-anvil-container.ps1 -Engine podman   # podman
+```
+
+`scripts/test-anvil-dogfood.ps1` is the complement: rather than a synthetic fixture it runs this repository's own
+generated tree in its own image, which is what catches the defects a fixture is too small to have — a check whose tool
+is missing, a mount whose permissions are wrong, a variable that does not cross the boundary. It mutates the working
+tree while asserting which edits rename the image, and restores each file from a byte copy; if it is interrupted
+mid-run, `cargo run -p cargo-anvil -- anvil` returns the generated tree to a known state.
+
+```powershell
+./scripts/test-anvil-dogfood.ps1                            # docker, full tier
+./scripts/test-anvil-dogfood.ps1 -Engine podman -SkipTier   # podman, mechanism only
 ```
 
 [design]: ./README.md

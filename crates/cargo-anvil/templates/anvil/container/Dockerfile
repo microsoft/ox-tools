@@ -92,12 +92,11 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
     && rm /tmp/cargo-binstall.tgz
 
 # Install the pinned toolchain and cargo subcommands from the generated
-# catalog. The whole recipe tree is copied because `just` has to parse it, but
-# only `tools.just` and `versions.just` decide what this layer installs, and
-# only those are hashed into the tag -- so editing a check does not rebuild the
-# image, and the check runs from the bind mount anyway. The synthetic Justfile
-# below imports only the anvil tree, avoiding repository-specific imports that
-# may not exist yet.
+# catalog. The whole recipe tree is copied because `just` has to parse it, and
+# the whole tree is hashed into the tag: `anvil-setup` reaches the install
+# recipes through the tier, group and check recipes, so any of them can change
+# what this layer installs. The synthetic Justfile below imports only the anvil
+# tree, avoiding repository-specific imports that may not exist yet.
 #
 # `binstall` matches what CI passes. It is not just a speed-up: some catalog
 # tools do not compile from source on every pinned toolchain, so a source
@@ -108,6 +107,13 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # *writes* with it is ordinary content -- and the `chmod` on the next line
 # would otherwise publish it world-readable. Deleting them in a later `RUN`
 # would not help: the earlier layer still carries the file.
+#
+# `registry` and `git` are created before the `chmod` because the run mounts a
+# named volume over each. An engine seeds a new volume from the image path it
+# covers, and a path that does not exist is seeded as a root-owned 0755
+# directory -- which the `--user` mapping on Linux then cannot write, so the
+# first cargo fetch fails with EACCES. Creating them here means the widened
+# permissions are what the volume inherits.
 WORKDIR /opt/anvil
 COPY justfiles ./justfiles
 COPY rust-toolchain.toml ./
@@ -115,6 +121,7 @@ RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
     && just anvil-setup binstall \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME}/.netrc" \
+    && mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
     && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
 
 # Consumed by `anvil-container` itself: a nested invocation from inside the

@@ -354,29 +354,33 @@ function Invoke-Suite([string]$EngineName) {
     $reuse = Invoke-Just -Arguments @('anvil-container', 'anvil-fmt') -AllowFailure
     Assert-Equal 'a later run succeeds' 0 $reuse.ExitCode
     Assert-That 'a later run does not rebuild the image' `
-        (-not ("$($reuse.StdOut)`n$($reuse.StdErr)" -match 'building image|Step 1/|FROM ')) `
+        (-not ("$($reuse.StdOut)`n$($reuse.StdErr)" -match 'building |Step 1/|FROM ')) `
         'a rebuild happened when the tag should have resolved'
 
-    Write-Section "$EngineName : only the tool catalog renames the image"
+    Write-Section "$EngineName : every recipe file defines the image"
 
-    # The recipes execute from the bind mount, so an edit to one takes effect on
-    # the next run. Rebuilding the image for it would cost a full catalog
-    # reinstall for a file the image never runs -- the difference between a
-    # feature that speeds work up and one that gets abandoned.
+    # `just anvil-setup` reaches the install recipes through the tier, group and
+    # check recipes, so the routing decides *whether* a tool is installed as
+    # surely as tools.just decides *how*. Hashing only the install definitions
+    # let a group drop an `anvil-<check>-setup` dependency -- changing the
+    # installed set -- while the tag stayed byte-identical, so the stale image
+    # was reused forever. The whole tree is hashed for that reason, and these
+    # cases are what keep it that way.
     #
     # Edits are made against a byte copy and restored from it. Never
     # `git checkout --` on a generated file: that restores the last *commit*,
     # not the generated state, and anvil then preserves the stale file as a
-    # user modification.
+    # user modification. If this script is killed mid-section, regenerate with
+    # `cargo run -p cargo-anvil -- anvil` to return the tree to a known state.
     $baseline = Get-ImageReference
     Assert-That 'a baseline tag is available' ([bool]$baseline)
 
     $cases = @(
-        @{ File = 'justfiles/anvil/checks/clippy.just'; Renames = $false; Why = 'a check only routes into the catalog' }
-        @{ File = 'justfiles/anvil/container.just';     Renames = $false; Why = 'the driver computes the tag; it cannot define it' }
-        @{ File = 'justfiles/anvil/tiers.just';         Renames = $false; Why = 'a tier only routes into the catalog' }
-        @{ File = 'justfiles/anvil/versions.just';      Renames = $true;  Why = 'a pin decides which build is installed' }
-        @{ File = 'justfiles/anvil/tools.just';         Renames = $true;  Why = 'the install recipes decide what is installed' }
+        @{ File = 'justfiles/anvil/checks/clippy.just'; Why = 'a check carries the setup dependency that installs its tool' }
+        @{ File = 'justfiles/anvil/container.just';     Why = 'the driver passes the build args, secrets and PreBuild output into the build' }
+        @{ File = 'justfiles/anvil/tiers.just';         Why = 'a tier decides which groups, and so which setups, are reached' }
+        @{ File = 'justfiles/anvil/versions.just';      Why = 'a pin decides which build is installed' }
+        @{ File = 'justfiles/anvil/tools.just';         Why = 'the install recipes decide what is installed' }
     )
 
     foreach ($case in $cases) {
@@ -390,12 +394,8 @@ function Invoke-Suite([string]$EngineName) {
         try {
             Add-Content -LiteralPath $path -Value "`n# dogfood scratch"
             $edited = Get-ImageReference
-            $name = "editing $($case.File) $(if ($case.Renames) { 'renames' } else { 'does not rename' }) the image"
-            if ($case.Renames) {
-                Assert-That $name ($edited -ne $baseline) "$($case.Why); tag stayed $edited"
-            } else {
-                Assert-That $name ($edited -eq $baseline) "$($case.Why); tag moved $baseline -> $edited"
-            }
+            Assert-That "editing $($case.File) renames the image" ($edited -ne $baseline) `
+                "$($case.Why); tag stayed $edited"
         } finally {
             Copy-Item -LiteralPath $backup -Destination $path -Force
             Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
@@ -404,22 +404,26 @@ function Invoke-Suite([string]$EngineName) {
 
     Assert-Equal 'restoring every file restores the original tag' $baseline (Get-ImageReference)
 
-    # The assertions above compare references. This one proves the consequence a
-    # user actually feels: after an irrelevant edit, a run starts rather than
-    # builds.
-    $scratchCheck = Join-Path $RepoRoot 'justfiles/anvil/checks/clippy.just'
-    $scratchBackup = [System.IO.Path]::GetTempFileName()
-    Copy-Item -LiteralPath $scratchCheck -Destination $scratchBackup -Force
-    try {
-        Add-Content -LiteralPath $scratchCheck -Value "`n# dogfood scratch"
-        $afterEdit = Invoke-Just -Arguments @('anvil-container', 'anvil-fmt') -AllowFailure
-        Assert-Equal 'a run after a check edit succeeds' 0 $afterEdit.ExitCode
-        Assert-That 'a run after a check edit does not rebuild the image' `
-            (-not ("$($afterEdit.StdOut)`n$($afterEdit.StdErr)" -match 'building |Step 1/|FROM ')) `
-            'the image was rebuilt for an edit that cannot change its contents'
-    } finally {
-        Copy-Item -LiteralPath $scratchBackup -Destination $scratchCheck -Force
-        Remove-Item -LiteralPath $scratchBackup -Force -ErrorAction SilentlyContinue
+    # The regression that motivated hashing the whole tree, stated in the terms
+    # it actually occurred in: a group drops a check's `-setup` dependency, so
+    # the image installs one tool fewer, while tools.just and versions.just are
+    # untouched. The tag has to move or the reduced image is reused forever.
+    $group = Join-Path $RepoRoot 'justfiles/anvil/groups/pr-fast.just'
+    if (Test-Path -LiteralPath $group -PathType Leaf) {
+        $groupBackup = [System.IO.Path]::GetTempFileName()
+        Copy-Item -LiteralPath $group -Destination $groupBackup -Force
+        try {
+            $kept = @(Get-Content -LiteralPath $group | Where-Object { $_ -notmatch 'anvil-spellcheck-setup' })
+            Set-Content -LiteralPath $group -Value $kept
+            Assert-That 'dropping a setup dependency renames the image' ((Get-ImageReference) -ne $baseline) `
+                'the installed tool set changed while the tag did not'
+        } finally {
+            Copy-Item -LiteralPath $groupBackup -Destination $group -Force
+            Remove-Item -LiteralPath $groupBackup -Force -ErrorAction SilentlyContinue
+        }
+        Assert-Equal 'restoring the group restores the original tag' $baseline (Get-ImageReference)
+    } else {
+        Write-Skipped 'dropping a setup dependency renames the image' 'no pr-fast group in this catalog'
     }
 
     if ($SkipTier) {

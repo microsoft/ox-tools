@@ -333,6 +333,14 @@ e2e-show-env:
 e2e-show-token:
     @echo "E2E-TOKEN:[${GITHUB_TOKEN:-}]"
 
+# The negative case for the same rule. A derived token is minted only when the
+# target's plan reads GITHUB_TOKEN, so this recipe must observe the environment
+# *without naming the variable* -- naming it is what would opt it in. Dumping
+# every name lets the assertion look for the value without the plan mentioning
+# it.
+e2e-dump-env:
+    @env | sed 's/=.*//' | sort | tr '\n' ' '
+
 # Proves git resolves inside the container, which a linked worktree breaks
 # unless the driver mounts the common git directory.
 e2e-show-git:
@@ -469,6 +477,16 @@ if ($hostGhToken -and $hostGhToken.Trim()) {
     Assert-That 'the gh CLI token is used when the environment has none' `
         ($viaGh.StdOut -match ('E2E-TOKEN:\[' + [regex]::Escape($hostGhToken.Trim()) + '\]')) `
         (Hide-Token "$($viaGh.StdOut)$($viaGh.StdErr)")
+
+    # The other half of the rule. Minting a credential the developer never put
+    # in this environment hands it to every build script and proc macro in the
+    # container, where natively the recipe would mint it in its own process --
+    # so a target that never reads the variable must not receive it.
+    $noNeed = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'e2e-dump-env') `
+        -Environment @{ GITHUB_TOKEN = '' }
+    Assert-That 'no token is derived for a target that does not read it' `
+        ($noNeed.StdOut -notmatch 'GITHUB_TOKEN') `
+        (Hide-Token "$($noNeed.StdOut)$($noNeed.StdErr)")
 } else {
     Write-Step 'skipping the gh-fallback check: this host has no gh credential'
 }
@@ -541,7 +559,8 @@ $editedReference = Get-ImageReference -Repo $repo
 Assert-That 'editing the Dockerfile selects a new tag' ($editedReference -ne $reference)
 
 Write-Step 're-running the generator over the edited file'
-Invoke-Native -Command $anvilExe -Arguments @('anvil', '--no-backends') -WorkingDirectory $repo -AllowFailure | Out-Null
+$regen = Invoke-Native -Command $anvilExe -Arguments @('anvil', '--no-backends') -WorkingDirectory $repo -AllowFailure
+Assert-Equal 'the generator succeeds over a user-modified owned file' 0 $regen.ExitCode
 $afterRegen = Get-Content -LiteralPath $dockerfile -Raw
 Assert-That 'the edit survives regeneration' ($afterRegen -match 'a repository-owned edit') `
     'anvil must preserve a user-modified owned file'
@@ -581,13 +600,36 @@ Assert-That 'adding a hook selects a new tag' ($hookReference -ne $reference) `
 # The default Dockerfile does not consume the secret, so prove the wiring by
 # having the image read it. This is a fixture-side Dockerfile edit, which is a
 # supported user action (proved in section 6).
+#
+# The build *writes* the secret and deletes it in the same layer, which is what
+# the real Dockerfile does with the credential files an install leaves behind.
+# Reading it alone would make the filesystem assertion below unfalsifiable:
+# nothing would have written the string, so `grep` would find nothing whatever
+# the layering did. A control build immediately below proves the probe can in
+# fact see a leak.
 $secretStanza = @'
 
 # --- e2e: prove the build secret arrives and never lands in a layer ---
 RUN --mount=type=secret,id=e2e_token,required=true \
     test -s /run/secrets/e2e_token \
-    && echo "e2e: secret length $(wc -c < /run/secrets/e2e_token)"
+    && echo "e2e: secret length $(wc -c < /run/secrets/e2e_token)" \
+    && cp /run/secrets/e2e_token /usr/local/cargo/credentials.toml \
+    && rm -f /usr/local/cargo/credentials.toml
 '@
+
+# The same stanza without the deletion. Built first, so a probe that cannot
+# detect a leak fails here rather than passing silently on the real image.
+$leakControlStanza = $secretStanza -replace '(?m)\s*&& rm -f /usr/local/cargo/credentials\.toml$', ''
+Write-Fixture $dockerfile ($dockerfileBody + $leakControlStanza)
+Write-Step 'building a deliberately leaking image to prove the probe works'
+$controlRun = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'anvil-fmt') -AllowFailure
+Assert-Equal 'the control image builds' 0 $controlRun.ExitCode
+$controlLeak = Invoke-Engine -Arguments @(
+    'run', '--rm', '--pull=never', (Get-ImageReference -Repo $repo),
+    'grep', '-rsq', 'build-secret-value', '/opt/anvil', '/root', '/usr/local/cargo', '/tmp', '/run'
+) -AllowFailure
+Assert-Equal 'the probe detects a secret left in the filesystem' 0 $controlLeak.ExitCode
+
 Write-Fixture $dockerfile ($dockerfileBody + $secretStanza)
 
 Write-Step 'rebuilding with the hook active'

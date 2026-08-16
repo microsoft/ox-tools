@@ -81,19 +81,28 @@ pub fn dockerignore() -> Artifact {
 /// catalog adds one with [`crate::CatalogBuilder::with_artifact`]; a single
 /// repository can write the same path by hand. The recipe loads it either way.
 ///
-/// The script may define either or both of two functions, and is dot-sourced
-/// before the phase that needs it:
+/// The script may define any of three functions, and is dot-sourced before the
+/// phase that needs it:
 ///
 /// - `Anvil-PreBuild` returns `@{ Secrets = @{ <id> = <value> } }`. Each entry
 ///   becomes a `BuildKit` `--secret id=<id>`, passed by environment variable
 ///   name so the value never reaches a process argument, and never a layer.
 /// - `Anvil-PreRun` returns `@{ Env = @{ <NAME> = <value> } }`. Each entry is
 ///   forwarded into the container by name, for the same reason.
+/// - `Anvil-ResolveImage` takes the computed reference and returns one to use
+///   instead, or nothing. It is how a repository fetches a published image
+///   rather than building locally.
 ///
-/// An empty value from either function is a hard error: a build that silently
-/// proceeds without its credential would install a reduced tool set and then be
-/// tagged with the same content hash a credentialed build produces, so every
-/// later run would reuse the broken image.
+/// The two credential phases are fail-closed: an empty value, a return with no
+/// entries, a throw, or a script that cannot even be loaded stops the run. A
+/// build that silently proceeded without its credential would install a reduced
+/// tool set and then be tagged with the same content hash a credentialed build
+/// produces, so every later run would reuse the broken image.
+///
+/// `Anvil-ResolveImage` is the opposite, and deliberately so: every failure --
+/// including a hook that fails to load -- falls through to a local build, which
+/// is slower but always correct. A publisher that has not caught up with a
+/// change must not block the developer who made it.
 ///
 /// The file's *content* is part of the image identity, since it decides what the
 /// build installs. Its *output* deliberately is not: a credential must never
@@ -210,15 +219,25 @@ mod tests {
         assert!(resolve < no_rebuild, "resolving is not building, so NO_REBUILD must not block it");
 
         // A publisher that has not caught up must not stop the developer who
-        // made the change, so every failure falls through to a build.
-        assert!(RECIPE.contains("anvil: Anvil-ResolveImage failed:"));
+        // made the change, so every failure falls through to a build --
+        // including a hook that cannot even be loaded, which is why the
+        // dot-source is inside the try rather than ahead of it.
+        let try_start = RECIPE[..resolve].rfind("try {").expect("the resolve call must sit inside a try");
+        let load = RECIPE[..resolve]
+            .rfind(". $hookPath")
+            .expect("the hook must be loaded before it is called");
+        assert!(try_start < load, "loading a broken hook must not escape the catch");
+        assert!(RECIPE.contains("anvil: $hookRel failed:"));
         assert!(RECIPE.contains("anvil: nothing resolved; building locally"));
     }
 
     #[test]
-    fn a_resolved_reference_is_verified_before_it_is_used() {
-        // The run is `--pull=never`, so a hook that reports a reference it did
-        // not actually fetch would fail later and further from the cause.
+    fn a_resolved_reference_is_checked_for_presence_before_it_is_used() {
+        // Presence, not verification: `image inspect` proves something carries
+        // that reference, not that its contents match the digest the tag
+        // claims. Trusting the hook is the contract; this only keeps a
+        // reference the hook never fetched from failing later, under
+        // `--pull=never`, a long way from the cause.
         let resolve = RECIPE.find("Anvil-ResolveImage $image").expect("the resolve call must exist");
         let verify = RECIPE[resolve..]
             .find("image inspect $resolved")
@@ -226,7 +245,7 @@ mod tests {
         let accept = RECIPE[resolve..]
             .find("Write-Output $resolved")
             .expect("a resolved reference must be returned");
-        assert!(verify < accept, "verify the resolved reference before returning it");
+        assert!(verify < accept, "check the resolved reference before returning it");
     }
 
     #[test]
@@ -259,7 +278,7 @@ mod tests {
         }
         // And the escaping that is present uses just's own doubling form.
         assert!(RECIPE.contains(r#"replace(justfile_directory(), "'", "''")"#));
-        assert!(RECIPE.contains(r#"replace(invocation_directory(), "'", "''")"#));
+        assert!(RECIPE.contains(r#"replace(invocation_directory_native(), "'", "''")"#));
         assert!(RECIPE.contains(r#"replace(target, "'", "''")"#));
     }
 
@@ -398,7 +417,8 @@ mod tests {
         // A derived token is set on this process, so it must be registered for
         // the same cleanup the hook's variables get.
         assert!(RECIPE.contains("$hookEnv += 'GITHUB_TOKEN'"));
-        // An exported token is left alone rather than re-derived.
+        // An exported token is left alone rather than re-derived; scoping of
+        // the derived one is asserted in its own test below.
         assert!(RECIPE.contains("if (-not $env:GITHUB_TOKEN -and (Get-Command gh"));
         // Forwarding by name only works if the engine can see the name, so a
         // WSL engine needs it bridged -- otherwise `-e NAME` forwards nothing.
@@ -406,16 +426,95 @@ mod tests {
     }
 
     #[test]
-    fn only_the_tool_catalog_defines_the_image() {
-        // `just anvil-setup` installs the whole catalog, and every install
-        // recipe is defined in tools.just against a pin in versions.just, so a
-        // tool cannot be added, removed or repinned without one of the two
-        // changing. Hashing the tier/group/check recipes as well would rebuild
-        // the image for an edit that cannot change what it contains -- and
-        // those recipes run from the bind mount, not from the image.
-        assert!(RECIPE.contains("$inputs += 'justfiles/anvil/tools.just'"));
-        assert!(RECIPE.contains("$inputs += 'justfiles/anvil/versions.just'"));
-        assert!(!RECIPE.contains("-Recurse -File -Filter '*.just'"));
+    fn the_whole_recipe_tree_defines_the_image() {
+        // `just anvil-setup` reaches the install recipes through the tier,
+        // group and check recipes, so the routing decides *whether* a tool is
+        // installed as surely as tools.just decides *how*. Hashing only the
+        // install definitions would let a group drop a `-setup` dependency,
+        // changing the installed set, without renaming the image.
+        assert!(RECIPE.contains("-Recurse -File -Filter '*.just'"));
+        // Including this driver, which passes the build arguments, the secret
+        // mounts and the hook's PreBuild output into the build.
+        assert!(!RECIPE.contains("-cne 'justfiles/anvil/container.just'"));
+    }
+
+    #[test]
+    fn the_recipe_contract_inputs_cross_the_boundary() {
+        // A check that reads one of these natively must read the same value in
+        // a container, or the same command means two different things.
+        // anvil-pr-title is the sharp case: with PR_TITLE unset it exits 0 with
+        // a skip notice, so a title a native run rejects would pass in a
+        // container and the tier would still report green.
+        for name in ["PR_TITLE", "BASE_REF", "GITHUB_BASE_REF", "SYSTEM_PULLREQUEST_TARGETBRANCH"] {
+            assert!(RECIPE.contains(name), "{name} must be forwarded");
+        }
+        for name in ["ANVIL_INCLUDE_MODIFIED", "ANVIL_INCLUDE_AFFECTED", "ANVIL_INCLUDE_REQUIRED"] {
+            assert!(RECIPE.contains(name), "{name} must be forwarded");
+        }
+    }
+
+    #[test]
+    fn a_derived_token_is_scoped_to_a_target_that_reads_it() {
+        // Forwarding an exported GITHUB_TOKEN is exact parity: natively it is
+        // visible to every process the shell spawns too. Minting one from `gh`
+        // is not -- PID 1's environment reaches every build script and proc
+        // macro, where natively the recipe mints it in its own process -- so it
+        // happens only for a target whose plan reads the variable.
+        let derive = RECIPE.find("gh auth token --hostname").expect("the gh fallback must exist");
+        let guard = RECIPE[..derive].rfind("if ($needsToken)").expect("the derive must be guarded");
+        let plan = RECIPE[..guard]
+            .rfind("$plan -match 'GITHUB_TOKEN'")
+            .expect("the plan must decide whether a token is needed");
+        let dry_run = RECIPE[..plan]
+            .rfind("just --dry-run @targetParts")
+            .expect("the plan must come from just");
+        assert!(dry_run < plan && plan < guard, "compute the plan, match it, then derive");
+        // The predicate is the variable, not the name of a check, so a catalog
+        // that adds another GitHub-authenticated check is covered for free.
+        assert!(!RECIPE.contains("$plan -match 'aprz'"));
+        // An interactive session has no target to plan, and can run anything.
+        assert!(RECIPE.contains("$needsToken = $targetParts.Count -eq 0"));
+    }
+
+    #[test]
+    fn the_credential_phases_are_fail_closed() {
+        // Unlike resolution, these must stop the run: a container that starts
+        // without its credentials fails deep inside, far from the cause.
+        assert!(RECIPE.contains("anvil: Anvil-PreBuild returned no secrets"));
+        assert!(RECIPE.contains("anvil: Anvil-PreRun returned no variables"));
+        assert!(RECIPE.contains("anvil: failed to load ${hookRel}:"));
+        // Whitespace is not a credential. IsNullOrEmpty would accept " ".
+        assert!(!RECIPE.contains("[string]::IsNullOrEmpty($hook"));
+        // Take the last object, not the whole stream: a hook that writes
+        // progress with Write-Output would otherwise hand back an array whose
+        // .Secrets is silently $null, and the guard above would not fire.
+        assert!(RECIPE.contains("@(Anvil-PreBuild | Where-Object { $_ }) | Select-Object -Last 1"));
+        assert!(RECIPE.contains("@(Anvil-PreRun | Where-Object { $_ }) | Select-Object -Last 1"));
+    }
+
+    #[test]
+    fn the_working_directory_is_mapped_from_a_native_path() {
+        // `invocation_directory()` reports a Cygwin-style path when cygpath is
+        // on PATH, which shares no prefix with the native justfile_directory()
+        // it is made relative to -- so the run would be placed outside the
+        // mount, on a path that does not exist in the container.
+        assert!(RECIPE.contains("invocation_directory_native()"));
+        assert!(!RECIPE.contains("replace(invocation_directory(), "));
+        assert!(RECIPE.contains("$rel.StartsWith('..')"));
+    }
+
+    #[test]
+    fn teardown_removes_only_volumes_the_run_creates() {
+        // Naming a volume the run never mounts is a claim that it exists.
+        let down = RECIPE.find("anvil-container-down:").expect("the teardown recipe must exist");
+        for stale in ["-cargo'", "-rustup'"] {
+            assert!(
+                !RECIPE[down..].contains(stale),
+                "{stale} is never created, so it cannot be torn down"
+            );
+        }
+        assert!(RECIPE[down..].contains("-cargo-registry'"));
+        assert!(RECIPE[down..].contains("-cargo-git'"));
     }
 
     #[test]

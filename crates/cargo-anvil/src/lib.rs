@@ -146,10 +146,11 @@
 //!
 //! The tag *is* a SHA-256 digest over the inputs that define the image: the
 //! Dockerfile and its ignore file, `rust-toolchain.toml`, the optional hook,
-//! and the tool catalog (`tools.just` and `versions.just`). The tier, group
-//! and check recipes are not inputs: they only route into the catalog, and
-//! they run from the bind mount rather than from the image, so editing one
-//! takes effect without a rebuild.
+//! and the whole generated `justfiles/anvil/` tree. The tree is included in
+//! full because the image installs its tools by running `just anvil-setup`,
+//! whose dependency chain runs through the tier, group and check recipes
+//! before it reaches the install recipes -- so the routing decides *whether* a
+//! tool is installed just as surely as `tools.just` decides *how*.
 //! A changed tool pin names a tag that cannot already exist, so a build
 //! follows. There is no staleness check because there is no staleness to
 //! detect: a locally built image that is present was built from the inputs
@@ -202,9 +203,10 @@
 //! `Anvil-ResolveImage` is offered the tag when nothing local matches, and
 //! returns the reference it made available: a registry reference, used as-is
 //! rather than re-tagged locally, so the run stays honest about where the
-//! image came from. It is verified before use, and every failure falls through
-//! to a local build: a publisher that has not caught up must not block the
-//! change it has not caught up with.
+//! image came from. Its presence is checked before use -- which proves
+//! something carries that reference, not that the contents match the digest --
+//! and every failure falls through to a local build: a publisher that has not
+//! caught up must not block the change it has not caught up with.
 //!
 //! The hook executes on the host, with the invoking user's permissions, before
 //! any container isolation exists. Only use one from a repository or catalog
@@ -217,7 +219,7 @@
 //! downstream catalog that needs a different base OS or toolchain source for
 //! every repository it manages replaces the artifact instead. A replacement
 //! that copies more of the tree must replace the ignore file with it, since
-//! the build context admits only `justfiles/` and `rust-toolchain.toml`. See
+//! the build context admits only `justfiles/anvil/` and `rust-toolchain.toml`. See
 //! [`artifacts::container`] and the design document for the full contract,
 //! the host setup for each engine, and the known limitations.
 //!

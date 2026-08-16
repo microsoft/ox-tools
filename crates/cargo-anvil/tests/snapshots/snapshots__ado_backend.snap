@@ -97,12 +97,11 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
     && rm /tmp/cargo-binstall.tgz
 
 # Install the pinned toolchain and cargo subcommands from the generated
-# catalog. The whole recipe tree is copied because `just` has to parse it, but
-# only `tools.just` and `versions.just` decide what this layer installs, and
-# only those are hashed into the tag -- so editing a check does not rebuild the
-# image, and the check runs from the bind mount anyway. The synthetic Justfile
-# below imports only the anvil tree, avoiding repository-specific imports that
-# may not exist yet.
+# catalog. The whole recipe tree is copied because `just` has to parse it, and
+# the whole tree is hashed into the tag: `anvil-setup` reaches the install
+# recipes through the tier, group and check recipes, so any of them can change
+# what this layer installs. The synthetic Justfile below imports only the anvil
+# tree, avoiding repository-specific imports that may not exist yet.
 #
 # `binstall` matches what CI passes. It is not just a speed-up: some catalog
 # tools do not compile from source on every pinned toolchain, so a source
@@ -113,6 +112,13 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # *writes* with it is ordinary content -- and the `chmod` on the next line
 # would otherwise publish it world-readable. Deleting them in a later `RUN`
 # would not help: the earlier layer still carries the file.
+#
+# `registry` and `git` are created before the `chmod` because the run mounts a
+# named volume over each. An engine seeds a new volume from the image path it
+# covers, and a path that does not exist is seeded as a root-owned 0755
+# directory -- which the `--user` mapping on Linux then cannot write, so the
+# first cargo fetch fails with EACCES. Creating them here means the widened
+# permissions are what the volume inherits.
 WORKDIR /opt/anvil
 COPY justfiles ./justfiles
 COPY rust-toolchain.toml ./
@@ -120,6 +126,7 @@ RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
     && just anvil-setup binstall \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME}/.netrc" \
+    && mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
     && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
 
 # Consumed by `anvil-container` itself: a nested invocation from inside the
@@ -3609,11 +3616,11 @@ _anvil-container-path host_path:
 # Print the exec image reference for the current inputs, without building it.
 #
 # The tag is a SHA-256 over the image's declared inputs: the Dockerfile and its
-# ignore file, the pinned toolchain, the optional hook, and the tool catalog
-# (`tools.just` and `versions.just`) that decides what `just anvil-setup`
-# installs. The tier, group and check recipes are not inputs: they only route
-# into the catalog, and they execute from the bind mount rather than from the
-# image, so editing one takes effect on the next run without a rebuild.
+# ignore file, the pinned toolchain, the optional hook, and the whole generated
+# recipe tree -- because the image installs its tools by running
+# `just anvil-setup`, whose dependency chain reaches the tier, group, check and
+# tool recipes alike. Editing any of them can change what the image contains, so
+# any of them can rename it.
 #
 # This is the only recipe that computes the reference; everything else asks it.
 # It is public because a publisher needs the tag before there is an image to
@@ -3637,14 +3644,24 @@ anvil-container-tag:
         # never hashed: a credential must not influence a tag.
         $inputs += $hookRel
     }
-    # The tool catalog, and nothing else. `just anvil-setup` installs the whole
-    # catalog, and every install recipe is defined in tools.just against a pin
-    # in versions.just -- so a tool cannot be added, removed or repinned
-    # without one of these two changing. The tier, group and check recipes only
-    # route into them, and are read from the bind mount at run time rather than
-    # from the image, so editing a check must not cost a rebuild.
-    $inputs += 'justfiles/anvil/tools.just'
-    $inputs += 'justfiles/anvil/versions.just'
+    # Every generated recipe file. The image installs its tools by running
+    # `just anvil-setup`, and that dependency chain runs through the tier,
+    # group and check recipes before it reaches the install recipes in
+    # tools.just -- so the routing decides *whether* a tool is installed just
+    # as surely as tools.just decides *how*. Hashing only the install
+    # definitions would let a group drop a `-setup` dependency, changing the
+    # installed set, without renaming the image.
+    #
+    # This driver is included too. It is not circular -- the tag is derived
+    # from file text, and no file contains the tag -- and it belongs in the set
+    # because it passes the build arguments, the secret mounts and the hook's
+    # `Anvil-PreBuild` output into the build, all of which shape the result.
+    $recipeRoot = Join-Path $repoRoot 'justfiles/anvil'
+    if (Test-Path -LiteralPath $recipeRoot) {
+        foreach ($file in Get-ChildItem -LiteralPath $recipeRoot -Recurse -File -Filter '*.just') {
+            $inputs += [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName) -replace '\\', '/'
+        }
+    }
 
     # Hash a tagged stream rather than raw concatenation, so no rearrangement of
     # names and contents can collide. Line endings are normalized once, here, so
@@ -3728,32 +3745,40 @@ _anvil-container-image:
         # with a change must not stop the developer who made it.
         $hookPath = Join-Path $repoRoot $hookRel
         if ($env:ANVIL_CONTAINER_NO_RESOLVE -ne '1' -and (Test-Path -LiteralPath $hookPath -PathType Leaf)) {
-            . $hookPath
-            if (Get-Command Anvil-ResolveImage -CommandType Function -ErrorAction SilentlyContinue) {
-                [Console]::Error.WriteLine("anvil: running Anvil-ResolveImage from $hookRel")
-                $resolved = $null
-                try {
+            # Dot-sourcing is inside the try as well: a hook with a syntax error,
+            # or one that throws while being loaded, must cost no more than a
+            # hook that resolves nothing. The recipe runs under
+            # `$ErrorActionPreference = 'Stop'`, so leaving the load outside
+            # would abort the run instead of falling through to a build.
+            $resolved = $null
+            try {
+                . $hookPath
+                if (Get-Command Anvil-ResolveImage -CommandType Function -ErrorAction SilentlyContinue) {
+                    [Console]::Error.WriteLine("anvil: running Anvil-ResolveImage from $hookRel")
                     $resolved = @(Anvil-ResolveImage $image | Where-Object { $_ }) | Select-Object -Last 1
-                } catch {
-                    [Console]::Error.WriteLine("anvil: Anvil-ResolveImage failed: $($_.Exception.Message)")
-                    $resolved = $null
                 }
-                if (-not [string]::IsNullOrWhiteSpace($resolved)) {
-                    $resolved = ([string]$resolved).Trim()
-                    # Verify rather than trust: the run is `--pull=never`, so a
-                    # reference the hook reported but did not actually fetch
-                    # would fail later, further from the cause.
-                    & $engineExe @enginePrefix image inspect $resolved *> $null
-                    if ($LASTEXITCODE -eq 0) {
-                        [Console]::Error.WriteLine("anvil: resolved $resolved")
-                        Write-Output $resolved
-                        exit 0
-                    }
-                    [Console]::Error.WriteLine(
-                        "anvil: Anvil-ResolveImage reported '$resolved' but no such image is present locally")
-                }
-                [Console]::Error.WriteLine("anvil: nothing resolved; building locally")
+            } catch {
+                [Console]::Error.WriteLine("anvil: $hookRel failed: $($_.Exception.Message)")
+                $resolved = $null
             }
+            if (-not [string]::IsNullOrWhiteSpace($resolved)) {
+                $resolved = ([string]$resolved).Trim()
+                # A presence check, not a verification: `image inspect` proves
+                # something is tagged with that reference, not that its contents
+                # match the digest the tag claims. Trusting the hook is the
+                # contract -- this only keeps a reference the hook reported but
+                # never fetched from failing later, under `--pull=never`, a long
+                # way from the cause.
+                & $engineExe @enginePrefix image inspect $resolved *> $null
+                if ($LASTEXITCODE -eq 0) {
+                    [Console]::Error.WriteLine("anvil: resolved $resolved")
+                    Write-Output $resolved
+                    exit 0
+                }
+                [Console]::Error.WriteLine(
+                    "anvil: Anvil-ResolveImage reported '$resolved' but no such image is present locally")
+            }
+            [Console]::Error.WriteLine("anvil: nothing resolved; building locally")
         }
     }
 
@@ -3781,23 +3806,49 @@ _anvil-container-image:
     $secretEnv = @()
     $hookPath = Join-Path $repoRoot $hookRel
     if (Test-Path -LiteralPath $hookPath -PathType Leaf) {
-        . $hookPath
+        # Fail-closed, unlike the resolve hook: a build that cannot mint its
+        # credentials must stop, not proceed to produce a reduced image. The
+        # try exists only so the cause is named -- loading a hook with a syntax
+        # error would otherwise surface as a bare parser error with no hint
+        # that a hook was involved.
+        try {
+            . $hookPath
+        } catch {
+            Write-Error "anvil: failed to load ${hookRel}: $($_.Exception.Message)"
+            exit 1
+        }
         if (Get-Command Anvil-PreBuild -CommandType Function -ErrorAction SilentlyContinue) {
             [Console]::Error.WriteLine("anvil: running Anvil-PreBuild from $hookRel")
-            $hook = Anvil-PreBuild
-            if ($null -ne $hook -and $null -ne $hook.Secrets) {
-                foreach ($id in $hook.Secrets.Keys) {
-                    if ([string]::IsNullOrEmpty($hook.Secrets[$id])) {
-                        Write-Error "anvil: Anvil-PreBuild returned an empty value for secret '$id'"
-                        exit 1
-                    }
-                    $name = "ANVIL_SECRET_$id"
-                    Set-Item -LiteralPath "Env:$name" -Value $hook.Secrets[$id]
-                    $secretEnv += $name
-                    $secretArgs += "id=$id,env=$name"
-                }
-                [Console]::Error.WriteLine("anvil: build secrets: $($hook.Secrets.Keys -join ', ')")
+            try {
+                # Take the last emitted object, not the whole stream: a hook
+                # that writes progress with `Write-Output` would otherwise hand
+                # back an array whose `.Secrets` is silently $null.
+                $hook = @(Anvil-PreBuild | Where-Object { $_ }) | Select-Object -Last 1
+            } catch {
+                Write-Error "anvil: Anvil-PreBuild failed: $($_.Exception.Message)"
+                exit 1
             }
+            $secrets = if ($null -ne $hook) { $hook.Secrets } else { $null }
+            # A defined `Anvil-PreBuild` that yields nothing is the hazard this
+            # guard exists for, not a hook opting out: secrets are the only
+            # thing the phase can contribute, so an empty return means the mint
+            # failed quietly. A hook with no build-time credentials simply does
+            # not define the function.
+            if ($null -eq $secrets -or $secrets.Keys.Count -eq 0) {
+                Write-Error "anvil: Anvil-PreBuild returned no secrets; omit the function if the build needs none"
+                exit 1
+            }
+            foreach ($id in $secrets.Keys) {
+                if ([string]::IsNullOrWhiteSpace($secrets[$id])) {
+                    Write-Error "anvil: Anvil-PreBuild returned an empty value for secret '$id'"
+                    exit 1
+                }
+                $name = "ANVIL_SECRET_$id"
+                Set-Item -LiteralPath "Env:$name" -Value $secrets[$id]
+                $secretEnv += $name
+                $secretArgs += "id=$id,env=$name"
+            }
+            [Console]::Error.WriteLine("anvil: build secrets: $($secrets.Keys -join ', ')")
         }
     }
 
@@ -3891,8 +3942,17 @@ anvil-container *target:
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     # Map the caller's working directory to its in-container equivalent so
-    # relative paths keep working from a subdirectory.
-    $rel = [System.IO.Path]::GetRelativePath($repoRoot, '{{ replace(invocation_directory(), "'", "''") }}') -replace '\\', '/'
+    # relative paths keep working from a subdirectory. `invocation_directory()`
+    # would be wrong here: with `cygpath` on PATH it reports a Cygwin-style
+    # path, which shares no prefix with the native `justfile_directory()` above.
+    # `GetRelativePath` then walks out with `..` segments and the run is placed
+    # outside the mount, so it fails on a path that does not exist in the
+    # container. The `_native` form is the one that agrees with the root.
+    $rel = [System.IO.Path]::GetRelativePath($repoRoot, '{{ replace(invocation_directory_native(), "'", "''") }}') -replace '\\', '/'
+    if ($rel.StartsWith('..')) {
+        Write-Error "anvil: run this from inside the repository; $rel is outside $repoRoot"
+        exit 1
+    }
     $containerCwd = if ($rel -eq '.' -or [string]::IsNullOrEmpty($rel)) {
         '{{anvil_container_workdir}}'
     } else {
@@ -3989,22 +4049,44 @@ anvil-container *target:
     #
     # Resolve the token exactly as the recipe does natively -- GITHUB_TOKEN
     # first, then the gh CLI's stored token -- so a containerized run
-    # authenticates for the same developers a native run does. Deriving it here
-    # rather than only forwarding an exported value is deliberate: the two
-    # paths have identical exposure once inside (a forwarded token is readable
-    # by every recipe in the container either way, including third-party build
-    # scripts and proc macros), so refusing to derive it buys no boundary and
-    # only makes behaviour depend on how the developer happened to sign in.
+    # authenticates for the same developers a native run does.
+    #
+    # An already-exported GITHUB_TOKEN is forwarded whatever the target is:
+    # that is exact parity, since a native run exposes it to every process the
+    # shell spawns too. Deriving one from `gh` is different -- it manufactures a
+    # credential the developer did not put in this environment, and PID 1's
+    # environment is inherited by every build script and proc macro in the
+    # container, where natively the recipe would mint it in its own process. So
+    # it is derived only when the target actually reads the variable, or when
+    # there is no target at all: an interactive session can run anything, and
+    # refusing there would reintroduce the silent hour-long stall on a tier the
+    # developer runs from inside the shell.
     # `gh auth token` is non-interactive and never opens a prompt.
+    #
+    # The predicate is the variable itself rather than the name of a check, so
+    # the driver stays generic: a catalog that adds another GitHub-authenticated
+    # check is covered without touching this recipe.
     #
     # Set here and passed by NAME, so the value never reaches the host's
     # process command line, and unset again with the hook's variables below.
     if (-not $env:GITHUB_TOKEN -and (Get-Command gh -ErrorAction SilentlyContinue)) {
-        $ghToken = $null
-        try { $ghToken = (gh auth token --hostname github.com 2>$null) } catch { $ghToken = $null }
-        if ($ghToken -and $ghToken.Trim()) {
-            Set-Item -LiteralPath 'Env:GITHUB_TOKEN' -Value $ghToken.Trim()
-            $hookEnv += 'GITHUB_TOKEN'
+        # Ask just what the target would run. A dry run has no side effects, and
+        # a target that cannot be planned (a typo, a recipe needing arguments)
+        # yields nothing, so the run fails on its own terms rather than on a
+        # missing token.
+        $needsToken = $targetParts.Count -eq 0
+        if (-not $needsToken) {
+            $plan = ''
+            try { $plan = (just --dry-run @targetParts 2>&1 | ForEach-Object { $_.ToString() }) -join "`n" } catch { $plan = '' }
+            $needsToken = $plan -match 'GITHUB_TOKEN'
+        }
+        if ($needsToken) {
+            $ghToken = $null
+            try { $ghToken = (gh auth token --hostname github.com 2>$null) } catch { $ghToken = $null }
+            if ($ghToken -and $ghToken.Trim()) {
+                Set-Item -LiteralPath 'Env:GITHUB_TOKEN' -Value $ghToken.Trim()
+                $hookEnv += 'GITHUB_TOKEN'
+            }
         }
     }
     if ($env:GITHUB_TOKEN) {
@@ -4012,28 +4094,64 @@ anvil-container *target:
         $runArgs += @('-e', 'GITHUB_TOKEN')
     }
 
+    # The recipe contract's own inputs. These are read by generated checks --
+    # `anvil-pr-title` reads PR_TITLE, `_anvil-base-ref` reads BASE_REF and its
+    # CI equivalents, and the impact filters read the ANVIL_INCLUDE_* set -- so
+    # dropping them at the boundary makes the same command mean different things
+    # inside and out. anvil-pr-title is the sharp case: with PR_TITLE unset it
+    # exits 0 with a skip notice, so a title a native run rejects passes in a
+    # container and the tier still reports green.
+    #
+    # Forwarded by name and only when set, so an unset variable stays unset
+    # rather than arriving as an empty string, which several of these treat as
+    # a value.
+    foreach ($name in @(
+        'PR_TITLE',
+        'BASE_REF', 'GITHUB_BASE_REF', 'SYSTEM_PULLREQUEST_TARGETBRANCH',
+        'ANVIL_INCLUDE_MODIFIED', 'ANVIL_INCLUDE_AFFECTED', 'ANVIL_INCLUDE_REQUIRED')) {
+        if ((Test-Path -LiteralPath "Env:$name") -and -not [string]::IsNullOrEmpty((Get-Item -LiteralPath "Env:$name").Value)) {
+            $forwardedEnv += $name
+            $runArgs += @('-e', $name)
+        }
+    }
+
     $hookPath = Join-Path $repoRoot '.anvil/container/hooks.ps1'
     if (Test-Path -LiteralPath $hookPath -PathType Leaf) {
-        . $hookPath
+        # Fail-closed like Anvil-PreBuild: a run that cannot obtain its
+        # credentials fails inside the container in a far less obvious way.
+        try {
+            . $hookPath
+        } catch {
+            Write-Error "anvil: failed to load .anvil/container/hooks.ps1: $($_.Exception.Message)"
+            exit 1
+        }
         if (Get-Command Anvil-PreRun -CommandType Function -ErrorAction SilentlyContinue) {
             [Console]::Error.WriteLine("anvil: running Anvil-PreRun from .anvil/container/hooks.ps1")
-            $hook = Anvil-PreRun
-            if ($null -ne $hook -and $null -ne $hook.Env) {
-                foreach ($name in $hook.Env.Keys) {
-                    if ([string]::IsNullOrEmpty($hook.Env[$name])) {
-                        Write-Error "anvil: Anvil-PreRun returned an empty value for '$name'"
-                        exit 1
-                    }
-                    Set-Item -LiteralPath "Env:$name" -Value $hook.Env[$name]
-                    $hookEnv += $name
-                    $forwardedEnv += $name
-                    $runArgs += @('-e', $name)
-                }
-                # Names only, never values: a hook with a broad idea of what to
-                # forward should be visible, since everything inside the
-                # container can read it -- including third-party build scripts.
-                [Console]::Error.WriteLine("anvil: forwarding env: $($hook.Env.Keys -join ', ')")
+            try {
+                $hook = @(Anvil-PreRun | Where-Object { $_ }) | Select-Object -Last 1
+            } catch {
+                Write-Error "anvil: Anvil-PreRun failed: $($_.Exception.Message)"
+                exit 1
             }
+            $hookVars = if ($null -ne $hook) { $hook.Env } else { $null }
+            if ($null -eq $hookVars -or $hookVars.Keys.Count -eq 0) {
+                Write-Error "anvil: Anvil-PreRun returned no variables; omit the function if the run needs none"
+                exit 1
+            }
+            foreach ($name in $hookVars.Keys) {
+                if ([string]::IsNullOrWhiteSpace($hookVars[$name])) {
+                    Write-Error "anvil: Anvil-PreRun returned an empty value for '$name'"
+                    exit 1
+                }
+                Set-Item -LiteralPath "Env:$name" -Value $hookVars[$name]
+                $hookEnv += $name
+                $forwardedEnv += $name
+                $runArgs += @('-e', $name)
+            }
+            # Names only, never values: a hook with a broad idea of what to
+            # forward should be visible, since everything inside the
+            # container can read it -- including third-party build scripts.
+            [Console]::Error.WriteLine("anvil: forwarding env: $($hookVars.Keys -join ', ')")
         }
     }
 
@@ -4131,7 +4249,7 @@ anvil-container-down:
     # be able to tell that it failed. `-f` already exits 0 for a volume that
     # does not exist, so this cannot fire spuriously.
     $failed = @()
-    foreach ($vol in @('{{anvil_container_name}}-cargo-registry', '{{anvil_container_name}}-cargo-git', '{{anvil_container_name}}-cargo', '{{anvil_container_name}}-rustup')) {
+    foreach ($vol in @('{{anvil_container_name}}-cargo-registry', '{{anvil_container_name}}-cargo-git')) {
         & $engineExe @enginePrefix volume rm -f $vol
         if ($LASTEXITCODE -ne 0) { $failed += $vol }
     }
