@@ -1,0 +1,544 @@
+{
+  "mode": "changed",
+  "tokens": [
+    "data_privacy_macros_impl",
+    "fundle_macros_impl",
+    "http_extensions",
+    "internity",
+    "internity_macros",
+    "internity_macros_impl",
+    "multitude",
+    "ohno",
+    "ohno_macros",
+    "routerama_build",
+    "thread_aware_macros",
+    "thread_aware_macros_impl",
+    "tick"
+  ],
+  "selectionDecisions": {
+    "bytesbuf": {
+      "decision": "decline",
+      "reason": "dev-dependency-only",
+      "evidence": [
+        "The only changed file is crates/bytesbuf/Cargo.toml, and manifestDependencyScopes is ['dev']: windows-sys under [target.'cfg(target_os = \"windows\")'.dev-dependencies] gained the Win32_Foundation and Win32_System_SystemInformation features.",
+        "No normal/build dependency, package feature, source, test, or benchmark file changed, so the published manifest is unchanged."
+      ]
+    },
+    "bytesbuf_io": {
+      "decision": "decline",
+      "reason": "test-only",
+      "evidence": [
+        "crates/bytesbuf_io/src/testing/pending.rs changed only inside its #[cfg(test)] mod tests block: hand-rolled Waker/Context polling was replaced with testing_aids::FutureTestExt helpers.",
+        "The supporting manifest edit is dev-scoped (manifestDependencyScopes ['dev']): dev-dependency futures gained the 'executor' feature.",
+        "No public item, published behavior, or runtime dependency declaration changed."
+      ]
+    },
+    "cachet": {
+      "decision": "decline",
+      "reason": "test-only",
+      "evidence": [
+        "crates/cachet/src/telemetry/cache.rs changed only inside its #[cfg(test)] mod tests block: nested_with_request_id_restores_outer_id now uses testing_aids::FutureTestExt::unwrap_ready instead of manual pin!/Waker::noop polling.",
+        "manifestDependencyScopes is empty and no Cargo.toml changed, so the published manifest and public API are untouched."
+      ]
+    },
+    "cachet_tier": {
+      "decision": "decline",
+      "reason": "internal-only",
+      "evidence": [
+        "crates/cachet_tier/src/error.rs replaced '#[ohno::error] #[no_constructors] #[derive(Clone)]' with '#[derive(ohno::Error, Clone)] #[no_constructors]' plus an explicitly declared '#[error] ohno_core: OhnoCore' private field.",
+        "This is the mechanical adaptation to ohno_macros rejecting #[no_constructors] under #[ohno::error]; the resulting public API (pub struct Error, its inherent methods, and its Clone/Error impls) and observable behavior are identical, and the added field is private.",
+        "docCommentChanged is false and manifestDependencyScopes is empty, so nothing consumer-visible in this crate's own diff changed."
+      ]
+    },
+    "data_privacy_core": {
+      "decision": "decline",
+      "reason": "dev-dependency-only",
+      "evidence": [
+        "Only crates/data_privacy_core/Cargo.toml and the generated crates/data_privacy_core/README.md changed; manifestDependencyScopes is ['dev'] (the serde dev-dependency declaration) and manifestOtherChanged is false.",
+        "Generated READMEs are produced by 'just readme' and never seed a release."
+      ]
+    },
+    "data_privacy_macros": {
+      "decision": "decline",
+      "reason": "release-metadata-only",
+      "evidence": [
+        "crates/data_privacy_macros/Cargo.toml only gained the anvil-managed '# >>> anvil-managed: anvil-lints' marker comments; manifestDependencyScopes is empty and manifestOtherChanged is false.",
+        "The other changed path is the generated crates/data_privacy_macros/README.md, which never seeds a release.",
+        "macroCompileFixtureChanges is empty for this macro, so no compile contract obligation is outstanding."
+      ]
+    },
+    "data_privacy_macros_impl": {
+      "decision": "accept",
+      "reason": "breaking",
+      "evidence": [
+        "externalDepChanges records syn moving from ^2.0.111 to ^3.0.2 (kinds ['normal'], breaking true) through the root [workspace.dependencies] bump.",
+        "externalExposedDeps for this crate contains syn (and proc_macro2): [package.metadata.cargo_check_external_types].allowed_external_types names syn::error::Error and syn::error::Result, so the public API hands consumers syn types.",
+        "Consumers therefore resolve against a different syn compatibility line under unchanged paths, which is a breaking manifest change even though cargo semver-checks reports no update required."
+      ]
+    },
+    "fetch": {
+      "decision": "decline",
+      "reason": "dev-dependency-only",
+      "evidence": [
+        "The only changed file is crates/fetch/Cargo.toml and manifestDependencyScopes is ['dev']: the dev-dependencies futures (+executor,std), serde_json (+std) and tracing (+std) feature activations.",
+        "Dev-dependency features are not part of the published manifest and do not seed a release."
+      ]
+    },
+    "fetch_options": {
+      "decision": "decline",
+      "reason": "release-metadata-only",
+      "evidence": [
+        "crates/fetch_options/Cargo.toml only gained the anvil-managed anvil-lints marker comments; manifestDependencyScopes is empty and manifestOtherChanged is false.",
+        "The only other changed path is the generated crates/fetch_options/README.md, so metadata takes precedence and the diff is release metadata only."
+      ]
+    },
+    "fundle_macros_impl": {
+      "decision": "accept",
+      "reason": "breaking",
+      "evidence": [
+        "modifiedFiles is empty: this crate was promoted to modified purely by the inherited [workspace.dependencies] change, which cargo publish inlines into its published manifest.",
+        "externalDepChanges records syn ^2.0.111 -> ^3.0.2 (kinds ['normal'], breaking true) against baseline 94229b8778baab215e5bf9b3af4edd5f92178b0a.",
+        "externalExposedDeps contains syn, so the public API names syn types whose identity changes with the new compatibility line."
+      ]
+    },
+    "http_extensions": {
+      "decision": "accept",
+      "reason": "runtime-manifest-change",
+      "evidence": [
+        "crates/http_extensions/Cargo.toml changed a normal dependency declaration: bytes = { workspace = true } became bytes = { workspace = true, features = [\"std\"] }.",
+        "manifestDependencyScopes is ['normal'], so the published manifest genuinely changed and seeds a patch.",
+        "No Rust source changed (rustImplementationChanged false) and cargo semver-checks reports no update required."
+      ]
+    },
+    "http_path_template": {
+      "decision": "decline",
+      "reason": "release-metadata-only",
+      "evidence": [
+        "crates/http_path_template/Cargo.toml only wrapped the existing [lints] workspace = true block in the anvil-managed anvil-lints markers; manifestDependencyScopes is empty and manifestOtherChanged is false (lints are ignorable release metadata).",
+        "The only other changed path is the generated crates/http_path_template/README.md."
+      ]
+    },
+    "internity": {
+      "decision": "accept",
+      "reason": "nonbreaking-api",
+      "evidence": [
+        "New public types are exported from crates/internity/src/lib.rs: LocalReader (crates/internity/src/local_reader.rs) and, under the std feature, ThreadedReader (crates/internity/src/threaded_reader.rs).",
+        "New public inherent methods LocalLexicon::index_of, LocalLexicon::sym_at, LocalReader::index_of and LocalReader::sym_at were added.",
+        "LocalLexicon::freeze and ThreadedLexicon::freeze changed from '-> impl Reader' to the concrete '-> LocalReader' / '-> ThreadedReader'. The concrete types have the same fields as the previous private FlatReader/ShardedReader (Box<[u32]>, Box<[u8]>, Box<[ShardReader; NUM_SHARDS]>), so Send, Sync and Unpin are preserved, they still implement the same sealed Reader trait, and they capture no lifetimes; Clone and Debug are additive.",
+        "cargo semver-checks --package internity --baseline-rev 0de29c656d919c6a3fce94ad7df8c2de9557550e --all-features reported 'no semver update required' (exit 0); the additions are elevated to nonbreaking by source-diff review as the skill requires."
+      ]
+    },
+    "internity_macros": {
+      "decision": "accept",
+      "reason": "runtime-manifest-change",
+      "evidence": [
+        "modifiedFiles is empty: the crate was promoted to modified solely by the inherited [workspace.dependencies] bump of syn from ^2.0.111 to ^3.0.2, recorded in externalDepChanges with kinds ['normal'] and manifestDependencyScopes ['normal'].",
+        "externalExposedDeps is empty (proc-macro-only crates cannot leak foreign type identity across the macro boundary), so the breaking external requirement imposes no classification floor here.",
+        "cargo publish inlines the inherited requirement, so the published manifest changed and seeds a patch."
+      ]
+    },
+    "internity_macros_impl": {
+      "decision": "accept",
+      "reason": "breaking",
+      "evidence": [
+        "modifiedFiles is empty; the crate was promoted by the inherited [workspace.dependencies] syn bump recorded in externalDepChanges as ^2.0.111 -> ^3.0.2 (kinds ['normal'], breaking true, baselineRev 0de29c656d919c6a3fce94ad7df8c2de9557550e).",
+        "externalExposedDeps contains syn and proc_macro2, so this ordinary library's public API names syn types and consumers resolve against a different compatibility line."
+      ]
+    },
+    "layered": {
+      "decision": "decline",
+      "reason": "benchmark-only",
+      "evidence": [
+        "Only crates/layered/benches/dynamic.rs and crates/layered/Cargo.toml changed, and manifestDependencyScopes is ['dev']: the supporting edit adds the benchmarking dev-dependency.",
+        "Benchmarks and their dev dependencies are not packaged consumer surface."
+      ]
+    },
+    "multitude": {
+      "decision": "accept",
+      "reason": "runtime-manifest-change",
+      "evidence": [
+        "crates/multitude/Cargo.toml changed a normal dependency declaration: zerocopy = { workspace = true, optional = true } became zerocopy = { workspace = true, features = [\"derive\"], optional = true }.",
+        "manifestDependencyScopes is ['normal'], so the published manifest changed and seeds a patch.",
+        "No Rust source changed (rustImplementationChanged false); cargo semver-checks reports no update required."
+      ]
+    },
+    "ohno": {
+      "decision": "accept",
+      "reason": "authored-doc-fix",
+      "evidence": [
+        "rustImplementationChanged is false and docCommentChanged is true: the packaged Rust changes in crates/ohno/src/lib.rs and crates/ohno/src/app/error.rs are rustdoc-visible //! and /// doc comments only.",
+        "The doc change is consumer guidance: it documents that the generated new()/caused_by() constructors are pub(crate), and that #[no_constructors] works only with #[derive(Error)] and an explicitly declared OhnoCore field.",
+        "The remaining changed paths are the generated README.md and the trybuild fixtures under tests/ui, which are not packaged release evidence; manifestDependencyScopes is empty, so no runtime-manifest change takes precedence.",
+        "cargo semver-checks --package ohno --baseline-rev 7c185b447c5c1c94db36c6176d42093aa67b83a2 --all-features reported 'no semver update required' (exit 0). This crate's own diff is not breaking; the re-exported ohno_macros contract break reaches it as a resolver-owned cascade."
+      ]
+    },
+    "ohno_macros": {
+      "decision": "accept",
+      "reason": "breaking",
+      "evidence": [
+        "crates/ohno_macros/src/error_type_attr.rs adds reject_no_constructors: an item carrying #[no_constructors] under #[ohno::error] is now a compile error (NO_CONSTRUCTORS), input that the released 0.4.0 macro accepted and expanded.",
+        "Measured end-to-end: the consumer fixture crates/ohno/tests/ui/ohno_error_no_constructors.rs compiles at baseline 7c185b447c5c1c94db36c6176d42093aa67b83a2 (trybuild pass, exit 0) and fails at 9000d1812bb4e9e707948b1e877e7c10be3096ba (exit 101).",
+        "The shape check also moved ahead of the attribute checks, so an enum or union now reports NOT_A_STRUCT; that path already failed to compile before, so it is diagnostic wording only.",
+        "rustImplementationChanged is true, so the breaking classification rests on this crate's own packaged source."
+      ]
+    },
+    "rallocator": {
+      "decision": "decline",
+      "reason": "test-only",
+      "evidence": [
+        "The only changed paths are crates/rallocator/tests/global_allocator.rs, crates/rallocator/tests/heap.rs and crates/rallocator/tests/telemetry.rs.",
+        "manifestDependencyScopes is empty and rustImplementationChanged is false, so no packaged source or manifest changed."
+      ]
+    },
+    "rest_over_grpc": {
+      "decision": "decline",
+      "reason": "generated-artifact-only",
+      "evidence": [
+        "The only changed paths are crates/rest_over_grpc/CHANGELOG.md and crates/rest_over_grpc/README.md, both release-generated artifacts.",
+        "No Cargo.toml or any other path changed, so generated-artifact-only is the canonical reason."
+      ]
+    },
+    "routerama": {
+      "decision": "decline",
+      "reason": "test-only",
+      "evidence": [
+        "The changed paths are crates/routerama/tests/query_allocations.rs and the generated crates/routerama/README.md.",
+        "manifestDependencyScopes is empty and rustImplementationChanged is false, so nothing packaged or consumer-visible changed in this crate's own diff."
+      ]
+    },
+    "routerama_build": {
+      "decision": "accept",
+      "reason": "runtime-manifest-change",
+      "evidence": [
+        "manifestDependencyScopes is ['normal']: externalDepChanges records the inherited [workspace.dependencies] bumps proc_macro_crate ^2.0.2 -> ^3.5.0 and syn ^2.0.111 -> ^3.0.2, both inlined into the published manifest by cargo publish.",
+        "externalExposedDeps is ['proc_macro2'] only, so neither breaking external requirement reaches a publicly exposed dependency and no breaking floor applies.",
+        "The source edits in crates/routerama_build/src/macro_impl/field.rs and query.rs are the mechanical syn 3 rename (TypeBareFn -> TypeFnPtr, visit_type_bare_fn -> visit_type_fn_ptr) plus the new TypePath::attrs field in test construction; generated code and accepted syntax are unchanged.",
+        "cargo semver-checks --package routerama_build --baseline-rev 1feffd7b9840293bbe1f01c98643f042bf0b5ecf --all-features reported 'no semver update required' (exit 0)."
+      ]
+    },
+    "routerama_macros": {
+      "decision": "decline",
+      "reason": "generated-artifact-only",
+      "evidence": [
+        "The only changed path is the generated crates/routerama_macros/README.md; manifestDependencyScopes is empty and externalDepChanges is empty.",
+        "macroCompileFixtureChanges is empty for this macro, so the decline leaves no compile obligation outstanding."
+      ]
+    },
+    "seatbelt": {
+      "decision": "decline",
+      "reason": "dev-dependency-only",
+      "evidence": [
+        "The only changed file is crates/seatbelt/Cargo.toml and manifestDependencyScopes is ['dev']: the serde_json dev-dependency gained the 'std' feature.",
+        "manifestOtherChanged is false, so the published manifest is unchanged."
+      ]
+    },
+    "templated_uri_macros_impl": {
+      "decision": "decline",
+      "reason": "release-metadata-only",
+      "evidence": [
+        "The only changed file is crates/templated_uri_macros_impl/Cargo.toml, and the only edit adds [package.metadata.cargo_check_external_types] allowed_external_types = [\"proc_macro2::*\"].",
+        "manifestDependencyScopes is empty and manifestOtherChanged is false: cargo_check_external_types metadata is explicitly ignorable release metadata."
+      ]
+    },
+    "thread_aware_macros": {
+      "decision": "accept",
+      "reason": "runtime-manifest-change",
+      "evidence": [
+        "manifestDependencyScopes is ['normal']: externalDepChanges records syn ^2.0.111 -> ^3.0.2 inherited from [workspace.dependencies] and inlined into the published manifest.",
+        "externalExposedDeps is empty because this is a proc-macro-only crate, so the breaking external requirement imposes no classification or selection floor.",
+        "The crate's own Cargo.toml edit otherwise only adds anvil-managed lint markers, and macroCompileFixtureChanges is empty."
+      ]
+    },
+    "thread_aware_macros_impl": {
+      "decision": "accept",
+      "reason": "breaking",
+      "evidence": [
+        "externalDepChanges records syn ^2.0.111 -> ^3.0.2 (kinds ['normal'], breaking true, baselineRev 542a32c00a8ce2cab3ed8876056aab847bc8c6c8).",
+        "externalExposedDeps contains syn and proc_macro2: this is an ordinary library whose public API names syn types, so consumers resolve against a different syn compatibility line under unchanged paths.",
+        "The only authored file change is crates/thread_aware_macros_impl/tests/derive.rs adding the new syn 3 TypeGroup::attrs field, which is test-only; the breaking floor comes from the exposed external requirement."
+      ]
+    },
+    "tick": {
+      "decision": "accept",
+      "reason": "nonbreaking-api",
+      "evidence": [
+        "A new public Cargo feature 'fast-instant' was added in crates/tick/Cargo.toml along with new optional target dependencies libc and windows-sys.",
+        "New public API: Clock::with_fast_instant (crates/tick/src/clock.rs) and SimpleClock::with_fast_instant (crates/tick/src/simple_clock.rs), both #[must_use] and additive.",
+        "Existing signatures are unchanged; Delay and PeriodicTimer switched internally to the new private Clock::timer_instant so timer scheduling keeps using the driver's precise source, and fmt deserialization moved to a private borrowed-str visitor with the same accepted inputs.",
+        "cargo semver-checks --package tick --baseline-rev 7c185b447c5c1c94db36c6176d42093aa67b83a2 --all-features reported 'no semver update required' (exit 0); the public additions are elevated to nonbreaking by source-diff review."
+      ]
+    }
+  },
+  "classifications": {
+    "anyspawn": "patch",
+    "anyspawn_azure": "patch",
+    "bytesbuf": "patch",
+    "bytesbuf_io": "patch",
+    "cachet": "patch",
+    "cachet_memory": "patch",
+    "cachet_service": "patch",
+    "cachet_tier": "patch",
+    "data_privacy": "patch",
+    "data_privacy_core": "patch",
+    "data_privacy_macros_impl": "breaking",
+    "fetch": "patch",
+    "fetch_azure": "patch",
+    "fetch_hyper": "patch",
+    "fetch_options": "patch",
+    "fetch_tls": "patch",
+    "fundle": "patch",
+    "fundle_macros_impl": "breaking",
+    "http_extensions": "patch",
+    "http_path_template": "patch",
+    "internity": "nonbreaking",
+    "internity_macros_impl": "breaking",
+    "layered": "patch",
+    "multitude": "patch",
+    "ohno": "patch",
+    "rallocator": "patch",
+    "rest_over_grpc": "patch",
+    "routerama": "patch",
+    "routerama_build": "patch",
+    "seatbelt": "patch",
+    "seatbelt_http": "patch",
+    "templated_uri": "patch",
+    "templated_uri_macros_impl": "patch",
+    "thread_aware": "patch",
+    "thread_aware_macros_impl": "breaking",
+    "tick": "nonbreaking",
+    "uniflight": "patch"
+  },
+  "macroContracts": {
+    "ohno_macros": {
+      "verdict": "breaking",
+      "reviewedPackages": ["ohno", "ohno_macros"],
+      "channels": {
+        "exportedMacros": "unchanged",
+        "acceptedSyntax": "changed",
+        "compileBehavior": "changed",
+        "generatedApi": "unchanged",
+        "generatedRuntimePaths": "unchanged",
+        "hygiene": "unchanged"
+      },
+      "evidence": [
+        "Exported entry points are unchanged: #[proc_macro_derive(Error, attributes(error, display, no_constructors, no_debug, from))] and the #[ohno::error] attribute macro, with the same derive helper attributes.",
+        "Accepted syntax narrowed: crates/ohno_macros/src/error_type_attr.rs now runs reject_no_constructors, so #[no_constructors] under #[ohno::error] is rejected with the NO_CONSTRUCTORS message. The released 0.4.0 macro accepted and expanded that input.",
+        "Compile behavior measured end-to-end on the consumer fixture crates/ohno/tests/ui/ohno_error_no_constructors.rs: trybuild pass at baseline 7c185b44 (exit 0), fail at HEAD 9000d181 (exit 101).",
+        "Generated API is unchanged: the injected #[doc = marker] OhnoCore field, the added #[derive(ohno::Error)], and the unit/tuple/named field placement in add_ohno_core_field are behavior-identical; only the enum/union rejection moved from add_ohno_core_field to an earlier shape check, and that input already failed to compile.",
+        "Generated runtime paths are unchanged: expansion still names ohno::OhnoCore and ohno::Error via the same absolute paths, and the runtime partner ohno adds no new required item.",
+        "Hygiene is unchanged: generate_unique_field_name still derives the injected field name from the declared field names, and no new identifier is introduced into the caller's scope.",
+        "Diagnostic wording changed in ALREADY_MARKED and MARKED_FIELD_WITH_GENERATED ('yourself' -> 'explicitly'), which is patch-level on its own; the verdict is breaking because of the measured compile-contract narrowing."
+      ],
+      "compileEvidence": [
+        {
+          "ownerPackage": "ohno",
+          "path": "crates/ohno/tests/ui/ohno_error_no_constructors.rs",
+          "baseline": {
+            "result": "pass",
+            "revision": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+            "exitCode": 0
+          },
+          "current": {
+            "result": "fail",
+            "revision": "9000d1812bb4e9e707948b1e877e7c10be3096ba",
+            "exitCode": 101
+          }
+        },
+        {
+          "ownerPackage": "ohno",
+          "path": "crates/ohno/tests/ui/ohno_error_marked_field.rs",
+          "baseline": {
+            "result": "fail",
+            "revision": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+            "exitCode": 101
+          },
+          "current": {
+            "result": "fail",
+            "revision": "9000d1812bb4e9e707948b1e877e7c10be3096ba",
+            "exitCode": 101
+          }
+        }
+      ]
+    },
+    "templated_uri_macros": {
+      "verdict": "compatible",
+      "reviewedPackages": [
+        "ohno",
+        "ohno_macros",
+        "templated_uri",
+        "templated_uri_macros",
+        "templated_uri_macros_impl"
+      ],
+      "channels": {
+        "exportedMacros": "unchanged",
+        "acceptedSyntax": "unchanged",
+        "compileBehavior": "unchanged",
+        "generatedApi": "unchanged",
+        "generatedRuntimePaths": "unchanged",
+        "hygiene": "unchanged"
+      },
+      "evidence": [
+        "templated_uri_macros has no changed files; its implementation crate templated_uri_macros_impl changed only crates/templated_uri_macros_impl/Cargo.toml, adding [package.metadata.cargo_check_external_types] allowed_external_types.",
+        "The ohno/ohno_macros members of macroImplementationClosure are used only for this crate's internal error type: crates/templated_uri_macros_impl/src/error.rs applies #[ohno::error] without #[no_constructors], so the narrowed ohno_macros syntax does not reach it.",
+        "The templated_uri macro's exported entry points, accepted URI template syntax, generated API, generated runtime paths, and hygiene are byte-for-byte unchanged.",
+        "The three changed fixtures in this review scope are owned by the published implementation-closure member ohno, which carries its own independent classification, so they do not set this contract's floor; they are measured below regardless."
+      ],
+      "compileEvidence": [
+        {
+          "ownerPackage": "ohno",
+          "path": "crates/ohno/tests/ui/ohno_error_no_constructors.rs",
+          "baseline": {
+            "result": "pass",
+            "revision": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+            "exitCode": 0
+          },
+          "current": {
+            "result": "fail",
+            "revision": "9000d1812bb4e9e707948b1e877e7c10be3096ba",
+            "exitCode": 101
+          }
+        },
+        {
+          "ownerPackage": "ohno",
+          "path": "crates/ohno/tests/ui/ohno_error_marked_field.rs",
+          "baseline": {
+            "result": "fail",
+            "revision": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+            "exitCode": 101
+          },
+          "current": {
+            "result": "fail",
+            "revision": "9000d1812bb4e9e707948b1e877e7c10be3096ba",
+            "exitCode": 101
+          }
+        }
+      ]
+    },
+    "thread_aware_macros": {
+      "verdict": "compatible",
+      "reviewedPackages": [
+        "thread_aware",
+        "thread_aware_macros",
+        "thread_aware_macros_impl"
+      ],
+      "channels": {
+        "exportedMacros": "unchanged",
+        "acceptedSyntax": "unchanged",
+        "compileBehavior": "unchanged",
+        "generatedApi": "unchanged",
+        "generatedRuntimePaths": "unchanged",
+        "hygiene": "unchanged"
+      },
+      "evidence": [
+        "No Rust source changed in thread_aware_macros or thread_aware_macros_impl (rustImplementationChanged is false for both); the only edits are the inherited syn ^2.0.111 -> ^3.0.2 requirement, anvil-managed lint marker comments, and generated READMEs.",
+        "The single authored source edit in the review scope is crates/thread_aware_macros_impl/tests/derive.rs adding the new syn 3 TypeGroup::attrs field to a hand-built test fixture, which is test-only and does not change expansion.",
+        "Exported macro names, derive helper attributes, accepted syntax, generated API and bounds, generated runtime paths, and hygiene are unchanged; an implementation dependency version is not the macro contract.",
+        "macroCompileFixtureChanges is empty for this macro, so no compile fixture in its review scope changed."
+      ],
+      "compileEvidence": []
+    },
+    "data_privacy_macros": {
+      "verdict": "compatible",
+      "reviewedPackages": [
+        "data_privacy",
+        "data_privacy_macros",
+        "data_privacy_macros_impl"
+      ],
+      "channels": {
+        "exportedMacros": "unchanged",
+        "acceptedSyntax": "unchanged",
+        "compileBehavior": "unchanged",
+        "generatedApi": "unchanged",
+        "generatedRuntimePaths": "unchanged",
+        "hygiene": "unchanged"
+      },
+      "evidence": [
+        "Neither data_privacy_macros nor data_privacy_macros_impl changed any Rust source (rustImplementationChanged is false for both); the edits are anvil-managed lint marker comments, a reformatted allowed_external_types array, the inherited syn requirement bump, and generated READMEs.",
+        "Exported macro names, accepted syntax, generated API, generated runtime paths, and hygiene are unchanged.",
+        "macroCompileFixtureChanges is empty for this macro."
+      ],
+      "compileEvidence": []
+    },
+    "fundle_macros": {
+      "verdict": "compatible",
+      "reviewedPackages": ["fundle", "fundle_macros", "fundle_macros_impl"],
+      "channels": {
+        "exportedMacros": "unchanged",
+        "acceptedSyntax": "unchanged",
+        "compileBehavior": "unchanged",
+        "generatedApi": "unchanged",
+        "generatedRuntimePaths": "unchanged",
+        "hygiene": "unchanged"
+      },
+      "evidence": [
+        "fundle_macros has no changed files; its implementation crate fundle_macros_impl has an empty modifiedFiles list and was promoted only by the inherited syn ^2.0.111 -> ^3.0.2 requirement.",
+        "An implementation dependency version is not the proc-macro contract: exported macro names, accepted syntax, generated API, generated runtime paths, and hygiene are all unchanged.",
+        "macroCompileFixtureChanges is empty for this macro."
+      ],
+      "compileEvidence": []
+    },
+    "internity_macros": {
+      "verdict": "compatible",
+      "reviewedPackages": ["internity", "internity_macros", "internity_macros_impl"],
+      "channels": {
+        "exportedMacros": "unchanged",
+        "acceptedSyntax": "unchanged",
+        "compileBehavior": "unchanged",
+        "generatedApi": "unchanged",
+        "generatedRuntimePaths": "unchanged",
+        "hygiene": "unchanged"
+      },
+      "evidence": [
+        "internity_macros and internity_macros_impl both have empty modifiedFiles lists; they were promoted only by the inherited syn ^2.0.111 -> ^3.0.2 requirement, which is an implementation dependency version and not the macro contract.",
+        "The modified runtime partner internity changed only its own library: new public LocalReader/ThreadedReader types, new index_of/sym_at methods, and module renames. The se::SerializeIn / de::DeserializeIn derives still expand against the same internity::Reader trait and the same public paths, all of which remain exported.",
+        "Exported macro names, derive helper attributes, accepted syntax, generated API and bounds, generated runtime paths, and hygiene are unchanged.",
+        "macroCompileFixtureChanges is empty for this macro."
+      ],
+      "compileEvidence": []
+    },
+    "multitude_macros": {
+      "verdict": "compatible",
+      "reviewedPackages": ["multitude", "multitude_macros", "multitude_macros_impl"],
+      "channels": {
+        "exportedMacros": "unchanged",
+        "acceptedSyntax": "unchanged",
+        "compileBehavior": "unchanged",
+        "generatedApi": "unchanged",
+        "generatedRuntimePaths": "unchanged",
+        "hygiene": "unchanged"
+      },
+      "evidence": [
+        "multitude_macros and multitude_macros_impl have no changed files. The only modified member of the review scope is the runtime partner multitude, whose sole change is a normal dependency feature activation in crates/multitude/Cargo.toml (zerocopy gains 'derive').",
+        "No public item of multitude changed (rustImplementationChanged is false and cargo semver-checks reports no update required), so the paths and items the expansion names are all still present.",
+        "Exported macro names, accepted syntax, generated API, generated runtime paths, and hygiene are unchanged.",
+        "macroCompileFixtureChanges is empty for this macro."
+      ],
+      "compileEvidence": []
+    },
+    "routerama_macros": {
+      "verdict": "compatible",
+      "reviewedPackages": [
+        "http_path_template",
+        "routerama",
+        "routerama_build",
+        "routerama_macros"
+      ],
+      "channels": {
+        "exportedMacros": "unchanged",
+        "acceptedSyntax": "unchanged",
+        "compileBehavior": "unchanged",
+        "generatedApi": "unchanged",
+        "generatedRuntimePaths": "unchanged",
+        "hygiene": "unchanged"
+      },
+      "evidence": [
+        "routerama_macros itself changed only its generated README.md. In its implementation closure, http_path_template changed only anvil-managed lint markers in Cargo.toml, and routerama_build changed only the mechanical syn 3 adaptation in crates/routerama_build/src/macro_impl/field.rs (TypeBareFn -> TypeFnPtr, visit_type_bare_fn -> visit_type_fn_ptr) plus the new TypePath::attrs field in unit-test construction in query.rs.",
+        "uses_capture_lifetime still detects the same lifetime shadowing: syn 3 renamed the bare-function-pointer node and its visitor hook, and both the old and new hooks fire on exactly the same fn-pointer types, so field-kind selection and the generated extraction code are unchanged.",
+        "The runtime partner routerama changed only a test and its generated README.",
+        "Exported macro names, accepted route/query syntax, generated API and bounds, generated runtime paths, and hygiene are unchanged; macroCompileFixtureChanges is empty for this macro."
+      ],
+      "compileEvidence": []
+    }
+  },
+  "force": false
+}

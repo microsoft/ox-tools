@@ -1,0 +1,42 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-ox-release"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors = ["The Oxidizer Project Authors"]
+description = "Deterministic release planner for Oxidizer-style Cargo workspaces: facts, resolution, and application"
+readme = "README.md"
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ox-release"
+homepage = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ox-release"
+keywords = ["cargo", "subcommand", "release", "semver", "workspace"]
+categories = ["development-tools::cargo-plugins"]
+
+[package.metadata.cargo_check_external_types]
+# - `ohno::app::error::AppError`: project-wide app error type from the `ohno`
+#   crate. Every fallible entry point returns it so callers can use ohno's `?`
+#   and `AppErr` conversions uniformly. Matches the allowlist entry in
+#   cargo-anvil and cargo-coverage-gate.
+allowed_external_types = ["ohno::app::error::AppError"]
+
+[[bin]]
+name = "cargo-ox-release"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context"] }
+ohno = { workspace = true, features = ["app-err"] }
+regex = { workspace = true, features = ["std", "unicode-perl"] }
+serde = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true, features = ["std"] }
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints

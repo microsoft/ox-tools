@@ -1,0 +1,2654 @@
+{
+  "schemaVersion": 5,
+  "repoRoot": "D:\\oxi-v4-sim-01",
+  "baseRef": "HEAD",
+  "packages": [
+    {
+      "folder": "allocation_hints",
+      "name": "allocation_hints",
+      "version": "0.1.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "9afbe27df84d310a9059f37927c9a6a24f839f78",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "anyspawn",
+      "name": "anyspawn",
+      "version": "0.7.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "futures_channel",
+        "thread_aware",
+        "tokio"
+      ],
+      "exposedDeps": [
+        "thread_aware"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "tokio"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "thread_aware",
+      "name": "thread_aware",
+      "version": "0.9.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "bytes",
+        "http",
+        "jiff",
+        "many_cpus",
+        "thread_aware_macros",
+        "uuid"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [
+        "thread_aware_macros"
+      ],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "bytes",
+        "http",
+        "jiff",
+        "uuid"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "thread_aware_macros",
+      "name": "thread_aware_macros",
+      "version": "0.7.5",
+      "published": true,
+      "procMacroOnly": true,
+      "hasLibraryTarget": false,
+      "deps": [
+        "syn",
+        "thread_aware_macros_impl"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": "thread_aware_macros_impl",
+      "macroRuntimePartners": [
+        "thread_aware"
+      ],
+      "exposureUnknown": false,
+      "baselineSha": "542a32c00a8ce2cab3ed8876056aab847bc8c6c8",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/thread_aware_macros/Cargo.toml",
+        "crates/thread_aware_macros/README.md"
+      ],
+      "modifiedFileCount": 2,
+      "manifestDependencyScopes": [
+        "normal"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [
+        {
+          "name": "syn",
+          "baselineReq": "^2.0.111",
+          "currentReq": "^3.0.2",
+          "kinds": [
+            "normal"
+          ],
+          "breaking": true,
+          "baselineRev": "542a32c00a8ce2cab3ed8876056aab847bc8c6c8"
+        }
+      ],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "thread_aware_macros_impl",
+      "name": "thread_aware_macros_impl",
+      "version": "0.7.4",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "proc_macro2",
+        "quote",
+        "syn"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "542a32c00a8ce2cab3ed8876056aab847bc8c6c8",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/thread_aware_macros_impl/Cargo.toml",
+        "crates/thread_aware_macros_impl/README.md",
+        "crates/thread_aware_macros_impl/tests/derive.rs"
+      ],
+      "modifiedFileCount": 3,
+      "manifestDependencyScopes": [
+        "normal"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [
+        {
+          "name": "syn",
+          "baselineReq": "^2.0.111",
+          "currentReq": "^3.0.2",
+          "kinds": [
+            "normal"
+          ],
+          "breaking": true,
+          "baselineRev": "542a32c00a8ce2cab3ed8876056aab847bc8c6c8"
+        }
+      ],
+      "externalExposedDeps": [
+        "proc_macro2",
+        "syn"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "anyspawn_azure",
+      "name": "anyspawn_azure",
+      "version": "0.2.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "anyspawn",
+        "async_trait",
+        "azure_core",
+        "azure_identity",
+        "futures",
+        "tick"
+      ],
+      "exposedDeps": [
+        "anyspawn",
+        "tick"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "azure_identity"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "tick",
+      "name": "tick",
+      "version": "0.5.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "futures_core",
+        "jiff",
+        "libc",
+        "pin_project_lite",
+        "serde_core",
+        "thread_aware",
+        "tokio",
+        "windows_sys"
+      ],
+      "exposedDeps": [
+        "thread_aware"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/tick/Cargo.toml",
+        "crates/tick/README.md",
+        "crates/tick/benches/tick_instant.rs",
+        "crates/tick/src/clock.rs",
+        "crates/tick/src/delay.rs",
+        "crates/tick/src/fast_instant.rs",
+        "crates/tick/src/fmt/ecmascript.rs",
+        "crates/tick/src/fmt/iso_8601.rs",
+        "crates/tick/src/fmt/mod.rs",
+        "crates/tick/src/fmt/rfc_2822.rs",
+        "crates/tick/src/fmt/serde.rs",
+        "crates/tick/src/lib.rs",
+        "crates/tick/src/periodic_timer.rs",
+        "crates/tick/src/simple_clock.rs",
+        "crates/tick/src/stopwatch.rs",
+        "crates/tick/tests/serde_allocations.rs"
+      ],
+      "modifiedFileCount": 16,
+      "manifestDependencyScopes": [
+        "normal",
+        "dev",
+        "features"
+      ],
+      "manifestOtherChanged": true,
+      "rustImplementationChanged": true,
+      "docCommentChanged": true,
+      "workspaceModified": true,
+      "externalDepChanges": [
+        {
+          "name": "libc",
+          "baselineReq": null,
+          "currentReq": "^0.2.178",
+          "kinds": [
+            "normal"
+          ],
+          "breaking": false,
+          "baselineRev": "7c185b447c5c1c94db36c6176d42093aa67b83a2"
+        },
+        {
+          "name": "windows_sys",
+          "baselineReq": null,
+          "currentReq": "^0.61.2",
+          "kinds": [
+            "normal"
+          ],
+          "breaking": false,
+          "baselineRev": "7c185b447c5c1c94db36c6176d42093aa67b83a2"
+        }
+      ],
+      "externalExposedDeps": [
+        "futures_core",
+        "serde_core"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "ohno",
+      "name": "ohno",
+      "version": "0.4.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "ohno_macros",
+        "typeid"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [
+        "ohno_macros"
+      ],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/ohno/README.md",
+        "crates/ohno/src/app/error.rs",
+        "crates/ohno/src/lib.rs",
+        "crates/ohno/tests/display_diagnostics.rs",
+        "crates/ohno/tests/ui/ohno_error_marked_field.stderr",
+        "crates/ohno/tests/ui/ohno_error_no_constructors.rs",
+        "crates/ohno/tests/ui/ohno_error_no_constructors.stderr"
+      ],
+      "modifiedFileCount": 7,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": true,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "ohno_macros",
+      "name": "ohno_macros",
+      "version": "0.4.0",
+      "published": true,
+      "procMacroOnly": true,
+      "hasLibraryTarget": false,
+      "deps": [
+        "proc_macro2",
+        "quote",
+        "syn"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [
+        "ohno"
+      ],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/ohno_macros/Cargo.toml",
+        "crates/ohno_macros/docs/error_display.md",
+        "crates/ohno_macros/docs/error_error.md",
+        "crates/ohno_macros/src/derive_error/field_detection.rs",
+        "crates/ohno_macros/src/error_type_attr.rs",
+        "crates/ohno_macros/src/lib.rs"
+      ],
+      "modifiedFileCount": 6,
+      "manifestDependencyScopes": [
+        "normal"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": true,
+      "docCommentChanged": true,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": [
+        {
+          "ownerPackage": "ohno",
+          "ownerPublished": true,
+          "path": "crates/ohno/tests/ui/ohno_error_marked_field.stderr",
+          "kind": "uiExpectation",
+          "status": "modified",
+          "expectedResult": "fail",
+          "baselineRev": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+          "scopeRole": "runtimePartner"
+        },
+        {
+          "ownerPackage": "ohno",
+          "ownerPublished": true,
+          "path": "crates/ohno/tests/ui/ohno_error_no_constructors.rs",
+          "kind": "uiFixture",
+          "status": "added",
+          "expectedResult": "fail",
+          "baselineRev": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+          "scopeRole": "runtimePartner"
+        },
+        {
+          "ownerPackage": "ohno",
+          "ownerPublished": true,
+          "path": "crates/ohno/tests/ui/ohno_error_no_constructors.stderr",
+          "kind": "uiExpectation",
+          "status": "added",
+          "expectedResult": "fail",
+          "baselineRev": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+          "scopeRole": "runtimePartner"
+        }
+      ]
+    },
+    {
+      "folder": "testing_aids",
+      "name": "testing_aids",
+      "version": "0.0.0",
+      "published": false,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "futures",
+        "opentelemetry",
+        "opentelemetry_sdk",
+        "tracing",
+        "tracing_subscriber"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "f0e4a32afe9d07e6a71f7fa49cfd70d0e33719ba",
+      "hasBaseline": true,
+      "everReleased": false,
+      "modified": false,
+      "modifiedFiles": [
+        "crates/testing_aids/Cargo.toml",
+        "crates/testing_aids/README.md",
+        "crates/testing_aids/src/io.rs",
+        "crates/testing_aids/src/lib.rs",
+        "crates/testing_aids/src/log.rs",
+        "crates/testing_aids/src/macros.rs",
+        "crates/testing_aids/src/metrics.rs",
+        "crates/testing_aids/src/poll.rs",
+        "crates/testing_aids/src/tracing_logs/capture.rs",
+        "crates/testing_aids/src/tracing_logs/mod.rs",
+        "crates/testing_aids/src/tracing_logs/output.rs",
+        "crates/testing_aids/tests/log_buffer.rs"
+      ],
+      "modifiedFileCount": 12,
+      "manifestDependencyScopes": [
+        "normal",
+        "dev"
+      ],
+      "manifestOtherChanged": true,
+      "rustImplementationChanged": true,
+      "docCommentChanged": true,
+      "workspaceModified": true,
+      "externalDepChanges": [
+        {
+          "name": "opentelemetry",
+          "baselineReq": null,
+          "currentReq": "^0.32.0",
+          "kinds": [
+            "normal"
+          ],
+          "breaking": false,
+          "baselineRev": "f0e4a32afe9d07e6a71f7fa49cfd70d0e33719ba"
+        },
+        {
+          "name": "opentelemetry_sdk",
+          "baselineReq": null,
+          "currentReq": "^0.32.0",
+          "kinds": [
+            "normal"
+          ],
+          "breaking": false,
+          "baselineRev": "f0e4a32afe9d07e6a71f7fa49cfd70d0e33719ba"
+        }
+      ],
+      "externalExposedDeps": [
+        "futures",
+        "opentelemetry",
+        "opentelemetry_sdk",
+        "tracing",
+        "tracing_subscriber"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "automation",
+      "name": "automation",
+      "version": "0.1.0",
+      "published": false,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "duct",
+        "ohno",
+        "serde",
+        "serde_json"
+      ],
+      "exposedDeps": [
+        "ohno"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "5012b9780556fbef47729dd05d83f8b30efbe18d",
+      "hasBaseline": true,
+      "everReleased": false,
+      "modified": false,
+      "modifiedFiles": [
+        "crates/automation/Cargo.toml",
+        "crates/automation/README.md",
+        "crates/automation/src/cargo.rs",
+        "crates/automation/src/cargo_metadata.rs",
+        "crates/automation/src/lib.rs",
+        "crates/automation/src/process.rs"
+      ],
+      "modifiedFileCount": 6,
+      "manifestDependencyScopes": [
+        "normal"
+      ],
+      "manifestOtherChanged": true,
+      "rustImplementationChanged": true,
+      "docCommentChanged": true,
+      "workspaceModified": true,
+      "externalDepChanges": [
+        {
+          "name": "anyhow",
+          "baselineReq": "^1.0.100",
+          "currentReq": null,
+          "kinds": [
+            "normal"
+          ],
+          "breaking": true,
+          "baselineRev": "5012b9780556fbef47729dd05d83f8b30efbe18d"
+        }
+      ],
+      "externalExposedDeps": [
+        "duct",
+        "serde",
+        "serde_json"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "benchmarking",
+      "name": "benchmarking",
+      "version": "0.1.0",
+      "published": false,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "238a0aa57874ade284fb70618ad526da2b7393b1",
+      "hasBaseline": true,
+      "everReleased": false,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "bytesbuf",
+      "name": "bytesbuf",
+      "version": "0.8.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "bytes",
+        "nm",
+        "plurality",
+        "smallvec",
+        "thread_aware"
+      ],
+      "exposedDeps": [
+        "thread_aware"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": "crates/bytesbuf/Cargo.toml",
+      "modifiedFileCount": 1,
+      "manifestDependencyScopes": [
+        "dev"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "bytes"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "plurality",
+      "name": "plurality",
+      "version": "0.2.1",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "allocator_api2",
+        "loom"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "allocator_api2"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "bytesbuf_io",
+      "name": "bytesbuf_io",
+      "version": "0.8.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "bytesbuf",
+        "futures_core",
+        "ohno",
+        "trait_variant"
+      ],
+      "exposedDeps": [
+        "bytesbuf",
+        "ohno"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/bytesbuf_io/Cargo.toml",
+        "crates/bytesbuf_io/src/testing/pending.rs"
+      ],
+      "modifiedFileCount": 2,
+      "manifestDependencyScopes": [
+        "dev"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": true,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "futures_core"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "cachet",
+      "name": "cachet",
+      "version": "0.11.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "anyspawn",
+        "bytesbuf",
+        "cachet_memory",
+        "cachet_service",
+        "cachet_tier",
+        "futures",
+        "layered",
+        "parking_lot",
+        "pin_project_lite",
+        "postcard",
+        "serde",
+        "tick",
+        "tracing",
+        "uniflight"
+      ],
+      "exposedDeps": [
+        "anyspawn",
+        "bytesbuf",
+        "cachet_memory",
+        "cachet_service",
+        "cachet_tier",
+        "layered",
+        "tick"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": "crates/cachet/src/telemetry/cache.rs",
+      "modifiedFileCount": 1,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": true,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "cachet_memory",
+      "name": "cachet_memory",
+      "version": "0.6.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "cachet_tier",
+        "foldhash",
+        "moka",
+        "ohno",
+        "thread_aware"
+      ],
+      "exposedDeps": [
+        "cachet_tier",
+        "thread_aware"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "foldhash"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "cachet_tier",
+      "name": "cachet_tier",
+      "version": "0.3.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "dynosaur",
+        "ohno",
+        "parking_lot",
+        "recoverable"
+      ],
+      "exposedDeps": [
+        "ohno",
+        "recoverable"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": "crates/cachet_tier/src/error.rs",
+      "modifiedFileCount": 1,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": true,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "recoverable",
+      "name": "recoverable",
+      "version": "0.2.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "cachet_service",
+      "name": "cachet_service",
+      "version": "0.3.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "cachet_tier",
+        "layered"
+      ],
+      "exposedDeps": [
+        "cachet_tier",
+        "layered"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "layered",
+      "name": "layered",
+      "version": "0.3.6",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "plurality",
+        "tower_layer",
+        "tower_service"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "94229b8778baab215e5bf9b3af4edd5f92178b0a",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/layered/Cargo.toml",
+        "crates/layered/benches/dynamic.rs"
+      ],
+      "modifiedFileCount": 2,
+      "manifestDependencyScopes": [
+        "dev"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "tower_layer",
+        "tower_service"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "uniflight",
+      "name": "uniflight",
+      "version": "0.4.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "ahash",
+        "async_once_cell",
+        "dashmap",
+        "futures_util",
+        "thread_aware"
+      ],
+      "exposedDeps": [
+        "thread_aware"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "seatbelt",
+      "name": "seatbelt",
+      "version": "0.7.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "fastrand",
+        "futures_util",
+        "jiff",
+        "layered",
+        "opentelemetry",
+        "recoverable",
+        "serde",
+        "thread_aware",
+        "tick",
+        "tower_service",
+        "tracing"
+      ],
+      "exposedDeps": [
+        "layered",
+        "recoverable",
+        "thread_aware",
+        "tick"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": "crates/seatbelt/Cargo.toml",
+      "modifiedFileCount": 1,
+      "manifestDependencyScopes": [
+        "dev"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "opentelemetry",
+        "tower_service"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "data_privacy",
+      "name": "data_privacy",
+      "version": "0.12.4",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "data_privacy_core",
+        "data_privacy_macros",
+        "rapidhash",
+        "rustc_hash",
+        "xxhash_rust"
+      ],
+      "exposedDeps": [
+        "data_privacy_core"
+      ],
+      "macroPublicDeps": [
+        "data_privacy_macros"
+      ],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "94229b8778baab215e5bf9b3af4edd5f92178b0a",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "rapidhash"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "data_privacy_core",
+      "name": "data_privacy_core",
+      "version": "0.1.2",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "serde_core"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "542a32c00a8ce2cab3ed8876056aab847bc8c6c8",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/data_privacy_core/Cargo.toml",
+        "crates/data_privacy_core/README.md"
+      ],
+      "modifiedFileCount": 2,
+      "manifestDependencyScopes": [
+        "dev"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "serde_core"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "data_privacy_macros",
+      "name": "data_privacy_macros",
+      "version": "0.10.3",
+      "published": true,
+      "procMacroOnly": true,
+      "hasLibraryTarget": false,
+      "deps": [
+        "data_privacy_macros_impl"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": "data_privacy_macros_impl",
+      "macroRuntimePartners": [
+        "data_privacy"
+      ],
+      "exposureUnknown": false,
+      "baselineSha": "542a32c00a8ce2cab3ed8876056aab847bc8c6c8",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/data_privacy_macros/Cargo.toml",
+        "crates/data_privacy_macros/README.md"
+      ],
+      "modifiedFileCount": 2,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "data_privacy_macros_impl",
+      "name": "data_privacy_macros_impl",
+      "version": "0.10.3",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "proc_macro2",
+        "quote",
+        "syn"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "542a32c00a8ce2cab3ed8876056aab847bc8c6c8",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/data_privacy_macros_impl/Cargo.toml",
+        "crates/data_privacy_macros_impl/README.md"
+      ],
+      "modifiedFileCount": 2,
+      "manifestDependencyScopes": [
+        "normal"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [
+        {
+          "name": "syn",
+          "baselineReq": "^2.0.111",
+          "currentReq": "^3.0.2",
+          "kinds": [
+            "normal"
+          ],
+          "breaking": true,
+          "baselineRev": "542a32c00a8ce2cab3ed8876056aab847bc8c6c8"
+        }
+      ],
+      "externalExposedDeps": [
+        "proc_macro2",
+        "syn"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "fetch",
+      "name": "fetch",
+      "version": "0.15.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "anyspawn",
+        "bytes",
+        "bytesbuf",
+        "data_privacy",
+        "fetch_hyper",
+        "fetch_options",
+        "fetch_tls",
+        "fundle",
+        "futures",
+        "http",
+        "http_extensions",
+        "hyper_util",
+        "layered",
+        "native_tls",
+        "ohno",
+        "opentelemetry",
+        "opentelemetry_semantic_conventions",
+        "rustls",
+        "rustls_platform_verifier",
+        "seatbelt",
+        "seatbelt_http",
+        "smallvec",
+        "templated_uri",
+        "thread_aware",
+        "tick",
+        "tokio",
+        "tracing"
+      ],
+      "exposedDeps": [
+        "bytesbuf",
+        "data_privacy",
+        "fetch_options",
+        "fetch_tls",
+        "http_extensions",
+        "layered",
+        "recoverable",
+        "seatbelt_http",
+        "templated_uri",
+        "thread_aware",
+        "tick"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": "crates/fetch/Cargo.toml",
+      "modifiedFileCount": 1,
+      "manifestDependencyScopes": [
+        "dev"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "http",
+        "opentelemetry"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "fetch_hyper",
+      "name": "fetch_hyper",
+      "version": "0.6.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "anyspawn",
+        "bytesbuf",
+        "fetch_options",
+        "fetch_tls",
+        "futures",
+        "http",
+        "http_body_util",
+        "http_extensions",
+        "hyper",
+        "hyper_rustls",
+        "hyper_tls",
+        "hyper_util",
+        "layered",
+        "native_tls",
+        "ohno",
+        "opentelemetry",
+        "opentelemetry_semantic_conventions",
+        "pin_project",
+        "rustls",
+        "seatbelt",
+        "templated_uri",
+        "tick",
+        "tokio_native_tls",
+        "tower",
+        "tracing"
+      ],
+      "exposedDeps": [
+        "anyspawn",
+        "fetch_options",
+        "fetch_tls",
+        "http_extensions",
+        "layered",
+        "templated_uri",
+        "tick"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "http",
+        "hyper",
+        "hyper_util",
+        "native_tls",
+        "opentelemetry",
+        "rustls"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "fetch_options",
+      "name": "fetch_options",
+      "version": "0.2.3",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "http"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "542a32c00a8ce2cab3ed8876056aab847bc8c6c8",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/fetch_options/Cargo.toml",
+        "crates/fetch_options/README.md"
+      ],
+      "modifiedFileCount": 2,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "http"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "fetch_tls",
+      "name": "fetch_tls",
+      "version": "0.3.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "base64",
+        "http",
+        "native_tls",
+        "ohno",
+        "rustls",
+        "rustls_pki_types"
+      ],
+      "exposedDeps": [
+        "ohno"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "http",
+        "native_tls",
+        "rustls"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "http_extensions",
+      "name": "http_extensions",
+      "version": "0.9.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "bytes",
+        "bytesbuf",
+        "futures",
+        "http",
+        "http_body",
+        "http_body_util",
+        "layered",
+        "ohno",
+        "pin_project",
+        "recoverable",
+        "serde_core",
+        "serde_json",
+        "templated_uri",
+        "thread_aware",
+        "tick"
+      ],
+      "exposedDeps": [
+        "bytesbuf",
+        "layered",
+        "ohno",
+        "recoverable",
+        "templated_uri",
+        "thread_aware",
+        "tick"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": "crates/http_extensions/Cargo.toml",
+      "modifiedFileCount": 1,
+      "manifestDependencyScopes": [
+        "normal"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "bytes",
+        "http",
+        "http_body",
+        "serde_core"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "templated_uri",
+      "name": "templated_uri",
+      "version": "0.4.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "data_privacy",
+        "http",
+        "ohno",
+        "serde",
+        "templated_uri_macros",
+        "uuid"
+      ],
+      "exposedDeps": [
+        "data_privacy",
+        "data_privacy_core",
+        "ohno"
+      ],
+      "macroPublicDeps": [
+        "templated_uri_macros"
+      ],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "http",
+        "uuid"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "templated_uri_macros",
+      "name": "templated_uri_macros",
+      "version": "0.4.0",
+      "published": true,
+      "procMacroOnly": true,
+      "hasLibraryTarget": false,
+      "deps": [
+        "templated_uri_macros_impl"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": [
+        "ohno",
+        "ohno_macros",
+        "templated_uri_macros_impl"
+      ],
+      "macroRuntimePartners": [
+        "templated_uri"
+      ],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": [
+        {
+          "ownerPackage": "ohno",
+          "ownerPublished": true,
+          "path": "crates/ohno/tests/ui/ohno_error_marked_field.stderr",
+          "kind": "uiExpectation",
+          "status": "modified",
+          "expectedResult": "fail",
+          "baselineRev": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+          "scopeRole": "implementationClosure"
+        },
+        {
+          "ownerPackage": "ohno",
+          "ownerPublished": true,
+          "path": "crates/ohno/tests/ui/ohno_error_no_constructors.rs",
+          "kind": "uiFixture",
+          "status": "added",
+          "expectedResult": "fail",
+          "baselineRev": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+          "scopeRole": "implementationClosure"
+        },
+        {
+          "ownerPackage": "ohno",
+          "ownerPublished": true,
+          "path": "crates/ohno/tests/ui/ohno_error_no_constructors.stderr",
+          "kind": "uiExpectation",
+          "status": "added",
+          "expectedResult": "fail",
+          "baselineRev": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+          "scopeRole": "implementationClosure"
+        }
+      ]
+    },
+    {
+      "folder": "templated_uri_macros_impl",
+      "name": "templated_uri_macros_impl",
+      "version": "0.4.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "chumsky",
+        "darling",
+        "ohno",
+        "proc_macro2",
+        "quote",
+        "syn"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": "crates/templated_uri_macros_impl/Cargo.toml",
+      "modifiedFileCount": 1,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "proc_macro2"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "fundle",
+      "name": "fundle",
+      "version": "0.3.5",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "fundle_macros"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [
+        "fundle_macros"
+      ],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "94229b8778baab215e5bf9b3af4edd5f92178b0a",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "fundle_macros",
+      "name": "fundle_macros",
+      "version": "0.3.5",
+      "published": true,
+      "procMacroOnly": true,
+      "hasLibraryTarget": false,
+      "deps": [
+        "fundle_macros_impl"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": "fundle_macros_impl",
+      "macroRuntimePartners": [
+        "fundle"
+      ],
+      "exposureUnknown": false,
+      "baselineSha": "94229b8778baab215e5bf9b3af4edd5f92178b0a",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "fundle_macros_impl",
+      "name": "fundle_macros_impl",
+      "version": "0.3.5",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "proc_macro2",
+        "quote",
+        "syn"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "94229b8778baab215e5bf9b3af4edd5f92178b0a",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [
+        "normal"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [
+        {
+          "name": "syn",
+          "baselineReq": "^2.0.111",
+          "currentReq": "^3.0.2",
+          "kinds": [
+            "normal"
+          ],
+          "breaking": true,
+          "baselineRev": "94229b8778baab215e5bf9b3af4edd5f92178b0a"
+        }
+      ],
+      "externalExposedDeps": [
+        "proc_macro2",
+        "syn"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "seatbelt_http",
+      "name": "seatbelt_http",
+      "version": "0.7.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "http",
+        "http_extensions",
+        "seatbelt",
+        "templated_uri",
+        "tick"
+      ],
+      "exposedDeps": [
+        "http_extensions",
+        "recoverable",
+        "seatbelt",
+        "tick"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "fetch_azure",
+      "name": "fetch_azure",
+      "version": "0.5.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "async_trait",
+        "azure_core",
+        "bytesbuf",
+        "fetch",
+        "futures",
+        "http",
+        "layered"
+      ],
+      "exposedDeps": [
+        "fetch"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "fetch_winhttp",
+      "name": "fetch_winhttp",
+      "version": "0.1.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "f9fcf5069412ca47dfa9f35c35a21c1992ebe150",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "http_path_template",
+      "name": "http_path_template",
+      "version": "0.2.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "1feffd7b9840293bbe1f01c98643f042bf0b5ecf",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/http_path_template/Cargo.toml",
+        "crates/http_path_template/README.md"
+      ],
+      "modifiedFileCount": 2,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "internity",
+      "name": "internity",
+      "version": "0.1.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "hashbrown",
+        "internity_macros",
+        "parking_lot",
+        "rustc_hash",
+        "serde"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [
+        "internity_macros"
+      ],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "0de29c656d919c6a3fce94ad7df8c2de9557550e",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/internity/README.md",
+        "crates/internity/docs/COMPARISON.md",
+        "crates/internity/docs/DESIGN.md",
+        "crates/internity/docs/TODO.md",
+        "crates/internity/src/flat_reader.rs",
+        "crates/internity/src/lib.rs",
+        "crates/internity/src/local_lexicon.rs",
+        "crates/internity/src/local_reader.rs",
+        "crates/internity/src/reader.rs",
+        "crates/internity/src/shard_reader.rs",
+        "crates/internity/src/sym.rs",
+        "crates/internity/src/threaded_lexicon.rs",
+        "crates/internity/src/threaded_reader.rs",
+        "crates/internity/tests/basic.rs"
+      ],
+      "modifiedFileCount": 14,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": true,
+      "docCommentChanged": true,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "rustc_hash",
+        "serde"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "internity_macros",
+      "name": "internity_macros",
+      "version": "0.1.0",
+      "published": true,
+      "procMacroOnly": true,
+      "hasLibraryTarget": false,
+      "deps": [
+        "internity_macros_impl",
+        "syn"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": "internity_macros_impl",
+      "macroRuntimePartners": [
+        "internity"
+      ],
+      "exposureUnknown": false,
+      "baselineSha": "0de29c656d919c6a3fce94ad7df8c2de9557550e",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [
+        "normal"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [
+        {
+          "name": "syn",
+          "baselineReq": "^2.0.111",
+          "currentReq": "^3.0.2",
+          "kinds": [
+            "normal"
+          ],
+          "breaking": true,
+          "baselineRev": "0de29c656d919c6a3fce94ad7df8c2de9557550e"
+        }
+      ],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "internity_macros_impl",
+      "name": "internity_macros_impl",
+      "version": "0.1.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "proc_macro2",
+        "quote",
+        "syn"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "0de29c656d919c6a3fce94ad7df8c2de9557550e",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [
+        "normal"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [
+        {
+          "name": "syn",
+          "baselineReq": "^2.0.111",
+          "currentReq": "^3.0.2",
+          "kinds": [
+            "normal"
+          ],
+          "breaking": true,
+          "baselineRev": "0de29c656d919c6a3fce94ad7df8c2de9557550e"
+        }
+      ],
+      "externalExposedDeps": [
+        "proc_macro2",
+        "syn"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "multitude",
+      "name": "multitude",
+      "version": "0.8.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "allocator_api2",
+        "bytemuck",
+        "bytes",
+        "bytesbuf",
+        "hashbrown",
+        "loom",
+        "multitude_macros",
+        "ptr_meta",
+        "serde",
+        "serde_json",
+        "widestring",
+        "zerocopy"
+      ],
+      "exposedDeps": [
+        "bytesbuf"
+      ],
+      "macroPublicDeps": [
+        "multitude_macros"
+      ],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": "crates/multitude/Cargo.toml",
+      "modifiedFileCount": 1,
+      "manifestDependencyScopes": [
+        "normal"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "allocator_api2",
+        "bytemuck",
+        "hashbrown",
+        "ptr_meta",
+        "serde",
+        "serde_json",
+        "widestring",
+        "zerocopy"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "multitude_macros",
+      "name": "multitude_macros",
+      "version": "0.1.1",
+      "published": true,
+      "procMacroOnly": true,
+      "hasLibraryTarget": false,
+      "deps": [
+        "multitude_macros_impl",
+        "syn"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": "multitude_macros_impl",
+      "macroRuntimePartners": [
+        "multitude"
+      ],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "multitude_macros_impl",
+      "name": "multitude_macros_impl",
+      "version": "0.1.1",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "proc_macro2",
+        "quote",
+        "syn"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "7c185b447c5c1c94db36c6176d42093aa67b83a2",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "proc_macro2",
+        "syn"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "rallocator",
+      "name": "rallocator",
+      "version": "0.1.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "allocation_hints",
+        "backtrace",
+        "libc",
+        "rallocator_telemetry",
+        "windows_sys"
+      ],
+      "exposedDeps": [
+        "allocation_hints",
+        "rallocator_telemetry"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "9afbe27df84d310a9059f37927c9a6a24f839f78",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/rallocator/tests/global_allocator.rs",
+        "crates/rallocator/tests/heap.rs",
+        "crates/rallocator/tests/telemetry.rs"
+      ],
+      "modifiedFileCount": 3,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "backtrace",
+        "libc",
+        "windows_sys"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "rallocator_telemetry",
+      "name": "rallocator_telemetry",
+      "version": "0.1.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "rallocator_wire"
+      ],
+      "exposedDeps": [
+        "rallocator_wire"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "9afbe27df84d310a9059f37927c9a6a24f839f78",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "rallocator_wire",
+      "name": "rallocator_wire",
+      "version": "0.1.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "9afbe27df84d310a9059f37927c9a6a24f839f78",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "rallocator_cli",
+      "name": "rallocator_cli",
+      "version": "0.1.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": false,
+      "deps": [
+        "clap",
+        "rallocator_telemetry",
+        "same_file"
+      ],
+      "exposedDeps": [
+        "clap",
+        "rallocator_telemetry",
+        "same_file"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": true,
+      "baselineSha": "9afbe27df84d310a9059f37927c9a6a24f839f78",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": false,
+      "modifiedFiles": null,
+      "modifiedFileCount": 0,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": false,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "clap",
+        "same_file"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "rest_over_grpc",
+      "name": "rest_over_grpc",
+      "version": "0.2.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "axum_core",
+        "base64",
+        "bytes",
+        "futures_core",
+        "futures_util",
+        "heck",
+        "http",
+        "http_body",
+        "http_body_util",
+        "http_path_template",
+        "layered",
+        "proc_macro2",
+        "prost_reflect",
+        "quote",
+        "routerama",
+        "routerama_build",
+        "serde",
+        "serde_json",
+        "smallvec",
+        "tower_service"
+      ],
+      "exposedDeps": [
+        "http_path_template",
+        "layered",
+        "routerama"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "b6509226b0dffd8b3c2ec737c87516b3781cd620",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/rest_over_grpc/CHANGELOG.md",
+        "crates/rest_over_grpc/README.md"
+      ],
+      "modifiedFileCount": 2,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "axum_core",
+        "bytes",
+        "futures_core",
+        "http",
+        "http_body",
+        "proc_macro2",
+        "serde",
+        "serde_json",
+        "tower_service"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "routerama",
+      "name": "routerama",
+      "version": "0.1.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "http_path_template",
+        "itoa",
+        "routerama_build",
+        "routerama_macros",
+        "smallvec"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [
+        "routerama_macros"
+      ],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "1feffd7b9840293bbe1f01c98643f042bf0b5ecf",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/routerama/README.md",
+        "crates/routerama/tests/query_allocations.rs"
+      ],
+      "modifiedFileCount": 2,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "routerama_build",
+      "name": "routerama_build",
+      "version": "0.1.0",
+      "published": true,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "http_path_template",
+        "proc_macro_crate",
+        "proc_macro2",
+        "quote",
+        "syn",
+        "unicode_ident"
+      ],
+      "exposedDeps": [
+        "http_path_template"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "1feffd7b9840293bbe1f01c98643f042bf0b5ecf",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": [
+        "crates/routerama_build/README.md",
+        "crates/routerama_build/src/macro_impl/field.rs",
+        "crates/routerama_build/src/macro_impl/query.rs"
+      ],
+      "modifiedFileCount": 3,
+      "manifestDependencyScopes": [
+        "normal"
+      ],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": true,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [
+        {
+          "name": "proc_macro_crate",
+          "baselineReq": "^2.0.2",
+          "currentReq": "^3.5.0",
+          "kinds": [
+            "normal"
+          ],
+          "breaking": true,
+          "baselineRev": "1feffd7b9840293bbe1f01c98643f042bf0b5ecf"
+        },
+        {
+          "name": "syn",
+          "baselineReq": "^2.0.111",
+          "currentReq": "^3.0.2",
+          "kinds": [
+            "normal"
+          ],
+          "breaking": true,
+          "baselineRev": "1feffd7b9840293bbe1f01c98643f042bf0b5ecf"
+        }
+      ],
+      "externalExposedDeps": [
+        "proc_macro2"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "routerama_macros",
+      "name": "routerama_macros",
+      "version": "0.1.0",
+      "published": true,
+      "procMacroOnly": true,
+      "hasLibraryTarget": false,
+      "deps": [
+        "routerama_build"
+      ],
+      "exposedDeps": [],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": [
+        "http_path_template",
+        "routerama_build"
+      ],
+      "macroRuntimePartners": [
+        "routerama"
+      ],
+      "exposureUnknown": false,
+      "baselineSha": "1feffd7b9840293bbe1f01c98643f042bf0b5ecf",
+      "hasBaseline": true,
+      "everReleased": true,
+      "modified": true,
+      "modifiedFiles": "crates/routerama_macros/README.md",
+      "modifiedFileCount": 1,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "rest_over_grpc_examples",
+      "name": "rest_over_grpc_examples",
+      "version": "0.0.0",
+      "published": false,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "futures_util",
+        "http",
+        "pbjson_build",
+        "prost",
+        "prost_build",
+        "protox",
+        "rest_over_grpc",
+        "serde",
+        "serde_json",
+        "tonic",
+        "tonic_prost",
+        "tonic_prost_build"
+      ],
+      "exposedDeps": [
+        "http_path_template",
+        "layered",
+        "plurality",
+        "rest_over_grpc",
+        "routerama",
+        "routerama_build"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "5b39c892970511e04182ac8e51b1d0c380c4debd",
+      "hasBaseline": true,
+      "everReleased": false,
+      "modified": false,
+      "modifiedFiles": [
+        "crates/rest_over_grpc_examples/build.rs",
+        "crates/rest_over_grpc_examples/examples/handling/client_streaming_upload.rs",
+        "crates/rest_over_grpc_examples/examples/handling/direct_service.rs",
+        "crates/rest_over_grpc_examples/examples/handling/volo_bridge.rs",
+        "crates/rest_over_grpc_examples/examples/serving/axum_app.rs",
+        "crates/rest_over_grpc_examples/examples/serving/custom_body_handling.rs",
+        "crates/rest_over_grpc_examples/examples/serving/streaming_response.rs",
+        "crates/rest_over_grpc_examples/examples/serving/tower_service.rs",
+        "crates/rest_over_grpc_examples/examples/transcoding/basic_transcode.rs",
+        "crates/rest_over_grpc_examples/examples/transcoding/custom_fallback.rs",
+        "crates/rest_over_grpc_examples/src/custom.rs",
+        "crates/rest_over_grpc_examples/src/tonic_bridge.rs"
+      ],
+      "modifiedFileCount": 12,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "futures_util",
+        "http",
+        "pbjson_build",
+        "prost",
+        "prost_build",
+        "protox",
+        "serde",
+        "serde_json",
+        "tonic",
+        "tonic_prost",
+        "tonic_prost_build"
+      ],
+      "macroCompileFixtureChanges": []
+    },
+    {
+      "folder": "rest_over_grpc_tests",
+      "name": "rest_over_grpc_tests",
+      "version": "0.0.0",
+      "published": false,
+      "procMacroOnly": false,
+      "hasLibraryTarget": true,
+      "deps": [
+        "futures_util",
+        "http",
+        "http_path_template",
+        "pbjson",
+        "pbjson_build",
+        "prost",
+        "prost_build",
+        "protox",
+        "rest_over_grpc",
+        "routerama",
+        "serde",
+        "serde_json",
+        "tonic",
+        "tonic_prost",
+        "tonic_prost_build"
+      ],
+      "exposedDeps": [
+        "http_path_template",
+        "layered",
+        "plurality",
+        "rest_over_grpc",
+        "routerama",
+        "routerama_build"
+      ],
+      "macroPublicDeps": [],
+      "macroImplementationClosure": null,
+      "macroRuntimePartners": [],
+      "exposureUnknown": false,
+      "baselineSha": "5b39c892970511e04182ac8e51b1d0c380c4debd",
+      "hasBaseline": true,
+      "everReleased": false,
+      "modified": false,
+      "modifiedFiles": [
+        "crates/rest_over_grpc_tests/bench_routes.rs",
+        "crates/rest_over_grpc_tests/benches/rog_router_cg.rs",
+        "crates/rest_over_grpc_tests/benches/rog_transcode_cg.rs",
+        "crates/rest_over_grpc_tests/build.rs",
+        "crates/rest_over_grpc_tests/src/custom.rs",
+        "crates/rest_over_grpc_tests/src/tonic_bridge.rs",
+        "crates/rest_over_grpc_tests/tests/bridge.rs",
+        "crates/rest_over_grpc_tests/tests/coverage.rs",
+        "crates/rest_over_grpc_tests/tests/e2e.rs",
+        "crates/rest_over_grpc_tests/tests/openapi.rs",
+        "crates/rest_over_grpc_tests/tests/serving.rs"
+      ],
+      "modifiedFileCount": 11,
+      "manifestDependencyScopes": [],
+      "manifestOtherChanged": false,
+      "rustImplementationChanged": false,
+      "docCommentChanged": false,
+      "workspaceModified": true,
+      "externalDepChanges": [],
+      "externalExposedDeps": [
+        "futures_util",
+        "http",
+        "pbjson",
+        "pbjson_build",
+        "prost",
+        "prost_build",
+        "protox",
+        "serde",
+        "serde_json",
+        "tonic",
+        "tonic_prost",
+        "tonic_prost_build"
+      ],
+      "macroCompileFixtureChanges": []
+    }
+  ]
+}
