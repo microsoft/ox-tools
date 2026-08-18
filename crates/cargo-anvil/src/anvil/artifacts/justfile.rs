@@ -309,6 +309,18 @@ mod tests {
     }
 
     #[test]
+    fn spellcheck_skips_aarch64() {
+        // Check, setup, and validation must each guard: setup would
+        // otherwise fail before the check gets a chance to skip.
+        let guard = "[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64'";
+        assert_eq!(
+            all_check_bodies().matches(guard).count(),
+            3,
+            "spellcheck must guard on aarch64 in its check, setup, and validate-prereqs recipes"
+        );
+    }
+
+    #[test]
     fn each_check_file_defines_its_own_check_recipe() {
         // The file `checks/<name>.just` must define `anvil-<name>:` -- guards
         // against a mis-split that files a check's recipe under the wrong name.
