@@ -267,11 +267,12 @@ mod tests {
 
     #[test]
     fn stages_identify_the_check_group_for_every_job() {
-        // Every per-OS job in the stages templates is named `linux` / `windows`,
-        // so `name` cannot tell an extension-template wrapper which group it is
-        // rendering. `group` carries that, letting a wrapper vary per-job
-        // `templateContext:` (which is evaluated at template-expansion time, so
-        // a runtime stage-name condition is not an option).
+        // Per-OS job names repeat across stages (`linux` / `windows` in every
+        // pr-* and scheduled-* stage, `compute_linux` / `compute_windows` in
+        // impact), so `name` cannot tell an extension-template wrapper which
+        // group it is rendering. `group` carries that, letting a wrapper vary
+        // per-job `templateContext:` (which is evaluated at template-expansion
+        // time, so a runtime stage-name condition is not an option).
         for (template, groups) in [
             (
                 PR_STAGES,

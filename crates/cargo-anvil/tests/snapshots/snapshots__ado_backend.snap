@@ -1898,13 +1898,18 @@ steps:
 #                          (`impact`, `pr-fast`, `pr-mutants`, ...). The
 #                          default wrapper ignores it; extension-template
 #                          wrappers use it to vary per-job `templateContext:`,
-#                          which cannot be expressed any other way: the stages
-#                          templates name every per-OS job `linux` / `windows`,
-#                          so `name` alone does not identify the group, and
-#                          `templateContext:` is evaluated at template-
-#                          expansion time so a runtime stage-name condition is
-#                          not available either. Defaults to '' so wrappers
-#                          written against the older contract keep working.
+#                          which cannot be expressed any other way: per-OS job
+#                          names repeat across stages (`linux` / `windows` in
+#                          every pr-* and scheduled-* stage, `compute_linux` /
+#                          `compute_windows` in impact), so `name` alone does
+#                          not identify the group, and `templateContext:` is
+#                          evaluated at template-expansion time so a runtime
+#                          stage-name condition is not available either.
+#                          Defaults to '' so a caller may omit it. A wrapper
+#                          that does not DECLARE the parameter is rejected by
+#                          ADO once the stages templates pass it, so an adopter
+#                          who owns this file takes the wrapper and stages
+#                          updates together.
 #   - pool      (object)   Pool block, passed verbatim to ADO's `pool:` key.
 #   - steps     (stepList) Body of the job. Templated step lists are fine.
 #   - artifacts (object)   Optional list of pipeline artifacts to publish.

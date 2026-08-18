@@ -368,6 +368,7 @@ The contract is intentionally small and stable:
 | Parameter   | Type       | Required | Meaning                                                                                                                                                                                |
 |-------------|------------|----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `name`      | `string`   | yes      | Job name; ADO derives the display name from it.                                                                                                                                        |
+| `group`     | `string`   | no       | The anvil check group this job runs (`impact`, `pr-fast`, `pr-test`, `pr-runtime-analysis`, `pr-mutants`, `scheduled-*`). The default wrapper ignores it; extension-template wrappers use it to vary per-job `templateContext:`. Per-OS job names repeat across stages (`linux` / `windows` in every pr-\* and scheduled-\* stage, `compute_linux` / `compute_windows` in impact), so `name` alone cannot identify the group, and `templateContext:` is evaluated at template-expansion time so a runtime stage-name condition is not available either. Defaults to `''` so a caller may omit it — but a wrapper that does not *declare* the parameter is rejected by ADO once the stages templates pass it, so an adopter who owns this file takes the wrapper and stages updates together. |
 | `pool`      | `object`   | yes      | Pool block, passed verbatim to ADO's `pool:` key. `linuxPool` and `windowsPool` at the stage level are object parameters, so users can override their shape (e.g. `{ name, os, image }` for 1ESPT). |
 | `steps`     | `stepList` | yes      | Body of the job. Templated step lists are fine — the wrapper splices them in via `${{ each step in parameters.steps }}: - ${{ step }}`.                                                |
 | `artifacts` | `object`   | no       | List of pipeline artifacts to publish. Each item: `{ name: string, path: string }`. Default wrapper appends one `PublishPipelineArtifact@1` per entry; 1ESPT wrappers translate the same list into `templateContext.outputs.pipelineArtifact` blocks. The stages templates don't need to know which backend they're targeting. |
@@ -377,6 +378,7 @@ The default wrapper anvil ships is six lines of logic:
 ```yaml
 parameters:
   - { name: name, type: string }
+  - { name: group, type: string, default: '' }
   - { name: pool, type: object }
   - { name: steps, type: stepList }
   - { name: artifacts, type: object, default: [] }
