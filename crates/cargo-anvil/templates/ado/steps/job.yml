@@ -15,6 +15,17 @@
 #
 # Contract (intentionally small and stable):
 #   - name      (string)   Job name; ADO derives the display name from it.
+#   - group     (string)   Optional. The anvil check group this job runs
+#                          (`impact`, `pr-fast`, `pr-mutants`, ...). The
+#                          default wrapper ignores it; extension-template
+#                          wrappers use it to vary per-job `templateContext:`,
+#                          which cannot be expressed any other way: the stages
+#                          templates name every per-OS job `linux` / `windows`,
+#                          so `name` alone does not identify the group, and
+#                          `templateContext:` is evaluated at template-
+#                          expansion time so a runtime stage-name condition is
+#                          not available either. Defaults to '' so wrappers
+#                          written against the older contract keep working.
 #   - pool      (object)   Pool block, passed verbatim to ADO's `pool:` key.
 #   - steps     (stepList) Body of the job. Templated step lists are fine.
 #   - artifacts (object)   Optional list of pipeline artifacts to publish.
@@ -29,6 +40,9 @@
 parameters:
   - name: name
     type: string
+  - name: group
+    type: string
+    default: ''
   - name: pool
     type: object
   - name: steps

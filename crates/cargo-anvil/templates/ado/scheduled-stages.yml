@@ -23,6 +23,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: scheduled-test
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/scheduled-test.yml
@@ -35,6 +36,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          group: scheduled-test
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-test.yml
@@ -54,12 +56,14 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: scheduled-advisories
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/scheduled-advisories.yml
       - template: steps/job.yml
         parameters:
           name: windows
+          group: scheduled-advisories
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-advisories.yml
@@ -75,12 +79,14 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: scheduled-runtime-analysis
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/scheduled-runtime-analysis.yml
       - template: steps/job.yml
         parameters:
           name: windows
+          group: scheduled-runtime-analysis
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-runtime-analysis.yml
@@ -97,12 +103,14 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: scheduled-exhaustive
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/scheduled-exhaustive.yml
       - template: steps/job.yml
         parameters:
           name: windows
+          group: scheduled-exhaustive
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-exhaustive.yml

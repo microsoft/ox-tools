@@ -40,12 +40,14 @@ stages:
       - template: steps/job.yml
         parameters:
           name: compute_linux
+          group: impact
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/impact.yml
       - template: steps/job.yml
         parameters:
           name: compute_windows
+          group: impact
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/impact.yml
@@ -77,6 +79,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: pr-fast
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/pr-fast.yml
@@ -97,6 +100,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          group: pr-fast
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/pr-fast.yml
@@ -137,6 +141,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: pr-test
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/pr-test.yml
@@ -153,6 +158,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          group: pr-test
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/pr-test.yml
@@ -181,6 +187,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: pr-runtime-analysis
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/pr-runtime-analysis.yml
@@ -191,6 +198,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          group: pr-runtime-analysis
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/pr-runtime-analysis.yml
@@ -215,6 +223,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: pr-mutants
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/pr-mutants.yml
@@ -225,6 +234,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          group: pr-mutants
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/pr-mutants.yml

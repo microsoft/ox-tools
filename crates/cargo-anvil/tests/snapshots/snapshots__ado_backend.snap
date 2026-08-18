@@ -1357,12 +1357,14 @@ stages:
       - template: steps/job.yml
         parameters:
           name: compute_linux
+          group: impact
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/impact.yml
       - template: steps/job.yml
         parameters:
           name: compute_windows
+          group: impact
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/impact.yml
@@ -1394,6 +1396,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: pr-fast
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/pr-fast.yml
@@ -1414,6 +1417,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          group: pr-fast
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/pr-fast.yml
@@ -1454,6 +1458,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: pr-test
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/pr-test.yml
@@ -1470,6 +1475,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          group: pr-test
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/pr-test.yml
@@ -1498,6 +1504,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: pr-runtime-analysis
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/pr-runtime-analysis.yml
@@ -1508,6 +1515,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          group: pr-runtime-analysis
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/pr-runtime-analysis.yml
@@ -1532,6 +1540,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: pr-mutants
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/pr-mutants.yml
@@ -1542,6 +1551,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          group: pr-mutants
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/pr-mutants.yml
@@ -1576,6 +1586,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: scheduled-test
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/scheduled-test.yml
@@ -1588,6 +1599,7 @@ stages:
       - template: steps/job.yml
         parameters:
           name: windows
+          group: scheduled-test
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-test.yml
@@ -1607,12 +1619,14 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: scheduled-advisories
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/scheduled-advisories.yml
       - template: steps/job.yml
         parameters:
           name: windows
+          group: scheduled-advisories
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-advisories.yml
@@ -1628,12 +1642,14 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: scheduled-runtime-analysis
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/scheduled-runtime-analysis.yml
       - template: steps/job.yml
         parameters:
           name: windows
+          group: scheduled-runtime-analysis
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-runtime-analysis.yml
@@ -1650,12 +1666,14 @@ stages:
       - template: steps/job.yml
         parameters:
           name: linux
+          group: scheduled-exhaustive
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/scheduled-exhaustive.yml
       - template: steps/job.yml
         parameters:
           name: windows
+          group: scheduled-exhaustive
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-exhaustive.yml
@@ -1876,6 +1894,17 @@ steps:
 #
 # Contract (intentionally small and stable):
 #   - name      (string)   Job name; ADO derives the display name from it.
+#   - group     (string)   Optional. The anvil check group this job runs
+#                          (`impact`, `pr-fast`, `pr-mutants`, ...). The
+#                          default wrapper ignores it; extension-template
+#                          wrappers use it to vary per-job `templateContext:`,
+#                          which cannot be expressed any other way: the stages
+#                          templates name every per-OS job `linux` / `windows`,
+#                          so `name` alone does not identify the group, and
+#                          `templateContext:` is evaluated at template-
+#                          expansion time so a runtime stage-name condition is
+#                          not available either. Defaults to '' so wrappers
+#                          written against the older contract keep working.
 #   - pool      (object)   Pool block, passed verbatim to ADO's `pool:` key.
 #   - steps     (stepList) Body of the job. Templated step lists are fine.
 #   - artifacts (object)   Optional list of pipeline artifacts to publish.
@@ -1890,6 +1919,9 @@ steps:
 parameters:
   - name: name
     type: string
+  - name: group
+    type: string
+    default: ''
   - name: pool
     type: object
   - name: steps

@@ -254,6 +254,7 @@ mod tests {
     fn job_wrapper_declares_expected_contract() {
         for needle in [
             "name: name",
+            "name: group",
             "name: pool",
             "name: steps",
             "type: stepList",
@@ -261,6 +262,43 @@ mod tests {
             "PublishPipelineArtifact@1",
         ] {
             assert!(JOB_WRAPPER.contains(needle), "wrapper missing '{needle}'");
+        }
+    }
+
+    #[test]
+    fn stages_identify_the_check_group_for_every_job() {
+        // Every per-OS job in the stages templates is named `linux` / `windows`,
+        // so `name` cannot tell an extension-template wrapper which group it is
+        // rendering. `group` carries that, letting a wrapper vary per-job
+        // `templateContext:` (which is evaluated at template-expansion time, so
+        // a runtime stage-name condition is not an option).
+        for (template, groups) in [
+            (
+                PR_STAGES,
+                &["impact", "pr-fast", "pr-test", "pr-runtime-analysis", "pr-mutants"][..],
+            ),
+            (
+                SCHEDULED_STAGES,
+                &[
+                    "scheduled-test",
+                    "scheduled-advisories",
+                    "scheduled-runtime-analysis",
+                    "scheduled-exhaustive",
+                ][..],
+            ),
+        ] {
+            for group in groups {
+                assert_eq!(
+                    template.matches(&format!("group: {group}\n")).count(),
+                    2,
+                    "group '{group}' must be declared on both per-OS jobs"
+                );
+            }
+            assert_eq!(
+                template.matches("- template: steps/job.yml").count(),
+                template.matches("\n          group: ").count(),
+                "every steps/job.yml invocation must pass a group"
+            );
         }
     }
 
