@@ -1,5 +1,6 @@
 ---
 source: crates/cargo-anvil/tests/snapshots.rs
+assertion_line: 106
 expression: render_tree(tmp.path())
 ---
 === .anvil/container/Containerfile ===
@@ -581,9 +582,6 @@ function Test-AnvilContainerBuildArgs($Value) {
 function Test-AnvilRecipeNeedsGitHubToken([string]$Name) {
     $Name -in @(
         'anvil-aprz',
-        'anvil-pr',
-        '_anvil-pr',
-        'anvil-pr-fast',
         'anvil-scheduled',
         '_anvil-scheduled',
         'anvil-scheduled-advisories',
@@ -889,8 +887,7 @@ done
 
 anvil_recipe_needs_github_token() {
     case "$1" in
-        anvil-aprz | anvil-pr | _anvil-pr | anvil-pr-fast \
-            | anvil-scheduled | _anvil-scheduled | anvil-scheduled-advisories \
+        anvil-aprz | anvil-scheduled | _anvil-scheduled | anvil-scheduled-advisories \
             | anvil-full | _anvil-full) return 0 ;;
         *) return 1 ;;
     esac
@@ -3340,8 +3337,7 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-audit \
     anvil-udeps \
     anvil-semver-check \
-    anvil-external-types \
-    anvil-aprz
+    anvil-external-types
 
 # Group-level setup + validate-prereqs
 #
@@ -3366,8 +3362,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-audit-setup installer) \
     (anvil-udeps-setup installer) \
     (anvil-semver-check-setup installer) \
-    (anvil-external-types-setup installer) \
-    (anvil-aprz-setup installer)
+    (anvil-external-types-setup installer)
 
 # Validate prerequisites for the `anvil-pr-fast` recipe.
 [group("anvil-setup")]
@@ -3386,8 +3381,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-audit-validate-prereqs \
     anvil-udeps-validate-prereqs \
     anvil-semver-check-validate-prereqs \
-    anvil-external-types-validate-prereqs \
-    anvil-aprz-validate-prereqs
+    anvil-external-types-validate-prereqs
 
 === justfiles/anvil/groups/pr-mutants.just ===
 # Copyright (c) Microsoft Corporation.
@@ -4963,7 +4957,7 @@ rust_nightly_external_types := "nightly-2026-03-20"
 # Cargo subcommands
 # ============================================================================
 
-cargo_aprz_version := "1.0.0"
+cargo_aprz_version := "1.1.0"
 cargo_audit_version := "0.22.2"
 cargo_bolero_version := "0.13.4"
 cargo_careful_version := "0.4.10"

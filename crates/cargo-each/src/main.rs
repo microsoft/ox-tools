@@ -14,6 +14,8 @@
 //! This crate ships **only** the `cargo-each` executable; it exposes no
 //! library API (every module below is crate-internal). Consume it as a cargo
 //! subcommand, not as a dependency.
+#![doc(html_logo_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-each/logo.png")]
+#![doc(html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-each/favicon.ico")]
 //!
 //! # Usage
 //!

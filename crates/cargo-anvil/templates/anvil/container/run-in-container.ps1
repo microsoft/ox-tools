@@ -51,9 +51,6 @@ function Test-AnvilContainerBuildArgs($Value) {
 function Test-AnvilRecipeNeedsGitHubToken([string]$Name) {
     $Name -in @(
         'anvil-aprz',
-        'anvil-pr',
-        '_anvil-pr',
-        'anvil-pr-fast',
         'anvil-scheduled',
         '_anvil-scheduled',
         'anvil-scheduled-advisories',

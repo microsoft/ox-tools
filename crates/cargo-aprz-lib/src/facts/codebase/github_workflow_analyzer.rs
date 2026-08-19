@@ -1,0 +1,441 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+//! Detector for CI tool usage in GitHub Actions CI workflows.
+
+use std::fs;
+use std::io::{BufRead, BufReader};
+use std::path::Path;
+
+use ohno::IntoAppError;
+
+use super::provider::LOG_TARGET;
+use crate::Result;
+
+#[derive(Debug, Default, Clone)]
+pub struct GitHubWorkflowInfo {
+    pub workflows_detected: bool,
+    pub clippy_detected: bool,
+    pub miri_detected: bool,
+}
+
+/// Detect if Miri and Clippy are mentioned in GitHub Actions CI
+pub fn sniff_github_workflows(repo_path: impl AsRef<Path>) -> Result<GitHubWorkflowInfo> {
+    const MAX_WORKFLOW_FILES: usize = 100;
+
+    let mut usage = GitHubWorkflowInfo::default();
+
+    let workflows_dir = repo_path.as_ref().join(".github").join("workflows");
+    if !workflows_dir.exists() {
+        return Ok(usage);
+    }
+
+    usage.workflows_detected = true;
+
+    let mut file_count = 0;
+
+    for entry_result in walkdir::WalkDir::new(&workflows_dir).follow_links(false) {
+        let entry = entry_result.into_app_err("walking workflows directory")?;
+
+        // Skip directories
+        if entry.file_type().is_dir() {
+            continue;
+        }
+
+        // Check for YAML extension
+        let is_yaml = entry
+            .path()
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|ext| ext == "yml" || ext == "yaml");
+
+        if !is_yaml {
+            continue;
+        }
+
+        file_count += 1;
+        if file_count > MAX_WORKFLOW_FILES {
+            log::warn!(target: LOG_TARGET, "Workflow file count limit ({MAX_WORKFLOW_FILES}) exceeded in directory '{}', stopping scan", workflows_dir.display());
+            break;
+        }
+
+        let file = fs::File::open(entry.path()).into_app_err_with(|| format!("opening workflow file '{}'", entry.path().display()))?;
+        let mut reader = BufReader::new(file);
+
+        // The line buffer is reused and matched case-insensitively in place, so scanning a
+        // workflow file allocates nothing per line.
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+
+            if !usage.miri_detected && contains_ignore_ascii_case(&line, "miri") {
+                usage.miri_detected = true;
+            }
+
+            if !usage.clippy_detected && contains_ignore_ascii_case(&line, "clippy") {
+                usage.clippy_detected = true;
+            }
+
+            if usage.miri_detected && usage.clippy_detected {
+                // early exit...
+                return Ok(usage);
+            }
+        }
+    }
+
+    Ok(usage)
+}
+
+/// Case-insensitive substring search for an ASCII needle, without allocating.
+fn contains_ignore_ascii_case(haystack: &str, needle: &str) -> bool {
+    let needle = needle.as_bytes();
+    !needle.is_empty()
+        && haystack
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+}
+
+#[cfg(test)]
+#[cfg(not(miri))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matches_needles_regardless_of_case() {
+        assert!(contains_ignore_ascii_case("run: cargo MIRI test", "miri"));
+        assert!(contains_ignore_ascii_case("Clippy", "clippy"));
+        assert!(contains_ignore_ascii_case("miri", "miri"));
+        assert!(!contains_ignore_ascii_case("mir", "miri"));
+        assert!(!contains_ignore_ascii_case("", "miri"));
+        assert!(!contains_ignore_ascii_case("miri", ""));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_no_workflows_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(!result.workflows_detected);
+        assert!(!result.miri_detected);
+        assert!(!result.clippy_detected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_empty_workflows_directory() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workflows_dir = temp_dir.path().join(".github").join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap();
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(result.workflows_detected);
+        assert!(!result.miri_detected);
+        assert!(!result.clippy_detected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_workflows_with_clippy() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workflows_dir = temp_dir.path().join(".github").join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap();
+
+        let workflow_file = workflows_dir.join("ci.yml");
+        fs::write(
+            &workflow_file,
+            "
+name: CI
+on: [push]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Run clippy
+        run: cargo clippy -- -D warnings
+",
+        )
+        .unwrap();
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(result.workflows_detected);
+        assert!(result.clippy_detected);
+        assert!(!result.miri_detected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_workflows_with_miri() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workflows_dir = temp_dir.path().join(".github").join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap();
+
+        let workflow_file = workflows_dir.join("miri.yaml");
+        fs::write(
+            &workflow_file,
+            "
+name: Miri
+on: [push]
+jobs:
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - name: Run Miri
+        run: cargo +nightly miri test
+",
+        )
+        .unwrap();
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(result.workflows_detected);
+        assert!(!result.clippy_detected);
+        assert!(result.miri_detected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_workflows_with_both() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workflows_dir = temp_dir.path().join(".github").join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap();
+
+        let workflow_file = workflows_dir.join("ci.yml");
+        fs::write(
+            &workflow_file,
+            "
+name: CI
+on: [push]
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Clippy
+        run: cargo clippy
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run Miri
+        run: cargo +nightly miri test
+",
+        )
+        .unwrap();
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(result.workflows_detected);
+        assert!(result.clippy_detected);
+        assert!(result.miri_detected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_case_insensitive_detection() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workflows_dir = temp_dir.path().join(".github").join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap();
+
+        let workflow_file = workflows_dir.join("ci.yml");
+        fs::write(
+            &workflow_file,
+            "
+name: CI
+steps:
+  - name: Run CLIPPY in uppercase
+    run: cargo CLIPPY
+  - name: Run MiRi in mixed case
+    run: cargo MiRi test
+",
+        )
+        .unwrap();
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(result.clippy_detected);
+        assert!(result.miri_detected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_multiple_workflow_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workflows_dir = temp_dir.path().join(".github").join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap();
+
+        // First file with clippy
+        fs::write(workflows_dir.join("clippy.yml"), "run: cargo clippy").unwrap();
+
+        // Second file with miri
+        fs::write(workflows_dir.join("miri.yaml"), "run: cargo miri test").unwrap();
+
+        // Third file with neither
+        fs::write(workflows_dir.join("test.yml"), "run: cargo test").unwrap();
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(result.workflows_detected);
+        assert!(result.clippy_detected);
+        assert!(result.miri_detected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_non_yaml_files_ignored() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workflows_dir = temp_dir.path().join(".github").join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap();
+
+        // Create a non-YAML file with clippy/miri mentions
+        fs::write(workflows_dir.join("README.md"), "This mentions clippy and miri").unwrap();
+
+        // Create a YAML file without mentions
+        fs::write(workflows_dir.join("ci.yml"), "run: cargo test").unwrap();
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(result.workflows_detected);
+        // README.md should be ignored
+        assert!(!result.clippy_detected);
+        assert!(!result.miri_detected);
+    }
+
+    #[test]
+    fn test_github_workflow_info_default() {
+        let info = GitHubWorkflowInfo::default();
+        assert!(!info.workflows_detected);
+        assert!(!info.clippy_detected);
+        assert!(!info.miri_detected);
+    }
+
+    #[test]
+    fn test_github_workflow_info_clone() {
+        let info1 = GitHubWorkflowInfo {
+            workflows_detected: true,
+            clippy_detected: true,
+            miri_detected: false,
+        };
+
+        let info2 = info1.clone();
+
+        assert_eq!(info1.workflows_detected, info2.workflows_detected);
+        assert_eq!(info1.clippy_detected, info2.clippy_detected);
+        assert_eq!(info1.miri_detected, info2.miri_detected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_malformed_yaml_is_still_scanned() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workflows_dir = temp_dir.path().join(".github").join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap();
+
+        // The scan is line based, so a file that no YAML parser would accept is
+        // still searched for tool mentions.
+        fs::write(workflows_dir.join("broken.yml"), "jobs: [ unbalanced\n\trun: cargo clippy\n:::\n").unwrap();
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(result.workflows_detected);
+        assert!(result.clippy_detected);
+        assert!(!result.miri_detected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_nested_workflow_directories_are_scanned() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let nested = temp_dir.path().join(".github").join("workflows").join("shared");
+        fs::create_dir_all(&nested).unwrap();
+
+        fs::write(nested.join("lint.yml"), "run: cargo clippy").unwrap();
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(result.workflows_detected);
+        assert!(result.clippy_detected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_workflow_file_limit_stops_the_scan() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workflows_dir = temp_dir.path().join(".github").join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap();
+
+        // The scan stops after 100 files, so the extra ones are never opened.
+        for i in 0..150 {
+            fs::write(workflows_dir.join(format!("wf-{i:03}.yml")), "run: cargo build").unwrap();
+        }
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(result.workflows_detected);
+        assert!(!result.clippy_detected);
+        assert!(!result.miri_detected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_hundredth_workflow_file_is_still_scanned() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workflows_dir = temp_dir.path().join(".github").join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap();
+
+        for i in 0..100 {
+            fs::write(workflows_dir.join(format!("wf-{i:03}.yml")), "run: cargo test").unwrap();
+        }
+        let yaml_paths = workflow_yaml_paths_in_scan_order(&workflows_dir);
+        fs::write(&yaml_paths[99], "run: cargo miri test").unwrap();
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(result.workflows_detected);
+        assert!(result.miri_detected);
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTempPathW")]
+    fn test_workflow_file_after_limit_is_not_scanned() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let workflows_dir = temp_dir.path().join(".github").join("workflows");
+        fs::create_dir_all(&workflows_dir).unwrap();
+
+        for i in 0..101 {
+            fs::write(workflows_dir.join(format!("wf-{i:03}.yml")), "run: cargo test").unwrap();
+        }
+        let yaml_paths = workflow_yaml_paths_in_scan_order(&workflows_dir);
+        fs::write(&yaml_paths[100], "run: cargo clippy").unwrap();
+
+        let result = sniff_github_workflows(temp_dir.path()).unwrap();
+
+        assert!(result.workflows_detected);
+        assert!(!result.clippy_detected);
+    }
+
+    fn workflow_yaml_paths_in_scan_order(workflows_dir: &Path) -> Vec<std::path::PathBuf> {
+        walkdir::WalkDir::new(workflows_dir)
+            .follow_links(false)
+            .into_iter()
+            .map(|entry| entry.unwrap())
+            .filter(|entry| !entry.file_type().is_dir())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|ext| ext == "yml" || ext == "yaml")
+            })
+            .map(|entry| entry.path().to_path_buf())
+            .collect()
+    }
+}

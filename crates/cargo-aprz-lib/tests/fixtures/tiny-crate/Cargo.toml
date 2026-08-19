@@ -1,0 +1,23 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# A tiny workspace used by the `deps` command tests. Every dependency is a path
+# dependency under `vendor/`, so `cargo metadata` resolves it entirely offline.
+# The names and versions match crates in the synthetic crates.io database dump
+# (`tests/support/dump.rs`), which is what supplies the facts for them.
+
+[package]
+name = "tiny-crate"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[features]
+default = ["extra"]
+extra = ["dep:once_cell"]
+
+[dependencies]
+itoa = { path = "vendor/itoa" }
+miniz_oxide = { path = "vendor/miniz_oxide" }
+once_cell = { path = "vendor/once_cell", optional = true }

@@ -1,0 +1,707 @@
+---
+source: cargo-aprz-lib/src/reports/mod.rs
+expression: output
+---
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Crate Appraisal Report</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg viewBox='0 0 1200 800' xmlns='http://www.w3.org/2000/svg'%3E%3Cg%3E%3Cg transform='matrix(1,0,0,1,654.172,668.359)'%3E%3Cpath d='M0,-322.648C-114.597,-322.648 -218.172,-308.869 -296.172,-286.419L-296.172,-291.49C-374.172,-266.395 -423.853,-231.531 -423.853,-192.984C-423.853,-186.907 -422.508,-180.922 -420.15,-175.053L-428.134,-160.732C-428.134,-160.732 -434.547,-152.373 -423.199,-134.733C-413.189,-119.179 -363.035,-58.295 -336.571,-26.413C-325.204,-10.065 -317.488,0 -316.814,-0.973C-315.753,-2.516 -323.878,-33.202 -346.453,-68.215C-356.986,-87.02 -369.811,-111.934 -377.361,-130.335C-356.28,-116.993 -328.172,-104.89 -296.172,-94.474L-296.172,-94.633C-218.172,-72.18 -114.597,-58.404 0,-58.404C131.156,-58.404 248.828,-76.45 327.828,-104.895L327.828,-276.153C248.828,-304.6 131.156,-322.648 0,-322.648' fill='%23a52b00'/%3E%3C/g%3E%3Cg transform='matrix(1,0,0,1,1177.87,277.21)'%3E%3Cpath d='M0,227.175L-88.296,162.132C-89.126,159.237 -89.956,156.345 -90.812,153.474L-61.81,111.458C-58.849,107.184 -58.252,101.629 -60.175,96.755C-62.1,91.905 -66.311,88.428 -71.292,87.576L-120.335,79.255C-122.233,75.376 -124.225,71.557 -126.224,67.771L-105.62,20.599C-103.501,15.793 -103.947,10.209 -106.759,5.848C-109.556,1.465 -114.31,-1.094 -119.376,-0.895L-169.146,0.914C-171.723,-2.442 -174.34,-5.766 -177.012,-9.032L-165.574,-59.592C-164.415,-64.724 -165.876,-70.1 -169.453,-73.83C-173.008,-77.546 -178.175,-79.084 -183.089,-77.88L-231.567,-65.961C-234.707,-68.736 -237.897,-71.474 -241.126,-74.157L-239.381,-126.064C-239.193,-131.318 -241.643,-136.311 -245.849,-139.227C-250.053,-142.161 -255.389,-142.603 -259.987,-140.423L-305.213,-118.921C-308.853,-121.011 -312.515,-123.081 -316.218,-125.084L-324.209,-176.232C-325.021,-181.413 -328.355,-185.816 -333.024,-187.826C-337.679,-189.848 -343.014,-189.193 -347.101,-186.116L-387.422,-155.863C-391.392,-157.181 -395.38,-158.446 -399.418,-159.655L-416.798,-208.159C-418.564,-213.104 -422.64,-216.735 -427.608,-217.756C-432.561,-218.768 -437.656,-217.053 -441.091,-213.217L-475.029,-175.246C-479.133,-175.717 -483.239,-176.147 -487.356,-176.505L-513.564,-220.659C-516.22,-225.131 -520.908,-227.852 -525.961,-227.852C-531.002,-227.852 -535.7,-225.131 -538.333,-220.659L-564.547,-176.505C-568.666,-176.147 -572.791,-175.717 -576.888,-175.246L-610.831,-213.217C-614.268,-217.053 -619.382,-218.768 -624.318,-217.756C-629.284,-216.721 -633.363,-213.104 -635.124,-208.159L-652.517,-159.655C-656.544,-158.446 -660.534,-157.173 -664.514,-155.863L-704.822,-186.116C-708.92,-189.204 -714.254,-189.857 -718.92,-187.826C-723.57,-185.816 -726.917,-181.413 -727.723,-176.232L-735.72,-125.084C-739.42,-123.081 -743.083,-121.022 -746.734,-118.921L-791.956,-140.423C-796.548,-142.612 -801.908,-142.161 -806.091,-139.227C-810.292,-136.311 -812.747,-131.318 -812.557,-126.064L-810.821,-74.157C-814.04,-71.474 -817.224,-68.736 -820.379,-65.961L-868.849,-77.88C-873.774,-79.075 -878.935,-77.546 -882.499,-73.83C-886.084,-70.1 -887.538,-64.724 -886.384,-59.592L-874.969,-9.032C-877.618,-5.753 -880.239,-2.442 -882.808,0.914L-932.579,-0.895C-937.602,-1.043 -942.396,1.465 -945.202,5.848C-948.014,10.209 -948.439,15.793 -946.348,20.599L-925.729,67.771C-927.732,71.557 -929.721,75.376 -931.635,79.255L-980.675,87.576C-985.657,88.417 -989.858,91.892 -991.795,96.755C-993.72,101.629 -993.095,107.184 -990.156,111.458L-961.146,153.474C-961.37,154.215 -961.576,154.964 -961.799,155.707L-1043.82,242.829C-1043.82,242.829 -1056.38,252.68 -1038.09,275.831C-1021.95,296.252 -939.097,377.207 -895.338,419.62C-876.855,441.152 -864.195,454.486 -862.872,453.332C-860.784,451.5 -871.743,412.326 -908.147,366.362C-936.207,325.123 -972.625,261.696 -964.086,254.385C-964.086,254.385 -954.372,242.054 -934.882,233.178C-934.169,233.749 -935.619,232.613 -934.882,233.178C-934.882,233.178 -523.568,422.914 -142.036,236.388C-98.452,228.571 -72.068,251.917 -72.068,251.917C-62.969,257.193 -86.531,322.412 -105.906,365.583C-132.259,414.606 -136.123,452.859 -133.888,454.185C-132.479,455.027 -122.89,440.438 -109.214,417.219C-75.469,370.196 -11.675,280.554 0,258.781C13.239,234.094 0,227.175 0,227.175' fill='%23f74c00'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E">
+  <style>
+    :root {
+      --bg-color: #f0f2f5;
+      --card-bg: #ffffff;
+      --text-color: #1a202c;
+      --text-secondary: #64748b;
+      --border-color: #e2e8f0;
+      --category-bg: #fef3e2;
+      --category-text: #9a3412;
+      --hover-bg: #f8fafc;
+      --accent-color: #3b82f6;
+      --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 16px rgba(0,0,0,0.04);
+      --summary-card-bg: #ffffff;
+      --risk-low: #86efac; --risk-medium: #fde68a; --risk-high: #fca5a5; --risk-not-eval: #d1d5db;
+      --risk-low-text: #14532d; --risk-medium-text: #713f12; --risk-high-text: #7f1d1d; --risk-not-eval-text: #374151;
+    }
+    body.dark-theme {
+      --bg-color: #0f172a; --card-bg: #1e293b; --text-color: #e2e8f0; --text-secondary: #94a3b8;
+      --border-color: #334155; --category-bg: #451a03; --category-text: #fdba74;
+      --hover-bg: #263044; --accent-color: #60a5fa;
+      --shadow: 0 1px 3px rgba(0,0,0,0.3), 0 4px 16px rgba(0,0,0,0.2); --summary-card-bg: #1e293b;
+      --risk-low: #4ade80; --risk-medium: #fbbf24; --risk-high: #f87171; --risk-not-eval: #9ca3af;
+      --risk-low-text: #052e16; --risk-medium-text: #422006; --risk-high-text: #450a0a; --risk-not-eval-text: #f3f4f6;
+      color-scheme: dark;
+    }
+    body.light-theme {
+      --bg-color: #f0f2f5; --card-bg: #ffffff; --text-color: #1a202c; --text-secondary: #64748b;
+      --border-color: #e2e8f0; --category-bg: #fef3e2; --category-text: #9a3412;
+      --hover-bg: #f8fafc; --accent-color: #3b82f6;
+      --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 16px rgba(0,0,0,0.04); --summary-card-bg: #ffffff;
+      --risk-low: #86efac; --risk-medium: #fde68a; --risk-high: #fca5a5; --risk-not-eval: #d1d5db;
+      --risk-low-text: #14532d; --risk-medium-text: #713f12; --risk-high-text: #7f1d1d; --risk-not-eval-text: #374151;
+      color-scheme: light;
+    }
+    * { box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; margin: 0; padding: 32px; background: var(--bg-color); color: var(--text-color); transition: background-color 0.3s ease, color 0.3s ease; line-height: 1.5; }
+    .header { display: flex; align-items: center; gap: 16px; margin-bottom: 28px; }
+    .header-content { flex: 1; }
+    h1 { margin: 0 0 2px 0; font-size: 26px; font-weight: 700; letter-spacing: -0.5px; }
+    .subtitle { margin: 0; font-size: 13px; color: var(--text-secondary); }
+    .ferris { width: 52px; height: 35px; flex-shrink: 0; }
+    .theme-toggle { background: none; border: 2px solid var(--border-color); border-radius: 8px; width: 40px; height: 40px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s ease; flex-shrink: 0; }
+    .theme-toggle:hover { border-color: var(--accent-color); }
+    .theme-toggle svg { width: 18px; height: 18px; fill: var(--text-color); opacity: 0.7; }
+    .summary-row { display: flex; align-items: center; gap: 20px; margin-bottom: 20px; }
+    .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; flex: 1; }
+    .pie-chart { width: 140px; height: 140px; flex-shrink: 0; }
+    body.light-theme .pie-chart circle, body.light-theme .pie-chart path { stroke: #000; stroke-width: 0.5; }
+    .pie-border { stroke: none; stroke-width: 0; }
+    body.light-theme .pie-border { stroke: #000; stroke-width: 1.5; }
+    .summary-card { background: var(--summary-card-bg); border-radius: 10px; padding: 16px 20px; box-shadow: var(--shadow); border: 1px solid var(--border-color); text-align: center; cursor: pointer; transition: opacity 0.15s; }
+    .summary-card:hover { opacity: 0.85; }
+    .summary-card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-secondary); font-weight: 600; margin-bottom: 4px; }
+    .summary-card .value { font-size: 28px; font-weight: 700; }
+    .summary-card.total .value { color: #2563eb; }
+    .summary-card.low .value { color: #15803d; }
+    .summary-card.medium .value { color: #d97706; }
+    .summary-card.high .value { color: #dc2626; }
+    .summary-card.not-eval .value { color: var(--text-secondary); }
+    body.dark-theme .summary-card.total .value { color: var(--accent-color); }
+    body.dark-theme .summary-card.low .value { color: var(--risk-low); }
+    body.dark-theme .summary-card.medium .value { color: var(--risk-medium); }
+    body.dark-theme .summary-card.high .value { color: var(--risk-high); }
+    .crate-card { background: var(--card-bg); border-radius: 12px; box-shadow: var(--shadow); border: 1px solid var(--border-color); margin-bottom: 20px; overflow: hidden; transition: box-shadow 0.2s ease; }
+    .crate-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.12), 0 8px 24px rgba(0,0,0,0.08); }
+    .crate-card-header { display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--border-color); }
+    .crate-card-header .crate-title { font-size: 18px; font-weight: 700; }
+    .crate-card-header .spacer { flex: 1; }
+    .crate-card-header .header-right { display: flex; align-items: center; gap: 12px; }
+    .crate-card-header.risk-low { background: linear-gradient(135deg, var(--risk-low) 0%, var(--card-bg) 100%); }
+    .crate-card-header.risk-medium { background: linear-gradient(135deg, var(--risk-medium) 0%, var(--card-bg) 100%); }
+    .crate-card-header.risk-high { background: linear-gradient(135deg, var(--risk-high) 0%, var(--card-bg) 100%); }
+    .crate-card-header.risk-low .crate-title { color: var(--risk-low-text); }
+    .crate-card-header.risk-medium .crate-title { color: var(--risk-medium-text); }
+    .crate-card-header.risk-high .crate-title { color: var(--risk-high-text); }
+    .risk-badge { display: inline-block; padding: 2px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; white-space: nowrap; }
+    .risk-badge.low { background: var(--risk-low); color: var(--risk-low-text); }
+    .risk-badge.medium { background: var(--risk-medium); color: var(--risk-medium-text); }
+    .risk-badge.high { background: var(--risk-high); color: var(--risk-high-text); }
+    .risk-badge.not-evaluated { background: var(--risk-not-eval); color: var(--risk-not-eval-text); }
+    .appraisal-score { font-size: 14px; font-weight: 600; white-space: nowrap; color: var(--text-secondary); }
+    .card-section { padding: 0; }
+    .card-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--category-text); background: var(--category-bg); padding: 8px 20px; }
+    table { border-collapse: collapse; width: 100%; }
+    th { text-align: left; padding: 8px 20px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); border-bottom: 2px solid var(--border-color); background: var(--card-bg); }
+    td { padding: 8px 20px; font-size: 14px; border-bottom: 1px solid var(--border-color); vertical-align: top; }
+    tr:last-child td { border-bottom: none; }
+    tr:nth-child(even) td { background: var(--hover-bg); }
+    td:first-child { font-weight: 500; color: var(--text-secondary); white-space: nowrap; width: 1%; }
+    .disposition { display: inline-block; padding: 2px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; }
+    .disposition.passed { background: #dcfce7; color: #166534; }
+    .disposition.failed { background: #fee2e2; color: #991b1b; }
+    .disposition.inconclusive { background: #f1f5f9; color: #64748b; }
+    body.dark-theme .disposition.passed { background: #14532d; color: #86efac; }
+    body.dark-theme .disposition.failed { background: #7f1d1d; color: #fca5a5; }
+    body.dark-theme .disposition.inconclusive { background: #334155; color: #94a3b8; }
+    .tabs { }
+    .tab-nav { display: flex; gap: 4px; border-bottom: 2px solid var(--border-color); padding: 0 20px; margin-top: 5px; overflow-x: auto; overflow-y: hidden; }
+    .tab-btn { background: var(--hover-bg); border: 1px solid var(--border-color); border-bottom: none; border-radius: 6px 6px 0 0; margin-bottom: -2px; padding: 10px 16px; font-size: 13px; font-weight: 600; color: var(--text-secondary); cursor: pointer; white-space: nowrap; transition: all 0.15s ease; }
+    .tab-btn:hover { color: var(--text-color); background: #e8e8e8; }
+    body.dark-theme .tab-btn:hover { background: #334155; }
+    .tab-btn.active { color: var(--text-color); background: #e8e8e8; border-color: var(--border-color); border-bottom: 2px solid #e8e8e8; }
+    body.dark-theme .tab-btn.active { background: #334155; border-bottom-color: #334155; }
+    .tab-panels { display: grid; }
+    .tab-panel { grid-area: 1 / 1; visibility: hidden; }
+    .tab-panel.active { visibility: visible; }
+    .risk-list { background: var(--card-bg); border-radius: 10px; padding: 14px 20px; box-shadow: var(--shadow); border: 1px solid var(--border-color); margin-bottom: 12px; }
+    .risk-list summary { font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; cursor: pointer; font-weight: 700; }
+    .risk-list .crate-names { margin-top: 6px; font-size: 14px; }
+    .risk-list .crate-names a { text-decoration: none; }
+    .risk-list .crate-name { display: inline-block; padding: 2px 10px; border-radius: 12px; margin: 3px 2px 3px 1px; font-weight: 500; font-size: 13px; cursor: pointer; transition: opacity 0.15s; }
+    .risk-list .crate-name:hover { opacity: 0.8; }
+    .risk-list.high { border-left: 4px solid var(--risk-high); }
+    .risk-list.high strong { color: var(--risk-high); }
+    .risk-list.high .crate-name { background: var(--risk-high); color: var(--risk-high-text); }
+    .risk-list.medium { border-left: 4px solid var(--risk-medium); }
+    .risk-list.medium strong { color: var(--risk-medium); }
+    .risk-list.medium .crate-name { background: var(--risk-medium); color: var(--risk-medium-text); }
+    .risk-list.low { border-left: 4px solid var(--risk-low); }
+    .risk-list.low strong { color: var(--risk-low); }
+    .risk-list.low .crate-name { background: var(--risk-low); color: var(--risk-low-text); }
+    .risk-list.not-eval { border-left: 4px solid var(--risk-not-eval); }
+    .risk-list.not-eval strong { color: var(--risk-not-eval); }
+    .risk-list.not-eval .crate-name { background: var(--risk-not-eval); color: var(--risk-not-eval-text); }
+    .risk-list .crate-name.active { outline: 2px solid var(--accent-color); outline-offset: 1px; }
+    .sort-controls { float: right; display: inline-flex; margin-left: 12px; }
+    .sort-btn { background: var(--hover-bg); border: 1px solid var(--border-color); padding: 1px 8px; font-size: 11px; font-weight: 600; color: var(--text-secondary); cursor: pointer; transition: all 0.15s ease; text-transform: none; letter-spacing: 0; }
+    .sort-btn:first-child { border-radius: 4px 0 0 4px; }
+    .sort-btn:last-child { border-radius: 0 4px 4px 0; border-left: none; }
+    .sort-btn:hover { color: var(--text-color); }
+    .sort-btn.active { background: #4b5563; color: #ffffff; border-color: #4b5563; }
+    .sort-btn.active + .sort-btn { border-left: 1px solid var(--border-color); }
+    .na { color: var(--text-secondary); font-style: italic; font-size: 13px; }
+    a { color: var(--accent-color); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    @media (max-width: 640px) { body { padding: 16px; } .summary-row { flex-direction: column; } .summary { grid-template-columns: repeat(2, 1fr); } }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <svg class="ferris" viewBox="0 0 1200 800" xmlns="http://www.w3.org/2000/svg">
+      <g>
+        <g transform="matrix(1,0,0,1,654.172,668.359)">
+          <path d="M0,-322.648C-114.597,-322.648 -218.172,-308.869 -296.172,-286.419L-296.172,-291.49C-374.172,-266.395 -423.853,-231.531 -423.853,-192.984C-423.853,-186.907 -422.508,-180.922 -420.15,-175.053L-428.134,-160.732C-428.134,-160.732 -434.547,-152.373 -423.199,-134.733C-413.189,-119.179 -363.035,-58.295 -336.571,-26.413C-325.204,-10.065 -317.488,0 -316.814,-0.973C-315.753,-2.516 -323.878,-33.202 -346.453,-68.215C-356.986,-87.02 -369.811,-111.934 -377.361,-130.335C-356.28,-116.993 -328.172,-104.89 -296.172,-94.474L-296.172,-94.633C-218.172,-72.18 -114.597,-58.404 0,-58.404C131.156,-58.404 248.828,-76.45 327.828,-104.895L327.828,-276.153C248.828,-304.6 131.156,-322.648 0,-322.648" style="fill:rgb(165,43,0);fill-rule:nonzero;"/>
+        </g>
+        <g transform="matrix(1,0,0,1,1099.87,554.94)">
+          <path d="M0,-50.399L-13.433,-78.227C-13.362,-79.283 -13.309,-80.341 -13.309,-81.402C-13.309,-112.95 -46.114,-142.022 -101.306,-165.303L-101.306,2.499C-75.555,-8.365 -54.661,-20.485 -39.72,-33.538C-44.118,-15.855 -59.157,19.917 -71.148,45.073C-90.855,81.054 -97.993,112.376 -97.077,113.926C-96.493,114.904 -89.77,104.533 -79.855,87.726C-56.783,54.85 -13.063,-7.914 -4.325,-23.901C5.574,-42.024 0,-50.399 0,-50.399" style="fill:rgb(165,43,0);fill-rule:nonzero;"/>
+        </g>
+        <g transform="matrix(1,0,0,1,1177.87,277.21)">
+          <path d="M0,227.175L-88.296,162.132C-89.126,159.237 -89.956,156.345 -90.812,153.474L-61.81,111.458C-58.849,107.184 -58.252,101.629 -60.175,96.755C-62.1,91.905 -66.311,88.428 -71.292,87.576L-120.335,79.255C-122.233,75.376 -124.225,71.557 -126.224,67.771L-105.62,20.599C-103.501,15.793 -103.947,10.209 -106.759,5.848C-109.556,1.465 -114.31,-1.094 -119.376,-0.895L-169.146,0.914C-171.723,-2.442 -174.34,-5.766 -177.012,-9.032L-165.574,-59.592C-164.415,-64.724 -165.876,-70.1 -169.453,-73.83C-173.008,-77.546 -178.175,-79.084 -183.089,-77.88L-231.567,-65.961C-234.707,-68.736 -237.897,-71.474 -241.126,-74.157L-239.381,-126.064C-239.193,-131.318 -241.643,-136.311 -245.849,-139.227C-250.053,-142.161 -255.389,-142.603 -259.987,-140.423L-305.213,-118.921C-308.853,-121.011 -312.515,-123.081 -316.218,-125.084L-324.209,-176.232C-325.021,-181.413 -328.355,-185.816 -333.024,-187.826C-337.679,-189.848 -343.014,-189.193 -347.101,-186.116L-387.422,-155.863C-391.392,-157.181 -395.38,-158.446 -399.418,-159.655L-416.798,-208.159C-418.564,-213.104 -422.64,-216.735 -427.608,-217.756C-432.561,-218.768 -437.656,-217.053 -441.091,-213.217L-475.029,-175.246C-479.133,-175.717 -483.239,-176.147 -487.356,-176.505L-513.564,-220.659C-516.22,-225.131 -520.908,-227.852 -525.961,-227.852C-531.002,-227.852 -535.7,-225.131 -538.333,-220.659L-564.547,-176.505C-568.666,-176.147 -572.791,-175.717 -576.888,-175.246L-610.831,-213.217C-614.268,-217.053 -619.382,-218.768 -624.318,-217.756C-629.284,-216.721 -633.363,-213.104 -635.124,-208.159L-652.517,-159.655C-656.544,-158.446 -660.534,-157.173 -664.514,-155.863L-704.822,-186.116C-708.92,-189.204 -714.254,-189.857 -718.92,-187.826C-723.57,-185.816 -726.917,-181.413 -727.723,-176.232L-735.72,-125.084C-739.42,-123.081 -743.083,-121.022 -746.734,-118.921L-791.956,-140.423C-796.548,-142.612 -801.908,-142.161 -806.091,-139.227C-810.292,-136.311 -812.747,-131.318 -812.557,-126.064L-810.821,-74.157C-814.04,-71.474 -817.224,-68.736 -820.379,-65.961L-868.849,-77.88C-873.774,-79.075 -878.935,-77.546 -882.499,-73.83C-886.084,-70.1 -887.538,-64.724 -886.384,-59.592L-874.969,-9.032C-877.618,-5.753 -880.239,-2.442 -882.808,0.914L-932.579,-0.895C-937.602,-1.043 -942.396,1.465 -945.202,5.848C-948.014,10.209 -948.439,15.793 -946.348,20.599L-925.729,67.771C-927.732,71.557 -929.721,75.376 -931.635,79.255L-980.675,87.576C-985.657,88.417 -989.858,91.892 -991.795,96.755C-993.72,101.629 -993.095,107.184 -990.156,111.458L-961.146,153.474C-961.37,154.215 -961.576,154.964 -961.799,155.707L-1043.82,242.829C-1043.82,242.829 -1056.38,252.68 -1038.09,275.831C-1021.95,296.252 -939.097,377.207 -895.338,419.62C-876.855,441.152 -864.195,454.486 -862.872,453.332C-860.784,451.5 -871.743,412.326 -908.147,366.362C-936.207,325.123 -972.625,261.696 -964.086,254.385C-964.086,254.385 -954.372,242.054 -934.882,233.178C-934.169,233.749 -935.619,232.613 -934.882,233.178C-934.882,233.178 -523.568,422.914 -142.036,236.388C-98.452,228.571 -72.068,251.917 -72.068,251.917C-62.969,257.193 -86.531,322.412 -105.906,365.583C-132.259,414.606 -136.123,452.859 -133.888,454.185C-132.479,455.027 -122.89,440.438 -109.214,417.219C-75.469,370.196 -11.675,280.554 0,258.781C13.239,234.094 0,227.175 0,227.175" style="fill:rgb(247,76,0);fill-rule:nonzero;"/>
+        </g>
+        <g transform="matrix(1,0,0,1,795.856,464.937)">
+          <path d="M0,159.631C1.575,158.289 2.4,157.492 2.4,157.492L-132.25,144.985C-22.348,0 65.618,116.967 74.988,129.879L74.988,159.631L0,159.631Z" style="fill-rule:nonzero;"/>
+        </g>
+        <g transform="matrix(1,0,0,1,278.418,211.791)">
+          <path d="M0,253.04C0,253.04 -111.096,209.79 -129.876,163.242C-129.876,163.242 0.515,59.525 -155.497,-50.644L-159.726,89.773C-159.726,89.773 -205.952,45.179 -203.912,-32.91C-203.912,-32.91 -347.685,36.268 -179.436,158.667C-179.436,158.667 -173.76,224.365 -22.459,303.684L0,253.04Z" style="fill:rgb(247,76,0);fill-rule:nonzero;"/>
+        </g>
+        <g transform="matrix(1,0,0,1,729.948,492.523)">
+          <path d="M0,-87.016C0,-87.016 41.104,-132.025 82.21,-87.016C82.21,-87.016 114.507,-27.003 82.21,3C82.21,3 29.36,45.009 0,3C0,3 -35.232,-30.006 0,-87.016" style="fill-rule:nonzero;"/>
+        </g>
+        <g transform="matrix(1,0,0,1,777.536,422.196)">
+          <path d="M0,0.008C0,17.531 -10.329,31.738 -23.07,31.738C-35.809,31.738 -46.139,17.531 -46.139,0.008C-46.139,-17.521 -35.809,-31.73 -23.07,-31.73C-10.329,-31.73 0,-17.521 0,0.008" style="fill:white;fill-rule:nonzero;"/>
+        </g>
+        <g transform="matrix(1,0,0,1,546.49,486.263)">
+          <path d="M0,-93.046C0,-93.046 70.508,-124.265 89.753,-54.583C89.753,-54.583 109.912,26.635 31.851,31.219C31.851,31.219 -67.69,12.047 0,-93.046" style="fill-rule:nonzero;"/>
+        </g>
+        <g transform="matrix(1,0,0,1,581.903,423.351)">
+          <path d="M0,0.002C0,18.074 -10.653,32.731 -23.794,32.731C-36.931,32.731 -47.586,18.074 -47.586,0.002C-47.586,-18.076 -36.931,-32.729 -23.794,-32.729C-10.653,-32.729 0,-18.076 0,0.002" style="fill:white;fill-rule:nonzero;"/>
+        </g>
+        <g transform="matrix(1,0,0,1,1002.23,778.679)">
+          <path d="M0,-296.808C0,-296.808 -14.723,-238.165 -106.292,-176.541L-131.97,-170.523C-131.97,-170.523 -215.036,-322.004 -332.719,-151.302C-332.719,-151.302 -296.042,-172.656 -197.719,-146.652C-197.719,-146.652 -242.949,-77.426 -334.061,-79.553C-334.061,-79.553 -246.748,25.196 -113.881,-126.107C-113.881,-126.107 26.574,-180.422 37.964,-296.808L0,-296.808Z" style="fill:rgb(247,76,0);fill-rule:nonzero;"/>
+        </g>
+      </g>
+    </svg>
+    <div class="header-content">
+      <h1>Crate Appraisal Report</h1>
+      <p class="subtitle">Produced by cargo-aprz 1.1.0 on 2024-01-15</p>
+    </div>
+    <button class="theme-toggle" onclick="toggleTheme()" aria-label="Toggle theme">
+      <svg id="theme-icon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+    </button>
+  </div>
+  <div class="summary-row">
+    <div class="summary">
+      <div class="summary-card total" role="button" tabindex="0" onclick="toggleRiskList('all')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleRiskList('all')}"><div class="label">Total Crates</div><div class="value">6</div></div>
+      <div class="summary-card high" role="button" tabindex="0" onclick="toggleRiskList('high')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleRiskList('high')}"><div class="label">High Risk</div><div class="value">4</div></div>
+      <div class="summary-card medium" role="button" tabindex="0" onclick="toggleRiskList('medium')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleRiskList('medium')}"><div class="label">Medium Risk</div><div class="value">0</div></div>
+      <div class="summary-card low" role="button" tabindex="0" onclick="toggleRiskList('low')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleRiskList('low')}"><div class="label">Low Risk</div><div class="value">1</div></div>
+      <div class="summary-card not-eval" role="button" tabindex="0" onclick="toggleRiskList('not-eval')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleRiskList('not-eval')}"><div class="label">Not Evaluated</div><div class="value">1</div></div>
+    </div>
+      <svg class="pie-chart" viewBox="0 0 160 160" xmlns="http://www.w3.org/2000/svg">
+        <path d="M 80,80 L 80.00,8.00 A 72,72 0 1,1 17.65,116.00 Z" fill="var(--risk-high)" stroke="var(--bg-color)" stroke-width="1"/>
+        <path d="M 80,80 L 17.65,116.00 A 72,72 0 0,1 17.65,44.00 Z" fill="var(--risk-low)" stroke="var(--bg-color)" stroke-width="1"/>
+        <path d="M 80,80 L 17.65,44.00 A 72,72 0 0,1 80.00,8.00 Z" fill="var(--risk-not-eval)" stroke="var(--bg-color)" stroke-width="1"/>
+        <circle class="pie-border" cx="80" cy="80" r="72" fill="none"/>
+      </svg>
+  </div>
+  <details id="risk-high" class="risk-list high" open>
+    <summary>4 High Risk Crates<span class="sort-controls"><button type="button" class="sort-btn" onclick="sortCrates(this, 'alpha', event)" title="Sort A–Z">A–Z</button><button type="button" class="sort-btn active" onclick="sortCrates(this, 'score', event)" title="Sort by score">Score</button></span></summary>
+    <div class="crate-names">
+      <a href="#crate-serde-1.0.195" onclick="selectCrate('crate-serde-1.0.195', this, event)" title="serde v1.0.195" data-name="serde" data-score="0"><span class="crate-name active">serde</span></a>
+      <a href="#crate-required-failed-1.0.0" onclick="selectCrate('crate-required-failed-1.0.0', this, event)" title="required-failed v1.0.0" data-name="required-failed" data-score="0"><span class="crate-name">required-failed</span></a>
+      <a href="#crate-required-inconclusive-1.0.0" onclick="selectCrate('crate-required-inconclusive-1.0.0', this, event)" title="required-inconclusive v1.0.0" data-name="required-inconclusive" data-score="0"><span class="crate-name">required-inconclusive</span></a>
+      <a href="#crate-weighted-inconclusive-1.0.0" onclick="selectCrate('crate-weighted-inconclusive-1.0.0', this, event)" title="weighted-inconclusive v1.0.0" data-name="weighted-inconclusive" data-score="0"><span class="crate-name">weighted-inconclusive</span></a>
+    </div>
+  </details>
+  <details id="risk-low" class="risk-list low">
+    <summary>1 Low Risk Crate<span class="sort-controls"><button type="button" class="sort-btn" onclick="sortCrates(this, 'alpha', event)" title="Sort A–Z">A–Z</button><button type="button" class="sort-btn active" onclick="sortCrates(this, 'score', event)" title="Sort by score">Score</button></span></summary>
+    <div class="crate-names">
+      <a href="#crate-tokio-1.35.0" onclick="selectCrate('crate-tokio-1.35.0', this, event)" title="tokio v1.35.0" data-name="tokio" data-score="100"><span class="crate-name">tokio</span></a>
+    </div>
+  </details>
+  <details id="risk-not-eval" class="risk-list not-eval">
+    <summary>1 Not Evaluated Crate<span class="sort-controls"><button type="button" class="sort-btn" onclick="sortCrates(this, 'alpha', event)" title="Sort A–Z">A–Z</button><button type="button" class="sort-btn active" onclick="sortCrates(this, 'score', event)" title="Sort by score">Score</button></span></summary>
+    <div class="crate-names">
+      <a href="#crate-anyhow-1.0.75" onclick="selectCrate('crate-anyhow-1.0.75', this, event)" title="anyhow v1.0.75" data-name="anyhow" data-score="0"><span class="crate-name">anyhow</span></a>
+    </div>
+  </details>
+  <div id="crate-list">
+    <div class="crate-card" id="crate-tokio-1.35.0" style="display:none">
+      <div class="crate-card-header risk-low">
+        <span class="crate-title">tokio v1.35.0</span>
+        <span class="spacer"></span>
+        <span class="header-right">
+          <span class="appraisal-score">score 100 · 1/1 points</span>
+          <span class="risk-badge low">LOW RISK</span>
+        </span>
+      </div>
+      <div class="tabs">
+        <div class="tab-nav">
+          <button class="tab-btn active" data-tab="card-0-appraisal" onclick="switchTab(this)">Appraisal</button>
+          <button class="tab-btn" data-tab="card-0-Metadata" onclick="switchTab(this)">Metadata</button>
+          <button class="tab-btn" data-tab="card-0-Stability" onclick="switchTab(this)">Stability</button>
+          <button class="tab-btn" data-tab="card-0-Usage" onclick="switchTab(this)">Usage</button>
+          <button class="tab-btn" data-tab="card-0-Community" onclick="switchTab(this)">Community</button>
+          <button class="tab-btn" data-tab="card-0-Trustworthiness" onclick="switchTab(this)">Trustworthiness</button>
+        </div>
+        <div class="tab-panels">
+        <div class="tab-panel active" id="card-0-appraisal">
+          <table>
+          <thead><tr><th>Expression</th><th>Result</th><th>Details</th></tr></thead>
+          <tbody>
+          <tr>
+            <td>high_stars</td>
+            <td><span class="disposition passed">PASSED</span></td>
+            <td></td>
+          </tr>
+          </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-0-Metadata">
+          <table>
+            <tbody>
+            <tr>
+              <td title="Name of the crate">crate.name</td>
+              <td><a href="https://crates.io/crates/tokio/1.35.0" target="_blank" rel="noopener noreferrer">tokio</a></td>
+            </tr>
+            <tr>
+              <td title="Version of the crate">crate.version</td>
+              <td>1.35.0</td>
+            </tr>
+            <tr>
+              <td title="Crate keywords">crate.keywords</td>
+              <td><a href="https://crates.io/keywords/async" target="_blank" rel="noopener noreferrer">#async</a>, <a href="https://crates.io/keywords/runtime" target="_blank" rel="noopener noreferrer">#runtime</a></td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-0-Stability">
+          <table>
+            <tbody>
+            <tr>
+              <td title="When the crate was created">stability.crate_created_at</td>
+              <td>2023-01-15</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-0-Usage">
+          <table>
+            <tbody>
+            <tr>
+              <td title="Total downloads">usage.total_downloads</td>
+              <td>50000000</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-0-Community">
+          <table>
+            <tbody>
+            <tr>
+              <td title="Number of stars">community.repo_stars</td>
+              <td>20000</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-0-Trustworthiness">
+          <table>
+            <tbody>
+            <tr>
+              <td title="Code coverage percentage">trust.code_coverage_percentage</td>
+              <td>85.50</td>
+            </tr>
+            <tr>
+              <td title="Whether CI is configured">trust.ci_workflows</td>
+              <td>true</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        </div>
+      </div>
+    </div>
+    <div class="crate-card" id="crate-serde-1.0.195">
+      <div class="crate-card-header risk-high">
+        <span class="crate-title">serde v1.0.195</span>
+        <span class="spacer"></span>
+        <span class="header-right">
+          <span class="appraisal-score">score 0 · 0/1 points</span>
+          <span class="risk-badge high">HIGH RISK</span>
+        </span>
+      </div>
+      <div class="tabs">
+        <div class="tab-nav">
+          <button class="tab-btn active" data-tab="card-1-appraisal" onclick="switchTab(this)">Appraisal</button>
+          <button class="tab-btn" data-tab="card-1-Metadata" onclick="switchTab(this)">Metadata</button>
+          <button class="tab-btn" data-tab="card-1-Stability" onclick="switchTab(this)">Stability</button>
+          <button class="tab-btn" data-tab="card-1-Usage" onclick="switchTab(this)">Usage</button>
+          <button class="tab-btn" data-tab="card-1-Community" onclick="switchTab(this)">Community</button>
+          <button class="tab-btn" data-tab="card-1-Trustworthiness" onclick="switchTab(this)">Trustworthiness</button>
+        </div>
+        <div class="tab-panels">
+        <div class="tab-panel active" id="card-1-appraisal">
+          <table>
+          <thead><tr><th>Expression</th><th>Result</th><th>Details</th></tr></thead>
+          <tbody>
+          <tr>
+            <td>low_stars</td>
+            <td><span class="disposition failed">FAILED</span></td>
+            <td>Low star count</td>
+          </tr>
+          </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-1-Metadata">
+          <table>
+            <tbody>
+            <tr>
+              <td title="Name of the crate">crate.name</td>
+              <td><a href="https://crates.io/crates/serde/1.0.195" target="_blank" rel="noopener noreferrer">serde</a></td>
+            </tr>
+            <tr>
+              <td title="Version of the crate">crate.version</td>
+              <td>1.0.195</td>
+            </tr>
+            <tr>
+              <td title="Crate keywords">crate.keywords</td>
+              <td><a href="https://crates.io/keywords/serialization" target="_blank" rel="noopener noreferrer">#serialization</a></td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-1-Stability">
+          <table>
+            <tbody>
+            <tr>
+              <td title="When the crate was created">stability.crate_created_at</td>
+              <td>2023-01-15</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-1-Usage">
+          <table>
+            <tbody>
+            <tr>
+              <td title="Total downloads">usage.total_downloads</td>
+              <td>100000000</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-1-Community">
+          <table>
+            <tbody>
+            <tr>
+              <td title="Number of stars">community.repo_stars</td>
+              <td>8000</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-1-Trustworthiness">
+          <table>
+            <tbody>
+            <tr>
+              <td title="Code coverage percentage">trust.code_coverage_percentage</td>
+              <td>92.30</td>
+            </tr>
+            <tr>
+              <td title="Whether CI is configured">trust.ci_workflows</td>
+              <td>true</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        </div>
+      </div>
+    </div>
+    <div class="crate-card" id="crate-anyhow-1.0.75" style="display:none">
+      <div class="crate-card-header">
+        <span class="crate-title">anyhow v1.0.75</span>
+        <span class="spacer"></span>
+        <span class="risk-badge not-evaluated">Not Evaluated</span>
+      </div>
+      <div class="tabs">
+        <div class="tab-nav">
+          <button class="tab-btn active" data-tab="card-2-Metadata" onclick="switchTab(this)">Metadata</button>
+          <button class="tab-btn" data-tab="card-2-Stability" onclick="switchTab(this)">Stability</button>
+          <button class="tab-btn" data-tab="card-2-Usage" onclick="switchTab(this)">Usage</button>
+          <button class="tab-btn" data-tab="card-2-Community" onclick="switchTab(this)">Community</button>
+          <button class="tab-btn" data-tab="card-2-Trustworthiness" onclick="switchTab(this)">Trustworthiness</button>
+        </div>
+        <div class="tab-panels">
+        <div class="tab-panel active" id="card-2-Metadata">
+          <table>
+            <tbody>
+            <tr>
+              <td title="Name of the crate">crate.name</td>
+              <td><a href="https://crates.io/crates/anyhow/1.0.75" target="_blank" rel="noopener noreferrer">anyhow</a></td>
+            </tr>
+            <tr>
+              <td title="Version of the crate">crate.version</td>
+              <td>1.0.75</td>
+            </tr>
+            <tr>
+              <td title="Crate keywords">crate.keywords</td>
+              <td><a href="https://crates.io/keywords/error" target="_blank" rel="noopener noreferrer">#error</a>, <a href="https://crates.io/keywords/handling" target="_blank" rel="noopener noreferrer">#handling</a></td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-2-Stability">
+          <table>
+            <tbody>
+            <tr>
+              <td title="When the crate was created">stability.crate_created_at</td>
+              <td>2023-01-15</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-2-Usage">
+          <table>
+            <tbody>
+            <tr>
+              <td title="Total downloads">usage.total_downloads</td>
+              <td>30000000</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-2-Community">
+          <table>
+            <tbody>
+            <tr>
+              <td title="Number of stars">community.repo_stars</td>
+              <td>4500</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-2-Trustworthiness">
+          <table>
+            <tbody>
+            <tr>
+              <td title="Code coverage percentage">trust.code_coverage_percentage</td>
+              <td>78.90</td>
+            </tr>
+            <tr>
+              <td title="Whether CI is configured">trust.ci_workflows</td>
+              <td>false</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        </div>
+      </div>
+    </div>
+    <div class="crate-card" id="crate-required-failed-1.0.0" style="display:none">
+      <div class="crate-card-header risk-high">
+        <span class="crate-title">required-failed v1.0.0</span>
+        <span class="spacer"></span>
+        <span class="header-right">
+          <span class="appraisal-score">1 required check failed · weighted score not calculated</span>
+          <span class="risk-badge high">HIGH RISK</span>
+        </span>
+      </div>
+      <div class="tabs">
+        <div class="tab-nav">
+          <button class="tab-btn active" data-tab="card-3-appraisal" onclick="switchTab(this)">Appraisal</button>
+          <button class="tab-btn" data-tab="card-3-Metadata" onclick="switchTab(this)">Metadata</button>
+        </div>
+        <div class="tab-panels">
+        <div class="tab-panel active" id="card-3-appraisal">
+          <table>
+          <thead><tr><th>Expression</th><th>Result</th><th>Details</th></tr></thead>
+          <tbody>
+          <tr>
+            <td>Required policy</td>
+            <td><span class="disposition failed">FAILED</span></td>
+            <td>The required condition must hold.</td>
+          </tr>
+          </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-3-Metadata">
+          <table>
+            <tbody>
+            <tr>
+              <td title="Name of the crate">crate.name</td>
+              <td><a href="https://crates.io/crates/required-failed/1.0.0" target="_blank" rel="noopener noreferrer">required-failed</a></td>
+            </tr>
+            <tr>
+              <td title="Version of the crate">crate.version</td>
+              <td>1.0.0</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        </div>
+      </div>
+    </div>
+    <div class="crate-card" id="crate-required-inconclusive-1.0.0" style="display:none">
+      <div class="crate-card-header risk-high">
+        <span class="crate-title">required-inconclusive v1.0.0</span>
+        <span class="spacer"></span>
+        <span class="header-right">
+          <span class="appraisal-score">1 required check inconclusive · weighted score not calculated</span>
+          <span class="risk-badge high">HIGH RISK</span>
+        </span>
+      </div>
+      <div class="tabs">
+        <div class="tab-nav">
+          <button class="tab-btn active" data-tab="card-4-appraisal" onclick="switchTab(this)">Appraisal</button>
+          <button class="tab-btn" data-tab="card-4-Metadata" onclick="switchTab(this)">Metadata</button>
+        </div>
+        <div class="tab-panels">
+        <div class="tab-panel active" id="card-4-appraisal">
+          <table>
+          <thead><tr><th>Expression</th><th>Result</th><th>Details</th></tr></thead>
+          <tbody>
+          <tr>
+            <td>Required facts</td>
+            <td><span class="disposition inconclusive">INCONCLUSIVE</span></td>
+            <td>Required facts must be available.<br><strong>Evaluation error:</strong> provider unavailable</td>
+          </tr>
+          </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-4-Metadata">
+          <table>
+            <tbody>
+            <tr>
+              <td title="Name of the crate">crate.name</td>
+              <td><a href="https://crates.io/crates/required-inconclusive/1.0.0" target="_blank" rel="noopener noreferrer">required-inconclusive</a></td>
+            </tr>
+            <tr>
+              <td title="Version of the crate">crate.version</td>
+              <td>1.0.0</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        </div>
+      </div>
+    </div>
+    <div class="crate-card" id="crate-weighted-inconclusive-1.0.0" style="display:none">
+      <div class="crate-card-header risk-high">
+        <span class="crate-title">weighted-inconclusive v1.0.0</span>
+        <span class="spacer"></span>
+        <span class="header-right">
+          <span class="appraisal-score">1 weighted check inconclusive · weighted score not calculated</span>
+          <span class="risk-badge high">HIGH RISK</span>
+        </span>
+      </div>
+      <div class="tabs">
+        <div class="tab-nav">
+          <button class="tab-btn active" data-tab="card-5-appraisal" onclick="switchTab(this)">Appraisal</button>
+          <button class="tab-btn" data-tab="card-5-Metadata" onclick="switchTab(this)">Metadata</button>
+        </div>
+        <div class="tab-panels">
+        <div class="tab-panel active" id="card-5-appraisal">
+          <table>
+          <thead><tr><th>Expression</th><th>Result</th><th>Details</th></tr></thead>
+          <tbody>
+          <tr>
+            <td>Weighted facts</td>
+            <td><span class="disposition inconclusive">INCONCLUSIVE</span></td>
+            <td>Weighted facts must be available.<br><strong>Evaluation error:</strong> provider unavailable</td>
+          </tr>
+          </tbody>
+          </table>
+        </div>
+        <div class="tab-panel" id="card-5-Metadata">
+          <table>
+            <tbody>
+            <tr>
+              <td title="Name of the crate">crate.name</td>
+              <td><a href="https://crates.io/crates/weighted-inconclusive/1.0.0" target="_blank" rel="noopener noreferrer">weighted-inconclusive</a></td>
+            </tr>
+            <tr>
+              <td title="Version of the crate">crate.version</td>
+              <td>1.0.0</td>
+            </tr>
+            </tbody>
+          </table>
+        </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+    function getSystemTheme() {
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    function updateIcon(theme) {
+      const icon = document.getElementById('theme-icon');
+      if (theme === 'dark') {
+        icon.innerHTML = '<circle cx="12" cy="12" r="4" fill="currentColor"/><path d="M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42m12.72-12.72l1.42-1.42" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>';
+      } else {
+        icon.innerHTML = '<path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>';
+      }
+    }
+    function applyTheme(theme) {
+      document.body.classList.remove('dark-theme', 'light-theme');
+      document.body.classList.add(theme + '-theme');
+      updateIcon(theme);
+    }
+    function toggleTheme() {
+      const currentTheme = localStorage.getItem('theme') || getSystemTheme();
+      const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+      localStorage.setItem('theme', newTheme);
+      applyTheme(newTheme);
+    }
+    function selectCrate(id, pill, event) {
+      event.preventDefault();
+      document.querySelectorAll('.risk-list .crate-name').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.crate-card').forEach(c => c.style.display = 'none');
+      const card = document.getElementById(id);
+      if (card) { card.style.display = ''; }
+      const span = pill.querySelector('.crate-name') || pill;
+      span.classList.add('active');
+    }
+    function sortCrates(btn, mode, event) {
+      event.preventDefault();
+      event.stopPropagation();
+      const list = btn.closest('.risk-list');
+      list.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      const container = list.querySelector('.crate-names');
+      const links = Array.from(container.querySelectorAll('a'));
+      if (mode === 'alpha') {
+        links.sort((a, b) => (a.dataset.name || '').localeCompare(b.dataset.name || ''));
+      } else if (mode === 'score') {
+        links.sort((a, b) => parseFloat(a.dataset.score || '0') - parseFloat(b.dataset.score || '0'));
+      }
+      links.forEach(l => container.appendChild(l));
+    }
+    function toggleRiskList(risk) {
+      const lists = document.querySelectorAll('.risk-list');
+      if (risk === 'all') {
+        const allOpen = Array.from(lists).every(l => l.open);
+        lists.forEach(l => l.open = !allOpen);
+      } else {
+        const target = document.getElementById('risk-' + risk);
+        if (!target) return;
+        const wasOpen = target.open;
+        lists.forEach(l => l.open = false);
+        target.open = !wasOpen;
+      }
+    }
+    function switchTab(btn) {
+      const tabs = btn.closest('.tabs');
+      tabs.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      tabs.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+      btn.classList.add('active');
+      document.getElementById(btn.dataset.tab).classList.add('active');
+    }
+    const savedTheme = localStorage.getItem('theme');
+    applyTheme(savedTheme || getSystemTheme());
+  </script>
+</body>
+</html>

@@ -1,0 +1,182 @@
+---
+source: cargo-aprz-lib/src/reports/mod.rs
+expression: output
+---
+{
+  "crates": [
+    {
+      "appraisal": {
+        "available_points": 1,
+        "awarded_points": 1,
+        "outcomes": [
+          {
+            "description": "High stars and good coverage",
+            "disposition": "passed",
+            "evaluation_error": null,
+            "name": "high_stars"
+          }
+        ],
+        "reasons": [
+          "high_stars"
+        ],
+        "required_check_failure": false,
+        "result": "LOW RISK (score = 100, awarded points = 1, available points = 1)",
+        "risk": "low",
+        "score": 100.0,
+        "weighted_evaluation_failure": false
+      },
+      "metrics": {
+        "community.repo_stars": 20000,
+        "crate.keywords": [
+          "async",
+          "runtime"
+        ],
+        "crate.name": "tokio",
+        "crate.version": "1.35.0",
+        "stability.crate_created_at": "2023-01-15",
+        "trust.ci_workflows": true,
+        "trust.code_coverage_percentage": 85.5,
+        "usage.total_downloads": 50000000
+      },
+      "name": "tokio",
+      "version": "1.35.0"
+    },
+    {
+      "appraisal": {
+        "available_points": 1,
+        "awarded_points": 0,
+        "outcomes": [
+          {
+            "description": "Low star count",
+            "disposition": "failed",
+            "evaluation_error": null,
+            "name": "low_stars"
+          }
+        ],
+        "reasons": [
+          "low_stars"
+        ],
+        "required_check_failure": false,
+        "result": "HIGH RISK (score = 0, awarded points = 0, available points = 1)",
+        "risk": "high",
+        "score": 0.0,
+        "weighted_evaluation_failure": false
+      },
+      "metrics": {
+        "community.repo_stars": 8000,
+        "crate.keywords": [
+          "serialization"
+        ],
+        "crate.name": "serde",
+        "crate.version": "1.0.195",
+        "stability.crate_created_at": "2023-01-15",
+        "trust.ci_workflows": true,
+        "trust.code_coverage_percentage": 92.3,
+        "usage.total_downloads": 100000000
+      },
+      "name": "serde",
+      "version": "1.0.195"
+    },
+    {
+      "metrics": {
+        "community.repo_stars": 4500,
+        "crate.keywords": [
+          "error",
+          "handling"
+        ],
+        "crate.name": "anyhow",
+        "crate.version": "1.0.75",
+        "stability.crate_created_at": "2023-01-15",
+        "trust.ci_workflows": false,
+        "trust.code_coverage_percentage": 78.9,
+        "usage.total_downloads": 30000000
+      },
+      "name": "anyhow",
+      "version": "1.0.75"
+    },
+    {
+      "appraisal": {
+        "available_points": null,
+        "awarded_points": null,
+        "outcomes": [
+          {
+            "description": "The required condition must hold.",
+            "disposition": "failed",
+            "evaluation_error": null,
+            "name": "Required policy"
+          }
+        ],
+        "reasons": [
+          "Required policy"
+        ],
+        "required_check_failure": true,
+        "result": "HIGH RISK (1 required check failed; weighted score not calculated)",
+        "risk": "high",
+        "score": null,
+        "weighted_evaluation_failure": false
+      },
+      "metrics": {
+        "crate.name": "required-failed",
+        "crate.version": "1.0.0"
+      },
+      "name": "required-failed",
+      "version": "1.0.0"
+    },
+    {
+      "appraisal": {
+        "available_points": null,
+        "awarded_points": null,
+        "outcomes": [
+          {
+            "description": "Required facts must be available.",
+            "disposition": "inconclusive",
+            "evaluation_error": "provider unavailable",
+            "name": "Required facts"
+          }
+        ],
+        "reasons": [
+          "Required facts (failure to evaluate: provider unavailable)"
+        ],
+        "required_check_failure": true,
+        "result": "HIGH RISK (1 required check inconclusive; weighted score not calculated)",
+        "risk": "high",
+        "score": null,
+        "weighted_evaluation_failure": false
+      },
+      "metrics": {
+        "crate.name": "required-inconclusive",
+        "crate.version": "1.0.0"
+      },
+      "name": "required-inconclusive",
+      "version": "1.0.0"
+    },
+    {
+      "appraisal": {
+        "available_points": null,
+        "awarded_points": null,
+        "outcomes": [
+          {
+            "description": "Weighted facts must be available.",
+            "disposition": "inconclusive",
+            "evaluation_error": "provider unavailable",
+            "name": "Weighted facts"
+          }
+        ],
+        "reasons": [
+          "Weighted facts (failure to evaluate: provider unavailable)"
+        ],
+        "required_check_failure": false,
+        "result": "HIGH RISK (1 weighted check inconclusive; weighted score not calculated)",
+        "risk": "high",
+        "score": null,
+        "weighted_evaluation_failure": true
+      },
+      "metrics": {
+        "crate.name": "weighted-inconclusive",
+        "crate.version": "1.0.0"
+      },
+      "name": "weighted-inconclusive",
+      "version": "1.0.0"
+    }
+  ]
+}

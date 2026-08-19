@@ -1,0 +1,96 @@
+---
+source: cargo-aprz-lib/src/reports/mod.rs
+expression: output
+---
+tokio v1.35.0 is appraised as LOW RISK (score = 100, awarded points = 1, available points = 1)
+  ✔️ high_stars
+
+Metadata
+  crate.name     : tokio
+  crate.version  : 1.35.0
+  crate.keywords : async, runtime
+
+Stability
+  stability.crate_created_at : 2023-01-15
+
+Usage
+  usage.total_downloads : 50000000
+
+Community
+  community.repo_stars : 20000
+
+Trustworthiness
+  trust.code_coverage_percentage : 85.50
+  trust.ci_workflows             : true
+
+═══════════════════════════════════════
+
+serde v1.0.195 is appraised as HIGH RISK (score = 0, awarded points = 0, available points = 1)
+  ❌ low_stars: Low star count
+
+Metadata
+  crate.name     : serde
+  crate.version  : 1.0.195
+  crate.keywords : serialization
+
+Stability
+  stability.crate_created_at : 2023-01-15
+
+Usage
+  usage.total_downloads : 100000000
+
+Community
+  community.repo_stars : 8000
+
+Trustworthiness
+  trust.code_coverage_percentage : 92.30
+  trust.ci_workflows             : true
+
+═══════════════════════════════════════
+
+anyhow v1.0.75 was not appraised
+
+Metadata
+  crate.name     : anyhow
+  crate.version  : 1.0.75
+  crate.keywords : error, handling
+
+Stability
+  stability.crate_created_at : 2023-01-15
+
+Usage
+  usage.total_downloads : 30000000
+
+Community
+  community.repo_stars : 4500
+
+Trustworthiness
+  trust.code_coverage_percentage : 78.90
+  trust.ci_workflows             : false
+
+═══════════════════════════════════════
+
+required-failed v1.0.0 is appraised as HIGH RISK (1 required check failed; weighted score not calculated)
+  ❌ Required policy: The required condition must hold.
+
+Metadata
+  crate.name    : required-failed
+  crate.version : 1.0.0
+
+═══════════════════════════════════════
+
+required-inconclusive v1.0.0 is appraised as HIGH RISK (1 required check inconclusive; weighted score not calculated)
+  ➖ Required facts: Required facts must be available. (failure to evaluate: provider unavailable)
+
+Metadata
+  crate.name    : required-inconclusive
+  crate.version : 1.0.0
+
+═══════════════════════════════════════
+
+weighted-inconclusive v1.0.0 is appraised as HIGH RISK (1 weighted check inconclusive; weighted score not calculated)
+  ➖ Weighted facts: Weighted facts must be available. (failure to evaluate: provider unavailable)
+
+Metadata
+  crate.name    : weighted-inconclusive
+  crate.version : 1.0.0
