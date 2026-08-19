@@ -435,12 +435,10 @@ exports `ANVIL_IMPACT=off` in its run step, which makes `anvil-impact` a no-op s
 resolves to its `--workspace` default. Impact scoping is purely a PR-tier optimization;
 the scheduled tier never benefits.
 
-If `.delta.toml`'s managed region is emptied
-([updates.md §opt-out](./updates.md#6-opting-out-in-file-stubs)),
-`cargo delta impact` runs with its own defaults — the file is optional configuration, not
-a feature gate — and the `impact` job still emits include lists that recipes interpret
-normally. The user has opted out of *anvil's curated cargo-delta config*, not out of
-impact scoping itself.
+Cloud impact explicitly loads the repository's `.delta.toml`, including the managed
+trip-wire patterns and any repository-owned parser, exclusion, or fixed comparison-
+branch settings. Existing repositories that already define top-level
+`trip_wire_patterns` retain that policy and receive an empty managed-region opt-out.
 
 The reusable workflow declares a small input set so the root workflow can pass overrides:
 
@@ -655,11 +653,11 @@ below-minimum `rustc` produces a clean failure message.
 
 ## 8. Caching
 
-The `anvil-setup` composite action computes a cache key from: OS, rustc version (read
-from `rust-toolchain.toml`), `Cargo.lock`, `.cargo/config.toml`, and `versions.just`
-(the single source of truth for catalog tool/toolchain pins). Uses `actions/cache`
-natively. `CARGO_HOME` is pinned to a workspace-scratch location to keep cache
-scoping predictable.
+The `anvil-setup` composite action computes a cache key from runner OS and
+architecture, the actual `rustc --version`, hashes of `Cargo.lock`,
+`.cargo/config.toml`, `rust-toolchain.toml`, and `versions.just`, plus the workflow
+job ID. Job discrimination prevents concurrent jobs from racing to save one key;
+prefix restore keys still share prior installs across jobs.
 
 The cache covers:
 

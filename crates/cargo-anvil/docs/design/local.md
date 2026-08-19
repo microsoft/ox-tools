@@ -49,11 +49,11 @@ repo/
 │   ├── container.just      optional container entry recipe (`anvil-container`).
 │   ├── tiers.just          tier aggregators (anvil-pr, anvil-scheduled, anvil-full).
 │   ├── tools.just          tool/component/toolchain install + validate-prereqs recipes,
-│   │                       plus anvil-system-deps-check and anvil-validate-prereqs.
-│   └── versions.just       pinned nightly toolchains and pinned cargo-subcommand versions
+│   │                       plus the cargo-spellcheck source-deps check and
+│   │                       anvil-validate-prereqs.
+│   └── versions.just       catalog nightly toolchains and cargo-subcommand minimum versions
 │                           as plain just variables (rust_nightly, cargo_nextest_version, …).
-│                           Read by recipes via `{{ var }}` interpolation.
-│                           Single source of truth for all version pins. See §3.
+│                           Read by recipes via `{{ var }}` interpolation. See §3.
 │
 └── .anvil/container/                              optional non-recipe container assets
     ├── Containerfile
@@ -139,11 +139,13 @@ anvil-pr-fast: anvil-fmt anvil-clippy anvil-cargo-sort anvil-license-headers \
 
 anvil-pr-slow: anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants
 anvil-pr-test: anvil-llvm-cov anvil-doc-test anvil-examples
-anvil-pr-runtime-analysis: anvil-miri anvil-careful
+anvil-pr-runtime-analysis: anvil-miri anvil-careful anvil-loom anvil-bolero
 anvil-pr-mutants: anvil-mutants-diff
 
 anvil-scheduled-test: anvil-llvm-cov anvil-doc-test anvil-examples
 anvil-scheduled-advisories: anvil-deny anvil-audit anvil-aprz anvil-clippy
+anvil-scheduled-runtime-analysis: anvil-miri anvil-miri-tree-borrows \
+                                  anvil-miri-strict-provenance anvil-miri-race-coverage
 anvil-scheduled-exhaustive: anvil-mutants-full anvil-cargo-hack anvil-bench
 ```
 
@@ -154,8 +156,9 @@ in a deterministic order:
 
 ```just
 anvil-pr: anvil-pr-validate-prereqs anvil-pr-fast anvil-pr-slow
-anvil-scheduled: anvil-scheduled-validate-prereqs anvil-scheduled-test anvil-scheduled-advisories \
-               anvil-scheduled-exhaustive
+anvil-scheduled: anvil-scheduled-validate-prereqs anvil-scheduled-test \
+                 anvil-scheduled-advisories anvil-scheduled-runtime-analysis \
+                 anvil-scheduled-exhaustive
 anvil-full: anvil-pr anvil-scheduled
 ```
 
@@ -163,10 +166,10 @@ anvil-full: anvil-pr anvil-scheduled
 
 `tools.just` houses six layers of recipes:
 
-1. **`anvil-system-deps-check`** — probe for system-level libs that catalog tools need to
-   build from source (currently: `libclang` for `cargo-spellcheck`). Best-effort presence
-   check; on missing deps emits per-OS install hints and exits non-zero. No auto-install.
-   See §3.3.1.
+1. **`anvil-tool-cargo-spellcheck-source-deps-check`** — probe for `libclang`, which
+   `cargo-spellcheck` needs when built from source. Best-effort presence check; on
+   missing deps emits per-OS install hints and exits non-zero. No auto-install. See
+   §3.3.1.
 2. **Private helpers** (`_install-tool`, `_check-tool`, `_install-toolchain`,
    `_check-toolchain`, `_install-component`, `_check-component`) — the single
    implementation point for "install this thing at the pinned version" and
@@ -194,8 +197,8 @@ The full tool-version policy these recipes implement is detailed in §3 below.
 
 ### 3.1 Policy
 
-The catalog records, for each cargo subcommand, a **pinned version** (e.g.
-`cargo_nextest_version := "0.9.122"`). The pin is used two different ways:
+The catalog records, for each cargo subcommand, a **catalog version** (e.g.
+`cargo_nextest_version := "0.9.137"`). The pin is used two different ways:
 
 - **On install** (`anvil-tool-<bin>-install` writing into `~/.cargo/bin`): the recipe
   installs *exactly* that version (`--version '={{ pin }}'`), never `>=`. Pulling
@@ -214,6 +217,13 @@ This asymmetry -- "install exact, accept newer if already present" -- gives clou
 reproducibility *and* leaves the user in control. Bumping a pin is a deliberate
 catalog edit (changing a variable in `versions.just`), not an upstream-release-triggered
 surprise.
+
+`cargo-binstall` and `just` are bootstrap utilities rather than catalog checks.
+When absent, setup installs the latest compatible release available at that time;
+when present, setup accepts it. They are intentionally outside the catalog's exact
+installation guarantee so the bootstrap does not recursively require a versioned
+installer. Their versions can therefore vary across cold environments, while every
+tool that determines a catalog check's verdict remains catalog-controlled.
 
 ### 3.2 Detecting installed versions
 
@@ -302,11 +312,13 @@ install recipe can run:
 - **`just`** itself -- bootstrap with `cargo install just --locked` once, or use a
   system package. Every backend's setup composite/template installs it via cargo as
   a one-shot before calling any catalog recipe.
-- **`pwsh`** (PowerShell Core) -- used by every `[script("pwsh")]` recipe in the
-  catalog. Preinstalled on every relevant cloud-workflow runner (GH-hosted
-  Linux/Windows/macOS, Microsoft-hosted ADO agents). On a developer machine
-  without pwsh, `anvil-tool-pwsh-validate-prereqs` fails with a per-OS install
-  hint pointing at <https://github.com/PowerShell/PowerShell>.
+- **`pwsh`** (PowerShell Core) -- used by every
+  `[script("pwsh", "-NoProfile")]` recipe in the catalog. Disabling profiles
+  keeps machine-readable output and exit behavior independent of user or system
+  startup scripts. PowerShell is preinstalled on every relevant cloud-workflow
+  runner (GH-hosted Linux/Windows/macOS, Microsoft-hosted ADO agents). On a
+  developer machine without pwsh, `anvil-tool-pwsh-validate-prereqs` fails with
+  a per-OS install hint pointing at <https://github.com/PowerShell/PowerShell>.
 
 Trade-off acknowledged: `cargo install --locked` is slow on a cold cache (several
 minutes for the full catalog). It is also the most reliable mechanism in restricted
@@ -327,20 +339,22 @@ requires. anvil is not a general-purpose dev-env doctor. Repository-specific
 system deps (e.g. `openssl-devel`, `symcrypt` for the adopter's own crates) belong
 in the adopter's `setup.yml` customization, not in the anvil catalog.
 
-Detection (`anvil-system-deps-check`) uses presence-only probes -- file existence
+Detection (`anvil-tool-cargo-spellcheck-source-deps-check`) uses presence-only probes -- file existence
 in standard install dirs plus the `LIBCLANG_PATH` env var override. No version
 checks: system libs upgrade independently of the catalog and any reasonably modern
 libclang satisfies clang-sys.
 
 On a missing dep the recipe prints per-OS install hints (apt-get / tdnf / brew /
 scoop / winget) and exits non-zero. **No auto-install** -- admin/sudo decisions and
-package-manager choice stay with the user. Tool-install recipes that need a system
-lib depend on `anvil-system-deps-check` (only on the source-build `install`
-backend), so missing system libs surface as a clear hint instead of a cryptic
-clang-sys build error 10 minutes into the install.
+package-manager choice stay with the user. The cargo-spellcheck install recipe passes
+`anvil-tool-cargo-spellcheck-source-deps-check` to `_install-tool` as its source prerequisite.
+The prerequisite runs for an explicit source-build `install` backend and when `binstall`
+cannot provide a binary and falls back to a source build, so missing libclang surfaces as a
+clear hint instead of a cryptic clang-sys build error 10 minutes into the install.
 
-Adding a new system dep is a one-block catalog change in `tools.just`; it
-propagates to adopters via `cargo anvil` like any other catalog edit.
+Each tool with a source-build system dependency owns a tool-specific prerequisite recipe and
+wires it into `_install-tool`. Catalog changes propagate to adopters via `cargo anvil` like
+any other template edit.
 
 ### 3.4 Per-check warnings
 

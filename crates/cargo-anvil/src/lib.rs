@@ -26,8 +26,8 @@
 //!
 //! Each run of `cargo anvil` writes:
 //!
-//! - The `justfiles/anvil/` recipe tree (`tools.just`, `checks.just`,
-//!   `groups.just`, `tiers.just`) — owned files.
+//! - The owned `justfiles/anvil/` recipe tree (`tools.just`, `checks/`,
+//!   `groups/`, `tiers.just`).
 //! - A managed region in your `Justfile` that imports them.
 //! - A managed region in your workspace `Cargo.toml` carrying
 //!   `[workspace.lints]` in dotted-key form, plus a `[lints] workspace =
@@ -65,7 +65,8 @@
 //! - `--no-backends` — emit only local files; skip every cloud-workflow backend.
 //!   Mutually exclusive with `--backend`.
 //! - `--dry-run` — analyze without writing. Exits 1 if anything would be
-//!   written or proposed.
+//!   written or proposed, or if Anvil refuses to manage an artifact it
+//!   cannot safely inspect.
 //! - `--force` — override the single-tool guard and switch the repository to
 //!   this tool, then run a normal update. A repo is managed by exactly one
 //!   anvil-family tool (recorded as `tool` in `.anvil.lock`); without

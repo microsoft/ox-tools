@@ -399,6 +399,14 @@ mod tests {
     }
 
     #[test]
+    fn setup_caches_cargo_install_metadata_without_eager_libclang_install() {
+        assert!(SETUP_STEP.contains("$(HOME)/.cargo/.crates.toml"));
+        assert!(SETUP_STEP.contains("$(HOME)/.cargo/.crates2.json"));
+        assert!(!SETUP_STEP.contains("install libclang"));
+        assert!(!SETUP_STEP.contains("install -y clang-devel"));
+    }
+
+    #[test]
     fn custom_stages_stubs_are_empty_and_take_pool_parameters() {
         // The extension stubs must emit a valid empty stages list (so the
         // default emit doesn't break the pipeline) and declare the pool

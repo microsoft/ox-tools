@@ -175,6 +175,7 @@ mod tests {
         assert!(SETUP_ACTION.contains("runner.environment == 'github-hosted'"));
         assert!(SETUP_ACTION.contains("/usr/local/lib/android"));
         assert!(SETUP_ACTION.contains(r"C:\Program Files (x86)\Android"));
+        assert!(!SETUP_ACTION.contains("Install libclang"));
     }
 
     #[test]

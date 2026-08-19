@@ -606,10 +606,10 @@ the same `steps/job.yml` delegation. Scheduled step templates don't receive any
 `include*` parameters; they default to empty strings and recipes fall through to
 `--workspace`.
 
-If `.delta.toml`'s managed region is disabled
-([updates.md §opt-out](./updates.md#6-opting-out-in-file-stubs)), the impact step is
-unaffected — `cargo delta impact` uses its own defaults when the config file is missing
-or empty.
+Cloud impact explicitly loads `.delta.toml`, so its managed trip wires and
+repository-owned parser, exclusion, and fixed comparison-branch settings apply
+equally to local and ADO execution. Existing top-level `trip_wire_patterns` are
+preserved and opt the managed region out rather than being duplicated.
 
 ## 5. Per-group step templates
 
@@ -626,14 +626,14 @@ steps:
 - template: setup.yml
 # ADO has no PR-title predefined variable (System.PullRequest.Title does
 # not exist), so resolve it from the REST API on PR builds and publish it
-# as PR_TITLE. Best-effort: empty on non-PR / fork / API failure, in which
-# case anvil-pr-title skips.
+# as PR_TITLE. Non-PR runs leave it empty; a known PR whose metadata cannot
+# be retrieved fails closed.
 - pwsh: |
     $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
     if (-not $prId) { Write-Host '##vso[task.setvariable variable=PR_TITLE]'; exit 0 }
     $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
     try { $r = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }; Write-Host "##vso[task.setvariable variable=PR_TITLE]$($r.title)" }
-    catch { Write-Host '##vso[task.setvariable variable=PR_TITLE]' }
+    catch { Write-Error "Could not resolve PR title for PR $prId"; exit 1 }
   env:
     SYSTEM_ACCESSTOKEN: $(System.AccessToken)
 - script: just anvil-pr-fast
@@ -741,11 +741,9 @@ msrustup.
 
 ## 7. Caching
 
-`setup.yml` computes a cache key from: OS, rustc version (read from
-`rust-toolchain.toml`), `Cargo.lock`, `.cargo/config.toml`, and `versions.just`
-(the single source of truth for catalog tool/toolchain pins). Uses the ADO
-pipeline workspace cache (`Cache@2` task). `CARGO_HOME` is pinned to a
-workspace-scratch location to keep cache scoping predictable.
+`setup.yml` computes a cache key from agent OS and architecture, the actual
+`rustc --version`, and hashes of `Cargo.lock`, `.cargo/config.toml`,
+`rust-toolchain.toml`, and `versions.just`. It uses the ADO `Cache@2` task.
 
 The cache covers:
 
