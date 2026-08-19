@@ -17,6 +17,10 @@ need to change:
    them.
 3. **Per-group composite actions** (`.github/actions/anvil-*/`). Each is a multi-step
    composite that runs setup + the matching `just anvil-<tier>-<group>` recipe.
+   The shared setup action registers a problem matcher that promotes Just's
+   standard failing-recipe diagnostic to a GitHub check annotation. Group
+   membership therefore remains solely in the Just recipe while the check UI
+   identifies the individual recipe that failed.
 
 See also:
 
@@ -185,6 +189,8 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 .github/
 ├── actions/
 │   ├── anvil-setup/action.yml         owned   (install just + group-scoped catalog tools)
+│   ├── anvil-setup/just-problem-matcher.json
+│   │                                  owned   (annotate failing Just recipes)
 │   ├── anvil-impact/action.yml        owned   (cargo-delta impact computation)
 │   ├── anvil-pr-fast/action.yml       owned   (one composite action per group)
 │   ├── anvil-pr-test/action.yml      owned
@@ -537,6 +543,14 @@ plug individual groups into an unrelated workflow can `uses:` them directly.
   toolchains that group actually needs. Every per-group composite action
   (`.github/actions/anvil-<group>`) passes its own group name here, so a
   `pr-fast` matrix leg never installs cargo-mutants.
+
+Before invoking Just, the action registers the generated
+`just-problem-matcher.json`. Just already prints the exact failed dependency
+recipe (for example, ``error: recipe `anvil-license-headers` failed with exit
+code 1``), but GitHub otherwise exposes only its generic process-exit
+annotation. The matcher promotes that existing diagnostic without wrapping
+Just, parsing its output in a custom runner, or repeating a group's check list
+in the action.
 
 The action does not install Rust; it expects `cargo` on PATH (see §7).
 `anvil-impact` is described in §6 below.

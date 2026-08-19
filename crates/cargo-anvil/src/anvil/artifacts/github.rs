@@ -15,6 +15,9 @@ use crate::catalog::Artifact;
 /// Embedded body of the shared setup composite action.
 const SETUP_ACTION: &str = include_str!("../../../templates/github/setup-action.yml");
 
+/// GitHub problem matcher that promotes Just recipe failures to annotations.
+const JUST_PROBLEM_MATCHER: &str = include_str!("../../../templates/github/just-problem-matcher.json");
+
 /// Embedded body of the cargo-delta impact composite action.
 const IMPACT_ACTION: &str = include_str!("../../../templates/github/impact-action.yml");
 
@@ -73,6 +76,16 @@ pub fn setup_action() -> Artifact {
     Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-setup/action.yml", SETUP_ACTION)
 }
 
+/// `.github/actions/anvil-setup/just-problem-matcher.json`.
+#[must_use]
+pub fn just_problem_matcher() -> Artifact {
+    Artifact::backend_file(
+        Backend::GitHub,
+        ".github/actions/anvil-setup/just-problem-matcher.json",
+        JUST_PROBLEM_MATCHER,
+    )
+}
+
 /// `.github/actions/anvil-impact/action.yml`.
 #[must_use]
 pub fn impact_action() -> Artifact {
@@ -128,7 +141,7 @@ pub(crate) const GROUP_ACTIONS: &[(&str, &str)] = &[
 /// All GitHub backend artifacts in emission order.
 #[must_use]
 pub(crate) fn all() -> Vec<Artifact> {
-    let mut out = vec![setup_action(), impact_action()];
+    let mut out = vec![setup_action(), just_problem_matcher(), impact_action()];
     for (group, path) in GROUP_ACTIONS {
         out.push(Artifact::backend_file(Backend::GitHub, path, render_group_action(group)));
     }
@@ -147,8 +160,15 @@ mod tests {
     #[test]
     fn setup_and_impact_templates_are_non_empty() {
         assert!(SETUP_ACTION.contains("name: anvil-setup"));
+        assert!(JUST_PROBLEM_MATCHER.contains("\"owner\": \"anvil-just\""));
         assert!(IMPACT_ACTION.contains("name: anvil-impact"));
         assert!(IMPACT_ACTION.contains("cargo-delta"));
+    }
+
+    #[test]
+    fn setup_registers_just_problem_matcher() {
+        assert!(SETUP_ACTION.contains("::add-matcher::$GITHUB_ACTION_PATH/just-problem-matcher.json"));
+        assert!(JUST_PROBLEM_MATCHER.contains("error: recipe `[^`]+` failed with exit code"));
     }
 
     #[test]

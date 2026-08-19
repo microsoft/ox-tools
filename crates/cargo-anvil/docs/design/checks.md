@@ -271,7 +271,10 @@ The `miri` row above is the one place the catalog deliberately duplicates a chec
 Each *group* is one cloud-workflow job. Within a job, the checks belonging to the group run sequentially
 as the `just` recipe defines them. A failure in any check fails the group; the per-check log
 lines are visible in the job log but the cloud workflow surface (the green/red pill in the PR view) is
-per-group.
+per-group. On GitHub, the setup action registers a problem matcher for Just's
+standard failed-recipe diagnostic, so the check annotations identify the
+individual recipe while group membership remains defined only by the Just
+aggregate recipe.
 
 Each group and tier recipe lists its `*-validate-prereqs` aggregate as its **first** dependency, so all
 of the group's tool/component checks run **up front** -- a missing tool fails immediately rather than
