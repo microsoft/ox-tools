@@ -5244,8 +5244,9 @@ anvil-impact: _anvil-impact-snapshot
 #     transitive dependency pulled in at a different version, which a
 #     bare `-p name` cannot do ("multiple packages named name").
 #   * "--skip" when the tier is empty (recipes treat this as a no-op).
-# Diagnostics (dropped unknown names) go to STDERR so they never
-# pollute the captured value.
+# Metadata failures and unknown/ambiguous package names are written to
+# STDERR and fail the recipe, so callers never continue with an incomplete
+# package set (which would silently under-scope and skip a check).
 #
 # Why pwsh + ConvertFrom-Json rather than jq + read: cargo-delta and
 # cargo-metadata both emit JSON, and parsing structured data through a
@@ -5320,7 +5321,6 @@ _anvil-impact-format tier impactJson:
     $impact = Get-Content -LiteralPath $impactJson -Raw | ConvertFrom-Json
     $names = @($impact.$tierKey)
     $specs = [System.Collections.Generic.List[string]]::new()
-    $unmapped = $false
     foreach ($name in $names) {
         if ([string]::IsNullOrWhiteSpace($name)) { continue }
         # Union the candidates from every namespace, de-duplicated by package
@@ -5339,34 +5339,26 @@ _anvil-impact-format tier impactJson:
         $candidates = @($matches.Values)
         if ($candidates.Count -eq 0) {
             # A name cargo-delta reported that doesn't resolve to any workspace
-            # package. Record it so we can fail *closed* below rather than
-            # silently narrowing the tier.
-            [Console]::Error.WriteLine("anvil impact: could not map '$name' to a workspace package in the $tier set")
-            $unmapped = $true
-            continue
+            # package -- a gap in our reverse-mapping of the (non-unique) library
+            # identifier cargo-delta emits. Fail hard so the mapping gap is
+            # surfaced and fixed rather than silently under-scoping the tier.
+            Write-Error "anvil impact: cargo-delta returned unknown package '$name' in the $tier set"
+            exit 1
         }
         if ($candidates.Count -ne 1) {
             # The identifier is genuinely ambiguous -- it names two or more
             # distinct workspace packages across the name / lib / directory-leaf
             # namespaces (e.g. `ffi` / `ffi_build` collisions in deeply nested
-            # workspaces). We cannot know which cargo-delta meant, so fail
-            # *closed* rather than guess and risk under-scoping the tier.
+            # workspaces). We cannot know which cargo-delta meant, so fail hard
+            # rather than guess and risk under-scoping the tier.
             $candidateNames = ($candidates | ForEach-Object { $_.name } | Sort-Object) -join ', '
-            [Console]::Error.WriteLine("anvil impact: '$name' is an ambiguous identifier in the $tier set (matches: $candidateNames)")
-            $unmapped = $true
-            continue
+            Write-Error "anvil impact: cargo-delta returned ambiguous package identifier '$name' in the $tier set (matches: $candidateNames)"
+            exit 1
         }
         $p = $candidates[0]
         $specs.Add("--package $($p.name)@$($p.version)")
     }
-    if ($unmapped) {
-        # Fail closed: at least one changed name could not be mapped to exactly
-        # one package. Emitting the mapped subset (or --skip, when all dropped)
-        # would silently UNDER-scope and skip a check that should run -- the
-        # wrong direction for a safety net. Widen this tier to the full
-        # workspace instead.
-        Write-Output '--workspace'
-    } elseif ($specs.Count -eq 0) {
+    if ($specs.Count -eq 0) {
         Write-Output '--skip'
     } else {
         Write-Output ($specs -join ' ')

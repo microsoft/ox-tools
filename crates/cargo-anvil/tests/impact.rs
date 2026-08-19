@@ -45,7 +45,7 @@ fn tools_available() -> bool {
         ("just", "--version"),
         ("pwsh", "--version"),
     ] {
-        let ok = Command::new(tool).arg(args).output().map(|o| o.status.success()).unwrap_or(false);
+        let ok = Command::new(tool).arg(args).output().is_ok_and(|o| o.status.success());
         if !ok {
             eprintln!("skipping: required tool '{tool}' not available");
             return false;
@@ -969,8 +969,8 @@ fn consume_without_downloaded_cache_fails_loudly() {
 /// Invoke the emitted `_anvil-impact-format` helper directly against a
 /// hand-written impact JSON file, returning (trimmed stdout, stderr, success).
 /// This exercises the formatter's mapping logic -- name/lib/proc-macro
-/// resolution and fail-closed widening -- in isolation from the snapshot/cache
-/// machinery, which the snapshot tests only pin as emitted *text*.
+/// resolution and fail-hard on unmappable names -- in isolation from the
+/// snapshot/cache machinery, which the snapshot tests only pin as emitted *text*.
 fn run_format(root: &Path, tier: &str, impact_json_rel: &str) -> (String, String, bool) {
     let out = just_cmd(root, &["_anvil-impact-format", tier, impact_json_rel]).output().unwrap();
     (
@@ -981,15 +981,15 @@ fn run_format(root: &Path, tier: &str, impact_json_rel: &str) -> (String, String
 }
 
 #[test]
-fn impact_format_fails_closed_to_workspace_on_unmappable_name() {
+fn impact_format_fails_hard_on_unmappable_name() {
     if !tools_available() {
         return;
     }
     // A cargo-delta report naming a package that resolves to no workspace
-    // member must widen the whole tier to --workspace (fail closed), NOT emit
-    // the mapped subset or --skip -- either of which would silently UNDER-scope
-    // and skip a check that should run. The snapshot tests pin the emitted
-    // script text; this pins what that script actually does.
+    // member must fail the recipe (non-zero exit), NOT emit the mapped subset
+    // or --skip -- either of which would silently UNDER-scope and skip a check
+    // that should run. cargo-delta reports (non-unique) library identifiers, so
+    // an unmappable name signals a gap in our reverse-mapping that must surface.
     let tmp = workspace();
     let root = tmp.path();
     // A valid member (`alpha`) plus a name that maps to nothing here.
@@ -997,11 +997,7 @@ fn impact_format_fails_closed_to_workspace_on_unmappable_name() {
     write(&root.join(fixture), "{\"Affected\":[\"alpha\",\"ghostpkg\"]}\n");
 
     let (stdout, stderr, ok) = run_format(root, "affected", fixture);
-    assert!(ok, "the formatter must exit 0 even when widening:\nstderr: {stderr}");
-    assert_eq!(
-        stdout, "--workspace",
-        "an unmappable name must widen the tier to --workspace, not the mapped subset:\nstdout: {stdout}\nstderr: {stderr}"
-    );
+    assert!(!ok, "an unmappable name must fail the recipe:\nstdout: {stdout}\nstderr: {stderr}");
     assert!(
         stderr.contains("ghostpkg"),
         "the diagnostic must name the unmappable package:\n{stderr}"

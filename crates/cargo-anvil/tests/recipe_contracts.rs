@@ -166,26 +166,8 @@ fn assert_failed(output: &Output, context: &str) {
     );
 }
 
-/// Assert the formatter failed *closed*: it exits 0 but widens the tier to the
-/// full workspace (`--workspace`) rather than aborting or emitting a narrowed
-/// package subset. Used for names cargo-delta reports that cannot be mapped to
-/// exactly one workspace package (unknown or ambiguous identifiers).
-fn assert_widened(output: &Output, context: &str) {
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success(),
-        "{context} should widen to --workspace, not abort\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-    assert_eq!(
-        stdout.trim(),
-        "--workspace",
-        "{context} must widen the tier to --workspace\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
-}
-
 #[test]
-fn impact_format_resolves_directory_aliases_and_fails_closed() {
+fn impact_format_resolves_directory_aliases_and_fails_hard() {
     if !tools_available() {
         return;
     }
@@ -201,7 +183,12 @@ fn impact_format_resolves_directory_aliases_and_fails_closed() {
         &["_anvil-impact-format", "affected", "impact.json"],
         &[("FAKE_METADATA_EXIT", OsStr::new("0")), ("FAKE_CARGO_LOG", log.as_os_str())],
     );
-    assert_widened(&unknown, "unknown cargo-delta package");
+    assert_failed(&unknown, "unknown cargo-delta package");
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("unknown package"),
+        "unknown package should be diagnosed directly:\n{}",
+        String::from_utf8_lossy(&unknown.stderr)
+    );
 
     write(
         &tmp.path().join("impact.json"),
@@ -236,7 +223,12 @@ fn impact_format_resolves_directory_aliases_and_fails_closed() {
             ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other-package")),
         ],
     );
-    assert_widened(&ambiguous_alias, "ambiguous cargo-delta directory alias");
+    assert_failed(&ambiguous_alias, "ambiguous cargo-delta directory alias");
+    assert!(
+        String::from_utf8_lossy(&ambiguous_alias.stderr).contains("ambiguous package identifier"),
+        "ambiguous alias should be diagnosed directly:\n{}",
+        String::from_utf8_lossy(&ambiguous_alias.stderr)
+    );
 
     write(
         &tmp.path().join("impact.json"),
@@ -253,7 +245,7 @@ fn impact_format_resolves_directory_aliases_and_fails_closed() {
             ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("workspace-leaf")),
         ],
     );
-    assert_widened(
+    assert_failed(
         &cross_namespace_alias,
         "cargo-delta alias that collides across identifier namespaces",
     );

@@ -490,19 +490,19 @@ full-workspace default (`--workspace` for affected/required, empty for modified)
 tier is unscoped. Every value comes from the shared `_anvil-impact-format` helper via the
 cache.
 
-`_anvil-impact-format` also emits `--workspace` for a *scoped* tier — including the
-modified tier, whose usual full-workspace default is empty — when at least one name
-cargo-delta reported cannot be resolved to exactly one workspace package. The helper
-resolves each reported name against three namespaces: the exact cargo package name, the
-library/proc-macro target name (snake_case, for crates whose package and lib names differ),
-and the manifest-directory leaf (for deeply nested workspaces where cargo-delta emits a
-directory name). A name triggers widening when it maps to **no** package *or* to **more
-than one** distinct package (a genuinely ambiguous identifier). This is deliberate
-**fail-closed widening**: rather than silently narrow the tier (and skip a check that
-should run), the helper logs `could not map '<name>' to a workspace package` or
-`'<name>' is an ambiguous identifier` to stderr and runs the whole workspace. So an adopter
-who sees clippy run workspace-wide on a small PR should look for that diagnostic — it is
-intentional widening, not broken scoping.
+`_anvil-impact-format` **fails the recipe** (non-zero exit, aborting `anvil-impact`)
+when at least one name cargo-delta reported cannot be resolved to exactly one workspace
+package. The helper resolves each reported name against three namespaces: the exact cargo
+package name, the library/proc-macro target name (snake_case, for crates whose package and
+lib names differ), and the manifest-directory leaf (for deeply nested workspaces where
+cargo-delta emits a directory name). A name is unresolvable when it maps to **no** package
+*or* to **more than one** distinct package (a genuinely ambiguous identifier). Because
+cargo-delta reports *library* identifiers rather than unique cargo specs, an unresolvable
+name signals a gap in this reverse-mapping — not a scoping decision — so the helper logs
+`cargo-delta returned unknown package '<name>'` or `cargo-delta returned ambiguous package
+identifier '<name>'` to stderr and exits non-zero rather than guessing (and risking a
+silently under-scoped tier that skips a check). Failing hard surfaces the mapping gap so it
+gets fixed, instead of masking it behind a silently full-workspace run.
 
 The mapping from check to bucket is fixed in the catalog (see
 [checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)). Unscoped checks
