@@ -716,13 +716,42 @@ anvil-tool-cargo-sort-install installer="install": (_install-tool "cargo-sort" c
 [group("anvil-setup")]
 anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_version)
 
+# cargo-spellcheck publishes x86_64-only release binaries, so binstall
+# finds no artifact on linux-arm and installs a wrong-architecture
+# binary on windows-arm, and the source-build fallback needs libclang
+# the hosted ARM images don't ship. The install and validation recipes
+# self-skip on aarch64 so per-group setup recipes that depend on them
+# (pr-fast-setup) don't fail there. The spellcheck check recipe
+# self-skips on the same hosts, so the check is a no-op end-to-end.
+# Spelling is a property of the source tree, not the host, so the
+# x86_64 legs cover it completely.
+#
+# The condition tests the OS architecture directly *and* the Windows
+# environment variables: `OSArchitecture` only reports the true host
+# arch under x64 emulation from .NET 7 onward, and `pwsh` 7.0-7.2 are
+# .NET 5/6, where an emulated x64 process reports `X64`.
+
 # Install the pinned `cargo-spellcheck` tool.
 [group("anvil-setup")]
-anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer "anvil-tool-cargo-spellcheck-source-deps-check")
+[script("pwsh", "-NoProfile")]
+anvil-tool-cargo-spellcheck-install installer="install":
+    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64' -or ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64'))) {
+        Write-Host 'anvil-tool-cargo-spellcheck-install: aarch64 host -- skipping (cargo-spellcheck ships x86_64-only binaries)'
+        exit 0
+    }
+    & just _install-tool cargo-spellcheck {{cargo_spellcheck_version}} {{installer}} anvil-tool-cargo-spellcheck-source-deps-check
+    exit $LASTEXITCODE
 
 # Validate that the pinned `cargo-spellcheck` tool is available.
 [group("anvil-setup")]
-anvil-tool-cargo-spellcheck-validate-prereqs: (_check-tool "cargo-spellcheck" cargo_spellcheck_version)
+[script("pwsh", "-NoProfile")]
+anvil-tool-cargo-spellcheck-validate-prereqs:
+    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64' -or ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64'))) {
+        Write-Host 'anvil-tool-cargo-spellcheck-validate-prereqs: aarch64 host -- skipping (cargo-spellcheck ships x86_64-only binaries)'
+        exit 0
+    }
+    & just _check-tool cargo-spellcheck {{cargo_spellcheck_version}}
+    exit $LASTEXITCODE
 
 # Install the pinned `cargo-udeps` tool.
 [group("anvil-setup")]

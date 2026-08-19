@@ -25,14 +25,15 @@
 # wrong-architecture binary on windows-arm, and the source-build
 # fallback needs libclang the hosted ARM images don't ship. Spelling is
 # a property of the source tree, not the host, so the x86_64 legs cover
-# it. The check, its setup, and its validation all guard, because setup
-# would otherwise fail before the check gets a chance to skip.
+# it. The paired tool install / validation recipes in `tools.just`
+# self-skip on the same hosts, so setup never installs the tool and the
+# check is a no-op end-to-end.
 
 # Check spelling in source comments and documentation.
 [script("pwsh", "-NoProfile")]
 anvil-spellcheck: anvil-spellcheck-validate-prereqs
     $ErrorActionPreference = 'Stop'
-    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') {
+    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64' -or ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64'))) {
         Write-Host 'anvil-spellcheck: aarch64 host -- skipping (cargo-spellcheck ships x86_64-only binaries)'
         exit 0
     }
@@ -66,24 +67,8 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
 
 # Install prerequisites for the `anvil-spellcheck` recipe.
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
-anvil-spellcheck-setup installer="install":
-    $ErrorActionPreference = 'Stop'
-    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') {
-        Write-Host 'anvil-spellcheck-setup: aarch64 host -- skipping (cargo-spellcheck ships x86_64-only binaries)'
-        exit 0
-    }
-    & "{{just_executable()}}" anvil-tool-cargo-spellcheck-install '{{installer}}'
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+anvil-spellcheck-setup installer="install": (anvil-tool-cargo-spellcheck-install installer)
 
 # Validate prerequisites for the `anvil-spellcheck` recipe.
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
-anvil-spellcheck-validate-prereqs:
-    $ErrorActionPreference = 'Stop'
-    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') {
-        Write-Host 'anvil-spellcheck-validate-prereqs: aarch64 host -- skipping (cargo-spellcheck ships x86_64-only binaries)'
-        exit 0
-    }
-    & "{{just_executable()}}" anvil-tool-cargo-spellcheck-validate-prereqs
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs

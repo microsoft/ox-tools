@@ -297,7 +297,7 @@ mod tests {
     fn spellcheck_checks_source_prerequisites_before_source_builds() {
         assert!(
             TOOLS_JUST.contains(
-                "_install-tool \"cargo-spellcheck\" cargo_spellcheck_version installer \"anvil-tool-cargo-spellcheck-source-deps-check\""
+                "_install-tool cargo-spellcheck {{cargo_spellcheck_version}} {{installer}} anvil-tool-cargo-spellcheck-source-deps-check"
             ),
             "spellcheck installer must run libclang validation before source builds"
         );
@@ -310,13 +310,60 @@ mod tests {
 
     #[test]
     fn spellcheck_skips_aarch64() {
-        // Check, setup, and validation must each guard: setup would
-        // otherwise fail before the check gets a chance to skip.
-        let guard = "[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64'";
-        assert_eq!(
-            all_check_bodies().matches(guard).count(),
-            3,
-            "spellcheck must guard on aarch64 in its check, setup, and validate-prereqs recipes"
+        // The check body and the paired tool install / validation
+        // recipes must each guard: setup would otherwise fail before
+        // the check gets a chance to skip. Assert per recipe rather
+        // than counting matches across every check body, so an
+        // unrelated check adopting the same guard can neither break
+        // this test nor mask a dropped guard here.
+        //
+        // The guard tests the Windows environment variables as well as
+        // `OSArchitecture`, because .NET before 7 reports `X64` for an
+        // x64-emulated process on a Windows ARM64 host and `pwsh`
+        // 7.0-7.2 are .NET 5/6.
+        let guard = "[System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64' \
+                     -or ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' \
+                     -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64'))";
+
+        // A recipe body runs from its header line to the next blank
+        // line, which is how `tools.just` separates recipes.
+        let tool_recipe = |name: &str| {
+            let start = TOOLS_JUST
+                .find(&format!("\n{name}"))
+                .unwrap_or_else(|| panic!("`{name}` is defined at column 0 in tools.just"));
+            let rest = &TOOLS_JUST[start + 1..];
+            &rest[..rest.find("\n\n").unwrap_or(rest.len())]
+        };
+
+        let spellcheck = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/spellcheck.just").then_some(*body))
+            .expect("spellcheck.just is registered in CHECK_FILES below");
+
+        assert!(
+            spellcheck.contains(guard),
+            "the `anvil-spellcheck` check recipe must self-skip on aarch64"
+        );
+        for recipe in [
+            "anvil-tool-cargo-spellcheck-install",
+            "anvil-tool-cargo-spellcheck-validate-prereqs",
+        ] {
+            assert!(
+                tool_recipe(recipe).contains(guard),
+                "`{recipe}` must self-skip on aarch64 -- otherwise setup fails before the check can skip, \
+                 and invoking the tool recipe directly stays broken"
+            );
+        }
+
+        // The check-level wrappers stay plain dependencies: the guard
+        // belongs on the atomic tool recipes, matching cargo-mutants.
+        assert!(
+            spellcheck.contains("anvil-spellcheck-setup installer=\"install\": (anvil-tool-cargo-spellcheck-install installer)"),
+            "anvil-spellcheck-setup must delegate to the guarded tool recipe as a dependency"
+        );
+        assert!(
+            spellcheck.contains("anvil-spellcheck-validate-prereqs: anvil-tool-cargo-spellcheck-validate-prereqs"),
+            "anvil-spellcheck-validate-prereqs must delegate to the guarded tool recipe as a dependency"
         );
     }
 
