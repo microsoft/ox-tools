@@ -20,7 +20,11 @@ need to change:
    The shared setup action registers a problem matcher that promotes Just's
    standard failing-recipe diagnostic to a GitHub check annotation. Group
    membership therefore remains solely in the Just recipe while the check UI
-   identifies the individual recipe that failed.
+   identifies the individual recipe that failed. The group action also captures
+   that same terminal diagnostic and fails through a final, dynamically named
+   step such as `Failed Just recipe: anvil-license-headers`, making the failed
+   recipe visible in the job's step list without copying group membership into
+   YAML.
 
 See also:
 
@@ -498,12 +502,25 @@ runs:
     - uses: ./.github/actions/anvil-setup
       with:
         free-disk-space: ${{ inputs.free-disk-space }}
-    - shell: bash
+    - id: run
+      shell: bash
       env:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
         ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
         ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-      run: just anvil-pr-fast
+      run: |
+        log="$RUNNER_TEMP/anvil-pr-fast.log"
+        set +e
+        just anvil-pr-fast 2>&1 | tee "$log"
+        status=${PIPESTATUS[0]}
+        set -e
+        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+        echo "failed_recipe=${failed_recipe:-anvil-pr-fast}" >> "$GITHUB_OUTPUT"
+        echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+    - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
+      if: steps.run.outputs.exit_code != '0'
+      shell: bash
+      run: exit 1
 ```
 
 Uniform input set on every per-group composite action:
@@ -527,6 +544,13 @@ separation: wiring is about "which jobs depend on impact and feed it forward", n
 
 These actions are consumed primarily by anvil's own reusable workflow. Users who want to
 plug individual groups into an unrelated workflow can `uses:` them directly.
+
+The Just step records the process status as an output so the final diagnostic
+step can run; that final step exits nonzero when Just did, so the composite
+action and job retain their normal failing result. The wrapper streams output
+through `tee` and extracts only Just's standard terminal failed-recipe line. If
+that line is absent, the diagnostic step falls back to the group recipe name.
+This presentation logic does not enumerate or invoke individual checks.
 
 ### `anvil-setup`
 

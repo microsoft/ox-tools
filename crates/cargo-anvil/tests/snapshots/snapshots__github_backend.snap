@@ -1399,6 +1399,7 @@ runs:
         group: pr-fast
         free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-pr-fast
+      id: run
       shell: bash
       env:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
@@ -1409,7 +1410,21 @@ runs:
         # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
         # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
-      run: just anvil-pr-fast
+      run: |
+        log="$RUNNER_TEMP/anvil-pr-fast.log"
+        set +e
+        just anvil-pr-fast 2>&1 | tee "$log"
+        status=${PIPESTATUS[0]}
+        set -e
+
+        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+        echo "failed_recipe=${failed_recipe:-anvil-pr-fast}" >> "$GITHUB_OUTPUT"
+        echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+    - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
+      if: steps.run.outputs.exit_code != '0'
+      shell: bash
+      run: exit 1
 
 === .github/actions/anvil-pr-mutants/action.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -1456,6 +1471,7 @@ runs:
         group: pr-mutants
         free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-pr-mutants
+      id: run
       shell: bash
       env:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
@@ -1466,7 +1482,21 @@ runs:
         # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
         # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
-      run: just anvil-pr-mutants
+      run: |
+        log="$RUNNER_TEMP/anvil-pr-mutants.log"
+        set +e
+        just anvil-pr-mutants 2>&1 | tee "$log"
+        status=${PIPESTATUS[0]}
+        set -e
+
+        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+        echo "failed_recipe=${failed_recipe:-anvil-pr-mutants}" >> "$GITHUB_OUTPUT"
+        echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+    - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
+      if: steps.run.outputs.exit_code != '0'
+      shell: bash
+      run: exit 1
 
 === .github/actions/anvil-pr-runtime-analysis/action.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -1513,6 +1543,7 @@ runs:
         group: pr-runtime-analysis
         free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-pr-runtime-analysis
+      id: run
       shell: bash
       env:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
@@ -1523,7 +1554,21 @@ runs:
         # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
         # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
-      run: just anvil-pr-runtime-analysis
+      run: |
+        log="$RUNNER_TEMP/anvil-pr-runtime-analysis.log"
+        set +e
+        just anvil-pr-runtime-analysis 2>&1 | tee "$log"
+        status=${PIPESTATUS[0]}
+        set -e
+
+        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+        echo "failed_recipe=${failed_recipe:-anvil-pr-runtime-analysis}" >> "$GITHUB_OUTPUT"
+        echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+    - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
+      if: steps.run.outputs.exit_code != '0'
+      shell: bash
+      run: exit 1
 
 === .github/actions/anvil-pr-test/action.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -1570,6 +1615,7 @@ runs:
         group: pr-test
         free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-pr-test
+      id: run
       shell: bash
       env:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
@@ -1580,7 +1626,21 @@ runs:
         # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
         # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
-      run: just anvil-pr-test
+      run: |
+        log="$RUNNER_TEMP/anvil-pr-test.log"
+        set +e
+        just anvil-pr-test 2>&1 | tee "$log"
+        status=${PIPESTATUS[0]}
+        set -e
+
+        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+        echo "failed_recipe=${failed_recipe:-anvil-pr-test}" >> "$GITHUB_OUTPUT"
+        echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+    - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
+      if: steps.run.outputs.exit_code != '0'
+      shell: bash
+      run: exit 1
 
 === .github/actions/anvil-scheduled-advisories/action.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -1627,6 +1687,7 @@ runs:
         group: scheduled-advisories
         free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-scheduled-advisories
+      id: run
       shell: bash
       env:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
@@ -1637,7 +1698,21 @@ runs:
         # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
         # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
-      run: just anvil-scheduled-advisories
+      run: |
+        log="$RUNNER_TEMP/anvil-scheduled-advisories.log"
+        set +e
+        just anvil-scheduled-advisories 2>&1 | tee "$log"
+        status=${PIPESTATUS[0]}
+        set -e
+
+        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+        echo "failed_recipe=${failed_recipe:-anvil-scheduled-advisories}" >> "$GITHUB_OUTPUT"
+        echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+    - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
+      if: steps.run.outputs.exit_code != '0'
+      shell: bash
+      run: exit 1
 
 === .github/actions/anvil-scheduled-exhaustive/action.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -1684,6 +1759,7 @@ runs:
         group: scheduled-exhaustive
         free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-scheduled-exhaustive
+      id: run
       shell: bash
       env:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
@@ -1694,7 +1770,21 @@ runs:
         # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
         # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
-      run: just anvil-scheduled-exhaustive
+      run: |
+        log="$RUNNER_TEMP/anvil-scheduled-exhaustive.log"
+        set +e
+        just anvil-scheduled-exhaustive 2>&1 | tee "$log"
+        status=${PIPESTATUS[0]}
+        set -e
+
+        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+        echo "failed_recipe=${failed_recipe:-anvil-scheduled-exhaustive}" >> "$GITHUB_OUTPUT"
+        echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+    - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
+      if: steps.run.outputs.exit_code != '0'
+      shell: bash
+      run: exit 1
 
 === .github/actions/anvil-scheduled-runtime-analysis/action.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -1741,6 +1831,7 @@ runs:
         group: scheduled-runtime-analysis
         free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-scheduled-runtime-analysis
+      id: run
       shell: bash
       env:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
@@ -1751,7 +1842,21 @@ runs:
         # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
         # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
-      run: just anvil-scheduled-runtime-analysis
+      run: |
+        log="$RUNNER_TEMP/anvil-scheduled-runtime-analysis.log"
+        set +e
+        just anvil-scheduled-runtime-analysis 2>&1 | tee "$log"
+        status=${PIPESTATUS[0]}
+        set -e
+
+        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+        echo "failed_recipe=${failed_recipe:-anvil-scheduled-runtime-analysis}" >> "$GITHUB_OUTPUT"
+        echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+    - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
+      if: steps.run.outputs.exit_code != '0'
+      shell: bash
+      run: exit 1
 
 === .github/actions/anvil-scheduled-test/action.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -1798,6 +1903,7 @@ runs:
         group: scheduled-test
         free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-scheduled-test
+      id: run
       shell: bash
       env:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
@@ -1808,7 +1914,21 @@ runs:
         # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
         # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
-      run: just anvil-scheduled-test
+      run: |
+        log="$RUNNER_TEMP/anvil-scheduled-test.log"
+        set +e
+        just anvil-scheduled-test 2>&1 | tee "$log"
+        status=${PIPESTATUS[0]}
+        set -e
+
+        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+        echo "failed_recipe=${failed_recipe:-anvil-scheduled-test}" >> "$GITHUB_OUTPUT"
+        echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+    - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
+      if: steps.run.outputs.exit_code != '0'
+      shell: bash
+      run: exit 1
 
 === .github/actions/anvil-setup/action.yml ===
 # Copyright (c) Microsoft Corporation.

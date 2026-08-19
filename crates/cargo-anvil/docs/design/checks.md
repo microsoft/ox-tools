@@ -274,7 +274,9 @@ lines are visible in the job log but the cloud workflow surface (the green/red p
 per-group. On GitHub, the setup action registers a problem matcher for Just's
 standard failed-recipe diagnostic, so the check annotations identify the
 individual recipe while group membership remains defined only by the Just
-aggregate recipe.
+aggregate recipe. The group action also uses that diagnostic to name its final
+failing step after the individual recipe; this improves the job details without
+changing the stable per-group check name shown on the pull request.
 
 Each group and tier recipe lists its `*-validate-prereqs` aggregate as its **first** dependency, so all
 of the group's tool/component checks run **up front** -- a missing tool fails immediately rather than

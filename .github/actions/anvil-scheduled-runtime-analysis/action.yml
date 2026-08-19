@@ -42,6 +42,7 @@ runs:
         group: scheduled-runtime-analysis
         free-disk-space: ${{ inputs.free-disk-space }}
     - name: Run just anvil-scheduled-runtime-analysis
+      id: run
       shell: bash
       env:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
@@ -52,4 +53,18 @@ runs:
         # authenticated quota (1000 vs 60 req/hr). Harmless for groups whose
         # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
-      run: just anvil-scheduled-runtime-analysis
+      run: |
+        log="$RUNNER_TEMP/anvil-scheduled-runtime-analysis.log"
+        set +e
+        just anvil-scheduled-runtime-analysis 2>&1 | tee "$log"
+        status=${PIPESTATUS[0]}
+        set -e
+
+        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+        echo "failed_recipe=${failed_recipe:-anvil-scheduled-runtime-analysis}" >> "$GITHUB_OUTPUT"
+        echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+    - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
+      if: steps.run.outputs.exit_code != '0'
+      shell: bash
+      run: exit 1

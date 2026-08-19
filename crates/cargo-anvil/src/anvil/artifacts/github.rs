@@ -216,6 +216,8 @@ mod tests {
         let body = render_group_action("pr-fast");
         assert!(body.contains("name: anvil-pr-fast"));
         assert!(body.contains("just anvil-pr-fast"));
+        assert!(body.contains("Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"));
+        assert!(body.contains("failed_recipe=${failed_recipe:-anvil-pr-fast}"));
         assert!(body.contains("ANVIL_INCLUDE_MODIFIED"));
         assert!(body.contains("ANVIL_INCLUDE_AFFECTED"));
         assert!(body.contains("ANVIL_INCLUDE_REQUIRED"));
