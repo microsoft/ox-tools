@@ -193,12 +193,22 @@ _anvil-impact-snapshot:
                 Set-Content -LiteralPath $baselineShaFile -Value $baseSha -Encoding UTF8 -NoNewline
             } else {
                 Push-Location $wt
+                # Preserve any caller-provided RUSTUP_TOOLCHAIN: we override it
+                # only for this baseline snapshot, then restore the caller's
+                # value (or remove it if we introduced it) so the current
+                # snapshot below runs under the same toolchain the caller chose.
+                $hadToolchain = Test-Path Env:\RUSTUP_TOOLCHAIN
+                $priorToolchain = if ($hadToolchain) { $env:RUSTUP_TOOLCHAIN } else { $null }
                 try {
                     if ($activeToolchain) { $env:RUSTUP_TOOLCHAIN = $activeToolchain }
                     $baseSnap = cargo delta snapshot
                     if ($LASTEXITCODE -ne 0) { throw 'cargo delta snapshot (baseline) failed' }
                 } finally {
-                    Remove-Item Env:\RUSTUP_TOOLCHAIN -ErrorAction SilentlyContinue
+                    if ($hadToolchain) {
+                        $env:RUSTUP_TOOLCHAIN = $priorToolchain
+                    } else {
+                        Remove-Item Env:\RUSTUP_TOOLCHAIN -ErrorAction SilentlyContinue
+                    }
                     Pop-Location
                 }
                 Set-Content -LiteralPath $baselineJson -Value $baseSnap -Encoding UTF8

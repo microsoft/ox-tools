@@ -249,6 +249,73 @@ pub fn tiers() -> Artifact {
 mod tests {
     use super::*;
 
+    /// A check's impact-scoping policy: either unscoped (always runs the full
+    /// workspace) or scoped to one cargo-delta impact category.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ImpactPolicy {
+        Unscoped,
+        Modified,
+        Affected,
+        Required,
+    }
+
+    impl ImpactPolicy {
+        /// The `_anvil-impact-include` category argument this policy emits, or
+        /// `None` when the check is unscoped and takes no impact dependency.
+        fn category(self) -> Option<&'static str> {
+            match self {
+                Self::Unscoped => None,
+                Self::Modified => Some("modified"),
+                Self::Affected => Some("affected"),
+                Self::Required => Some("required"),
+            }
+        }
+    }
+
+    /// The intended impact policy for every catalog check -- the canonical
+    /// mapping `every_check_matches_its_declared_impact_policy` enforces
+    /// against the emitted recipes. Keep in sync with the check mapping table
+    /// in the design docs.
+    const EXPECTED_CHECK_POLICY: &[(&str, ImpactPolicy)] = {
+        use ImpactPolicy::{Affected, Modified, Required, Unscoped};
+        &[
+            ("aprz", Unscoped),
+            ("audit", Unscoped),
+            ("bench", Affected),
+            ("bolero", Affected),
+            ("careful", Affected),
+            ("cargo-hack", Required),
+            ("cargo-sort", Modified),
+            ("clippy", Affected),
+            ("deny", Unscoped),
+            ("doc-build", Required),
+            ("doc-test", Affected),
+            ("ensure-no-cyclic-deps", Modified),
+            ("ensure-no-default-features", Modified),
+            ("examples", Affected),
+            ("external-types", Affected),
+            ("fmt", Modified),
+            ("license-headers", Modified),
+            ("llvm-cov", Affected),
+            ("loom", Affected),
+            ("miri", Affected),
+            ("miri-race-coverage", Affected),
+            ("miri-strict-provenance", Affected),
+            ("miri-tree-borrows", Affected),
+            ("mutants-diff", Affected),
+            ("mutants-full", Unscoped),
+            ("pr-title", Unscoped),
+            // readme-check + spellcheck are unscoped: their inputs (workspace
+            // README template, root .spelling dictionary) are repo-level files
+            // cargo-delta does not map to a package, so scoping them would
+            // silently skip a changed template/dictionary.
+            ("readme-check", Unscoped),
+            ("semver-check", Affected),
+            ("spellcheck", Unscoped),
+            ("udeps", Required),
+        ]
+    };
+
     #[test]
     fn tools_just_template_is_not_empty() {
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-spellcheck-source-deps-check"));
@@ -361,32 +428,99 @@ mod tests {
     }
 
     #[test]
-    fn every_scoped_check_depends_on_and_reads_the_impact_cache() {
-        // A check is "scoped" iff it resolves its package set from the impact
-        // cache via `_anvil-impact-include`. Every such check must depend on
-        // `anvil-impact` so the cache is fresh before it runs.
-        let mut scoped = 0;
+    fn every_check_matches_its_declared_impact_policy() {
+        use std::collections::{BTreeMap, BTreeSet};
+
+        // Single source of truth for each check's impact policy. The catalog
+        // encodes the policy structurally -- an `_anvil-impact-include
+        // <category>` call, or its absence for unscoped checks -- and this
+        // table pins the intended value. Pinning the exact category per check
+        // (rather than a bare count) makes a check silently changing category,
+        // or gaining/losing scoping, fail here instead of slipping through.
+        let expected: BTreeMap<&str, ImpactPolicy> = EXPECTED_CHECK_POLICY.iter().copied().collect();
+        assert_eq!(
+            expected.len(),
+            EXPECTED_CHECK_POLICY.len(),
+            "EXPECTED_CHECK_POLICY contains a duplicate check entry"
+        );
+
+        let mut seen = BTreeSet::new();
         for (path, body) in CHECK_FILES {
-            if !body.contains("_anvil-impact-include") {
-                continue;
+            let stem = path
+                .strip_prefix("justfiles/anvil/checks/")
+                .and_then(|p| p.strip_suffix(".just"))
+                .expect("check file path has the expected shape");
+            seen.insert(stem);
+            let policy = *expected
+                .get(stem)
+                .unwrap_or_else(|| panic!("check '{stem}' is missing from EXPECTED_CHECK_POLICY; classify it explicitly"));
+
+            // Parse the actual category calls, matched as whole tokens so
+            // `_anvil-impact-include affected` cannot collide with a longer
+            // word. A recipe must resolve exactly one category, never two.
+            let calls: Vec<&str> = ["modified", "affected", "required"]
+                .into_iter()
+                .filter(|cat| body.contains(&format!("_anvil-impact-include {cat}")))
+                .collect();
+            assert!(
+                calls.len() <= 1,
+                "{path} makes contradictory impact-include calls {calls:?}; a check resolves exactly one category"
+            );
+
+            match policy.category() {
+                None => {
+                    // Unscoped: no cache dependency, no include call.
+                    assert!(
+                        !body.contains("_anvil-impact-include"),
+                        "{path} is declared Unscoped but calls _anvil-impact-include"
+                    );
+                    assert!(
+                        !body.contains("-validate-prereqs anvil-impact"),
+                        "{path} is declared Unscoped but depends on anvil-impact"
+                    );
+                }
+                Some(category) => {
+                    assert_eq!(
+                        calls.as_slice(),
+                        &[category],
+                        "{path}: declared {policy:?} but its _anvil-impact-include category is {calls:?}"
+                    );
+                    // A scoped check must depend on anvil-impact so the cache is
+                    // fresh, and capture the scope into a local $include -- no
+                    // ANVIL_INCLUDE_* env-var indirection.
+                    assert!(
+                        body.contains("-validate-prereqs anvil-impact"),
+                        "{path} reads the impact cache but does not depend on anvil-impact"
+                    );
+                    assert!(
+                        body.contains("$include = (& \"{{ just_executable() }}\" _anvil-impact-include"),
+                        "{path} must capture _anvil-impact-include into a local $include variable"
+                    );
+                }
             }
-            scoped += 1;
-            assert!(
-                body.contains("-validate-prereqs anvil-impact"),
-                "{path} reads the impact cache but does not depend on anvil-impact"
-            );
-            // The scope is captured into a local variable and consumed
-            // directly -- no ANVIL_INCLUDE_* env-var indirection.
-            assert!(
-                body.contains("$include = (& \"{{ just_executable() }}\" _anvil-impact-include"),
-                "{path} must capture _anvil-impact-include into a local $include variable"
-            );
             assert!(
                 !body.contains("ANVIL_INCLUDE_"),
                 "{path} must not reference the removed ANVIL_INCLUDE_* env vars"
             );
         }
-        assert_eq!(scoped, 25, "expected 25 scoped checks wired to anvil-impact");
+
+        // Bijection: every declared check exists as a file, and every file is
+        // declared -- so adding or removing a check forces an explicit policy.
+        let declared: BTreeSet<&str> = expected.keys().copied().collect();
+        assert_eq!(
+            declared, seen,
+            "EXPECTED_CHECK_POLICY and the check catalog disagree on the set of checks"
+        );
+
+        // Guard the headline scoped/unscoped split so a wholesale policy shift
+        // is a deliberate, reviewed edit rather than an accident.
+        let scoped = EXPECTED_CHECK_POLICY.iter().filter(|(_, p)| p.category().is_some()).count();
+        let unscoped = EXPECTED_CHECK_POLICY.len() - scoped;
+        assert_eq!(
+            (scoped, unscoped),
+            (23, 7),
+            "impact scoped/unscoped split changed; update EXPECTED_CHECK_POLICY deliberately"
+        );
     }
 
     #[test]

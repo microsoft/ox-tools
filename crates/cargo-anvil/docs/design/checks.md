@@ -352,10 +352,10 @@ Bucket assignments per check:
 
 | Bucket    | Checks                                                                                                                |
 |-----------|-----------------------------------------------------------------------------------------------------------------------|
-| modified  | `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features`, `readme-check`, `spellcheck` |
+| modified  | `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features` |
 | affected  | `clippy`*, `llvm-cov`, `doc-test`, `examples`, `mutants-diff`, `miri`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`, `careful`, `loom`, `bolero`, `semver-check`, `external-types`, `bench` |
 | required  | `doc-build`, `udeps`, `cargo-hack` (feature powerset)                                                                  |
-| unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full` |
+| unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `readme-check`, `spellcheck` |
 
 \* cargo-delta's README recommends `clippy` with the modified tier. anvil deliberately
 runs it on the affected set instead: a change in a crate's API can introduce clippy lints
@@ -371,7 +371,11 @@ deps), `cargo udeps` (unused-deps detection needs the resolved graph), `cargo ha
 
 `unscoped` is for checks that have nothing to do with workspace-member identity:
 `deny`/`audit` read `Cargo.lock`, `pr-title` reads PR metadata, `aprz` consults an
-external risk DB. These ignore impact scoping and always run.
+external risk DB. `readme-check` and `spellcheck` also belong here: their inputs include
+repo-level files cargo-delta does not map to any package — the workspace-level README
+template (`crates/README.j2` / `README.j2`) and the root `.spelling` dictionary — so a
+change to one of those would be silently scoped out. These ignore impact scoping and
+always run.
 
 The sentinel `--skip` is a magic string that cannot be a valid cargo argument, so there
 is no collision with real package names. Recipes test for it with

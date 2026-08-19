@@ -6,7 +6,11 @@
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Modified tier.
+# Unscoped.
+#
+# cargo-spellcheck checks the whole workspace and reads a repo-root `.spelling`
+# dictionary -- repo-level inputs that cargo-delta does not map to any cargo
+# package -- so this check cannot be safely impact-scoped and always runs.
 #
 # cargo-spellcheck reads a Hunspell-compatible dictionary file at the
 # path configured in spellcheck.toml (typically `extra_dictionaries =
@@ -22,13 +26,8 @@
 
 # Check spelling in source comments and documentation.
 [script("pwsh", "-NoProfile")]
-anvil-spellcheck: anvil-spellcheck-validate-prereqs anvil-impact
+anvil-spellcheck: anvil-spellcheck-validate-prereqs
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
-    if ($include -eq '--skip') {
-        Write-Host 'anvil-spellcheck: no modified packages; skipping'
-        exit 0
-    }
     $output_file = 'target/spelling.dic'
     $filtered_lines = @()
     if (Test-Path '.spelling') {

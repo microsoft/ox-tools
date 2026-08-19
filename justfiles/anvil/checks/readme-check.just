@@ -6,7 +6,11 @@
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Modified tier.
+# Unscoped.
+#
+# A workspace-level README template (`crates/README.j2` / `README.j2`) feeds
+# every crate's README but is a repo-level input cargo-delta does not map to a
+# cargo package, so this check cannot be safely impact-scoped and always runs.
 #
 # cargo-doc2readme regenerates a crate's README.md from its rustdoc.
 # Two extension points users frequently need:
@@ -26,18 +30,12 @@
 # (publish=false, [package.metadata.ox-gen-readme] disable), per-crate
 # Push-Location into the crate dir (cargo-doc2readme is CWD-sensitive
 # rather than --manifest-path-driven), and per-crate template-path
-# resolution. The impact-scoped set ($include) would still need to
-# be intersected with the lib-crate set rather than splatted into cargo.
+# resolution. The recipe iterates the full library-crate set every run.
 
 # Check that crate README files are up to date.
 [script("pwsh", "-NoProfile")]
-anvil-readme-check: anvil-readme-check-validate-prereqs anvil-impact
+anvil-readme-check: anvil-readme-check-validate-prereqs
     $ErrorActionPreference = 'Stop'
-    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
-    if ($include -eq '--skip') {
-        Write-Host 'anvil-readme-check: no modified packages; skipping'
-        exit 0
-    }
     # Detect a workspace-level README template. Two conventional
     # locations: crates/README.j2 (cargo-workspaces idiom) or
     # README.j2 at repo root.
@@ -45,9 +43,10 @@ anvil-readme-check: anvil-readme-check-validate-prereqs anvil-impact
     foreach ($candidate in 'crates/README.j2', 'README.j2') {
         if (Test-Path $candidate) { $template = (Resolve-Path $candidate).Path; break }
     }
-    # Iterate library crates. Filter by impact set when set, then drop
-    # bin-only crates and opt-outs.
-    $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    # Iterate every library crate, then drop bin-only crates and opt-outs.
+    # Unscoped: a change to the workspace-level README template is a repo-level
+    # input cargo-delta cannot map to a package, so this check always runs the
+    # full library set rather than an impact subset.
     $metadataJson = & cargo metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil-readme-check: cargo metadata failed'
@@ -56,20 +55,7 @@ anvil-readme-check: anvil-readme-check-validate-prereqs anvil-impact
     $meta = $metadataJson | ConvertFrom-Json
     $byName = @{}
     foreach ($p in $meta.packages) { $byName[$p.name] = $p }
-    $candidates = if ($pkg -contains '--workspace') {
-        @($meta.packages | ForEach-Object { $_.name })
-    } else {
-        $names = @()
-        for ($i = 0; $i -lt $pkg.Count; $i++) {
-            if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
-                # Impact emits version-qualified specs (name@version);
-                # strip the @version to recover the bare package name
-                # this metadata lookup keys on.
-                $names += ($pkg[$i + 1] -split '@', 2)[0]; $i++
-            }
-        }
-        $names
-    }
+    $candidates = @($meta.packages | ForEach-Object { $_.name })
     $hadFailure = $false
     foreach ($name in $candidates) {
         $p = $byName[$name]
