@@ -718,32 +718,13 @@ anvil-tool-cargo-sort-install installer="install": (_install-tool "cargo-sort" c
 [group("anvil-setup")]
 anvil-tool-cargo-sort-validate-prereqs: (_check-tool "cargo-sort" cargo_sort_version)
 
-# cargo-spellcheck 0.15.1 is not usable on ARM64: its source dependency
-# ra_ap_stdx no longer compiles with current Rust, and its Windows ARM64 binary
-# segfaults. Spelling is architecture-independent and runs on the x64 matrix
-# legs, so installation, validation, and execution all self-skip on ARM64.
-
 # Install the pinned `cargo-spellcheck` tool.
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
-anvil-tool-cargo-spellcheck-install installer="install":
-    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) {
-        Write-Host 'anvil-tool-cargo-spellcheck-install: ARM64 -- skipping (upstream tool incompatibility)'
-        exit 0
-    }
-    & "{{just_executable()}}" _install-tool cargo-spellcheck {{cargo_spellcheck_version}} {{installer}} anvil-tool-cargo-spellcheck-source-deps-check
-    exit $LASTEXITCODE
+anvil-tool-cargo-spellcheck-install installer="install": (_install-tool "cargo-spellcheck" cargo_spellcheck_version installer "anvil-tool-cargo-spellcheck-source-deps-check")
 
 # Validate that the pinned `cargo-spellcheck` tool is available.
 [group("anvil-setup")]
-[script("pwsh", "-NoProfile")]
-anvil-tool-cargo-spellcheck-validate-prereqs:
-    if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq [System.Runtime.InteropServices.Architecture]::Arm64) {
-        Write-Host 'anvil-tool-cargo-spellcheck-validate-prereqs: ARM64 -- skipping (upstream tool incompatibility)'
-        exit 0
-    }
-    & "{{just_executable()}}" _check-tool cargo-spellcheck {{cargo_spellcheck_version}}
-    exit $LASTEXITCODE
+anvil-tool-cargo-spellcheck-validate-prereqs: (_check-tool "cargo-spellcheck" cargo_spellcheck_version)
 
 # Install the pinned `cargo-udeps` tool.
 [group("anvil-setup")]

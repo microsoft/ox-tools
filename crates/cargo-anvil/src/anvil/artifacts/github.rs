@@ -216,6 +216,10 @@ mod tests {
     #[test]
     fn pr_impl_workflow_has_expected_jobs() {
         assert!(PR_IMPL_WORKFLOW.contains("workflow_call:"));
+        assert!(
+            !PR_IMPL_WORKFLOW.contains("ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64"),
+            "the PR workflow must run spellcheck on ARM64"
+        );
         for needle in [
             "impact-linux:",
             "impact-windows:",

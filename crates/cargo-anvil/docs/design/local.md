@@ -352,12 +352,6 @@ Each tool with a source-build system dependency owns a tool-specific prerequisit
 wires it into `_install-tool`. Catalog changes propagate to adopters via `cargo anvil` like
 any other template edit.
 
-`cargo-spellcheck 0.15.1` is skipped end-to-end on ARM64. Its pinned
-`ra_ap_stdx` dependency does not compile with current Rust on Linux ARM64, and
-the available Windows ARM64 binary terminates with an access violation. Because
-spelling results are architecture-independent, x64 workflow legs retain the
-check while ARM64 setup, prerequisite validation, and execution are no-ops.
-
 ### 3.4 Per-check warnings
 
 Every check recipe depends on `anvil-<check>-validate-prereqs` so even ad-hoc

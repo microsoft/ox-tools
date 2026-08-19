@@ -303,18 +303,14 @@ mod tests {
             TOOLS_JUST.contains("anvil-tool-cargo-spellcheck-source-deps-check"),
             "spellcheck installer must run libclang validation before source builds"
         );
-        assert!(
-            TOOLS_JUST.contains("anvil-tool-cargo-spellcheck-install: ARM64 -- skipping (upstream tool incompatibility)"),
-            "spellcheck installation must skip unsupported ARM64 hosts"
-        );
         let checks = all_check_bodies();
         assert!(
             !checks.contains("anvil-spellcheck-setup installer=\"install\": anvil-tool-cargo-spellcheck-source-deps-check"),
             "spellcheck setup must not require libclang before binstall"
         );
         assert!(
-            checks.contains("anvil-spellcheck: ARM64 -- skipping (upstream tool incompatibility)"),
-            "spellcheck execution must skip unsupported ARM64 hosts"
+            !TOOLS_JUST.contains("ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64") && !checks.contains("ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64"),
+            "spellcheck must run normally on ARM64"
         );
     }
 
