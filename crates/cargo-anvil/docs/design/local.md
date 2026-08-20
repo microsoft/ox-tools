@@ -278,12 +278,12 @@ The `installer` argument:
   source builds; works in any cargo environment with no extra runtime dependency.
   Slow on a cold runner (~30 min for the full catalog) because every tool
   re-compiles common deps (`clap`, `syn`, `quote`, ...) from scratch independently.
-- `binstall` -- `cargo binstall --no-confirm --locked --disable-strategies compile
-  <tool> --version '=<pin>'`. Downloads a prebuilt binary from each tool's GitHub
-  Releases when available. If no binary is available, Anvil runs the tool's source
-  prerequisite before invoking `cargo install` itself; disabling binstall's compile
-  strategy prevents an uncontrolled source build from bypassing that check. The
-  binary path cuts the cold-runner install phase from ~30 min to ~1 min.
+- `binstall` -- `cargo binstall --no-confirm --locked <tool> --version '=<pin>'`.
+  Downloads a prebuilt binary from each tool's GitHub Releases when available.
+  When a tool declares a source prerequisite, Anvil disables binstall's compile
+  strategy and performs the source fallback itself after checking that prerequisite.
+  Tools without a source prerequisite retain binstall's normal compile strategy.
+  The binary path cuts the cold-runner install phase from ~30 min to ~1 min.
   `cargo-binstall` itself needs to be on PATH; the GH setup composite arranges this.
 
 The GitHub composite setup action calls `just anvil-<group>-setup binstall`

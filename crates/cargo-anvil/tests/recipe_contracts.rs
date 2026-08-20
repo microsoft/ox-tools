@@ -21,6 +21,7 @@ const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.ju
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
+const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
 const FAKE_CARGO_PS1: &str = r#"
 $joined = $args -join ' '
@@ -88,6 +89,12 @@ if ($args -contains 'nextest') {
         exit 0
     }
     exit [int]$env:FAKE_NEXTEST_EXIT
+}
+if ($args -contains 'binstall') {
+    exit [int]$env:FAKE_BINSTALL_EXIT
+}
+if ($args -contains 'install' -and $args -contains '--version') {
+    exit [int]$env:FAKE_INSTALL_EXIT
 }
 exit 0
 "#;
@@ -368,6 +375,96 @@ fn semver_exit_code_contract_is_executed() {
         );
         assert_failed(&failed, &format!("cargo-semver-checks exit {exit}"));
     }
+}
+
+#[test]
+fn install_tool_controls_source_fallback_and_prerequisite_ordering() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
+    let justfile_path = tmp.path().join("Justfile");
+    let mut justfile = std::fs::read_to_string(&justfile_path).unwrap();
+    justfile.push_str(
+        r#"
+[script("pwsh", "-NoProfile")]
+source-prereq:
+    Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value 'source-prereq'
+    exit [int]$env:FAKE_PREREQ_EXIT
+"#,
+    );
+    write(&justfile_path, &justfile);
+    let log = tmp.path().join("cargo.log");
+
+    let fallback = run_just(
+        tmp.path(),
+        &["_install-tool", "cargo-spellcheck", "0.15.7", "binstall", "source-prereq"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_BINSTALL_EXIT", OsStr::new("7")),
+            ("FAKE_PREREQ_EXIT", OsStr::new("0")),
+            ("FAKE_INSTALL_EXIT", OsStr::new("0")),
+        ],
+    );
+    assert!(
+        fallback.status.success(),
+        "controlled source fallback should succeed:\n{}",
+        String::from_utf8_lossy(&fallback.stderr)
+    );
+    let log_contents = std::fs::read_to_string(&log).unwrap();
+    let lines = log_contents.lines().collect::<Vec<_>>();
+    let binstall = lines
+        .iter()
+        .position(|line| line.contains("binstall --no-confirm --locked --disable-strategies compile"))
+        .expect("source-prerequisite tools must disable binstall compilation");
+    let prerequisite = lines
+        .iter()
+        .position(|line| *line == "source-prereq")
+        .expect("source prerequisite must run after binary installation fails");
+    let source_install = lines
+        .iter()
+        .position(|line| line.contains("install --locked cargo-spellcheck --version =0.15.7"))
+        .expect("Anvil must perform the controlled source install at the exact pin");
+    assert!(binstall < prerequisite && prerequisite < source_install);
+
+    std::fs::remove_file(&log).unwrap();
+    let prerequisite_failure = run_just(
+        tmp.path(),
+        &["_install-tool", "cargo-spellcheck", "0.15.7", "binstall", "source-prereq"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_BINSTALL_EXIT", OsStr::new("7")),
+            ("FAKE_PREREQ_EXIT", OsStr::new("9")),
+        ],
+    );
+    assert_failed(&prerequisite_failure, "source prerequisite failure");
+    let failed_log = std::fs::read_to_string(&log).unwrap();
+    assert!(failed_log.contains("source-prereq"));
+    assert!(
+        !failed_log.contains("install --locked cargo-spellcheck --version =0.15.7"),
+        "source installation must not run after prerequisite failure"
+    );
+
+    std::fs::remove_file(&log).unwrap();
+    let ordinary_tool = run_just(
+        tmp.path(),
+        &["_install-tool", "cargo-other", "1.2.3", "binstall", ""],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_BINSTALL_EXIT", OsStr::new("7")),
+            ("FAKE_INSTALL_EXIT", OsStr::new("0")),
+        ],
+    );
+    assert!(ordinary_tool.status.success());
+    let ordinary_log = std::fs::read_to_string(&log).unwrap();
+    let ordinary_binstall = ordinary_log
+        .lines()
+        .find(|line| line.contains("binstall --no-confirm --locked"))
+        .expect("ordinary tool must attempt binstall");
+    assert!(
+        !ordinary_binstall.contains("--disable-strategies compile"),
+        "tools without source prerequisites retain binstall's compile strategy"
+    );
 }
 
 #[test]
