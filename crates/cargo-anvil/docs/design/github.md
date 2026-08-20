@@ -24,7 +24,9 @@ need to change:
    that same terminal diagnostic and fails through a final, dynamically named
    step such as `Failed Just recipe: anvil-license-headers`, making the failed
    recipe visible in the job's step list without copying group membership into
-   YAML.
+   YAML. For same-repository pull requests, it also publishes a Check Run named
+   after the failed recipe and runner so the concrete failure is visible
+   directly in the PR check list.
 
 See also:
 
@@ -530,7 +532,7 @@ runs:
         echo "failed_recipe=${failed_recipe:-anvil-pr-fast}" >> "$GITHUB_OUTPUT"
         echo "exit_code=$status" >> "$GITHUB_OUTPUT"
     - name: "Publish check: ${{ steps.run.outputs.failed_recipe }}"
-      if: inputs.publish_failure_checks == 'true'
+      if: inputs.publish_failure_checks == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
       uses: ./.github/actions/anvil-report-check
       with:
         group: pr-fast
@@ -565,33 +567,75 @@ separation: wiring is about "which jobs depend on impact and feed it forward", n
 These actions are consumed primarily by anvil's own reusable workflow. Users who want to
 plug individual groups into an unrelated workflow can `uses:` them directly.
 
-The Just step records the process status as an output so the final diagnostic
-step can run; that final step exits nonzero when Just did, so the composite
-action and job retain their normal failing result. The wrapper streams output
-through `tee` and extracts only Just's standard terminal failed-recipe line. If
-that line is absent, the diagnostic step falls back to the group recipe name.
-The diagnostic step uses `always()` so an ancillary reporting failure cannot
-hide the original recipe failure. This presentation logic does not enumerate
-or invoke individual checks.
+### Failure attribution and dynamic Check Runs
 
-When `publish_failure_checks` is enabled, the same generic failure information
-also drives the shared `anvil-report-check` action. A failure creates a Checks
-API result named after the concrete recipe and runner, such as
-`anvil-license-headers (linux-x64)`. Every PR group uses the same logic, so this
-works for any check reachable from a group recipe without a check list in YAML.
-The report is attached to the pull request head commit rather than GitHub's
-synthetic merge commit so it appears in the PR check list. Its external id is
-stable per group and runner. A rerun on the same commit updates that check
-instead of creating a duplicate; if the group passes on rerun, the prior
-dynamic failure is renamed to the group and completed successfully so no stale
-red check remains.
+GitHub fixes workflow job names before a job runs, so a matrix job named
+`anvil-pr / pr-fast (linux)` cannot rename itself after discovering that
+`anvil-license-headers` failed. Anvil instead presents the concrete failure at
+three levels, all driven by Just's existing terminal diagnostic:
+
+1. The problem matcher registered by `anvil-setup` promotes
+   ``error: recipe `anvil-license-headers` failed with exit code 1`` to a
+   GitHub annotation.
+2. The group composite ends with a failing step named
+   `Failed Just recipe: anvil-license-headers`, putting the recipe name in the
+   job's step list.
+3. On eligible pull requests, `anvil-report-check` publishes a completed,
+   failing Check Run such as `anvil-license-headers (linux-x64)`, putting the
+   recipe name directly in the PR check list.
+
+The group action invokes `just anvil-<group>` through `tee` so users retain
+live logs while the action keeps a copy in `$RUNNER_TEMP`. Bash's
+`PIPESTATUS[0]` preserves Just's exit code rather than `tee`'s. After Just
+exits, a narrow `sed` expression extracts the last standard Just
+failed-recipe line and writes both `failed_recipe` and `exit_code` as step
+outputs. If no such line is present, `failed_recipe` falls back to the group
+recipe, such as `anvil-pr-fast`.
+
+The run step does not fail immediately because the reporter still needs its
+outputs. A final step guarded by `always()` exits with status 1 whenever the
+captured Just status was nonzero. The composite action and its workflow job
+therefore retain their normal failing conclusions even if Check Run
+publication fails. The reporter is presentation logic only: it neither invokes
+checks nor contains the membership of any group.
+
+When `publish_failure_checks` is enabled, the shared reporter uses
+`actions/github-script` and the workflow token to:
+
+1. Address the pull request's head commit with
+   `github.event.pull_request.head.sha`. Attaching the Check Run to GitHub's
+   synthetic merge commit would not place it in the PR head's check list.
+2. Find an existing GitHub Actions Check Run whose external id is
+   `cargo-anvil:<group>:<runner>`.
+3. Create the Check Run when the group failed and no matching result exists,
+   or update the matching result on a rerun.
+4. Link the Check Run's Details target to the originating workflow run and
+   include the concrete group, recipe, and runner in its output summary.
+
+The runner suffix is derived from `RUNNER_OS` and `RUNNER_ARCH`, producing
+names such as `linux-x64` and `windows-arm64`. It prevents matrix legs from
+overwriting one another. The external id is stable per group and runner rather
+than per failed recipe: if a different dependency fails on a rerun of the same
+commit, the existing result is renamed and updated instead of leaving a stale
+duplicate.
+
+Successful groups do not create extra green Check Runs. On a successful rerun,
+the reporter returns immediately if no prior dynamic result exists. If one
+does exist, it renames that result to `anvil-<group> (<runner>)` and completes
+it successfully, clearing the stale recipe-specific failure.
 
 The reusable workflow input defaults to `false`. The generated root workflow
 opts in and grants `checks: write`; a customized root that has not accepted the
-new permission continues to run groups without attempting Checks API writes.
-Reporting is limited to same-repository `pull_request` events. Fork PRs and
-`merge_group` runs retain the annotation and dynamically named step but do not
-publish custom checks.
+permission continues to run groups without attempting Checks API writes.
+Publication is also guarded to same-repository `pull_request` events. Fork PRs
+have read-only tokens, and `merge_group` events do not carry the required PR
+head payload, so both retain the annotation and dynamically named step but
+skip custom Check Runs.
+
+Setup happens before the captured Just group invocation. If `anvil-setup`
+itself fails, the group run and reporter steps are skipped, so GitHub shows the
+setup-step failure rather than a recipe-specific dynamic Check Run. This is
+intentional: no group recipe ran and there is no group failure to attribute.
 
 ### `anvil-setup`
 
