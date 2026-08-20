@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.4.0"
-catalog_checksum = "sha256:fb4d728e41bae189e4e8f63cbcf0dde0cb11cd88370c1b94017022a78f387e51"
+catalog_checksum = "sha256:cac27010655e876c3c38b75f77b7e9f88613ebad545719480875debc0dda4517"
 
 [[file]]
 path = ".anvil/container/Containerfile"
