@@ -258,7 +258,6 @@ impl<'a> ReportContext<'a> {
 /// Group metrics by category across multiple crates, producing the union of all metric names.
 ///
 /// Each metric name appears at most once per category, in the order first encountered.
-#[expect(single_use_lifetimes, reason = "Lifetime required for impl Trait parameter")]
 pub fn group_all_metrics_by_category<'a>(
     crate_metrics: impl IntoIterator<Item = &'a [Metric]>,
 ) -> HashMap<MetricCategory, Vec<&'static str>> {
