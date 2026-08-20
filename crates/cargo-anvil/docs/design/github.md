@@ -570,19 +570,14 @@ than action inputs because only the recipes consume them.
 
 The recipes themselves consume only the env vars they need; the catalog records the
 mapping (see [checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)).
-Threading all three to every action costs a few lines per composite but is the right
-separation: wiring is about "which jobs depend on impact and feed it forward", not about
-"which check needs which env var."
+Threading all three through every group-action invocation costs a few workflow
+lines but is the right separation: wiring is about "which jobs depend on impact
+and feed it forward", not about "which check needs which env var."
 
 The shared action is an implementation detail of Anvil's generated reusable
 workflows. Anvil does not emit or support public per-group action paths.
 
 ### Failure attribution and commit statuses
-
-> **Design status:** This subsection defines the proposed commit-status
-> contract for review. The generated artifacts continue to use the
-> experimental Check Run reporter until this design is approved and
-> implemented.
 
 GitHub fixes workflow job names before a job runs, so a matrix job named
 `anvil-pr / pr-fast (linux)` cannot rename itself after discovering that
@@ -603,13 +598,15 @@ three levels, all driven by Just's existing terminal diagnostic:
    cargo-anvil/pr-fast (linux-x64)    anvil-license-headers failed
    ```
 
-The group action invokes `just anvil-<group>` through `tee` so users retain
-live logs while the action keeps a copy in `$RUNNER_TEMP`. Bash's
-`PIPESTATUS[0]` preserves Just's exit code rather than `tee`'s. After Just
-exits, a narrow `sed` expression extracts the last standard Just
-failed-recipe line and writes both `failed_recipe` and `exit_code` as step
-outputs. If no such line is present, `failed_recipe` falls back to the group
-recipe, such as `anvil-pr-fast`.
+The group action uses Bash as a cross-platform capture wrapper, including on
+Windows runners, and invokes `just anvil-<group>` through `tee` so users retain
+live logs while the action keeps a copy in `$RUNNER_TEMP`. The Anvil recipe
+bodies that Just dispatches continue to use their declared
+`[script("pwsh", "-NoProfile")]` interpreter. Bash's `PIPESTATUS[0]` preserves
+Just's exit code rather than `tee`'s. After Just exits, a narrow `sed`
+expression extracts the last standard Just failed-recipe line and writes both
+`failed_recipe` and `exit_code` as step outputs. If no such line is present,
+`failed_recipe` falls back to the group recipe, such as `anvil-pr-fast`.
 
 The run step does not fail immediately because the reporter still needs its
 outputs. A final step guarded by `always()` exits with status 1 whenever the
@@ -770,9 +767,10 @@ jobs:
     # toolchain to a shared cache, then reference it here.
 ```
 
-Since reusable workflows can't accept "previous step" handoff, self-hosted users usually
-forgo the reusable-workflow shape and write a single workflow that calls the composite
-actions directly. anvil's composite actions are exposed for that use case.
+Since reusable workflows cannot accept a "previous step" handoff, self-hosted
+users that need additional preparation take ownership of the generated reusable
+implementation workflow and add the preparation there. The generated composite
+actions remain implementation details rather than a separately supported API.
 
 `anvil-tool-rustc-validate-prereqs` (depended on by every check that needs rustc)
 validates the installed `rustc` against the catalog minimum at recipe time; a

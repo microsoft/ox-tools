@@ -17,12 +17,25 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  anvil-pr:
+  pull-request:
+    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/anvil-pr-impl.yml
     permissions:
       contents: read
+      # Publish one stable status per Anvil group and runner so the PR checks
+      # rollup shows the concrete failed Just recipe in its description.
+      statuses: write
       # Write needed so the pr-fast job can upsert/clear the sticky PR
       # comment carrying the cargo-semver-checks advisory (and any
       # future advisory checks that emit target/anvil/comments/*).
       pull-requests: write
+    with:
+      publish_job_statuses: true
+    secrets: inherit
+
+  merge-group:
+    if: github.event_name == 'merge_group'
+    uses: ./.github/workflows/anvil-pr-impl.yml
+    permissions:
+      contents: read
     secrets: inherit

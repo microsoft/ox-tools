@@ -4,8 +4,7 @@
 //! GitHub Actions backend files: composite actions, reusable workflows, and
 //! root workflows, each an owned file gated on [`Backend::GitHub`].
 //!
-//! Holds the embedded templates, the per-group fan-out (`__GROUP__`
-//! substitution expanded to concrete files), and the registry functions.
+//! Holds the embedded templates and registry functions.
 //!
 //! See [`github.md`](../../../docs/design/github.md).
 
@@ -14,6 +13,15 @@ use crate::catalog::Artifact;
 
 /// Embedded body of the shared setup composite action.
 const SETUP_ACTION: &str = include_str!("../../../templates/github/setup-action.yml");
+
+/// GitHub problem matcher that promotes Just recipe failures to annotations.
+const JUST_PROBLEM_MATCHER: &str = include_str!("../../../templates/github/just-problem-matcher.json");
+
+/// Shared composite action that runs any Anvil group.
+const RUN_GROUP_ACTION: &str = include_str!("../../../templates/github/run-group-action.yml");
+
+/// Shared composite action that publishes a stable commit status.
+const REPORT_STATUS_ACTION: &str = include_str!("../../../templates/github/report-status-action.yml");
 
 /// Embedded body of the cargo-delta impact composite action.
 const IMPACT_ACTION: &str = include_str!("../../../templates/github/impact-action.yml");
@@ -30,47 +38,36 @@ const PR_ROOT_WORKFLOW: &str = include_str!("../../../templates/github/pr-root-w
 /// Embedded body of the scheduled root workflow.
 const SCHEDULED_ROOT_WORKFLOW: &str = include_str!("../../../templates/github/scheduled-root-workflow.yml");
 
-/// All check groups that get a per-group composite action.
-///
-/// The PR-tier "pr-slow" umbrella is split into three cloud-workflow-visible
-/// sub-groups (`pr-test`, `pr-runtime-analysis`, `pr-mutants`) so each runs
-/// as its own job and they execute in parallel across the matrix.
-#[cfg(test)]
-const GROUPS: &[&str] = &[
-    "pr-fast",
-    "pr-test",
-    "pr-runtime-analysis",
-    "pr-mutants",
-    "scheduled-test",
-    "scheduled-advisories",
-    "scheduled-runtime-analysis",
-    "scheduled-exhaustive",
-];
-
-/// Embedded template for one per-group composite action. `__GROUP__` is
-/// substituted with the group name at emit time.
-const GROUP_ACTION_TEMPLATE: &str = include_str!("../../../templates/github/group-action.yml");
-
-/// Placeholder token the per-group template uses for the group name.
-const GROUP_PLACEHOLDER: &str = "__GROUP__";
-
-/// Render the `action.yml` for one check group's composite action.
-#[must_use]
-fn render_group_action(group: &str) -> String {
-    GROUP_ACTION_TEMPLATE.replace(GROUP_PLACEHOLDER, group)
-}
-
-/// Repo-root-relative path for a per-group composite action.
-#[cfg(test)]
-#[must_use]
-fn group_action_path(group: &str) -> String {
-    format!(".github/actions/anvil-{group}/action.yml")
-}
-
 /// `.github/actions/anvil-setup/action.yml`.
 #[must_use]
 pub fn setup_action() -> Artifact {
     Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-setup/action.yml", SETUP_ACTION)
+}
+
+/// `.github/actions/anvil-setup/just-problem-matcher.json`.
+#[must_use]
+pub fn just_problem_matcher() -> Artifact {
+    Artifact::backend_file(
+        Backend::GitHub,
+        ".github/actions/anvil-setup/just-problem-matcher.json",
+        JUST_PROBLEM_MATCHER,
+    )
+}
+
+/// `.github/actions/anvil-run-group/action.yml`.
+#[must_use]
+pub fn run_group_action() -> Artifact {
+    Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-run-group/action.yml", RUN_GROUP_ACTION)
+}
+
+/// `.github/actions/anvil-report-status/action.yml`.
+#[must_use]
+pub fn report_status_action() -> Artifact {
+    Artifact::backend_file(
+        Backend::GitHub,
+        ".github/actions/anvil-report-status/action.yml",
+        REPORT_STATUS_ACTION,
+    )
 }
 
 /// `.github/actions/anvil-impact/action.yml`.
@@ -107,36 +104,20 @@ pub fn scheduled_root_workflow() -> Artifact {
     Artifact::backend_file(Backend::GitHub, ".github/workflows/anvil-scheduled.yml", SCHEDULED_ROOT_WORKFLOW)
 }
 
-/// The per-group composite actions, one concrete owned file per group.
-///
-/// Each `(group, path)` pair's `path` must equal [`group_action_path`] for
-/// its group (asserted in tests); the body is [`render_group_action`].
-pub(crate) const GROUP_ACTIONS: &[(&str, &str)] = &[
-    ("pr-fast", ".github/actions/anvil-pr-fast/action.yml"),
-    ("pr-test", ".github/actions/anvil-pr-test/action.yml"),
-    ("pr-runtime-analysis", ".github/actions/anvil-pr-runtime-analysis/action.yml"),
-    ("pr-mutants", ".github/actions/anvil-pr-mutants/action.yml"),
-    ("scheduled-test", ".github/actions/anvil-scheduled-test/action.yml"),
-    ("scheduled-advisories", ".github/actions/anvil-scheduled-advisories/action.yml"),
-    (
-        "scheduled-runtime-analysis",
-        ".github/actions/anvil-scheduled-runtime-analysis/action.yml",
-    ),
-    ("scheduled-exhaustive", ".github/actions/anvil-scheduled-exhaustive/action.yml"),
-];
-
 /// All GitHub backend artifacts in emission order.
 #[must_use]
 pub(crate) fn all() -> Vec<Artifact> {
-    let mut out = vec![setup_action(), impact_action()];
-    for (group, path) in GROUP_ACTIONS {
-        out.push(Artifact::backend_file(Backend::GitHub, path, render_group_action(group)));
-    }
-    out.push(pr_impl_workflow());
-    out.push(scheduled_impl_workflow());
-    out.push(pr_root_workflow());
-    out.push(scheduled_root_workflow());
-    out
+    vec![
+        setup_action(),
+        just_problem_matcher(),
+        run_group_action(),
+        report_status_action(),
+        impact_action(),
+        pr_impl_workflow(),
+        scheduled_impl_workflow(),
+        pr_root_workflow(),
+        scheduled_root_workflow(),
+    ]
 }
 
 #[cfg(test)]
@@ -145,17 +126,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn setup_and_impact_templates_are_non_empty() {
+    fn shared_action_templates_are_non_empty() {
         assert!(SETUP_ACTION.contains("name: anvil-setup"));
+        assert!(JUST_PROBLEM_MATCHER.contains("\"owner\": \"anvil-just\""));
+        assert!(RUN_GROUP_ACTION.contains("name: anvil-run-group"));
+        assert!(REPORT_STATUS_ACTION.contains("name: anvil-report-status"));
         assert!(IMPACT_ACTION.contains("name: anvil-impact"));
         assert!(IMPACT_ACTION.contains("cargo-delta"));
+    }
+
+    #[test]
+    fn setup_registers_just_problem_matcher() {
+        assert!(SETUP_ACTION.contains("::add-matcher::$GITHUB_ACTION_PATH/just-problem-matcher.json"));
+        assert!(JUST_PROBLEM_MATCHER.contains("error: recipe `[^`]+` failed with exit code"));
     }
 
     #[test]
     fn setup_action_takes_group_input_and_dispatches() {
         assert!(SETUP_ACTION.contains("group:"));
         assert!(SETUP_ACTION.contains("just anvil-setup binstall"));
-        assert!(SETUP_ACTION.contains("just \"anvil-${{ inputs.group }}-setup\" binstall"));
+        assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
+        assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" binstall"));
+        assert!(SETUP_ACTION.contains(r"^[a-z0-9-]+$"));
         assert!(SETUP_ACTION.contains("none)"));
     }
 
@@ -169,11 +161,16 @@ mod tests {
     }
 
     #[test]
-    fn group_action_passes_group_to_setup() {
-        let body = render_group_action("pr-fast");
-        assert!(body.contains("uses: ./.github/actions/anvil-setup"));
-        assert!(body.contains("group: pr-fast"));
-        assert!(body.contains("free-disk-space: ${{ inputs.free-disk-space }}"));
+    fn run_group_action_captures_and_reports_results() {
+        assert!(RUN_GROUP_ACTION.contains("uses: ./.github/actions/anvil-setup"));
+        assert!(RUN_GROUP_ACTION.contains("group: ${{ inputs.group }}"));
+        assert!(RUN_GROUP_ACTION.contains("free-disk-space: ${{ inputs.free-disk-space }}"));
+        assert!(RUN_GROUP_ACTION.contains("status=${PIPESTATUS[0]}"));
+        assert!(RUN_GROUP_ACTION.contains("Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"));
+        assert!(RUN_GROUP_ACTION.contains("uses: ./.github/actions/anvil-report-status"));
+        assert!(RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_MODIFIED"));
+        assert!(RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_AFFECTED"));
+        assert!(RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_REQUIRED"));
     }
 
     #[test]
@@ -192,21 +189,11 @@ mod tests {
     }
 
     #[test]
-    fn render_group_action_uses_correct_name() {
-        let body = render_group_action("pr-fast");
-        assert!(body.contains("name: anvil-pr-fast"));
-        assert!(body.contains("just anvil-pr-fast"));
-        assert!(body.contains("ANVIL_INCLUDE_MODIFIED"));
-        assert!(body.contains("ANVIL_INCLUDE_AFFECTED"));
-        assert!(body.contains("ANVIL_INCLUDE_REQUIRED"));
-    }
-
-    #[test]
-    fn group_actions_declare_include_inputs() {
-        let body = render_group_action("scheduled-test");
-        assert!(body.contains("include_modified:"));
-        assert!(body.contains("include_affected:"));
-        assert!(body.contains("include_required:"));
+    fn status_action_uses_stable_context_and_pr_head() {
+        assert!(REPORT_STATUS_ACTION.contains("github.rest.repos.createCommitStatus"));
+        assert!(REPORT_STATUS_ACTION.contains("context.payload.pull_request.head.sha"));
+        assert!(REPORT_STATUS_ACTION.contains("cargo-anvil/${group} (${runner})"));
+        assert!(REPORT_STATUS_ACTION.contains("description: description.slice(0, 140)"));
     }
 
     #[test]
@@ -233,6 +220,19 @@ mod tests {
         assert!(!PR_IMPL_WORKFLOW.contains("fromJSON"));
         assert!(PR_IMPL_WORKFLOW.contains("PR_TITLE"));
         assert!(PR_IMPL_WORKFLOW.contains("BASE_REF"));
+        assert!(PR_IMPL_WORKFLOW.contains("publish_job_statuses:"));
+        assert_eq!(
+            PR_IMPL_WORKFLOW.matches("uses: ./.github/actions/anvil-run-group").count(),
+            4,
+            "every PR group job must use the shared group action"
+        );
+        assert_eq!(
+            PR_IMPL_WORKFLOW
+                .matches("publish_job_statuses: ${{ inputs.publish_job_statuses }}")
+                .count(),
+            4,
+            "every PR group job must receive the status opt-in"
+        );
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("codecov/codecov-action").count(),
             1,
@@ -262,6 +262,11 @@ mod tests {
         }
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("codecov/codecov-action"));
         assert_eq!(
+            SCHEDULED_IMPL_WORKFLOW.matches("uses: ./.github/actions/anvil-run-group").count(),
+            4,
+            "every scheduled group job must use the shared group action"
+        );
+        assert_eq!(
             SCHEDULED_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
             1,
             "disk cleanup should be enabled for the scheduled test group"
@@ -273,25 +278,11 @@ mod tests {
         assert!(PR_ROOT_WORKFLOW.contains("uses: ./.github/workflows/anvil-pr-impl.yml"));
         assert!(PR_ROOT_WORKFLOW.contains("pull_request:"));
         assert!(PR_ROOT_WORKFLOW.contains("merge_group:"));
+        assert!(PR_ROOT_WORKFLOW.contains("statuses: write"));
+        assert!(PR_ROOT_WORKFLOW.contains("publish_job_statuses: true"));
+        assert!(PR_ROOT_WORKFLOW.contains("if: github.event_name == 'pull_request'"));
+        assert!(PR_ROOT_WORKFLOW.contains("if: github.event_name == 'merge_group'"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("uses: ./.github/workflows/anvil-scheduled-impl.yml"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("schedule:"));
-    }
-
-    #[test]
-    fn group_action_path_is_under_dot_github() {
-        assert_eq!(group_action_path("pr-fast"), ".github/actions/anvil-pr-fast/action.yml");
-    }
-
-    #[test]
-    fn group_action_paths_match_render() {
-        assert_eq!(GROUP_ACTIONS.len(), GROUPS.len());
-        for ((group, path), expected_group) in GROUP_ACTIONS.iter().zip(GROUPS) {
-            assert_eq!(group, expected_group, "group order must match GROUPS");
-            assert_eq!(
-                *path,
-                group_action_path(group),
-                "registry path must match group_action_path for {group}"
-            );
-        }
     }
 }

@@ -24,6 +24,10 @@ on:
         description: Runner label for aarch64 Windows jobs.
         type: string
         default: windows-11-arm
+      publish_job_statuses:
+        description: Publish stable commit statuses for Anvil group jobs.
+        type: boolean
+        default: false
     secrets:
       CODECOV_TOKEN:
         description: |
@@ -105,8 +109,10 @@ jobs:
           # origin/<base> absent. Full history makes the baseline
           # resolvable; the other pr-fast checks only touch the HEAD tree.
           fetch-depth: 0
-      - uses: ./.github/actions/anvil-pr-fast
+      - uses: ./.github/actions/anvil-run-group
         with:
+          group: pr-fast
+          publish_job_statuses: ${{ inputs.publish_job_statuses }}
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
@@ -154,8 +160,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           lfs: true
-      - uses: ./.github/actions/anvil-pr-test
+      - uses: ./.github/actions/anvil-run-group
         with:
+          group: pr-test
+          publish_job_statuses: ${{ inputs.publish_job_statuses }}
           free-disk-space: true
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
@@ -201,8 +209,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           lfs: true
-      - uses: ./.github/actions/anvil-pr-runtime-analysis
+      - uses: ./.github/actions/anvil-run-group
         with:
+          group: pr-runtime-analysis
+          publish_job_statuses: ${{ inputs.publish_job_statuses }}
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
@@ -227,8 +237,10 @@ jobs:
         with:
           lfs: true
           fetch-depth: 0
-      - uses: ./.github/actions/anvil-pr-mutants
+      - uses: ./.github/actions/anvil-run-group
         with:
+          group: pr-mutants
+          publish_job_statuses: ${{ inputs.publish_job_statuses }}
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
