@@ -18,6 +18,9 @@ const SETUP_ACTION: &str = include_str!("../../../templates/github/setup-action.
 /// GitHub problem matcher that promotes Just recipe failures to annotations.
 const JUST_PROBLEM_MATCHER: &str = include_str!("../../../templates/github/just-problem-matcher.json");
 
+/// Shared composite action that publishes dynamically named check runs.
+const REPORT_CHECK_ACTION: &str = include_str!("../../../templates/github/report-check-action.yml");
+
 /// Embedded body of the cargo-delta impact composite action.
 const IMPACT_ACTION: &str = include_str!("../../../templates/github/impact-action.yml");
 
@@ -86,6 +89,16 @@ pub fn just_problem_matcher() -> Artifact {
     )
 }
 
+/// `.github/actions/anvil-report-check/action.yml`.
+#[must_use]
+pub fn report_check_action() -> Artifact {
+    Artifact::backend_file(
+        Backend::GitHub,
+        ".github/actions/anvil-report-check/action.yml",
+        REPORT_CHECK_ACTION,
+    )
+}
+
 /// `.github/actions/anvil-impact/action.yml`.
 #[must_use]
 pub fn impact_action() -> Artifact {
@@ -141,7 +154,7 @@ pub(crate) const GROUP_ACTIONS: &[(&str, &str)] = &[
 /// All GitHub backend artifacts in emission order.
 #[must_use]
 pub(crate) fn all() -> Vec<Artifact> {
-    let mut out = vec![setup_action(), just_problem_matcher(), impact_action()];
+    let mut out = vec![setup_action(), just_problem_matcher(), report_check_action(), impact_action()];
     for (group, path) in GROUP_ACTIONS {
         out.push(Artifact::backend_file(Backend::GitHub, path, render_group_action(group)));
     }
@@ -161,6 +174,7 @@ mod tests {
     fn setup_and_impact_templates_are_non_empty() {
         assert!(SETUP_ACTION.contains("name: anvil-setup"));
         assert!(JUST_PROBLEM_MATCHER.contains("\"owner\": \"anvil-just\""));
+        assert!(REPORT_CHECK_ACTION.contains("name: anvil-report-check"));
         assert!(IMPACT_ACTION.contains("name: anvil-impact"));
         assert!(IMPACT_ACTION.contains("cargo-delta"));
     }
@@ -218,6 +232,8 @@ mod tests {
         assert!(body.contains("just anvil-pr-fast"));
         assert!(body.contains("Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"));
         assert!(body.contains("failed_recipe=${failed_recipe:-anvil-pr-fast}"));
+        assert!(body.contains("uses: ./.github/actions/anvil-report-check"));
+        assert!(REPORT_CHECK_ACTION.contains("cargo-anvil:${group}:${runner}"));
         assert!(body.contains("ANVIL_INCLUDE_MODIFIED"));
         assert!(body.contains("ANVIL_INCLUDE_AFFECTED"));
         assert!(body.contains("ANVIL_INCLUDE_REQUIRED"));
@@ -255,6 +271,14 @@ mod tests {
         assert!(!PR_IMPL_WORKFLOW.contains("fromJSON"));
         assert!(PR_IMPL_WORKFLOW.contains("PR_TITLE"));
         assert!(PR_IMPL_WORKFLOW.contains("BASE_REF"));
+        assert!(PR_IMPL_WORKFLOW.contains("publish_failure_checks:"));
+        assert_eq!(
+            PR_IMPL_WORKFLOW
+                .matches("publish_failure_checks: ${{ inputs.publish_failure_checks }}")
+                .count(),
+            4,
+            "every PR group action must receive the dynamic-check opt-in"
+        );
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("codecov/codecov-action").count(),
             1,
@@ -295,6 +319,8 @@ mod tests {
         assert!(PR_ROOT_WORKFLOW.contains("uses: ./.github/workflows/anvil-pr-impl.yml"));
         assert!(PR_ROOT_WORKFLOW.contains("pull_request:"));
         assert!(PR_ROOT_WORKFLOW.contains("merge_group:"));
+        assert!(PR_ROOT_WORKFLOW.contains("checks: write"));
+        assert!(PR_ROOT_WORKFLOW.contains("publish_failure_checks: true"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("uses: ./.github/workflows/anvil-scheduled-impl.yml"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("schedule:"));
     }

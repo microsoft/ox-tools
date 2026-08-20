@@ -34,6 +34,10 @@ inputs:
     description: Remove unused toolchains from GitHub-hosted runners before setup.
     default: "false"
     required: false
+  publish_failure_checks:
+    description: Publish a dynamically named GitHub check run when a Just recipe fails.
+    default: "false"
+    required: false
 runs:
   using: composite
   steps:
@@ -63,6 +67,14 @@ runs:
         failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
         echo "failed_recipe=${failed_recipe:-anvil-scheduled-exhaustive}" >> "$GITHUB_OUTPUT"
         echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+
+    - name: "Publish check: ${{ steps.run.outputs.failed_recipe }}"
+      if: inputs.publish_failure_checks == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+      uses: ./.github/actions/anvil-report-check
+      with:
+        group: scheduled-exhaustive
+        exit_code: ${{ steps.run.outputs.exit_code }}
+        failed_recipe: ${{ steps.run.outputs.failed_recipe }}
 
     - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
       if: steps.run.outputs.exit_code != '0'

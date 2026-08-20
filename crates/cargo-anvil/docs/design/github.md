@@ -195,6 +195,7 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 │   ├── anvil-setup/action.yml         owned   (install just + group-scoped catalog tools)
 │   ├── anvil-setup/just-problem-matcher.json
 │   │                                  owned   (annotate failing Just recipes)
+│   ├── anvil-report-check/action.yml   owned   (publish dynamic failure checks)
 │   ├── anvil-impact/action.yml        owned   (cargo-delta impact computation)
 │   ├── anvil-pr-fast/action.yml       owned   (one composite action per group)
 │   ├── anvil-pr-test/action.yml      owned
@@ -230,8 +231,15 @@ on:
 permissions:
   contents: read
 jobs:
-  anvil:
+  anvil-pr:
     uses: ./.github/workflows/anvil-pr-impl.yml
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: write
+    with:
+      publish_failure_checks: true
+    secrets: inherit
 ```
 
 The scheduled root workflow adds a schedule and `workflow_dispatch`:
@@ -496,6 +504,10 @@ inputs:
     description: Remove unused toolchains from GitHub-hosted runners before setup.
     required: false
     default: "false"
+  publish_failure_checks:
+    description: Publish a dynamically named GitHub check run when a Just recipe fails.
+    required: false
+    default: "false"
 runs:
   using: composite
   steps:
@@ -517,6 +529,13 @@ runs:
         failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
         echo "failed_recipe=${failed_recipe:-anvil-pr-fast}" >> "$GITHUB_OUTPUT"
         echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+    - name: "Publish check: ${{ steps.run.outputs.failed_recipe }}"
+      if: inputs.publish_failure_checks == 'true'
+      uses: ./.github/actions/anvil-report-check
+      with:
+        group: pr-fast
+        exit_code: ${{ steps.run.outputs.exit_code }}
+        failed_recipe: ${{ steps.run.outputs.failed_recipe }}
     - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
       if: steps.run.outputs.exit_code != '0'
       shell: bash
@@ -531,6 +550,7 @@ Uniform input set on every per-group composite action:
 | `include_affected` | `""`      | Forwarded as `ANVIL_INCLUDE_AFFECTED`. Same semantics.                                                                              |
 | `include_required` | `""`      | Forwarded as `ANVIL_INCLUDE_REQUIRED`. Same semantics.                                                                              |
 | `free-disk-space`  | `"false"` | Forwarded to `anvil-setup`; ignored on macOS and self-hosted runners.                                                               |
+| `publish_failure_checks` | `"false"` | Creates or updates a dynamically named check run for the failed Just recipe. Enabled by the generated PR root workflow. |
 
 The reusable workflow sets `PR_TITLE` on the `anvil-pr-fast` action step and
 `BASE_REF` on the `anvil-pr-mutants` step. They are environment variables rather
@@ -551,6 +571,23 @@ action and job retain their normal failing result. The wrapper streams output
 through `tee` and extracts only Just's standard terminal failed-recipe line. If
 that line is absent, the diagnostic step falls back to the group recipe name.
 This presentation logic does not enumerate or invoke individual checks.
+
+When `publish_failure_checks` is enabled, the same generic failure information
+also drives the shared `anvil-report-check` action. A failure creates a Checks
+API result named after the concrete recipe and runner, such as
+`anvil-license-headers (linux-x64)`. Every PR group uses the same logic, so this
+works for any check reachable from a group recipe without a check list in YAML.
+The report's external id is stable per group and runner. A rerun on the same
+commit updates that check instead of creating a duplicate; if the group passes
+on rerun, the prior dynamic failure is renamed to the group and completed
+successfully so no stale red check remains.
+
+The reusable workflow input defaults to `false`. The generated root workflow
+opts in and grants `checks: write`; a customized root that has not accepted the
+new permission continues to run groups without attempting Checks API writes.
+Reporting is limited to same-repository `pull_request` events. Fork PRs and
+`merge_group` runs retain the annotation and dynamically named step but do not
+publish custom checks.
 
 ### `anvil-setup`
 
@@ -683,8 +720,11 @@ Recommended root workflow shape:
 
 - `permissions: contents: read` at the workflow level. anvil's default ships with
   this.
-- No `pull-requests: write` (the PR-title check only needs the title from the event
-  payload, which is already in `${{ github.event.pull_request.title }}`).
+- The reusable-workflow call grants `pull-requests: write` for advisory comments
+  and `checks: write` for opt-in dynamic failure checks. The called workflow
+  cannot elevate beyond these caller permissions.
+- Dynamic check publishing is guarded to same-repository `pull_request` events.
+  Fork PR tokens are read-only and never reach the Checks API step.
 - Scheduled-tier secrets, if any, live on `anvil-scheduled.yml` only — never on `anvil-pr.yml`.
 - All cargo-tool installs done by the catalog setup recipes use `--locked` (with
   `cargo install` or `cargo binstall` depending on `installer`).

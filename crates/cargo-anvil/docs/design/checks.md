@@ -276,7 +276,10 @@ standard failed-recipe diagnostic, so the check annotations identify the
 individual recipe while group membership remains defined only by the Just
 aggregate recipe. The group action also uses that diagnostic to name its final
 failing step after the individual recipe; this improves the job details without
-changing the stable per-group check name shown on the pull request.
+changing the stable per-group workflow check name. When enabled by the GitHub
+root workflow, the same generic diagnostic publishes an additional Checks API
+result named after the concrete recipe and runner. This applies uniformly to
+every group without enumerating checks outside the Just recipes.
 
 Each group and tier recipe lists its `*-validate-prereqs` aggregate as its **first** dependency, so all
 of the group's tool/component checks run **up front** -- a missing tool fails immediately rather than

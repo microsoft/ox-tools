@@ -24,6 +24,10 @@ on:
         description: Runner label for aarch64 Windows jobs.
         type: string
         default: windows-11-arm
+      publish_failure_checks:
+        description: Publish dynamically named check runs for failed Just recipes.
+        type: boolean
+        default: false
     secrets:
       CODECOV_TOKEN:
         description: |
@@ -107,6 +111,7 @@ jobs:
           fetch-depth: 0
       - uses: ./.github/actions/anvil-pr-fast
         with:
+          publish_failure_checks: ${{ inputs.publish_failure_checks }}
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
@@ -156,6 +161,7 @@ jobs:
           lfs: true
       - uses: ./.github/actions/anvil-pr-test
         with:
+          publish_failure_checks: ${{ inputs.publish_failure_checks }}
           free-disk-space: true
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
@@ -203,6 +209,7 @@ jobs:
           lfs: true
       - uses: ./.github/actions/anvil-pr-runtime-analysis
         with:
+          publish_failure_checks: ${{ inputs.publish_failure_checks }}
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
@@ -229,6 +236,7 @@ jobs:
           fetch-depth: 0
       - uses: ./.github/actions/anvil-pr-mutants
         with:
+          publish_failure_checks: ${{ inputs.publish_failure_checks }}
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
