@@ -77,6 +77,6 @@ runs:
         failed_recipe: ${{ steps.run.outputs.failed_recipe }}
 
     - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
-      if: steps.run.outputs.exit_code != '0'
+      if: always() && steps.run.outputs.exit_code != '0'
       shell: bash
       run: exit 1

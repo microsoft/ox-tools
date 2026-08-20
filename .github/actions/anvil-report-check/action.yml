@@ -42,7 +42,7 @@ runs:
             response => response.data.check_runs,
           );
           const existing = runs.find(run =>
-            run.external_id === externalId && run.app?.slug === "github-actions"
+            run?.external_id === externalId && run.app?.slug === "github-actions"
           );
 
           if (!failed && !existing) {

@@ -537,7 +537,7 @@ runs:
         exit_code: ${{ steps.run.outputs.exit_code }}
         failed_recipe: ${{ steps.run.outputs.failed_recipe }}
     - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
-      if: steps.run.outputs.exit_code != '0'
+      if: always() && steps.run.outputs.exit_code != '0'
       shell: bash
       run: exit 1
 ```
@@ -570,7 +570,9 @@ step can run; that final step exits nonzero when Just did, so the composite
 action and job retain their normal failing result. The wrapper streams output
 through `tee` and extracts only Just's standard terminal failed-recipe line. If
 that line is absent, the diagnostic step falls back to the group recipe name.
-This presentation logic does not enumerate or invoke individual checks.
+The diagnostic step uses `always()` so an ancillary reporting failure cannot
+hide the original recipe failure. This presentation logic does not enumerate
+or invoke individual checks.
 
 When `publish_failure_checks` is enabled, the same generic failure information
 also drives the shared `anvil-report-check` action. A failure creates a Checks
