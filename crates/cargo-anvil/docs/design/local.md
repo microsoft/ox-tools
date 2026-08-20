@@ -196,10 +196,10 @@ The catalog records, for each cargo subcommand, a **catalog version** (e.g.
   installs *exactly* that version (`--version '={{ pin }}'`), never `>=`. Pulling
   latest-matching at install time is a cloud-workflow reproducibility risk -- an upstream release
   between yesterday's green build and today's PR can break things, even though the
-  catalog hasn't moved. `cargo-spellcheck 0.15.7`'s em-dash word-boundary regression is
-  the canonical example: with `>=0.15.1` the catalog would have silently picked it up,
-  breaking every PR until the catalog was edited. With `=0.15.1` the catalog locks in
-  the version it was validated against.
+  catalog hasn't moved. Exact pins let the catalog accommodate behavior changes before
+  upgrading; for example, cargo-spellcheck 0.15.7 is paired with the explicit
+  `tokenization_splitchars` boundary list in `spellcheck.toml` rather than being selected
+  implicitly by a range.
 - **On runtime check** (`anvil-tool-<bin>-validate-prereqs`): the recipe enforces
   `installed >= pin`. A local developer who has manually upgraded a tool for their own
   reasons (e.g. needing a bugfix the catalog hasn't pinned yet) is not downgraded by
