@@ -193,6 +193,7 @@ mod tests {
         assert!(REPORT_STATUS_ACTION.contains("github.rest.repos.createCommitStatus"));
         assert!(REPORT_STATUS_ACTION.contains("context.payload.pull_request.head.sha"));
         assert!(REPORT_STATUS_ACTION.contains("anvil-pr / ${group} details (${runner})"));
+        assert!(REPORT_STATUS_ACTION.contains("failedRecipe.replace(/^anvil-/, \"\")"));
         assert!(REPORT_STATUS_ACTION.contains("description: description.slice(0, 140)"));
     }
 

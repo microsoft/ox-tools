@@ -595,7 +595,7 @@ three levels, all driven by Just's existing terminal diagnostic:
    the failed recipe:
 
    ```text
-   anvil-pr / pr-fast details (linux-x64)    anvil-license-headers failed
+   anvil-pr / pr-fast details (linux-x64)    license-headers failed
    ```
 
 The group action uses Bash as a cross-platform capture wrapper, including on
@@ -627,7 +627,7 @@ status with:
 | State after setup failure | `error` |
 | State after recipe failure | `failure` |
 | State after success | `success` |
-| Failure description | `<failed-recipe> failed` |
+| Failure description | `<failed-recipe-without-anvil-prefix> failed` |
 | Setup description | `setup failed before <group> ran` |
 | Success description | `all <group> recipes passed` |
 | Target URL | The originating GitHub Actions workflow run |
@@ -636,6 +636,8 @@ The runner suffix is derived from `RUNNER_OS` and `RUNNER_ARCH`, producing
 values such as `linux-x64` and `windows-arm64`. The context is stable per group
 and runner; the failed recipe appears only in the description. Matrix legs
 therefore do not overwrite one another, while reruns of the same leg do.
+When Just reports an `anvil-` recipe, the reporter removes that conventional
+prefix from the status description to keep the limited inline text concise.
 
 The `anvil-pr / <group> details` prefix also places supplemental statuses
 before the generated workflow's `anvil-pr / pull-request / <group>` Check Runs

@@ -37,6 +37,7 @@ runs:
           const setupOutcome = process.env.ANVIL_SETUP_OUTCOME;
           const exitCode = process.env.ANVIL_EXIT_CODE;
           const failedRecipe = process.env.ANVIL_FAILED_RECIPE || `anvil-${group}`;
+          const displayRecipe = failedRecipe.replace(/^anvil-/, "");
           const runner = `${process.env.RUNNER_OS}-${process.env.RUNNER_ARCH}`.toLowerCase();
 
           let state;
@@ -52,7 +53,7 @@ runs:
             description = `${group} did not report a result`;
           } else {
             state = "failure";
-            description = `${failedRecipe} failed`;
+            description = `${displayRecipe} failed`;
           }
 
           await github.rest.repos.createCommitStatus({
