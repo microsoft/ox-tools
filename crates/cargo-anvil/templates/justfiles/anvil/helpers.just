@@ -12,7 +12,7 @@
 #
 #   - "modified": only run when at least one package's source files changed
 #     in the diff. The check's underlying tool is workspace-wide or
-#     directory-scoped (cargo fmt --all, cargo spellcheck, cargo heather), so
+#     directory-scoped (cargo fmt --all, cargo heather), so
 #     it doesn't take --package; it short-circuits on the "--skip" sentinel.
 #
 #   - "affected": run on the affected set (modified U reverse-deps within the
@@ -26,8 +26,11 @@
 #     -> feature powerset; cargo udeps -> unused-deps).
 #
 #   - "unscoped": always run. External-input checks (deny, audit, aprz) and
-#     PR-context checks (pr-title) live here; scheduled-exhaustive recipes
-#     (mutants-full) are unscoped by design.
+#     PR-context checks (pr-title) live here, as do checks whose inputs
+#     include repo-level files cargo-delta maps to no package (the
+#     workspace-level README template via readme-check, the root `.spelling`
+#     via spellcheck); scheduled-exhaustive recipes (mutants-full) are
+#     unscoped by design.
 #
 # Each scoped check depends on `anvil-impact` (which produces the
 # target/anvil/impact cache) and captures its tier's scope into a local

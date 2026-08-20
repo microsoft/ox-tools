@@ -435,8 +435,9 @@ Impact analysis lives in **one** place: the `anvil-impact` recipe (`impact.just`
 runs `cargo delta impact` against the working tree vs. the resolved base ref and writes
 durable artifacts under `target/anvil/impact/`. The **same** recipe runs locally and in
 cloud workflows — a cloud impact job runs `just anvil-impact` and the scoped checks read
-its output. This replaces the older "compute impact inline in CI shell and thread env
-vars" split with a single building block that behaves identically everywhere.
+its output. It is a single building block that behaves identically everywhere: CI computes
+impact once and publishes it as a downloadable artifact, rather than computing it inline in
+a CI shell and threading the result between jobs as environment variables.
 
 `anvil-impact` produces, under `target/anvil/impact/`:
 
@@ -453,11 +454,12 @@ same way a PR does — not un-committed working-tree edits.
 
 ### 4.1 How checks consume it
 
-Every per-crate check depends on `anvil-impact` and, at the top of its body, resolves its
-tier's scope into a local `$include` variable by calling `_anvil-impact-include`:
+Every **impact-scoped** per-crate check depends on `anvil-impact` and, at the top of its
+body, resolves its category's scope into a local `$include` variable by calling
+`_anvil-impact-include`:
 
 ```just
-[script("pwsh")]
+[script("pwsh", "-NoProfile")]
 anvil-clippy: anvil-clippy-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
@@ -475,13 +477,14 @@ both worlds:
   uploaded, so the *same* `_anvil-impact-include` call reads the *same* cache — no scoping
   is threaded between jobs via environment variables.
 
-`$include` holds one of three shapes, per cargo-delta tier:
+Each check requests one cargo-delta **category** — the selector it passes to
+`_anvil-impact-include` — which determines how it uses the returned `$include`:
 
-| `$include` value             | Bucket    | What recipes do with it                                                                       |
-|------------------------------|-----------|------------------------------------------------------------------------------------------------|
-| modified tier                | modified  | `--skip` → recipe exits 0. Otherwise: run unconditionally (modified-tier tools are workspace-wide). |
-| affected tier                | affected  | `--skip` → recipe exits 0. Otherwise: splice the value into the cargo invocation, defaulting to `--workspace` when empty. |
-| required tier                | required  | Same semantics as affected, but consumed by recipes that need the transitive dep graph in scope (doc-build, cargo-hack, udeps). |
+| Category   | What recipes do with it                                                                       |
+|------------|------------------------------------------------------------------------------------------------|
+| `modified` | `--skip` → recipe exits 0. Otherwise: run unconditionally (modified-category tools are workspace-wide). |
+| `affected` | `--skip` → recipe exits 0. Otherwise: splice the value into the cargo invocation, defaulting to `--workspace` when empty. |
+| `required` | Same semantics as affected, but consumed by recipes that need the transitive dep graph in scope (doc-build, cargo-hack, udeps). |
 
 `$include` is either the literal sentinel `--skip` (the tier is empty), a pre-built
 argument string like `--package alpha@1.0.0 --package beta@0.2.0` (version-qualified cargo
@@ -505,10 +508,11 @@ silently under-scoped tier that skips a check). Failing hard surfaces the mappin
 gets fixed, instead of masking it behind a silently full-workspace run.
 
 The mapping from check to bucket is fixed in the catalog (see
-[checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)). Unscoped checks
-(`pr-title`, `deny`, `audit`, `aprz`, `mutants-full`) take no `anvil-impact` dependency
-and never resolve a scope — they always run. Group recipes do not resolve scope
-themselves; each underlying check reads what it needs.
+[checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)). Unscoped checks —
+`pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, and the repo-level-input checks
+`readme-check` and `spellcheck` (whose inputs cargo-delta maps to no package) — take no
+`anvil-impact` dependency and never resolve a scope; they always run. Group recipes do not
+resolve scope themselves; each underlying check reads what it needs.
 
 ### 4.2 The `--skip` sentinel
 
@@ -530,7 +534,7 @@ dependency. This is exactly how the **scheduled** and **full** tiers stay full-w
 `anvil-scheduled` / `anvil-full` route through the `_anvil-run` tier router
 (`anvil-scheduled: (_anvil-run "scheduled" anvil_runner "off")`), which exports
 `ANVIL_IMPACT=off` before invoking the private `_anvil-<tier>` recipe, so the whole
-dependency tree runs unscoped. The export had to move into the router because a
+dependency tree runs unscoped. The export lives in the router because a
 dependency-only tier recipe cannot set env for its own dependencies — they run before its
 body. The four scheduled *groups* (`anvil-scheduled-test`, …) route the same way, so a
 scheduled group invoked directly is full-workspace too.
@@ -561,6 +565,32 @@ This only affects local runs: cloud-workflow checkouts are clean (the PR head is
 so CI always gets the scoped, committed-diff result. It is deliberately conservative over
 fast — a dirty tree runs everything. Commit to scope by impact, or use `ANVIL_IMPACT=off`
 (which also runs the full workspace, and additionally skips cargo-delta entirely).
+
+### 4.5 Base-ref resolution and failure modes
+
+`anvil-impact` resolves the base ref through `_anvil-base-ref` and computes the committed
+diff of `HEAD` against it. It deliberately **does not** run `git fetch`: mutating git state
+as a side effect of a build check is surprising and can race the user's own git operations.
+The base is therefore a prerequisite the caller must satisfy, which yields three distinct
+outcomes rather than one catch-all fallback:
+
+- **Base ref not present locally** — the recipe fails fast, naming the missing ref and the
+  recovery command (`git fetch origin <branch>`, then retry), rather than silently scoping
+  against nothing.
+- **Shallow clone** — a shallow history cannot produce a trustworthy diff, so the recipe
+  fails with unshallow guidance (`git fetch --unshallow`) rather than under-scoping.
+- **Base predates the workspace** — when the base commit has no root `Cargo.toml` (first
+  adoption of anvil, or a base older than the workspace itself), the baseline snapshot
+  records a `baseline-no-workspace` marker and `anvil-impact` widens **every** category to
+  its full-workspace/run default. First adoption therefore validates broadly instead of
+  failing.
+
+The missing-base and shallow-clone cases are hard errors because a clean checkout with no
+resolvable full-history base has no diff to trust; the workspace-less-base case still
+carries a meaningful broad-validation signal, so it widens instead. A warm offline cache
+can still hit these paths outside `consume` mode, because a cache miss recomputes the
+baseline — so an environment without the base ref must either provide it, run with
+`ANVIL_IMPACT=off`, or (in CI) download the cache and set `ANVIL_IMPACT=consume`.
 
 
 ## 5. Daily driver

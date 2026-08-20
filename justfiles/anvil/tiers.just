@@ -25,9 +25,9 @@ _anvil-pr: anvil-pr-validate-prereqs \
 # against `main`, not on PRs.
 #
 # The scheduled tier is deliberately NOT impact-scoped: it is the
-# catch-all that backstops PR-tier scoping. Because every check now
-# depends on `anvil-impact` and self-populates its scope from the cache,
-# the tier must run with ANVIL_IMPACT=off so `_anvil-impact-include`
+# catch-all that backstops PR-tier scoping. Because every impact-scoped
+# check depends on `anvil-impact` and self-populates its scope from the
+# cache, the tier must run with ANVIL_IMPACT=off so `_anvil-impact-include`
 # returns each tier's full-workspace default and the `anvil-impact`
 # dependency no-ops. A dependency-only recipe can't set env for its own
 # deps (deps run before the body), so the public tier routes through

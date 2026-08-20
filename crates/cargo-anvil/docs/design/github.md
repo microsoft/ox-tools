@@ -380,7 +380,7 @@ blocking failure rather than leaving the run green with a lone red impact job.
 The wiring never branches on impact's *output values*, though. When impact succeeds,
 each group always runs; recipes inside the group decide whether a given check no-ops,
 by testing for the literal sentinel `--skip` in the relevant include var. This matters
-because unscoped checks (`fmt`, `deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
+because unscoped checks (`deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
 must run on every PR, including docs-only PRs where every tier comes back `--skip`. See
 [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe) for the recipe-side
 contract.
@@ -606,7 +606,8 @@ threading pre-formatted strings that local runs never see. The chain in
    longer caches `target/` at all — see §setup — so the durable `impact.state` never
    travels through the build cache; the tier-fixed mode also means no leftover on-disk
    state could ever flip a scheduled job into impact scoping and skip the full-workspace
-   backstop.)
+   backstop.) (`anvil-setup` does not cache `target/` at all — see §setup — so the durable
+   `impact.state` never travels through the build cache.)
 
 The wiring never gates jobs on the impact result — every job runs regardless of `--skip`
 status. This is intentional: unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,

@@ -1014,9 +1014,10 @@ fn impact_format_maps_proc_macro_target_name_to_its_package() {
     // cargo-delta reports *target* names (snake_case). A proc-macro crate whose
     // package name differs from its target name (`my-macro` vs `my_macro`) must
     // still resolve to `--package my-macro@<version>` via the proc-macro branch
-    // of the lib-target lookup -- NOT fall into the unknown-name --workspace
-    // fallback, which would silently cost a full-workspace run and be
-    // indistinguishable from a real mapping regression.
+    // of the lib-target lookup. An unmappable target name no longer widens to
+    // --workspace -- `_anvil-impact-format` fails the whole run (see
+    // `impact_format_fails_hard_on_unmappable_name`) -- so a mapping miss here
+    // would abort scoping rather than silently cost a full-workspace run.
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
     write(
@@ -1043,6 +1044,6 @@ fn impact_format_maps_proc_macro_target_name_to_its_package() {
     assert!(ok, "the formatter must exit 0:\nstderr: {stderr}");
     assert_eq!(
         stdout, "--package my-macro@0.3.0",
-        "the proc-macro target `my_macro` must map back to its package `my-macro`, not widen:\nstdout: {stdout}\nstderr: {stderr}"
+        "the proc-macro target `my_macro` must map back to its package `my-macro`:\nstdout: {stdout}\nstderr: {stderr}"
     );
 }

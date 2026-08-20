@@ -589,7 +589,7 @@ blocking failure.
 The wiring never branches on impact's *result*, though. When impact succeeds,
 each group always runs; recipes inside the group decide whether a given check no-ops
 by testing for the literal sentinel `--skip` in the relevant include var. This matters
-because unscoped checks (`fmt`, `deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
+because unscoped checks (`deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
 must run on every PR. See
 [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe) for the
 recipe-side contract.
@@ -602,9 +602,10 @@ elide the Windows job entirely if their root pipeline is shaped to support that.
 
 The scheduled stages template is simpler — it omits the `impact` stage and runs each
 group full-workspace, with the same `linuxPool` / `windowsPool` parameter shape and
-the same `steps/job.yml` delegation. Scheduled step templates don't receive any
-`include*` parameters; they default to empty strings and recipes fall through to
-`--workspace`.
+the same `steps/job.yml` delegation. Scheduled step templates pass no `include*`
+parameters; the scheduled group recipes route through `_anvil-run` with
+`ANVIL_IMPACT=off`, so `anvil-impact` no-ops and every category resolves to its
+full-workspace default (`--workspace`).
 
 Cloud impact explicitly loads `.delta.toml`, so its managed trip wires and
 repository-owned parser, exclusion, and fixed comparison-branch settings apply
@@ -805,8 +806,11 @@ it just contributes a stage.
 ## 10. Coverage upload
 
 After `pr-test` (and `scheduled-test`) runs the `anvil-llvm-cov` recipe, the stages
-template adds a `PublishCodeCoverageResults@2` step on **each** OS job that ingests
-`target/coverage/cobertura.xml`. The cobertura format is the modern recommendation for
+template adds a `PublishCodeCoverageResults@2` step on **each** OS job. `anvil-llvm-cov`
+emits one Cobertura report per feature configuration — `cobertura-all-features.xml` and
+`cobertura-no-default.xml` — and never an unsuffixed `cobertura.xml`, so the step's
+`summaryFileLocation` uses the `target/coverage/cobertura-*.xml` wildcard to select both
+and let the task coalesce them. The cobertura format is the modern recommendation for
 the task (lcov is not accepted) and is produced alongside lcov.info by the same
 instrumented test run.
 

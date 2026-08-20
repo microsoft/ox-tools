@@ -2586,8 +2586,8 @@ anvil-miri-strict-provenance-validate-prereqs: anvil-component-nightly-miri-vali
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Stricter miri profiles. Each runs miri over the full workspace
-# with a profile-specific MIRIFLAGS plus a profile-specific
+# Stricter miri profiles. Each runs miri with a profile-specific
+# MIRIFLAGS plus a profile-specific
 # `--cfg miri_<profile>` set via RUSTFLAGS. Per-test opt-outs use
 # `#[cfg_attr(miri_<profile>, ignore = "<reason>")]`, keeping the
 # suppression next to the test rather than in a sidecar file.
@@ -2634,10 +2634,11 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Nightly checks always run full-workspace: the scheduled workflow forces
-# ANVIL_IMPACT=off, so anvil-impact no-ops and _anvil-impact-include returns
-# --workspace for every tier. Skip guards are still included for local
-# diff-scoped runs.
+# Scope: a clean direct or PR invocation is impact-scoped -- anvil-impact
+# computes the cache and _anvil-impact-include returns the affected set, so
+# unaffected packages are skipped. Full-workspace runs come from the
+# scheduled/full tiers (which force ANVIL_IMPACT=off) or a dirty local tree
+# (which widens for safety).
 
 # Run Miri tests for affected workspace packages.
 [script("pwsh", "-NoProfile")]
@@ -2916,16 +2917,9 @@ anvil-readme-check: anvil-readme-check-validate-prereqs
         exit $LASTEXITCODE
     }
     $meta = $metadataJson | ConvertFrom-Json
-    $byName = @{}
-    foreach ($p in $meta.packages) { $byName[$p.name] = $p }
-    $candidates = @($meta.packages | ForEach-Object { $_.name })
     $hadFailure = $false
-    foreach ($name in $candidates) {
-        $p = $byName[$name]
-        if (-not $p) {
-            Write-Error "anvil-readme-check: impact selected unknown package '$name'"
-            exit 1
-        }
+    foreach ($p in $meta.packages) {
+        $name = $p.name
         if (-not ($p.targets | Where-Object { $_.kind -contains 'lib' })) { continue }
         # Skip private crates (publish = false). They aren't released
         # and rarely have a polished README. Mirrors the
@@ -3721,7 +3715,7 @@ anvil-scheduled-test-validate-prereqs: \
 #
 #   - "modified": only run when at least one package's source files changed
 #     in the diff. The check's underlying tool is workspace-wide or
-#     directory-scoped (cargo fmt --all, cargo spellcheck, cargo heather), so
+#     directory-scoped (cargo fmt --all, cargo heather), so
 #     it doesn't take --package; it short-circuits on the "--skip" sentinel.
 #
 #   - "affected": run on the affected set (modified U reverse-deps within the
@@ -3735,8 +3729,11 @@ anvil-scheduled-test-validate-prereqs: \
 #     -> feature powerset; cargo udeps -> unused-deps).
 #
 #   - "unscoped": always run. External-input checks (deny, audit, aprz) and
-#     PR-context checks (pr-title) live here; scheduled-exhaustive recipes
-#     (mutants-full) are unscoped by design.
+#     PR-context checks (pr-title) live here, as do checks whose inputs
+#     include repo-level files cargo-delta maps to no package (the
+#     workspace-level README template via readme-check, the root `.spelling`
+#     via spellcheck); scheduled-exhaustive recipes (mutants-full) are
+#     unscoped by design.
 #
 # Each scoped check depends on `anvil-impact` (which produces the
 # target/anvil/impact cache) and captures its tier's scope into a local
@@ -4534,9 +4531,9 @@ _anvil-pr: anvil-pr-validate-prereqs \
 # against `main`, not on PRs.
 #
 # The scheduled tier is deliberately NOT impact-scoped: it is the
-# catch-all that backstops PR-tier scoping. Because every check now
-# depends on `anvil-impact` and self-populates its scope from the cache,
-# the tier must run with ANVIL_IMPACT=off so `_anvil-impact-include`
+# catch-all that backstops PR-tier scoping. Because every impact-scoped
+# check depends on `anvil-impact` and self-populates its scope from the
+# cache, the tier must run with ANVIL_IMPACT=off so `_anvil-impact-include`
 # returns each tier's full-workspace default and the `anvil-impact`
 # dependency no-ops. A dependency-only recipe can't set env for its own
 # deps (deps run before the body), so the public tier routes through

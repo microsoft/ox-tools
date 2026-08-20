@@ -36,8 +36,10 @@ const TOOLS_JUST_PATH: &str = "justfiles/anvil/tools.just";
 /// Contents of `justfiles/anvil/helpers.just` baked into the binary.
 ///
 /// Holds the shared helper recipe `_anvil-base-ref` (reused by the impact
-/// recipe and anvil-mutants-diff) and the impact env-var contract that the
-/// per-check recipes rely on.
+/// recipe and anvil-mutants-diff) and the bucket legend documenting how
+/// per-check recipes consume the impact cache via `_anvil-impact-include`
+/// (which, along with cache production and `_anvil-impact-format`, lives in
+/// `impact.just`).
 const HELPERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/helpers.just");
 
 /// Repo-root-relative path of the shared-helpers recipe file.

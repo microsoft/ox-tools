@@ -6,8 +6,8 @@
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Stricter miri profiles. Each runs miri over the full workspace
-# with a profile-specific MIRIFLAGS plus a profile-specific
+# Stricter miri profiles. Each runs miri with a profile-specific
+# MIRIFLAGS plus a profile-specific
 # `--cfg miri_<profile>` set via RUSTFLAGS. Per-test opt-outs use
 # `#[cfg_attr(miri_<profile>, ignore = "<reason>")]`, keeping the
 # suppression next to the test rather than in a sidecar file.

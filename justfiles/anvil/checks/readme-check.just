@@ -53,16 +53,9 @@ anvil-readme-check: anvil-readme-check-validate-prereqs
         exit $LASTEXITCODE
     }
     $meta = $metadataJson | ConvertFrom-Json
-    $byName = @{}
-    foreach ($p in $meta.packages) { $byName[$p.name] = $p }
-    $candidates = @($meta.packages | ForEach-Object { $_.name })
     $hadFailure = $false
-    foreach ($name in $candidates) {
-        $p = $byName[$name]
-        if (-not $p) {
-            Write-Error "anvil-readme-check: impact selected unknown package '$name'"
-            exit 1
-        }
+    foreach ($p in $meta.packages) {
+        $name = $p.name
         if (-not ($p.targets | Where-Object { $_.kind -contains 'lib' })) { continue }
         # Skip private crates (publish = false). They aren't released
         # and rarely have a polished README. Mirrors the

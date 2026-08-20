@@ -54,4 +54,3 @@ runs:
         name: anvil-impact-${{ runner.os }}
         path: target/anvil/impact
         retention-days: 1
-        include-hidden-files: true
