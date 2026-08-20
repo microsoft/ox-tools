@@ -579,10 +579,12 @@ also drives the shared `anvil-report-check` action. A failure creates a Checks
 API result named after the concrete recipe and runner, such as
 `anvil-license-headers (linux-x64)`. Every PR group uses the same logic, so this
 works for any check reachable from a group recipe without a check list in YAML.
-The report's external id is stable per group and runner. A rerun on the same
-commit updates that check instead of creating a duplicate; if the group passes
-on rerun, the prior dynamic failure is renamed to the group and completed
-successfully so no stale red check remains.
+The report is attached to the pull request head commit rather than GitHub's
+synthetic merge commit so it appears in the PR check list. Its external id is
+stable per group and runner. A rerun on the same commit updates that check
+instead of creating a duplicate; if the group passes on rerun, the prior
+dynamic failure is renamed to the group and completed successfully so no stale
+red check remains.
 
 The reusable workflow input defaults to `false`. The generated root workflow
 opts in and grants `checks: write`; a customized root that has not accepted the

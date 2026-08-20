@@ -1727,11 +1727,12 @@ runs:
           const failedRecipe = process.env.ANVIL_FAILED_RECIPE;
           const runner = `${process.env.RUNNER_OS}-${process.env.RUNNER_ARCH}`.toLowerCase();
           const externalId = `cargo-anvil:${group}:${runner}`;
+          const headSha = context.payload.pull_request.head.sha;
           const detailsUrl = `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`;
 
           const runs = await github.paginate(
             github.rest.checks.listForRef,
-            { owner, repo, ref: context.sha, filter: "all", per_page: 100 },
+            { owner, repo, ref: headSha, filter: "all", per_page: 100 },
             response => response.data.check_runs,
           );
           const existing = runs.find(run =>
@@ -1772,7 +1773,7 @@ runs:
               owner,
               repo,
               name,
-              head_sha: context.sha,
+              head_sha: headSha,
               details_url: detailsUrl,
               external_id: externalId,
               status: "completed",

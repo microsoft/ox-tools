@@ -234,6 +234,7 @@ mod tests {
         assert!(body.contains("failed_recipe=${failed_recipe:-anvil-pr-fast}"));
         assert!(body.contains("uses: ./.github/actions/anvil-report-check"));
         assert!(REPORT_CHECK_ACTION.contains("cargo-anvil:${group}:${runner}"));
+        assert!(REPORT_CHECK_ACTION.contains("context.payload.pull_request.head.sha"));
         assert!(body.contains("ANVIL_INCLUDE_MODIFIED"));
         assert!(body.contains("ANVIL_INCLUDE_AFFECTED"));
         assert!(body.contains("ANVIL_INCLUDE_REQUIRED"));
