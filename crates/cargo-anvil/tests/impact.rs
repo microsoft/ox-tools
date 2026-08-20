@@ -23,7 +23,8 @@
 //! subprocesses; if any is missing it is skipped, never failed (matching
 //! the schema-validation tests). See `docs/verification.md`.
 
-use std::path::Path;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cargo_anvil::test_support::{Cli, run_update};
@@ -52,6 +53,76 @@ fn tools_available() -> bool {
         }
     }
     true
+}
+
+/// Returns true if the tools the *cargo-delta-free* recipe paths need are on
+/// PATH (git, just, pwsh). Deliberately omits cargo/cargo-delta: the paths this
+/// gates -- `ANVIL_IMPACT=off`, an invalid mode, a dirty-tree widen, and
+/// `consume` -- must reach their decision WITHOUT ever invoking cargo-delta.
+/// Requiring it here would both wrongly skip these tests on a machine that
+/// lacks it and mask a regression that starts shelling out to it on a path that
+/// must not. The tests that use this gate run under [`ShimBin::tripwire_cargo`],
+/// which turns any cargo invocation into a hard failure + a logged entry.
+fn core_tools_available() -> bool {
+    for (tool, arg) in [("git", "--version"), ("just", "--version"), ("pwsh", "--version")] {
+        let ok = Command::new(tool).arg(arg).output().is_ok_and(|o| o.status.success());
+        if !ok {
+            eprintln!("skipping: required tool '{tool}' not available");
+            return false;
+        }
+    }
+    true
+}
+
+/// A scratch directory prepended to `PATH` that holds pwsh command shims
+/// (`<name>.ps1`) used to make the recipe's `cargo` / `rustup` calls observable
+/// -- or to prove they never happen. pwsh resolves a bare `cargo`/`rustup` to
+/// the `.ps1` on PATH cross-platform, so the emitted recipes call the shim
+/// instead of the real tool. Kept in its own `TempDir` (not the workspace) so
+/// the shims never surface in the workspace's `git status` -- which the recipe's
+/// dirty-tree probe would otherwise read as an uncommitted change.
+///
+/// Every shim logs to the file named by the `ANVIL_TEST_LOG` env var; tests set
+/// that var to [`ShimBin::log`] on the command they run.
+struct ShimBin {
+    _dir: TempDir,
+    path: OsString,
+    log: PathBuf,
+}
+
+impl ShimBin {
+    fn new(scripts: &[(&str, &str)]) -> Self {
+        let dir = TempDir::new().unwrap();
+        let log = dir.path().join("shim.log");
+        for (name, body) in scripts {
+            write(&dir.path().join(name), body);
+        }
+        let mut paths = vec![dir.path().to_path_buf()];
+        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+        let path = std::env::join_paths(paths).unwrap();
+        Self { _dir: dir, path, log }
+    }
+
+    /// A `cargo` shim that records every invocation to `ANVIL_TEST_LOG` and then
+    /// fails hard (exit 97). Used to assert a recipe path never shells out to
+    /// cargo-delta: any call both fails the recipe and leaves a log entry.
+    fn tripwire_cargo() -> Self {
+        Self::new(&[(
+            "cargo.ps1",
+            "if ($env:ANVIL_TEST_LOG) { Add-Content -LiteralPath $env:ANVIL_TEST_LOG -Value ($args -join ' ') }\n\
+             [Console]::Error.WriteLine('cargo tripwire: unexpected cargo invocation: ' + ($args -join ' '))\n\
+             exit 97\n",
+        )])
+    }
+
+    /// The lines logged by the shims so far (empty when nothing was invoked).
+    fn log_lines(&self) -> Vec<String> {
+        std::fs::read_to_string(&self.log)
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
 }
 
 fn git(dir: &Path, args: &[&str]) {
@@ -317,13 +388,21 @@ fn impact_empty_output_when_head_equals_base() {
 
 #[test]
 fn impact_off_short_circuits_without_computing() {
-    if !tools_available() {
+    if !core_tools_available() {
         return;
     }
     let tmp = workspace();
     let root = tmp.path();
 
-    let out = just_cmd(root, &["anvil-impact"]).env("ANVIL_IMPACT", "off").output().unwrap();
+    // ANVIL_IMPACT=off must reach its no-op WITHOUT cargo-delta: run under a
+    // tripwire cargo shim so any invocation fails loudly and is logged.
+    let shim = ShimBin::tripwire_cargo();
+    let out = just_cmd(root, &["anvil-impact"])
+        .env("ANVIL_IMPACT", "off")
+        .env("PATH", &shim.path)
+        .env("ANVIL_TEST_LOG", &shim.log)
+        .output()
+        .unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "ANVIL_IMPACT=off run failed:\n{combined}");
     // No snapshotting, no projection, and -- crucially -- no artifacts written.
@@ -331,6 +410,11 @@ fn impact_off_short_circuits_without_computing() {
     assert!(
         !root.join("target/anvil/impact/impact.json").exists(),
         "off run must not write impact artifacts"
+    );
+    assert!(
+        shim.log_lines().is_empty(),
+        "off run must not invoke cargo-delta, but did: {:?}",
+        shim.log_lines()
     );
 }
 
@@ -439,7 +523,7 @@ fn impact_include_reads_zero_byte_modified_file_without_throwing() {
 
 #[test]
 fn impact_dirty_tree_widens_without_needing_a_resolvable_base() {
-    if !tools_available() {
+    if !core_tools_available() {
         return;
     }
     // Regression: the dirty-tree safety net must win even when the recompute
@@ -455,9 +539,14 @@ fn impact_dirty_tree_widens_without_needing_a_resolvable_base() {
 
     // BASE_REF points at a ref that does not exist, so the recompute path
     // would hard-fail base-ref resolution. The dirty short-circuit must make
-    // that unreachable.
+    // that unreachable -- and reach the widen WITHOUT cargo-delta, which a
+    // WIP checkout may not even have installed. The tripwire cargo shim proves
+    // the widen path never shells out to it.
+    let shim = ShimBin::tripwire_cargo();
     let out = just_cmd(root, &["anvil-impact"])
         .env("BASE_REF", "refs/heads/anvil-does-not-exist")
+        .env("PATH", &shim.path)
+        .env("ANVIL_TEST_LOG", &shim.log)
         .output()
         .unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
@@ -473,6 +562,11 @@ fn impact_dirty_tree_widens_without_needing_a_resolvable_base() {
     assert!(
         !combined.contains("napshotting"),
         "dirty tree must short-circuit the snapshot before recompute:\n{combined}"
+    );
+    assert!(
+        shim.log_lines().is_empty(),
+        "a dirty-tree widen must not invoke cargo-delta, but did: {:?}",
+        shim.log_lines()
     );
     assert_eq!(
         std::fs::read_to_string(root.join("target/anvil/impact/include_affected.txt"))
@@ -826,17 +920,24 @@ fn loom_runs_declared_targets_in_full_workspace_mode() {
 
 #[test]
 fn invalid_anvil_impact_value_fails_loudly_without_computing() {
-    if !tools_available() {
+    if !core_tools_available() {
         return;
     }
     // ANVIL_IMPACT is a strict tri-state (off / consume / unset). A typo like
     // `on` must fail closed at every read site with exit 2 and an actionable
     // error -- never silently fall through to "scoping on" (which could skip
-    // checks) or compute a scope.
+    // checks) or compute a scope. The rejection must also happen WITHOUT
+    // cargo-delta, so run under the tripwire shim.
     let tmp = workspace();
     let root = tmp.path();
+    let shim = ShimBin::tripwire_cargo();
     for recipe in [&["anvil-impact"][..], &["_anvil-impact-include", "affected"][..]] {
-        let out = just_cmd(root, recipe).env("ANVIL_IMPACT", "on").output().unwrap();
+        let out = just_cmd(root, recipe)
+            .env("ANVIL_IMPACT", "on")
+            .env("PATH", &shim.path)
+            .env("ANVIL_TEST_LOG", &shim.log)
+            .output()
+            .unwrap();
         let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         assert_eq!(
             out.status.code(),
@@ -851,6 +952,11 @@ fn invalid_anvil_impact_value_fails_loudly_without_computing() {
     assert!(
         !root.join("target/anvil/impact/impact.json").exists(),
         "an invalid mode must not compute or write impact artifacts"
+    );
+    assert!(
+        shim.log_lines().is_empty(),
+        "an invalid mode must not invoke cargo-delta, but did: {:?}",
+        shim.log_lines()
     );
 }
 
@@ -913,17 +1019,32 @@ fn shallow_clone_fails_with_unshallow_guidance() {
 
 #[test]
 fn consume_without_downloaded_cache_fails_loudly() {
-    if !tools_available() {
+    if !core_tools_available() {
         return;
     }
     // consume trusts a downloaded cache verbatim, so a missing cache is a real
     // pipeline defect (renamed artifact, a missing download step, or a group
     // action run directly). It must fail loudly rather than let every scoped
     // check silently widen to --workspace while the pipeline stays green.
+    //
+    // consume is a pure cache-presence check: it must never invoke cargo-delta
+    // (a downstream group job has neither it nor a base ref), so the whole test
+    // runs under a tripwire cargo shim and seeds the cache directly rather than
+    // producing it via a real snapshot.
     let tmp = workspace();
     let root = tmp.path();
+    let shim = ShimBin::tripwire_cargo();
+    let consume = |args: &[&str]| {
+        just_cmd(root, args)
+            .env("ANVIL_IMPACT", "consume")
+            .env("PATH", &shim.path)
+            .env("ANVIL_TEST_LOG", &shim.log)
+            .output()
+            .unwrap()
+    };
+
     // No target/anvil/impact/ cache has been downloaded.
-    let out = just_cmd(root, &["anvil-impact"]).env("ANVIL_IMPACT", "consume").output().unwrap();
+    let out = consume(&["anvil-impact"]);
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert_ne!(
         out.status.code(),
@@ -936,9 +1057,17 @@ fn consume_without_downloaded_cache_fails_loudly() {
     );
 
     // With the cache present (as after a real artifact download), consume is a
-    // successful no-op.
-    run_impact(root);
-    let ok = just_cmd(root, &["anvil-impact"]).env("ANVIL_IMPACT", "consume").output().unwrap();
+    // successful no-op. Seed the three include files directly -- consume only
+    // checks their presence, never recomputes.
+    let cache = root.join("target/anvil/impact");
+    for (file, spec) in [
+        ("include_modified.txt", ""),
+        ("include_affected.txt", "--package alpha@0.1.0"),
+        ("include_required.txt", "--workspace"),
+    ] {
+        write(&cache.join(file), spec);
+    }
+    let ok = consume(&["anvil-impact"]);
     let ok_combined = format!("{}{}", String::from_utf8_lossy(&ok.stdout), String::from_utf8_lossy(&ok.stderr));
     assert!(
         ok.status.success(),
@@ -950,8 +1079,8 @@ fn consume_without_downloaded_cache_fails_loudly() {
     // all-three-files contract against regressing to a directory or
     // representative-file check, which would let one tier silently fall back to
     // its default.
-    std::fs::remove_file(root.join("target/anvil/impact/include_affected.txt")).unwrap();
-    let partial = just_cmd(root, &["anvil-impact"]).env("ANVIL_IMPACT", "consume").output().unwrap();
+    std::fs::remove_file(cache.join("include_affected.txt")).unwrap();
+    let partial = consume(&["anvil-impact"]);
     let partial_combined = format!(
         "{}{}",
         String::from_utf8_lossy(&partial.stdout),
@@ -965,6 +1094,14 @@ fn consume_without_downloaded_cache_fails_loudly() {
     assert!(
         partial_combined.contains("affected"),
         "the error must name the missing tier (affected):\n{partial_combined}"
+    );
+
+    // Across every consume path above -- missing, present, and partial -- the
+    // recipe must never have shelled out to cargo-delta.
+    assert!(
+        shim.log_lines().is_empty(),
+        "consume must not invoke cargo-delta on any path, but did: {:?}",
+        shim.log_lines()
     );
 }
 
@@ -1045,5 +1182,93 @@ fn impact_format_maps_proc_macro_target_name_to_its_package() {
     assert_eq!(
         stdout, "--package my-macro@0.3.0",
         "the proc-macro target `my_macro` must map back to its package `my-macro`:\nstdout: {stdout}\nstderr: {stderr}"
+    );
+}
+
+/// Drive `just _anvil-impact-snapshot` under a `cargo` shim that records the
+/// `RUSTUP_TOOLCHAIN` in effect at each `cargo delta snapshot` and a `rustup`
+/// shim that reports a fixed active toolchain, returning the two logged values
+/// in order: `[baseline, current]`. `caller_toolchain` is the value the caller
+/// exports (or `None` to leave it unset).
+fn snapshot_toolchain_probe(caller_toolchain: Option<&str>) -> Vec<String> {
+    let tmp = workspace();
+    let root = tmp.path();
+    // cargo shim: log the active RUSTUP_TOOLCHAIN on each `delta snapshot`
+    // (emitting `{}` as the snapshot), satisfy the cargo-delta prereq probe
+    // (`cargo install --list`), and no-op everything else. rustup shim: report
+    // a fixed active toolchain, distinct from any caller value, so the baseline
+    // override is unambiguous.
+    let shim = ShimBin::new(&[
+        (
+            "cargo.ps1",
+            "if (($args -contains 'delta') -and ($args -contains 'snapshot')) {\n\
+            \x20   $tc = if (Test-Path Env:\\RUSTUP_TOOLCHAIN) { $env:RUSTUP_TOOLCHAIN } else { '<unset>' }\n\
+            \x20   Add-Content -LiteralPath $env:ANVIL_TEST_LOG -Value $tc\n\
+            \x20   Write-Output '{}'\n\
+            \x20   exit 0\n\
+            }\n\
+            if (($args -contains 'install') -and ($args -contains '--list')) {\n\
+            \x20   Write-Output 'cargo-delta v9.9.9:'\n\
+            \x20   exit 0\n\
+            }\n\
+            exit 0\n",
+        ),
+        (
+            "rustup.ps1",
+            "if (($args -contains 'show') -and ($args -contains 'active-toolchain')) {\n\
+            \x20   Write-Output 'anvil-active-toolchain'\n\
+            \x20   exit 0\n\
+            }\n\
+            exit 0\n",
+        ),
+    ]);
+
+    let mut cmd = just_cmd(root, &["_anvil-impact-snapshot"]);
+    cmd.env("PATH", &shim.path).env("ANVIL_TEST_LOG", &shim.log);
+    match caller_toolchain {
+        Some(tc) => {
+            cmd.env("RUSTUP_TOOLCHAIN", tc);
+        }
+        None => {
+            cmd.env_remove("RUSTUP_TOOLCHAIN");
+        }
+    }
+    let out = cmd.output().unwrap();
+    let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "_anvil-impact-snapshot failed:\n{combined}");
+    shim.log_lines()
+}
+
+#[test]
+fn impact_snapshot_runs_baseline_under_active_toolchain_then_restores_caller_value() {
+    if !core_tools_available() {
+        return;
+    }
+    // The baseline snapshot is taken inside a worktree checked out at the merge
+    // target, whose rust-toolchain.toml may pin a toolchain that is NOT
+    // installed here (any PR that bumps rust-toolchain.toml). The recipe runs
+    // that snapshot under the *active* toolchain via RUSTUP_TOOLCHAIN, then must
+    // put the caller's value back so the *current* snapshot runs under the
+    // toolchain the caller chose -- restoring a prior value, or removing the
+    // override entirely when the caller set none. A regression that forgets to
+    // restore would leak the baseline override into the current snapshot.
+
+    // Case A: the caller pins RUSTUP_TOOLCHAIN. Baseline runs under the active
+    // toolchain; the current snapshot must see the caller's pin restored.
+    let with_caller = snapshot_toolchain_probe(Some("caller-pin-toolchain"));
+    assert_eq!(
+        with_caller,
+        vec!["anvil-active-toolchain".to_owned(), "caller-pin-toolchain".to_owned()],
+        "baseline must snapshot under the active toolchain, then the caller's RUSTUP_TOOLCHAIN must be restored for the current snapshot"
+    );
+
+    // Case B: the caller sets nothing. The recipe introduces RUSTUP_TOOLCHAIN
+    // only for the baseline, then must REMOVE it so the current snapshot runs
+    // under the caller's (unset) toolchain rather than a leaked override.
+    let without_caller = snapshot_toolchain_probe(None);
+    assert_eq!(
+        without_caller,
+        vec!["anvil-active-toolchain".to_owned(), "<unset>".to_owned()],
+        "with no caller RUSTUP_TOOLCHAIN, the recipe must remove the baseline override so the current snapshot sees it unset"
     );
 }

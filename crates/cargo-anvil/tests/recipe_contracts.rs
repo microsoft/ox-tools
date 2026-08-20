@@ -117,6 +117,20 @@ if ($args -contains 'metadata') {
         workspace_members = @($packages | ForEach-Object { $_.id })
         packages = $packages
     }
+    if ($env:FAKE_NON_MEMBER_PACKAGE_NAME) {
+        # A package present in `packages` but absent from `workspace_members`
+        # (a path/registry dependency). Recipes that enumerate the workspace
+        # must filter these out; the object is added AFTER workspace_members is
+        # computed so it is never listed as a member.
+        $metadata.packages += [pscustomobject]@{
+            name = $env:FAKE_NON_MEMBER_PACKAGE_NAME
+            version = '0.1.0'
+            id = "$($env:FAKE_NON_MEMBER_PACKAGE_NAME) 0.1.0"
+            manifest_path = [System.IO.Path]::Combine($root, 'external', 'Cargo.toml')
+            targets = @([pscustomobject]@{ name = $env:FAKE_NON_MEMBER_PACKAGE_NAME; kind = @('lib') })
+            metadata = [pscustomobject]@{}
+        }
+    }
     $metadata | ConvertTo-Json -Depth 8 -Compress
     exit 0
 }
@@ -295,6 +309,73 @@ fn bolero_discovery_failure_propagates() {
     );
 
     assert_failed(&output, "cargo bolero target discovery failure");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bolero_full_workspace_discovery_enumerates_every_member() {
+    if !tools_available() {
+        return;
+    }
+    // When the affected tier is the whole workspace (`--workspace`, or an
+    // adopter running `anvil-bolero` directly with no impact cache), the recipe
+    // cannot read package specs from the include string -- it must enumerate
+    // the workspace via `cargo metadata` and run target discovery for EVERY
+    // member. A regression that only handled the scoped `--package` form, or
+    // that dropped members, would silently fuzz nothing. Drive the metadata
+    // shim so the workspace has two members and assert both are discovered.
+    let tmp = fixture(
+        &[("bolero.just", BOLERO), ("impact.just", IMPACT)],
+        &[
+            "anvil-toolchain-nightly-validate-prereqs",
+            "anvil-tool-cargo-bolero-validate-prereqs",
+            "anvil-toolchain-nightly-install",
+            "anvil-tool-cargo-bolero-install installer",
+            "anvil-impact",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    // A whole-workspace affected tier forces the metadata-enumeration branch
+    // (the scoped `--package` branch never calls `cargo metadata`).
+    seed_include(tmp.path(), "affected", "--workspace");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-bolero"],
+        &[
+            // `bolero list` succeeds but reports no targets, so the recipe
+            // no-ops after discovery -- exactly the path we want to observe.
+            ("FAKE_BOLERO_LIST_EXIT", OsStr::new("0")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other-package")),
+            // A package present in metadata but NOT a workspace member must be
+            // skipped -- discovery is over members, not every known package.
+            ("FAKE_NON_MEMBER_PACKAGE_NAME", OsStr::new("external-dep")),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "full-workspace bolero discovery must succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        calls.contains("metadata"),
+        "full-workspace discovery must enumerate members via `cargo metadata`, got:\n{calls}"
+    );
+    assert!(
+        calls.contains("bolero list --profile release --package fixture"),
+        "the first workspace member must be discovered, got:\n{calls}"
+    );
+    assert!(
+        calls.contains("bolero list --profile release --package other-package"),
+        "every workspace member must be discovered, not just the first, got:\n{calls}"
+    );
+    assert!(
+        !calls.contains("external-dep"),
+        "a non-workspace-member package must NOT be discovered, got:\n{calls}"
+    );
 }
 
 #[test]
