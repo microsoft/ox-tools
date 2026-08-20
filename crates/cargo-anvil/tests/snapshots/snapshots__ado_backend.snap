@@ -5411,6 +5411,13 @@ anvil-impact: _anvil-impact-snapshot
         exit 0
     }
 
+    # Resolve the repo's cargo-delta config for `cargo delta impact` below. This
+    # recipe is a separate pwsh script from `_anvil-impact-snapshot`, so it does
+    # not inherit that recipe's `$deltaArgs`; resolve it again here (at the repo
+    # root) so the impact diff honors `.delta.toml` (e.g. trip_wire_patterns).
+    $deltaArgs = @()
+    if (Test-Path '.delta.toml') { $deltaArgs = @('--config', (Resolve-Path '.delta.toml').Path) }
+
     # Full impact JSON -- the durable source of truth. cargo-delta prints
     # nothing when no files changed between baseline and current (it "quits"
     # early), so default to an empty object so impact.json always exists --
