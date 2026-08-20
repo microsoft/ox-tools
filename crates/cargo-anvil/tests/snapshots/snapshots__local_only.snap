@@ -4298,7 +4298,7 @@ _anvil-impact-format tier impactJson:
             # package -- a gap in our reverse-mapping of the (non-unique) library
             # identifier cargo-delta emits. Fail hard so the mapping gap is
             # surfaced and fixed rather than silently under-scoping the tier.
-            Write-Error "anvil impact: cargo-delta returned unknown package '$name' in the $tier set"
+            Write-Error "anvil impact: cargo-delta returned unknown package '$name' in the $tier set. Re-run with ANVIL_IMPACT=off to proceed unscoped, and report the unmapped identifier."
             exit 1
         }
         if ($candidates.Count -ne 1) {
@@ -4308,7 +4308,7 @@ _anvil-impact-format tier impactJson:
             # workspaces). We cannot know which cargo-delta meant, so fail hard
             # rather than guess and risk under-scoping the tier.
             $candidateNames = ($candidates | ForEach-Object { $_.name } | Sort-Object) -join ', '
-            Write-Error "anvil impact: cargo-delta returned ambiguous package identifier '$name' in the $tier set (matches: $candidateNames)"
+            Write-Error "anvil impact: cargo-delta returned ambiguous package identifier '$name' in the $tier set (matches: $candidateNames). Re-run with ANVIL_IMPACT=off to proceed unscoped, and report the identifier."
             exit 1
         }
         $p = $candidates[0]
