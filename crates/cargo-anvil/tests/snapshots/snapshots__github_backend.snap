@@ -1416,7 +1416,7 @@ runs:
             ...context.repo,
             sha: context.payload.pull_request.head.sha,
             state,
-            context: `cargo-anvil/${group} (${runner})`,
+            context: `anvil-pr / ${group} details (${runner})`,
             description: description.slice(0, 140),
             target_url: `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID}`,
           });

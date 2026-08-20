@@ -192,7 +192,7 @@ mod tests {
     fn status_action_uses_stable_context_and_pr_head() {
         assert!(REPORT_STATUS_ACTION.contains("github.rest.repos.createCommitStatus"));
         assert!(REPORT_STATUS_ACTION.contains("context.payload.pull_request.head.sha"));
-        assert!(REPORT_STATUS_ACTION.contains("cargo-anvil/${group} (${runner})"));
+        assert!(REPORT_STATUS_ACTION.contains("anvil-pr / ${group} details (${runner})"));
         assert!(REPORT_STATUS_ACTION.contains("description: description.slice(0, 140)"));
     }
 
