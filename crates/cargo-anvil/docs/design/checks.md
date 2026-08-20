@@ -125,7 +125,7 @@ The three `pr-slow*` groups are independent: failures in `pr-test` don't block `
 | Group                | OS scope                  | Purpose                                                                                                                                |
 |----------------------|---------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
 | `scheduled-test`       | Same default as `pr-test` | Re-runs the test suite on `main` (with coverage instrumentation) to catch flakes/environment-dependent failures and to publish a full coverage snapshot of the current `main`. |
-| `scheduled-advisories` | Same default as `pr-fast` | Re-runs every check whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain). Cross-OS because clippy compiles per host. |
+| `scheduled-advisories` | Same default as `pr-fast` | Runs checks whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain). Cross-OS because clippy compiles per host. |
 | `scheduled-runtime-analysis` | Same default as `pr-runtime-analysis` | Whole-workspace runtime correctness under `miri`, tree-borrows, strict-provenance, and race-coverage. One job per OS leg runs the four profiles sequentially so they share setup and cache state; parallelism is across OS legs. |
 | `scheduled-exhaustive` | Linux x86_64 + Windows x86_64 | Full `cargo mutants`, cargo-hack feature powerset, and benchmark compilation. The default matrix is x86-only because cargo-mutants is unsupported on Windows ARM. |
 | `scheduled-benchmarks` | Same default as `scheduled-exhaustive` | Runs the benchmarks and analyzes the accumulated history with `cargo-bench-history` to detect performance regressions, restoring and publishing that history as a build artifact and failing on an active regression. Its own group so the history round-trip and fail-on-regression semantics stay isolated from the other exhaustive work. See [benchmarks.md](./benchmarks.md). |
@@ -168,7 +168,7 @@ that provided the strongest version of the check.
 | `ensure-no-cyclic-deps`        | `cargo ensure-no-cyclic-deps --workspace`                 | oxidizer-github (sibling crate in `ox-tools-gh`) |
 | `ensure-no-default-features`   | `cargo ensure-no-default-features --workspace`            | oxidizer-github |
 | `doc-build`                    | `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --all-features --no-deps` | oxidizer-github |
-| `readme-check`                 | `cargo doc2readme --check` for each crate that opts in (presence of a `[package.metadata.doc2readme]` table) | oxidizer-github |
+| `readme-check`                 | `cargo doc2readme --check` for each publishable crate that does not opt out through `[package.metadata.ox-gen-readme]`; library rustdoc is preferred, with binary rustdoc used for bin-only crates | oxidizer-github |
 | `spellcheck`                   | `cargo spellcheck check --code 1`                         | oxidizer-github |
 | `pr-title`                     | Repository policy regex applied to the title in the `PR_TITLE` env var. The accepted types (`feat`, `fix`, `chore`, `docs`, `refactor`, `test`, `build`, `ci`, `perf`, `revert`) are a deliberate subset of Conventional Commits, not the complete grammar. The title must occupy a single line, so trailing content after the description is rejected. A rejected title reports the accepted title formats and the case-insensitive type names, so the author can correct the title from the check output alone. Skipped only outside a pull request context, where `PR_TITLE` is unset or empty (local runs and cloud builds that are not pull request builds); an invalid title or failure to retrieve a known PR's title fails loudly. GitHub supplies the event title directly. ADO resolves it through the REST API because `System.PullRequest.Title` does not exist. | oxidizer-github |
 | `deny`                         | `cargo deny check`                                        | all |
@@ -176,7 +176,6 @@ that provided the strongest version of the check.
 | `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` run **twice** — once with default targets (lib + bins) and once with `--all-targets`. cargo-udeps only analyzes the targets it's told to, and each run catches a variant the other masks: the default-targets run surfaces a dep in `[dependencies]` referenced only by tests/benches/examples (it should be a dev-dep; `--all-targets` would see it as "used"), while the `--all-targets` run surfaces unused `[dev-dependencies]` (never compiled by the default-targets run). Together they cover unused deps, unused dev-deps, and deps that should be dev-deps. | oxidizer, oxidizer-github |
 | `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected library crate. The PR target is the baseline. Exit 100 is a completed check with deny-level findings: it writes `target/anvil/comments/semver.md` and remains advisory. Exit 101 or any unexpected nonzero status is operational failure and fails the recipe, except for proven rename and bin→lib transitions with no comparable baseline. | oxidizer-github |
 | `external-types`               | `cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path` per library crate (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are skipped). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
-| `aprz`                         | `cargo aprz check` — third-party risk analysis published on crates.io | oxidizer |
 
 ### `pr-slow`
 
@@ -311,10 +310,12 @@ What that means concretely:
 - **Re-run in scheduled** (in addition to PR):
   - `llvm-cov`, `doc-test`, `examples` (in `scheduled-test`) -- non-determinism, environment
     sensitivity, runner drift can produce flakes that the PR run missed.
-  - `deny`, `audit`, `aprz`, `clippy` (in `scheduled-advisories`) -- see §2.
+  - `deny`, `audit`, `clippy` (in `scheduled-advisories`) -- see §2.
   - `miri` (in `scheduled-runtime-analysis`) -- the PR-tier run is impact-scoped, so
     crates not touched by a given PR can go indefinitely without miri coverage; the
     scheduled re-run is full-workspace and closes that gap.
+- **Run only in scheduled** -- `aprz` performs a network-heavy, full-workspace appraisal
+  against external services and belongs in `scheduled-advisories`, not on the PR critical path.
 - **Run only in PR** -- checks whose outcome is fully determined by the source tree and
   the pinned tool versions, so re-running on the same `main` commit can't surface anything
   new: `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`,

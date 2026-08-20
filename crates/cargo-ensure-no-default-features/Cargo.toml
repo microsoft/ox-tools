@@ -1,0 +1,42 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-ensure-no-default-features"
+description = "A cargo subcommand that ensures dependencies are declared with default-features = false"
+version = "1.1.0"
+readme = "README.md"
+keywords = ["oxidizer", "cargo", "subcommand", "features", "ci"]
+categories = ["command-line-utilities", "development-tools::cargo-plugins"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ensure-no-default-features"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.cargo_check_external_types]
+# `anyhow::Error` leaks through the `run` entry point that `main` calls. Mirrors the
+# allowlist entry in `cargo-ensure-no-cyclic-deps`, which has the same shape.
+allowed_external_types = ["anyhow::Result"]
+
+[[bin]]
+name = "cargo-ensure-no-default-features"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true, features = ["std"] }
+clap = { workspace = true, features = ["std", "derive", "color", "help", "error-context", "usage"] }
+toml = { workspace = true, features = ["parse", "serde"] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints

@@ -3,6 +3,8 @@
 
 //! An unpublished crate for shared code used for writing Rust scripts
 
+#![doc(html_logo_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/automation/logo.png")]
+#![doc(html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/automation/favicon.ico")]
 #![allow(clippy::missing_errors_doc, reason = "this is an internal crate for scripts")]
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg_attr(coverage_nightly, coverage(off))]

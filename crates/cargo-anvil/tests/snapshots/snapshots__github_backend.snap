@@ -581,9 +581,6 @@ function Test-AnvilContainerBuildArgs($Value) {
 function Test-AnvilRecipeNeedsGitHubToken([string]$Name) {
     $Name -in @(
         'anvil-aprz',
-        'anvil-pr',
-        '_anvil-pr',
-        'anvil-pr-fast',
         'anvil-scheduled',
         '_anvil-scheduled',
         'anvil-scheduled-advisories',
@@ -889,8 +886,7 @@ done
 
 anvil_recipe_needs_github_token() {
     case "$1" in
-        anvil-aprz | anvil-pr | _anvil-pr | anvil-pr-fast \
-            | anvil-scheduled | _anvil-scheduled | anvil-scheduled-advisories \
+        anvil-aprz | anvil-scheduled | _anvil-scheduled | anvil-scheduled-advisories \
             | anvil-full | _anvil-full) return 0 ;;
         *) return 1 ;;
     esac
@@ -2132,6 +2128,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          lfs: true
           fetch-depth: 0
       - id: delta
         uses: ./.github/actions/anvil-impact
@@ -2145,6 +2142,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          lfs: true
           fetch-depth: 0
       - id: delta
         uses: ./.github/actions/anvil-impact
@@ -2166,6 +2164,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          lfs: true
           # anvil-semver-check compares the affected crates' current API
           # against the PR's target branch (origin/<base>) via
           # `cargo semver-checks --baseline-rev`. That resolves the
@@ -2222,6 +2221,8 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
       - uses: ./.github/actions/anvil-pr-test
         with:
           free-disk-space: true
@@ -2267,6 +2268,8 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
       - uses: ./.github/actions/anvil-pr-runtime-analysis
         with:
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
@@ -2291,6 +2294,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          lfs: true
           fetch-depth: 0
       - uses: ./.github/actions/anvil-pr-mutants
         with:
@@ -2379,6 +2383,8 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
       - uses: ./.github/actions/anvil-scheduled-test
         with:
           free-disk-space: true
@@ -2410,6 +2416,8 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
       - uses: ./.github/actions/anvil-scheduled-advisories
 
   scheduled-runtime-analysis:
@@ -2433,6 +2441,8 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
       - uses: ./.github/actions/anvil-scheduled-runtime-analysis
 
   scheduled-exhaustive:
@@ -2446,6 +2456,8 @@ jobs:
     runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
       - uses: ./.github/actions/anvil-scheduled-exhaustive
 
   scheduled-benchmarks:
@@ -4857,8 +4869,7 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-audit \
     anvil-udeps \
     anvil-semver-check \
-    anvil-external-types \
-    anvil-aprz
+    anvil-external-types
 
 # Group-level setup + validate-prereqs
 #
@@ -4883,8 +4894,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-audit-setup installer) \
     (anvil-udeps-setup installer) \
     (anvil-semver-check-setup installer) \
-    (anvil-external-types-setup installer) \
-    (anvil-aprz-setup installer)
+    (anvil-external-types-setup installer)
 
 # Validate prerequisites for the `anvil-pr-fast` recipe.
 [group("anvil-setup")]
@@ -4903,8 +4913,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-audit-validate-prereqs \
     anvil-udeps-validate-prereqs \
     anvil-semver-check-validate-prereqs \
-    anvil-external-types-validate-prereqs \
-    anvil-aprz-validate-prereqs
+    anvil-external-types-validate-prereqs
 
 === justfiles/anvil/groups/pr-mutants.just ===
 # Copyright (c) Microsoft Corporation.
@@ -6522,7 +6531,7 @@ rust_nightly_external_types := "nightly-2026-03-20"
 # Cargo subcommands
 # ============================================================================
 
-cargo_aprz_version := "1.0.0"
+cargo_aprz_version := "1.1.0"
 cargo_audit_version := "0.22.2"
 cargo_bench_history_version := "0.0.9"
 cargo_bolero_version := "0.13.4"
@@ -6541,7 +6550,7 @@ cargo_mutants_version := "27.0.0"
 cargo_nextest_version := "0.9.137"
 cargo_semver_checks_version := "0.49.0"
 cargo_sort_version := "2.1.4"
-cargo_spellcheck_version := "0.15.1"
+cargo_spellcheck_version := "0.15.7"
 cargo_udeps_version := "0.1.61"
 
 === rustfmt.toml ===
