@@ -127,7 +127,19 @@ _anvil-impact-snapshot:
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     [System.IO.Directory]::CreateDirectory($snapDir) | Out-Null
 
-    # Ensure a base sha. The fast path probed it best-effort (2>$null); if that
+    # Resolve the repo's cargo-delta config ONCE, at the repo root, before any
+    # Push-Location into the base worktree below. cargo-delta's default config
+    # lookup is `delta.toml` (no dot), so a repo that uses `.delta.toml` (as
+    # this one does) must pass `--config` explicitly or every snapshot/impact
+    # runs under cargo-delta's built-in defaults -- ignoring file_exclude /
+    # [parser] / assume_patterns / trip_wire_patterns. All three invocations
+    # (baseline snapshot, current snapshot, impact) share this one repo-root
+    # config so the baseline -- taken inside the base worktree -- is computed
+    # under the same rules as the current tree rather than the base commit's
+    # config. Absent a config file, `$deltaArgs` stays empty and cargo-delta
+    # uses its defaults, so adopters without a `.delta.toml` are unaffected.
+    $deltaArgs = @()
+    if (Test-Path '.delta.toml') { $deltaArgs = @('--config', (Resolve-Path '.delta.toml').Path) }
     # failed we truly need it now, so resolve with fail-fast diagnostics. We
     # deliberately do NOT `git fetch`: mutating git state as a side effect of a
     # build check is surprising and can race the user's own git operations.
@@ -199,7 +211,7 @@ _anvil-impact-snapshot:
                 $priorToolchain = if ($hadToolchain) { $env:RUSTUP_TOOLCHAIN } else { $null }
                 try {
                     if ($activeToolchain) { $env:RUSTUP_TOOLCHAIN = $activeToolchain }
-                    $baseSnap = cargo delta snapshot
+                    $baseSnap = cargo delta @deltaArgs snapshot
                     if ($LASTEXITCODE -ne 0) { throw 'cargo delta snapshot (baseline) failed' }
                 } finally {
                     if ($hadToolchain) {
@@ -225,7 +237,7 @@ _anvil-impact-snapshot:
         Write-Host 'anvil-impact: current snapshot up to date'
     } else {
         Write-Host 'anvil-impact: snapshotting working tree'
-        $curSnap = cargo delta snapshot
+        $curSnap = cargo delta @deltaArgs snapshot
         if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-impact: cargo delta snapshot (current) failed'; exit 1 }
         Set-Content -LiteralPath $currentJson -Value $curSnap -Encoding UTF8
         Set-Content -LiteralPath $currentStateFile -Value $currentState -Encoding UTF8 -NoNewline
@@ -332,7 +344,7 @@ anvil-impact: _anvil-impact-snapshot
     # early), so default to an empty object so impact.json always exists --
     # the freshness check above keys on its presence, and a missing file
     # would force a recompute on every invocation.
-    $impactOut = (cargo delta impact --baseline $baselineJson --current $currentJson --format json | Out-String)
+    $impactOut = (cargo delta @deltaArgs impact --baseline $baselineJson --current $currentJson --format json | Out-String)
     if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-impact: cargo delta impact failed'; exit 1 }
     if ([string]::IsNullOrWhiteSpace($impactOut)) { $impactOut = '{}' }
     Set-Content -LiteralPath $impactJson -Value $impactOut.Trim() -Encoding UTF8
