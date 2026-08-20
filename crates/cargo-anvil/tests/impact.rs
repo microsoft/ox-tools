@@ -10,8 +10,8 @@
 //! recipe (not just its emitted text): the expensive base-ref snapshot
 //! (`baseline.json`, keyed on the base commit sha) is regenerated only
 //! when the base moves, the cheap working-tree snapshot (`current.json`,
-//! keyed on `HEAD + worktree-diff`) is regenerated only when the tree
-//! changes, and a no-op invocation reuses both.
+//! keyed on the HEAD sha) is regenerated only when HEAD moves, and a
+//! no-op invocation reuses both.
 //!
 //! The recipe prints a distinct line for each path -- "snapshotting
 //! baseline" / "baseline snapshot up to date" and "snapshotting working
@@ -501,7 +501,9 @@ fn impact_consume_mode_trusts_cache_without_recompute() {
         .trim()
         .to_owned();
 
-    // Perturb the tree so the fast path's current.state would NOT match.
+    // Perturb the tree (uncommitted) so the cache no longer reflects the
+    // working tree. In normal mode this dirty tree would widen; consume must
+    // still trust the downloaded cache verbatim without re-snapshotting.
     write(&root.join("crates/beta/src/lib.rs"), "pub fn b() {}\npub fn later() {}\n");
 
     let out = just_cmd(root, &["anvil-impact"])

@@ -443,7 +443,7 @@ vars" split with a single building block that behaves identically everywhere.
 | Artifact                     | Purpose                                                                 |
 |------------------------------|-------------------------------------------------------------------------|
 | `snapshots/baseline.json`    | cargo-delta snapshot of the base ref. Cached, keyed on the base commit sha (`baseline.sha`) — the expensive throwaway-worktree snapshot is only retaken when the base actually moves. |
-| `snapshots/current.json`     | cargo-delta snapshot of the working tree. Cached, keyed on `<HEAD sha + working-tree-diff hash>` (`current.state`). |
+| `snapshots/current.json`     | cargo-delta snapshot of the working tree. Cached, keyed on the HEAD sha (`current.state`); the dirty-tree guard widens instead of snapshotting, so a snapshotted tree always corresponds exactly to HEAD. |
 | `impact.json`                | the `cargo delta impact --format json` report (the durable source of truth; `{}` when nothing changed). |
 | `include_<tier>.txt`         | the pre-projected per-tier scope string (see below), one file per tier. |
 

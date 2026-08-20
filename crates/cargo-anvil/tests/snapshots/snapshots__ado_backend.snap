@@ -5114,7 +5114,8 @@ _anvil-base-ref:
 #     git worktree). Keyed solely on the base commit sha (baseline.sha), so the
 #     worktree is only recreated when the base actually moves.
 #   * current.json   -- snapshot of the working tree. Cheap. Keyed on
-#     <HEAD sha + working-tree-diff hash> (current.state).
+#     <HEAD sha> (current.state); the dirty-tree guard means a clean tree
+#     corresponds exactly to HEAD.
 
 # Snapshot the base ref and working tree for impact analysis.
 [script("pwsh", "-NoProfile")]
@@ -5146,20 +5147,17 @@ _anvil-impact-snapshot:
     $currentStateFile = Join-Path $snapDir 'current.state'
     $noWorkspaceMarker = Join-Path $snapDir 'baseline-no-workspace'
 
-    # Working-tree state key -- git only, no cargo-delta, no base ref. Pins
-    # HEAD plus the working-tree diff, so a match means the snapshots were
-    # produced for exactly this tree. target/ is excluded: it holds build
-    # output and the impact cache itself (and is untracked in some adopter
-    # repos), so it must not perturb the key -- otherwise the state would never
-    # match once target/ exists, and a downstream consumer that downloaded the
-    # cache into target/anvil/impact would look "changed".
-    $headSha = (git rev-parse HEAD).Trim()
-    $statusLines = @(git status --porcelain | Where-Object { $_ -and ($_.Substring(3) -notmatch '^"?target/') })
-    $diffText = (git diff HEAD | Out-String) + "`n" + ($statusLines -join "`n")
-    $diffHash = [System.BitConverter]::ToString(
-        [System.Security.Cryptography.SHA256]::HashData([System.Text.Encoding]::UTF8.GetBytes($diffText))
-    ).Replace('-', '')
-    $currentState = "$headSha $diffHash"
+    # Working-tree state key -- git only, no cargo-delta, no base ref. The
+    # dirty-tree guard above already exited on any non-target/ change, so by
+    # this point the tree is clean and the snapshot corresponds exactly to
+    # HEAD; the key is therefore just the HEAD sha. (An earlier version also
+    # appended a hash of `git diff HEAD` + porcelain status, but past the guard
+    # both are empty for every tracked change. Their only remaining input was
+    # tracked target/ content -- which `git diff HEAD` reports even though the
+    # guard's status probe excludes target/ -- so it could only cause spurious
+    # current-snapshot invalidation, never add signal. target/ must not perturb
+    # the key, so keying on HEAD alone is both simpler and more correct.)
+    $currentState = (git rev-parse HEAD).Trim()
 
     # Consumer fast path: reuse an already-present, matching snapshot set
     # WITHOUT cargo-delta or a fetched base ref -- this short-circuits a local
