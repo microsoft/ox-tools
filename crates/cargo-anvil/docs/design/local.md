@@ -196,10 +196,10 @@ The catalog records, for each cargo subcommand, a **catalog version** (e.g.
   installs *exactly* that version (`--version '={{ pin }}'`), never `>=`. Pulling
   latest-matching at install time is a cloud-workflow reproducibility risk -- an upstream release
   between yesterday's green build and today's PR can break things, even though the
-  catalog hasn't moved. `cargo-spellcheck 0.15.7`'s em-dash word-boundary regression is
-  the canonical example: with `>=0.15.1` the catalog would have silently picked it up,
-  breaking every PR until the catalog was edited. With `=0.15.1` the catalog locks in
-  the version it was validated against.
+  catalog hasn't moved. Exact pins let the catalog accommodate behavior changes before
+  upgrading; for example, cargo-spellcheck 0.15.7 is paired with the explicit
+  `tokenization_splitchars` boundary list in `spellcheck.toml` rather than being selected
+  implicitly by a range.
 - **On runtime check** (`anvil-tool-<bin>-validate-prereqs`): the recipe enforces
   `installed >= pin`. A local developer who has manually upgraded a tool for their own
   reasons (e.g. needing a bugfix the catalog hasn't pinned yet) is not downgraded by
@@ -279,9 +279,14 @@ The `installer` argument:
   Slow on a cold runner (~30 min for the full catalog) because every tool
   re-compiles common deps (`clap`, `syn`, `quote`, ...) from scratch independently.
 - `binstall` -- `cargo binstall --no-confirm --locked <tool> --version '=<pin>'`.
-  Downloads a prebuilt binary from each tool's GitHub Releases when available.
-  Cuts the cold-runner install phase from ~30 min to ~1 min. `cargo-binstall`
-  itself needs to be on PATH; the GH setup composite arranges this.
+  This selects an ordered strategy, not a binary-only backend. Anvil first asks
+  cargo-binstall to install the exact pin. Tools without a source prerequisite retain
+  cargo-binstall's compile strategy. For tools that declare a source prerequisite,
+  Anvil disables that compile strategy so compilation cannot bypass the check. Any
+  nonzero binstall result then falls back to Anvil's exact-pin `cargo install`; the
+  declared prerequisite, when present, runs immediately before that fallback.
+  A successful binary path cuts the cold-runner install phase from ~30 min to ~1 min.
+  `cargo-binstall` itself needs to be on PATH; the GH setup composite arranges this.
 
 The GitHub composite setup action calls `just anvil-<group>-setup binstall`
 (or just `anvil-setup binstall` when no group is scoped). The ADO setup step
@@ -323,8 +328,9 @@ channel, and `versions.just`. See
 
 A small set of catalog tools have non-Rust build dependencies that `cargo install`
 can't satisfy on its own. Today the only entry is `libclang`, needed by
-`cargo-spellcheck` (via `clang-sys` / `hunspell-rs`) at build time. The `binstall`
-install path sidesteps these entirely by downloading prebuilt binaries.
+`cargo-spellcheck` (via `clang-sys` / `hunspell-rs`) at build time. A successful
+prebuilt binstall sidesteps these; a failed binstall can reach the controlled source
+fallback and therefore still requires them.
 
 Scope policy: only check for system libs that an anvil catalog tool **directly**
 requires. anvil is not a general-purpose dev-env doctor. Repository-specific
@@ -341,8 +347,9 @@ scoop / winget) and exits non-zero. **No auto-install** -- admin/sudo decisions 
 package-manager choice stay with the user. The cargo-spellcheck install recipe passes
 `anvil-tool-cargo-spellcheck-source-deps-check` to `_install-tool` as its source prerequisite.
 The prerequisite runs for an explicit source-build `install` backend and when `binstall`
-cannot provide a binary and falls back to a source build, so missing libclang surfaces as a
-clear hint instead of a cryptic clang-sys build error 10 minutes into the install.
+cannot provide a binary. Anvil disables binstall's own compile strategy and performs the
+source fallback itself, so missing libclang surfaces as a clear hint before compilation
+instead of a cryptic clang-sys build error 10 minutes into the install.
 
 Each tool with a source-build system dependency owns a tool-specific prerequisite recipe and
 wires it into `_install-tool`. Catalog changes propagate to adopters via `cargo anvil` like

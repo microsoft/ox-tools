@@ -173,9 +173,9 @@ anvil-tool-pwsh-validate-prereqs:
 # or no-op if it is already installed at or above that version. The
 # `installer` parameter selects between:
 #   - "install"  (cargo install --locked, pure-source). Default.
-#   - "binstall" (cargo binstall --no-confirm --locked, with cargo install
-#                 fallback if binstall fails). Bootstraps cargo-binstall
-#                 itself if not on PATH.
+#   - "binstall" (cargo binstall --no-confirm --locked, with a controlled
+#                 cargo install fallback for tools that declare source
+#                 prerequisites). Bootstraps cargo-binstall itself if not on PATH.
 # `source_prereq`, when set, runs immediately before a source installation,
 # including a binstall fallback.
 [script("pwsh", "-NoProfile")]
@@ -223,7 +223,15 @@ _install-tool name version installer source_prereq="":
                 exit $LASTEXITCODE
             }
         }
-        cargo binstall --no-confirm --locked $name --version "=$version"
+        # Keep source builds behind Anvil's prerequisite check instead of
+        # allowing binstall to compile before that check can run. Tools with
+        # no source prerequisite may still use binstall's compile strategy.
+        $binstallArgs = @('binstall', '--no-confirm', '--locked')
+        if ($sourcePrereq) {
+            $binstallArgs += @('--disable-strategies', 'compile')
+        }
+        $binstallArgs += @($name, '--version', "=$version")
+        cargo @binstallArgs
         if ($LASTEXITCODE -eq 0) { exit 0 }
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
     }

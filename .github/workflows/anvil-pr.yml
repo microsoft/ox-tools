@@ -21,6 +21,9 @@ jobs:
     name: PR Job
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/anvil-pr-impl.yml
+    # A called workflow cannot elevate beyond its caller. The implementation
+    # resets this upper bound to read-only and restores pull-requests:write
+    # only on pr-fast. See docs/design/github.md §9.
     permissions:
       contents: read
       # Publish named failure statuses so the PR checks rollup identifies the
