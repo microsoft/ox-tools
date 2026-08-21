@@ -1758,7 +1758,7 @@ runs:
       # path; GH uses `binstall`.
       run: |
         if [[ -n "$ANVIL_GROUP" && "$ANVIL_GROUP" != "none" && ! "$ANVIL_GROUP" =~ ^[a-z0-9-]+$ ]]; then
-          echo "::error::Invalid Anvil group '$ANVIL_GROUP'; expected lowercase letters, digits, and hyphens."
+          echo "::error::Invalid Anvil group; expected lowercase letters, digits, and hyphens."
           exit 2
         fi
 

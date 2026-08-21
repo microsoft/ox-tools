@@ -170,6 +170,8 @@ mod tests {
         assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
         assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" binstall"));
         assert!(SETUP_ACTION.contains(r"^[a-z0-9-]+$"));
+        assert!(SETUP_ACTION.contains("::error::Invalid Anvil group;"));
+        assert!(!SETUP_ACTION.contains("::error::Invalid Anvil group '$ANVIL_GROUP'"));
         assert!(SETUP_ACTION.contains("none)"));
     }
 
