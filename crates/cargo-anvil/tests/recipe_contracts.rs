@@ -44,6 +44,10 @@ fn tools_available() -> bool {
     Command::new("just").arg("--version").output().is_ok() && Command::new("pwsh").arg("--version").output().is_ok()
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear fixture builder; length tracks the number of knobs, not branching complexity"
+)]
 fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
     let tmp = TempDir::new().unwrap();
     let mut justfile = String::from("set unstable\nset allow-duplicate-recipes\n\nrust_nightly := \"nightly-test\"\n\n");
