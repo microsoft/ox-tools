@@ -365,12 +365,10 @@ export -f just
         );
         assert!(PR_IMPL_WORKFLOW.contains("matrix.os != 'windows-arm'"));
         assert!(PR_IMPL_WORKFLOW.contains("flags: ${{ matrix.os }}"));
-        assert!(PR_IMPL_WORKFLOW.contains("\npermissions:\n  contents: read\n"));
-        assert_eq!(PR_IMPL_WORKFLOW.matches("pull-requests: write").count(), 1);
         assert_eq!(
-            PR_IMPL_WORKFLOW.matches("statuses: write").count(),
-            PR_GROUPS.len(),
-            "every PR group job must request status publication within the caller's permission ceiling"
+            PR_IMPL_WORKFLOW.matches("permissions:").count(),
+            0,
+            "the shared implementation must inherit the PR or merge-group caller's permission ceiling"
         );
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
@@ -420,6 +418,187 @@ export -f just
             SCHEDULED_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
             1,
             "disk cleanup should be enabled for the scheduled test group"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
+    #[expect(clippy::too_many_lines, reason = "keeps the reporter lifecycle scenarios together")]
+    fn status_script_manages_failure_lifecycle() {
+        let action = REPORT_STATUS_ACTION.replace("\r\n", "\n");
+        let script = action
+            .split_once("        script: |\n")
+            .expect("status action should contain an inline script")
+            .1
+            .lines()
+            .map(|line| line.strip_prefix("          ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let harness = format!("const workflowScript = {script:?};\n")
+            + r##"
+const assert = require("node:assert/strict");
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const run = new AsyncFunction("github", "context", "process", workflowScript);
+
+const baseContext = {
+  repo: { owner: "microsoft", repo: "ox-tools" },
+  payload: { pull_request: { head: { sha: "head-sha" } } },
+};
+const baseEnv = {
+  ANVIL_GROUP: "pr-fast",
+  ANVIL_SETUP_OUTCOME: "success",
+  ANVIL_EXIT_CODE: "17",
+  ANVIL_FAILED_RECIPE: "anvil-license-headers",
+  RUNNER_OS: "Linux",
+  RUNNER_ARCH: "X64",
+  GITHUB_SERVER_URL: "https://github.com",
+  GITHUB_REPOSITORY: "microsoft/ox-tools",
+  GITHUB_RUN_ID: "42",
+};
+
+async function scenario({ env = {}, history = [], context = baseContext } = {}) {
+  const calls = { paginate: [], publish: [] };
+  const github = {
+    paginate: async (method, args) => {
+      calls.paginate.push({ method, args });
+      return history;
+    },
+    rest: {
+      repos: {
+        listCommitStatusesForRef: function listCommitStatusesForRef() {},
+        createCommitStatus: async args => calls.publish.push(args),
+      },
+    },
+  };
+  const process = { env: { ...baseEnv, ...env } };
+  let error;
+  try {
+    await run(github, context, process);
+  } catch (caught) {
+    error = caught;
+  }
+  return { calls, error };
+}
+
+(async () => {
+  const groupMarker = "#anvil-group=pr-fast";
+  const staleContext = "Anvil / clippy (linux-x64)";
+  const failure = await scenario({
+    history: [
+      {
+        context: staleContext,
+        state: "failure",
+        target_url: `https://github.com/microsoft/ox-tools/actions/runs/41${groupMarker}`,
+      },
+      {
+        context: staleContext,
+        state: "success",
+        target_url: `https://github.com/microsoft/ox-tools/actions/runs/40${groupMarker}`,
+      },
+      {
+        context: "Anvil / already-clear (linux-x64)",
+        state: "success",
+        target_url: `https://github.com/microsoft/ox-tools/actions/runs/41${groupMarker}`,
+      },
+      {
+        context: "Anvil / already-clear (linux-x64)",
+        state: "failure",
+        target_url: `https://github.com/microsoft/ox-tools/actions/runs/40${groupMarker}`,
+      },
+      {
+        context: "Anvil / other-group (linux-x64)",
+        state: "failure",
+        target_url: "https://github.com/microsoft/ox-tools/actions/runs/41#anvil-group=pr-test",
+      },
+      {
+        context: "Anvil / other-runner (windows-x64)",
+        state: "failure",
+        target_url: `https://github.com/microsoft/ox-tools/actions/runs/41${groupMarker}`,
+      },
+    ],
+  });
+  assert.equal(failure.error, undefined);
+  assert.equal(failure.calls.paginate.length, 1);
+  assert.equal(failure.calls.paginate[0].args.ref, "head-sha");
+  assert.equal(failure.calls.paginate[0].args.per_page, 100);
+  assert.equal(failure.calls.publish.length, 2);
+  assert.deepEqual(failure.calls.publish[0], {
+    owner: "microsoft",
+    repo: "ox-tools",
+    sha: "head-sha",
+    state: "failure",
+    context: "Anvil / license-headers (linux-x64)",
+    description: "license-headers failed",
+    target_url: `https://github.com/microsoft/ox-tools/actions/runs/42${groupMarker}`,
+  });
+  assert.equal(failure.calls.publish[1].context, staleContext);
+  assert.equal(failure.calls.publish[1].state, "success");
+  assert.equal(failure.calls.publish[1].description, "superseded by license-headers");
+
+  const clean = await scenario({
+    env: { ANVIL_EXIT_CODE: "0", ANVIL_FAILED_RECIPE: "" },
+    history: [
+      {
+        context: staleContext,
+        state: "error",
+        target_url: `https://github.com/microsoft/ox-tools/actions/runs/41${groupMarker}`,
+      },
+    ],
+  });
+  assert.equal(clean.calls.publish.length, 1);
+  assert.equal(clean.calls.publish[0].context, staleContext);
+  assert.equal(clean.calls.publish[0].state, "success");
+  assert.equal(clean.calls.publish[0].description, "superseded: all pr-fast recipes passed");
+
+  const setup = await scenario({
+    env: { ANVIL_SETUP_OUTCOME: "failure", ANVIL_EXIT_CODE: "", ANVIL_FAILED_RECIPE: "" },
+  });
+  assert.equal(setup.calls.publish.length, 1);
+  assert.equal(setup.calls.publish[0].state, "error");
+  assert.equal(setup.calls.publish[0].context, "Anvil / pr-fast setup (linux-x64)");
+  assert.equal(setup.calls.publish[0].description, "setup failed before pr-fast ran");
+
+  const noResult = await scenario({
+    env: { ANVIL_EXIT_CODE: "", ANVIL_FAILED_RECIPE: "" },
+  });
+  assert.equal(noResult.calls.publish.length, 1);
+  assert.equal(noResult.calls.publish[0].state, "error");
+  assert.equal(noResult.calls.publish[0].context, "Anvil / pr-fast no result (linux-x64)");
+
+  const longRecipe = `anvil-${"x".repeat(150)}`;
+  const truncated = await scenario({ env: { ANVIL_FAILED_RECIPE: longRecipe } });
+  assert.equal(truncated.calls.publish[0].context.length, 100);
+  assert.match(truncated.calls.publish[0].context, /^Anvil \/ x+ \(linux-x64\)$/);
+
+  const missingPullRequest = await scenario({ context: { repo: baseContext.repo, payload: {} } });
+  assert.match(
+    missingPullRequest.error.message,
+    /requires a pull_request event with a head SHA/,
+  );
+  assert.equal(missingPullRequest.calls.paginate.length, 0);
+  assert.equal(missingPullRequest.calls.publish.length, 0);
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
+"##;
+
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("create temporary test directory");
+        let path = dir.path().join("report-status.test.cjs");
+        fs::write(&path, harness).expect("write status reporter behavior test");
+        let output = Command::new("node")
+            .arg(&path)
+            .output()
+            .expect("execute generated status reporter behavior test");
+        assert!(
+            output.status.success(),
+            "generated status reporter behavior test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
@@ -554,6 +733,18 @@ async function scenario(items) {
         );
         assert!(PR_ROOT_WORKFLOW.contains("if: github.event_name == 'pull_request'"));
         assert!(PR_ROOT_WORKFLOW.contains("if: github.event_name == 'merge_group'"));
+        let (validation_caller, merge_caller) = PR_ROOT_WORKFLOW
+            .split_once("\n  validation:")
+            .expect("PR root workflow should contain validation")
+            .1
+            .split_once("\n  merge-validation:")
+            .expect("PR root workflow should contain merge-validation");
+        assert!(validation_caller.contains("\n    permissions:\n      contents: read"));
+        assert!(validation_caller.contains("statuses: write"));
+        assert!(validation_caller.contains("pull-requests: write"));
+        assert!(merge_caller.contains("\n    permissions:\n      contents: read"));
+        assert!(!merge_caller.contains("statuses: write"));
+        assert!(!merge_caller.contains("pull-requests: write"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("uses: ./.github/workflows/anvil-scheduled-impl.yml"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("schedule:"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("issues: write"));

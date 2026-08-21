@@ -1851,11 +1851,8 @@ on:
           configured at Codecov; required for private repos.
         required: false
 
-# The caller grants the maximum token scopes available to this reusable
-# workflow. Reset jobs to read-only here, then restore status publication on
-# group jobs and PR-comment publication on pr-fast. See docs/design/github.md §9.
-permissions:
-  contents: read
+# Jobs inherit the selected caller's permission ceiling. The PR caller grants
+# status/comment writes; the merge-group caller grants read-only contents.
 
 # Note on matrices: every multi-OS job below hardcodes its OS axis as
 # an inline YAML array. Per-leg runner *labels* are inputs (so adopters
@@ -1908,10 +1905,6 @@ jobs:
 
   pr-fast:
     name: "Check Group: Fast Checks (${{ matrix.os }})"
-    permissions:
-      contents: read
-      statuses: write
-      pull-requests: write
     # Cross-OS / cross-arch because pr-fast contains compile-sensitive
     # checks (clippy, doc-build, udeps, semver-check, external-types)
     # whose results can differ across host for crates that use
@@ -1972,9 +1965,6 @@ jobs:
 
   pr-test:
     name: "Check Group: Tests and Coverage (${{ matrix.os }})"
-    permissions:
-      contents: read
-      statuses: write
     # Tests + coverage: llvm-cov / doc-test / examples.
     # 4-leg matrix -- compile and runtime behaviour can differ across
     # OS and arch for cfg-gated code, so we exercise tests on every leg.
@@ -2026,9 +2016,6 @@ jobs:
 
   pr-runtime-analysis:
     name: "Check Group: Runtime Analysis (${{ matrix.os }})"
-    permissions:
-      contents: read
-      statuses: write
     # Stricter-runtime correctness: miri + careful.
     # 4-leg matrix -- both checks compile per host target and can
     # surface OS/arch-specific UB. Both are impact-scoped so the
@@ -2056,9 +2043,6 @@ jobs:
 
   pr-mutants:
     name: "Check Group: Mutation Testing (${{ matrix.os }})"
-    permissions:
-      contents: read
-      statuses: write
     # Mutation testing: cargo mutants (diff-scoped against the PR base).
     # 4-leg matrix. cargo-mutants doesn't build on aarch64-pc-windows-msvc
     # (upstream winapi crate incompat); the anvil-mutants-diff recipe
@@ -2112,9 +2096,7 @@ jobs:
     name: PR Job
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/anvil-pr-impl.yml
-    # A called workflow cannot elevate beyond its caller. The implementation
-    # resets this upper bound to read-only and restores pull-requests:write
-    # only on pr-fast. See docs/design/github.md §9.
+    # The called workflow inherits this PR-only write-capable ceiling.
     permissions:
       contents: read
       # Publish named failure statuses so the PR checks rollup identifies the
@@ -2134,6 +2116,7 @@ jobs:
     name: PR Job
     if: github.event_name == 'merge_group'
     uses: ./.github/workflows/anvil-pr-impl.yml
+    # The same called workflow inherits this read-only merge-group ceiling.
     permissions:
       contents: read
     secrets: inherit
@@ -2174,7 +2157,7 @@ on:
 
 # The caller grants the maximum token scopes available to this reusable
 # workflow. Reset jobs to read-only here, then restore only the publisher's
-# issues scope below. See docs/design/github.md §9.
+# issues scope below.
 permissions:
   contents: read
 
@@ -2364,9 +2347,8 @@ permissions:
 jobs:
   anvil-scheduled:
     uses: ./.github/workflows/anvil-scheduled-impl.yml
-    # A called workflow cannot elevate beyond its caller. The implementation
-    # resets this upper bound to read-only and restores issues:write only on
-    # publish-failure. See docs/design/github.md §9.
+    # The implementation resets this upper bound to read-only and restores
+    # issues:write only on publish-failure.
     permissions:
       contents: read
       issues: write

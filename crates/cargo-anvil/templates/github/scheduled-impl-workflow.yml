@@ -33,7 +33,7 @@ on:
 
 # The caller grants the maximum token scopes available to this reusable
 # workflow. Reset jobs to read-only here, then restore only the publisher's
-# issues scope below. See docs/design/github.md §9.
+# issues scope below.
 permissions:
   contents: read
 

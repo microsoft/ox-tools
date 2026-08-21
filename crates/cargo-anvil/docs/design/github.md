@@ -232,7 +232,11 @@ both display names are `PR Job`. Together with the workflow display name,
 GitHub renders the same user-facing `Anvil / PR Job / ...` required-check
 hierarchy for pull-request and merge-group commits without exposing
 implementation IDs. Merge-group execution does not publish the supplemental
-status and never receives `statuses: write` or `pull-requests: write`.
+status and never receives `statuses: write` or `pull-requests: write`. The
+called PR implementation intentionally declares no `permissions` blocks, so
+its jobs inherit the selected caller's ceiling. Static job-level write requests
+would make the read-only merge caller fail workflow validation before any check
+could run.
 
 The scheduled root workflow adds a schedule and `workflow_dispatch`:
 
@@ -661,7 +665,11 @@ authoritative. Group ownership is carried in the target-URL fragment, while the
 visible context is intentionally check-centric. If two groups fail the same
 recipe on the same runner, they share the visible context; newest-status
 deduplication prevents an older group-specific history entry from overriding a
-newer value.
+newer value. This mechanism relies on the commit-status API returning the
+stored `target_url` verbatim. Supplemental contexts must not be required, so a
+future platform change that stopped round-tripping the fragment could leave a
+stale presentation row but could not block correctly configured branch
+protection.
 
 The reporter runs under `always()` and receives the setup outcome as well as
 the Just outputs. A setup failure can therefore publish an `error` description
@@ -838,12 +846,13 @@ Recommended root workflow shape:
   this.
 - The pull-request reusable-workflow call grants `pull-requests: write` for
   advisory comments and `statuses: write` for opt-in per-job statuses. The
-  called workflow resets its default to `contents: read`, restores
-  `statuses: write` only on the four group jobs, and additionally restores
-  `pull-requests: write` only on `pr-fast`, where the sticky-comment steps run.
-  Impact jobs remain read-only.
+  shared called workflow declares no permission overrides and inherits that
+  caller ceiling. This gives its impact jobs the same scopes on trusted
+  same-repository PR runs; the tradeoff avoids duplicating the implementation
+  workflow while allowing the separate merge-group caller to remain read-only.
 - The merge-group caller grants only `contents: read`; it cannot publish
-  comments or statuses.
+  comments or statuses. Because the called workflow does not statically request
+  write scopes, GitHub accepts and runs it under that ceiling.
 - Status publishing is guarded to same-repository `pull_request` events. Fork
   PR tokens are read-only and never reach the status API step.
 - The scheduled reusable-workflow call grants `issues: write` at job scope so its
