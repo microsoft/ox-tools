@@ -233,6 +233,7 @@ export -f just
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
     fn run_group_script_exports_success() {
         let (status, outputs) = run_group_script("all checks passed", 0);
 
@@ -245,6 +246,7 @@ export -f just
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
     fn run_group_script_exports_terminal_recipe_failure() {
         let diagnostic = "error: recipe `anvil-license-headers` failed with exit code 17";
         let (status, outputs) = run_group_script(diagnostic, 17);
@@ -258,6 +260,7 @@ export -f just
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
     fn run_group_script_falls_back_to_group_without_terminal_diagnostic() {
         let (status, outputs) = run_group_script("unexpected tool failure", 9);
 
@@ -289,6 +292,7 @@ export -f just
         assert!(REPORT_STATUS_ACTION.contains("github.rest.repos.createCommitStatus"));
         assert!(REPORT_STATUS_ACTION.contains("github.rest.repos.listCommitStatusesForRef"));
         assert!(REPORT_STATUS_ACTION.contains("context.payload.pull_request.head.sha"));
+        assert!(REPORT_STATUS_ACTION.contains("requires a pull_request event with a head SHA"));
         assert!(REPORT_STATUS_ACTION.contains("const statusPrefix = \"Anvil / \""));
         assert!(REPORT_STATUS_ACTION.contains("if (seen.has(status.context))"));
         assert!(REPORT_STATUS_ACTION.contains("status.context.endsWith(statusSuffix)"));

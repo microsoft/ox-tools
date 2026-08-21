@@ -691,7 +691,9 @@ The reporter runs under `always()` and receives the setup outcome as well as
 the Just outputs. A setup failure can therefore publish an `error` description
 even though the group recipe never ran. Cancellation may prevent final steps
 from running; the native GitHub Actions job remains the authoritative required
-check in that case.
+check in that case. The reporter validates that its event payload contains a
+pull-request head SHA and fails with an explicit precondition error if it is
+invoked directly from an unsupported event.
 
 The reusable workflow input defaults to `false`. The generated pull-request
 caller opts in and grants `statuses: write`; a customized root that has not
