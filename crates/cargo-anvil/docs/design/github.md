@@ -606,8 +606,7 @@ threading pre-formatted strings that local runs never see. The chain in
    longer caches `target/` at all — see §setup — so the durable `impact.state` never
    travels through the build cache; the tier-fixed mode also means no leftover on-disk
    state could ever flip a scheduled job into impact scoping and skip the full-workspace
-   backstop.) (`anvil-setup` does not cache `target/` at all — see §setup — so the durable
-   `impact.state` never travels through the build cache.)
+   backstop.)
 
 The wiring never gates jobs on the impact result — every job runs regardless of `--skip`
 status. This is intentional: unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,

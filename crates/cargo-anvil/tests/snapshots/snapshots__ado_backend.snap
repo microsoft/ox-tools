@@ -5147,8 +5147,10 @@ _anvil-impact-snapshot:
     # Effective cargo-delta config identity -- part of the baseline cache key.
     # Resolve the repo's `.delta.toml` ONCE here, at the repo root, before the
     # fast path below and before any Push-Location into the base worktree.
-    # cargo-delta's default config lookup is `delta.toml` (no dot), so a repo
-    # that uses `.delta.toml` must pass `--config` explicitly or every
+    # (This probe -- like the one in anvil-impact -- is CWD-relative; it relies
+    # on `just` invoking recipes at the repo root, which the generated Justfile
+    # guarantees.) cargo-delta's default config lookup is `delta.toml` (no dot),
+    # so a repo that uses `.delta.toml` must pass `--config` explicitly or every
     # snapshot/impact runs under cargo-delta's built-in defaults -- ignoring
     # file_exclude / [parser] / assume_patterns / trip_wire_patterns. All three
     # invocations (baseline snapshot, current snapshot, impact) share this one
@@ -5166,12 +5168,26 @@ _anvil-impact-snapshot:
     # below (which also flows into anvil-impact's projection cache via
     # baseline.sha). Absent a config file, `$deltaArgs` stays empty and the id
     # is `<none>`, so adopters without a `.delta.toml` are unaffected.
+    #
+    # anvil manages `.delta.toml` (the anvil-delta artifact owns its
+    # trip_wire_patterns region), so in an anvil-managed repo the file should
+    # exist whenever this impact recipe does. Its absence means cargo-delta runs
+    # under defaults with trip wires + file_exclude OFF, which can silently
+    # UNDER-scope -- the opposite of what trip wires exist to prevent. Every
+    # neighbouring precondition here (missing base ref, shallow clone) is a hard
+    # error; failing open on this one alone would be surprising, so warn loudly.
+    # We warn rather than fail because a repo may legitimately opt out of the
+    # `.delta.toml` region; the warning surfaces the reduced coverage without
+    # blocking. (anvil-impact re-probes but stays silent: this dependency
+    # recipe always runs first, so one warning per compute is enough.)
     $deltaArgs = @()
     $deltaConfigId = '<none>'
     if (Test-Path '.delta.toml') {
         $deltaConfigPath = (Resolve-Path '.delta.toml').Path
-        $deltaArgs = @('--config', $deltaConfigPath)
+        $deltaArgs = @()
         $deltaConfigId = (Get-FileHash -LiteralPath $deltaConfigPath -Algorithm SHA256).Hash
+    } else {
+        [Console]::Error.WriteLine("anvil-impact: warning: no .delta.toml found at the repo root; cargo-delta will run under its defaults (trip_wire_patterns and file_exclude_patterns inactive), which can under-scope the impact set. Restore the anvil-managed .delta.toml to get conservative scoping.")
     }
 
     # Working-tree state key -- git only, no cargo-delta, no base ref. The
@@ -5443,7 +5459,7 @@ anvil-impact: _anvil-impact-snapshot
     # not inherit that recipe's `$deltaArgs`; resolve it again here (at the repo
     # root) so the impact diff honors `.delta.toml` (e.g. trip_wire_patterns).
     $deltaArgs = @()
-    if (Test-Path '.delta.toml') { $deltaArgs = @('--config', (Resolve-Path '.delta.toml').Path) }
+    if (Test-Path '.delta.toml') { $deltaArgs = @() }
 
     # Full impact JSON -- the durable source of truth. cargo-delta prints
     # nothing when no files changed between baseline and current (it "quits"

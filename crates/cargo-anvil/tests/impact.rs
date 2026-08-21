@@ -400,6 +400,65 @@ fn baseline_regenerates_when_delta_config_changes_without_moving_the_base() {
 }
 
 #[test]
+fn current_snapshot_ignores_tracked_target_changes_without_moving_head() {
+    if !tools_available() {
+        return;
+    }
+    // The current-snapshot key is the HEAD sha ALONE -- deliberately NOT a hash
+    // of `git diff HEAD`, so that tracked content under `target/` (where the
+    // impact cache itself lives) can never perturb it. This pins that contract:
+    // a tracked `target/` file modified WITHOUT moving HEAD must be a full cache
+    // hit. A `git diff`-based key would regenerate the current snapshot here;
+    // the HEAD-only key must not. (The dirty-tree guard also excludes `target/`,
+    // so the modification does not widen either.)
+    let tmp = workspace();
+    let root = tmp.path();
+
+    // Force-track a file under `target/` (target/ is git-ignored in the emitted
+    // workspace, hence `-f`). Committing it advances HEAD so the first run's
+    // cache corresponds exactly to this commit.
+    let tracked = root.join("target/tracked.marker");
+    write(&tracked, "one\n");
+    git(root, &["add", "-f", "target/tracked.marker"]);
+    git(root, &["commit", "-q", "-m", "track a target/ file"]);
+
+    // First run populates the cache at this HEAD.
+    let first = run_impact(root);
+    assert!(
+        first.contains("snapshotting working tree"),
+        "first run should snapshot the working tree:\n{first}"
+    );
+    let head_before = git_stdout(root, &["rev-parse", "HEAD"]);
+
+    // Modify ONLY the tracked target/ file, without committing: HEAD does not
+    // move and the change is confined to target/.
+    write(&tracked, "one\ntwo\n");
+    assert_eq!(
+        git_stdout(root, &["rev-parse", "HEAD"]),
+        head_before,
+        "modifying a working-tree file must not move HEAD"
+    );
+
+    let after = run_impact(root);
+    assert!(
+        !after.contains("widening"),
+        "a tracked target/ change is excluded by the dirty guard, so scoping must not widen:\n{after}"
+    );
+    assert!(
+        after.contains("snapshots up to date"),
+        "a tracked target/ change must not invalidate the HEAD-keyed current snapshot:\n{after}"
+    );
+    assert!(
+        !after.contains("snapshotting working tree"),
+        "the current snapshot must be reused, NOT regenerated, for a target/-only change:\n{after}"
+    );
+    assert!(
+        after.contains("cache hit"),
+        "the impact projection must be a cache hit when nothing outside target/ moved:\n{after}"
+    );
+}
+
+#[test]
 fn impact_empty_output_when_head_equals_base() {
     if !tools_available() {
         return;
