@@ -21,6 +21,8 @@ jobs:
       # prep
       - name: Checkout
         uses: actions/checkout@v6.0.3
+        with:
+          lfs: true
       - name: Setup
         uses: ./.github/actions/setup
         with:
@@ -55,6 +57,8 @@ jobs:
       # prep
       - name: Checkout
         uses: actions/checkout@v6.0.3
+        with:
+          lfs: true
       - name: Setup
         uses: ./.github/actions/setup
         with:
@@ -96,6 +100,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6.0.3
         with:
+          lfs: true
           fetch-depth: 1
       - name: Setup
         uses: ./.github/actions/setup
@@ -116,6 +121,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6.0.3
         with:
+          lfs: true
           fetch-depth: 0
       - name: Setup
         uses: ./.github/actions/setup
@@ -181,6 +187,8 @@ jobs:
       # prep
       - name: Checkout
         uses: actions/checkout@v6.0.3
+        with:
+          lfs: true
       - name: Setup
         uses: ./.github/actions/setup
         with:
@@ -208,6 +216,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6.0.3
         with:
+          lfs: true
           fetch-depth: 0
       - name: Setup
         uses: ./.github/actions/setup
@@ -221,8 +230,8 @@ jobs:
       - name: Generate PR Diff
         run: git diff origin/main...HEAD >diff.txt
       - name: Mutate Diff
-        timeout-minutes: 45
-        run: cargo +${{ env.RUST_NIGHTLY }} -Zscript scripts/mutants.rs --in-place --in-diff diff.txt
+        timeout-minutes: 360
+        run: cargo mutants --in-diff diff.txt --no-shuffle --jobs 0
 
   coverage:
     runs-on: ${{ matrix.os }}
@@ -236,6 +245,8 @@ jobs:
       # prep
       - name: Checkout
         uses: actions/checkout@v6.0.3
+        with:
+          lfs: true
       - name: Setup
         uses: ./.github/actions/setup
         with:
@@ -286,6 +297,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6.0.3
+        with:
+          lfs: true
       - name: Setup
         uses: ./.github/actions/setup
         with:
@@ -302,6 +315,8 @@ jobs:
       # prep
       - name: Checkout
         uses: actions/checkout@v6.0.3
+        with:
+          lfs: true
       - name: Setup
         uses: ./.github/actions/setup
         with:

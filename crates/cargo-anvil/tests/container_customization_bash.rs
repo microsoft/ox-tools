@@ -417,7 +417,7 @@ fn aggregate_recipe_isolates_the_token_from_the_main_container() {
     let run = run_driver(
         tmp.path(),
         "",
-        "_anvil-pr",
+        "_anvil-scheduled",
         &[("FAKE_DOCKER_IMAGE_EXISTS", "1"), ("GITHUB_TOKEN", "test-token")],
     );
 
@@ -430,7 +430,7 @@ fn aggregate_recipe_isolates_the_token_from_the_main_container() {
     let main = run
         .docker_log
         .lines()
-        .find(|line| line.contains("just _anvil-pr"))
+        .find(|line| line.contains("just _anvil-scheduled"))
         .expect("aggregate recipe must run its main container");
     assert!(
         aprz.contains("/run/secrets/anvil-github-token"),
@@ -453,12 +453,12 @@ fn aggregate_recipe_isolates_the_token_from_the_main_container() {
 
 #[test]
 fn token_file_is_removed_after_aprz_or_main_failure() {
-    for marker in ["just anvil-aprz", "just _anvil-pr"] {
+    for marker in ["just anvil-aprz", "just _anvil-scheduled"] {
         let tmp = repo_with_container();
         let run = run_driver(
             tmp.path(),
             "",
-            "_anvil-pr",
+            "_anvil-scheduled",
             &[
                 ("FAKE_DOCKER_IMAGE_EXISTS", "1"),
                 ("GITHUB_TOKEN", "test-token"),

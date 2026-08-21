@@ -112,7 +112,7 @@ _anvil-impact-snapshot:
     $deltaConfigId = '<none>'
     if (Test-Path '.delta.toml') {
         $deltaConfigPath = (Resolve-Path '.delta.toml').Path
-        $deltaArgs = @()
+        $deltaArgs = @('--config', $deltaConfigPath)
         $deltaConfigId = (Get-FileHash -LiteralPath $deltaConfigPath -Algorithm SHA256).Hash
     } else {
         [Console]::Error.WriteLine("anvil-impact: warning: no .delta.toml found at the repo root; cargo-delta will run under its defaults (trip_wire_patterns and file_exclude_patterns inactive), which can under-scope the impact set. Restore the anvil-managed .delta.toml to get conservative scoping.")
@@ -387,7 +387,7 @@ anvil-impact: _anvil-impact-snapshot
     # not inherit that recipe's `$deltaArgs`; resolve it again here (at the repo
     # root) so the impact diff honors `.delta.toml` (e.g. trip_wire_patterns).
     $deltaArgs = @()
-    if (Test-Path '.delta.toml') { $deltaArgs = @() }
+    if (Test-Path '.delta.toml') { $deltaArgs = @('--config', (Resolve-Path '.delta.toml').Path) }
 
     # Full impact JSON -- the durable source of truth. cargo-delta prints
     # nothing when no files changed between baseline and current (it "quits"

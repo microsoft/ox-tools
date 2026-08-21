@@ -446,7 +446,7 @@ mod tests {
             assert!(driver.contains("auth token --hostname github.com"));
             assert!(driver.contains("gh auth login --hostname github.com"));
             assert!(driver.contains("/run/secrets/anvil-github-token"));
-            assert!(driver.contains("anvil-pr-fast"));
+            assert!(!driver.contains("anvil-pr-fast"));
             assert!(driver.contains("anvil-scheduled-advisories"));
             assert!(driver.contains("PR_TITLE"));
             assert!(driver.contains("--pull=never"));

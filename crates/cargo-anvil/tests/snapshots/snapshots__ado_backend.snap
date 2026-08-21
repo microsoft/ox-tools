@@ -581,9 +581,6 @@ function Test-AnvilContainerBuildArgs($Value) {
 function Test-AnvilRecipeNeedsGitHubToken([string]$Name) {
     $Name -in @(
         'anvil-aprz',
-        'anvil-pr',
-        '_anvil-pr',
-        'anvil-pr-fast',
         'anvil-scheduled',
         '_anvil-scheduled',
         'anvil-scheduled-advisories',
@@ -888,8 +885,7 @@ done
 
 anvil_recipe_needs_github_token() {
     case "$1" in
-        anvil-aprz | anvil-pr | _anvil-pr | anvil-pr-fast \
-            | anvil-scheduled | _anvil-scheduled | anvil-scheduled-advisories | _anvil-scheduled-advisories \
+        anvil-aprz | anvil-scheduled | _anvil-scheduled | anvil-scheduled-advisories | _anvil-scheduled-advisories \
             | anvil-full | _anvil-full) return 0 ;;
         *) return 1 ;;
     esac
@@ -4592,8 +4588,7 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-audit \
     anvil-udeps \
     anvil-semver-check \
-    anvil-external-types \
-    anvil-aprz
+    anvil-external-types
 
 # Group-level setup + validate-prereqs
 #
@@ -4619,8 +4614,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-audit-setup installer) \
     (anvil-udeps-setup installer) \
     (anvil-semver-check-setup installer) \
-    (anvil-external-types-setup installer) \
-    (anvil-aprz-setup installer)
+    (anvil-external-types-setup installer)
 
 # Validate prerequisites for the `anvil-pr-fast` recipe.
 [group("anvil-setup")]
@@ -4640,8 +4634,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-audit-validate-prereqs \
     anvil-udeps-validate-prereqs \
     anvil-semver-check-validate-prereqs \
-    anvil-external-types-validate-prereqs \
-    anvil-aprz-validate-prereqs
+    anvil-external-types-validate-prereqs
 
 === justfiles/anvil/groups/pr-mutants.just ===
 # Copyright (c) Microsoft Corporation.
@@ -5184,7 +5177,7 @@ _anvil-impact-snapshot:
     $deltaConfigId = '<none>'
     if (Test-Path '.delta.toml') {
         $deltaConfigPath = (Resolve-Path '.delta.toml').Path
-        $deltaArgs = @()
+        $deltaArgs = @('--config', $deltaConfigPath)
         $deltaConfigId = (Get-FileHash -LiteralPath $deltaConfigPath -Algorithm SHA256).Hash
     } else {
         [Console]::Error.WriteLine("anvil-impact: warning: no .delta.toml found at the repo root; cargo-delta will run under its defaults (trip_wire_patterns and file_exclude_patterns inactive), which can under-scope the impact set. Restore the anvil-managed .delta.toml to get conservative scoping.")
@@ -5459,7 +5452,7 @@ anvil-impact: _anvil-impact-snapshot
     # not inherit that recipe's `$deltaArgs`; resolve it again here (at the repo
     # root) so the impact diff honors `.delta.toml` (e.g. trip_wire_patterns).
     $deltaArgs = @()
-    if (Test-Path '.delta.toml') { $deltaArgs = @() }
+    if (Test-Path '.delta.toml') { $deltaArgs = @('--config', (Resolve-Path '.delta.toml').Path) }
 
     # Full impact JSON -- the durable source of truth. cargo-delta prints
     # nothing when no files changed between baseline and current (it "quits"
@@ -6721,7 +6714,7 @@ rust_nightly_external_types := "nightly-2026-03-20"
 # Cargo subcommands
 # ============================================================================
 
-cargo_aprz_version := "1.0.0"
+cargo_aprz_version := "1.1.0"
 cargo_audit_version := "0.22.2"
 cargo_bolero_version := "0.13.4"
 cargo_careful_version := "0.4.10"
@@ -6739,7 +6732,7 @@ cargo_mutants_version := "27.0.0"
 cargo_nextest_version := "0.9.137"
 cargo_semver_checks_version := "0.49.0"
 cargo_sort_version := "2.1.4"
-cargo_spellcheck_version := "0.15.1"
+cargo_spellcheck_version := "0.15.7"
 cargo_udeps_version := "0.1.61"
 
 === rustfmt.toml ===

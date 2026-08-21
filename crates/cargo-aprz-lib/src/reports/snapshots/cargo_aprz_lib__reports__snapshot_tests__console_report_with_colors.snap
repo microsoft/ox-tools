@@ -1,0 +1,96 @@
+---
+source: cargo-aprz-lib/src/reports/mod.rs
+expression: output
+---
+tokio v1.35.0 is appraised as [1m[32mLOW RISK (score = 100, awarded points = 1, available points = 1)[39m[0m
+  ✔️ high_stars
+
+[1mMetadata[0m
+  crate.name     : tokio
+  crate.version  : 1.35.0
+  crate.keywords : async, runtime
+
+[1mStability[0m
+  stability.crate_created_at : 2023-01-15
+
+[1mUsage[0m
+  usage.total_downloads : 50000000
+
+[1mCommunity[0m
+  community.repo_stars : 20000
+
+[1mTrustworthiness[0m
+  trust.code_coverage_percentage : 85.50
+  trust.ci_workflows             : true
+
+═══════════════════════════════════════
+
+serde v1.0.195 is appraised as [1m[31mHIGH RISK (score = 0, awarded points = 0, available points = 1)[39m[0m
+  ❌ low_stars: Low star count
+
+[1mMetadata[0m
+  crate.name     : serde
+  crate.version  : 1.0.195
+  crate.keywords : serialization
+
+[1mStability[0m
+  stability.crate_created_at : 2023-01-15
+
+[1mUsage[0m
+  usage.total_downloads : 100000000
+
+[1mCommunity[0m
+  community.repo_stars : 8000
+
+[1mTrustworthiness[0m
+  trust.code_coverage_percentage : 92.30
+  trust.ci_workflows             : true
+
+═══════════════════════════════════════
+
+anyhow v1.0.75 was not appraised
+
+[1mMetadata[0m
+  crate.name     : anyhow
+  crate.version  : 1.0.75
+  crate.keywords : error, handling
+
+[1mStability[0m
+  stability.crate_created_at : 2023-01-15
+
+[1mUsage[0m
+  usage.total_downloads : 30000000
+
+[1mCommunity[0m
+  community.repo_stars : 4500
+
+[1mTrustworthiness[0m
+  trust.code_coverage_percentage : 78.90
+  trust.ci_workflows             : false
+
+═══════════════════════════════════════
+
+required-failed v1.0.0 is appraised as [1m[31mHIGH RISK (1 required check failed; weighted score not calculated)[39m[0m
+  ❌ Required policy: The required condition must hold.
+
+[1mMetadata[0m
+  crate.name    : required-failed
+  crate.version : 1.0.0
+
+═══════════════════════════════════════
+
+required-inconclusive v1.0.0 is appraised as [1m[31mHIGH RISK (1 required check inconclusive; weighted score not calculated)[39m[0m
+  ➖ Required facts: Required facts must be available. (failure to evaluate: provider unavailable)
+
+[1mMetadata[0m
+  crate.name    : required-inconclusive
+  crate.version : 1.0.0
+
+═══════════════════════════════════════
+
+weighted-inconclusive v1.0.0 is appraised as [1m[31mHIGH RISK (1 weighted check inconclusive; weighted score not calculated)[39m[0m
+  ➖ Weighted facts: Weighted facts must be available. (failure to evaluate: provider unavailable)
+
+[1mMetadata[0m
+  crate.name    : weighted-inconclusive
+  crate.version : 1.0.0
