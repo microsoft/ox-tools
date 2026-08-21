@@ -224,6 +224,14 @@ mod tests {
         assert!(!PR_IMPL_WORKFLOW.contains("fromJSON"));
         assert!(PR_IMPL_WORKFLOW.contains("PR_TITLE"));
         assert!(PR_IMPL_WORKFLOW.contains("BASE_REF"));
+        for name in [
+            "aggregate: fast checks (${{ matrix.os }})",
+            "aggregate: tests (${{ matrix.os }})",
+            "aggregate: runtime analysis (${{ matrix.os }})",
+            "aggregate: mutation testing (${{ matrix.os }})",
+        ] {
+            assert!(PR_IMPL_WORKFLOW.contains(name), "PR impl workflow missing display name '{name}'");
+        }
         assert!(PR_IMPL_WORKFLOW.contains("publish_job_statuses:"));
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("uses: ./.github/actions/anvil-run-group").count(),
@@ -284,6 +292,8 @@ mod tests {
         assert!(PR_ROOT_WORKFLOW.contains("merge_group:"));
         assert!(PR_ROOT_WORKFLOW.contains("statuses: write"));
         assert!(PR_ROOT_WORKFLOW.contains("publish_job_statuses: true"));
+        assert!(PR_ROOT_WORKFLOW.contains("\n  validation:\n"));
+        assert!(PR_ROOT_WORKFLOW.contains("\n  merge-validation:\n"));
         assert!(PR_ROOT_WORKFLOW.contains("if: github.event_name == 'pull_request'"));
         assert!(PR_ROOT_WORKFLOW.contains("if: github.event_name == 'merge_group'"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("uses: ./.github/workflows/anvil-scheduled-impl.yml"));

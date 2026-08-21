@@ -197,7 +197,7 @@ on:
 permissions:
   contents: read
 jobs:
-  pull-request:
+  validation:
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/anvil-pr-impl.yml
     permissions:
@@ -207,7 +207,7 @@ jobs:
     with:
       publish_job_statuses: true
     secrets: inherit
-  merge-group:
+  merge-validation:
     if: github.event_name == 'merge_group'
     uses: ./.github/workflows/anvil-pr-impl.yml
     permissions:
@@ -217,8 +217,10 @@ jobs:
 
 The two conditional callers keep the workflow name and reusable implementation
 the same across events while granting write permissions only to pull-request
-runs. Merge-group execution does not publish the supplemental status and never
-receives `statuses: write` or `pull-requests: write`.
+runs. The pull-request caller is named `validation` so GitHub renders a
+user-facing hierarchy rather than exposing the event name. Merge-group
+execution does not publish the supplemental status and never receives
+`statuses: write` or `pull-requests: write`.
 
 The scheduled root workflow adds a schedule and `workflow_dispatch`:
 
@@ -305,6 +307,7 @@ jobs:
         uses: ./.github/actions/anvil-impact
 
   pr-fast:
+    name: "aggregate: fast checks (${{ matrix.os }})"
     needs: impact
     strategy:
       fail-fast: false
@@ -327,6 +330,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
 
   pr-test:
+    name: "aggregate: tests (${{ matrix.os }})"
     # Tests + coverage: llvm-cov, doc-test, examples. Coverage upload
     # is gated to the canonical x86_64 Linux leg (omitted here for brevity).
     needs: impact
@@ -579,10 +583,11 @@ workflows. Anvil does not emit or support public per-group action paths.
 
 ### Failure attribution and commit statuses
 
-GitHub fixes workflow job names before a job runs, so a matrix job named
-`anvil-pr / pr-fast (linux)` cannot rename itself after discovering that
-`anvil-license-headers` failed. Anvil instead presents the concrete failure at
-three levels, all driven by Just's existing terminal diagnostic:
+GitHub fixes workflow job names before a job runs, so a matrix job rendered as
+`anvil-pr / validation / aggregate: fast checks (linux)` cannot rename itself
+after discovering that `anvil-license-headers` failed. Anvil instead presents
+the concrete failure at three levels, all driven by Just's existing terminal
+diagnostic:
 
 1. The problem matcher registered by `anvil-setup` promotes
    ``error: recipe `anvil-license-headers` failed with exit code 1`` to a
@@ -641,10 +646,10 @@ prefix from the context and description to keep the limited inline text
 concise.
 
 The `anvil-pr / failure:` prefix also places supplemental statuses before the
-generated workflow's `anvil-pr / pull-request / <group>` Check Runs in GitHub's
-current alphabetical PR-check rendering. This is a presentation hint, not a
-correctness dependency: GitHub does not document the ordering as a stable
-contract.
+generated workflow's `anvil-pr / validation / aggregate: ...` Check Runs in
+GitHub's current alphabetical PR-check rendering. This is a presentation hint,
+not a correctness dependency: GitHub does not document the ordering as a
+stable contract.
 
 Cleanup runs after the group result is known. Keeping the old failure visible
 while a rerun is pending avoids a temporary green result and unnecessary API

@@ -17,7 +17,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pull-request:
+  validation:
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/anvil-pr-impl.yml
     permissions:
@@ -33,7 +33,7 @@ jobs:
       publish_job_statuses: true
     secrets: inherit
 
-  merge-group:
+  merge-validation:
     if: github.event_name == 'merge_group'
     uses: ./.github/workflows/anvil-pr-impl.yml
     permissions:

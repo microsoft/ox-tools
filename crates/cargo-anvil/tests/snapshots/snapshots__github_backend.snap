@@ -1879,6 +1879,7 @@ jobs:
         uses: ./.github/actions/anvil-impact
 
   pr-fast:
+    name: "aggregate: fast checks (${{ matrix.os }})"
     # Cross-OS / cross-arch because pr-fast contains compile-sensitive
     # checks (clippy, doc-build, udeps, semver-check, external-types)
     # whose results can differ across host for crates that use
@@ -1938,6 +1939,7 @@ jobs:
           delete: true
 
   pr-test:
+    name: "aggregate: tests (${{ matrix.os }})"
     # Tests + coverage: llvm-cov / doc-test / examples.
     # 4-leg matrix -- compile and runtime behaviour can differ across
     # OS and arch for cfg-gated code, so we exercise tests on every leg.
@@ -1988,6 +1990,7 @@ jobs:
           fail_ci_if_error: false
 
   pr-runtime-analysis:
+    name: "aggregate: runtime analysis (${{ matrix.os }})"
     # Stricter-runtime correctness: miri + careful.
     # 4-leg matrix -- both checks compile per host target and can
     # surface OS/arch-specific UB. Both are impact-scoped so the
@@ -2014,6 +2017,7 @@ jobs:
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
 
   pr-mutants:
+    name: "aggregate: mutation testing (${{ matrix.os }})"
     # Mutation testing: cargo mutants (diff-scoped against the PR base).
     # 4-leg matrix. cargo-mutants doesn't build on aarch64-pc-windows-msvc
     # (upstream winapi crate incompat); the anvil-mutants-diff recipe
@@ -2063,7 +2067,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pull-request:
+  validation:
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/anvil-pr-impl.yml
     permissions:
@@ -2079,7 +2083,7 @@ jobs:
       publish_job_statuses: true
     secrets: inherit
 
-  merge-group:
+  merge-validation:
     if: github.event_name == 'merge_group'
     uses: ./.github/workflows/anvil-pr-impl.yml
     permissions:
