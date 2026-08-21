@@ -16,7 +16,9 @@ need to change:
    These change when anvil's groups or impact wiring evolve; most users won't ever edit
    them.
 3. **Per-group composite actions** (`.github/actions/anvil-*/`). Each is a multi-step
-   composite that runs setup + the matching `just anvil-<tier>-<group>` recipe.
+   composite that runs setup + the matching `just anvil-<tier>-<group>` recipe, plus
+   any steps that group needs around it (the benchmark group's history round-trip).
+   Keeping those in the group's own action leaves the workflows a plain list of jobs.
 
 See also:
 
@@ -836,12 +838,17 @@ clearable when a check is removed from the catalog.
 The scheduled benchmark group (see [benchmarks.md](./benchmarks.md)) runs
 `cargo-bench-history`, whose history persists across scheduled runs as GitHub
 **Actions artifacts**. The history is partitioned per machine, so each leg of the
-group's matrix carries its own artifact (`bench-history-<leg>`) — which also keeps
-the names distinct within a run, as artifact upload requires.
+group's matrix carries its own artifact (`bench-history-<runner.os>`).
+
+The round-trip lives in the group's **composite action**, not in the workflow: the
+scheduled workflow's benchmark job is a checkout plus the group action, like every
+other job. Only job-level concerns stay in the workflow — the matrix, the
+`actions: read` grant, the full-depth checkout, and the machine-key input.
 
 Each scheduled benchmark job:
 
-1. checks out with `fetch-depth: 0` (analysis reads the commit graph);
+1. checks out with `fetch-depth: 0` and `lfs: true` (analysis reads the commit
+   graph; benchmark inputs may be LFS-tracked);
 2. **restores** the history by walking back from the newest `anvil-scheduled` run
    on the default branch and taking the first that carries the leg's artifact; the
    first run finds none and starts empty;

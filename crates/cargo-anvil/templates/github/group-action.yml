@@ -37,6 +37,7 @@ inputs:
 runs:
   using: composite
   steps:
+__PRE_STEPS__
     - uses: ./.github/actions/anvil-setup
       with:
         group: __GROUP__
@@ -53,3 +54,4 @@ runs:
         # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-__GROUP__
+__POST_STEPS__

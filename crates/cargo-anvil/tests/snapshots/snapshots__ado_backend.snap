@@ -1574,32 +1574,20 @@ stages:
   - stage: scheduled_test
     displayName: anvil scheduled-test
     jobs:
-      # Publish coverage from both legs so OS-gated code is fully
-      # represented (see the pr-stages.yml comment for the rationale).
+      # Coverage is published from both legs so OS-gated code is fully
+      # represented; that step lives in steps/scheduled-test.yml.
       - template: steps/job.yml
         parameters:
           name: linux
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/scheduled-test.yml
-            - task: PublishCodeCoverageResults@2
-              condition: succeededOrFailed()
-              displayName: Publish coverage (linux)
-              inputs:
-                summaryFileLocation: target/coverage/cobertura-*.xml
-                failIfCoverageEmpty: false
       - template: steps/job.yml
         parameters:
           name: windows
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-test.yml
-            - task: PublishCodeCoverageResults@2
-              condition: succeededOrFailed()
-              displayName: Publish coverage (windows)
-              inputs:
-                summaryFileLocation: target/coverage/cobertura-*.xml
-                failIfCoverageEmpty: false
 
   - stage: scheduled_advisories
     displayName: anvil scheduled-advisories
@@ -1672,61 +1660,35 @@ stages:
       # variables, so this reaches the recipe without further plumbing.
       ANVIL_BENCH_MACHINE_KEY: ${{ parameters.benchMachineKey }}
     jobs:
-      # Benchmark regression detection. OS scope matches
-      # scheduled-exhaustive. The history is partitioned per machine, so
-      # each leg carries its own artifact rather than sharing one name.
+      # The history round-trip lives in steps/scheduled-benchmarks.yml. Only
+      # the artifact declaration is here, because publishing is a job-level
+      # output: a forked (1ESPT) wrapper translates this list into its own
+      # output shape, which a task inside the step list would bypass.
       #
-      # The publish goes through the wrapper's `artifacts` contract like
-      # every other job, carrying a `condition`: the store is only a valid
-      # continuation of the chain once the restore reached a known state,
-      # so an operational restore failure must not overwrite good history
-      # with a truncated snapshot. Failed runs still publish -- a flagged
-      # regression fails the job, and those samples belong in the history.
-      #
-      # The explicit `checkout` leads the step list rather than going
-      # through a wrapper parameter: `steps/job.yml` is the file adopters
-      # fork for 1ESPT and friends, so binding a parameter their wrapper
-      # does not declare would fail template expansion for the whole
-      # pipeline. An explicit checkout step needs nothing from the wrapper
-      # and replaces the implicit default checkout.
+      # The condition is the guard that keeps an operational restore failure
+      # from overwriting a good chain with a truncated store; failed runs
+      # still publish, since a flagged regression fails the job and those
+      # samples belong in the history.
       - template: steps/job.yml
         parameters:
           name: linux
           pool: ${{ parameters.linuxPool }}
           artifacts:
-            - name: bench-history-linux
+            - name: bench-history-$(Agent.OS)
               path: target/anvil/bench-history
               condition: and(succeededOrFailed(), ne(variables['ANVIL_BENCH_RESTORE'], ''))
           steps:
-            # The analysis orders each series by first-parent commit
-            # topology and locates the merge-base, so it needs the whole
-            # commit graph. LFS matters because benchmark inputs can be
-            # LFS-tracked and would otherwise arrive as pointer files.
-            - checkout: self
-              fetchDepth: 0
-              lfs: true
-            - template: steps/bench-history-restore.yml
-              parameters:
-                artifact: bench-history-linux
             - template: steps/scheduled-benchmarks.yml
-            - template: steps/bench-history-summary.yml
       - template: steps/job.yml
         parameters:
           name: windows
           pool: ${{ parameters.windowsPool }}
           artifacts:
-            - name: bench-history-windows
+            - name: bench-history-$(Agent.OS)
               path: target/anvil/bench-history
               condition: and(succeededOrFailed(), ne(variables['ANVIL_BENCH_RESTORE'], ''))
           steps:
-            - checkout: self
-              fetchDepth: 0
-              lfs: true
-            - template: steps/bench-history-restore.yml
-              parameters:
-                artifact: bench-history-windows
             - template: steps/scheduled-benchmarks.yml
-            - template: steps/bench-history-summary.yml
 
 === .pipelines/anvil/steps/advisory-comments.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -2123,6 +2085,9 @@ jobs:
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token pr-fast is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
+# Steps that a particular group needs around the uniform runner are spliced
+# in at the same time, so the stages templates stay a plain list of groups
+# with no per-group customization at the call site.
 parameters:
   - name: include_modified
     type: string
@@ -2181,6 +2146,9 @@ steps:
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token pr-mutants is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
+# Steps that a particular group needs around the uniform runner are spliced
+# in at the same time, so the stages templates stay a plain list of groups
+# with no per-group customization at the call site.
 parameters:
   - name: include_modified
     type: string
@@ -2239,6 +2207,9 @@ steps:
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token pr-runtime-analysis is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
+# Steps that a particular group needs around the uniform runner are spliced
+# in at the same time, so the stages templates stay a plain list of groups
+# with no per-group customization at the call site.
 parameters:
   - name: include_modified
     type: string
@@ -2297,6 +2268,9 @@ steps:
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token pr-test is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
+# Steps that a particular group needs around the uniform runner are spliced
+# in at the same time, so the stages templates stay a plain list of groups
+# with no per-group customization at the call site.
 parameters:
   - name: include_modified
     type: string
@@ -2355,6 +2329,9 @@ steps:
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token scheduled-advisories is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
+# Steps that a particular group needs around the uniform runner are spliced
+# in at the same time, so the stages templates stay a plain list of groups
+# with no per-group customization at the call site.
 parameters:
   - name: include_modified
     type: string
@@ -2413,6 +2390,9 @@ steps:
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token scheduled-benchmarks is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
+# Steps that a particular group needs around the uniform runner are spliced
+# in at the same time, so the stages templates stay a plain list of groups
+# with no per-group customization at the call site.
 parameters:
   - name: include_modified
     type: string
@@ -2424,6 +2404,12 @@ parameters:
     type: string
     default: ''
 steps:
+  - checkout: self
+    fetchDepth: 0
+    lfs: true
+  - template: bench-history-restore.yml
+    parameters:
+      artifact: bench-history-$(Agent.OS)
   - template: setup.yml
     parameters:
       group: scheduled-benchmarks
@@ -2462,6 +2448,7 @@ steps:
       ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
       ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
       ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+  - template: bench-history-summary.yml
 
 === .pipelines/anvil/steps/scheduled-exhaustive.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -2471,6 +2458,9 @@ steps:
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token scheduled-exhaustive is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
+# Steps that a particular group needs around the uniform runner are spliced
+# in at the same time, so the stages templates stay a plain list of groups
+# with no per-group customization at the call site.
 parameters:
   - name: include_modified
     type: string
@@ -2529,6 +2519,9 @@ steps:
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token scheduled-runtime-analysis is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
+# Steps that a particular group needs around the uniform runner are spliced
+# in at the same time, so the stages templates stay a plain list of groups
+# with no per-group customization at the call site.
 parameters:
   - name: include_modified
     type: string
@@ -2587,6 +2580,9 @@ steps:
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token scheduled-test is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
+# Steps that a particular group needs around the uniform runner are spliced
+# in at the same time, so the stages templates stay a plain list of groups
+# with no per-group customization at the call site.
 parameters:
   - name: include_modified
     type: string
@@ -2636,6 +2632,12 @@ steps:
       ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
       ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
       ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+  - task: PublishCodeCoverageResults@2
+    condition: succeededOrFailed()
+    displayName: Publish coverage
+    inputs:
+      summaryFileLocation: target/coverage/cobertura-*.xml
+      failIfCoverageEmpty: false
 
 === .pipelines/anvil/steps/setup.yml ===
 # Copyright (c) Microsoft Corporation.

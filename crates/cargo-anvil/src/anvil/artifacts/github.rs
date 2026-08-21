@@ -55,10 +55,40 @@ const GROUP_ACTION_TEMPLATE: &str = include_str!("../../../templates/github/grou
 /// Placeholder token the per-group template uses for the group name.
 const GROUP_PLACEHOLDER: &str = "__GROUP__";
 
+/// Placeholder lines for steps a group needs around the uniform runner.
+const PRE_STEPS_PLACEHOLDER: &str = "__PRE_STEPS__\n";
+const POST_STEPS_PLACEHOLDER: &str = "__POST_STEPS__\n";
+
+/// Steps that run before the uniform group runner, per group.
+///
+/// These live in the group's own composite action rather than in the
+/// scheduled workflow, whose jobs stay a plain list of groups.
+const GROUP_PRE_STEPS: &[(&str, &str)] = &[(
+    "scheduled-benchmarks",
+    include_str!("../../../templates/github/bench-history-restore.yml"),
+)];
+
+/// Steps that run after the uniform group runner, per group.
+const GROUP_POST_STEPS: &[(&str, &str)] = &[(
+    "scheduled-benchmarks",
+    include_str!("../../../templates/github/bench-history-save.yml"),
+)];
+
+/// The extra steps registered for `group`, or the empty string.
+fn extra_steps(table: &'static [(&'static str, &'static str)], group: &str) -> &'static str {
+    table
+        .iter()
+        .find_map(|&(name, steps)| (name == group).then_some(steps))
+        .unwrap_or("")
+}
+
 /// Render the `action.yml` for one check group's composite action.
 #[must_use]
 fn render_group_action(group: &str) -> String {
-    GROUP_ACTION_TEMPLATE.replace(GROUP_PLACEHOLDER, group)
+    GROUP_ACTION_TEMPLATE
+        .replace(GROUP_PLACEHOLDER, group)
+        .replace(PRE_STEPS_PLACEHOLDER, extra_steps(GROUP_PRE_STEPS, group))
+        .replace(POST_STEPS_PLACEHOLDER, extra_steps(GROUP_POST_STEPS, group))
 }
 
 /// Repo-root-relative path for a per-group composite action.
@@ -301,35 +331,38 @@ mod tests {
 
     #[test]
     fn scheduled_benchmarks_job_round_trips_the_history_artifact() {
-        // Analysis walks the commit graph, so the leg needs full history;
-        // benchmark inputs can be LFS-tracked.
+        // The job is a plain checkout + group action like every other one;
+        // the round-trip lives in the group's composite action.
+        let group_action = render_group_action("scheduled-benchmarks");
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("fetch-depth: 0"));
         // Per-leg artifact names: the history is partitioned per machine,
         // and upload-artifact rejects a name reused within one run.
         assert_eq!(
-            SCHEDULED_IMPL_WORKFLOW.matches("bench-history-${{ matrix.os }}").count(),
+            group_action.matches("bench-history-${{ runner.os }}").count(),
             2,
             "the restore and save steps must agree on the per-leg artifact name"
         );
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("actions/upload-artifact@"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("gh run download"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("GITHUB_STEP_SUMMARY"));
+        assert!(group_action.contains("actions/upload-artifact@"));
+        assert!(group_action.contains("gh run download"));
+        assert!(group_action.contains("GITHUB_STEP_SUMMARY"));
+        // A group with no registered extras gets none of this.
+        assert!(!render_group_action("scheduled-exhaustive").contains("bench-history"));
         // The workflow is identified by its runtime name, not a literal
         // filename: the root workflow is owned and renameable, and a rename
         // must not silently reset the series.
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("WORKFLOW: ${{ github.workflow }}"));
+        assert!(group_action.contains("WORKFLOW: ${{ github.workflow }}"));
         assert!(
-            !SCHEDULED_IMPL_WORKFLOW.contains("--workflow anvil-scheduled.yml"),
+            !group_action.contains("--workflow anvil-scheduled.yml"),
             "a hardcoded workflow filename breaks on rename"
         );
         // Absence and operational failure must stay distinguishable, and the
         // upload is guarded on the restore having reached a known state --
         // otherwise one transient failure publishes an empty store over the
         // accumulated chain and reports clean.
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("select(.name == \\\"$ARTIFACT\\\" and .expired == false)"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("ANVIL_BENCH_RESTORE=restored"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("ANVIL_BENCH_RESTORE=cold-start"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("if: always() && env.ANVIL_BENCH_RESTORE != ''"));
+        assert!(group_action.contains("select(.name == \\\"$ARTIFACT\\\" and .expired == false)"));
+        assert!(group_action.contains("ANVIL_BENCH_RESTORE=restored"));
+        assert!(group_action.contains("ANVIL_BENCH_RESTORE=cold-start"));
+        assert!(group_action.contains("if: always() && env.ANVIL_BENCH_RESTORE != ''"));
         // The machine-key escape hatch has to be reachable in CI, which
         // workflow-level env is not across a called reusable workflow.
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("bench_machine_key:"));

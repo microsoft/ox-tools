@@ -460,6 +460,19 @@ keyword, which for parameters defined at the call site is the stages template
 itself — so the path is written relative to `pr.yml` / `scheduled.yml`, *not*
 relative to `steps/job.yml`.
 
+**Per-group steps.** Some groups need steps around the uniform runner — the
+benchmark group checks out at full depth and round-trips its history store,
+`scheduled-test` publishes coverage. Those are spliced into the group's own
+emitted step template at generation time, not written at the call site, so the
+stages templates stay a plain list of groups. Moving a check between groups, or
+giving a group extra steps, never edits `pr.yml` / `scheduled.yml`.
+
+The one thing that cannot move is a **job-level output**: `artifacts` is declared
+where the job is constructed, because a forked wrapper translates that list into
+its own output shape and a publish task inside the step list would bypass the
+translation. That declaration is therefore the only per-group content the stages
+templates carry.
+
 ### 4.2 Stages template shape
 
 Approximate shape (anvil writes this verbatim; users normally don't edit it):
@@ -842,22 +855,21 @@ own artifact (`bench-history-<leg>`).
 
 Each scheduled benchmark job:
 
-1. checks out with full history and LFS via an explicit `checkout` step at the head
-   of its own step list (analysis reads the commit graph; benchmark inputs may be
-   LFS-tracked);
-2. **restores** the history with `steps/bench-history-restore.yml`, which walks the
-   pipeline's own builds on the branch newest-first
+1. checks out with full history and LFS, and restores, applies blessings, runs
+   the analysis and attaches findings — all inside `steps/scheduled-benchmarks.yml`,
+   the group's own emitted step template (§4.1), so the stages template stays a
+   plain list of groups;
+2. the restore walks the pipeline's own builds on the branch newest-first
    (`_apis/build/builds?…&queryOrder=finishTimeDescending`) and, per build, queries
    the artifacts endpoint for this leg's artifact. A `404` means that build simply
    has no such artifact and the walk continues; any other status is an operational
    failure and fails the job. Finding none across the whole window is a genuine cold
    start;
-3. applies any pending blessings, runs collect + analyze, writing findings to a
-   findings file which a following step attaches to the build summary;
-4. **publishes** the updated store through the wrapper's `artifacts` parameter
-   (`{ name: bench-history-<leg>, path: <store>, condition: … }`), which the default
-   wrapper emits as `PublishPipelineArtifact@1` and 1ESPT wrappers as a
-   `pipelineArtifact` output.
+3. **publishes** the updated store through the wrapper's `artifacts` parameter
+   (`{ name: bench-history-$(Agent.OS), path: <store>, condition: … }`), which the
+   default wrapper emits as `PublishPipelineArtifact@1` and 1ESPT wrappers as a
+   `pipelineArtifact` output. The name is derived from the agent OS so both legs
+   share one declaration.
 
 `DownloadPipelineArtifact@2` is not used for the restore: `latestFromBranch` resolves
 a single build and does not walk, so a cancelled or never-publishing latest build

@@ -5,6 +5,9 @@
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 # The token __GROUP__ is substituted by cargo-anvil at emit time with
 # the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
+# Steps that a particular group needs around the uniform runner are spliced
+# in at the same time, so the stages templates stay a plain list of groups
+# with no per-group customization at the call site.
 parameters:
   - name: include_modified
     type: string
@@ -16,6 +19,7 @@ parameters:
     type: string
     default: ''
 steps:
+__PRE_STEPS__
   - template: setup.yml
     parameters:
       group: __GROUP__
@@ -54,3 +58,4 @@ steps:
       ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
       ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
       ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+__POST_STEPS__

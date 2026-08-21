@@ -1,0 +1,25 @@
+    - name: Save benchmark history
+      # always(): the run's own samples belong in the history even when the
+      # analysis flagged a regression and failed the job.
+      #
+      # Guarded on the restore having reached a known state: if the restore
+      # failed operationally the store is not a continuation of the chain,
+      # and publishing it would overwrite good history with a truncated
+      # snapshot.
+      if: always() && env.ANVIL_BENCH_RESTORE != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: bench-history-${{ runner.os }}
+        path: target/anvil/bench-history
+        # Comfortably longer than the scheduled cadence, so a paused or
+        # infrequent schedule does not break the chain.
+        retention-days: 90
+        if-no-files-found: ignore
+    - name: Publish benchmark findings
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -f target/anvil/bench/findings.md ]; then
+          cat target/anvil/bench/findings.md >> "$GITHUB_STEP_SUMMARY"
+        fi

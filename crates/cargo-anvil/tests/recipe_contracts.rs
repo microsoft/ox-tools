@@ -985,7 +985,7 @@ fn bench_history_bless_rejects_malformed_entries() {
 // transports.
 // ---------------------------------------------------------------------------
 
-const SCHEDULED_IMPL: &str = include_str!("../templates/github/scheduled-impl-workflow.yml");
+const GH_BENCH_RESTORE: &str = include_str!("../templates/github/bench-history-restore.yml");
 const ADO_RESTORE: &str = include_str!("../templates/ado/steps/bench-history-restore.yml");
 
 /// Extracts a block scalar (`run: |` / `pwsh: |`) from `yaml`, starting the
@@ -1051,7 +1051,7 @@ exit 0
 "#,
     );
 
-    let script = block_scalar(SCHEDULED_IMPL, "- name: Restore benchmark history", "run: |");
+    let script = block_scalar(GH_BENCH_RESTORE, "- name: Restore benchmark history", "run: |");
     write(&root.join("restore.sh"), &script);
 
     let github_env = root.join("env.txt");

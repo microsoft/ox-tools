@@ -70,10 +70,63 @@ const GROUP_STEP_TEMPLATE: &str = include_str!("../../../templates/ado/steps/gro
 /// Placeholder token the per-group template uses for the group name.
 const GROUP_PLACEHOLDER: &str = "__GROUP__";
 
+/// Placeholder lines for steps a group needs around the uniform runner.
+/// Substituted away entirely for groups that need none.
+const PRE_STEPS_PLACEHOLDER: &str = "__PRE_STEPS__\n";
+const POST_STEPS_PLACEHOLDER: &str = "__POST_STEPS__\n";
+
+/// Steps that run before the uniform group runner, per group.
+///
+/// These live in the group's own emitted step template rather than at the
+/// call site, so `pr.yml` / `scheduled.yml` stay a plain list of groups. A
+/// group absent from the table gets nothing.
+const GROUP_PRE_STEPS: &[(&str, &str)] = &[(
+    "scheduled-benchmarks",
+    // The analysis orders each series by first-parent commit topology and
+    // locates the merge-base, so it needs the whole commit graph. LFS
+    // matters because benchmark inputs can be LFS-tracked and would
+    // otherwise arrive as pointer files.
+    //
+    // The checkout is explicit rather than a wrapper parameter: job.yml is
+    // the file adopters fork, so binding a parameter their copy lacks would
+    // fail expansion for the whole pipeline.
+    "  - checkout: self\n\
+     \x20   fetchDepth: 0\n\
+     \x20   lfs: true\n\
+     \x20 - template: bench-history-restore.yml\n\
+     \x20   parameters:\n\
+     \x20     artifact: bench-history-$(Agent.OS)\n",
+)];
+
+/// Steps that run after the uniform group runner, per group.
+const GROUP_POST_STEPS: &[(&str, &str)] = &[
+    (
+        "scheduled-test",
+        "  - task: PublishCodeCoverageResults@2\n\
+         \x20   condition: succeededOrFailed()\n\
+         \x20   displayName: Publish coverage\n\
+         \x20   inputs:\n\
+         \x20     summaryFileLocation: target/coverage/cobertura-*.xml\n\
+         \x20     failIfCoverageEmpty: false\n",
+    ),
+    ("scheduled-benchmarks", "  - template: bench-history-summary.yml\n"),
+];
+
+/// The extra steps registered for `group`, or the empty string.
+fn extra_steps(table: &'static [(&'static str, &'static str)], group: &str) -> &'static str {
+    table
+        .iter()
+        .find_map(|&(name, steps)| (name == group).then_some(steps))
+        .unwrap_or("")
+}
+
 /// Render the step template for one group.
 #[must_use]
 fn render_group_step(group: &str) -> String {
-    GROUP_STEP_TEMPLATE.replace(GROUP_PLACEHOLDER, group)
+    GROUP_STEP_TEMPLATE
+        .replace(GROUP_PLACEHOLDER, group)
+        .replace(PRE_STEPS_PLACEHOLDER, extra_steps(GROUP_PRE_STEPS, group))
+        .replace(POST_STEPS_PLACEHOLDER, extra_steps(GROUP_POST_STEPS, group))
 }
 
 /// Repo-root-relative path for one group's step template.
@@ -384,7 +437,9 @@ mod tests {
         ] {
             assert!(SCHEDULED_STAGES.contains(needle), "scheduled stages missing '{needle}'");
         }
-        assert!(SCHEDULED_STAGES.contains("PublishCodeCoverageResults@2"));
+        // Coverage publication lives in the group's own step template now;
+        // the stages file is a plain list of groups.
+        assert!(render_group_step("scheduled-test").contains("PublishCodeCoverageResults@2"));
         assert!(SCHEDULED_STAGES.contains("- template: steps/job.yml"));
         assert!(
             !SCHEDULED_STAGES.contains("\n      - job: "),
@@ -394,35 +449,30 @@ mod tests {
 
     #[test]
     fn scheduled_benchmarks_stage_round_trips_the_history_artifact() {
-        // The checkout leads the group's own step list rather than going
-        // through a wrapper parameter: job.yml is the file adopters fork,
-        // so binding a parameter their copy lacks would fail expansion for
-        // the whole pipeline.
+        // The stage is a plain list of groups; the round-trip lives in the
+        // group's own step template.
+        let group_step = render_group_step("scheduled-benchmarks");
         assert!(
             !JOB_WRAPPER.contains("fetchDepth"),
-            "the job wrapper contract must stay frozen; put checkout in the group's step list"
+            "the job wrapper contract must stay frozen; put checkout in the group's step template"
         );
-        assert_eq!(
-            SCHEDULED_STAGES.matches("- checkout: self").count(),
-            2,
-            "both benchmark legs check out explicitly"
-        );
-        assert_eq!(SCHEDULED_STAGES.matches("fetchDepth: 0").count(), 2);
+        assert!(group_step.contains("- checkout: self"));
+        assert!(group_step.contains("fetchDepth: 0"));
         // Benchmark inputs can be LFS-tracked.
-        assert_eq!(SCHEDULED_STAGES.matches("lfs: true").count(), 2);
-        // Per-leg artifact names: the history is partitioned per machine.
-        for needle in ["bench-history-linux", "bench-history-windows"] {
-            assert_eq!(
-                SCHEDULED_STAGES.matches(needle).count(),
-                2,
-                "the restore and publish sides must agree on the artifact name '{needle}'"
-            );
-        }
-        assert!(SCHEDULED_STAGES.contains("template: steps/bench-history-restore.yml"));
-        assert!(SCHEDULED_STAGES.contains("template: steps/bench-history-summary.yml"));
-        // The publish goes through the wrapper's `artifacts` contract rather
-        // than emitting its own task, so a forked wrapper still performs the
-        // translation it exists for. The guard rides along as a `condition`.
+        assert!(group_step.contains("lfs: true"));
+        assert!(group_step.contains("template: bench-history-restore.yml"));
+        assert!(group_step.contains("template: bench-history-summary.yml"));
+        // A group with no registered extras gets none of this.
+        assert!(!render_group_step("scheduled-exhaustive").contains("bench-history"));
+        assert!(!render_group_step("scheduled-exhaustive").contains("checkout: self"));
+        // Coverage publication likewise moved off the call site.
+        assert!(render_group_step("scheduled-test").contains("PublishCodeCoverageResults@2"));
+        assert!(
+            !SCHEDULED_STAGES.contains("PublishCodeCoverageResults@2"),
+            "the stages template must not carry per-group steps"
+        );
+        // The publish stays a job-level output so a forked (1ESPT) wrapper
+        // still translates it; the guard rides along as a `condition`.
         assert_eq!(
             SCHEDULED_STAGES
                 .matches("condition: and(succeededOrFailed(), ne(variables['ANVIL_BENCH_RESTORE'], ''))")
