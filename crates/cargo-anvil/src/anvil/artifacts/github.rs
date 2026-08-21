@@ -280,6 +280,15 @@ mod tests {
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("github.rest.issues.create"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("\npermissions:\n  contents: read\n"));
         assert_eq!(SCHEDULED_IMPL_WORKFLOW.matches("issues: write").count(), 1);
+        let publisher_permissions = SCHEDULED_IMPL_WORKFLOW
+            .split_once("\n  publish-failure:")
+            .expect("scheduled workflow should contain publish-failure")
+            .1
+            .split_once("\n    steps:")
+            .expect("publish-failure should contain steps")
+            .0;
+        assert!(publisher_permissions.contains("\n    permissions:\n      issues: write"));
+        assert!(!publisher_permissions.contains("contents: read"));
         assert_eq!(
             SCHEDULED_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
             1,
@@ -301,6 +310,9 @@ mod tests {
         let harness = format!("const workflowScript = {script:?};\n")
             + r#"
 const assert = require("node:assert/strict");
+// github-script executes an asynchronous body with injected runtime values.
+// Model only the github/context/process values this script uses; the API client
+// remains mocked rather than recreating the complete action runtime or Node image.
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const run = new AsyncFunction("github", "context", "process", workflowScript);
 const marker = "<!-- anvil scheduled failure -->";

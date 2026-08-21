@@ -393,56 +393,24 @@ contract.
 
 The scheduled reusable workflow is simpler — it omits the `impact` job and runs each group
 full-workspace. The include inputs default to empty strings, so recipes fall through to
-their local-default behavior (`--workspace`):
+their local-default behavior (`--workspace`). The following is deliberately a
+non-executable schematic; the generated
+[`scheduled-impl-workflow.yml`](../../templates/github/scheduled-impl-workflow.yml)
+is the canonical YAML:
 
-```yaml
-# .github/workflows/anvil-scheduled-impl.yml  (owned)
-on:
-  workflow_call:
-    inputs:
-      linux_runner:       { type: string, default: ubuntu-latest }
-      windows_runner:     { type: string, default: windows-latest }
-      linux_arm_runner:   { type: string, default: ubuntu-24.04-arm }
-      windows_arm_runner: { type: string, default: windows-11-arm }
-jobs:
-  scheduled-test:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [linux, windows, linux-arm, windows-arm]
-    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
-      || matrix.os == 'windows' && inputs.windows_runner
-      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
-      || inputs.windows_arm_runner }}
-    steps: [ { uses: actions/checkout }, { uses: ./.github/actions/anvil-scheduled-test } ]
-  scheduled-advisories:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [linux, windows, linux-arm, windows-arm]
-    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
-      || matrix.os == 'windows' && inputs.windows_runner
-      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
-      || inputs.windows_arm_runner }}
-    steps: [ { uses: actions/checkout }, { uses: ./.github/actions/anvil-scheduled-advisories } ]
-  scheduled-exhaustive:
-    # x86_64 only -- cargo-mutants constraint.
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [linux, windows]
-    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}
-    steps: [ { uses: actions/checkout }, { uses: ./.github/actions/anvil-scheduled-exhaustive } ]
-
-  publish-failure:
-    needs: [scheduled-test, scheduled-advisories, scheduled-runtime-analysis, scheduled-exhaustive]
-    if: ${{ always() && vars.ANVIL_PUBLISH_FAILURE_ISSUE != 'false'
-      && contains(needs.*.result, 'failure') }}
-    runs-on: ${{ inputs.linux_runner }}
-    permissions: { contents: read, issues: write }
-    steps:
-      - uses: actions/github-script
-        # Upsert the stable "[Anvil] Scheduled checks failed" issue.
+```text
+caller anvil-scheduled.yml
+  permissions upper bound: contents:read + issues:write
+  └─ called anvil-scheduled-impl.yml
+       default reset: contents:read
+       ├─ scheduled-test             (Linux/Windows × x64/ARM64)
+       ├─ scheduled-advisories       (Linux/Windows × x64/ARM64)
+       ├─ scheduled-runtime-analysis (Linux/Windows × x64/ARM64)
+       ├─ scheduled-exhaustive       (Linux/Windows x64)
+       └─ publish-failure
+            needs: all four scheduled groups
+            condition: at least one failure and publication not disabled
+            job override: issues:write only
 ```
 
 Scheduled composite actions don't receive any `include_*` inputs at all — their inputs
@@ -670,7 +638,8 @@ Recommended root workflow shape:
 - The scheduled reusable-workflow call grants `issues: write` at job scope so its
   publisher can create or comment on the failure issue. The called workflow resets its
   default permissions to `contents: read`, then restores `issues: write` only on the
-  publishing job; scheduled check jobs do not inherit write access. The PR workflow
+  publishing job. That job-level map omits `contents`, so the publisher cannot read
+  repository contents; scheduled check jobs retain read-only access. The PR workflow
   never receives this permission.
 - The PR reusable-workflow call grants `pull-requests: write` for advisory comments.
   The called workflow resets its default permissions to `contents: read`, then restores
@@ -731,32 +700,43 @@ least one result is `failure`; successful, skipped, and cancelled runs do not cr
 issues.
 
 The issue title is `[Anvil] Scheduled checks failed`, while the stable hidden marker
-`<!-- anvil scheduled failure -->` identifies an issue owned by the publisher. The
-publisher makes one repository-scoped Search API request for open issues whose bodies
-match the marker terms, then verifies the exact marker client-side:
+`<!-- anvil scheduled failure -->` identifies the repository's shared scheduled-failure
+incident. Anvil and any legacy scheduled publisher that adopts this identity converge on
+the same open issue. Each publisher makes one repository-scoped Search API request for
+open issues whose bodies match the marker terms, then verifies the exact marker
+client-side:
 
 - If none exists, it creates one containing the failed group names and a link to the
   workflow run.
 - If one exists, it adds the new failure details as a comment instead of creating a
   duplicate.
 
-This is a best-effort upsert: GitHub's search index is eventually consistent and the
-single request considers at most 100 results, so closely overlapping failures can
-occasionally create duplicate incident issues. Marker-based identity prevents a
-human-authored issue with the same title from being reused and survives a maintainer
-renaming an Anvil incident.
+This is a bounded best-effort upsert, not a singleton guarantee. One Search request is
+the selected boundary because a scheduled failure should spend a fixed, minimal amount
+of API quota instead of paginating through repository issues; the marker is expected to
+match at most one open incident. GitHub's search index is eventually consistent and the
+request considers at most 100 results, so closely overlapping failures can occasionally
+create duplicate incident issues. Marker-based identity prevents a human-authored issue
+with the same title from being reused and survives a maintainer renaming an incident.
 
 No label is required because repositories can remove or rename their default labels.
-The issue remains open until a maintainer resolves the underlying failure and closes it.
-If a later run fails after closure, the publisher creates a new incident issue.
+Here, "open incident" means an open marker-owned issue, not an automatically tracked
+failure state. Successful runs do not close or update it. The issue remains open until a
+maintainer resolves the underlying failure and closes it; a later failure after closure
+creates a new incident issue.
+
+This repository's legacy nightly mutation workflow intentionally uses the same title and
+marker. Its mutation configuration remains distinct from Anvil's exhaustive group, but
+an overlapping failure updates the same durable incident instead of creating a second
+notification owner and a duplicate Teams post.
 
 The publisher uses the workflow's short-lived `GITHUB_TOKEN`. The scheduled root call
 allows `issues: write`, while the reusable workflow defaults to `contents: read` and
 grants `issues: write` only to the publishing job. Scheduled check jobs therefore retain
-read-only access. The publisher does not receive repository contents beyond read access
-and does not forward logs or environment data into the issue. This narrow GitHub-native
-path also lets GitHub's Teams app relay issue notifications without an external webhook
-or additional secret.
+read-only access. The publisher's job-level permission map omits `contents`, so it cannot
+read repository contents, and it does not forward logs or environment data into the
+issue. This narrow GitHub-native path also lets GitHub's Teams app relay issue
+notifications without an external webhook or additional secret.
 
 The generated root and implementation workflows must be updated together. A repository
 that has taken ownership of the root workflow must retain `issues: write` on the reusable

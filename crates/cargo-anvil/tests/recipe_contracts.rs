@@ -113,6 +113,8 @@ fn tools_available() -> bool {
 fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
     let tmp = TempDir::new().unwrap();
     let mut justfile = String::from("set unstable\n\n");
+    // Focused fixtures need this shared variable, but the real version catalog
+    // already defines it and Just rejects duplicate definitions.
     if !imports.iter().any(|(name, _)| *name == "versions.just") {
         justfile.push_str("rust_nightly := \"nightly-test\"\n\n");
     }

@@ -97,11 +97,11 @@
 //! `just anvil-pr` runs every check over the whole workspace.
 //!
 //! The generated GitHub scheduled workflow publishes failures as GitHub
-//! issues. It creates one issue for an active failure and comments on that
-//! issue when later scheduled runs also fail, providing a durable incident
-//! record without creating one issue per run. Repositories can disable this
-//! behavior by setting the `ANVIL_PUBLISH_FAILURE_ISSUE` Actions repository
-//! variable to `false`.
+//! issues. On failure, it best-effort reuses an open marker-owned issue and
+//! comments when later scheduled runs also fail. A maintainer closes the issue
+//! after resolving the incident; successful runs do not close it automatically.
+//! Repositories can disable this behavior by setting the
+//! `ANVIL_PUBLISH_FAILURE_ISSUE` Actions repository variable to `false`.
 //!
 //! ## Containerized local checks
 //!

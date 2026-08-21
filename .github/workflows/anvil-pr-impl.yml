@@ -31,6 +31,9 @@ on:
           configured at Codecov; required for private repos.
         required: false
 
+# The caller grants the maximum token scopes available to this reusable
+# workflow. Reset jobs to read-only here, then restore only pr-fast's pull
+# request scope below. See docs/design/github.md §9.
 permissions:
   contents: read
 

@@ -16,6 +16,9 @@ permissions:
 jobs:
   anvil-scheduled:
     uses: ./.github/workflows/anvil-scheduled-impl.yml
+    # A called workflow cannot elevate beyond its caller. The implementation
+    # resets this upper bound to read-only and restores issues:write only on
+    # publish-failure. See docs/design/github.md §9.
     permissions:
       contents: read
       issues: write

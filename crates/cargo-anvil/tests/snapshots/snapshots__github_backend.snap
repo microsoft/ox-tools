@@ -2043,6 +2043,9 @@ on:
           configured at Codecov; required for private repos.
         required: false
 
+# The caller grants the maximum token scopes available to this reusable
+# workflow. Reset jobs to read-only here, then restore only pr-fast's pull
+# request scope below. See docs/design/github.md §9.
 permissions:
   contents: read
 
@@ -2275,6 +2278,9 @@ concurrency:
 jobs:
   anvil-pr:
     uses: ./.github/workflows/anvil-pr-impl.yml
+    # A called workflow cannot elevate beyond its caller. The implementation
+    # resets this upper bound to read-only and restores pull-requests:write
+    # only on pr-fast. See docs/design/github.md §9.
     permissions:
       contents: read
       # Write needed so the pr-fast job can upsert/clear the sticky PR
@@ -2317,6 +2323,9 @@ on:
           configured at Codecov; required for private repos.
         required: false
 
+# The caller grants the maximum token scopes available to this reusable
+# workflow. Reset jobs to read-only here, then restore only the publisher's
+# issues scope below. See docs/design/github.md §9.
 permissions:
   contents: read
 
@@ -2423,7 +2432,6 @@ jobs:
       && contains(needs.*.result, 'failure') }}
     runs-on: ${{ inputs.linux_runner }}
     permissions:
-      contents: read
       issues: write
     steps:
       - name: Create or update failure issue
@@ -2500,6 +2508,9 @@ permissions:
 jobs:
   anvil-scheduled:
     uses: ./.github/workflows/anvil-scheduled-impl.yml
+    # A called workflow cannot elevate beyond its caller. The implementation
+    # resets this upper bound to read-only and restores issues:write only on
+    # publish-failure. See docs/design/github.md §9.
     permissions:
       contents: read
       issues: write

@@ -279,11 +279,13 @@ The `installer` argument:
   Slow on a cold runner (~30 min for the full catalog) because every tool
   re-compiles common deps (`clap`, `syn`, `quote`, ...) from scratch independently.
 - `binstall` -- `cargo binstall --no-confirm --locked <tool> --version '=<pin>'`.
-  Downloads a prebuilt binary from each tool's GitHub Releases when available.
-  When a tool declares a source prerequisite, Anvil disables binstall's compile
-  strategy and performs the source fallback itself after checking that prerequisite.
-  Tools without a source prerequisite retain binstall's normal compile strategy.
-  The binary path cuts the cold-runner install phase from ~30 min to ~1 min.
+  This selects an ordered strategy, not a binary-only backend. Anvil first asks
+  cargo-binstall to install the exact pin. Tools without a source prerequisite retain
+  cargo-binstall's compile strategy. For tools that declare a source prerequisite,
+  Anvil disables that compile strategy so compilation cannot bypass the check. Any
+  nonzero binstall result then falls back to Anvil's exact-pin `cargo install`; the
+  declared prerequisite, when present, runs immediately before that fallback.
+  A successful binary path cuts the cold-runner install phase from ~30 min to ~1 min.
   `cargo-binstall` itself needs to be on PATH; the GH setup composite arranges this.
 
 The GitHub composite setup action calls `just anvil-<group>-setup binstall`
@@ -326,8 +328,9 @@ channel, and `versions.just`. See
 
 A small set of catalog tools have non-Rust build dependencies that `cargo install`
 can't satisfy on its own. Today the only entry is `libclang`, needed by
-`cargo-spellcheck` (via `clang-sys` / `hunspell-rs`) at build time. The `binstall`
-install path sidesteps these entirely by downloading prebuilt binaries.
+`cargo-spellcheck` (via `clang-sys` / `hunspell-rs`) at build time. A successful
+prebuilt binstall sidesteps these; a failed binstall can reach the controlled source
+fallback and therefore still requires them.
 
 Scope policy: only check for system libs that an anvil catalog tool **directly**
 requires. anvil is not a general-purpose dev-env doctor. Repository-specific

@@ -19,6 +19,9 @@ concurrency:
 jobs:
   anvil-pr:
     uses: ./.github/workflows/anvil-pr-impl.yml
+    # A called workflow cannot elevate beyond its caller. The implementation
+    # resets this upper bound to read-only and restores pull-requests:write
+    # only on pr-fast. See docs/design/github.md §9.
     permissions:
       contents: read
       # Write needed so the pr-fast job can upsert/clear the sticky PR
