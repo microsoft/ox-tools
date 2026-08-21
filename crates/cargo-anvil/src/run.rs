@@ -952,6 +952,7 @@ mod tests {
             ".github/actions/anvil-setup/action.yml",
             ".github/actions/anvil-setup/just-problem-matcher.json",
             ".github/actions/anvil-run-group/action.yml",
+            ".github/actions/anvil-run-group/run-group.sh",
             ".github/actions/anvil-report-status/action.yml",
             ".github/actions/anvil-impact/action.yml",
             ".github/workflows/anvil-pr-impl.yml",

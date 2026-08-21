@@ -42,8 +42,9 @@ const SCHEDULED_ROOT_PIPELINE: &str = include_str!("../../../templates/ado/sched
 
 /// All check groups that get a per-group step template.
 ///
-/// See `github::GROUPS` for the rationale around splitting `pr-slow` into
-/// three cloud-workflow-visible sub-stages.
+/// The former `pr-slow` group is split into test, runtime-analysis, and
+/// mutation-testing stages so cloud workflow UIs identify the expensive
+/// category that failed while keeping Just as the source of recipe membership.
 #[cfg(test)]
 const GROUPS: &[&str] = &[
     "pr-fast",

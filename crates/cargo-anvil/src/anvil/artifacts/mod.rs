@@ -102,6 +102,7 @@ mod tests {
             github::setup_action(),
             github::just_problem_matcher(),
             github::run_group_action(),
+            github::run_group_script(),
             github::report_status_action(),
             github::impact_action(),
             github::pr_impl_workflow(),

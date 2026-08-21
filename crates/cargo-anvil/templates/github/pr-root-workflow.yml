@@ -35,7 +35,9 @@ jobs:
     secrets: inherit
 
   merge-validation:
-    name: Merge Group Job
+    # Keep the called-job check contexts identical to pull-request runs so one
+    # branch-protection configuration works for PRs and the merge queue.
+    name: PR Job
     if: github.event_name == 'merge_group'
     uses: ./.github/workflows/anvil-pr-impl.yml
     permissions:

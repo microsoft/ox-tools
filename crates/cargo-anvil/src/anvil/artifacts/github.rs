@@ -20,7 +20,10 @@ const JUST_PROBLEM_MATCHER: &str = include_str!("../../../templates/github/just-
 /// Shared composite action that runs any Anvil group.
 const RUN_GROUP_ACTION: &str = include_str!("../../../templates/github/run-group-action.yml");
 
-/// Shared composite action that publishes a stable commit status.
+/// Bash implementation used by the shared group action.
+const RUN_GROUP_SCRIPT: &str = include_str!("../../../templates/github/run-group.sh");
+
+/// Shared composite action that publishes dynamic failure commit statuses.
 const REPORT_STATUS_ACTION: &str = include_str!("../../../templates/github/report-status-action.yml");
 
 /// Embedded body of the cargo-delta impact composite action.
@@ -58,6 +61,12 @@ pub fn just_problem_matcher() -> Artifact {
 #[must_use]
 pub fn run_group_action() -> Artifact {
     Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-run-group/action.yml", RUN_GROUP_ACTION)
+}
+
+/// `.github/actions/anvil-run-group/run-group.sh`.
+#[must_use]
+pub fn run_group_script() -> Artifact {
+    Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-run-group/run-group.sh", RUN_GROUP_SCRIPT)
 }
 
 /// `.github/actions/anvil-report-status/action.yml`.
@@ -111,6 +120,7 @@ pub(crate) fn all() -> Vec<Artifact> {
         setup_action(),
         just_problem_matcher(),
         run_group_action(),
+        run_group_script(),
         report_status_action(),
         impact_action(),
         pr_impl_workflow(),
@@ -123,13 +133,25 @@ pub(crate) fn all() -> Vec<Artifact> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::fs;
+    use std::process::Command;
+
     use super::*;
+
+    const PR_GROUPS: &[&str] = &["pr-fast", "pr-test", "pr-runtime-analysis", "pr-mutants"];
+    const SCHEDULED_GROUPS: &[&str] = &[
+        "scheduled-test",
+        "scheduled-advisories",
+        "scheduled-runtime-analysis",
+        "scheduled-exhaustive",
+    ];
 
     #[test]
     fn shared_action_templates_are_non_empty() {
         assert!(SETUP_ACTION.contains("name: anvil-setup"));
         assert!(JUST_PROBLEM_MATCHER.contains("\"owner\": \"anvil-just\""));
         assert!(RUN_GROUP_ACTION.contains("name: anvil-run-group"));
+        assert!(RUN_GROUP_SCRIPT.contains("status=${PIPESTATUS[0]}"));
         assert!(REPORT_STATUS_ACTION.contains("name: anvil-report-status"));
         assert!(IMPACT_ACTION.contains("name: anvil-impact"));
         assert!(IMPACT_ACTION.contains("cargo-delta"));
@@ -165,12 +187,86 @@ mod tests {
         assert!(RUN_GROUP_ACTION.contains("uses: ./.github/actions/anvil-setup"));
         assert!(RUN_GROUP_ACTION.contains("group: ${{ inputs.group }}"));
         assert!(RUN_GROUP_ACTION.contains("free-disk-space: ${{ inputs.free-disk-space }}"));
-        assert!(RUN_GROUP_ACTION.contains("status=${PIPESTATUS[0]}"));
+        assert!(RUN_GROUP_ACTION.contains("bash \"$GITHUB_ACTION_PATH/run-group.sh\""));
         assert!(RUN_GROUP_ACTION.contains("Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"));
         assert!(RUN_GROUP_ACTION.contains("uses: ./.github/actions/anvil-report-status"));
         assert!(RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_MODIFIED"));
         assert!(RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_AFFECTED"));
         assert!(RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_REQUIRED"));
+    }
+
+    fn run_group_script(fake_output: &str, fake_status: i32) -> (std::process::ExitStatus, String) {
+        let temp = tempfile::tempdir().expect("the test must be able to create a temporary action workspace");
+        let output_path = temp.path().join("github-output");
+        let harness = r#"
+just() {
+  if [[ -n "$FAKE_JUST_OUTPUT" ]]; then
+    printf '%s\n' "$FAKE_JUST_OUTPUT"
+  fi
+  return "$FAKE_JUST_STATUS"
+}
+export -f just
+"#;
+        let script = RUN_GROUP_SCRIPT.replace("\r\n", "\n");
+        let program = format!("{harness}\n{script}");
+        #[cfg(windows)]
+        let bash = std::path::PathBuf::from(
+            std::env::var_os("ProgramFiles").expect("Git for Windows must be installed under Program Files on Windows test runners"),
+        )
+        .join("Git")
+        .join("bin")
+        .join("bash.exe");
+        #[cfg(not(windows))]
+        let bash = std::path::PathBuf::from("bash");
+        let status = Command::new(bash)
+            .args(["-c", &program])
+            .current_dir(temp.path())
+            .env("ANVIL_GROUP", "pr-fast")
+            .env("FAKE_JUST_OUTPUT", fake_output)
+            .env("FAKE_JUST_STATUS", fake_status.to_string())
+            .env("GITHUB_OUTPUT", "github-output")
+            .env("RUNNER_TEMP", ".")
+            .status()
+            .expect("bash must be available because generated GitHub group actions require it");
+        let outputs = fs::read_to_string(output_path).expect("the group script must write GitHub step outputs");
+        (status, outputs)
+    }
+
+    #[test]
+    fn run_group_script_exports_success() {
+        let (status, outputs) = run_group_script("all checks passed", 0);
+
+        assert!(
+            status.success(),
+            "the capture script must defer group failure to the named action step"
+        );
+        assert!(outputs.contains("failed_recipe=anvil-pr-fast"));
+        assert!(outputs.contains("exit_code=0"));
+    }
+
+    #[test]
+    fn run_group_script_exports_terminal_recipe_failure() {
+        let diagnostic = "error: recipe `anvil-license-headers` failed with exit code 17";
+        let (status, outputs) = run_group_script(diagnostic, 17);
+
+        assert!(
+            status.success(),
+            "the capture script must defer group failure to the named action step"
+        );
+        assert!(outputs.contains("failed_recipe=anvil-license-headers"));
+        assert!(outputs.contains("exit_code=17"));
+    }
+
+    #[test]
+    fn run_group_script_falls_back_to_group_without_terminal_diagnostic() {
+        let (status, outputs) = run_group_script("unexpected tool failure", 9);
+
+        assert!(
+            status.success(),
+            "the capture script must defer group failure to the named action step"
+        );
+        assert!(outputs.contains("failed_recipe=anvil-pr-fast"));
+        assert!(outputs.contains("exit_code=9"));
     }
 
     #[test]
@@ -235,9 +331,15 @@ mod tests {
             assert!(PR_IMPL_WORKFLOW.contains(name), "PR impl workflow missing display name '{name}'");
         }
         assert!(PR_IMPL_WORKFLOW.contains("publish_job_statuses:"));
+        for group in PR_GROUPS {
+            assert!(
+                PR_IMPL_WORKFLOW.contains(&format!("group: {group}")),
+                "PR impl workflow missing group '{group}'"
+            );
+        }
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("uses: ./.github/actions/anvil-run-group").count(),
-            4,
+            PR_GROUPS.len(),
             "every PR group job must use the shared group action"
         );
         assert_eq!(
@@ -263,21 +365,21 @@ mod tests {
 
     #[test]
     fn scheduled_impl_workflow_has_expected_jobs() {
-        for needle in [
-            "scheduled-test:",
-            "scheduled-advisories:",
-            "scheduled-runtime-analysis:",
-            "scheduled-exhaustive:",
-        ] {
+        for group in SCHEDULED_GROUPS {
+            let needle = format!("{group}:");
             assert!(
-                SCHEDULED_IMPL_WORKFLOW.contains(needle),
+                SCHEDULED_IMPL_WORKFLOW.contains(&needle),
                 "scheduled impl workflow missing job '{needle}'"
+            );
+            assert!(
+                SCHEDULED_IMPL_WORKFLOW.contains(&format!("group: {group}")),
+                "scheduled impl workflow missing group '{group}'"
             );
         }
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("codecov/codecov-action"));
         assert_eq!(
             SCHEDULED_IMPL_WORKFLOW.matches("uses: ./.github/actions/anvil-run-group").count(),
-            4,
+            SCHEDULED_GROUPS.len(),
             "every scheduled group job must use the shared group action"
         );
         assert_eq!(
@@ -298,6 +400,11 @@ mod tests {
         assert!(PR_ROOT_WORKFLOW.contains("\n  validation:\n"));
         assert!(PR_ROOT_WORKFLOW.contains("name: PR Job"));
         assert!(PR_ROOT_WORKFLOW.contains("\n  merge-validation:\n"));
+        assert_eq!(
+            PR_ROOT_WORKFLOW.matches("name: PR Job").count(),
+            2,
+            "pull-request and merge-group callers must emit identical required-check contexts"
+        );
         assert!(PR_ROOT_WORKFLOW.contains("if: github.event_name == 'pull_request'"));
         assert!(PR_ROOT_WORKFLOW.contains("if: github.event_name == 'merge_group'"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("uses: ./.github/workflows/anvil-scheduled-impl.yml"));

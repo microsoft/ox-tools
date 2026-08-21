@@ -168,7 +168,8 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 │   ├── anvil-setup/action.yml         owned   (install just + group-scoped catalog tools)
 │   ├── anvil-setup/just-problem-matcher.json
 │   │                                  owned   (annotate failing Just recipes)
-│   ├── anvil-run-group/action.yml      owned   (run any Just group and capture its result)
+│   ├── anvil-run-group/action.yml      owned   (orchestrate any Just group)
+│   ├── anvil-run-group/run-group.sh    owned   (capture the group result)
 │   ├── anvil-report-status/action.yml  owned   (publish per-job commit statuses)
 │   ├── anvil-impact/action.yml        owned   (cargo-delta impact computation)
 └── workflows/
@@ -209,7 +210,7 @@ jobs:
       publish_job_statuses: true
     secrets: inherit
   merge-validation:
-    name: Merge Group Job
+    name: PR Job
     if: github.event_name == 'merge_group'
     uses: ./.github/workflows/anvil-pr-impl.yml
     permissions:
@@ -220,11 +221,11 @@ jobs:
 The two conditional callers keep the workflow name and reusable implementation
 the same across events while granting write permissions only to pull-request
 runs. Their internal IDs remain `validation` and `merge-validation`, while
-their display names are `PR Job` and `Merge Group Job`. Together with the
-workflow display name, GitHub renders a user-facing `Anvil / PR Job / ...`
-hierarchy without exposing implementation IDs. Merge-group execution does not
-publish the supplemental status and never receives `statuses: write` or
-`pull-requests: write`.
+both display names are `PR Job`. Together with the workflow display name,
+GitHub renders the same user-facing `Anvil / PR Job / ...` required-check
+hierarchy for pull-request and merge-group commits without exposing
+implementation IDs. Merge-group execution does not publish the supplemental
+status and never receives `statuses: write` or `pull-requests: write`.
 
 The scheduled root workflow adds a schedule and `workflow_dispatch`:
 
@@ -532,15 +533,7 @@ runs:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
         ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
         ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-      run: |
-        log="$RUNNER_TEMP/anvil-$ANVIL_GROUP.log"
-        set +e
-        just "anvil-$ANVIL_GROUP" 2>&1 | tee "$log"
-        status=${PIPESTATUS[0]}
-        set -e
-        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
-        echo "failed_recipe=${failed_recipe:-anvil-$ANVIL_GROUP}" >> "$GITHUB_OUTPUT"
-        echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+      run: bash "$GITHUB_ACTION_PATH/run-group.sh"
     - name: Publish Anvil job status
       if: always() && inputs.publish_job_statuses == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
       continue-on-error: true
@@ -570,8 +563,10 @@ Input set on the shared group action:
 Generated workflows pass constant catalog group names. Both `anvil-run-group`
 and `anvil-setup` carry the value through an `ANVIL_GROUP` environment
 variable and quote the composed recipe name; they do not interpolate an action
-input directly into shell source. The shared action rejects group names outside
-`[a-z0-9-]+` before invoking Just.
+input directly into shell source. The nested `anvil-setup` action rejects group
+names outside `[a-z0-9-]+`; `anvil-run-group` invokes Just only when that setup
+step succeeds, so validation necessarily precedes use of the value in the log
+path and recipe name.
 
 The reusable workflow sets `PR_TITLE` on the `pr-fast` group step and
 `BASE_REF` on the `pr-mutants` group step. They are environment variables rather
@@ -615,7 +610,11 @@ bodies that Just dispatches continue to use their declared
 Just's exit code rather than `tee`'s. After Just exits, a narrow `sed`
 expression extracts the last standard Just failed-recipe line and writes both
 `failed_recipe` and `exit_code` as step outputs. If no such line is present,
-`failed_recipe` falls back to the group recipe, such as `anvil-pr-fast`.
+`failed_recipe` falls back to the group recipe, such as `anvil-pr-fast`. This
+logic lives in the generated
+`.github/actions/anvil-run-group/run-group.sh`; the composite action invokes
+that file, and Cargo Anvil's functional tests execute the same embedded script
+against fake success, parsed-failure, and no-diagnostic-failure results.
 
 The run step does not fail immediately because the reporter still needs its
 outputs. A final step guarded by `always()` exits with status 1 whenever the
@@ -675,6 +674,19 @@ required check; supplemental statuses are presentation only. Each new commit
 has its own status set, so discovery and supersession matter only for reruns of
 the same commit.
 
+Dynamic contexts are permanent repository metadata: every distinct
+`Anvil / <recipe> (<runner>)` context that is published can continue to appear
+in GitHub's required-check picker even after it has been superseded. Repositories
+must not configure these supplemental contexts as required checks. The bounded
+native `Anvil / PR Job / Check Group: ...` jobs are the only branch-protection
+surface. Status cleanup is a best-effort, non-atomic read-then-write operation;
+concurrent reruns can temporarily race, but their native jobs remain
+authoritative. Group ownership is carried in the target-URL fragment, while the
+visible context is intentionally check-centric. If two groups fail the same
+recipe on the same runner, they share the visible context; newest-status
+deduplication prevents an older group-specific history entry from overriding a
+newer value.
+
 The reporter runs under `always()` and receives the setup outcome as well as
 the Just outputs. A setup failure can therefore publish an `error` description
 even though the group recipe never ran. Cancellation may prevent final steps
@@ -689,10 +701,22 @@ read-only, so forks retain the annotation and dynamically named step but skip
 the status call.
 
 Merge-group runs use a separate conditional caller with only `contents: read`.
-They retain the normal Anvil jobs, annotations, and dynamically named steps but
-do not publish supplemental statuses. This avoids exposing a write-capable
-token while executing a synthetic merge that may contain fork-originated code,
-and avoids redundant statuses on ephemeral merge-group commits.
+Both conditional callers have the display name `PR Job`, so their called jobs
+produce identical required-check contexts on pull-request and merge-group
+commits even though their internal IDs and permissions differ. Merge-group runs
+retain the normal Anvil jobs, annotations, and dynamically named steps but do
+not publish supplemental statuses. This avoids exposing a write-capable token
+while executing a synthetic merge that may contain fork-originated code, and
+avoids redundant statuses on ephemeral merge-group commits.
+
+Adopting this workflow naming changes existing required-check contexts from
+`anvil-pr / anvil-pr / <job>` to
+`Anvil / PR Job / Check Group: <display name> (<platform>)`. Repository
+maintainers must update branch-protection rules or rulesets in coordination
+with regeneration. The pull-request and merge-queue runs intentionally emit
+the same new contexts, so one required-check configuration applies to both
+event types. Supplemental `Anvil / <recipe> (<runner>)` statuses must not be
+selected.
 
 Commit statuses are intentionally preferred over custom Check Runs for this
 contract. GitHub Actions has no native workflow field for the inline status
@@ -700,8 +724,8 @@ description, so one REST call is still required. Check Runs provide richer
 Markdown and annotations that this feature does not need, require more
 lifecycle logic for dynamic names, and—when created with `GITHUB_TOKEN`—can be
 placed in an unrelated GitHub Actions check suite such as Advanced CodeQL.
-Commit statuses provide the required stable name, inline description, result,
-and log link without check-suite attribution.
+Commit statuses provide the required prominent name, inline description,
+result, and log link without check-suite attribution.
 
 ### `anvil-setup`
 
@@ -929,7 +953,8 @@ Conditions explained:
   `pull-requests: write` to fork-PR workflow runs by default, so the action would 403.
 
 Permissions: the reusable workflow's caller (`anvil-pr.yml`) declares
-`pull-requests: write` on the `anvil-pr` job that calls `anvil-pr-impl.yml`. The
+`pull-requests: write` on the `validation` job that calls
+`anvil-pr-impl.yml`. The
 top-level `permissions:` block stays at `contents: read` so unrelated reads in the same
 workflow are still least-privilege.
 
