@@ -25,9 +25,9 @@ need to change:
    that same terminal diagnostic and fails through a final, dynamically named
    step such as `Failed Just recipe: anvil-license-headers`, making the failed
    recipe visible in the job's step list without copying group membership into
-   YAML. For same-repository pull requests, it also publishes a stable commit
-   status per group job. The status description identifies the failed recipe
-   directly in the PR check list.
+   YAML. For same-repository pull requests, it also publishes a dynamically
+   named failure status per group job. The status name identifies the failed
+   recipe directly in the PR check list.
 
 See also:
 
@@ -190,7 +190,7 @@ workflow:
 
 ```yaml
 # .github/workflows/anvil-pr.yml
-name: anvil-pr
+name: Anvil
 on:
   pull_request: {}
   merge_group: {}
@@ -198,6 +198,7 @@ permissions:
   contents: read
 jobs:
   validation:
+    name: PR Job
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/anvil-pr-impl.yml
     permissions:
@@ -208,6 +209,7 @@ jobs:
       publish_job_statuses: true
     secrets: inherit
   merge-validation:
+    name: Merge Group Job
     if: github.event_name == 'merge_group'
     uses: ./.github/workflows/anvil-pr-impl.yml
     permissions:
@@ -217,10 +219,12 @@ jobs:
 
 The two conditional callers keep the workflow name and reusable implementation
 the same across events while granting write permissions only to pull-request
-runs. The pull-request caller is named `validation` so GitHub renders a
-user-facing hierarchy rather than exposing the event name. Merge-group
-execution does not publish the supplemental status and never receives
-`statuses: write` or `pull-requests: write`.
+runs. Their internal IDs remain `validation` and `merge-validation`, while
+their display names are `PR Job` and `Merge Group Job`. Together with the
+workflow display name, GitHub renders a user-facing `Anvil / PR Job / ...`
+hierarchy without exposing implementation IDs. Merge-group execution does not
+publish the supplemental status and never receives `statuses: write` or
+`pull-requests: write`.
 
 The scheduled root workflow adds a schedule and `workflow_dispatch`:
 
@@ -295,6 +299,7 @@ on:
 
 jobs:
   impact:
+    name: "Preparation: Impact Analysis (linux)"
     runs-on: ${{ inputs.linux_runner }}
     outputs:
       include_modified: ${{ steps.delta.outputs.include_modified }}
@@ -307,7 +312,7 @@ jobs:
         uses: ./.github/actions/anvil-impact
 
   pr-fast:
-    name: "aggregate: fast checks (${{ matrix.os }})"
+    name: "Check Group: Fast Checks (${{ matrix.os }})"
     needs: impact
     strategy:
       fail-fast: false
@@ -330,7 +335,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
 
   pr-test:
-    name: "aggregate: tests (${{ matrix.os }})"
+    name: "Check Group: Tests and Coverage (${{ matrix.os }})"
     # Tests + coverage: llvm-cov, doc-test, examples. Coverage upload
     # is gated to the canonical x86_64 Linux leg (omitted here for brevity).
     needs: impact
@@ -560,7 +565,7 @@ Input set on the shared group action:
 | `include_affected` | `""`      | Forwarded as `ANVIL_INCLUDE_AFFECTED`. Same semantics.                                                                              |
 | `include_required` | `""`      | Forwarded as `ANVIL_INCLUDE_REQUIRED`. Same semantics.                                                                              |
 | `free-disk-space`  | `"false"` | Forwarded to `anvil-setup`; ignored on macOS and self-hosted runners.                                                               |
-| `publish_job_statuses` | `"false"` | Publishes a stable commit status for the group and runner. Enabled by the generated PR root workflow. |
+| `publish_job_statuses` | `"false"` | Publishes named failure statuses for the group and runner. Enabled by the generated PR root workflow. |
 
 Generated workflows pass constant catalog group names. Both `anvil-run-group`
 and `anvil-setup` carry the value through an `ANVIL_GROUP` environment
@@ -584,9 +589,9 @@ workflows. Anvil does not emit or support public per-group action paths.
 ### Failure attribution and commit statuses
 
 GitHub fixes workflow job names before a job runs, so a matrix job rendered as
-`anvil-pr / validation / aggregate: fast checks (linux)` cannot rename itself
-after discovering that `anvil-license-headers` failed. Anvil instead presents
-the concrete failure at three levels, all driven by Just's existing terminal
+`Anvil / PR Job / Check Group: Fast Checks (linux)` cannot rename itself after
+discovering that `anvil-license-headers` failed. Anvil instead presents the
+concrete failure at three levels, all driven by Just's existing terminal
 diagnostic:
 
 1. The problem matcher registered by `anvil-setup` promotes
@@ -596,10 +601,10 @@ diagnostic:
    `Failed Just recipe: anvil-license-headers`, putting the recipe name in the
    job's step list.
 3. On eligible pull requests, `anvil-report-status` publishes a commit status
-   whose reserved context namespace names the failed recipe, group, and runner:
+   whose reserved context namespace names the failed recipe and runner:
 
    ```text
-   anvil-pr / failure: license-headers / pr-fast (linux-x64)
+   Anvil / license-headers (linux-x64)
    ```
 
 The group action uses Bash as a cross-platform capture wrapper, including on
@@ -627,7 +632,7 @@ When `publish_job_statuses` is enabled, the shared reporter uses pinned
 | Field | Value |
 |-------|-------|
 | Commit | `github.event.pull_request.head.sha` |
-| Failure context | `anvil-pr / failure: <recipe> / <group> (<runner>)` |
+| Failure context | `Anvil / <recipe> (<runner>)` |
 | State after setup failure | `error` |
 | State after recipe failure | `failure` |
 | Fresh success | No supplemental status |
@@ -637,25 +642,27 @@ When `publish_job_statuses` is enabled, the shared reporter uses pinned
 | Target URL | The originating GitHub Actions workflow run |
 
 The runner suffix is derived from `RUNNER_OS` and `RUNNER_ARCH`, producing
-values such as `linux-x64` and `windows-arm64`. The reserved
-`anvil-pr / failure: ` prefix identifies statuses owned by this mechanism; the
-` / <group> (<runner>)` suffix scopes cleanup to one matrix leg. Contexts are
-limited to 100 characters by truncating only the recipe portion.
+values such as `linux-x64` and `windows-arm64`. The reserved `Anvil / ` prefix
+and runner suffix identify statuses owned by this mechanism. The reporter adds
+an `#anvil-group=<group>` marker to the workflow-run target URL so cleanup is
+scoped to one group without exposing that implementation name in the check
+label. Contexts are limited to 100 characters by truncating only the recipe
+portion.
 When Just reports an `anvil-` recipe, the reporter removes that conventional
 prefix from the context and description to keep the limited inline text
 concise.
 
-The `anvil-pr / failure:` prefix also places supplemental statuses before the
-generated workflow's `anvil-pr / validation / aggregate: ...` Check Runs in
-GitHub's current alphabetical PR-check rendering. This is a presentation hint,
-not a correctness dependency: GitHub does not document the ordering as a
-stable contract.
+The concise `Anvil / <recipe>` context puts the failed check name immediately
+after the product name. In GitHub's current alphabetical PR-check rendering it
+also places typical check names before `Anvil / PR Job / Check Group: ...`.
+This is a presentation hint, not a correctness dependency: GitHub does not
+document the ordering as a stable contract.
 
 Cleanup runs after the group result is known. Keeping the old failure visible
 while a rerun is pending avoids a temporary green result and unnecessary API
 writes. At the end, the reporter queries status history for the PR head and
-finds the newest value of every context with its reserved prefix and exact
-group/runner suffix. On failure it publishes the current dynamic context first,
+finds the newest value of every context with its reserved prefix, runner suffix,
+and group marker. On failure it publishes the current dynamic context first,
 then posts `success` to other active contexts for that leg. On success it posts
 `success` to every active prior failure and creates no new supplemental row.
 Publishing the new failure first ensures cleanup never creates a moment with no

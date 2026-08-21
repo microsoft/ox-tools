@@ -193,8 +193,10 @@ mod tests {
         assert!(REPORT_STATUS_ACTION.contains("github.rest.repos.createCommitStatus"));
         assert!(REPORT_STATUS_ACTION.contains("github.rest.repos.listCommitStatusesForRef"));
         assert!(REPORT_STATUS_ACTION.contains("context.payload.pull_request.head.sha"));
-        assert!(REPORT_STATUS_ACTION.contains("anvil-pr / failure: "));
+        assert!(REPORT_STATUS_ACTION.contains("const statusPrefix = \"Anvil / \""));
+        assert!(REPORT_STATUS_ACTION.contains("if (seen.has(status.context))"));
         assert!(REPORT_STATUS_ACTION.contains("status.context.endsWith(statusSuffix)"));
+        assert!(REPORT_STATUS_ACTION.contains("status.target_url?.endsWith(groupMarker)"));
         assert!(REPORT_STATUS_ACTION.contains("100 - statusPrefix.length - statusSuffix.length"));
         assert!(REPORT_STATUS_ACTION.contains("failedRecipe.replace(/^anvil-/, \"\")"));
         assert!(REPORT_STATUS_ACTION.contains("statusDescription.slice(0, 140)"));
@@ -225,10 +227,10 @@ mod tests {
         assert!(PR_IMPL_WORKFLOW.contains("PR_TITLE"));
         assert!(PR_IMPL_WORKFLOW.contains("BASE_REF"));
         for name in [
-            "aggregate: fast checks (${{ matrix.os }})",
-            "aggregate: tests (${{ matrix.os }})",
-            "aggregate: runtime analysis (${{ matrix.os }})",
-            "aggregate: mutation testing (${{ matrix.os }})",
+            "Check Group: Fast Checks (${{ matrix.os }})",
+            "Check Group: Tests and Coverage (${{ matrix.os }})",
+            "Check Group: Runtime Analysis (${{ matrix.os }})",
+            "Check Group: Mutation Testing (${{ matrix.os }})",
         ] {
             assert!(PR_IMPL_WORKFLOW.contains(name), "PR impl workflow missing display name '{name}'");
         }
@@ -292,7 +294,9 @@ mod tests {
         assert!(PR_ROOT_WORKFLOW.contains("merge_group:"));
         assert!(PR_ROOT_WORKFLOW.contains("statuses: write"));
         assert!(PR_ROOT_WORKFLOW.contains("publish_job_statuses: true"));
+        assert!(PR_ROOT_WORKFLOW.contains("name: Anvil"));
         assert!(PR_ROOT_WORKFLOW.contains("\n  validation:\n"));
+        assert!(PR_ROOT_WORKFLOW.contains("name: PR Job"));
         assert!(PR_ROOT_WORKFLOW.contains("\n  merge-validation:\n"));
         assert!(PR_ROOT_WORKFLOW.contains("if: github.event_name == 'pull_request'"));
         assert!(PR_ROOT_WORKFLOW.contains("if: github.event_name == 'merge_group'"));
