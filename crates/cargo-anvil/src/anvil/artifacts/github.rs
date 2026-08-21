@@ -142,6 +142,9 @@ pub(crate) fn all() -> Vec<Artifact> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::fs;
+    use std::process::Command;
+
     use super::*;
 
     #[test]
@@ -166,6 +169,7 @@ mod tests {
         assert!(SETUP_ACTION.contains("/usr/local/lib/android"));
         assert!(SETUP_ACTION.contains(r"C:\Program Files (x86)\Android"));
         assert!(!SETUP_ACTION.contains("Install libclang"));
+        assert!(!SETUP_ACTION.contains("apt-get install -y libclang-dev"));
     }
 
     #[test]
@@ -212,6 +216,10 @@ mod tests {
     #[test]
     fn pr_impl_workflow_has_expected_jobs() {
         assert!(PR_IMPL_WORKFLOW.contains("workflow_call:"));
+        assert!(
+            !PR_IMPL_WORKFLOW.contains("ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64"),
+            "the PR workflow must run spellcheck on ARM64"
+        );
         for needle in [
             "impact-linux:",
             "impact-windows:",
@@ -240,6 +248,8 @@ mod tests {
         );
         assert!(PR_IMPL_WORKFLOW.contains("matrix.os != 'windows-arm'"));
         assert!(PR_IMPL_WORKFLOW.contains("flags: ${{ matrix.os }}"));
+        assert!(PR_IMPL_WORKFLOW.contains("\npermissions:\n  contents: read\n"));
+        assert_eq!(PR_IMPL_WORKFLOW.matches("pull-requests: write").count(), 1);
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
             1,
@@ -254,6 +264,7 @@ mod tests {
             "scheduled-advisories:",
             "scheduled-runtime-analysis:",
             "scheduled-exhaustive:",
+            "publish-failure:",
         ] {
             assert!(
                 SCHEDULED_IMPL_WORKFLOW.contains(needle),
@@ -261,10 +272,140 @@ mod tests {
             );
         }
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("codecov/codecov-action"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("vars.ANVIL_PUBLISH_FAILURE_ISSUE != 'false'"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("contains(needs.*.result, 'failure')"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("github.rest.search.issuesAndPullRequests"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("github.rest.issues.createComment"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("github.rest.issues.create"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("\npermissions:\n  contents: read\n"));
+        assert_eq!(SCHEDULED_IMPL_WORKFLOW.matches("issues: write").count(), 1);
+        let publisher_permissions = SCHEDULED_IMPL_WORKFLOW
+            .split_once("\n  publish-failure:")
+            .expect("scheduled workflow should contain publish-failure")
+            .1
+            .split_once("\n    steps:")
+            .expect("publish-failure should contain steps")
+            .0;
+        assert!(publisher_permissions.contains("\n    permissions:\n      issues: write"));
+        assert!(!publisher_permissions.contains("contents: read"));
         assert_eq!(
             SCHEDULED_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
             1,
             "disk cleanup should be enabled for the scheduled test group"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
+    fn scheduled_failure_script_upserts_marker_owned_issues() {
+        let script = SCHEDULED_IMPL_WORKFLOW
+            .split_once("          script: |\n")
+            .expect("scheduled workflow should contain an inline script")
+            .1
+            .lines()
+            .map(|line| line.strip_prefix("            ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let harness = format!("const workflowScript = {script:?};\n")
+            + r#"
+const assert = require("node:assert/strict");
+// github-script executes an asynchronous body with injected runtime values.
+// Model only the github/context/process values this script uses; the API client
+// remains mocked rather than recreating the complete action runtime or Node image.
+const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+const run = new AsyncFunction("github", "context", "process", workflowScript);
+const marker = "<!-- anvil scheduled failure -->";
+const searchableMarker = marker.replace(/^<!--\s*|\s*-->$/g, "");
+const title = "[Anvil] Scheduled checks failed";
+const context = {
+  serverUrl: "https://github.com",
+  repo: { owner: "microsoft", repo: "ox-tools" },
+  runId: 42,
+};
+const expectedQuery = `repo:${context.repo.owner}/${context.repo.repo} is:issue is:open in:body "${searchableMarker}"`;
+
+async function scenario(items) {
+  const calls = { search: [], create: [], comment: [] };
+  const github = {
+    rest: {
+      search: {
+        issuesAndPullRequests: async args => {
+          calls.search.push(args);
+          return { data: { items: args.q === expectedQuery ? items : [] } };
+        },
+      },
+      issues: {
+        create: async args => calls.create.push(args),
+        createComment: async args => calls.comment.push(args),
+      },
+    },
+  };
+  const process = {
+    env: {
+      ANVIL_JOB_RESULTS: JSON.stringify({
+        "scheduled-test": { result: "failure" },
+        "scheduled-advisories": { result: "success" },
+        "scheduled-runtime-analysis": { result: "cancelled" },
+        "scheduled-exhaustive": { result: "failure" },
+      }),
+    },
+  };
+  await run(github, context, process);
+  return calls;
+}
+
+(async () => {
+  const created = await scenario([]);
+  assert.equal(created.search.length, 1);
+  assert.equal(created.search[0].q, expectedQuery);
+  assert.equal(created.create.length, 1);
+  assert.equal(created.comment.length, 0);
+  assert.equal(created.create[0].title, title);
+  assert.match(created.create[0].body, new RegExp(marker));
+  assert.match(created.create[0].body, /- `scheduled-test`/);
+  assert.match(created.create[0].body, /- `scheduled-exhaustive`/);
+  assert.doesNotMatch(created.create[0].body, /scheduled-advisories/);
+  assert.doesNotMatch(created.create[0].body, /scheduled-runtime-analysis/);
+  assert.match(
+    created.create[0].body,
+    /https:\/\/github\.com\/microsoft\/ox-tools\/actions\/runs\/42/,
+  );
+
+  const existing = await scenario([
+    { number: 17, title: "Maintainer-renamed incident", body: marker },
+  ]);
+  assert.equal(existing.create.length, 0);
+  assert.equal(existing.comment.length, 1);
+  assert.equal(existing.comment[0].issue_number, 17);
+
+  const collision = await scenario([
+    { number: 23, title, body: "A human-authored issue without the marker." },
+  ]);
+  assert.equal(collision.create.length, 1);
+  assert.equal(collision.comment.length, 0);
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
+"#;
+
+        if Command::new("node").arg("--version").output().is_err() {
+            return;
+        }
+
+        let dir = tempfile::tempdir().expect("create temporary test directory");
+        let path = dir.path().join("scheduled-failure.test.cjs");
+        fs::write(&path, harness).expect("write JavaScript behavior test");
+        let output = Command::new("node")
+            .arg(&path)
+            .output()
+            .expect("execute generated github-script behavior test");
+        assert!(
+            output.status.success(),
+            "generated github-script behavior test failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
         );
     }
 
@@ -275,6 +416,7 @@ mod tests {
         assert!(PR_ROOT_WORKFLOW.contains("merge_group:"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("uses: ./.github/workflows/anvil-scheduled-impl.yml"));
         assert!(SCHEDULED_ROOT_WORKFLOW.contains("schedule:"));
+        assert!(SCHEDULED_ROOT_WORKFLOW.contains("issues: write"));
     }
 
     #[test]
