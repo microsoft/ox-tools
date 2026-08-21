@@ -1010,11 +1010,10 @@ Conditions explained:
 
 Permissions: the reusable workflow's caller (`anvil-pr.yml`) declares
 `pull-requests: write` on the `validation` job that calls
-`anvil-pr-impl.yml`. The called
-workflow resets its default to `contents: read` and restores `pull-requests: write` only
-on `pr-fast`, where the sticky-comment steps run. Other called jobs remain read-only.
-The top-level `permissions:` block stays at `contents: read` so unrelated reads in the
-same workflow are still least-privilege.
+`anvil-pr-impl.yml`. The called workflow declares no permission overrides, so all
+of its jobs inherit that caller ceiling. Only the guarded sticky-comment steps
+use `pull-requests: write`. The separate merge-group caller grants only
+`contents: read`, and fork-PR tokens remain read-only.
 
 Adding a new advisory check is a two-step change: the recipe writes
 `target/anvil/comments/<NEW>.md` (and removes it on a clean run); the workflow gains
