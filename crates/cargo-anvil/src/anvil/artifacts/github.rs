@@ -189,12 +189,15 @@ mod tests {
     }
 
     #[test]
-    fn status_action_uses_stable_context_and_pr_head() {
+    fn status_action_manages_dynamic_failure_contexts_on_pr_head() {
         assert!(REPORT_STATUS_ACTION.contains("github.rest.repos.createCommitStatus"));
+        assert!(REPORT_STATUS_ACTION.contains("github.rest.repos.listCommitStatusesForRef"));
         assert!(REPORT_STATUS_ACTION.contains("context.payload.pull_request.head.sha"));
-        assert!(REPORT_STATUS_ACTION.contains("anvil-pr / ${group} details (${runner})"));
+        assert!(REPORT_STATUS_ACTION.contains("anvil-pr / failure: "));
+        assert!(REPORT_STATUS_ACTION.contains("status.context.endsWith(statusSuffix)"));
+        assert!(REPORT_STATUS_ACTION.contains("100 - statusPrefix.length - statusSuffix.length"));
         assert!(REPORT_STATUS_ACTION.contains("failedRecipe.replace(/^anvil-/, \"\")"));
-        assert!(REPORT_STATUS_ACTION.contains("description: description.slice(0, 140)"));
+        assert!(REPORT_STATUS_ACTION.contains("statusDescription.slice(0, 140)"));
     }
 
     #[test]

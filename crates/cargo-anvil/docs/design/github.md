@@ -591,11 +591,10 @@ three levels, all driven by Just's existing terminal diagnostic:
    `Failed Just recipe: anvil-license-headers`, putting the recipe name in the
    job's step list.
 3. On eligible pull requests, `anvil-report-status` publishes a commit status
-   whose stable context names the group and runner and whose description names
-   the failed recipe:
+   whose reserved context namespace names the failed recipe, group, and runner:
 
    ```text
-   anvil-pr / pr-fast details (linux-x64)    license-headers failed
+   anvil-pr / failure: license-headers / pr-fast (linux-x64)
    ```
 
 The group action uses Bash as a cross-platform capture wrapper, including on
@@ -617,40 +616,52 @@ must not turn a successful validation job red or hide the original failure.
 The reporter neither invokes checks nor contains the membership of any group.
 
 When `publish_job_statuses` is enabled, the shared reporter uses pinned
-`actions/github-script` and `github.rest.repos.createCommitStatus` to post one
-status with:
+`actions/github-script`, `github.rest.repos.listCommitStatusesForRef`, and
+`github.rest.repos.createCommitStatus` to manage statuses with:
 
 | Field | Value |
 |-------|-------|
 | Commit | `github.event.pull_request.head.sha` |
-| Context | `anvil-pr / <group> details (<runner>)` |
+| Failure context | `anvil-pr / failure: <recipe> / <group> (<runner>)` |
 | State after setup failure | `error` |
 | State after recipe failure | `failure` |
-| State after success | `success` |
+| Fresh success | No supplemental status |
+| Superseded failure | `success` with a superseded description |
 | Failure description | `<failed-recipe-without-anvil-prefix> failed` |
 | Setup description | `setup failed before <group> ran` |
-| Success description | `all <group> recipes passed` |
 | Target URL | The originating GitHub Actions workflow run |
 
 The runner suffix is derived from `RUNNER_OS` and `RUNNER_ARCH`, producing
-values such as `linux-x64` and `windows-arm64`. The context is stable per group
-and runner; the failed recipe appears only in the description. Matrix legs
-therefore do not overwrite one another, while reruns of the same leg do.
+values such as `linux-x64` and `windows-arm64`. The reserved
+`anvil-pr / failure: ` prefix identifies statuses owned by this mechanism; the
+` / <group> (<runner>)` suffix scopes cleanup to one matrix leg. Contexts are
+limited to 100 characters by truncating only the recipe portion.
 When Just reports an `anvil-` recipe, the reporter removes that conventional
-prefix from the status description to keep the limited inline text concise.
+prefix from the context and description to keep the limited inline text
+concise.
 
-The `anvil-pr / <group> details` prefix also places supplemental statuses
-before the generated workflow's `anvil-pr / pull-request / <group>` Check Runs
-in GitHub's current alphabetical PR-check rendering. This is a presentation
-hint, not a correctness dependency: GitHub does not document the ordering as a
-stable contract, and the description remains useful if the UI changes.
+The `anvil-pr / failure:` prefix also places supplemental statuses before the
+generated workflow's `anvil-pr / pull-request / <group>` Check Runs in GitHub's
+current alphabetical PR-check rendering. This is a presentation hint, not a
+correctness dependency: GitHub does not document the ordering as a stable
+contract.
 
-GitHub retains each posted status as history but uses only the newest status
-for a given commit and context in the PR status rollup. A successful rerun
-posts `success` to the same context and immediately replaces the visible
-failure. A different recipe failing on a rerun changes only the description,
-so there is no dynamic-name discovery or stale-result cleanup. Each new commit
-has its own status set and receives fresh results from its workflow run.
+Cleanup runs after the group result is known. Keeping the old failure visible
+while a rerun is pending avoids a temporary green result and unnecessary API
+writes. At the end, the reporter queries status history for the PR head and
+finds the newest value of every context with its reserved prefix and exact
+group/runner suffix. On failure it publishes the current dynamic context first,
+then posts `success` to other active contexts for that leg. On success it posts
+`success` to every active prior failure and creates no new supplemental row.
+Publishing the new failure first ensures cleanup never creates a moment with no
+visible failure.
+
+GitHub does not allow commit-status deletion. Superseded contexts therefore
+remain as green historical rows with a description explaining that a later run
+replaced them. The native workflow job remains the stable, authoritative
+required check; supplemental statuses are presentation only. Each new commit
+has its own status set, so discovery and supersession matter only for reruns of
+the same commit.
 
 The reporter runs under `always()` and receives the setup outcome as well as
 the Just outputs. A setup failure can therefore publish an `error` description
