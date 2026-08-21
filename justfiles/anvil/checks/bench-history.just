@@ -13,13 +13,30 @@
 # ANVIL_INCLUDE_* contract and always measures the whole workspace.
 #
 # Environment contract (all optional):
-#   ANVIL_BENCH_HISTORY_STORE  history directory (default target/anvil/bench-history)
-#   ANVIL_BENCH_MACHINE_KEY    machine key overriding cbh's hardware fingerprint
+#   ANVIL_BENCH_HISTORY_STORE  history directory (default target/anvil/bench-history).
+#                              Local-only: the generated cloud wiring restores and
+#                              publishes the default path, so overriding it in CI
+#                              would leave the recipe reading a different directory
+#                              than the one the artifact round-trip maintains.
+#   ANVIL_BENCH_MACHINE_KEY    machine key overriding cbh's hardware fingerprint,
+#                              for pools heterogeneous enough to fragment a series.
+#                              Both backends plumb this through their scheduled
+#                              wiring, so it is settable in CI as well as locally.
+#   ANVIL_BENCH_GATE           "1" to make an active regression fail this recipe
+#                              locally. CI sets it automatically; see below.
 #
 # The store is the cross-run state the cloud wiring restores before and
 # publishes after this recipe; locally it is whatever has accumulated
 # under target/, which on a fresh checkout is empty and analyzes to a
 # clean no-op.
+#
+# Gating is CI-only by default. The recipe behaves identically either way
+# --- it always runs the benches and always writes its findings --- but a
+# laptop produces measurement noise that a shared, homogeneous runner pool
+# does not, and `anvil-scheduled` / `anvil-full` are run locally before a
+# release. Failing those on thermal throttling would invite committing a
+# blessing to silence it, which would pollute the reviewed, audited
+# blessings file with an artifact of one developer's hardware.
 
 # Run the benchmarks and analyze the accumulated history for regressions.
 [script("pwsh", "-NoProfile")]
@@ -83,6 +100,18 @@ anvil-bench-history: anvil-bench-history-validate-prereqs
     }
     Write-Host ''
     Write-Host "Findings: $findingsMd"
+
+    # CI sets its own marker (GitHub: CI, ADO: TF_BUILD); locally the gate
+    # is opt-in via ANVIL_BENCH_GATE. Reporting above is unconditional --
+    # only the exit code differs.
+    $gate = $env:ANVIL_BENCH_GATE -eq '1' -or $env:CI -or $env:TF_BUILD
+    if (-not $gate) {
+        Write-Host 'Reporting only: a local run does not gate on the shared trend.' -ForegroundColor Yellow
+        Write-Host 'These numbers come from this machine, whose noise a shared runner pool does not have.'
+        Write-Host 'Set ANVIL_BENCH_GATE=1 to make this fail locally too.'
+        exit 0
+    }
+
     Write-Host "Fix the regression, or accept it by adding an entry to $blessingsFile."
     exit 1
 
@@ -113,13 +142,19 @@ _anvil-bench-history-bless store blessings:
     }
 
     # A deliberately small TOML subset: `[[blessing]]` headers plus
-    # `key = "value"` pairs. Depending on a TOML parser here would mean a
-    # second tool pin for three string fields.
+    # `key = "value"` pairs with no escapes. Anything outside it is
+    # rejected rather than reinterpreted, so a value this cannot represent
+    # fails loudly instead of being silently rewritten. The same subset is
+    # documented in the emitted file's own header.
     $entries = New-Object System.Collections.Generic.List[object]
     $current = $null
     foreach ($rawLine in (Get-Content -LiteralPath $blessingsFile)) {
-        $line = ($rawLine -split '#', 2)[0].Trim()
-        if (-not $line) { continue }
+        $line = $rawLine.Trim()
+        # A `#` only starts a comment outside a value. Stripping to the
+        # first `#` unconditionally would silently truncate a reason
+        # citing an issue or PR number -- exactly what a rationale
+        # contains -- so comments are only recognised at line start.
+        if (-not $line -or $line.StartsWith('#')) { continue }
         if ($line -eq '[[blessing]]') {
             $current = @{}
             $entries.Add($current) | Out-Null
@@ -129,7 +164,7 @@ _anvil-bench-history-bless store blessings:
             Write-Error "anvil-bench-history: unexpected table '$line' in $blessingsFile (expected only [[blessing]])"
             exit 1
         }
-        if ($line -match '^([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*"(.*)"$') {
+        if ($line -match '^([A-Za-z_][A-Za-z0-9_-]*)\s*=\s*"([^"\\]*)"$') {
             if ($null -eq $current) {
                 Write-Error "anvil-bench-history: key '$($Matches[1])' outside any [[blessing]] in $blessingsFile"
                 exit 1
@@ -137,7 +172,7 @@ _anvil-bench-history-bless store blessings:
             $current[$Matches[1]] = $Matches[2]
             continue
         }
-        Write-Error ('anvil-bench-history: cannot parse ''{0}'' in {1} (expected a [[blessing]] header or a key = "value" pair)' -f $line, $blessingsFile)
+        Write-Error ('anvil-bench-history: cannot parse ''{0}'' in {1}. Expected a [[blessing]] header, a line-leading # comment, or key = "value" with a double-quoted single-line value containing no backslash escapes.' -f $line, $blessingsFile)
         exit 1
     }
 
@@ -180,12 +215,14 @@ _anvil-bench-history-bless store blessings:
             exit 1
         }
         $resolved = $resolved.Trim()
-        # Stored commits are abbreviated, and a stored blessing names
-        # either the concrete benchmark it resolved to (once a run exists
-        # at that commit) or the prefix filter it was issued with.
+        # Compare the persisted identity exactly. A `StartsWith` in either
+        # direction is wrong: a stored concrete `foo/bar` would satisfy a
+        # prefix test for the broader `foo`, so a committed blessing of
+        # `foo` would be skipped while still leaving the build red -- with
+        # a log line claiming it was already in effect.
         $already = $applied | Where-Object {
             $resolved.StartsWith($_.commit) -and
-            (($_.benchmark -and $_.benchmark.StartsWith($benchmark)) -or ($_.prefixes -contains $benchmark))
+            (($_.prefixes -contains $benchmark) -or ($_.benchmark -eq $benchmark))
         }
         if ($already) {
             Write-Host "anvil-bench-history: blessing already in effect: $benchmark at $commit"

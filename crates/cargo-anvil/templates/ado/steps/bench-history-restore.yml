@@ -4,7 +4,17 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 #
-# Restores the benchmark history the previous scheduled run published.
+# Restores the benchmark history published by the most recent build that
+# carries this leg's artifact.
+#
+# `DownloadPipelineArtifact@2` with `latestFromBranch` resolves a single
+# build and yields nothing if that build has no such artifact -- it does
+# not walk back. A cancelled or never-publishing latest build would
+# therefore cold-start a store that actually has history. This step
+# resolves the build itself, so absence of the artifact throughout the
+# window (a genuine cold start) stays distinct from an operational
+# failure, which fails the job rather than silently publishing a
+# truncated snapshot over a good chain.
 #
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/benchmarks.md
 parameters:
@@ -13,27 +23,71 @@ parameters:
   - name: path
     type: string
     default: target/anvil/bench-history
+  - name: window
+    type: number
+    default: 30
 steps:
-  # The store has to exist even when there is nothing to restore, so the
-  # first ever run analyzes an empty history instead of erroring.
-  - pwsh: New-Item -ItemType Directory -Force -Path '${{ parameters.path }}' | Out-Null
-    displayName: Prepare benchmark history store
-  - task: DownloadPipelineArtifact@2
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      $artifact = '${{ parameters.artifact }}'
+      $path = '${{ parameters.path }}'
+      $window = ${{ parameters.window }}
+
+      New-Item -ItemType Directory -Force -Path $path | Out-Null
+
+      if (-not $env:SYSTEM_ACCESSTOKEN) {
+          Write-Error "anvil: SYSTEM_ACCESSTOKEN is not exposed to this job, so the benchmark history cannot be restored."
+          exit 1
+      }
+
+      $collection = $env:SYSTEM_COLLECTIONURI
+      $project = $env:SYSTEM_TEAMPROJECTID
+      $definition = $env:SYSTEM_DEFINITIONID
+      $branch = $env:BUILD_SOURCEBRANCH
+      $headers = @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }
+
+      # Newest first, whatever the outcome: a flagged regression fails the
+      # build, so restricting to successful builds would discard exactly
+      # the stretch of history that matters most.
+      $runsUri = "$collection$project/_apis/build/builds?definitions=$definition&branchName=$branch&`$top=$window&queryOrder=finishTimeDescending&api-version=7.0"
+      $runs = (Invoke-RestMethod -Uri $runsUri -Headers $headers).value
+
+      foreach ($run in $runs) {
+          if ($run.id -eq $env:BUILD_BUILDID) { continue }
+
+          $artifactUri = "$collection$project/_apis/build/builds/$($run.id)/artifacts?artifactName=$artifact&api-version=7.0"
+          try {
+              $found = Invoke-RestMethod -Uri $artifactUri -Headers $headers
+          } catch {
+              # 404 is "this build has no such artifact" -- the expected,
+              # common case while walking back. Anything else is an
+              # operational failure and must not be read as absence.
+              $status = $_.Exception.Response.StatusCode.value__
+              if ($status -eq 404) { continue }
+              Write-Error "anvil: querying artifacts of build $($run.id) failed with HTTP $status; refusing to continue with an empty history."
+              exit 1
+          }
+          if (-not $found.resource.downloadUrl) { continue }
+
+          Write-Host "anvil: restoring $artifact from build $($run.id)"
+          $tmp = [System.IO.Path]::GetTempPath()
+          $zip = Join-Path $tmp "$artifact.zip"
+          $staging = Join-Path $tmp "$artifact-extract"
+          Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
+          Invoke-WebRequest -Uri $found.resource.downloadUrl -Headers $headers -OutFile $zip
+          Expand-Archive -LiteralPath $zip -DestinationPath $staging -Force
+          # The archive nests its contents under a directory named for the
+          # artifact; lift them up into the store path.
+          $inner = Join-Path $staging $artifact
+          $source = if (Test-Path $inner) { $inner } else { $staging }
+          Copy-Item -Path (Join-Path $source '*') -Destination $path -Recurse -Force
+          Write-Host "##vso[task.setvariable variable=ANVIL_BENCH_RESTORE]restored"
+          exit 0
+      }
+
+      # Nothing in the window carried the artifact: a genuine cold start.
+      Write-Host "anvil: no $artifact artifact in the last $window builds on $branch; starting a new history"
+      Write-Host "##vso[task.setvariable variable=ANVIL_BENCH_RESTORE]cold-start"
     displayName: Restore ${{ parameters.artifact }}
-    # The first run has no artifact to restore; a missing artifact is a
-    # cold start, not a failure.
-    continueOnError: true
-    inputs:
-      buildType: specific
-      project: $(System.TeamProjectId)
-      definition: $(System.DefinitionId)
-      buildVersionToDownload: latestFromBranch
-      branchName: $(Build.SourceBranch)
-      # Take the newest run that carries the artifact whatever its
-      # outcome. Restoring only from green runs would drop every sample
-      # collected while the pipeline was red from a regression --
-      # precisely the window that matters.
-      allowPartiallySucceededBuilds: true
-      allowFailedBuilds: true
-      artifactName: ${{ parameters.artifact }}
-      targetPath: ${{ parameters.path }}
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)

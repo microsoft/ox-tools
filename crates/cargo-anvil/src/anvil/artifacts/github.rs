@@ -273,7 +273,8 @@ mod tests {
 
     #[test]
     fn scheduled_benchmarks_job_round_trips_the_history_artifact() {
-        // Analysis walks the commit graph, so the leg needs full history.
+        // Analysis walks the commit graph, so the leg needs full history;
+        // benchmark inputs can be LFS-tracked.
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("fetch-depth: 0"));
         // Per-leg artifact names: the history is partitioned per machine,
         // and upload-artifact rejects a name reused within one run.
@@ -283,12 +284,30 @@ mod tests {
             "the restore and save steps must agree on the per-leg artifact name"
         );
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("actions/upload-artifact@"));
-        // Saving on failure too: the samples collected while the pipeline
-        // is red from a regression are the ones that matter.
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("gh run download"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("GITHUB_STEP_SUMMARY"));
-        // Notifying a human is the generic scheduled-failure publisher's
-        // job; this group only has to fail and leave its findings behind.
+        // The workflow is identified by its runtime name, not a literal
+        // filename: the root workflow is owned and renameable, and a rename
+        // must not silently reset the series.
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("WORKFLOW: ${{ github.workflow }}"));
+        assert!(
+            !SCHEDULED_IMPL_WORKFLOW.contains("--workflow anvil-scheduled.yml"),
+            "a hardcoded workflow filename breaks on rename"
+        );
+        // Absence and operational failure must stay distinguishable, and the
+        // upload is guarded on the restore having reached a known state --
+        // otherwise one transient failure publishes an empty store over the
+        // accumulated chain and reports clean.
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("select(.name == \\\"$ARTIFACT\\\" and .expired == false)"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("ANVIL_BENCH_RESTORE=restored"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("ANVIL_BENCH_RESTORE=cold-start"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("if: always() && env.ANVIL_BENCH_RESTORE != ''"));
+        // The machine-key escape hatch has to be reachable in CI, which
+        // workflow-level env is not across a called reusable workflow.
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("bench_machine_key:"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("ANVIL_BENCH_MACHINE_KEY: ${{ inputs.bench_machine_key }}"));
+        // Notifying a human is the repo's existing scheduled-failure
+        // reporting; this group only has to fail and leave findings behind.
         assert!(!SCHEDULED_IMPL_WORKFLOW.contains("gh issue create"));
         // Restoring the history reads the runs/artifacts API, and a
         // reusable workflow cannot grant itself more than its caller.

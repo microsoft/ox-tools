@@ -17,10 +17,6 @@
 #   - name      (string)   Job name; ADO derives the display name from it.
 #   - pool      (object)   Pool block, passed verbatim to ADO's `pool:` key.
 #   - steps     (stepList) Body of the job. Templated step lists are fine.
-#   - fetchDepth (string)  Optional. When set, the job checks out explicitly at
-#                          this depth ('0' for full history) instead of taking
-#                          the implicit default checkout. 1ESPT wrappers map it
-#                          onto templateContext.inputs instead.
 #   - artifacts (object)   Optional list of pipeline artifacts to publish.
 #                          Each item: { name: string, path: string }.
 #                          The default wrapper appends one
@@ -37,9 +33,6 @@ parameters:
     type: object
   - name: steps
     type: stepList
-  - name: fetchDepth
-    type: string
-    default: ''
   - name: artifacts
     type: object
     default: []
@@ -48,9 +41,6 @@ jobs:
   - job: ${{ parameters.name }}
     pool: ${{ parameters.pool }}
     steps:
-      - ${{ if ne(parameters.fetchDepth, '') }}:
-          - checkout: self
-            fetchDepth: ${{ parameters.fetchDepth }}
       - ${{ each step in parameters.steps }}:
           - ${{ step }}
       - ${{ each artifact in parameters.artifacts }}:

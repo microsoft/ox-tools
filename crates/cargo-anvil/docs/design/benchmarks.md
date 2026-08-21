@@ -21,8 +21,12 @@ hard part: results must be ordered by how the code evolved (not by when a
 benchmark happened to run), compared only against like hardware (CI runs on a
 heterogeneous, rotating pool whose machine-to-machine variance dwarfs the
 measurement), and judged with noise-aware statistics (a fixed percentage
-threshold on that noise fires constantly). Every anvil repo has benchmarks and
-none of them gets this today — the existing `bench` check only compiles them.
+threshold on that noise fires constantly). A repo with benchmarks gets none of
+this today — the existing `bench` check only compiles them.
+
+A repo without benchmarks is a first-class case, not an oversight: the recipe
+runs, records nothing, and analyzes an empty history to a clean no-op, so the
+capability costs such a repo a green job and nothing else.
 
 ## 2. Design principles
 
@@ -103,11 +107,13 @@ the build summary and to a findings file. The emitted findings include cbh's
 topology-accurate trend chart, so the reviewer's surface is self-contained —
 enough to decide *fix or bless* without reproducing the run.
 
-The failure itself is reported by whatever mechanism the backend already uses for
-a failed scheduled build: notification subscriptions on Azure DevOps, the
-scheduled-failure issue publisher on GitHub Actions. This subsystem contributes
-the *detail* on the build summary rather than a notification channel of its own, so
-a regression reaches a human exactly the way every other scheduled failure does.
+The failure itself is reported by whatever mechanism the repo already has for a
+failed scheduled build: notification subscriptions on Azure DevOps, GitHub's own
+scheduled-run failure notifications (or an adopter-supplied publisher) on GitHub
+Actions. anvil generates no notifier of its own for this. The subsystem
+contributes the *detail* on the build summary rather than a notification channel,
+so a regression reaches a human exactly the way every other scheduled failure
+does.
 
 A sustained regression re-fails every run until it is fixed or blessed, so red
 stays meaningful only under the discipline that the build is always returned to
@@ -122,6 +128,13 @@ into a gitignored local store, and analyzes that store — which on a fresh chec
 is empty, so analysis is a clean no-op reporting that there is no local history
 yet. A developer thus gets the current run's numbers (and a single-machine local
 trend if they run it repeatedly), not the shared regression signal.
+
+For the same reason the *gate* is CI-only by default. The recipe reports
+identically in both places, but only exits non-zero under CI (or with an explicit
+local opt-in): a laptop's measurement noise is not the shared trend, and failing
+a pre-release `anvil-full` on thermal throttling would invite silencing it with a
+committed blessing — polluting a reviewed, audited file with one machine's
+artifacts.
 
 Regression detection is therefore a scheduled, shared concern, and the failure
 surface (§5) — cbh's finding and trend chart on the build summary — is
@@ -153,7 +166,8 @@ that is already in effect.
   partitions too sparse to analyze. Whether a hosted pool stays dense enough
   depends on its hardware homogeneity; self-hosted or dedicated runners avoid the
   concern. An adopter who knows their pool is uniform enough can substitute a
-  stable pool label for the fingerprint, trading partition fidelity for density.
+  stable pool label for the fingerprint, trading partition fidelity for density;
+  both backends expose that as an input on their scheduled wiring.
 - **Attribution is coarse under sparse benchmarking.** Benches do not run on
   every commit, so the attributed commit is the first *benchmarked* one after a
   regression and may bundle several changes — an honest range, not always a

@@ -25,6 +25,9 @@ const JOB_WRAPPER: &str = include_str!("../../../templates/ado/steps/job.yml");
 /// Embedded body of the benchmark-history restore step template.
 const BENCH_HISTORY_RESTORE_STEP: &str = include_str!("../../../templates/ado/steps/bench-history-restore.yml");
 
+/// Embedded body of the benchmark-history publish step template.
+const BENCH_HISTORY_PUBLISH_STEP: &str = include_str!("../../../templates/ado/steps/bench-history-publish.yml");
+
 /// Embedded body of the benchmark-findings build-summary step template.
 const BENCH_HISTORY_SUMMARY_STEP: &str = include_str!("../../../templates/ado/steps/bench-history-summary.yml");
 
@@ -129,6 +132,17 @@ pub fn bench_history_summary() -> Artifact {
     )
 }
 
+/// `.pipelines/anvil/steps/bench-history-publish.yml` — publishes the
+/// updated benchmark history as this leg's artifact.
+#[must_use]
+pub fn bench_history_publish() -> Artifact {
+    Artifact::backend_file(
+        Backend::Ado,
+        ".pipelines/anvil/steps/bench-history-publish.yml",
+        BENCH_HISTORY_PUBLISH_STEP,
+    )
+}
+
 /// `.pipelines/anvil/pr.yml` — the PR-tier stages template.
 #[must_use]
 pub fn pr_stages() -> Artifact {
@@ -206,6 +220,7 @@ pub(crate) fn all() -> Vec<Artifact> {
         job_wrapper(),
         bench_history_restore(),
         bench_history_summary(),
+        bench_history_publish(),
     ];
     for (group, path) in GROUP_STEPS {
         out.push(Artifact::backend_file(Backend::Ado, path, render_group_step(group)));
@@ -295,7 +310,6 @@ mod tests {
             "name: steps",
             "type: stepList",
             "name: artifacts",
-            "name: fetchDepth",
             "PublishPipelineArtifact@1",
         ] {
             assert!(JOB_WRAPPER.contains(needle), "wrapper missing '{needle}'");
@@ -395,12 +409,22 @@ mod tests {
 
     #[test]
     fn scheduled_benchmarks_stage_round_trips_the_history_artifact() {
-        // Analysis walks the commit graph, so both legs check out fully.
-        assert_eq!(
-            SCHEDULED_STAGES.matches("fetchDepth: '0'").count(),
-            2,
-            "both benchmark legs must check out the full history"
+        // The checkout leads the group's own step list rather than going
+        // through a wrapper parameter: job.yml is the file adopters fork,
+        // so binding a parameter their copy lacks would fail expansion for
+        // the whole pipeline.
+        assert!(
+            !JOB_WRAPPER.contains("fetchDepth"),
+            "the job wrapper contract must stay frozen; put checkout in the group's step list"
         );
+        assert_eq!(
+            SCHEDULED_STAGES.matches("- checkout: self").count(),
+            2,
+            "both benchmark legs check out explicitly"
+        );
+        assert_eq!(SCHEDULED_STAGES.matches("fetchDepth: 0").count(), 2);
+        // Benchmark inputs can be LFS-tracked.
+        assert_eq!(SCHEDULED_STAGES.matches("lfs: true").count(), 2);
         // Per-leg artifact names: the history is partitioned per machine.
         for needle in ["bench-history-linux", "bench-history-windows"] {
             assert_eq!(
@@ -411,14 +435,23 @@ mod tests {
         }
         assert!(SCHEDULED_STAGES.contains("template: steps/bench-history-restore.yml"));
         assert!(SCHEDULED_STAGES.contains("template: steps/bench-history-summary.yml"));
-        // Take the newest run carrying the artifact whatever its outcome:
-        // restoring only from green runs would drop every sample collected
+        assert!(SCHEDULED_STAGES.contains("template: steps/bench-history-publish.yml"));
+        // Take the newest build carrying the artifact whatever its outcome:
+        // restoring only from green builds would drop every sample collected
         // while the pipeline was red from a regression.
-        assert!(BENCH_HISTORY_RESTORE_STEP.contains("buildVersionToDownload: latestFromBranch"));
-        assert!(BENCH_HISTORY_RESTORE_STEP.contains("allowFailedBuilds: true"));
-        assert!(BENCH_HISTORY_RESTORE_STEP.contains("allowPartiallySucceededBuilds: true"));
-        // A missing artifact is a cold start, not a failure.
-        assert!(BENCH_HISTORY_RESTORE_STEP.contains("continueOnError: true"));
+        assert!(BENCH_HISTORY_RESTORE_STEP.contains("queryOrder=finishTimeDescending"));
+        // Absence and operational failure must stay distinguishable, or one
+        // transient error publishes an empty store over a good history.
+        assert!(BENCH_HISTORY_RESTORE_STEP.contains("if ($status -eq 404) { continue }"));
+        assert!(BENCH_HISTORY_RESTORE_STEP.contains("ANVIL_BENCH_RESTORE]restored"));
+        assert!(BENCH_HISTORY_RESTORE_STEP.contains("ANVIL_BENCH_RESTORE]cold-start"));
+        assert!(
+            !BENCH_HISTORY_RESTORE_STEP.contains("continueOnError"),
+            "a blanket continueOnError would read every failure as a cold start"
+        );
+        // The publish is guarded on the restore having reached a known state.
+        assert!(BENCH_HISTORY_PUBLISH_STEP.contains("ne(variables['ANVIL_BENCH_RESTORE'], '')"));
+        assert!(BENCH_HISTORY_PUBLISH_STEP.contains("succeededOrFailed()"));
         assert!(BENCH_HISTORY_SUMMARY_STEP.contains("##vso[task.uploadsummary]"));
         assert!(BENCH_HISTORY_SUMMARY_STEP.contains("condition: succeededOrFailed()"));
     }

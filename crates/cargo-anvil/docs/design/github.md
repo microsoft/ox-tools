@@ -786,11 +786,13 @@ taken while the pipeline stayed red.
 
 Surfacing is by **build failure**, not a PR comment — the regression is discovered
 after merge (see [benchmarks.md §5](./benchmarks.md)). The benchmark recipe exits
-non-zero on an active regression, failing the job; the repo's scheduled-failure
-issue publisher then reports it like any other scheduled failure. The per-finding
-detail — each benchmark, its magnitude, its attributed commit, and cbh's trend
-chart — is written to the job summary, so the failed run carries everything a
-reviewer needs to decide *fix or bless*.
+non-zero on an active regression, failing the job. anvil does not generate a
+notifier for this: what reaches a human is whatever failure reporting the repo
+already has — GitHub's own scheduled-run failure notifications by default, or an
+adopter-supplied publisher. The per-finding detail — each benchmark, its
+magnitude, its attributed commit, and cbh's trend chart — is written to the job
+summary, so the failed run carries everything a reviewer needs to decide
+*fix or bless*.
 
 Blessings are applied from a committed `.config/bench-blessings.toml` before analyze
 (step 3), so accepting an intentional change is a reviewed pull request rather than an

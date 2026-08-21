@@ -211,9 +211,9 @@ Note the ADO topology differs from GitHub Actions in two places:
         ├── impact.yml              owned   (cargo-delta impact step)
         ├── job.yml                 owned-but-user-customizable
         │                                   (per-job wrapper; takes `name`,
-        │                                    `pool`, `steps`, `fetchDepth`,
-        │                                    `artifacts`; users edit to inject
-        │                                    1ESPT `templateContext:` etc.)
+        │                                    `pool`, `steps`, `artifacts`;
+        │                                    users edit to inject 1ESPT
+        │                                    `templateContext:` etc.)
         ├── bench-history-restore.yml owned (restore the benchmark history artifact)
         ├── bench-history-summary.yml owned (attach benchmark findings to the build summary)
         ├── pr-fast.yml             owned   (one step template per group)
@@ -235,8 +235,8 @@ customized by adopters whose ADO instance requires extension templates
 (1ES PT, SubstratePT, M365PT). Once a user edits it, the standard dirty-file
 flow kicks in — subsequent anvil updates Propose into a `.proposed` sibling
 rather than overwriting. The stages templates address the wrapper only via its
-parameter contract (`name`, `pool`, `steps`, `fetchDepth`, `artifacts`), so the
-wrapper can diverge arbitrarily without blocking stage-shape updates. See §4.1.
+parameter contract (`name`, `pool`, `steps`, `artifacts`), so the wrapper can
+diverge arbitrarily without blocking stage-shape updates. See §4.1.
 
 ## 3. Root pipelines
 
@@ -379,8 +379,13 @@ The contract is intentionally small and stable:
 | `name`      | `string`   | yes      | Job name; ADO derives the display name from it.                                                                                                                                        |
 | `pool`      | `object`   | yes      | Pool block, passed verbatim to ADO's `pool:` key. `linuxPool` and `windowsPool` at the stage level are object parameters, so users can override their shape (e.g. `{ name, os, image }` for 1ESPT). |
 | `steps`     | `stepList` | yes      | Body of the job. Templated step lists are fine — the wrapper splices them in via `${{ each step in parameters.steps }}: - ${{ step }}`.                                                |
-| `fetchDepth` | `string`  | no       | When set, the job checks out explicitly at this depth (`'0'` for full history) instead of taking the implicit default checkout. 1ESPT wrappers map it onto `templateContext.inputs` instead. |
 | `artifacts` | `object`   | no       | List of pipeline artifacts to publish. Each item: `{ name: string, path: string }`. Default wrapper appends one `PublishPipelineArtifact@1` per entry; 1ESPT wrappers translate the same list into `templateContext.outputs.pipelineArtifact` blocks. The stages templates don't need to know which backend they're targeting. |
+
+A job that needs a non-default checkout (depth, LFS) puts an explicit `checkout`
+step at the head of its own `steps` list rather than growing this contract. The
+contract stays frozen because a forked wrapper cannot be expected to declare a
+parameter added after the fork, and a stages template binding one would fail
+expansion for the entire pipeline.
 
 The default wrapper anvil ships is six lines of logic:
 
@@ -389,15 +394,11 @@ parameters:
   - { name: name, type: string }
   - { name: pool, type: object }
   - { name: steps, type: stepList }
-  - { name: fetchDepth, type: string, default: '' }
   - { name: artifacts, type: object, default: [] }
 jobs:
   - job: ${{ parameters.name }}
     pool: ${{ parameters.pool }}
     steps:
-      - ${{ if ne(parameters.fetchDepth, '') }}:
-          - checkout: self
-            fetchDepth: ${{ parameters.fetchDepth }}
       - ${{ each step in parameters.steps }}:
           - ${{ step }}
       - ${{ each artifact in parameters.artifacts }}:
@@ -416,10 +417,6 @@ jobs:
   - job: ${{ parameters.name }}
     pool: ${{ parameters.pool }}
     templateContext:
-      inputs:
-        - input: checkout
-          repository: self
-          fetchDepth: ${{ parameters.fetchDepth }}
       outputs:
         - ${{ each artifact in parameters.artifacts }}:
             - output: pipelineArtifact
@@ -839,8 +836,9 @@ own artifact (`bench-history-<leg>`).
 
 Each scheduled benchmark job:
 
-1. checks out with full history (the §4.1 wrapper's `fetchDepth` parameter; analysis
-   reads the commit graph);
+1. checks out with full history and LFS via an explicit `checkout` step at the head
+   of its own step list (analysis reads the commit graph; benchmark inputs may be
+   LFS-tracked);
 2. **restores** the history with `DownloadPipelineArtifact@2`
    (`buildVersionToDownload: latestFromBranch`, the default branch); the first run
    finds none and starts empty;

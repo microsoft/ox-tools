@@ -118,34 +118,46 @@ stages:
       # publishes the updated store at the end of the job -- including
       # when the analysis failed the job, so the samples collected while
       # the pipeline is red are not lost.
+      #
+      # The explicit `checkout` leads the step list rather than going
+      # through a wrapper parameter: `steps/job.yml` is the file adopters
+      # fork for 1ESPT and friends, so binding a parameter their wrapper
+      # does not declare would fail template expansion for the whole
+      # pipeline. An explicit checkout step needs nothing from the wrapper
+      # and replaces the implicit default checkout.
       - template: steps/job.yml
         parameters:
           name: linux
           pool: ${{ parameters.linuxPool }}
-          # The analysis orders each series by first-parent commit
-          # topology and locates the merge-base, so it needs the whole
-          # commit graph.
-          fetchDepth: '0'
-          artifacts:
-            - name: bench-history-linux
-              path: target/anvil/bench-history
           steps:
+            # The analysis orders each series by first-parent commit
+            # topology and locates the merge-base, so it needs the whole
+            # commit graph. LFS matters because benchmark inputs can be
+            # LFS-tracked and would otherwise arrive as pointer files.
+            - checkout: self
+              fetchDepth: 0
+              lfs: true
             - template: steps/bench-history-restore.yml
               parameters:
                 artifact: bench-history-linux
             - template: steps/scheduled-benchmarks.yml
             - template: steps/bench-history-summary.yml
+            - template: steps/bench-history-publish.yml
+              parameters:
+                artifact: bench-history-linux
       - template: steps/job.yml
         parameters:
           name: windows
           pool: ${{ parameters.windowsPool }}
-          fetchDepth: '0'
-          artifacts:
-            - name: bench-history-windows
-              path: target/anvil/bench-history
           steps:
+            - checkout: self
+              fetchDepth: 0
+              lfs: true
             - template: steps/bench-history-restore.yml
               parameters:
                 artifact: bench-history-windows
             - template: steps/scheduled-benchmarks.yml
             - template: steps/bench-history-summary.yml
+            - template: steps/bench-history-publish.yml
+              parameters:
+                artifact: bench-history-windows
