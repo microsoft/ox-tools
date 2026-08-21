@@ -443,7 +443,7 @@ a CI shell and threading the result between jobs as environment variables.
 
 | Artifact                     | Purpose                                                                 |
 |------------------------------|-------------------------------------------------------------------------|
-| `snapshots/baseline.json`    | cargo-delta snapshot of the base ref. Cached, keyed on the base commit sha (`baseline.sha`) — the expensive throwaway-worktree snapshot is only retaken when the base actually moves. |
+| `snapshots/baseline.json`    | cargo-delta snapshot of the base ref. Cached, keyed on the composite of the base commit sha **and** the effective `.delta.toml` identity (`baseline.sha` stores `<base-sha> <config-hash>`) — the expensive throwaway-worktree snapshot is retaken when the base moves *or* the cargo-delta config changes, so the baseline is never diffed against a current snapshot captured under different rules. |
 | `snapshots/current.json`     | cargo-delta snapshot of the working tree. Cached, keyed on the HEAD sha (`current.state`); the dirty-tree guard widens instead of snapshotting, so a snapshotted tree always corresponds exactly to HEAD. |
 | `impact.json`                | the `cargo delta impact --format json` report (the durable source of truth; `{}` when nothing changed). |
 | `include_<tier>.txt`         | the pre-projected per-tier scope string (see below), one file per tier. |

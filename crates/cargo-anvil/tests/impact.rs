@@ -342,6 +342,64 @@ fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
 }
 
 #[test]
+fn baseline_regenerates_when_delta_config_changes_without_moving_the_base() {
+    if !tools_available() {
+        return;
+    }
+    // Regression: the baseline cache must be keyed on the *effective cargo-delta
+    // config identity* as well as the base sha. cargo-delta snapshots capture
+    // WHAT they capture according to `.delta.toml` (file_exclude / [parser] /
+    // assume_patterns / ...). If the baseline were keyed on the base sha alone,
+    // a committed `.delta.toml` edit -- which moves HEAD but NOT the base ref --
+    // would regenerate the *current* snapshot under the new config while the
+    // warm baseline stayed under the OLD config, and `cargo delta impact` would
+    // then diff two snapshots taken under different rules and silently mis-scope.
+    let tmp = workspace();
+    let root = tmp.path();
+
+    // Commit an initial `.delta.toml`. It must be committed (not left in the
+    // working tree) or the dirty-tree guard would widen and skip snapshotting.
+    let config = root.join(".delta.toml");
+    write(&config, "file_exclude_patterns = [\"target\", \"*.md\"]\n");
+    git(root, &["add", ".delta.toml"]);
+    git(root, &["commit", "-q", "-m", "add delta config"]);
+
+    // First run captures the baseline under config v1.
+    let first = run_impact(root);
+    assert!(
+        first.contains("snapshotting baseline"),
+        "first run with a config present should snapshot the baseline:\n{first}"
+    );
+
+    // Sanity: the base ref is genuinely NOT moving across the config edit, so a
+    // sha-only key would treat the stale baseline as fresh.
+    let base_before = git_stdout(root, &["rev-parse", "origin/master"]);
+
+    // Change the config and commit it. This advances HEAD (so `current`
+    // regenerates) but leaves origin/master where it was.
+    write(&config, "file_exclude_patterns = [\"target\", \"*.md\", \"*.png\"]\n");
+    git(root, &["add", ".delta.toml"]);
+    git(root, &["commit", "-q", "-m", "change delta config"]);
+    assert_eq!(
+        git_stdout(root, &["rev-parse", "origin/master"]),
+        base_before,
+        "the base ref must not move across the config edit (that is the whole point)"
+    );
+
+    // The config change alone must invalidate the baseline: without the
+    // composite key this would report "baseline snapshot up to date".
+    let after = run_impact(root);
+    assert!(
+        after.contains("snapshotting baseline"),
+        "a changed `.delta.toml` must regenerate the baseline even though the base ref did not move:\n{after}"
+    );
+    assert!(
+        !after.contains("baseline snapshot up to date"),
+        "the stale (old-config) baseline must NOT be reused after a config change:\n{after}"
+    );
+}
+
+#[test]
 fn impact_empty_output_when_head_equals_base() {
     if !tools_available() {
         return;
