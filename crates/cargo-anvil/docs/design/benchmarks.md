@@ -107,13 +107,12 @@ the build summary and to a findings file. The emitted findings include cbh's
 topology-accurate trend chart, so the reviewer's surface is self-contained —
 enough to decide *fix or bless* without reproducing the run.
 
-The failure itself is reported by whatever mechanism the repo already has for a
-failed scheduled build: notification subscriptions on Azure DevOps, GitHub's own
-scheduled-run failure notifications (or an adopter-supplied publisher) on GitHub
-Actions. anvil generates no notifier of its own for this. The subsystem
-contributes the *detail* on the build summary rather than a notification channel,
-so a regression reaches a human exactly the way every other scheduled failure
-does.
+The failure itself is reported by whatever mechanism the backend already uses for a
+failed scheduled build: notification subscriptions on Azure DevOps, and on GitHub
+Actions the scheduled tier's own `publish-failure` job, which `scheduled-benchmarks`
+is one of the dependencies of. This subsystem contributes the *detail* on the build
+summary rather than a notification channel of its own, so a regression reaches a
+human exactly the way every other scheduled failure does.
 
 A sustained regression re-fails every run until it is fixed or blessed, so red
 stays meaningful only under the discipline that the build is always returned to

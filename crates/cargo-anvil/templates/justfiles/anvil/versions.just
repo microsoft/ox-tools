@@ -11,10 +11,9 @@
 #   - On install (`-install` recipes): exactly this version (`=<pin>` for
 #     cargo subcommands, exact ref for rustup toolchains). Pulling
 #     "latest-matching" at install time is a cloud-workflow reproducibility risk --
-#     an upstream release between yesterday's green build and today's
-#     PR can break things (cargo-spellcheck 0.15.7's em-dash regression
-#     is the canonical case). The `=` constraint locks the install to
-#     the version the catalog was validated against.
+#     an upstream release between yesterday's green build and today's PR can
+#     change behavior. The `=` constraint locks the install to the version the
+#     catalog was validated against.
 #   - On validate-prereqs (`-validate-prereqs` recipes): the installed
 #     version must be `>= <pin>`. A user who has manually upgraded a
 #     tool for their own reasons (e.g. needing an unreleased bugfix)

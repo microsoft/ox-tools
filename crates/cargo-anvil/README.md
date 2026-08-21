@@ -95,6 +95,13 @@ runs perform impact analysis (via [`cargo-delta`][__link0])
 and run each check only over the affected packages, whereas a local
 `just anvil-pr` runs every check over the whole workspace.
 
+The generated GitHub scheduled workflow publishes failures as GitHub
+issues. On failure, it best-effort reuses an open marker-owned issue and
+comments when later scheduled runs also fail. A maintainer closes the issue
+after resolving the incident; successful runs do not close it automatically.
+Repositories can disable this behavior by setting the
+`ANVIL_PUBLISH_FAILURE_ISSUE` Actions repository variable to `false`.
+
 ### Containerized local checks
 
 Anvil can run any generated recipe in a content-addressed Linux container.
@@ -293,6 +300,16 @@ Four escape valves, in increasing severity:
    region. The next `update` detects the dirt and writes a
    `.anvil-proposed` sibling instead of overwriting.
 
+#### Scheduled failure issue publication (GitHub)
+
+The generated GitHub scheduled workflow creates or updates
+`[Anvil] Scheduled checks failed` when a scheduled group fails.
+To disable this behavior without editing an Anvil-owned workflow,
+set the Actions repository variable `ANVIL_PUBLISH_FAILURE_ISSUE`
+to `false` under **Settings → Secrets and variables → Actions →
+Variables**. Removing the variable or setting any other value
+restores the default publication behavior.
+
 ### In-tree tool customization
 
 anvil follows a few source-level and `Cargo.toml` conventions so you
@@ -428,7 +445,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbmgw9ngCRh88bD4YZ-TeBeC0bbYgbbm-bkRgbBdGaf8tAHeZhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbg_i30X-3gcQbjz6zC6ezNMsbVz7h7GJnnrkbJGtVmGgCMnJhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

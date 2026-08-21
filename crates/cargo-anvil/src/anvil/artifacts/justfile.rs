@@ -298,15 +298,25 @@ mod tests {
     #[test]
     fn spellcheck_checks_source_prerequisites_before_source_builds() {
         assert!(
-            TOOLS_JUST.contains(
-                "_install-tool \"cargo-spellcheck\" cargo_spellcheck_version installer \"anvil-tool-cargo-spellcheck-source-deps-check\""
-            ),
+            TOOLS_JUST.contains("if ($sourcePrereq)"),
+            "binstall compile strategy must only be disabled for tools with source prerequisites"
+        );
+        assert!(
+            TOOLS_JUST.contains("$binstallArgs += @('--disable-strategies', 'compile')"),
+            "binstall must not compile before Anvil checks source prerequisites"
+        );
+        assert!(
+            TOOLS_JUST.contains("anvil-tool-cargo-spellcheck-source-deps-check"),
             "spellcheck installer must run libclang validation before source builds"
         );
         let checks = all_check_bodies();
         assert!(
             !checks.contains("anvil-spellcheck-setup installer=\"install\": anvil-tool-cargo-spellcheck-source-deps-check"),
             "spellcheck setup must not require libclang before binstall"
+        );
+        assert!(
+            !TOOLS_JUST.contains("ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64") && !checks.contains("ANVIL_SPELLCHECK_SKIP_UNSUPPORTED_ARM64"),
+            "spellcheck must run normally on ARM64"
         );
     }
 
