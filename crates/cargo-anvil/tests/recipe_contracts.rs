@@ -872,3 +872,255 @@ fn bench_history_bless_rejects_malformed_entries() {
         assert_failed(&output, label);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Benchmark-history restore blocks.
+//
+// These carry the most control flow in the benchmark wiring, and the invariant
+// they exist for -- an operational failure must never be mistaken for "no
+// history yet" -- is invisible to a `contains` assertion on the emitted YAML.
+// Both are therefore extracted from their template and executed against mocked
+// transports.
+// ---------------------------------------------------------------------------
+
+const SCHEDULED_IMPL: &str = include_str!("../templates/github/scheduled-impl-workflow.yml");
+const ADO_RESTORE: &str = include_str!("../templates/ado/steps/bench-history-restore.yml");
+
+/// Extracts a block scalar (`run: |` / `pwsh: |`) from `yaml`, starting the
+/// search at `after` and dedenting the body.
+fn block_scalar(yaml: &str, after: &str, key: &str) -> String {
+    let start = yaml.find(after).unwrap_or_else(|| panic!("marker '{after}' not found"));
+    let rest = &yaml[start..];
+    let key_offset = rest.find(key).unwrap_or_else(|| panic!("key '{key}' not found after '{after}'"));
+    let key_line_start = rest[..key_offset].rfind('\n').map_or(0, |index| index + 1);
+    let indent = key_offset - key_line_start;
+
+    let body = &rest[key_offset + key.len()..];
+    let mut lines = Vec::new();
+    for line in body.lines().skip(1) {
+        let line_indent = line.len() - line.trim_start().len();
+        if !line.trim().is_empty() && line_indent <= indent {
+            break;
+        }
+        lines.push(if line.len() > indent + 2 { &line[indent + 2..] } else { "" });
+    }
+    lines.join("\n")
+}
+
+fn git_bash() -> Option<&'static str> {
+    let candidate = r"C:\Program Files\Git\bin\bash.exe";
+    Path::new(candidate).is_file().then_some(candidate)
+}
+
+/// Runs the GitHub restore block with a stubbed `gh`.
+///
+/// `runs` are the run ids the listing yields, newest first; `artifact_runs`
+/// are those the artifacts API reports as carrying the artifact.
+fn run_github_restore(runs: &str, artifact_runs: &str, download_exit: &str) -> (TempDir, Output, String, String) {
+    let bash = git_bash().expect("git bash checked by caller");
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    write(
+        &root.join("bin/gh"),
+        r#"#!/usr/bin/env bash
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  for id in $FAKE_GH_RUNS; do echo "$id"; done
+  exit 0
+fi
+if [ "$1" = "api" ]; then
+  for arg in "$@"; do
+    case "$arg" in
+      */actions/runs/*/artifacts)
+        rid="${arg##*/runs/}"
+        rid="${rid%%/artifacts}"
+        for id in $FAKE_GH_ARTIFACT_RUNS; do
+          if [ "$id" = "$rid" ]; then echo "artifact-$id"; exit 0; fi
+        done
+        ;;
+    esac
+  done
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "download" ]; then
+  exit "${FAKE_GH_DOWNLOAD_EXIT:-0}"
+fi
+exit 0
+"#,
+    );
+
+    let script = block_scalar(SCHEDULED_IMPL, "- name: Restore benchmark history", "run: |");
+    write(&root.join("restore.sh"), &script);
+
+    let github_env = root.join("env.txt");
+    let summary = root.join("summary.md");
+    write(&github_env, "");
+    write(&summary, "");
+
+    let output = Command::new(bash)
+        .arg("restore.sh")
+        .current_dir(root)
+        .env("PATH", format!("{}:/usr/bin:/bin", root.join("bin").display()).replace('\\', "/"))
+        .env("FAKE_GH_RUNS", runs)
+        .env("FAKE_GH_ARTIFACT_RUNS", artifact_runs)
+        .env("FAKE_GH_DOWNLOAD_EXIT", download_exit)
+        .env("ARTIFACT", "bench-history-linux")
+        .env("DEFAULT_BRANCH", "main")
+        .env("WORKFLOW", "anvil-scheduled")
+        .env("REPO", "owner/repo")
+        .env("WINDOW", "30")
+        .env("GITHUB_ENV", &github_env)
+        .env("GITHUB_STEP_SUMMARY", &summary)
+        .output()
+        .expect("bash runs the extracted restore block");
+
+    let env_text = std::fs::read_to_string(&github_env).unwrap_or_default();
+    let summary_text = std::fs::read_to_string(&summary).unwrap_or_default();
+    (tmp, output, env_text, summary_text)
+}
+
+#[test]
+fn github_restore_separates_absence_from_failure() {
+    if git_bash().is_none() {
+        eprintln!("skipping: git bash not installed");
+        return;
+    }
+
+    // (1) The newest run has no artifact; an older one does. The walk must
+    // reach it rather than cold-starting on the first miss.
+    let (_tmp, output, env, _summary) = run_github_restore("30 20 10", "10", "0");
+    assert!(
+        output.status.success(),
+        "walking back should succeed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(env.contains("ANVIL_BENCH_RESTORE=restored"), "env:\n{env}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("run 10"),
+        "should name the run it restored from:\n{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    // (2) No run in the window carries it: a genuine cold start, and it must
+    // be visible on the summary rather than only in the log.
+    let (_tmp, output, env, summary) = run_github_restore("30 20 10", "", "0");
+    assert!(output.status.success());
+    assert!(env.contains("ANVIL_BENCH_RESTORE=cold-start"), "env:\n{env}");
+    assert!(summary.contains("cold start"), "summary:\n{summary}");
+
+    // (3) The artifact exists but the download fails. This is the branch whose
+    // silent reintroduction re-creates the history-loss bug: it must fail and
+    // leave no publishable restore state.
+    let (_tmp, output, env, _summary) = run_github_restore("30 20 10", "30", "1");
+    assert_failed(&output, "a failing download");
+    assert!(
+        !env.contains("ANVIL_BENCH_RESTORE"),
+        "a failed restore must not mark a publishable state:\n{env}"
+    );
+}
+
+/// Runs the ADO restore block with mocked REST/download/extract cmdlets.
+///
+/// `artifact_builds` are the build ids whose artifact query succeeds; every
+/// other build answers 404 (absence). `failure` injects an operational fault:
+/// "query" (non-404 status), "download", or "extract".
+fn run_ado_restore(builds: &str, artifact_builds: &str, failure: &str) -> (TempDir, Output, String) {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    let body = block_scalar(ADO_RESTORE, "steps:", "pwsh: |")
+        .replace("${{ parameters.artifact }}", "bench-history-linux")
+        .replace("${{ parameters.path }}", "store")
+        .replace("${{ parameters.window }}", "30");
+
+    // Function definitions shadow cmdlets of the same name, so the block runs
+    // unchanged against these stand-ins.
+    let prelude = r#"
+# An exception whose Response.StatusCode.value__ the block can read, which is
+# how it tells absence (404) from an operational failure (anything else).
+class FakeHttpException : System.Exception {
+    [object]$Response
+    FakeHttpException([int]$status) : base("http $status") {
+        $this.Response = [pscustomobject]@{ StatusCode = [pscustomobject]@{ value__ = $status } }
+    }
+}
+function Invoke-RestMethod {
+    param([string]$Uri, $Headers)
+    if ($Uri -notlike '*/artifacts*') {
+        $ids = $env:FAKE_ADO_BUILDS -split ' ' | Where-Object { $_ }
+        return [pscustomobject]@{ value = @($ids | ForEach-Object { [pscustomobject]@{ id = $_ } }) }
+    }
+    $buildId = ($Uri -replace '.*/builds/', '') -replace '/artifacts.*', ''
+    $carries = ($env:FAKE_ADO_ARTIFACT_BUILDS -split ' ') -contains $buildId
+    if (-not $carries) { throw [FakeHttpException]::new(404) }
+    if ($env:FAKE_ADO_FAILURE -eq 'query') { throw [FakeHttpException]::new(500) }
+    return [pscustomobject]@{ resource = [pscustomobject]@{ downloadUrl = "https://example/$buildId" } }
+}
+function Invoke-WebRequest {
+    param([string]$Uri, $Headers, [string]$OutFile)
+    if ($env:FAKE_ADO_FAILURE -eq 'download') { throw 'download failed' }
+    Set-Content -LiteralPath $OutFile -Value 'zip'
+}
+function Expand-Archive {
+    param([string]$LiteralPath, [string]$DestinationPath, [switch]$Force)
+    if ($env:FAKE_ADO_FAILURE -eq 'extract') { throw 'corrupt archive' }
+    New-Item -ItemType Directory -Force -Path $DestinationPath | Out-Null
+    Set-Content -LiteralPath (Join-Path $DestinationPath 'run.json') -Value '{}'
+}
+"#;
+
+    write(&root.join("restore.ps1"), &format!("{prelude}\n{body}"));
+
+    let output = Command::new("pwsh")
+        .args(["-NoProfile", "-File", "restore.ps1"])
+        .current_dir(root)
+        .env("FAKE_ADO_BUILDS", builds)
+        .env("FAKE_ADO_ARTIFACT_BUILDS", artifact_builds)
+        .env("FAKE_ADO_FAILURE", failure)
+        .env("SYSTEM_ACCESSTOKEN", "token")
+        .env("SYSTEM_COLLECTIONURI", "https://example/")
+        .env("SYSTEM_TEAMPROJECTID", "project")
+        .env("SYSTEM_DEFINITIONID", "7")
+        .env("BUILD_SOURCEBRANCH", "refs/heads/main")
+        .env("BUILD_BUILDID", "999")
+        .output()
+        .expect("pwsh runs the extracted restore block");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    (tmp, output, stdout)
+}
+
+#[test]
+fn ado_restore_separates_absence_from_failure() {
+    if Command::new("pwsh").arg("--version").output().is_err() {
+        eprintln!("skipping: pwsh not installed");
+        return;
+    }
+
+    // A 404 on the newest build walks back to an older one that has it.
+    let (_tmp, output, stdout) = run_ado_restore("30 20 10", "10", "");
+    assert!(
+        output.status.success(),
+        "walking back should succeed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("restoring"), "stdout:\n{stdout}");
+    assert!(stdout.contains("ANVIL_BENCH_RESTORE]restored"), "stdout:\n{stdout}");
+
+    // Nothing in the window carries it: a genuine cold start.
+    let (_tmp, output, stdout) = run_ado_restore("30 20 10", "", "");
+    assert!(output.status.success());
+    assert!(stdout.contains("ANVIL_BENCH_RESTORE]cold-start"), "stdout:\n{stdout}");
+
+    // Every operational fault must fail without marking a publishable state,
+    // which is what the guarded publish depends on to avoid overwriting a
+    // good chain with a truncated store.
+    for failure in ["query", "download", "extract"] {
+        let (_tmp, output, stdout) = run_ado_restore("30 20 10", "30", failure);
+        assert_failed(&output, failure);
+        assert!(
+            !stdout.contains("ANVIL_BENCH_RESTORE]"),
+            "{failure} must not set a restore state:\n{stdout}"
+        );
+    }
+}

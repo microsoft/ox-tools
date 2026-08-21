@@ -448,11 +448,30 @@ The reusable workflow declares a small input set so the root workflow can pass o
 | `windows_runner`     | string | `windows-latest`     | Runner label for x86_64 Windows jobs.                  |
 | `linux_arm_runner`   | string | `ubuntu-24.04-arm`   | Runner label for aarch64 Linux jobs.                   |
 | `windows_arm_runner` | string | `windows-11-arm`     | Runner label for aarch64 Windows jobs.                 |
+| `bench_machine_key`  | string | *(empty)*            | Machine key the benchmark history is partitioned by (scheduled workflow only). |
 
-The input surface is intentionally narrow: only per-leg *runner labels* are exposed,
-because swapping in self-hosted runners is the one common need that doesn't require
-otherwise touching the workflow. The OS matrix shape (which legs run) is fixed in the
-workflow source — see the discussion under the PR snippet above.
+The input surface is **per-leg runner labels plus a per-capability knob where the
+capability's behaviour depends on the runner fleet rather than on the source tree**.
+Runner labels are exposed because swapping in self-hosted runners is the one common
+need that doesn't require otherwise touching the workflow. `bench_machine_key` earns
+an input on the same test: benchmark history is partitioned by a hardware
+fingerprint, so a heterogeneous pool can fragment a series into partitions too sparse
+to analyze, and only the adopter knows whether their fleet is uniform enough to
+substitute a stable pool label. That is a property of *their* runners, invisible to
+the catalog, so no recipe default or env var can supply it.
+
+A knob that fails that test — anything the catalog could decide, or that varies per
+developer rather than per fleet — stays an env var read by the recipe
+(`ANVIL_BENCH_HISTORY_STORE` is the local-only counterexample) rather than growing
+this surface.
+
+Setting an input means editing the generated root workflow, which takes ownership of
+it through the dirty-file flow (§3): subsequent updates Propose into an
+`.anvil-proposed` sibling instead of overwriting. That cost is real and is why the
+surface stays small.
+
+The OS matrix shape (which legs run) is fixed in the workflow source — see the
+discussion under the PR snippet above.
 
 The reusable workflows also declare an optional `workflow_call` secret
 `CODECOV_TOKEN`. See §10 (Coverage upload) for how it's used.

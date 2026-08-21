@@ -1702,7 +1702,10 @@ _anvil-bench-history-bless store blessings:
     $tmpDir = $env:RUNNER_TEMP
     if (-not $tmpDir) { $tmpDir = $env:AGENT_TEMPDIRECTORY }
     if (-not $tmpDir) { $tmpDir = [System.IO.Path]::GetTempPath() }
-    $listJson = Join-Path $tmpDir 'anvil-bench-blessings.json'
+    # Process-scoped: two jobs sharing a machine (matrix legs on a self-hosted
+    # agent, or concurrent local runs) would otherwise race on one filename and
+    # read each other's listing.
+    $listJson = Join-Path $tmpDir "anvil-bench-blessings-$PID.json"
 
     & cargo bench-history list blessings --all --local="$store" `
         --since 1970-01-01 --no-text --json $listJson @key

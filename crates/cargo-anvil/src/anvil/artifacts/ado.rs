@@ -25,9 +25,6 @@ const JOB_WRAPPER: &str = include_str!("../../../templates/ado/steps/job.yml");
 /// Embedded body of the benchmark-history restore step template.
 const BENCH_HISTORY_RESTORE_STEP: &str = include_str!("../../../templates/ado/steps/bench-history-restore.yml");
 
-/// Embedded body of the benchmark-history publish step template.
-const BENCH_HISTORY_PUBLISH_STEP: &str = include_str!("../../../templates/ado/steps/bench-history-publish.yml");
-
 /// Embedded body of the benchmark-findings build-summary step template.
 const BENCH_HISTORY_SUMMARY_STEP: &str = include_str!("../../../templates/ado/steps/bench-history-summary.yml");
 
@@ -132,17 +129,6 @@ pub fn bench_history_summary() -> Artifact {
     )
 }
 
-/// `.pipelines/anvil/steps/bench-history-publish.yml` — publishes the
-/// updated benchmark history as this leg's artifact.
-#[must_use]
-pub fn bench_history_publish() -> Artifact {
-    Artifact::backend_file(
-        Backend::Ado,
-        ".pipelines/anvil/steps/bench-history-publish.yml",
-        BENCH_HISTORY_PUBLISH_STEP,
-    )
-}
-
 /// `.pipelines/anvil/pr.yml` — the PR-tier stages template.
 #[must_use]
 pub fn pr_stages() -> Artifact {
@@ -220,7 +206,6 @@ pub(crate) fn all() -> Vec<Artifact> {
         job_wrapper(),
         bench_history_restore(),
         bench_history_summary(),
-        bench_history_publish(),
     ];
     for (group, path) in GROUP_STEPS {
         out.push(Artifact::backend_file(Backend::Ado, path, render_group_step(group)));
@@ -435,7 +420,17 @@ mod tests {
         }
         assert!(SCHEDULED_STAGES.contains("template: steps/bench-history-restore.yml"));
         assert!(SCHEDULED_STAGES.contains("template: steps/bench-history-summary.yml"));
-        assert!(SCHEDULED_STAGES.contains("template: steps/bench-history-publish.yml"));
+        // The publish goes through the wrapper's `artifacts` contract rather
+        // than emitting its own task, so a forked wrapper still performs the
+        // translation it exists for. The guard rides along as a `condition`.
+        assert_eq!(
+            SCHEDULED_STAGES
+                .matches("condition: and(succeededOrFailed(), ne(variables['ANVIL_BENCH_RESTORE'], ''))")
+                .count(),
+            2,
+            "each leg's artifact entry carries the restore guard"
+        );
+        assert!(JOB_WRAPPER.contains("${{ if artifact.condition }}"));
         // Take the newest build carrying the artifact whatever its outcome:
         // restoring only from green builds would drop every sample collected
         // while the pipeline was red from a regression.
@@ -449,11 +444,11 @@ mod tests {
             !BENCH_HISTORY_RESTORE_STEP.contains("continueOnError"),
             "a blanket continueOnError would read every failure as a cold start"
         );
-        // The publish is guarded on the restore having reached a known state.
-        assert!(BENCH_HISTORY_PUBLISH_STEP.contains("ne(variables['ANVIL_BENCH_RESTORE'], '')"));
-        assert!(BENCH_HISTORY_PUBLISH_STEP.contains("succeededOrFailed()"));
         assert!(BENCH_HISTORY_SUMMARY_STEP.contains("##vso[task.uploadsummary]"));
         assert!(BENCH_HISTORY_SUMMARY_STEP.contains("condition: succeededOrFailed()"));
+        // The machine-key escape hatch is an input on this backend too.
+        assert!(SCHEDULED_STAGES.contains("name: benchMachineKey"));
+        assert!(SCHEDULED_STAGES.contains("ANVIL_BENCH_MACHINE_KEY: ${{ parameters.benchMachineKey }}"));
     }
 
     #[test]

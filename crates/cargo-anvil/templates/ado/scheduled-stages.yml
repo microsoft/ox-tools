@@ -13,6 +13,13 @@ parameters:
   - name: windowsPool
     type: object
     default: { vmImage: windows-latest }
+  - name: benchMachineKey
+    type: string
+    # Machine key the benchmark history is partitioned by. Empty uses
+    # cargo-bench-history's hardware fingerprint; set a stable pool label
+    # when the agent pool is heterogeneous enough to fragment a series into
+    # partitions too sparse to analyze.
+    default: ''
 
 stages:
   - stage: scheduled_test
@@ -110,14 +117,22 @@ stages:
   - stage: scheduled_benchmarks
     displayName: anvil scheduled-benchmarks
     dependsOn: []
+    variables:
+      # Read by the bench-history recipe; empty means "use the hardware
+      # fingerprint". ADO exports pipeline variables as environment
+      # variables, so this reaches the recipe without further plumbing.
+      ANVIL_BENCH_MACHINE_KEY: ${{ parameters.benchMachineKey }}
     jobs:
       # Benchmark regression detection. OS scope matches
       # scheduled-exhaustive. The history is partitioned per machine, so
       # each leg carries its own artifact rather than sharing one name.
-      # The restore step runs first; the wrapper's `artifacts` contract
-      # publishes the updated store at the end of the job -- including
-      # when the analysis failed the job, so the samples collected while
-      # the pipeline is red are not lost.
+      #
+      # The publish goes through the wrapper's `artifacts` contract like
+      # every other job, carrying a `condition`: the store is only a valid
+      # continuation of the chain once the restore reached a known state,
+      # so an operational restore failure must not overwrite good history
+      # with a truncated snapshot. Failed runs still publish -- a flagged
+      # regression fails the job, and those samples belong in the history.
       #
       # The explicit `checkout` leads the step list rather than going
       # through a wrapper parameter: `steps/job.yml` is the file adopters
@@ -129,6 +144,10 @@ stages:
         parameters:
           name: linux
           pool: ${{ parameters.linuxPool }}
+          artifacts:
+            - name: bench-history-linux
+              path: target/anvil/bench-history
+              condition: and(succeededOrFailed(), ne(variables['ANVIL_BENCH_RESTORE'], ''))
           steps:
             # The analysis orders each series by first-parent commit
             # topology and locates the merge-base, so it needs the whole
@@ -142,13 +161,14 @@ stages:
                 artifact: bench-history-linux
             - template: steps/scheduled-benchmarks.yml
             - template: steps/bench-history-summary.yml
-            - template: steps/bench-history-publish.yml
-              parameters:
-                artifact: bench-history-linux
       - template: steps/job.yml
         parameters:
           name: windows
           pool: ${{ parameters.windowsPool }}
+          artifacts:
+            - name: bench-history-windows
+              path: target/anvil/bench-history
+              condition: and(succeededOrFailed(), ne(variables['ANVIL_BENCH_RESTORE'], ''))
           steps:
             - checkout: self
               fetchDepth: 0
@@ -158,6 +178,3 @@ stages:
                 artifact: bench-history-windows
             - template: steps/scheduled-benchmarks.yml
             - template: steps/bench-history-summary.yml
-            - template: steps/bench-history-publish.yml
-              parameters:
-                artifact: bench-history-windows

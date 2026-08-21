@@ -379,7 +379,7 @@ The contract is intentionally small and stable:
 | `name`      | `string`   | yes      | Job name; ADO derives the display name from it.                                                                                                                                        |
 | `pool`      | `object`   | yes      | Pool block, passed verbatim to ADO's `pool:` key. `linuxPool` and `windowsPool` at the stage level are object parameters, so users can override their shape (e.g. `{ name, os, image }` for 1ESPT). |
 | `steps`     | `stepList` | yes      | Body of the job. Templated step lists are fine — the wrapper splices them in via `${{ each step in parameters.steps }}: - ${{ step }}`.                                                |
-| `artifacts` | `object`   | no       | List of pipeline artifacts to publish. Each item: `{ name: string, path: string }`. Default wrapper appends one `PublishPipelineArtifact@1` per entry; 1ESPT wrappers translate the same list into `templateContext.outputs.pipelineArtifact` blocks. The stages templates don't need to know which backend they're targeting. |
+| `artifacts` | `object`   | no       | List of pipeline artifacts to publish. Each item: `{ name: string, path: string, condition: string (optional) }`. Default wrapper appends one `PublishPipelineArtifact@1` per entry; 1ESPT wrappers translate the same list into `templateContext.outputs.pipelineArtifact` blocks. `condition` defaults to `succeededOrFailed()`; a caller that must not publish in some states sets it, and a fork carries it through to whatever output shape it emits. The stages templates don't need to know which backend they're targeting. |
 
 A job that needs a non-default checkout (depth, LFS) puts an explicit `checkout`
 step at the head of its own `steps` list rather than growing this contract. The
@@ -404,7 +404,10 @@ jobs:
       - ${{ each artifact in parameters.artifacts }}:
           - task: PublishPipelineArtifact@1
             displayName: Publish ${{ artifact.name }}
-            condition: succeededOrFailed()
+            ${{ if artifact.condition }}:
+              condition: ${{ artifact.condition }}
+            ${{ else }}:
+              condition: succeededOrFailed()
             inputs:
               targetPath: ${{ artifact.path }}
               artifact: ${{ artifact.name }}
@@ -422,7 +425,10 @@ jobs:
             - output: pipelineArtifact
               targetPath: ${{ artifact.path }}
               artifactName: ${{ artifact.name }}
-              condition: succeededOrFailed()
+              ${{ if artifact.condition }}:
+                condition: ${{ artifact.condition }}
+              ${{ else }}:
+                condition: succeededOrFailed()
     steps:
       - ${{ each step in parameters.steps }}:
           - ${{ step }}
@@ -839,19 +845,33 @@ Each scheduled benchmark job:
 1. checks out with full history and LFS via an explicit `checkout` step at the head
    of its own step list (analysis reads the commit graph; benchmark inputs may be
    LFS-tracked);
-2. **restores** the history with `DownloadPipelineArtifact@2`
-   (`buildVersionToDownload: latestFromBranch`, the default branch); the first run
-   finds none and starts empty;
+2. **restores** the history with `steps/bench-history-restore.yml`, which walks the
+   pipeline's own builds on the branch newest-first
+   (`_apis/build/builds?…&queryOrder=finishTimeDescending`) and, per build, queries
+   the artifacts endpoint for this leg's artifact. A `404` means that build simply
+   has no such artifact and the walk continues; any other status is an operational
+   failure and fails the job. Finding none across the whole window is a genuine cold
+   start;
 3. applies any pending blessings, runs collect + analyze, writing findings to a
    findings file which a following step attaches to the build summary;
 4. **publishes** the updated store through the wrapper's `artifacts` parameter
-   (`{ name: bench-history-<leg>, path: <store> }`), which the default wrapper emits
-   as `PublishPipelineArtifact@1` and 1ESPT wrappers as a `pipelineArtifact` output.
+   (`{ name: bench-history-<leg>, path: <store>, condition: … }`), which the default
+   wrapper emits as `PublishPipelineArtifact@1` and 1ESPT wrappers as a
+   `pipelineArtifact` output.
 
-The restore admits failed and partially succeeded builds, which is what keeps the
-chain intact across a regression: a flagged regression fails the stage, so a
-success-only restore would discard every sample taken while the pipeline stayed red.
-The publish likewise runs whatever the job's outcome.
+`DownloadPipelineArtifact@2` is not used for the restore: `latestFromBranch` resolves
+a single build and does not walk, so a cancelled or never-publishing latest build
+would cold-start a store that still has usable history.
+
+The walk is outcome-agnostic, which is what keeps the chain intact across a
+regression: a flagged regression fails the stage, so a success-only restore would
+discard every sample taken while the pipeline stayed red. Publishing is likewise not
+limited to green runs, but it *is* conditioned on the restore having reached a known
+state — the `condition` on the artifact entry. An operational restore failure
+therefore neither continues silently nor overwrites a good chain with a truncated
+snapshot. That guard is the reason the `artifacts` contract carries an optional
+`condition` (§4.1) rather than the benchmark group emitting its own publish task,
+which would bypass the translation a forked wrapper performs.
 
 Surfacing is by **build failure**, not a PR comment — the regression is discovered
 after merge (see [benchmarks.md §5](./benchmarks.md)). The benchmark recipe exits
@@ -864,3 +884,8 @@ the findings remain in the build summary.
 
 Blessings are applied from a committed `.config/bench-blessings.toml` before analyze
 (step 3) — a reviewed pull request, not an out-of-band action.
+
+The machine key the history is partitioned by is a `benchMachineKey` parameter on the
+stages template, surfaced as a stage-level `ANVIL_BENCH_MACHINE_KEY` variable. Empty
+uses the hardware fingerprint; a stable pool label trades partition fidelity for
+density on a heterogeneous pool.
