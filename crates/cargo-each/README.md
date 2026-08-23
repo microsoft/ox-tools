@@ -4,6 +4,7 @@
 # Cargo-Each
 
 [![crates.io](https://img.shields.io/crates/v/cargo-each.svg)](https://crates.io/crates/cargo-each)
+[![docs.rs](https://docs.rs/cargo-each/badge.svg)](https://docs.rs/cargo-each)
 [![MSRV](https://img.shields.io/crates/msrv/cargo-each)](https://crates.io/crates/cargo-each)
 [![CI](https://github.com/microsoft/ox-tools/actions/workflows/main.yml/badge.svg?event=push)](https://github.com/microsoft/ox-tools/actions/workflows/main.yml)
 [![Coverage](https://codecov.io/gh/microsoft/ox-tools/graph/badge.svg?token=FCUG0EL5TI)](https://codecov.io/gh/microsoft/ox-tools)
@@ -122,6 +123,7 @@ Run one clippy invocation over a computed subset, skipping when it is empty:
 cargo each -p crate-a -p crate-b --once -- \
     cargo clippy {packages} --all-targets -- -D warnings
 ```
+
 
 <hr/>
 <sub>

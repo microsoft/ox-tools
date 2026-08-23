@@ -1,0 +1,42 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-gamma-attrs-impl"
+description = "Implementation of the inert attribute macros exposed by cargo-gamma-attrs"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["cargo", "mutation-testing", "testing"]
+categories = ["development-tools::testing"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-attrs-impl"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.cargo_check_external_types]
+# This implementation crate exists to provide proc-macro entry points, so its
+# public API necessarily accepts and returns proc-macro token streams.
+allowed_external_types = ["proc_macro2::TokenStream"]
+
+# HARD CONSTRAINT: this crate must not become a proc-macro crate.
+# A proc macro's code runs only inside rustc while some *other* crate is being compiled, which
+# puts it out of reach of both the coverage harness and the mutation runtime. Keeping the logic
+# in an ordinary library is the whole reason this crate exists — see the crate docs.
+
+[dependencies]
+proc-macro2 = { workspace = true, features = ["span-locations", "proc-macro"] }
+# `#[gamma::value(<expr>)]` promises its argument is one valid Rust expression, and only a real
+# expression parser can keep that promise. Checking it with tokens alone would accept things the
+# compiler later rejects at the expansion site, which is the diagnostic this crate exists to avoid.
+syn = { workspace = true, features = ["full", "parsing", "printing", "visit", "extra-traits", "clone-impls", "proc-macro"] }
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints

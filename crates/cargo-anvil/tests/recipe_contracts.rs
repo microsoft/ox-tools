@@ -347,7 +347,11 @@ fn semver_exit_code_contract_is_executed() {
     );
     assert!(!tmp.path().join("target/anvil/comments/semver.md").exists());
 
-    for output in ["has no lib target", "no library targets found"] {
+    for output in [
+        "has no lib target",
+        "no library targets found",
+        "version 1.0.0 is yanked: target/semver-checks/git-origin_main/crates/fixture",
+    ] {
         let bin_to_lib = run_just(
             tmp.path(),
             &["anvil-semver-check"],
