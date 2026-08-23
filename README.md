@@ -31,6 +31,7 @@ These are the crates built out of this repo:
 - [`cargo-each`](./crates/cargo-each/README.md) - A cargo subcommand that runs a command over a cargo-style selection of workspace members
 - [`cargo-ensure-no-cyclic-deps`](./crates/cargo_ensure_no_cyclic_deps/README.md) - A cargo subcommand to detect cyclic dependencies in workspace crates
 - [`cargo-ensure-no-default-features`](./crates/cargo-ensure-no-default-features/README.md) - A cargo subcommand that ensures dependencies are declared with default-features = false
+- [`cargo-gamma`](./crates/cargo-gamma/README.md) - Fast mutation testing for Rust
 - [`cargo-heather`](./crates/cargo-heather/README.md) - A cargo subcommand to validate license headers in Rust, TOML, PowerShell, Just, and env source files
 
 ## About this Repo
