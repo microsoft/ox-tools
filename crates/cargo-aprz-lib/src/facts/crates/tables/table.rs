@@ -275,7 +275,8 @@ macro_rules! define_rows {
     };
 }
 
-pub(crate) use {define_rows, define_table};
+pub(crate) use define_rows;
+pub(crate) use define_table;
 
 pub fn validate_table_header(mmap: &Mmap, max_ttl: Duration, now: DateTime<Utc>) -> Result<(u64, DateTime<Utc>)> {
     use ohno::bail;
