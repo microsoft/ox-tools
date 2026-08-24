@@ -3013,8 +3013,7 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-audit \
     anvil-udeps \
     anvil-semver-check \
-    anvil-external-types \
-    anvil-aprz
+    anvil-external-types
 
 # Group-level setup + validate-prereqs
 #
@@ -3039,8 +3038,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-audit-setup installer) \
     (anvil-udeps-setup installer) \
     (anvil-semver-check-setup installer) \
-    (anvil-external-types-setup installer) \
-    (anvil-aprz-setup installer)
+    (anvil-external-types-setup installer)
 
 # Validate prerequisites for the `anvil-pr-fast` recipe.
 [group("anvil-setup")]
@@ -3059,8 +3057,7 @@ anvil-pr-fast-validate-prereqs: \
     anvil-audit-validate-prereqs \
     anvil-udeps-validate-prereqs \
     anvil-semver-check-validate-prereqs \
-    anvil-external-types-validate-prereqs \
-    anvil-aprz-validate-prereqs
+    anvil-external-types-validate-prereqs
 
 === justfiles/anvil/groups/pr-mutants.just ===
 # Copyright (c) Microsoft Corporation.
@@ -3965,9 +3962,9 @@ anvil-tool-pwsh-validate-prereqs:
 # or no-op if it is already installed at or above that version. The
 # `installer` parameter selects between:
 #   - "install"  (cargo install --locked, pure-source). Default.
-#   - "binstall" (cargo binstall --no-confirm --locked, with cargo install
-#                 fallback if binstall fails). Bootstraps cargo-binstall
-#                 itself if not on PATH.
+#   - "binstall" (cargo binstall --no-confirm --locked, with a controlled
+#                 cargo install fallback for tools that declare source
+#                 prerequisites). Bootstraps cargo-binstall itself if not on PATH.
 # `source_prereq`, when set, runs immediately before a source installation,
 # including a binstall fallback.
 [script("pwsh", "-NoProfile")]
@@ -4015,7 +4012,15 @@ _install-tool name version installer source_prereq="":
                 exit $LASTEXITCODE
             }
         }
-        cargo binstall --no-confirm --locked $name --version "=$version"
+        # Keep source builds behind Anvil's prerequisite check instead of
+        # allowing binstall to compile before that check can run. Tools with
+        # no source prerequisite may still use binstall's compile strategy.
+        $binstallArgs = @('binstall', '--no-confirm', '--locked')
+        if ($sourcePrereq) {
+            $binstallArgs += @('--disable-strategies', 'compile')
+        }
+        $binstallArgs += @($name, '--version', "=$version")
+        cargo @binstallArgs
         if ($LASTEXITCODE -eq 0) { exit 0 }
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
     }
@@ -4538,10 +4543,9 @@ anvil-tool-cargo-udeps-validate-prereqs: (_check-tool "cargo-udeps" cargo_udeps_
 #   - On install (`-install` recipes): exactly this version (`=<pin>` for
 #     cargo subcommands, exact ref for rustup toolchains). Pulling
 #     "latest-matching" at install time is a cloud-workflow reproducibility risk --
-#     an upstream release between yesterday's green build and today's
-#     PR can break things (cargo-spellcheck 0.15.7's em-dash regression
-#     is the canonical case). The `=` constraint locks the install to
-#     the version the catalog was validated against.
+#     an upstream release between yesterday's green build and today's PR can
+#     change behavior. The `=` constraint locks the install to the version the
+#     catalog was validated against.
 #   - On validate-prereqs (`-validate-prereqs` recipes): the installed
 #     version must be `>= <pin>`. A user who has manually upgraded a
 #     tool for their own reasons (e.g. needing an unreleased bugfix)
@@ -4577,7 +4581,7 @@ rust_nightly_external_types := "nightly-2026-03-20"
 # Cargo subcommands
 # ============================================================================
 
-cargo_aprz_version := "1.0.0"
+cargo_aprz_version := "1.1.0"
 cargo_audit_version := "0.22.2"
 cargo_bolero_version := "0.13.4"
 cargo_careful_version := "0.4.10"
@@ -4595,7 +4599,7 @@ cargo_mutants_version := "27.0.0"
 cargo_nextest_version := "0.9.137"
 cargo_semver_checks_version := "0.49.0"
 cargo_sort_version := "2.1.4"
-cargo_spellcheck_version := "0.15.1"
+cargo_spellcheck_version := "0.15.7"
 cargo_udeps_version := "0.1.61"
 
 === rustfmt.toml ===
