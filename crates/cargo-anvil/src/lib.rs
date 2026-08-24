@@ -190,8 +190,8 @@
 //! file is present, whoever wrote it:
 //!
 //! ```powershell
-//! function Anvil-PreBuild     { @{ Secrets = @{ feed = (mint-a-token) } } }
-//! function Anvil-PreRun       { @{ Env     = @{ FEED_TOKEN = (mint-a-token) } } }
+//! function Anvil-BuildSecrets { @{ Secrets = @{ feed = (mint-a-token) } } }
+//! function Anvil-RunEnv       { @{ Env     = @{ FEED_TOKEN = (mint-a-token) } } }
 //! function Anvil-ResolveImage { param($tag) (fetch-a-published-image $tag) }
 //! ```
 //!

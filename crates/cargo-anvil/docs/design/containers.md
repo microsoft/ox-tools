@@ -32,8 +32,8 @@ wraps, and [extensibility.md](./extensibility.md) for the catalog seam a downstr
   - [6.2 Docker](#62-docker)
   - [6.3 Podman](#63-podman)
 - [7. The hook](#7-the-hook)
-  - [7.1 Anvil-PreBuild](#71-anvil-prebuild)
-  - [7.2 Anvil-PreRun](#72-anvil-prerun)
+  - [7.1 Anvil-BuildSecrets](#71-Anvil-BuildSecrets)
+  - [7.2 Anvil-RunEnv](#72-Anvil-RunEnv)
   - [7.3 Anvil-ResolveImage](#73-anvil-resolveimage)
   - [7.4 Trust boundary](#74-trust-boundary)
 - [8. Customization](#8-customization)
@@ -141,7 +141,7 @@ byte-identical. Hashing only the install definitions would leave that change unn
 the image does not have.
 
 `container.just` is hashed too. It is not circular — the digest is over file text, and no file contains the tag — and
-it belongs in the set because it passes the build arguments, the secret mounts and the hook's `Anvil-PreBuild` output
+it belongs in the set because it passes the build arguments, the secret mounts and the hook's `Anvil-BuildSecrets` output
 into the build.
 
 The cost is that editing any recipe renames the image and the next run rebuilds it. That is the correct trade: a tag
@@ -198,11 +198,17 @@ removed on exit (`--rm`).
 | `anvil-<repo>-cargo-git` (volume) | `/usr/local/cargo/git` | Git checkouts of git dependencies. |
 
 A linked worktree (`git worktree add`) keeps its git directory outside the checkout and stores an absolute host path
-in `.git`, which does not exist inside the container. anvil detects this by comparing `git rev-parse --git-dir` against
-`--git-common-dir`, mounts the common directory, and bind-mounts a generated `.git` file naming that mount over the
-checkout's own, so git resolves it by ordinary discovery. The redirection is confined to the checkout: a git command
-run elsewhere in the container, such as `git init` in a scratch directory, is unaffected. An ordinary clone carries its
-git directory inside the bind mount and takes none of this. No flag or variable selects the behaviour.
+in `.git`, which does not exist inside the container. The recipe resolves this while assembling the run, before the
+container starts: it compares `git rev-parse --git-dir` against `--git-common-dir`, and when they differ it adds a
+bind mount for the common directory and a second one placing a generated `.git` file over the checkout's own, naming
+that mount. Git then resolves the history by ordinary discovery. This is what lets the checks that read history — the
+impact-scoped filters, `anvil-mutants-diff`, `anvil-semver-check` — work from a worktree at all; without it git
+resolves nothing inside the container and each of them fails a long way from the cause.
+
+The redirection is confined to the checkout: a git command run elsewhere in the container, such as `git init` in a
+scratch directory, is unaffected. That is why a generated `.git` file is used rather than `GIT_DIR`, which is ambient
+and would be inherited by every process in the container. An ordinary clone carries its git directory inside the bind
+mount and takes none of this. Nothing is written to the host, and no flag or variable selects the behaviour.
 
 Only cargo's content-addressed download caches are volumes, so the write-heavy download path never crosses the host
 boundary and the host's own toolchain is untouched. `$CARGO_HOME` and `$RUSTUP_HOME` themselves are **not** mounted:
@@ -220,10 +226,11 @@ The caller's working directory is mapped to its in-container equivalent, so rela
 `anvil-container` is invoked from a subdirectory.
 
 Image and volume names derive from the repository directory name, lowercased with every run of characters outside
-`[a-z0-9]` replaced by a single `-` and any trailing `-` removed, so the result is always a valid reference: a
-checkout in `ox-tools (copy)` would otherwise end in a separator, which the engine rejects. Two checkouts with the
-same directory name therefore share cache volumes. That is harmless, since both volumes hold only content-addressed
-downloads, but `anvil-container-down` then removes volumes the other checkout is also using.
+`[a-z0-9]` replaced by a single `-` and any trailing `-` removed: a checkout in `ox-tools (copy)` becomes
+`anvil-ox-tools-copy` rather than ending in a separator, which the engine rejects. A directory name with no `[a-z0-9]`
+character at all degrades to plain `anvil` — still a valid reference, but no longer repository-specific. Two checkouts
+with the same directory name therefore share cache volumes. That is harmless, since both volumes hold only
+content-addressed downloads, but `anvil-container-down` then removes volumes the other checkout is also using.
 
 ### 5.2 Process identity
 
@@ -351,7 +358,7 @@ Podman differs from Docker in three respects:
   Error: creating temp file: open /mnt/c/Users/…/repo\podman-build-secret-4085781963
   ```
 
-  Only a repository whose hook defines `Anvil-PreBuild` (§7.1) is affected; building, running, and tag reuse are not.
+  Only a repository whose hook defines `Anvil-BuildSecrets` (§7.1) is affected; building, running, and tag reuse are not.
   Use Docker if you need build-time credentials on Windows.
 
 - **The ignore file is passed explicitly.** buildah honours only an ignore file at the context root, so anvil passes
@@ -373,8 +380,8 @@ The script may define up to three independent functions. All are optional, and e
 
 | Function | Invoked | Returns |
 | --- | --- | --- |
-| `Anvil-PreBuild` | before a build | `@{ Secrets = @{ <id> = <value> } }` |
-| `Anvil-PreRun` | before a run | `@{ Env = @{ <NAME> = <value> } }` |
+| `Anvil-BuildSecrets` | before a build | `@{ Secrets = @{ <id> = <value> } }` |
+| `Anvil-RunEnv` | before a run | `@{ Env = @{ <NAME> = <value> } }` |
 | `Anvil-ResolveImage $tag` | before a build, when no local image matches | an image reference, or nothing |
 
 Both value-returning functions **fail closed on an empty value**, which the engine does not: BuildKit accepts
@@ -387,13 +394,13 @@ retains it far longer than a short-lived token is intended to live. The variable
 returns, and when the engine is reached through WSL the names are exported through `WSLENV` so the values cross that
 boundary.
 
-### 7.1 Anvil-PreBuild
+### 7.1 Anvil-BuildSecrets
 
 Each entry becomes a BuildKit `--secret id=<id>,env=ANVIL_SECRET_<id>` mount, which BuildKit keeps out of every image
 layer.
 
 ```powershell
-function Anvil-PreBuild {
+function Anvil-BuildSecrets {
     @{ Secrets = @{ feed_token = (az account get-access-token --resource … --query accessToken -o tsv) } }
 }
 ```
@@ -412,13 +419,13 @@ Anything the build *writes* using a secret is ordinary layer content. The defaul
 `credentials.toml` and `.netrc` in the same `RUN` layer as the install; a replacement must do the same, or the
 credential is baked into a layer that a later deletion cannot remove.
 
-### 7.2 Anvil-PreRun
+### 7.2 Anvil-RunEnv
 
 Each entry is forwarded with `-e <NAME>` and is an ordinary environment variable inside the image. The forwarded
 names, never their values, are echoed to stderr, because everything executing in the container can read them.
 
 ```powershell
-function Anvil-PreRun {
+function Anvil-RunEnv {
     @{ Env = @{ CARGO_REGISTRIES_INTERNAL_TOKEN = (mint-a-token) } }
 }
 ```

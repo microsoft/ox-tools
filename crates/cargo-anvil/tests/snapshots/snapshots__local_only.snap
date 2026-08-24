@@ -2395,7 +2395,7 @@ anvil-container-tag:
     # This driver is included too. It is not circular -- the tag is derived
     # from file text, and no file contains the tag -- and it belongs in the set
     # because it passes the build arguments, the secret mounts and the hook's
-    # `Anvil-PreBuild` output into the build, all of which shape the result.
+    # `Anvil-BuildSecrets` output into the build, all of which shape the result.
     $recipeRoot = Join-Path $repoRoot 'justfiles/anvil'
     if (Test-Path -LiteralPath $recipeRoot) {
         foreach ($file in Get-ChildItem -LiteralPath $recipeRoot -Recurse -File -Filter '*.just') {
@@ -2557,30 +2557,30 @@ _anvil-container-image:
             Write-Error "anvil: failed to load ${hookRel}: $($_.Exception.Message)"
             exit 1
         }
-        if (Get-Command Anvil-PreBuild -CommandType Function -ErrorAction SilentlyContinue) {
-            [Console]::Error.WriteLine("anvil: running Anvil-PreBuild from $hookRel")
+        if (Get-Command Anvil-BuildSecrets -CommandType Function -ErrorAction SilentlyContinue) {
+            [Console]::Error.WriteLine("anvil: running Anvil-BuildSecrets from $hookRel")
             try {
                 # Take the last emitted object, not the whole stream: a hook
                 # that writes progress with `Write-Output` would otherwise hand
                 # back an array whose `.Secrets` is silently $null.
-                $hook = @(Anvil-PreBuild | Where-Object { $_ }) | Select-Object -Last 1
+                $hook = @(Anvil-BuildSecrets | Where-Object { $_ }) | Select-Object -Last 1
             } catch {
-                Write-Error "anvil: Anvil-PreBuild failed: $($_.Exception.Message)"
+                Write-Error "anvil: Anvil-BuildSecrets failed: $($_.Exception.Message)"
                 exit 1
             }
             $secrets = if ($null -ne $hook) { $hook.Secrets } else { $null }
-            # A defined `Anvil-PreBuild` that yields nothing is the hazard this
+            # A defined `Anvil-BuildSecrets` that yields nothing is the hazard this
             # guard exists for, not a hook opting out: secrets are the only
             # thing the phase can contribute, so an empty return means the mint
             # failed quietly. A hook with no build-time credentials simply does
             # not define the function.
             if ($null -eq $secrets -or $secrets.Keys.Count -eq 0) {
-                Write-Error "anvil: Anvil-PreBuild returned no secrets; omit the function if the build needs none"
+                Write-Error "anvil: Anvil-BuildSecrets returned no secrets; omit the function if the build needs none"
                 exit 1
             }
             foreach ($id in $secrets.Keys) {
                 if ([string]::IsNullOrWhiteSpace($secrets[$id])) {
-                    Write-Error "anvil: Anvil-PreBuild returned an empty value for secret '$id'"
+                    Write-Error "anvil: Anvil-BuildSecrets returned an empty value for secret '$id'"
                     exit 1
                 }
                 $name = "ANVIL_SECRET_$id"
@@ -2857,7 +2857,7 @@ anvil-container *target:
 
     $hookPath = Join-Path $repoRoot '.anvil/container/hooks.ps1'
     if (Test-Path -LiteralPath $hookPath -PathType Leaf) {
-        # Fail-closed like Anvil-PreBuild: a run that cannot obtain its
+        # Fail-closed like Anvil-BuildSecrets: a run that cannot obtain its
         # credentials fails inside the container in a far less obvious way.
         try {
             . $hookPath
@@ -2865,22 +2865,22 @@ anvil-container *target:
             Write-Error "anvil: failed to load .anvil/container/hooks.ps1: $($_.Exception.Message)"
             exit 1
         }
-        if (Get-Command Anvil-PreRun -CommandType Function -ErrorAction SilentlyContinue) {
-            [Console]::Error.WriteLine("anvil: running Anvil-PreRun from .anvil/container/hooks.ps1")
+        if (Get-Command Anvil-RunEnv -CommandType Function -ErrorAction SilentlyContinue) {
+            [Console]::Error.WriteLine("anvil: running Anvil-RunEnv from .anvil/container/hooks.ps1")
             try {
-                $hook = @(Anvil-PreRun | Where-Object { $_ }) | Select-Object -Last 1
+                $hook = @(Anvil-RunEnv | Where-Object { $_ }) | Select-Object -Last 1
             } catch {
-                Write-Error "anvil: Anvil-PreRun failed: $($_.Exception.Message)"
+                Write-Error "anvil: Anvil-RunEnv failed: $($_.Exception.Message)"
                 exit 1
             }
             $hookVars = if ($null -ne $hook) { $hook.Env } else { $null }
             if ($null -eq $hookVars -or $hookVars.Keys.Count -eq 0) {
-                Write-Error "anvil: Anvil-PreRun returned no variables; omit the function if the run needs none"
+                Write-Error "anvil: Anvil-RunEnv returned no variables; omit the function if the run needs none"
                 exit 1
             }
             foreach ($name in $hookVars.Keys) {
                 if ([string]::IsNullOrWhiteSpace($hookVars[$name])) {
-                    Write-Error "anvil: Anvil-PreRun returned an empty value for '$name'"
+                    Write-Error "anvil: Anvil-RunEnv returned an empty value for '$name'"
                     exit 1
                 }
                 Set-Item -LiteralPath "Env:$name" -Value $hookVars[$name]

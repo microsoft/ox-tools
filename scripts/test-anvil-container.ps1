@@ -584,11 +584,11 @@ if (-not $buildSecretsSupported) {
 } else {
 # A user writes this file by hand; the public catalog does not emit one.
 Write-Fixture $hooks @'
-function Anvil-PreBuild {
+function Anvil-BuildSecrets {
     @{ Secrets = @{ e2e_token = 'build-secret-value' } }
 }
 
-function Anvil-PreRun {
+function Anvil-RunEnv {
     @{ Env = @{ ANVIL_E2E_RUNTIME = 'run-value' } }
 }
 '@
@@ -635,9 +635,9 @@ Write-Fixture $dockerfile ($dockerfileBody + $secretStanza)
 Write-Step 'rebuilding with the hook active'
 $hookRun = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'anvil-fmt') -AllowFailure
 Assert-Equal 'the run with a hook succeeds' 0 $hookRun.ExitCode
-Assert-That 'the hook announced itself at build time' ($hookRun.StdErr -match 'Anvil-PreBuild')
+Assert-That 'the hook announced itself at build time' ($hookRun.StdErr -match 'Anvil-BuildSecrets')
 Assert-That 'the build secret was declared' ($hookRun.StdErr -match 'build secrets: e2e_token')
-Assert-That 'the hook announced itself at run time' ($hookRun.StdErr -match 'Anvil-PreRun')
+Assert-That 'the hook announced itself at run time' ($hookRun.StdErr -match 'Anvil-RunEnv')
 Assert-That 'forwarded names are reported' ($hookRun.StdErr -match 'forwarding env: ANVIL_E2E_RUNTIME')
 
 $secretReference = Get-ImageReference -Repo $repo
@@ -668,7 +668,7 @@ Assert-That 'the run-time value reaches a recipe in the container' `
 Write-Section '8. An empty hook value fails closed'
 
 Write-Fixture $hooks @'
-function Anvil-PreBuild {
+function Anvil-BuildSecrets {
     @{ Secrets = @{ e2e_token = '' } }
 }
 '@
@@ -684,11 +684,11 @@ Assert-That 'the failure names the offending secret' ($emptyHook.StdErr -match "
 Write-Section '9. Hook output does not change the tag'
 
 Write-Fixture $hooks @'
-function Anvil-PreBuild {
+function Anvil-BuildSecrets {
     @{ Secrets = @{ e2e_token = 'build-secret-value' } }
 }
 
-function Anvil-PreRun {
+function Anvil-RunEnv {
     @{ Env = @{ ANVIL_E2E_RUNTIME = 'run-value' } }
 }
 '@
@@ -702,11 +702,11 @@ Assert-Equal 'restoring the hook restores the tag' $secretReference (Get-ImageRe
 # the file. Changing the file instead would only re-prove that file content is
 # hashed, which section 7 already covers.
 Write-Fixture $hooks @'
-function Anvil-PreBuild {
+function Anvil-BuildSecrets {
     @{ Secrets = @{ e2e_token = $env:ANVIL_E2E_MINT } }
 }
 
-function Anvil-PreRun {
+function Anvil-RunEnv {
     @{ Env = @{ ANVIL_E2E_RUNTIME = 'run-value' } }
 }
 '@

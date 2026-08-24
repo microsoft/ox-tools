@@ -82,12 +82,14 @@ pub fn dockerignore() -> Artifact {
 /// repository can write the same path by hand. The recipe loads it either way.
 ///
 /// The script may define any of three functions, and is dot-sourced before the
-/// phase that needs it:
+/// phase that needs it. Each is named for what it supplies rather than for when
+/// it runs, because all three exist to provide credentials or an image, not as
+/// general-purpose extension points:
 ///
-/// - `Anvil-PreBuild` returns `@{ Secrets = @{ <id> = <value> } }`. Each entry
+/// - `Anvil-BuildSecrets` returns `@{ Secrets = @{ <id> = <value> } }`. Each entry
 ///   becomes a `BuildKit` `--secret id=<id>`, passed by environment variable
 ///   name so the value never reaches a process argument, and never a layer.
-/// - `Anvil-PreRun` returns `@{ Env = @{ <NAME> = <value> } }`. Each entry is
+/// - `Anvil-RunEnv` returns `@{ Env = @{ <NAME> = <value> } }`. Each entry is
 ///   forwarded into the container by name, for the same reason.
 /// - `Anvil-ResolveImage` takes the computed reference and returns one to use
 ///   instead, or nothing. It is how a repository fetches a published image
@@ -381,8 +383,8 @@ mod tests {
         // Both phases, asserted independently: "for" alone is a substring of
         // the build-side message, so it would pass with the run-side guard
         // deleted.
-        assert!(RECIPE.contains("Anvil-PreBuild returned an empty value for secret"));
-        assert!(RECIPE.contains("Anvil-PreRun returned an empty value for"));
+        assert!(RECIPE.contains("Anvil-BuildSecrets returned an empty value for secret"));
+        assert!(RECIPE.contains("Anvil-RunEnv returned an empty value for"));
     }
 
     #[test]
@@ -513,16 +515,16 @@ mod tests {
     fn the_credential_phases_are_fail_closed() {
         // Unlike resolution, these must stop the run: a container that starts
         // without its credentials fails deep inside, far from the cause.
-        assert!(RECIPE.contains("anvil: Anvil-PreBuild returned no secrets"));
-        assert!(RECIPE.contains("anvil: Anvil-PreRun returned no variables"));
+        assert!(RECIPE.contains("anvil: Anvil-BuildSecrets returned no secrets"));
+        assert!(RECIPE.contains("anvil: Anvil-RunEnv returned no variables"));
         assert!(RECIPE.contains("anvil: failed to load ${hookRel}:"));
         // Whitespace is not a credential. IsNullOrEmpty would accept " ".
         assert!(!RECIPE.contains("[string]::IsNullOrEmpty($hook"));
         // Take the last object, not the whole stream: a hook that writes
         // progress with Write-Output would otherwise hand back an array whose
         // .Secrets is silently $null, and the guard above would not fire.
-        assert!(RECIPE.contains("@(Anvil-PreBuild | Where-Object { $_ }) | Select-Object -Last 1"));
-        assert!(RECIPE.contains("@(Anvil-PreRun | Where-Object { $_ }) | Select-Object -Last 1"));
+        assert!(RECIPE.contains("@(Anvil-BuildSecrets | Where-Object { $_ }) | Select-Object -Last 1"));
+        assert!(RECIPE.contains("@(Anvil-RunEnv | Where-Object { $_ }) | Select-Object -Last 1"));
     }
 
     #[test]
