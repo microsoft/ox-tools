@@ -229,14 +229,16 @@ The two conditional callers keep the workflow name and reusable implementation
 the same across events while granting write permissions only to pull-request
 runs. Their internal IDs remain `validation` and `merge-validation`, while
 both display names are `PR Job`. Together with the workflow display name,
-GitHub renders the same user-facing `Anvil / PR Job / ...` required-check
-hierarchy for pull-request and merge-group commits without exposing
-implementation IDs. Merge-group execution does not publish the supplemental
-status and never receives `statuses: write` or `pull-requests: write`. The
-called PR implementation intentionally declares no `permissions` blocks, so
-its jobs inherit the selected caller's ceiling. Static job-level write requests
-would make the read-only merge caller fail workflow validation before any check
-could run.
+GitHub renders the same user-facing `Anvil / PR Job / ...` hierarchy in the
+pull-request checks UI for both event types without exposing implementation
+IDs. The workflow display name is UI grouping rather than part of a check-run
+name; branch protection sees contexts beginning with `PR Job / ...`.
+Merge-group execution does not publish the supplemental status and never
+receives `statuses: write` or `pull-requests: write`. The called PR
+implementation intentionally declares no `permissions` blocks, so its jobs
+inherit the selected caller's ceiling. Static job-level write requests would
+make the read-only merge caller fail workflow validation before any check could
+run.
 
 The scheduled root workflow adds a schedule and `workflow_dispatch`:
 
@@ -563,11 +565,11 @@ workflows. Anvil does not emit or support public per-group action paths.
 
 ### Failure attribution and commit statuses
 
-GitHub fixes workflow job names before a job runs, so a matrix job rendered as
-`Anvil / PR Job / Check Group: Fast Checks (linux)` cannot rename itself after
-discovering that `anvil-license-headers` failed. Anvil instead presents the
-concrete failure at three levels, all driven by Just's existing terminal
-diagnostic:
+GitHub fixes workflow job names before a job runs, so a matrix check named
+`PR Job / Check Group: Fast Checks (linux)` cannot rename itself after
+discovering that `anvil-license-headers` failed. The checks UI groups that name
+under the `Anvil` workflow. Anvil instead presents the concrete failure at
+three levels, all driven by Just's existing terminal diagnostic:
 
 1. The problem matcher registered by `anvil-setup` promotes
    ``error: recipe `anvil-license-headers` failed with exit code 1`` to a
@@ -588,13 +590,15 @@ live logs while the action keeps a copy in `$RUNNER_TEMP`. The Anvil recipe
 bodies that Just dispatches continue to use their declared
 `[script("pwsh", "-NoProfile")]` interpreter. Bash's `PIPESTATUS[0]` preserves
 Just's exit code rather than `tee`'s. After Just exits, a narrow `sed`
-expression extracts the last standard Just failed-recipe line and writes both
-`failed_recipe` and `exit_code` as step outputs. If no such line is present,
-`failed_recipe` falls back to the group recipe, such as `anvil-pr-fast`. This
-logic lives in the generated
+expression extracts the last standard Just failed-recipe line, including the
+`failed on line <line> with exit code <code>` form emitted by ordinary
+line-based recipes, and writes both `failed_recipe` and `exit_code` as step
+outputs. If no such line is present, `failed_recipe` falls back to the group
+recipe, such as `anvil-pr-fast`. This logic lives in the generated
 `.github/actions/anvil-run-group/run-group.sh`; the composite action invokes
 that file, and Cargo Anvil's functional tests execute the same embedded script
-against fake success, parsed-failure, and no-diagnostic-failure results.
+against fake success, both failed-recipe diagnostic forms, and
+no-diagnostic-failure results.
 
 The run step does not fail immediately because the reporter still needs its
 outputs. A final step guarded by `always()` exits with status 1 whenever the
@@ -633,7 +637,7 @@ concise.
 
 The concise `Anvil / <recipe>` context puts the failed check name immediately
 after the product name. In GitHub's current alphabetical PR-check rendering it
-also places typical check names before `Anvil / PR Job / Check Group: ...`.
+also places typical check names before `PR Job / Check Group: ...`.
 This is a presentation hint, not a correctness dependency: GitHub does not
 document the ordering as a stable contract.
 
@@ -658,7 +662,7 @@ Dynamic contexts are permanent repository metadata: every distinct
 `Anvil / <recipe> (<runner>)` context that is published can continue to appear
 in GitHub's required-check picker even after it has been superseded. Repositories
 must not configure these supplemental contexts as required checks. The bounded
-native `Anvil / PR Job / Check Group: ...` jobs are the only branch-protection
+native `PR Job / Check Group: ...` jobs are the only branch-protection
 surface. Status cleanup is a best-effort, non-atomic read-then-write operation;
 concurrent reruns can temporarily race, but their native jobs remain
 authoritative. Group ownership is carried in the target-URL fragment, while the
@@ -696,8 +700,8 @@ while executing a synthetic merge that may contain fork-originated code, and
 avoids redundant statuses on ephemeral merge-group commits.
 
 Adopting this workflow naming changes existing required-check contexts from
-`anvil-pr / anvil-pr / <job>` to
-`Anvil / PR Job / Check Group: <display name> (<platform>)`. Repository
+`anvil-pr / <job>` to
+`PR Job / Check Group: <display name> (<platform>)`. Repository
 maintainers must update branch-protection rules or rulesets in coordination
 with regeneration. The pull-request and merge-queue runs intentionally emit
 the same new contexts, so one required-check configuration applies to both

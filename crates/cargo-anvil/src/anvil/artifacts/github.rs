@@ -160,7 +160,7 @@ mod tests {
     #[test]
     fn setup_registers_just_problem_matcher() {
         assert!(SETUP_ACTION.contains("::add-matcher::$GITHUB_ACTION_PATH/just-problem-matcher.json"));
-        assert!(JUST_PROBLEM_MATCHER.contains("error: recipe `[^`]+` failed with exit code"));
+        assert!(JUST_PROBLEM_MATCHER.contains("failed( on line \\\\d+)? with exit code"));
     }
 
     #[test]
@@ -252,6 +252,20 @@ export -f just
     #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
     fn run_group_script_exports_terminal_recipe_failure() {
         let diagnostic = "error: recipe `anvil-license-headers` failed with exit code 17";
+        let (status, outputs) = run_group_script(diagnostic, 17);
+
+        assert!(
+            status.success(),
+            "the capture script must defer group failure to the named action step"
+        );
+        assert!(outputs.contains("failed_recipe=anvil-license-headers"));
+        assert!(outputs.contains("exit_code=17"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
+    fn run_group_script_exports_line_recipe_failure() {
+        let diagnostic = "error: recipe `anvil-license-headers` failed on line 42 with exit code 17";
         let (status, outputs) = run_group_script(diagnostic, 17);
 
         assert!(

@@ -6,7 +6,7 @@
       "severity": "error",
       "pattern": [
         {
-          "regexp": "^(error: recipe `[^`]+` failed with exit code \\d+)$",
+          "regexp": "^(error: recipe `[^`]+` failed( on line \\d+)? with exit code \\d+)$",
           "message": 1
         }
       ]

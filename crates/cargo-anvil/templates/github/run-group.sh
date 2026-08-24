@@ -11,6 +11,6 @@ just "anvil-$ANVIL_GROUP" 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}
 set -e
 
-failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed\( on line [0-9][0-9]*\)\? with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
 echo "failed_recipe=${failed_recipe:-anvil-$ANVIL_GROUP}" >> "$GITHUB_OUTPUT"
 echo "exit_code=$status" >> "$GITHUB_OUTPUT"
