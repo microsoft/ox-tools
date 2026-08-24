@@ -176,10 +176,43 @@ mod tests {
             "anvil-container *target:",
             "anvil-container-tag:",
             "anvil-container-status:",
-            "anvil-container-rebuild:",
             "anvil-container-down:",
         ] {
             assert!(RECIPE.contains(expected), "missing recipe: {expected}");
+        }
+        // A cache-defeating rebuild is `ANVIL_CONTAINER_NO_CACHE=1`, which is
+        // already public and composes with the other guards. A recipe wrapping
+        // one variable assignment would be a second way to say the same thing.
+        assert!(!RECIPE.contains("anvil-container-rebuild:"));
+    }
+
+    #[test]
+    fn every_public_recipe_lists_with_a_whole_sentence() {
+        // `just --list` takes the last comment line before the attributes as
+        // the description, so a recipe whose rationale paragraph ends mid
+        // sentence lists as a fragment -- "# toolchain that would otherwise
+        // mask the image's own." The generated tree is the discovery surface,
+        // so each public recipe repeats a one-line summary immediately above
+        // its attributes.
+        for recipe in [
+            "anvil-container *target:",
+            "anvil-container-tag:",
+            "anvil-container-status:",
+            "anvil-container-down:",
+        ] {
+            let at = RECIPE.find(recipe).expect("recipe must exist");
+            let description = RECIPE[..at]
+                .lines()
+                .rev()
+                .find(|line| line.trim_start().starts_with('#'))
+                .expect("a public recipe must carry a description")
+                .trim_start()
+                .trim_start_matches('#')
+                .trim();
+            assert!(
+                description.ends_with('.') && description.starts_with(|c: char| c.is_uppercase()),
+                "{recipe} lists as a fragment: {description:?}"
+            );
         }
     }
 

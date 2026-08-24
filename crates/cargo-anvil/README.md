@@ -179,9 +179,9 @@ exactly the reference a consumer will later look up.
 |`GITHUB_TOKEN`|Forwarded into the run when set on the host, so `anvil-aprz` is not rate-limited.|
 
 Supporting recipes: `anvil-container-tag`, `anvil-container-status`
-(reports the engine and image without building or pulling),
-`anvil-container-rebuild`, and `anvil-container-down` (removes this
-repository’s cache volumes).
+(reports the engine and image without building or pulling), and
+`anvil-container-down` (removes this repository’s cache volumes). To rebuild
+a tag that already resolves, set `ANVIL_CONTAINER_NO_CACHE=1` above.
 
 #### The hook
 
@@ -445,7 +445,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbUzxBCeTxVhgbVH3PyXajspMbraXhPJJZx38bmTnJe7clsEdhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQb_EzqVXVh9lMbSZB2fnIqi24bEggz4HxWFLMb7lUzlllOloVhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts

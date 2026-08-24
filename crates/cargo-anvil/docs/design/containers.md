@@ -71,10 +71,15 @@ takes one; a fork whose recipes do should pass them through the environment inst
 | `just anvil-container <recipe> [args…]` | Execute a recipe in the image. With no argument, opens an interactive shell. |
 | `just anvil-container-tag` | Print the image reference for the current inputs. Builds nothing. |
 | `just anvil-container-status` | Print the engine, working directory, image reference, and whether it is present. Never builds or pulls. |
-| `just anvil-container-rebuild` | Rebuild the image with every layer cache disabled. |
 | `just anvil-container-down` | Remove this repository's cache volumes. The image is retained. |
 
-All five are annotated `[group("anvil-container")]` and appear as one cluster in `just --groups`.
+All four are annotated `[group("anvil-container")]` and appear as one cluster in `just --groups`. Each repeats a
+one-line summary immediately above its attributes, because `just --list` takes the last comment line before them as the
+description and would otherwise print the tail of a rationale paragraph as a fragment.
+
+There is deliberately no `anvil-container-rebuild`. Its whole body would be `ANVIL_CONTAINER_NO_CACHE=1` followed by
+the ordinary resolve, and that variable is already public below — where it also composes with `NO_REBUILD` and
+`NO_RESOLVE`, which a recipe form does not.
 
 | Variable | Effect |
 | --- | --- |
@@ -496,7 +501,7 @@ guard. A different base OS with a different toolchain source is one Dockerfile r
   hashed, so changing the build recipe always renames the tag — but any *additional* file it copies is outside the
   tag. Such a file can change what a build produces while naming a tag that already resolves, and the existing image
   is then reused, so the change is never built. A fork that needs extra content should carry it in the Dockerfile
-  itself, or accept that edits to it require `anvil-container-rebuild`.
+  itself, or accept that edits to it require `ANVIL_CONTAINER_NO_CACHE=1`.
 - anvil never pushes or promotes an image. It builds one, and will use one a hook fetched (§7.3); publishing belongs
   to whoever owns the registry.
 

@@ -704,26 +704,14 @@ anvil-container-status:
     }
     exit 0
 
-# Rebuild the exec image from scratch, ignoring every cached layer.
-#
-# The ordinary path already rebuilds whenever an input changes, so this is for
-# the cases a content hash cannot see: a moved upstream package, a stale base
-# layer, or a build that is suspected of being wrong.
-[group("anvil-container")]
-[script("pwsh", "-NoProfile")]
-anvil-container-rebuild:
-    $ErrorActionPreference = 'Stop'
-    $env:ANVIL_CONTAINER_NO_CACHE = '1'
-    $image = (just _anvil-container-image) | Select-Object -Last 1
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    Write-Output "image rebuilt: $image"
-    exit 0
-
 # Remove this repository's cache volumes. The image is left in place.
 #
-# The last two names are from an earlier build of this driver, which mounted
-# the cargo and rustup homes wholesale; removing them here clears a stale
-# toolchain that would otherwise mask the image's own.
+# Only the download caches are volumes, so this discards fetched crates and git
+# checkouts and nothing else: the next run re-fetches them, and the image's own
+# tools are untouched. The counterpart to a rebuild, which discards the image
+# and keeps these.
+
+# Remove this repository's cache volumes. The image is left in place.
 [group("anvil-container")]
 [script("pwsh", "-NoProfile")]
 anvil-container-down:

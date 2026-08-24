@@ -178,9 +178,9 @@
 //! | `GITHUB_TOKEN` | Forwarded into the run when set on the host, so `anvil-aprz` is not rate-limited. |
 //!
 //! Supporting recipes: `anvil-container-tag`, `anvil-container-status`
-//! (reports the engine and image without building or pulling),
-//! `anvil-container-rebuild`, and `anvil-container-down` (removes this
-//! repository's cache volumes).
+//! (reports the engine and image without building or pulling), and
+//! `anvil-container-down` (removes this repository's cache volumes). To rebuild
+//! a tag that already resolves, set `ANVIL_CONTAINER_NO_CACHE=1` above.
 //!
 //! ### The hook
 //!
