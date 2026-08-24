@@ -37,13 +37,17 @@ inputs:
 runs:
   using: composite
   steps:
+# Fragment spliced into the scheduled-benchmarks group's composite action.
+# Not a standalone action: this is part of a steps list.
     - name: Restore benchmark history
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        # Per-leg: the history is partitioned by machine, and one run cannot
-        # upload the same artifact name twice.
-        ARTIFACT: bench-history-${{ runner.os }}
+        # Per-leg identity comes from the workflow: only it knows the matrix
+        # value. Deriving the name from the runner OS instead would collide
+        # if two legs ever ran on like-OS runners, merging two machines'
+        # samples into one series.
+        ARTIFACT: ${{ env.ANVIL_BENCH_ARTIFACT }}
         DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         # The caller's workflow *name*, not a hardcoded filename: the root
         # scheduled workflow is an owned, renameable file, and a rename must
@@ -53,7 +57,20 @@ runs:
         WINDOW: "30"
       run: |
         set -euo pipefail
-        mkdir -p target/anvil/bench-history
+
+        # Staged first. The store path is created only once the restore has
+        # reached a known state, so an operational failure leaves no store
+        # at all and a publisher that runs unconditionally has nothing to
+        # upload over the accumulated chain.
+        staging="$(mktemp -d)"
+
+        complete_restore() {
+          mkdir -p target/anvil/bench-history
+          if [ -n "$(ls -A "$staging" 2>/dev/null)" ]; then
+            cp -R "$staging/." target/anvil/bench-history/
+          fi
+          echo "ANVIL_BENCH_RESTORE=$1" >> "$GITHUB_ENV"
+        }
 
         # Walk back from the newest run and take the first that carries this
         # leg's artifact. Restoring from the latest *successful* run would
@@ -64,9 +81,7 @@ runs:
         # once the artifacts API confirms the artifact exists and has not
         # expired; a download that then fails is an operational error
         # (token, API, corrupt payload) and fails the job rather than being
-        # silently downgraded to a cold start. That distinction is what
-        # stops one transient failure from publishing an empty store over a
-        # good history.
+        # silently downgraded to a cold start.
         for run_id in $(gh run list --workflow "$WORKFLOW" \
             --branch "$DEFAULT_BRANCH" --limit "$WINDOW" \
             --json databaseId --jq '.[].databaseId'); do
@@ -76,22 +91,22 @@ runs:
             | head -n1)
           [ -n "$artifact_id" ] || continue
 
-          if ! gh run download "$run_id" --name "$ARTIFACT" --dir target/anvil/bench-history; then
+          if ! gh run download "$run_id" --name "$ARTIFACT" --dir "$staging"; then
             echo "::error::found $ARTIFACT in run $run_id but could not download it;" \
                  "failing rather than continuing with an empty history, which would" \
                  "publish a truncated store over the existing chain."
             exit 1
           fi
           echo "restored benchmark history from run $run_id"
-          echo "ANVIL_BENCH_RESTORE=restored" >> "$GITHUB_ENV"
+          complete_restore restored
           exit 0
         done
 
-        # No run in the window carried the artifact. That is a genuine cold
-        # start (first run, or the chain lapsed), so it is surfaced on the
-        # summary rather than only in this log — "history quietly restarted"
-        # must not look like "no regressions".
-        echo "ANVIL_BENCH_RESTORE=cold-start" >> "$GITHUB_ENV"
+        # No run in the window carried the artifact: a genuine cold start
+        # (first run, or the chain lapsed), which is a valid empty store.
+        # Surfaced on the summary rather than only in this log — "history
+        # quietly restarted" must not look like "no regressions".
+        complete_restore cold-start
         echo "no $ARTIFACT artifact in the last $WINDOW scheduled runs; starting a new history"
         {
           printf '### Benchmark history: cold start\n\n'
@@ -115,6 +130,8 @@ runs:
         # checks never read it.
         GITHUB_TOKEN: ${{ github.token }}
       run: just anvil-scheduled-benchmarks
+# Fragment spliced into the scheduled-benchmarks group's composite action.
+# Not a standalone action: this is part of a steps list.
     - name: Save benchmark history
       # always(): the run's own samples belong in the history even when the
       # analysis flagged a regression and failed the job.
@@ -126,7 +143,7 @@ runs:
       if: always() && env.ANVIL_BENCH_RESTORE != ''
       uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
-        name: bench-history-${{ runner.os }}
+        name: ${{ env.ANVIL_BENCH_ARTIFACT }}
         path: target/anvil/bench-history
         # Comfortably longer than the scheduled cadence, so a paused or
         # infrequent schedule does not break the chain.

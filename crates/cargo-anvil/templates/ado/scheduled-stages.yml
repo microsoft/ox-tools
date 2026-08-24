@@ -125,7 +125,7 @@ stages:
           name: linux
           pool: ${{ parameters.linuxPool }}
           artifacts:
-            - name: bench-history-$(Agent.OS)
+            - name: bench-history-$(Agent.JobName)
               path: target/anvil/bench-history
               condition: and(succeededOrFailed(), ne(variables['ANVIL_BENCH_RESTORE'], ''))
           steps:
@@ -135,7 +135,7 @@ stages:
           name: windows
           pool: ${{ parameters.windowsPool }}
           artifacts:
-            - name: bench-history-$(Agent.OS)
+            - name: bench-history-$(Agent.JobName)
               path: target/anvil/bench-history
               condition: and(succeededOrFailed(), ne(variables['ANVIL_BENCH_RESTORE'], ''))
           steps:

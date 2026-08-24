@@ -80,44 +80,42 @@ const POST_STEPS_PLACEHOLDER: &str = "__POST_STEPS__\n";
 /// These live in the group's own emitted step template rather than at the
 /// call site, so `pr.yml` / `scheduled.yml` stay a plain list of groups. A
 /// group absent from the table gets nothing.
+///
+/// The bodies are template files like every other emitted YAML, rather than
+/// Rust string literals: they are fragments of a `steps:` list, so they are
+/// not standalone-valid templates, but keeping them in `templates/ado/`
+/// means the indentation is real YAML instead of escapes.
 const GROUP_PRE_STEPS: &[(&str, &str)] = &[(
     "scheduled-benchmarks",
-    // The analysis orders each series by first-parent commit topology and
-    // locates the merge-base, so it needs the whole commit graph. LFS
-    // matters because benchmark inputs can be LFS-tracked and would
-    // otherwise arrive as pointer files.
-    //
-    // The checkout is explicit rather than a wrapper parameter: job.yml is
-    // the file adopters fork, so binding a parameter their copy lacks would
-    // fail expansion for the whole pipeline.
-    "  - checkout: self\n\
-     \x20   fetchDepth: 0\n\
-     \x20   lfs: true\n\
-     \x20 - template: bench-history-restore.yml\n\
-     \x20   parameters:\n\
-     \x20     artifact: bench-history-$(Agent.OS)\n",
+    include_str!("../../../templates/ado/steps/scheduled-benchmarks-pre.yml"),
 )];
 
 /// Steps that run after the uniform group runner, per group.
 const GROUP_POST_STEPS: &[(&str, &str)] = &[
     (
         "scheduled-test",
-        "  - task: PublishCodeCoverageResults@2\n\
-         \x20   condition: succeededOrFailed()\n\
-         \x20   displayName: Publish coverage\n\
-         \x20   inputs:\n\
-         \x20     summaryFileLocation: target/coverage/cobertura-*.xml\n\
-         \x20     failIfCoverageEmpty: false\n",
+        include_str!("../../../templates/ado/steps/scheduled-test-post.yml"),
     ),
-    ("scheduled-benchmarks", "  - template: bench-history-summary.yml\n"),
+    (
+        "scheduled-benchmarks",
+        include_str!("../../../templates/ado/steps/scheduled-benchmarks-post.yml"),
+    ),
 ];
 
-/// The extra steps registered for `group`, or the empty string.
-fn extra_steps(table: &'static [(&'static str, &'static str)], group: &str) -> &'static str {
-    table
-        .iter()
-        .find_map(|&(name, steps)| (name == group).then_some(steps))
-        .unwrap_or("")
+/// The extra steps registered for `group`, with the fragment's own license
+/// header removed: the emitted file already carries one, and a second copy
+/// mid-list is noise. The explanatory comments are kept.
+fn extra_steps(table: &'static [(&'static str, &'static str)], group: &str) -> String {
+    let Some(text) = table.iter().find_map(|&(name, steps)| (name == group).then_some(steps)) else {
+        return String::new();
+    };
+    let body: Vec<&str> = text
+        .lines()
+        .skip_while(|line| line.starts_with("# Copyright") || line.starts_with("# Licensed") || *line == "#")
+        .collect();
+    let mut out = body.join("\n");
+    out.push('\n');
+    out
 }
 
 /// Render the step template for one group.
@@ -125,8 +123,8 @@ fn extra_steps(table: &'static [(&'static str, &'static str)], group: &str) -> &
 fn render_group_step(group: &str) -> String {
     GROUP_STEP_TEMPLATE
         .replace(GROUP_PLACEHOLDER, group)
-        .replace(PRE_STEPS_PLACEHOLDER, extra_steps(GROUP_PRE_STEPS, group))
-        .replace(POST_STEPS_PLACEHOLDER, extra_steps(GROUP_POST_STEPS, group))
+        .replace(PRE_STEPS_PLACEHOLDER, &extra_steps(GROUP_PRE_STEPS, group))
+        .replace(POST_STEPS_PLACEHOLDER, &extra_steps(GROUP_POST_STEPS, group))
 }
 
 /// Repo-root-relative path for one group's step template.
@@ -427,6 +425,23 @@ mod tests {
     }
 
     #[test]
+    fn per_group_step_keys_name_real_groups() {
+        // `extra_steps` matches by string equality and falls back to "", so a
+        // renamed or dropped group would silently lose its steps -- and for
+        // the benchmark group that means analyzing an empty store and
+        // reporting "no regressions", the one outcome it must never produce
+        // by accident.
+        for (table, label) in [(GROUP_PRE_STEPS, "pre"), (GROUP_POST_STEPS, "post")] {
+            let mut seen = Vec::new();
+            for &(group, _) in table {
+                assert!(GROUPS.contains(&group), "{label}-step key '{group}' is not a catalog group");
+                assert!(!seen.contains(&group), "{label}-step key '{group}' is registered twice");
+                seen.push(group);
+            }
+        }
+    }
+
+    #[test]
     fn scheduled_stages_has_four_groups() {
         for needle in [
             "stage: scheduled_test",
@@ -488,8 +503,18 @@ mod tests {
         // Absence and operational failure must stay distinguishable, or one
         // transient error publishes an empty store over a good history.
         assert!(BENCH_HISTORY_RESTORE_STEP.contains("if ($status -eq 404) { continue }"));
-        assert!(BENCH_HISTORY_RESTORE_STEP.contains("ANVIL_BENCH_RESTORE]restored"));
-        assert!(BENCH_HISTORY_RESTORE_STEP.contains("ANVIL_BENCH_RESTORE]cold-start"));
+        assert!(BENCH_HISTORY_RESTORE_STEP.contains("Complete-Restore 'restored'"));
+        assert!(BENCH_HISTORY_RESTORE_STEP.contains("Complete-Restore 'cold-start'"));
+        // Fail-closed by construction: the store path is created only inside
+        // Complete-Restore, so an operational failure leaves nothing for a
+        // wrapper that ignores the artifact condition to upload.
+        assert_eq!(
+            BENCH_HISTORY_RESTORE_STEP
+                .matches("New-Item -ItemType Directory -Force -Path $path")
+                .count(),
+            1,
+            "the store path must be created only on a completed restore"
+        );
         assert!(
             !BENCH_HISTORY_RESTORE_STEP.contains("continueOnError"),
             "a blanket continueOnError would read every failure as a cold start"

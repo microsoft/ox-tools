@@ -234,6 +234,19 @@ fn assert_failed(output: &Output, context: &str) {
     );
 }
 
+/// Both streams of a recipe run, for assertion messages.
+///
+/// A recipe that dies before producing output says why on stderr, so a
+/// failure message carrying only stdout hides the actual cause.
+fn both_streams(output: &Output) -> String {
+    format!(
+        "\n--- stdout ---\n{}\n--- stderr ---\n{}\n--- status: {:?} ---",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        output.status
+    )
+}
+
 #[test]
 fn impact_format_resolves_directory_aliases_and_fails_closed() {
     if !tools_available() {
@@ -809,8 +822,8 @@ fn bench_history_gates_on_active_regressions_only() {
     let (tmp, output) = run_bench_history(ACTIVE_REGRESSION, &[]);
     assert_failed(&output, "an active regression");
     let text = String::from_utf8_lossy(&output.stdout);
-    assert!(text.contains("emit_alloc/churn"), "names the benchmark:\n{text}");
-    assert!(text.contains("8392995a"), "names the attributed commit:\n{text}");
+    assert!(text.contains("emit_alloc/churn"), "names the benchmark:{}", both_streams(&output));
+    assert!(text.contains("8392995a"), "names the attributed commit:{}", both_streams(&output));
     let calls = cargo_calls(tmp.path());
     assert!(calls.contains("bench-history collect"), "calls:\n{calls}");
     assert!(calls.contains("bench-history analyze"), "calls:\n{calls}");
@@ -818,11 +831,7 @@ fn bench_history_gates_on_active_regressions_only() {
     // A recovered regression and an improvement both need no action.
     for (findings, label) in [(INACTIVE_REGRESSION, "inactive"), (IMPROVEMENT, "improvement")] {
         let (_tmp, output) = run_bench_history(findings, &[]);
-        assert!(
-            output.status.success(),
-            "{label} finding must not gate:\n{}",
-            String::from_utf8_lossy(&output.stdout)
-        );
+        assert!(output.status.success(), "{label} finding must not gate:{}", both_streams(&output));
     }
 
     // A workspace with no benchmarks analyzes to nothing and stays green:
@@ -830,8 +839,8 @@ fn bench_history_gates_on_active_regressions_only() {
     let (_tmp, output) = run_bench_history(NO_FINDINGS, &[]);
     assert!(
         output.status.success(),
-        "an empty history must be a clean no-op:\n{}",
-        String::from_utf8_lossy(&output.stdout)
+        "an empty history must be a clean no-op:{}",
+        both_streams(&output)
     );
 }
 
@@ -861,8 +870,8 @@ fn bench_history_reports_without_gating_outside_ci() {
     );
     assert!(
         output.status.success(),
-        "a local run reports but does not gate:\n{}",
-        String::from_utf8_lossy(&output.stdout)
+        "a local run reports but does not gate:{}",
+        both_streams(&output)
     );
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(text.contains("emit_alloc/churn"), "still reports the finding:\n{text}");
@@ -921,8 +930,8 @@ fn bench_history_bless_reconciles_on_exact_prefix_identity() {
     );
     assert!(
         cargo_calls(tmp.path()).contains("bench-history bless"),
-        "a narrower stored blessing must not satisfy a broader request:\n{}",
-        String::from_utf8_lossy(&output.stdout)
+        "a narrower stored blessing must not satisfy a broader request:{}",
+        both_streams(&output)
     );
 
     // The exact same prefix already recorded is a no-op, so a scheduled run
@@ -932,8 +941,8 @@ fn bench_history_bless_reconciles_on_exact_prefix_identity() {
     assert!(output.status.success());
     assert!(
         !cargo_calls(tmp.path()).contains("bench-history bless"),
-        "an already-applied blessing must not be re-appended:\n{}",
-        String::from_utf8_lossy(&output.stdout)
+        "an already-applied blessing must not be re-appended:{}",
+        both_streams(&output)
     );
 }
 
@@ -959,8 +968,8 @@ fn bench_history_bless_rejects_malformed_entries() {
     );
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("#1234"),
-        "the reason must survive intact:\n{}",
-        String::from_utf8_lossy(&output.stdout)
+        "the reason must survive intact:{}",
+        both_streams(&output)
     );
     assert!(cargo_calls(tmp.path()).contains("bench-history bless"));
 
@@ -1099,8 +1108,8 @@ fn github_restore_separates_absence_from_failure() {
     assert!(env.contains("ANVIL_BENCH_RESTORE=restored"), "env:\n{env}");
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("run 10"),
-        "should name the run it restored from:\n{}",
-        String::from_utf8_lossy(&output.stdout)
+        "should name the run it restored from:{}",
+        both_streams(&output)
     );
 
     // (2) No run in the window carries it: a genuine cold start, and it must
@@ -1225,4 +1234,70 @@ fn ado_restore_separates_absence_from_failure() {
             "{failure} must not set a restore state:\n{stdout}"
         );
     }
+}
+
+#[test]
+fn bench_history_bless_listings_are_process_scoped() {
+    if !tools_available() {
+        return;
+    }
+    // The blessing reconciliation writes `list blessings` output to a temp
+    // file before reading it back. A fixed name lets two jobs sharing a
+    // machine -- matrix legs on a self-hosted agent, concurrent local runs --
+    // read each other's listing. Reverting the process scoping must trip
+    // this deterministically rather than by chance under parallel runs.
+    let shared_temp = TempDir::new().unwrap();
+
+    // Each invocation asks for a different benchmark and is told a different
+    // already-applied set, so consuming the other's listing is observable:
+    // each would then think its blessing was already in effect and skip it.
+    let cases = [
+        ("alpha", r#"{"blessings":[{"commit":"8392995a3b94","prefixes":["beta"]}]}"#),
+        ("beta", r#"{"blessings":[{"commit":"8392995a3b94","prefixes":["alpha"]}]}"#),
+    ];
+
+    for (benchmark, applied) in cases {
+        let file = format!("[[blessing]]\nbenchmark = \"{benchmark}\"\ncommit = \"8392995a\"\nreason = \"deliberate\"\n");
+        let tmp = fixture(
+            &[("bench-history.just", BENCH_HISTORY)],
+            &[
+                "anvil-tool-cargo-bench-history-validate-prereqs",
+                "anvil-tool-cargo-bench-history-install installer=\"install\"",
+            ],
+        );
+        write(&tmp.path().join(".config/bench-blessings.toml"), &file);
+        let log = tmp.path().join("cargo.log");
+        let output = run_just(
+            tmp.path(),
+            &["_anvil-bench-history-bless", "store", ".config/bench-blessings.toml"],
+            &[
+                ("FAKE_CBH_BLESSINGS", OsStr::new(applied)),
+                ("FAKE_CARGO_LOG", log.as_os_str()),
+                // Both invocations share one temp directory, which is what a
+                // fixed listing filename would collide in.
+                ("RUNNER_TEMP", shared_temp.path().as_os_str()),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "reconciliation failed for {benchmark}:{}",
+            both_streams(&output)
+        );
+        // Its own listing says a *different* benchmark is blessed, so this
+        // one must still be applied.
+        assert!(
+            cargo_calls(tmp.path()).contains("bench-history bless"),
+            "{benchmark} must be blessed from its own listing:{}",
+            both_streams(&output)
+        );
+    }
+
+    // One listing file per process, so the two runs never shared one.
+    let listings: Vec<_> = std::fs::read_dir(shared_temp.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("anvil-bench-blessings"))
+        .collect();
+    assert_eq!(listings.len(), 2, "each invocation must write its own listing, got: {listings:?}");
 }

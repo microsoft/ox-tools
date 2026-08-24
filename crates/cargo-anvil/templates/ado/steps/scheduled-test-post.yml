@@ -1,0 +1,15 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# Fragment spliced into the scheduled-test group's emitted step template,
+# after the uniform runner. Not a standalone template: this is part of a
+# `steps:` list.
+#
+# Coverage is published from every leg so OS-gated code is fully
+# represented.
+  - task: PublishCodeCoverageResults@2
+    condition: succeededOrFailed()
+    displayName: Publish coverage
+    inputs:
+      summaryFileLocation: target/coverage/cobertura-*.xml
+      failIfCoverageEmpty: false

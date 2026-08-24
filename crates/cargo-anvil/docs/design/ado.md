@@ -866,10 +866,20 @@ Each scheduled benchmark job:
    failure and fails the job. Finding none across the whole window is a genuine cold
    start;
 3. **publishes** the updated store through the wrapper's `artifacts` parameter
-   (`{ name: bench-history-$(Agent.OS), path: <store>, condition: … }`), which the
-   default wrapper emits as `PublishPipelineArtifact@1` and 1ESPT wrappers as a
-   `pipelineArtifact` output. The name is derived from the agent OS so both legs
-   share one declaration.
+   (`{ name: bench-history-$(Agent.JobName), path: <store>, condition: … }`), which
+   the default wrapper emits as `PublishPipelineArtifact@1` and 1ESPT wrappers as a
+   `pipelineArtifact` output. The name is keyed on the job, which ADO guarantees is
+   unique within a stage, so two legs can never declare one artifact and merge two
+   machines' samples into a single series.
+
+The restore stages its download and creates the store path **only once it has
+reached a known state** — restored, or a positively identified cold start. An
+operational failure therefore leaves no store directory at all, so a publisher that
+runs unconditionally has nothing to upload and the chain survives. That matters
+because `artifacts[].condition` is an optional field: a wrapper forked before it
+existed accepts the entry and ignores the condition silently, and this is exactly
+the case where ignoring it would overwrite good history. The condition remains as a
+second line of defence, not the only one.
 
 `DownloadPipelineArtifact@2` is not used for the restore: `latestFromBranch` resolves
 a single build and does not walk, so a cancelled or never-publishing latest build
@@ -878,12 +888,9 @@ would cold-start a store that still has usable history.
 The walk is outcome-agnostic, which is what keeps the chain intact across a
 regression: a flagged regression fails the stage, so a success-only restore would
 discard every sample taken while the pipeline stayed red. Publishing is likewise not
-limited to green runs, but it *is* conditioned on the restore having reached a known
-state — the `condition` on the artifact entry. An operational restore failure
-therefore neither continues silently nor overwrites a good chain with a truncated
-snapshot. That guard is the reason the `artifacts` contract carries an optional
-`condition` (§4.1) rather than the benchmark group emitting its own publish task,
-which would bypass the translation a forked wrapper performs.
+limited to green runs. The `condition` on the artifact entry lives in the `artifacts`
+contract (§4.1) rather than in a publish task the benchmark group emits itself, which
+would bypass the translation a forked wrapper performs.
 
 Surfacing is by **build failure**, not a PR comment — the regression is discovered
 after merge (see [benchmarks.md §5](./benchmarks.md)). The benchmark recipe exits

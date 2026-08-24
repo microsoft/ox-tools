@@ -1674,7 +1674,7 @@ stages:
           name: linux
           pool: ${{ parameters.linuxPool }}
           artifacts:
-            - name: bench-history-$(Agent.OS)
+            - name: bench-history-$(Agent.JobName)
               path: target/anvil/bench-history
               condition: and(succeededOrFailed(), ne(variables['ANVIL_BENCH_RESTORE'], ''))
           steps:
@@ -1684,7 +1684,7 @@ stages:
           name: windows
           pool: ${{ parameters.windowsPool }}
           artifacts:
-            - name: bench-history-$(Agent.OS)
+            - name: bench-history-$(Agent.JobName)
               path: target/anvil/bench-history
               condition: and(succeededOrFailed(), ne(variables['ANVIL_BENCH_RESTORE'], ''))
           steps:
@@ -1804,8 +1804,16 @@ steps:
 # therefore cold-start a store that actually has history. This step
 # resolves the build itself, so absence of the artifact throughout the
 # window (a genuine cold start) stays distinct from an operational
-# failure, which fails the job rather than silently publishing a
-# truncated snapshot over a good chain.
+# failure.
+#
+# The store path is created only once the restore has reached a known
+# state -- restored, or a positively identified cold start. An operational
+# failure therefore leaves *no store directory at all*, so a publisher
+# that runs unconditionally has nothing to upload and the accumulated
+# chain survives. That makes the guard structural rather than dependent on
+# every job wrapper honouring the `artifacts` condition: a fork predating
+# that field ignores it silently, and this is the case where ignoring it
+# would overwrite good history with a truncated store.
 #
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/benchmarks.md
 parameters:
@@ -1824,11 +1832,25 @@ steps:
       $path = '${{ parameters.path }}'
       $window = ${{ parameters.window }}
 
-      New-Item -ItemType Directory -Force -Path $path | Out-Null
-
       if (-not $env:SYSTEM_ACCESSTOKEN) {
           Write-Error "anvil: SYSTEM_ACCESSTOKEN is not exposed to this job, so the benchmark history cannot be restored."
           exit 1
+      }
+
+      # Everything lands here first; $path is created only on success.
+      $staging = Join-Path ([System.IO.Path]::GetTempPath()) "$artifact-staging"
+      Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
+      New-Item -ItemType Directory -Force -Path $staging | Out-Null
+
+      # Publishes the staged store as the restore's result and records how
+      # the restore ended, so the publish step can tell a continuation of
+      # the chain from a job that never established one.
+      function Complete-Restore([string]$state) {
+          New-Item -ItemType Directory -Force -Path $path | Out-Null
+          if (Test-Path (Join-Path $staging '*')) {
+              Copy-Item -Path (Join-Path $staging '*') -Destination $path -Recurse -Force
+          }
+          Write-Host "##vso[task.setvariable variable=ANVIL_BENCH_RESTORE]$state"
       }
 
       $collection = $env:SYSTEM_COLLECTIONURI
@@ -1861,24 +1883,24 @@ steps:
           if (-not $found.resource.downloadUrl) { continue }
 
           Write-Host "anvil: restoring $artifact from build $($run.id)"
-          $tmp = [System.IO.Path]::GetTempPath()
-          $zip = Join-Path $tmp "$artifact.zip"
-          $staging = Join-Path $tmp "$artifact-extract"
-          Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
+          $zip = Join-Path ([System.IO.Path]::GetTempPath()) "$artifact.zip"
+          $extract = Join-Path ([System.IO.Path]::GetTempPath()) "$artifact-extract"
+          Remove-Item -Recurse -Force $extract -ErrorAction SilentlyContinue
           Invoke-WebRequest -Uri $found.resource.downloadUrl -Headers $headers -OutFile $zip
-          Expand-Archive -LiteralPath $zip -DestinationPath $staging -Force
+          Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
           # The archive nests its contents under a directory named for the
-          # artifact; lift them up into the store path.
-          $inner = Join-Path $staging $artifact
-          $source = if (Test-Path $inner) { $inner } else { $staging }
-          Copy-Item -Path (Join-Path $source '*') -Destination $path -Recurse -Force
-          Write-Host "##vso[task.setvariable variable=ANVIL_BENCH_RESTORE]restored"
+          # artifact; lift them up into the staging directory.
+          $inner = Join-Path $extract $artifact
+          $source = if (Test-Path $inner) { $inner } else { $extract }
+          Copy-Item -Path (Join-Path $source '*') -Destination $staging -Recurse -Force
+          Complete-Restore 'restored'
           exit 0
       }
 
-      # Nothing in the window carried the artifact: a genuine cold start.
+      # Nothing in the window carried the artifact: a genuine cold start,
+      # which is a valid empty store rather than a failure.
       Write-Host "anvil: no $artifact artifact in the last $window builds on $branch; starting a new history"
-      Write-Host "##vso[task.setvariable variable=ANVIL_BENCH_RESTORE]cold-start"
+      Complete-Restore 'cold-start'
     displayName: Restore ${{ parameters.artifact }}
     env:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
@@ -2404,12 +2426,29 @@ parameters:
     type: string
     default: ''
 steps:
+# Fragment spliced into the scheduled-benchmarks group's emitted step
+# template, ahead of the uniform runner. Not a standalone template: this is
+# part of a `steps:` list, which is why it has no `steps:` key of its own.
+#
+# The analysis orders each series by first-parent commit topology and
+# locates the merge-base, so it needs the whole commit graph. LFS matters
+# because benchmark inputs can be LFS-tracked and would otherwise arrive as
+# pointer files.
+#
+# The checkout is explicit rather than a job-wrapper parameter: job.yml is
+# the file adopters fork, so binding a parameter their copy lacks would fail
+# expansion for the whole pipeline.
+#
+# The artifact is named for the *job*, which ADO guarantees is unique within
+# a stage. Naming it for the agent OS instead would let two legs on like-OS
+# pools declare one artifact, colliding on publish and merging two machines'
+# samples into a single series.
   - checkout: self
     fetchDepth: 0
     lfs: true
   - template: bench-history-restore.yml
     parameters:
-      artifact: bench-history-$(Agent.OS)
+      artifact: bench-history-$(Agent.JobName)
   - template: setup.yml
     parameters:
       group: scheduled-benchmarks
@@ -2448,6 +2487,9 @@ steps:
       ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
       ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
       ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+# Fragment spliced into the scheduled-benchmarks group's emitted step
+# template, after the uniform runner. Not a standalone template: this is
+# part of a `steps:` list.
   - template: bench-history-summary.yml
 
 === .pipelines/anvil/steps/scheduled-exhaustive.yml ===
@@ -2632,6 +2674,12 @@ steps:
       ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
       ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
       ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+# Fragment spliced into the scheduled-test group's emitted step template,
+# after the uniform runner. Not a standalone template: this is part of a
+# `steps:` list.
+#
+# Coverage is published from every leg so OS-gated code is fully
+# represented.
   - task: PublishCodeCoverageResults@2
     condition: succeededOrFailed()
     displayName: Publish coverage

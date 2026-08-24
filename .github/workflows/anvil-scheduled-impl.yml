@@ -160,6 +160,9 @@ jobs:
       - uses: ./.github/actions/anvil-scheduled-benchmarks
         env:
           ANVIL_BENCH_MACHINE_KEY: ${{ inputs.bench_machine_key }}
+          # Per-leg artifact identity: only the workflow knows the matrix
+          # value, and each leg's history must stay its own series.
+          ANVIL_BENCH_ARTIFACT: bench-history-${{ matrix.os }}
 
   publish-failure:
     name: Publish scheduled failure

@@ -409,15 +409,17 @@ is the canonical YAML:
 
 ```text
 caller anvil-scheduled.yml
-  permissions upper bound: contents:read + issues:write
+  permissions upper bound: contents:read + actions:read + issues:write
   └─ called anvil-scheduled-impl.yml
        default reset: contents:read
        ├─ scheduled-test             (Linux/Windows × x64/ARM64)
        ├─ scheduled-advisories       (Linux/Windows × x64/ARM64)
        ├─ scheduled-runtime-analysis (Linux/Windows × x64/ARM64)
        ├─ scheduled-exhaustive       (Linux/Windows x64)
+       ├─ scheduled-benchmarks       (Linux/Windows x64)
+       │    job override: actions:read (history-artifact restore)
        └─ publish-failure
-            needs: all four scheduled groups
+            needs: all five scheduled groups
             condition: at least one failure and publication not disabled
             job override: issues:write only
 ```

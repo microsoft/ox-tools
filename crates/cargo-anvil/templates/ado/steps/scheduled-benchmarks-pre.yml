@@ -1,0 +1,26 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# Fragment spliced into the scheduled-benchmarks group's emitted step
+# template, ahead of the uniform runner. Not a standalone template: this is
+# part of a `steps:` list, which is why it has no `steps:` key of its own.
+#
+# The analysis orders each series by first-parent commit topology and
+# locates the merge-base, so it needs the whole commit graph. LFS matters
+# because benchmark inputs can be LFS-tracked and would otherwise arrive as
+# pointer files.
+#
+# The checkout is explicit rather than a job-wrapper parameter: job.yml is
+# the file adopters fork, so binding a parameter their copy lacks would fail
+# expansion for the whole pipeline.
+#
+# The artifact is named for the *job*, which ADO guarantees is unique within
+# a stage. Naming it for the agent OS instead would let two legs on like-OS
+# pools declare one artifact, colliding on publish and merging two machines'
+# samples into a single series.
+  - checkout: self
+    fetchDepth: 0
+    lfs: true
+  - template: bench-history-restore.yml
+    parameters:
+      artifact: bench-history-$(Agent.JobName)

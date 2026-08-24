@@ -10,6 +10,10 @@
 //! grow with the catalog: this crate's own history is a steady accretion of
 //! checks, groups and backend files.
 //!
+//! The two are timed separately rather than end-to-end, so a move can be
+//! attributed to assembly or to rendering rather than leaving the reader to
+//! guess which half shifted.
+//!
 //! They are also the shape a trend watch handles well — pure, deterministic,
 //! no I/O, no network — so a move here is a change in the code rather than in
 //! the environment.
@@ -23,8 +27,10 @@ fn catalog(c: &mut Criterion) {
     // Assembly alone: the embedded templates and the per-group expansions.
     group.bench_function("anvil", |b| b.iter(Catalog::anvil));
 
-    // Assembly plus rendering and hashing every artifact body, which is what
-    // the update path pays to decide whether anything changed.
+    // Rendering and hashing every artifact body, over an already-assembled
+    // catalog. Assembly is deliberately outside the timed closure; the
+    // benchmark above covers it, and the update path's total cost is the
+    // two together.
     group.bench_function("checksum", |b| {
         let catalog = Catalog::anvil();
         b.iter(|| catalog.checksum());

@@ -74,12 +74,20 @@ const GROUP_POST_STEPS: &[(&str, &str)] = &[(
     include_str!("../../../templates/github/bench-history-save.yml"),
 )];
 
-/// The extra steps registered for `group`, or the empty string.
-fn extra_steps(table: &'static [(&'static str, &'static str)], group: &str) -> &'static str {
-    table
-        .iter()
-        .find_map(|&(name, steps)| (name == group).then_some(steps))
-        .unwrap_or("")
+/// The extra steps registered for `group`, with the fragment's own license
+/// header removed: the composite action already carries one. Explanatory
+/// comments are kept.
+fn extra_steps(table: &'static [(&'static str, &'static str)], group: &str) -> String {
+    let Some(text) = table.iter().find_map(|&(name, steps)| (name == group).then_some(steps)) else {
+        return String::new();
+    };
+    let body: Vec<&str> = text
+        .lines()
+        .skip_while(|line| line.starts_with("# Copyright") || line.starts_with("# Licensed") || *line == "#")
+        .collect();
+    let mut out = body.join("\n");
+    out.push('\n');
+    out
 }
 
 /// Render the `action.yml` for one check group's composite action.
@@ -87,8 +95,8 @@ fn extra_steps(table: &'static [(&'static str, &'static str)], group: &str) -> &
 fn render_group_action(group: &str) -> String {
     GROUP_ACTION_TEMPLATE
         .replace(GROUP_PLACEHOLDER, group)
-        .replace(PRE_STEPS_PLACEHOLDER, extra_steps(GROUP_PRE_STEPS, group))
-        .replace(POST_STEPS_PLACEHOLDER, extra_steps(GROUP_POST_STEPS, group))
+        .replace(PRE_STEPS_PLACEHOLDER, &extra_steps(GROUP_PRE_STEPS, group))
+        .replace(POST_STEPS_PLACEHOLDER, &extra_steps(GROUP_POST_STEPS, group))
 }
 
 /// Repo-root-relative path for a per-group composite action.
@@ -330,6 +338,21 @@ mod tests {
     }
 
     #[test]
+    fn per_group_step_keys_name_real_groups() {
+        // See the ADO twin: a stale key silently drops the group's steps,
+        // which for the benchmark group means an empty store reporting
+        // "no regressions".
+        for (table, label) in [(GROUP_PRE_STEPS, "pre"), (GROUP_POST_STEPS, "post")] {
+            let mut seen = Vec::new();
+            for &(group, _) in table {
+                assert!(GROUPS.contains(&group), "{label}-step key '{group}' is not a catalog group");
+                assert!(!seen.contains(&group), "{label}-step key '{group}' is registered twice");
+                seen.push(group);
+            }
+        }
+    }
+
+    #[test]
     fn scheduled_benchmarks_job_round_trips_the_history_artifact() {
         // The job is a plain checkout + group action like every other one;
         // the round-trip lives in the group's composite action.
@@ -337,11 +360,14 @@ mod tests {
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("fetch-depth: 0"));
         // Per-leg artifact names: the history is partitioned per machine,
         // and upload-artifact rejects a name reused within one run.
+        // Per-leg artifact identity comes from the workflow, which is the
+        // only place that knows the matrix value.
         assert_eq!(
-            group_action.matches("bench-history-${{ runner.os }}").count(),
+            group_action.matches("${{ env.ANVIL_BENCH_ARTIFACT }}").count(),
             2,
             "the restore and save steps must agree on the per-leg artifact name"
         );
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("ANVIL_BENCH_ARTIFACT: bench-history-${{ matrix.os }}"));
         assert!(group_action.contains("actions/upload-artifact@"));
         assert!(group_action.contains("gh run download"));
         assert!(group_action.contains("GITHUB_STEP_SUMMARY"));
@@ -360,8 +386,16 @@ mod tests {
         // otherwise one transient failure publishes an empty store over the
         // accumulated chain and reports clean.
         assert!(group_action.contains("select(.name == \\\"$ARTIFACT\\\" and .expired == false)"));
-        assert!(group_action.contains("ANVIL_BENCH_RESTORE=restored"));
-        assert!(group_action.contains("ANVIL_BENCH_RESTORE=cold-start"));
+        assert!(group_action.contains("complete_restore restored"));
+        assert!(group_action.contains("complete_restore cold-start"));
+        // Fail-closed by construction: the store path is created only inside
+        // complete_restore, so an operational failure leaves nothing to
+        // upload over the accumulated chain.
+        assert_eq!(
+            group_action.matches("mkdir -p target/anvil/bench-history").count(),
+            1,
+            "the store path must be created only on a completed restore"
+        );
         assert!(group_action.contains("if: always() && env.ANVIL_BENCH_RESTORE != ''"));
         // The machine-key escape hatch has to be reachable in CI, which
         // workflow-level env is not across a called reusable workflow.
