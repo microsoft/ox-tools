@@ -4108,7 +4108,9 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 # We pre-filter to library-bearing crates from cargo metadata, skip
 # packages whose current manifest path is absent from the baseline,
 # then run cargo-semver-checks per-package and tolerate the remaining
-# "no-comparable-baseline" failure modes.
+# "no-comparable-baseline" failure modes. A historical baseline can also
+# become unreproducible when one of its registry dependencies is yanked;
+# cargo-deny remains authoritative for the current dependency graph.
 #
 # Findings policy: this recipe is *advisory*. Real SemVer findings do
 # NOT fail the recipe -- breaking changes between unreleased commits
@@ -4243,16 +4245,23 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
             $findings.Add('```') | Out-Null
             $findings.Add('') | Out-Null
         } elseif ($semverExit -eq 101) {
-            # Exit 101 means the check could not complete. Two transitions
+            # Exit 101 means the check could not complete. Some states
             # intentionally have no comparable branch baseline: a package
-            # renamed in place and a baseline bin becoming a library.
+            # renamed in place, a baseline bin becoming a library, or a
+            # historical registry dependency being yanked after the baseline
+            # commit. cargo-deny independently rejects yanked dependencies in
+            # the current graph.
             $packageMissing = $output.Contains(('package `{0}` not found in' -f $p))
             $manifestParseFailed = $output.Contains('possibly due to errors:')
             $renamedPackage = $packageMissing -and -not $manifestParseFailed
             $baselineLibraryMissing = $output.Contains('has no lib target') -or
                                       $output.Contains('no library targets found')
+            $yankedBaselineDependency = $output.Contains('failed to update dependencies for crate') -and
+                                        $output.Contains(' is yanked')
             if ($renamedPackage -or $baselineLibraryMissing) {
                 Write-Host "  $p has no comparable branch baseline; skipping (likely renamed or bin->lib transition)" -ForegroundColor Yellow
+            } elseif ($yankedBaselineDependency) {
+                Write-Host "  $p baseline dependencies are no longer reproducible because a registry version was yanked; skipping SemVer comparison" -ForegroundColor Yellow
             } else {
                 Write-Error "anvil-semver-check: $p could not be checked (cargo-semver-checks exit 101):`n$output"
                 exit 1

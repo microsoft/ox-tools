@@ -347,6 +347,8 @@ mod tests {
             "git rev-parse --verify \"$base^{commit}\"",
             "git cat-file -e $baselineManifest",
             "cargo semver-checks --package $p --baseline-rev $base",
+            "$yankedBaselineDependency",
+            "baseline dependencies are no longer reproducible",
         ] {
             assert!(body.contains(needle), "semver check template missing '{needle}'");
         }
