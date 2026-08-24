@@ -95,6 +95,13 @@ runs perform impact analysis (via [`cargo-delta`][__link0])
 and run each check only over the affected packages, whereas a local
 `just anvil-pr` runs every check over the whole workspace.
 
+The generated GitHub scheduled workflow publishes failures as GitHub
+issues. On failure, it best-effort reuses an open marker-owned issue and
+comments when later scheduled runs also fail. A maintainer closes the issue
+after resolving the incident; successful runs do not close it automatically.
+Repositories can disable this behavior by setting the
+`ANVIL_PUBLISH_FAILURE_ISSUE` Actions repository variable to `false`.
+
 ### Containerized local checks
 
 Any generated recipe can be executed inside a content-addressed Linux
@@ -244,7 +251,7 @@ sub-groups run sequentially within the one job per OS leg):
 <table>
   <thead><tr><th>Job</th><th>Sub-group</th><th>Check</th><th>Notes</th></tr></thead>
   <tbody>
-    <tr><td rowspan="16"><code>pr-fast</code></td><td rowspan="16">—</td><td><a href="https://rust-lang.github.io/rustfmt/">fmt</a></td><td>predefined configuration with nightly features</td></tr>
+    <tr><td rowspan="15"><code>pr-fast</code></td><td rowspan="15">—</td><td><a href="https://rust-lang.github.io/rustfmt/">fmt</a></td><td>predefined configuration with nightly features</td></tr>
     <tr><td><a href="https://doc.rust-lang.org/clippy/">clippy</a></td><td>predefined lints</td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-sort">cargo-sort</a></td><td>keeps blank-line groups (<code>--grouped</code>)</td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-heather">license-headers</a></td><td></td></tr>
@@ -259,7 +266,6 @@ sub-groups run sequentially within the one job per OS leg):
     <tr><td><a href="https://crates.io/crates/cargo-udeps">udeps</a></td><td>runs twice: with and without <code>--all-targets</code></td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-semver-checks">semver-check</a></td><td>advisory-only; never fails the build (posts a PR comment)</td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-check-external-types">external-types</a></td><td></td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-aprz">aprz</a></td><td>fails on a high-risk crate</td></tr>
     <tr><td rowspan="8"><code>pr-slow</code></td><td rowspan="3"><code>pr-test</code></td><td><a href="https://crates.io/crates/cargo-llvm-cov">llvm-cov</a></td><td>dual feature-config; gated by <a href="https://crates.io/crates/cargo-coverage-gate">cargo-coverage-gate</a></td></tr>
     <tr><td><a href="https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html">doc-test</a></td><td>runs both feature configs</td></tr>
     <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-build.html">examples</a></td><td>compile-only</td></tr>
@@ -309,6 +315,16 @@ Four escape valves, in increasing severity:
 1. **Take ownership by editing inside** an owned file or managed
    region. The next `update` detects the dirt and writes a
    `.anvil-proposed` sibling instead of overwriting.
+
+#### Scheduled failure issue publication (GitHub)
+
+The generated GitHub scheduled workflow creates or updates
+`[Anvil] Scheduled checks failed` when a scheduled group fails.
+To disable this behavior without editing an Anvil-owned workflow,
+set the Actions repository variable `ANVIL_PUBLISH_FAILURE_ISSUE`
+to `false` under **Settings → Secrets and variables → Actions →
+Variables**. Removing the variable or setting any other value
+restores the default publication behavior.
 
 ### In-tree tool customization
 
@@ -445,7 +461,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbM7cgRtZ4wjwbJoeFnDDhNxUbRGJcKx-hNawbu8tGIw2QbgphZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbSYqfQlDuez4bxOpm9tVy5dwb5v23EdpLmHAb3Yt_7tHlH1thZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts

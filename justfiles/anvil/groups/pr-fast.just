@@ -23,8 +23,7 @@ anvil-pr-fast: anvil-pr-fast-validate-prereqs \
     anvil-audit \
     anvil-udeps \
     anvil-semver-check \
-    anvil-external-types \
-    anvil-aprz
+    anvil-external-types
 
 # Group-level setup + validate-prereqs
 #
@@ -49,8 +48,7 @@ anvil-pr-fast-setup installer="install": \
     (anvil-audit-setup installer) \
     (anvil-udeps-setup installer) \
     (anvil-semver-check-setup installer) \
-    (anvil-external-types-setup installer) \
-    (anvil-aprz-setup installer)
+    (anvil-external-types-setup installer)
 
 # Validate prerequisites for the `anvil-pr-fast` recipe.
 [group("anvil-setup")]
@@ -69,5 +67,4 @@ anvil-pr-fast-validate-prereqs: \
     anvil-audit-validate-prereqs \
     anvil-udeps-validate-prereqs \
     anvil-semver-check-validate-prereqs \
-    anvil-external-types-validate-prereqs \
-    anvil-aprz-validate-prereqs
+    anvil-external-types-validate-prereqs

@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
+#![doc(html_logo_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-anvil/logo.png")]
+#![doc(html_favicon_url = "https://media.githubusercontent.com/media/microsoft/ox-tools/refs/heads/main/crates/cargo-anvil/favicon.ico")]
 #![cfg_attr(
     test,
     allow(
@@ -93,6 +95,13 @@
 //! runs perform impact analysis (via [`cargo-delta`](https://crates.io/crates/cargo-delta))
 //! and run each check only over the affected packages, whereas a local
 //! `just anvil-pr` runs every check over the whole workspace.
+//!
+//! The generated GitHub scheduled workflow publishes failures as GitHub
+//! issues. On failure, it best-effort reuses an open marker-owned issue and
+//! comments when later scheduled runs also fail. A maintainer closes the issue
+//! after resolving the incident; successful runs do not close it automatically.
+//! Repositories can disable this behavior by setting the
+//! `ANVIL_PUBLISH_FAILURE_ISSUE` Actions repository variable to `false`.
 //!
 //! ## Containerized local checks
 //!
@@ -243,7 +252,7 @@
 //! <table>
 //!   <thead><tr><th>Job</th><th>Sub-group</th><th>Check</th><th>Notes</th></tr></thead>
 //!   <tbody>
-//!     <tr><td rowspan="16"><code>pr-fast</code></td><td rowspan="16">—</td><td><a href="https://rust-lang.github.io/rustfmt/">fmt</a></td><td>predefined configuration with nightly features</td></tr>
+//!     <tr><td rowspan="15"><code>pr-fast</code></td><td rowspan="15">—</td><td><a href="https://rust-lang.github.io/rustfmt/">fmt</a></td><td>predefined configuration with nightly features</td></tr>
 //!     <tr><td><a href="https://doc.rust-lang.org/clippy/">clippy</a></td><td>predefined lints</td></tr>
 //!     <tr><td><a href="https://crates.io/crates/cargo-sort">cargo-sort</a></td><td>keeps blank-line groups (<code>--grouped</code>)</td></tr>
 //!     <tr><td><a href="https://crates.io/crates/cargo-heather">license-headers</a></td><td></td></tr>
@@ -258,7 +267,6 @@
 //!     <tr><td><a href="https://crates.io/crates/cargo-udeps">udeps</a></td><td>runs twice: with and without <code>--all-targets</code></td></tr>
 //!     <tr><td><a href="https://crates.io/crates/cargo-semver-checks">semver-check</a></td><td>advisory-only; never fails the build (posts a PR comment)</td></tr>
 //!     <tr><td><a href="https://crates.io/crates/cargo-check-external-types">external-types</a></td><td></td></tr>
-//!     <tr><td><a href="https://crates.io/crates/cargo-aprz">aprz</a></td><td>fails on a high-risk crate</td></tr>
 //!     <tr><td rowspan="8"><code>pr-slow</code></td><td rowspan="3"><code>pr-test</code></td><td><a href="https://crates.io/crates/cargo-llvm-cov">llvm-cov</a></td><td>dual feature-config; gated by <a href="https://crates.io/crates/cargo-coverage-gate">cargo-coverage-gate</a></td></tr>
 //!     <tr><td><a href="https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html">doc-test</a></td><td>runs both feature configs</td></tr>
 //!     <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-build.html">examples</a></td><td>compile-only</td></tr>
@@ -308,6 +316,16 @@
 //! 4. **Take ownership by editing inside** an owned file or managed
 //!    region. The next `update` detects the dirt and writes a
 //!    `.anvil-proposed` sibling instead of overwriting.
+//!
+//! ### Scheduled failure issue publication (GitHub)
+//!
+//! The generated GitHub scheduled workflow creates or updates
+//! `[Anvil] Scheduled checks failed` when a scheduled group fails.
+//! To disable this behavior without editing an Anvil-owned workflow,
+//! set the Actions repository variable `ANVIL_PUBLISH_FAILURE_ISSUE`
+//! to `false` under **Settings → Secrets and variables → Actions →
+//! Variables**. Removing the variable or setting any other value
+//! restores the default publication behavior.
 //!
 //! ## In-tree tool customization
 //!

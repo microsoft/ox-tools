@@ -1,0 +1,2253 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+use core::fmt::Write;
+use std::borrow::Cow;
+
+use chrono::{DateTime, Local};
+use percent_encoding::{AsciiSet, CONTROLS, NON_ALPHANUMERIC, utf8_percent_encode};
+
+use super::{ReportableCrate, common};
+use crate::Result;
+use crate::expr::{Appraisal, ExpressionDisposition, Risk};
+use crate::metrics::MetricCategory;
+use crate::reports::common::ReportContext;
+
+/// Characters to percent-encode in URL path segments.
+/// Preserves unreserved characters (RFC 3986): ALPHA, DIGIT, `-`, `.`, `_`, `~`
+/// Also preserves `+` which appears in semver build metadata.
+const PATH_SEGMENT_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'<')
+    .add(b'>')
+    .add(b'`')
+    .add(b'?')
+    .add(b'{')
+    .add(b'}')
+    .add(b'%')
+    .add(b'/')
+    .add(b'@')
+    .add(b'[')
+    .add(b']')
+    .add(b'^')
+    .add(b'|');
+use strum::IntoEnumIterator;
+
+const FERRIS_FAVICON: &str = "data:image/svg+xml,%3Csvg viewBox='0 0 1200 800' xmlns='http://www.w3.org/2000/svg'%3E%3Cg%3E%3Cg transform='matrix(1,0,0,1,654.172,668.359)'%3E%3Cpath d='M0,-322.648C-114.597,-322.648 -218.172,-308.869 -296.172,-286.419L-296.172,-291.49C-374.172,-266.395 -423.853,-231.531 -423.853,-192.984C-423.853,-186.907 -422.508,-180.922 -420.15,-175.053L-428.134,-160.732C-428.134,-160.732 -434.547,-152.373 -423.199,-134.733C-413.189,-119.179 -363.035,-58.295 -336.571,-26.413C-325.204,-10.065 -317.488,0 -316.814,-0.973C-315.753,-2.516 -323.878,-33.202 -346.453,-68.215C-356.986,-87.02 -369.811,-111.934 -377.361,-130.335C-356.28,-116.993 -328.172,-104.89 -296.172,-94.474L-296.172,-94.633C-218.172,-72.18 -114.597,-58.404 0,-58.404C131.156,-58.404 248.828,-76.45 327.828,-104.895L327.828,-276.153C248.828,-304.6 131.156,-322.648 0,-322.648' fill='%23a52b00'/%3E%3C/g%3E%3Cg transform='matrix(1,0,0,1,1177.87,277.21)'%3E%3Cpath d='M0,227.175L-88.296,162.132C-89.126,159.237 -89.956,156.345 -90.812,153.474L-61.81,111.458C-58.849,107.184 -58.252,101.629 -60.175,96.755C-62.1,91.905 -66.311,88.428 -71.292,87.576L-120.335,79.255C-122.233,75.376 -124.225,71.557 -126.224,67.771L-105.62,20.599C-103.501,15.793 -103.947,10.209 -106.759,5.848C-109.556,1.465 -114.31,-1.094 -119.376,-0.895L-169.146,0.914C-171.723,-2.442 -174.34,-5.766 -177.012,-9.032L-165.574,-59.592C-164.415,-64.724 -165.876,-70.1 -169.453,-73.83C-173.008,-77.546 -178.175,-79.084 -183.089,-77.88L-231.567,-65.961C-234.707,-68.736 -237.897,-71.474 -241.126,-74.157L-239.381,-126.064C-239.193,-131.318 -241.643,-136.311 -245.849,-139.227C-250.053,-142.161 -255.389,-142.603 -259.987,-140.423L-305.213,-118.921C-308.853,-121.011 -312.515,-123.081 -316.218,-125.084L-324.209,-176.232C-325.021,-181.413 -328.355,-185.816 -333.024,-187.826C-337.679,-189.848 -343.014,-189.193 -347.101,-186.116L-387.422,-155.863C-391.392,-157.181 -395.38,-158.446 -399.418,-159.655L-416.798,-208.159C-418.564,-213.104 -422.64,-216.735 -427.608,-217.756C-432.561,-218.768 -437.656,-217.053 -441.091,-213.217L-475.029,-175.246C-479.133,-175.717 -483.239,-176.147 -487.356,-176.505L-513.564,-220.659C-516.22,-225.131 -520.908,-227.852 -525.961,-227.852C-531.002,-227.852 -535.7,-225.131 -538.333,-220.659L-564.547,-176.505C-568.666,-176.147 -572.791,-175.717 -576.888,-175.246L-610.831,-213.217C-614.268,-217.053 -619.382,-218.768 -624.318,-217.756C-629.284,-216.721 -633.363,-213.104 -635.124,-208.159L-652.517,-159.655C-656.544,-158.446 -660.534,-157.173 -664.514,-155.863L-704.822,-186.116C-708.92,-189.204 -714.254,-189.857 -718.92,-187.826C-723.57,-185.816 -726.917,-181.413 -727.723,-176.232L-735.72,-125.084C-739.42,-123.081 -743.083,-121.022 -746.734,-118.921L-791.956,-140.423C-796.548,-142.612 -801.908,-142.161 -806.091,-139.227C-810.292,-136.311 -812.747,-131.318 -812.557,-126.064L-810.821,-74.157C-814.04,-71.474 -817.224,-68.736 -820.379,-65.961L-868.849,-77.88C-873.774,-79.075 -878.935,-77.546 -882.499,-73.83C-886.084,-70.1 -887.538,-64.724 -886.384,-59.592L-874.969,-9.032C-877.618,-5.753 -880.239,-2.442 -882.808,0.914L-932.579,-0.895C-937.602,-1.043 -942.396,1.465 -945.202,5.848C-948.014,10.209 -948.439,15.793 -946.348,20.599L-925.729,67.771C-927.732,71.557 -929.721,75.376 -931.635,79.255L-980.675,87.576C-985.657,88.417 -989.858,91.892 -991.795,96.755C-993.72,101.629 -993.095,107.184 -990.156,111.458L-961.146,153.474C-961.37,154.215 -961.576,154.964 -961.799,155.707L-1043.82,242.829C-1043.82,242.829 -1056.38,252.68 -1038.09,275.831C-1021.95,296.252 -939.097,377.207 -895.338,419.62C-876.855,441.152 -864.195,454.486 -862.872,453.332C-860.784,451.5 -871.743,412.326 -908.147,366.362C-936.207,325.123 -972.625,261.696 -964.086,254.385C-964.086,254.385 -954.372,242.054 -934.882,233.178C-934.169,233.749 -935.619,232.613 -934.882,233.178C-934.882,233.178 -523.568,422.914 -142.036,236.388C-98.452,228.571 -72.068,251.917 -72.068,251.917C-62.969,257.193 -86.531,322.412 -105.906,365.583C-132.259,414.606 -136.123,452.859 -133.888,454.185C-132.479,455.027 -122.89,440.438 -109.214,417.219C-75.469,370.196 -11.675,280.554 0,258.781C13.239,234.094 0,227.175 0,227.175' fill='%23f74c00'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E";
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "HTML generation is inherently sequential; splitting would reduce readability"
+)]
+pub fn generate<W: Write>(crates: &[ReportableCrate], timestamp: DateTime<Local>, writer: &mut W) -> Result<()> {
+    let has_appraisals = crates.iter().any(|c| c.appraisal.is_some());
+    let total = crates.len();
+    let crate_description = |c: &ReportableCrate| -> String {
+        c.metrics
+            .iter()
+            .find(|m| m.name() == "crate.description")
+            .and_then(|m| m.value.as_ref())
+            .map(common::format_metric_value)
+            .unwrap_or_default()
+    };
+    let crates_by_risk = |risk: Risk| -> Vec<(&str, String, String, f64)> {
+        let mut v: Vec<_> = crates
+            .iter()
+            .filter(|c| c.appraisal.as_ref().is_some_and(|a| a.risk() == risk))
+            .map(|c| {
+                (
+                    c.name.as_ref(),
+                    c.version.to_string(),
+                    crate_description(c),
+                    // The browser's score control requires a finite numeric sort
+                    // key. Unscored appraisals are already isolated by risk and
+                    // deliberately sort with the lowest scored entries; this
+                    // fallback must never be rendered as a weighted score.
+                    c.appraisal.as_ref().and_then(Appraisal::weighted_score).unwrap_or(0.0),
+                )
+            })
+            .collect();
+        v.sort_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(core::cmp::Ordering::Equal));
+        v
+    };
+    let high_risk_crates = crates_by_risk(Risk::High);
+    let medium_risk_crates = crates_by_risk(Risk::Medium);
+    let low_risk_crates = crates_by_risk(Risk::Low);
+    let not_evaluated_crates: Vec<(&str, String, String, f64)> = {
+        let mut v: Vec<_> = crates
+            .iter()
+            .filter(|c| c.appraisal.is_none())
+            .map(|c| (c.name.as_ref(), c.version.to_string(), crate_description(c), 0.0))
+            .collect();
+        v.sort_by(|a, b| a.0.cmp(b.0));
+        v
+    };
+
+    let has_risk_lists = has_appraisals && total > 1;
+    writeln!(writer, "<!DOCTYPE html>\n<html>\n<head>")?;
+    writeln!(writer, "  <meta charset=\"UTF-8\">")?;
+    writeln!(
+        writer,
+        "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
+    )?;
+    writeln!(writer, "  <title>Crate Appraisal Report</title>")?;
+    writeln!(writer, "  <link rel=\"icon\" type=\"image/svg+xml\" href=\"{FERRIS_FAVICON}\">")?;
+    write_styles(writer)?;
+    writeln!(writer, "</head>")?;
+    writeln!(writer, "<body>")?;
+
+    write_header(writer, timestamp)?;
+
+    // Summary section
+    let default_visible_anchor = if has_appraisals && total > 1 {
+        write_summary(
+            writer,
+            total,
+            &high_risk_crates,
+            &medium_risk_crates,
+            &low_risk_crates,
+            &not_evaluated_crates,
+        )?;
+        // The first pill's crate should be visible by default
+        high_risk_crates
+            .first()
+            .or_else(|| medium_risk_crates.first())
+            .or_else(|| low_risk_crates.first())
+            .or_else(|| not_evaluated_crates.first())
+            .map(|(name, version, _, _)| crate_anchor_id(name, version))
+    } else {
+        None
+    };
+
+    // Crate cards
+    let ctx = ReportContext::new(crates);
+    writeln!(writer, "  <div id=\"crate-list\">")?;
+    for (crate_index, crate_info) in crates.iter().enumerate() {
+        let anchor_id = crate_anchor_id(&crate_info.name, &crate_info.version.to_string());
+        let hidden = if has_risk_lists && default_visible_anchor.as_deref() != Some(&anchor_id) {
+            " style=\"display:none\""
+        } else {
+            ""
+        };
+        writeln!(writer, "    <div class=\"crate-card\" id=\"{anchor_id}\"{hidden}>")?;
+        write_crate_card_header(writer, crate_info)?;
+
+        // Collect which tabs this crate has
+        let has_appraisal_tab = crate_info.appraisal.as_ref().is_some_and(|a| !a.expression_outcomes.is_empty());
+        let metric_map = &ctx.crate_metric_maps[crate_index];
+        let mut crate_categories: Vec<MetricCategory> = Vec::new();
+        for category in MetricCategory::iter() {
+            if ctx
+                .metrics_by_category
+                .get(&category)
+                .is_some_and(|cm| cm.iter().any(|&name| metric_map.contains_key(name)))
+            {
+                crate_categories.push(category);
+            }
+        }
+
+        // Tab navigation
+        let card_id = format!("card-{crate_index}");
+        writeln!(writer, "      <div class=\"tabs\">")?;
+        writeln!(writer, "        <div class=\"tab-nav\">")?;
+        let mut tab_index = 0u32;
+        if has_appraisal_tab {
+            writeln!(
+                writer,
+                "          <button class=\"tab-btn active\" data-tab=\"{card_id}-appraisal\" onclick=\"switchTab(this)\">Appraisal</button>"
+            )?;
+            tab_index += 1;
+        }
+        for cat in &crate_categories {
+            let active = if tab_index == 0 { " active" } else { "" };
+            writeln!(
+                writer,
+                "          <button class=\"tab-btn{active}\" data-tab=\"{card_id}-{cat}\" onclick=\"switchTab(this)\">{cat}</button>"
+            )?;
+            tab_index += 1;
+        }
+        writeln!(writer, "        </div>")?;
+
+        // Tab panels
+        writeln!(writer, "        <div class=\"tab-panels\">")?;
+        if let Some(appraisal) = crate_info.appraisal.as_ref().filter(|a| !a.expression_outcomes.is_empty()) {
+            writeln!(writer, "        <div class=\"tab-panel active\" id=\"{card_id}-appraisal\">")?;
+            write_appraisal_table(writer, appraisal)?;
+            writeln!(writer, "        </div>")?;
+        }
+
+        for (panel_index, category) in crate_categories.iter().enumerate() {
+            let active = if panel_index == 0 && !has_appraisal_tab { " active" } else { "" };
+            writeln!(writer, "        <div class=\"tab-panel{active}\" id=\"{card_id}-{category}\">")?;
+            write_metrics_category(writer, *category, &ctx.metrics_by_category, metric_map)?;
+            writeln!(writer, "        </div>")?;
+        }
+
+        writeln!(writer, "        </div>")?;
+        writeln!(writer, "      </div>")?;
+
+        writeln!(writer, "    </div>")?;
+    }
+    writeln!(writer, "  </div>")?;
+
+    write_scripts(writer, has_risk_lists)?;
+    writeln!(writer, "</body>")?;
+    writeln!(writer, "</html>")?;
+
+    Ok(())
+}
+
+#[expect(clippy::too_many_lines, reason = "CSS template generation naturally requires many lines")]
+fn write_styles<W: Write>(writer: &mut W) -> Result<()> {
+    writeln!(writer, "  <style>")?;
+    // CSS custom properties
+    writeln!(writer, "    :root {{")?;
+    writeln!(writer, "      --bg-color: #f0f2f5;")?;
+    writeln!(writer, "      --card-bg: #ffffff;")?;
+    writeln!(writer, "      --text-color: #1a202c;")?;
+    writeln!(writer, "      --text-secondary: #64748b;")?;
+    writeln!(writer, "      --border-color: #e2e8f0;")?;
+    writeln!(writer, "      --category-bg: #fef3e2;")?;
+    writeln!(writer, "      --category-text: #9a3412;")?;
+    writeln!(writer, "      --hover-bg: #f8fafc;")?;
+    writeln!(writer, "      --accent-color: #3b82f6;")?;
+    writeln!(writer, "      --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 16px rgba(0,0,0,0.04);")?;
+    writeln!(writer, "      --summary-card-bg: #ffffff;")?;
+    // Risk colors: one color per level, used everywhere
+    writeln!(
+        writer,
+        "      --risk-low: #86efac; --risk-medium: #fde68a; --risk-high: #fca5a5; --risk-not-eval: #d1d5db;"
+    )?;
+    writeln!(
+        writer,
+        "      --risk-low-text: #14532d; --risk-medium-text: #713f12; --risk-high-text: #7f1d1d; --risk-not-eval-text: #374151;"
+    )?;
+    writeln!(writer, "    }}")?;
+    writeln!(writer, "    body.dark-theme {{")?;
+    writeln!(
+        writer,
+        "      --bg-color: #0f172a; --card-bg: #1e293b; --text-color: #e2e8f0; --text-secondary: #94a3b8;"
+    )?;
+    writeln!(
+        writer,
+        "      --border-color: #334155; --category-bg: #451a03; --category-text: #fdba74;"
+    )?;
+    writeln!(writer, "      --hover-bg: #263044; --accent-color: #60a5fa;")?;
+    writeln!(
+        writer,
+        "      --shadow: 0 1px 3px rgba(0,0,0,0.3), 0 4px 16px rgba(0,0,0,0.2); --summary-card-bg: #1e293b;"
+    )?;
+    writeln!(
+        writer,
+        "      --risk-low: #4ade80; --risk-medium: #fbbf24; --risk-high: #f87171; --risk-not-eval: #9ca3af;"
+    )?;
+    writeln!(
+        writer,
+        "      --risk-low-text: #052e16; --risk-medium-text: #422006; --risk-high-text: #450a0a; --risk-not-eval-text: #f3f4f6;"
+    )?;
+    writeln!(writer, "      color-scheme: dark;")?;
+    writeln!(writer, "    }}")?;
+    writeln!(writer, "    body.light-theme {{")?;
+    writeln!(
+        writer,
+        "      --bg-color: #f0f2f5; --card-bg: #ffffff; --text-color: #1a202c; --text-secondary: #64748b;"
+    )?;
+    writeln!(
+        writer,
+        "      --border-color: #e2e8f0; --category-bg: #fef3e2; --category-text: #9a3412;"
+    )?;
+    writeln!(writer, "      --hover-bg: #f8fafc; --accent-color: #3b82f6;")?;
+    writeln!(
+        writer,
+        "      --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 16px rgba(0,0,0,0.04); --summary-card-bg: #ffffff;"
+    )?;
+    writeln!(
+        writer,
+        "      --risk-low: #86efac; --risk-medium: #fde68a; --risk-high: #fca5a5; --risk-not-eval: #d1d5db;"
+    )?;
+    writeln!(
+        writer,
+        "      --risk-low-text: #14532d; --risk-medium-text: #713f12; --risk-high-text: #7f1d1d; --risk-not-eval-text: #374151;"
+    )?;
+    writeln!(writer, "      color-scheme: light;")?;
+    writeln!(writer, "    }}")?;
+
+    // Base styles
+    writeln!(writer, "    * {{ box-sizing: border-box; }}")?;
+    writeln!(
+        writer,
+        "    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif; margin: 0; padding: 32px; background: var(--bg-color); color: var(--text-color); transition: background-color 0.3s ease, color 0.3s ease; line-height: 1.5; }}"
+    )?;
+
+    // Header
+    writeln!(
+        writer,
+        "    .header {{ display: flex; align-items: center; gap: 16px; margin-bottom: 28px; }}"
+    )?;
+    writeln!(writer, "    .header-content {{ flex: 1; }}")?;
+    writeln!(
+        writer,
+        "    h1 {{ margin: 0 0 2px 0; font-size: 26px; font-weight: 700; letter-spacing: -0.5px; }}"
+    )?;
+    writeln!(
+        writer,
+        "    .subtitle {{ margin: 0; font-size: 13px; color: var(--text-secondary); }}"
+    )?;
+    writeln!(writer, "    .ferris {{ width: 52px; height: 35px; flex-shrink: 0; }}")?;
+    writeln!(
+        writer,
+        "    .theme-toggle {{ background: none; border: 2px solid var(--border-color); border-radius: 8px; width: 40px; height: 40px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all 0.2s ease; flex-shrink: 0; }}"
+    )?;
+    writeln!(writer, "    .theme-toggle:hover {{ border-color: var(--accent-color); }}")?;
+    writeln!(
+        writer,
+        "    .theme-toggle svg {{ width: 18px; height: 18px; fill: var(--text-color); opacity: 0.7; }}"
+    )?;
+
+    // Summary row (cards + pie chart)
+    writeln!(
+        writer,
+        "    .summary-row {{ display: flex; align-items: center; gap: 20px; margin-bottom: 20px; }}"
+    )?;
+    writeln!(
+        writer,
+        "    .summary {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; flex: 1; }}"
+    )?;
+    writeln!(writer, "    .pie-chart {{ width: 140px; height: 140px; flex-shrink: 0; }}")?;
+    writeln!(
+        writer,
+        "    body.light-theme .pie-chart circle, body.light-theme .pie-chart path {{ stroke: #000; stroke-width: 0.5; }}"
+    )?;
+    writeln!(writer, "    .pie-border {{ stroke: none; stroke-width: 0; }}")?;
+    writeln!(writer, "    body.light-theme .pie-border {{ stroke: #000; stroke-width: 1.5; }}")?;
+    writeln!(
+        writer,
+        "    .summary-card {{ background: var(--summary-card-bg); border-radius: 10px; padding: 16px 20px; box-shadow: var(--shadow); border: 1px solid var(--border-color); text-align: center; cursor: pointer; transition: opacity 0.15s; }}"
+    )?;
+    writeln!(writer, "    .summary-card:hover {{ opacity: 0.85; }}")?;
+    writeln!(
+        writer,
+        "    .summary-card .label {{ font-size: 11px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--text-secondary); font-weight: 600; margin-bottom: 4px; }}"
+    )?;
+    writeln!(writer, "    .summary-card .value {{ font-size: 28px; font-weight: 700; }}")?;
+    writeln!(writer, "    .summary-card.total .value {{ color: #2563eb; }}")?;
+    writeln!(writer, "    .summary-card.low .value {{ color: #15803d; }}")?;
+    writeln!(writer, "    .summary-card.medium .value {{ color: #d97706; }}")?;
+    writeln!(writer, "    .summary-card.high .value {{ color: #dc2626; }}")?;
+    writeln!(writer, "    .summary-card.not-eval .value {{ color: var(--text-secondary); }}")?;
+    writeln!(
+        writer,
+        "    body.dark-theme .summary-card.total .value {{ color: var(--accent-color); }}"
+    )?;
+    writeln!(writer, "    body.dark-theme .summary-card.low .value {{ color: var(--risk-low); }}")?;
+    writeln!(
+        writer,
+        "    body.dark-theme .summary-card.medium .value {{ color: var(--risk-medium); }}"
+    )?;
+    writeln!(
+        writer,
+        "    body.dark-theme .summary-card.high .value {{ color: var(--risk-high); }}"
+    )?;
+
+    // Crate card
+    writeln!(
+        writer,
+        "    .crate-card {{ background: var(--card-bg); border-radius: 12px; box-shadow: var(--shadow); border: 1px solid var(--border-color); margin-bottom: 20px; overflow: hidden; transition: box-shadow 0.2s ease; }}"
+    )?;
+    writeln!(
+        writer,
+        "    .crate-card:hover {{ box-shadow: 0 2px 8px rgba(0,0,0,0.12), 0 8px 24px rgba(0,0,0,0.08); }}"
+    )?;
+    writeln!(
+        writer,
+        "    .crate-card-header {{ display: flex; align-items: center; gap: 12px; padding: 16px 20px; border-bottom: 1px solid var(--border-color); }}"
+    )?;
+    writeln!(
+        writer,
+        "    .crate-card-header .crate-title {{ font-size: 18px; font-weight: 700; }}"
+    )?;
+    writeln!(writer, "    .crate-card-header .spacer {{ flex: 1; }}")?;
+    writeln!(
+        writer,
+        "    .crate-card-header .header-right {{ display: flex; align-items: center; gap: 12px; }}"
+    )?;
+    writeln!(
+        writer,
+        "    .crate-card-header.risk-low {{ background: linear-gradient(135deg, var(--risk-low) 0%, var(--card-bg) 100%); }}"
+    )?;
+    writeln!(
+        writer,
+        "    .crate-card-header.risk-medium {{ background: linear-gradient(135deg, var(--risk-medium) 0%, var(--card-bg) 100%); }}"
+    )?;
+    writeln!(
+        writer,
+        "    .crate-card-header.risk-high {{ background: linear-gradient(135deg, var(--risk-high) 0%, var(--card-bg) 100%); }}"
+    )?;
+    writeln!(
+        writer,
+        "    .crate-card-header.risk-low .crate-title {{ color: var(--risk-low-text); }}"
+    )?;
+    writeln!(
+        writer,
+        "    .crate-card-header.risk-medium .crate-title {{ color: var(--risk-medium-text); }}"
+    )?;
+    writeln!(
+        writer,
+        "    .crate-card-header.risk-high .crate-title {{ color: var(--risk-high-text); }}"
+    )?;
+
+    // Risk badges
+    writeln!(
+        writer,
+        "    .risk-badge {{ display: inline-block; padding: 2px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; letter-spacing: 0.5px; text-transform: uppercase; white-space: nowrap; }}"
+    )?;
+    writeln!(
+        writer,
+        "    .risk-badge.low {{ background: var(--risk-low); color: var(--risk-low-text); }}"
+    )?;
+    writeln!(
+        writer,
+        "    .risk-badge.medium {{ background: var(--risk-medium); color: var(--risk-medium-text); }}"
+    )?;
+    writeln!(
+        writer,
+        "    .risk-badge.high {{ background: var(--risk-high); color: var(--risk-high-text); }}"
+    )?;
+    writeln!(
+        writer,
+        "    .risk-badge.not-evaluated {{ background: var(--risk-not-eval); color: var(--risk-not-eval-text); }}"
+    )?;
+
+    // Appraisal score
+    writeln!(
+        writer,
+        "    .appraisal-score {{ font-size: 14px; font-weight: 600; white-space: nowrap; color: var(--text-secondary); }}"
+    )?;
+
+    // Tables within cards
+    writeln!(writer, "    .card-section {{ padding: 0; }}")?;
+    writeln!(
+        writer,
+        "    .card-section-title {{ font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.8px; color: var(--category-text); background: var(--category-bg); padding: 8px 20px; }}"
+    )?;
+    writeln!(writer, "    table {{ border-collapse: collapse; width: 100%; }}")?;
+    writeln!(
+        writer,
+        "    th {{ text-align: left; padding: 8px 20px; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); border-bottom: 2px solid var(--border-color); background: var(--card-bg); }}"
+    )?;
+    writeln!(
+        writer,
+        "    td {{ padding: 8px 20px; font-size: 14px; border-bottom: 1px solid var(--border-color); vertical-align: top; }}"
+    )?;
+    writeln!(writer, "    tr:last-child td {{ border-bottom: none; }}")?;
+    writeln!(writer, "    tr:nth-child(even) td {{ background: var(--hover-bg); }}")?;
+    writeln!(
+        writer,
+        "    td:first-child {{ font-weight: 500; color: var(--text-secondary); white-space: nowrap; width: 1%; }}"
+    )?;
+
+    // Disposition badges
+    writeln!(
+        writer,
+        "    .disposition {{ display: inline-block; padding: 2px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; }}"
+    )?;
+    writeln!(writer, "    .disposition.passed {{ background: #dcfce7; color: #166534; }}")?;
+    writeln!(writer, "    .disposition.failed {{ background: #fee2e2; color: #991b1b; }}")?;
+    writeln!(writer, "    .disposition.inconclusive {{ background: #f1f5f9; color: #64748b; }}")?;
+    writeln!(
+        writer,
+        "    body.dark-theme .disposition.passed {{ background: #14532d; color: #86efac; }}"
+    )?;
+    writeln!(
+        writer,
+        "    body.dark-theme .disposition.failed {{ background: #7f1d1d; color: #fca5a5; }}"
+    )?;
+    writeln!(
+        writer,
+        "    body.dark-theme .disposition.inconclusive {{ background: #334155; color: #94a3b8; }}"
+    )?;
+
+    // Tabs
+    writeln!(writer, "    .tabs {{ }}")?;
+    writeln!(
+        writer,
+        "    .tab-nav {{ display: flex; gap: 4px; border-bottom: 2px solid var(--border-color); padding: 0 20px; margin-top: 5px; overflow-x: auto; overflow-y: hidden; }}"
+    )?;
+    writeln!(
+        writer,
+        "    .tab-btn {{ background: var(--hover-bg); border: 1px solid var(--border-color); border-bottom: none; border-radius: 6px 6px 0 0; margin-bottom: -2px; padding: 10px 16px; font-size: 13px; font-weight: 600; color: var(--text-secondary); cursor: pointer; white-space: nowrap; transition: all 0.15s ease; }}"
+    )?;
+    writeln!(writer, "    .tab-btn:hover {{ color: var(--text-color); background: #e8e8e8; }}")?;
+    writeln!(writer, "    body.dark-theme .tab-btn:hover {{ background: #334155; }}")?;
+    writeln!(
+        writer,
+        "    .tab-btn.active {{ color: var(--text-color); background: #e8e8e8; border-color: var(--border-color); border-bottom: 2px solid #e8e8e8; }}"
+    )?;
+    writeln!(
+        writer,
+        "    body.dark-theme .tab-btn.active {{ background: #334155; border-bottom-color: #334155; }}"
+    )?;
+    writeln!(writer, "    .tab-panels {{ display: grid; }}")?;
+    writeln!(writer, "    .tab-panel {{ grid-area: 1 / 1; visibility: hidden; }}")?;
+    writeln!(writer, "    .tab-panel.active {{ visibility: visible; }}")?;
+
+    // Risk list (shared by high/medium)
+    writeln!(
+        writer,
+        "    .risk-list {{ background: var(--card-bg); border-radius: 10px; padding: 14px 20px; box-shadow: var(--shadow); border: 1px solid var(--border-color); margin-bottom: 12px; }}"
+    )?;
+    writeln!(
+        writer,
+        "    .risk-list summary {{ font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; cursor: pointer; font-weight: 700; }}"
+    )?;
+    writeln!(writer, "    .risk-list .crate-names {{ margin-top: 6px; font-size: 14px; }}")?;
+    writeln!(writer, "    .risk-list .crate-names a {{ text-decoration: none; }}")?;
+    writeln!(
+        writer,
+        "    .risk-list .crate-name {{ display: inline-block; padding: 2px 10px; border-radius: 12px; margin: 3px 2px 3px 1px; font-weight: 500; font-size: 13px; cursor: pointer; transition: opacity 0.15s; }}"
+    )?;
+    writeln!(writer, "    .risk-list .crate-name:hover {{ opacity: 0.8; }}")?;
+    writeln!(writer, "    .risk-list.high {{ border-left: 4px solid var(--risk-high); }}")?;
+    writeln!(writer, "    .risk-list.high strong {{ color: var(--risk-high); }}")?;
+    writeln!(
+        writer,
+        "    .risk-list.high .crate-name {{ background: var(--risk-high); color: var(--risk-high-text); }}"
+    )?;
+    writeln!(writer, "    .risk-list.medium {{ border-left: 4px solid var(--risk-medium); }}")?;
+    writeln!(writer, "    .risk-list.medium strong {{ color: var(--risk-medium); }}")?;
+    writeln!(
+        writer,
+        "    .risk-list.medium .crate-name {{ background: var(--risk-medium); color: var(--risk-medium-text); }}"
+    )?;
+    writeln!(writer, "    .risk-list.low {{ border-left: 4px solid var(--risk-low); }}")?;
+    writeln!(writer, "    .risk-list.low strong {{ color: var(--risk-low); }}")?;
+    writeln!(
+        writer,
+        "    .risk-list.low .crate-name {{ background: var(--risk-low); color: var(--risk-low-text); }}"
+    )?;
+    writeln!(writer, "    .risk-list.not-eval {{ border-left: 4px solid var(--risk-not-eval); }}")?;
+    writeln!(writer, "    .risk-list.not-eval strong {{ color: var(--risk-not-eval); }}")?;
+    writeln!(
+        writer,
+        "    .risk-list.not-eval .crate-name {{ background: var(--risk-not-eval); color: var(--risk-not-eval-text); }}"
+    )?;
+    writeln!(
+        writer,
+        "    .risk-list .crate-name.active {{ outline: 2px solid var(--accent-color); outline-offset: 1px; }}"
+    )?;
+
+    // Sort controls (toggle style)
+    writeln!(
+        writer,
+        "    .sort-controls {{ float: right; display: inline-flex; margin-left: 12px; }}"
+    )?;
+    writeln!(
+        writer,
+        "    .sort-btn {{ background: var(--hover-bg); border: 1px solid var(--border-color); padding: 1px 8px; font-size: 11px; font-weight: 600; color: var(--text-secondary); cursor: pointer; transition: all 0.15s ease; text-transform: none; letter-spacing: 0; }}"
+    )?;
+    writeln!(writer, "    .sort-btn:first-child {{ border-radius: 4px 0 0 4px; }}")?;
+    writeln!(
+        writer,
+        "    .sort-btn:last-child {{ border-radius: 0 4px 4px 0; border-left: none; }}"
+    )?;
+    writeln!(writer, "    .sort-btn:hover {{ color: var(--text-color); }}")?;
+    writeln!(
+        writer,
+        "    .sort-btn.active {{ background: #4b5563; color: #ffffff; border-color: #4b5563; }}"
+    )?;
+    writeln!(
+        writer,
+        "    .sort-btn.active + .sort-btn {{ border-left: 1px solid var(--border-color); }}"
+    )?;
+
+    // Misc
+    writeln!(
+        writer,
+        "    .na {{ color: var(--text-secondary); font-style: italic; font-size: 13px; }}"
+    )?;
+    writeln!(writer, "    a {{ color: var(--accent-color); text-decoration: none; }}")?;
+    writeln!(writer, "    a:hover {{ text-decoration: underline; }}")?;
+    writeln!(
+        writer,
+        "    @media (max-width: 640px) {{ body {{ padding: 16px; }} .summary-row {{ flex-direction: column; }} .summary {{ grid-template-columns: repeat(2, 1fr); }} }}"
+    )?;
+    writeln!(writer, "  </style>")?;
+    Ok(())
+}
+
+fn write_header<W: Write>(writer: &mut W, timestamp: DateTime<Local>) -> Result<()> {
+    let date = timestamp.format("%Y-%m-%d").to_string();
+    writeln!(writer, "  <div class=\"header\">")?;
+    writeln!(
+        writer,
+        "    <svg class=\"ferris\" viewBox=\"0 0 1200 800\" xmlns=\"http://www.w3.org/2000/svg\">"
+    )?;
+    writeln!(writer, "      <g>")?;
+    writeln!(writer, "        <g transform=\"matrix(1,0,0,1,654.172,668.359)\">")?;
+    writeln!(
+        writer,
+        "          <path d=\"M0,-322.648C-114.597,-322.648 -218.172,-308.869 -296.172,-286.419L-296.172,-291.49C-374.172,-266.395 -423.853,-231.531 -423.853,-192.984C-423.853,-186.907 -422.508,-180.922 -420.15,-175.053L-428.134,-160.732C-428.134,-160.732 -434.547,-152.373 -423.199,-134.733C-413.189,-119.179 -363.035,-58.295 -336.571,-26.413C-325.204,-10.065 -317.488,0 -316.814,-0.973C-315.753,-2.516 -323.878,-33.202 -346.453,-68.215C-356.986,-87.02 -369.811,-111.934 -377.361,-130.335C-356.28,-116.993 -328.172,-104.89 -296.172,-94.474L-296.172,-94.633C-218.172,-72.18 -114.597,-58.404 0,-58.404C131.156,-58.404 248.828,-76.45 327.828,-104.895L327.828,-276.153C248.828,-304.6 131.156,-322.648 0,-322.648\" style=\"fill:rgb(165,43,0);fill-rule:nonzero;\"/>"
+    )?;
+    writeln!(writer, "        </g>")?;
+    writeln!(writer, "        <g transform=\"matrix(1,0,0,1,1099.87,554.94)\">")?;
+    writeln!(
+        writer,
+        "          <path d=\"M0,-50.399L-13.433,-78.227C-13.362,-79.283 -13.309,-80.341 -13.309,-81.402C-13.309,-112.95 -46.114,-142.022 -101.306,-165.303L-101.306,2.499C-75.555,-8.365 -54.661,-20.485 -39.72,-33.538C-44.118,-15.855 -59.157,19.917 -71.148,45.073C-90.855,81.054 -97.993,112.376 -97.077,113.926C-96.493,114.904 -89.77,104.533 -79.855,87.726C-56.783,54.85 -13.063,-7.914 -4.325,-23.901C5.574,-42.024 0,-50.399 0,-50.399\" style=\"fill:rgb(165,43,0);fill-rule:nonzero;\"/>"
+    )?;
+    writeln!(writer, "        </g>")?;
+    writeln!(writer, "        <g transform=\"matrix(1,0,0,1,1177.87,277.21)\">")?;
+    writeln!(
+        writer,
+        "          <path d=\"M0,227.175L-88.296,162.132C-89.126,159.237 -89.956,156.345 -90.812,153.474L-61.81,111.458C-58.849,107.184 -58.252,101.629 -60.175,96.755C-62.1,91.905 -66.311,88.428 -71.292,87.576L-120.335,79.255C-122.233,75.376 -124.225,71.557 -126.224,67.771L-105.62,20.599C-103.501,15.793 -103.947,10.209 -106.759,5.848C-109.556,1.465 -114.31,-1.094 -119.376,-0.895L-169.146,0.914C-171.723,-2.442 -174.34,-5.766 -177.012,-9.032L-165.574,-59.592C-164.415,-64.724 -165.876,-70.1 -169.453,-73.83C-173.008,-77.546 -178.175,-79.084 -183.089,-77.88L-231.567,-65.961C-234.707,-68.736 -237.897,-71.474 -241.126,-74.157L-239.381,-126.064C-239.193,-131.318 -241.643,-136.311 -245.849,-139.227C-250.053,-142.161 -255.389,-142.603 -259.987,-140.423L-305.213,-118.921C-308.853,-121.011 -312.515,-123.081 -316.218,-125.084L-324.209,-176.232C-325.021,-181.413 -328.355,-185.816 -333.024,-187.826C-337.679,-189.848 -343.014,-189.193 -347.101,-186.116L-387.422,-155.863C-391.392,-157.181 -395.38,-158.446 -399.418,-159.655L-416.798,-208.159C-418.564,-213.104 -422.64,-216.735 -427.608,-217.756C-432.561,-218.768 -437.656,-217.053 -441.091,-213.217L-475.029,-175.246C-479.133,-175.717 -483.239,-176.147 -487.356,-176.505L-513.564,-220.659C-516.22,-225.131 -520.908,-227.852 -525.961,-227.852C-531.002,-227.852 -535.7,-225.131 -538.333,-220.659L-564.547,-176.505C-568.666,-176.147 -572.791,-175.717 -576.888,-175.246L-610.831,-213.217C-614.268,-217.053 -619.382,-218.768 -624.318,-217.756C-629.284,-216.721 -633.363,-213.104 -635.124,-208.159L-652.517,-159.655C-656.544,-158.446 -660.534,-157.173 -664.514,-155.863L-704.822,-186.116C-708.92,-189.204 -714.254,-189.857 -718.92,-187.826C-723.57,-185.816 -726.917,-181.413 -727.723,-176.232L-735.72,-125.084C-739.42,-123.081 -743.083,-121.022 -746.734,-118.921L-791.956,-140.423C-796.548,-142.612 -801.908,-142.161 -806.091,-139.227C-810.292,-136.311 -812.747,-131.318 -812.557,-126.064L-810.821,-74.157C-814.04,-71.474 -817.224,-68.736 -820.379,-65.961L-868.849,-77.88C-873.774,-79.075 -878.935,-77.546 -882.499,-73.83C-886.084,-70.1 -887.538,-64.724 -886.384,-59.592L-874.969,-9.032C-877.618,-5.753 -880.239,-2.442 -882.808,0.914L-932.579,-0.895C-937.602,-1.043 -942.396,1.465 -945.202,5.848C-948.014,10.209 -948.439,15.793 -946.348,20.599L-925.729,67.771C-927.732,71.557 -929.721,75.376 -931.635,79.255L-980.675,87.576C-985.657,88.417 -989.858,91.892 -991.795,96.755C-993.72,101.629 -993.095,107.184 -990.156,111.458L-961.146,153.474C-961.37,154.215 -961.576,154.964 -961.799,155.707L-1043.82,242.829C-1043.82,242.829 -1056.38,252.68 -1038.09,275.831C-1021.95,296.252 -939.097,377.207 -895.338,419.62C-876.855,441.152 -864.195,454.486 -862.872,453.332C-860.784,451.5 -871.743,412.326 -908.147,366.362C-936.207,325.123 -972.625,261.696 -964.086,254.385C-964.086,254.385 -954.372,242.054 -934.882,233.178C-934.169,233.749 -935.619,232.613 -934.882,233.178C-934.882,233.178 -523.568,422.914 -142.036,236.388C-98.452,228.571 -72.068,251.917 -72.068,251.917C-62.969,257.193 -86.531,322.412 -105.906,365.583C-132.259,414.606 -136.123,452.859 -133.888,454.185C-132.479,455.027 -122.89,440.438 -109.214,417.219C-75.469,370.196 -11.675,280.554 0,258.781C13.239,234.094 0,227.175 0,227.175\" style=\"fill:rgb(247,76,0);fill-rule:nonzero;\"/>"
+    )?;
+    writeln!(writer, "        </g>")?;
+    writeln!(writer, "        <g transform=\"matrix(1,0,0,1,795.856,464.937)\">")?;
+    writeln!(
+        writer,
+        "          <path d=\"M0,159.631C1.575,158.289 2.4,157.492 2.4,157.492L-132.25,144.985C-22.348,0 65.618,116.967 74.988,129.879L74.988,159.631L0,159.631Z\" style=\"fill-rule:nonzero;\"/>"
+    )?;
+    writeln!(writer, "        </g>")?;
+    writeln!(writer, "        <g transform=\"matrix(1,0,0,1,278.418,211.791)\">")?;
+    writeln!(
+        writer,
+        "          <path d=\"M0,253.04C0,253.04 -111.096,209.79 -129.876,163.242C-129.876,163.242 0.515,59.525 -155.497,-50.644L-159.726,89.773C-159.726,89.773 -205.952,45.179 -203.912,-32.91C-203.912,-32.91 -347.685,36.268 -179.436,158.667C-179.436,158.667 -173.76,224.365 -22.459,303.684L0,253.04Z\" style=\"fill:rgb(247,76,0);fill-rule:nonzero;\"/>"
+    )?;
+    writeln!(writer, "        </g>")?;
+    writeln!(writer, "        <g transform=\"matrix(1,0,0,1,729.948,492.523)\">")?;
+    writeln!(
+        writer,
+        "          <path d=\"M0,-87.016C0,-87.016 41.104,-132.025 82.21,-87.016C82.21,-87.016 114.507,-27.003 82.21,3C82.21,3 29.36,45.009 0,3C0,3 -35.232,-30.006 0,-87.016\" style=\"fill-rule:nonzero;\"/>"
+    )?;
+    writeln!(writer, "        </g>")?;
+    writeln!(writer, "        <g transform=\"matrix(1,0,0,1,777.536,422.196)\">")?;
+    writeln!(
+        writer,
+        "          <path d=\"M0,0.008C0,17.531 -10.329,31.738 -23.07,31.738C-35.809,31.738 -46.139,17.531 -46.139,0.008C-46.139,-17.521 -35.809,-31.73 -23.07,-31.73C-10.329,-31.73 0,-17.521 0,0.008\" style=\"fill:white;fill-rule:nonzero;\"/>"
+    )?;
+    writeln!(writer, "        </g>")?;
+    writeln!(writer, "        <g transform=\"matrix(1,0,0,1,546.49,486.263)\">")?;
+    writeln!(
+        writer,
+        "          <path d=\"M0,-93.046C0,-93.046 70.508,-124.265 89.753,-54.583C89.753,-54.583 109.912,26.635 31.851,31.219C31.851,31.219 -67.69,12.047 0,-93.046\" style=\"fill-rule:nonzero;\"/>"
+    )?;
+    writeln!(writer, "        </g>")?;
+    writeln!(writer, "        <g transform=\"matrix(1,0,0,1,581.903,423.351)\">")?;
+    writeln!(
+        writer,
+        "          <path d=\"M0,0.002C0,18.074 -10.653,32.731 -23.794,32.731C-36.931,32.731 -47.586,18.074 -47.586,0.002C-47.586,-18.076 -36.931,-32.729 -23.794,-32.729C-10.653,-32.729 0,-18.076 0,0.002\" style=\"fill:white;fill-rule:nonzero;\"/>"
+    )?;
+    writeln!(writer, "        </g>")?;
+    writeln!(writer, "        <g transform=\"matrix(1,0,0,1,1002.23,778.679)\">")?;
+    writeln!(
+        writer,
+        "          <path d=\"M0,-296.808C0,-296.808 -14.723,-238.165 -106.292,-176.541L-131.97,-170.523C-131.97,-170.523 -215.036,-322.004 -332.719,-151.302C-332.719,-151.302 -296.042,-172.656 -197.719,-146.652C-197.719,-146.652 -242.949,-77.426 -334.061,-79.553C-334.061,-79.553 -246.748,25.196 -113.881,-126.107C-113.881,-126.107 26.574,-180.422 37.964,-296.808L0,-296.808Z\" style=\"fill:rgb(247,76,0);fill-rule:nonzero;\"/>"
+    )?;
+    writeln!(writer, "        </g>")?;
+    writeln!(writer, "      </g>")?;
+    writeln!(writer, "    </svg>")?;
+    writeln!(writer, "    <div class=\"header-content\">")?;
+    writeln!(writer, "      <h1>Crate Appraisal Report</h1>")?;
+    writeln!(
+        writer,
+        "      <p class=\"subtitle\">Produced by cargo-aprz {} on {}</p>",
+        env!("CARGO_PKG_VERSION"),
+        date
+    )?;
+    writeln!(writer, "    </div>")?;
+    writeln!(
+        writer,
+        "    <button class=\"theme-toggle\" onclick=\"toggleTheme()\" aria-label=\"Toggle theme\">"
+    )?;
+    writeln!(
+        writer,
+        "      <svg id=\"theme-icon\" viewBox=\"0 0 24 24\"><path d=\"M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z\"/></svg>"
+    )?;
+    writeln!(writer, "    </button>")?;
+    writeln!(writer, "  </div>")?;
+    Ok(())
+}
+
+fn write_summary<W: Write>(
+    writer: &mut W,
+    total: usize,
+    high_risk_crates: &[(&str, String, String, f64)],
+    medium_risk_crates: &[(&str, String, String, f64)],
+    low_risk_crates: &[(&str, String, String, f64)],
+    not_evaluated_crates: &[(&str, String, String, f64)],
+) -> Result<()> {
+    let high = high_risk_crates.len();
+    let medium = medium_risk_crates.len();
+    let low = low_risk_crates.len();
+    let not_evaluated = not_evaluated_crates.len();
+
+    writeln!(writer, "  <div class=\"summary-row\">")?;
+    writeln!(writer, "    <div class=\"summary\">")?;
+    writeln!(
+        writer,
+        "      <div class=\"summary-card total\" role=\"button\" tabindex=\"0\" onclick=\"toggleRiskList('all')\" onkeydown=\"if(event.key==='Enter'||event.key===' '){{event.preventDefault();toggleRiskList('all')}}\"><div class=\"label\">Total Crates</div><div class=\"value\">{total}</div></div>"
+    )?;
+    writeln!(
+        writer,
+        "      <div class=\"summary-card high\" role=\"button\" tabindex=\"0\" onclick=\"toggleRiskList('high')\" onkeydown=\"if(event.key==='Enter'||event.key===' '){{event.preventDefault();toggleRiskList('high')}}\"><div class=\"label\">High Risk</div><div class=\"value\">{high}</div></div>"
+    )?;
+    writeln!(
+        writer,
+        "      <div class=\"summary-card medium\" role=\"button\" tabindex=\"0\" onclick=\"toggleRiskList('medium')\" onkeydown=\"if(event.key==='Enter'||event.key===' '){{event.preventDefault();toggleRiskList('medium')}}\"><div class=\"label\">Medium Risk</div><div class=\"value\">{medium}</div></div>"
+    )?;
+    writeln!(
+        writer,
+        "      <div class=\"summary-card low\" role=\"button\" tabindex=\"0\" onclick=\"toggleRiskList('low')\" onkeydown=\"if(event.key==='Enter'||event.key===' '){{event.preventDefault();toggleRiskList('low')}}\"><div class=\"label\">Low Risk</div><div class=\"value\">{low}</div></div>"
+    )?;
+    if not_evaluated > 0 {
+        writeln!(
+            writer,
+            "      <div class=\"summary-card not-eval\" role=\"button\" tabindex=\"0\" onclick=\"toggleRiskList('not-eval')\" onkeydown=\"if(event.key==='Enter'||event.key===' '){{event.preventDefault();toggleRiskList('not-eval')}}\"><div class=\"label\">Not Evaluated</div><div class=\"value\">{not_evaluated}</div></div>"
+        )?;
+    }
+    writeln!(writer, "    </div>")?;
+    write_pie_chart(writer, low, medium, high, not_evaluated)?;
+    writeln!(writer, "  </div>")?;
+
+    let panel_title = |count: usize, label: &str| -> String {
+        let noun = if count == 1 { "Crate" } else { "Crates" };
+        format!("{count} {label} {noun}")
+    };
+
+    let mut first_pill_emitted = false;
+    let mut first_panel = true;
+    if !high_risk_crates.is_empty() {
+        write_risk_crate_list(
+            writer,
+            "high",
+            &panel_title(high, "High Risk"),
+            high_risk_crates,
+            first_panel,
+            &mut first_pill_emitted,
+        )?;
+        first_panel = false;
+    }
+    if !medium_risk_crates.is_empty() {
+        write_risk_crate_list(
+            writer,
+            "medium",
+            &panel_title(medium, "Medium Risk"),
+            medium_risk_crates,
+            first_panel,
+            &mut first_pill_emitted,
+        )?;
+        first_panel = false;
+    }
+    if !low_risk_crates.is_empty() {
+        write_risk_crate_list(
+            writer,
+            "low",
+            &panel_title(low, "Low Risk"),
+            low_risk_crates,
+            first_panel,
+            &mut first_pill_emitted,
+        )?;
+        first_panel = false;
+    }
+    if !not_evaluated_crates.is_empty() {
+        write_risk_crate_list(
+            writer,
+            "not-eval",
+            &panel_title(not_evaluated, "Not Evaluated"),
+            not_evaluated_crates,
+            first_panel,
+            &mut first_pill_emitted,
+        )?;
+    }
+    let _ = first_panel;
+    Ok(())
+}
+
+fn write_pie_chart<W: Write>(writer: &mut W, low: usize, medium: usize, high: usize, not_evaluated: usize) -> Result<()> {
+    let total = low + medium + high + not_evaluated;
+    if total == 0 {
+        return Ok(());
+    }
+
+    let slices: &[(usize, &str)] = &[
+        (high, "var(--risk-high)"),
+        (medium, "var(--risk-medium)"),
+        (low, "var(--risk-low)"),
+        (not_evaluated, "var(--risk-not-eval)"),
+    ];
+    let non_zero: Vec<_> = slices.iter().filter(|(c, _)| *c > 0).collect();
+
+    let cx = 80.0_f64;
+    let cy = 80.0_f64;
+    let r = 72.0_f64;
+
+    writeln!(
+        writer,
+        "      <svg class=\"pie-chart\" viewBox=\"0 0 160 160\" xmlns=\"http://www.w3.org/2000/svg\">"
+    )?;
+
+    if non_zero.len() == 1 {
+        let circle = format!("        <circle cx=\"{cx}\" cy=\"{cy}\" r=\"{r}\" fill=\"{}\"/>", non_zero[0].1);
+        writeln!(writer, "{circle}")?;
+    } else {
+        let pi = core::f64::consts::PI;
+        let mut angle = -pi / 2.0;
+        #[expect(clippy::cast_precision_loss, reason = "Crate counts will never exceed 2^52")]
+        for &(count, color) in slices {
+            if count == 0 {
+                continue;
+            }
+            let sweep = 2.0 * pi * (count as f64) / (total as f64);
+            let end_angle = angle + sweep;
+            let x1 = r.mul_add(angle.cos(), cx);
+            let y1 = r.mul_add(angle.sin(), cy);
+            let x2 = r.mul_add(end_angle.cos(), cx);
+            let y2 = r.mul_add(end_angle.sin(), cy);
+            let large_arc = u8::from(sweep > pi);
+            writeln!(
+                writer,
+                "        <path d=\"M {cx},{cy} L {x1:.2},{y1:.2} A {r},{r} 0 {large_arc},1 {x2:.2},{y2:.2} Z\" fill=\"{color}\" stroke=\"var(--bg-color)\" stroke-width=\"1\"/>"
+            )?;
+            angle = end_angle;
+        }
+    }
+
+    writeln!(
+        writer,
+        "        <circle class=\"pie-border\" cx=\"{cx}\" cy=\"{cy}\" r=\"{r}\" fill=\"none\"/>"
+    )?;
+    writeln!(writer, "      </svg>")?;
+    Ok(())
+}
+
+fn write_risk_crate_list<W: Write>(
+    writer: &mut W,
+    class: &str,
+    title: &str,
+    crate_entries: &[(&str, String, String, f64)],
+    expanded: bool,
+    first_pill_emitted: &mut bool,
+) -> Result<()> {
+    let open = if expanded { " open" } else { "" };
+    writeln!(writer, "  <details id=\"risk-{class}\" class=\"risk-list {class}\"{open}>")?;
+    writeln!(
+        writer,
+        "    <summary>{title}<span class=\"sort-controls\"><button type=\"button\" class=\"sort-btn\" onclick=\"sortCrates(this, 'alpha', event)\" title=\"Sort A\u{2013}Z\">A\u{2013}Z</button><button type=\"button\" class=\"sort-btn active\" onclick=\"sortCrates(this, 'score', event)\" title=\"Sort by score\">Score</button></span></summary>"
+    )?;
+    writeln!(writer, "    <div class=\"crate-names\">")?;
+    for (name, version, description, score) in crate_entries {
+        let anchor = crate_anchor_id(name, version);
+        let active = if *first_pill_emitted {
+            ""
+        } else {
+            *first_pill_emitted = true;
+            " active"
+        };
+        let tooltip = if description.is_empty() {
+            format!("{} v{}", html_escape(name), html_escape(version))
+        } else {
+            format!("{} v{}\n{}", html_escape(name), html_escape(version), html_escape(description))
+        };
+        writeln!(
+            writer,
+            "      <a href=\"#{anchor}\" onclick=\"selectCrate('{anchor}', this, event)\" title=\"{tooltip}\" data-name=\"{}\" data-score=\"{score}\"><span class=\"crate-name{active}\">{}</span></a>",
+            html_escape(name),
+            html_escape(name)
+        )?;
+    }
+    writeln!(writer, "    </div>")?;
+    writeln!(writer, "  </details>")?;
+    Ok(())
+}
+
+fn write_crate_card_header<W: Write>(writer: &mut W, crate_info: &ReportableCrate) -> Result<()> {
+    let risk_class = crate_info.appraisal.as_ref().map_or("", |a| match a.risk() {
+        Risk::Low => " risk-low",
+        Risk::Medium => " risk-medium",
+        Risk::High => " risk-high",
+    });
+    writeln!(writer, "      <div class=\"crate-card-header{risk_class}\">")?;
+    writeln!(
+        writer,
+        "        <span class=\"crate-title\">{} v{}</span>",
+        html_escape(&crate_info.name),
+        html_escape(&crate_info.version.to_string())
+    )?;
+    writeln!(writer, "        <span class=\"spacer\"></span>")?;
+    if let Some(appraisal) = &crate_info.appraisal {
+        let (class, label) = match appraisal.risk() {
+            Risk::Low => ("low", "LOW RISK"),
+            Risk::Medium => ("medium", "MEDIUM RISK"),
+            Risk::High => ("high", "HIGH RISK"),
+        };
+        writeln!(writer, "        <span class=\"header-right\">")?;
+        if appraisal.weighted_score().is_none() {
+            writeln!(
+                writer,
+                "          <span class=\"appraisal-score\">{}</span>",
+                html_escape(&common::format_appraisal_details_with_separator(appraisal, " · "))
+            )?;
+        } else {
+            let (awarded_points, available_points) = appraisal.point_totals().expect("scored appraisals have point totals");
+            writeln!(
+                writer,
+                "          <span class=\"appraisal-score\">score {:.0} · {}/{} points</span>",
+                appraisal.weighted_score().expect("scored appraisals have a weighted score"),
+                awarded_points,
+                available_points
+            )?;
+        }
+        writeln!(writer, "          <span class=\"risk-badge {class}\">{label}</span>")?;
+        writeln!(writer, "        </span>")?;
+    } else {
+        writeln!(writer, "        <span class=\"risk-badge not-evaluated\">Not Evaluated</span>")?;
+    }
+    writeln!(writer, "      </div>")?;
+    Ok(())
+}
+
+fn write_appraisal_table<W: Write>(writer: &mut W, appraisal: &Appraisal) -> Result<()> {
+    writeln!(writer, "          <table>")?;
+    writeln!(
+        writer,
+        "          <thead><tr><th>Expression</th><th>Result</th><th>Details</th></tr></thead>"
+    )?;
+    writeln!(writer, "          <tbody>")?;
+    for outcome in &appraisal.expression_outcomes {
+        let (disp_class, disp_label) = match &outcome.disposition {
+            ExpressionDisposition::True => ("passed", "PASSED"),
+            ExpressionDisposition::False => ("failed", "FAILED"),
+            ExpressionDisposition::Failed(_) => ("inconclusive", "INCONCLUSIVE"),
+        };
+        let detail = match &outcome.disposition {
+            ExpressionDisposition::True => Cow::Borrowed(""),
+            ExpressionDisposition::False => html_escape(&outcome.description),
+            ExpressionDisposition::Failed(reason) => Cow::Owned(format!(
+                "{}<br><strong>Evaluation error:</strong> {}",
+                html_escape(&outcome.description),
+                html_escape(reason)
+            )),
+        };
+        writeln!(writer, "          <tr>")?;
+        writeln!(writer, "            <td>{}</td>", html_escape(&outcome.name))?;
+        writeln!(
+            writer,
+            "            <td><span class=\"disposition {disp_class}\">{disp_label}</span></td>"
+        )?;
+        writeln!(writer, "            <td>{detail}</td>")?;
+        writeln!(writer, "          </tr>")?;
+    }
+    writeln!(writer, "          </tbody>")?;
+    writeln!(writer, "          </table>")?;
+    Ok(())
+}
+
+fn write_metrics_category<W: Write>(
+    writer: &mut W,
+    category: MetricCategory,
+    metrics_by_category: &crate::HashMap<MetricCategory, Vec<&'static str>>,
+    metric_map: &crate::HashMap<&str, &crate::metrics::Metric>,
+) -> Result<()> {
+    let mut metric_buf = String::new();
+    if let Some(category_metrics) = metrics_by_category.get(&category) {
+        writeln!(writer, "          <table>")?;
+        writeln!(writer, "            <tbody>")?;
+
+        for &metric_name in category_metrics {
+            let Some(m) = metric_map.get(metric_name) else { continue };
+
+            writeln!(writer, "            <tr>")?;
+            writeln!(
+                writer,
+                "              <td title=\"{}\">{}</td>",
+                html_escape(m.description()),
+                html_escape(metric_name)
+            )?;
+            write!(writer, "              <td>")?;
+            if let Some(value) = &m.value {
+                metric_buf.clear();
+                common::write_metric_value(&mut metric_buf, value);
+
+                if common::is_crate_name_metric(metric_name) {
+                    let version = metric_map
+                        .get("crate.version")
+                        .and_then(|v| v.value.as_ref())
+                        .map(common::format_metric_value);
+                    if let Some(ver) = version {
+                        write!(
+                            writer,
+                            "<a href=\"https://crates.io/crates/{}/{}\" target=\"_blank\" rel=\"noopener noreferrer\">{}</a>",
+                            utf8_percent_encode(&metric_buf, PATH_SEGMENT_ENCODE_SET),
+                            utf8_percent_encode(&ver, PATH_SEGMENT_ENCODE_SET),
+                            html_escape(&metric_buf)
+                        )?;
+                    } else {
+                        write!(writer, "{}", html_escape(&metric_buf))?;
+                    }
+                } else if common::is_keywords_metric(metric_name) {
+                    format_keywords_or_categories(&metric_buf, "keywords", writer)?;
+                } else if common::is_categories_metric(metric_name) {
+                    format_keywords_or_categories(&metric_buf, "categories", writer)?;
+                } else if common::is_url(&metric_buf) {
+                    write!(
+                        writer,
+                        "<a href=\"{}\" target=\"_blank\" rel=\"noopener noreferrer\">{}</a>",
+                        html_escape(&metric_buf),
+                        html_escape(&metric_buf)
+                    )?;
+                } else {
+                    write!(writer, "{}", html_escape(&metric_buf))?;
+                }
+            } else {
+                write!(writer, "<span class=\"na\">n/a</span>")?;
+            }
+            writeln!(writer, "</td>")?;
+            writeln!(writer, "            </tr>")?;
+        }
+
+        writeln!(writer, "            </tbody>")?;
+        writeln!(writer, "          </table>")?;
+    }
+    Ok(())
+}
+
+fn crate_anchor_id(name: &str, version: &str) -> String {
+    let mut id = String::with_capacity(name.len() + version.len() + 7);
+    id.push_str("crate-");
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' {
+            id.push(c);
+        } else {
+            id.push('-');
+        }
+    }
+    id.push('-');
+    for c in version.chars() {
+        if c.is_ascii_alphanumeric() || c == '.' {
+            id.push(c);
+        } else {
+            id.push('-');
+        }
+    }
+    id
+}
+
+fn write_scripts<W: Write>(writer: &mut W, has_risk_lists: bool) -> Result<()> {
+    writeln!(writer, "  <script>")?;
+
+    write_theme_scripts(writer)?;
+
+    if has_risk_lists {
+        write_risk_list_scripts(writer)?;
+    }
+
+    write_tab_scripts(writer)?;
+
+    writeln!(writer, "    const savedTheme = localStorage.getItem('theme');")?;
+    writeln!(writer, "    applyTheme(savedTheme || getSystemTheme());")?;
+    writeln!(writer, "  </script>")?;
+    Ok(())
+}
+
+/// Emits the light/dark theme helpers: system-theme detection, the icon swap, and the toggle.
+fn write_theme_scripts<W: Write>(writer: &mut W) -> Result<()> {
+    writeln!(writer, "    function getSystemTheme() {{")?;
+    writeln!(
+        writer,
+        "      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';"
+    )?;
+    writeln!(writer, "    }}")?;
+    writeln!(writer, "    function updateIcon(theme) {{")?;
+    writeln!(writer, "      const icon = document.getElementById('theme-icon');")?;
+    writeln!(writer, "      if (theme === 'dark') {{")?;
+    writeln!(
+        writer,
+        "        icon.innerHTML = '<circle cx=\"12\" cy=\"12\" r=\"4\" fill=\"currentColor\"/><path d=\"M12 1v2m0 18v2M4.22 4.22l1.42 1.42m12.72 12.72l1.42 1.42M1 12h2m18 0h2M4.22 19.78l1.42-1.42m12.72-12.72l1.42-1.42\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\"/>';"
+    )?;
+    writeln!(writer, "      }} else {{")?;
+    writeln!(
+        writer,
+        "        icon.innerHTML = '<path d=\"M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z\"/>';"
+    )?;
+    writeln!(writer, "      }}")?;
+    writeln!(writer, "    }}")?;
+    writeln!(writer, "    function applyTheme(theme) {{")?;
+    writeln!(writer, "      document.body.classList.remove('dark-theme', 'light-theme');")?;
+    writeln!(writer, "      document.body.classList.add(theme + '-theme');")?;
+    writeln!(writer, "      updateIcon(theme);")?;
+    writeln!(writer, "    }}")?;
+    writeln!(writer, "    function toggleTheme() {{")?;
+    writeln!(
+        writer,
+        "      const currentTheme = localStorage.getItem('theme') || getSystemTheme();"
+    )?;
+    writeln!(writer, "      const newTheme = currentTheme === 'dark' ? 'light' : 'dark';")?;
+    writeln!(writer, "      localStorage.setItem('theme', newTheme);")?;
+    writeln!(writer, "      applyTheme(newTheme);")?;
+    writeln!(writer, "    }}")?;
+
+    Ok(())
+}
+
+/// Emits the per-risk crate list helpers: selecting a crate, sorting the list, and expanding or
+/// collapsing a risk section.
+fn write_risk_list_scripts<W: Write>(writer: &mut W) -> Result<()> {
+    writeln!(writer, "    function selectCrate(id, pill, event) {{")?;
+    writeln!(writer, "      event.preventDefault();")?;
+    writeln!(
+        writer,
+        "      document.querySelectorAll('.risk-list .crate-name').forEach(p => p.classList.remove('active'));"
+    )?;
+    writeln!(
+        writer,
+        "      document.querySelectorAll('.crate-card').forEach(c => c.style.display = 'none');"
+    )?;
+    writeln!(writer, "      const card = document.getElementById(id);")?;
+    writeln!(writer, "      if (card) {{ card.style.display = ''; }}")?;
+    writeln!(writer, "      const span = pill.querySelector('.crate-name') || pill;")?;
+    writeln!(writer, "      span.classList.add('active');")?;
+    writeln!(writer, "    }}")?;
+    writeln!(writer, "    function sortCrates(btn, mode, event) {{")?;
+    writeln!(writer, "      event.preventDefault();")?;
+    writeln!(writer, "      event.stopPropagation();")?;
+    writeln!(writer, "      const list = btn.closest('.risk-list');")?;
+    writeln!(
+        writer,
+        "      list.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));"
+    )?;
+    writeln!(writer, "      btn.classList.add('active');")?;
+    writeln!(writer, "      const container = list.querySelector('.crate-names');")?;
+    writeln!(writer, "      const links = Array.from(container.querySelectorAll('a'));")?;
+    writeln!(writer, "      if (mode === 'alpha') {{")?;
+    writeln!(
+        writer,
+        "        links.sort((a, b) => (a.dataset.name || '').localeCompare(b.dataset.name || ''));"
+    )?;
+    writeln!(writer, "      }} else if (mode === 'score') {{")?;
+    writeln!(
+        writer,
+        "        links.sort((a, b) => parseFloat(a.dataset.score || '0') - parseFloat(b.dataset.score || '0'));"
+    )?;
+    writeln!(writer, "      }}")?;
+    writeln!(writer, "      links.forEach(l => container.appendChild(l));")?;
+    writeln!(writer, "    }}")?;
+    writeln!(writer, "    function toggleRiskList(risk) {{")?;
+    writeln!(writer, "      const lists = document.querySelectorAll('.risk-list');")?;
+    writeln!(writer, "      if (risk === 'all') {{")?;
+    writeln!(writer, "        const allOpen = Array.from(lists).every(l => l.open);")?;
+    writeln!(writer, "        lists.forEach(l => l.open = !allOpen);")?;
+    writeln!(writer, "      }} else {{")?;
+    writeln!(writer, "        const target = document.getElementById('risk-' + risk);")?;
+    writeln!(writer, "        if (!target) return;")?;
+    writeln!(writer, "        const wasOpen = target.open;")?;
+    writeln!(writer, "        lists.forEach(l => l.open = false);")?;
+    writeln!(writer, "        target.open = !wasOpen;")?;
+    writeln!(writer, "      }}")?;
+    writeln!(writer, "    }}")?;
+    Ok(())
+}
+
+/// Emits the tab-switching helper shared by every tabbed panel.
+fn write_tab_scripts<W: Write>(writer: &mut W) -> Result<()> {
+    writeln!(writer, "    function switchTab(btn) {{")?;
+    writeln!(writer, "      const tabs = btn.closest('.tabs');")?;
+    writeln!(
+        writer,
+        "      tabs.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));"
+    )?;
+    writeln!(
+        writer,
+        "      tabs.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));"
+    )?;
+    writeln!(writer, "      btn.classList.add('active');")?;
+    writeln!(writer, "      document.getElementById(btn.dataset.tab).classList.add('active');")?;
+    writeln!(writer, "    }}")?;
+
+    Ok(())
+}
+
+fn html_escape(s: &str) -> Cow<'_, str> {
+    // Escaping runs for every metric of every crate, and the overwhelming majority of values
+    // contain nothing to escape, so the input is borrowed unless it actually needs rewriting.
+    if !s.bytes().any(|b| matches!(b, b'&' | b'<' | b'>' | b'"' | b'\'')) {
+        return Cow::Borrowed(s);
+    }
+
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => result.push_str("&amp;"),
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            '"' => result.push_str("&quot;"),
+            '\'' => result.push_str("&#39;"),
+            _ => result.push(c),
+        }
+    }
+    Cow::Owned(result)
+}
+
+fn format_keywords_or_categories<W: Write>(value: &str, url_type: &str, writer: &mut W) -> Result<()> {
+    // Split by comma and filter empty items
+    let items: Vec<&str> = value.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+
+    if items.is_empty() {
+        write!(writer, "{}", html_escape(value))?;
+        return Ok(());
+    }
+
+    // Base URL doesn't need escaping (it's a constant string)
+    let base_url = format!("https://crates.io/{url_type}/");
+
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            write!(writer, ", ")?;
+        }
+        let url_encoded_item = utf8_percent_encode(item, NON_ALPHANUMERIC);
+        let escaped_item = html_escape(item);
+        write!(
+            writer,
+            "<a href=\"{base_url}{url_encoded_item}\" target=\"_blank\" rel=\"noopener noreferrer\">#{escaped_item}</a>"
+        )?;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+#[cfg(not(miri))]
+mod tests {
+    use std::sync::Arc;
+
+    use chrono::TimeZone;
+
+    use super::*;
+    use crate::expr::ExpressionOutcome;
+    use crate::metrics::{Metric, MetricDef, MetricValue};
+
+    fn test_timestamp() -> DateTime<Local> {
+        Local.with_ymd_and_hms(2024, 1, 15, 10, 30, 0).unwrap()
+    }
+
+    static NAME_DEF: MetricDef = MetricDef {
+        name: "name",
+        description: "Crate name",
+        category: MetricCategory::Metadata,
+        extractor: |_| None,
+        default_value: || None,
+    };
+
+    static VERSION_DEF: MetricDef = MetricDef {
+        name: "version",
+        description: "Crate version",
+        category: MetricCategory::Metadata,
+        extractor: |_| None,
+        default_value: || None,
+    };
+
+    fn create_test_crate(name: &str, version: &str, evaluation: Option<Appraisal>) -> ReportableCrate {
+        let metrics = vec![
+            Metric::with_value(&NAME_DEF, MetricValue::String(name.into())),
+            Metric::with_value(&VERSION_DEF, MetricValue::String(version.into())),
+        ];
+        ReportableCrate::new(name.into(), Arc::new(version.parse().unwrap()), metrics, evaluation)
+    }
+
+    #[test]
+    fn test_html_escape_basic() {
+        assert_eq!(html_escape("hello"), "hello");
+    }
+
+    #[test]
+    fn test_html_escape_ampersand() {
+        assert_eq!(html_escape("A & B"), "A &amp; B");
+    }
+
+    #[test]
+    fn test_html_escape_less_than() {
+        assert_eq!(html_escape("<script>"), "&lt;script&gt;");
+    }
+
+    #[test]
+    fn test_html_escape_quotes() {
+        assert_eq!(html_escape("\"quoted\" and 'single'"), "&quot;quoted&quot; and &#39;single&#39;");
+    }
+
+    #[test]
+    fn test_html_escape_all_special_chars() {
+        assert_eq!(html_escape("<>&\"'"), "&lt;&gt;&amp;&quot;&#39;");
+    }
+
+    #[test]
+    fn test_html_escape_empty() {
+        assert_eq!(html_escape(""), "");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_empty_crates() {
+        let crates: Vec<ReportableCrate> = vec![];
+        let mut output = String::new();
+        let result = generate(&crates, test_timestamp(), &mut output);
+        result.unwrap();
+        // Should still generate valid HTML structure
+        assert!(output.contains("<!DOCTYPE html>"));
+        assert!(output.contains("<html>"));
+        assert!(output.contains("</html>"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_single_crate() {
+        let crates = vec![create_test_crate("test_crate", "1.2.3", None)];
+        let mut output = String::new();
+        let result = generate(&crates, test_timestamp(), &mut output);
+        result.unwrap();
+        assert!(output.contains("<!DOCTYPE html>"));
+        assert!(output.contains("Crate Appraisal Report"));
+        assert!(output.contains("cargo-aprz"));
+    }
+
+    #[test]
+    fn test_crate_header_explains_required_check_failure() {
+        let appraisal = Appraisal::required_check_failure(vec![ExpressionOutcome::new(
+            "Sound Crate".into(),
+            "RustSec reports zero unsound advisories for this crate version.".into(),
+            ExpressionDisposition::False,
+        )]);
+        let crate_info = create_test_crate("event-listener", "5.4.1", Some(appraisal));
+        let mut output = String::new();
+
+        write_crate_card_header(&mut output, &crate_info).unwrap();
+
+        assert!(output.contains("1 required check failed · weighted score not calculated"));
+        assert!(!output.contains("score 0"));
+    }
+
+    #[test]
+    fn test_crate_header_explains_weighted_evaluation_failure() {
+        let appraisal = Appraisal::weighted_evaluation_failure(vec![ExpressionOutcome::new(
+            "Advisory facts".into(),
+            "Advisory facts must be available.".into(),
+            ExpressionDisposition::Failed("service unavailable".into()),
+        )]);
+        let crate_info = create_test_crate("example", "1.0.0", Some(appraisal));
+        let mut output = String::new();
+
+        write_crate_card_header(&mut output, &crate_info).unwrap();
+
+        assert!(output.contains("1 weighted check inconclusive · weighted score not calculated"));
+        assert!(!output.contains("score -1"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_required_check_failure_uses_normalized_sort_score() {
+        let required = Appraisal::required_check_failure(vec![ExpressionOutcome::new(
+            "Sound Crate".into(),
+            "RustSec reports zero unsound advisories for this crate version.".into(),
+            ExpressionDisposition::False,
+        )]);
+        let scored = Appraisal::new(Risk::Low, vec![], 1, 1, 100.0);
+        let crates = vec![
+            create_test_crate("event-listener", "5.4.1", Some(required)),
+            create_test_crate("scored", "1.0.0", Some(scored)),
+        ];
+        let mut output = String::new();
+
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        assert!(output.contains("data-name=\"event-listener\" data-score=\"0\""));
+        assert!(!output.contains("data-score=\"-0\""));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_contains_ferris() {
+        let crates = vec![create_test_crate("test", "1.0.0", None)];
+        let mut output = String::new();
+        let result = generate(&crates, test_timestamp(), &mut output);
+        result.unwrap();
+        // Should contain Ferris SVG
+        assert!(output.contains("<svg class=\"ferris\""));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_contains_theme_toggle() {
+        let crates = vec![create_test_crate("test", "1.0.0", None)];
+        let mut output = String::new();
+        let result = generate(&crates, test_timestamp(), &mut output);
+        result.unwrap();
+        // Should contain theme toggle functionality
+        assert!(output.contains("toggleTheme"));
+        assert!(output.contains("dark"));
+        assert!(output.contains("light"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_contains_css_styles() {
+        let crates = vec![create_test_crate("test", "1.0.0", None)];
+        let mut output = String::new();
+        let result = generate(&crates, test_timestamp(), &mut output);
+        result.unwrap();
+        // Should contain CSS styles
+        assert!(output.contains("<style>"));
+        assert!(output.contains("--bg-color"));
+        assert!(output.contains("--text-color"));
+    }
+
+    #[test]
+    fn test_format_keywords_or_categories_single() {
+        let mut output = String::new();
+        let result = format_keywords_or_categories("rust", "keywords", &mut output);
+        result.unwrap();
+        assert!(output.contains("#rust"));
+        assert!(output.contains("https://crates.io/keywords/rust"));
+    }
+
+    #[test]
+    fn test_format_keywords_or_categories_multiple() {
+        let mut output = String::new();
+        let result = format_keywords_or_categories("rust, web, async", "keywords", &mut output);
+        result.unwrap();
+        assert!(output.contains("#rust"));
+        assert!(output.contains("#web"));
+        assert!(output.contains("#async"));
+        assert!(output.contains(", "));
+    }
+
+    #[test]
+    fn test_format_keywords_or_categories_empty() {
+        let mut output = String::new();
+        let result = format_keywords_or_categories("", "keywords", &mut output);
+        result.unwrap();
+        assert_eq!(output, "");
+    }
+
+    #[test]
+    fn test_format_keywords_with_special_chars() {
+        let mut output = String::new();
+        let result = format_keywords_or_categories("A&B, C<D", "keywords", &mut output);
+        result.unwrap();
+        // Special characters should be escaped
+        assert!(output.contains("&amp;"));
+        assert!(output.contains("&lt;"));
+    }
+
+    #[test]
+    fn test_format_categories() {
+        let mut output = String::new();
+        format_keywords_or_categories("web, cli", "categories", &mut output).unwrap();
+        assert!(output.contains("https://crates.io/categories/"));
+        assert!(output.contains("#web"));
+        assert!(output.contains("#cli"));
+    }
+
+    // --- crate_anchor_id tests ---
+
+    #[test]
+    fn test_crate_anchor_id_simple() {
+        assert_eq!(crate_anchor_id("tokio", "1.35.0"), "crate-tokio-1.35.0");
+    }
+
+    #[test]
+    fn test_crate_anchor_id_with_hyphens() {
+        assert_eq!(crate_anchor_id("my-crate", "0.1.0"), "crate-my-crate-0.1.0");
+    }
+
+    #[test]
+    fn test_crate_anchor_id_special_chars_in_name() {
+        // Underscores and other non-alphanumeric/non-hyphen chars become hyphens
+        assert_eq!(crate_anchor_id("my_crate", "1.0.0"), "crate-my-crate-1.0.0");
+    }
+
+    #[test]
+    fn test_crate_anchor_id_special_chars_in_version() {
+        // Non-alphanumeric/non-dot chars in version become hyphens
+        assert_eq!(crate_anchor_id("crate", "1.0.0-beta"), "crate-crate-1.0.0-beta");
+    }
+
+    // --- generate with all risk levels ---
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_with_all_risk_levels() {
+        use crate::expr::ExpressionOutcome;
+
+        let crates = vec![
+            create_test_crate(
+                "low_crate",
+                "1.0.0",
+                Some(Appraisal::new(
+                    Risk::Low,
+                    vec![ExpressionOutcome::new(
+                        "check".into(),
+                        "All good".into(),
+                        ExpressionDisposition::True,
+                    )],
+                    1,
+                    1,
+                    100.0,
+                )),
+            ),
+            create_test_crate(
+                "medium_crate",
+                "2.0.0",
+                Some(Appraisal::new(
+                    Risk::Medium,
+                    vec![ExpressionOutcome::new(
+                        "check".into(),
+                        "Partial".into(),
+                        ExpressionDisposition::False,
+                    )],
+                    2,
+                    1,
+                    50.0,
+                )),
+            ),
+            create_test_crate(
+                "high_crate",
+                "3.0.0",
+                Some(Appraisal::new(
+                    Risk::High,
+                    vec![ExpressionOutcome::new(
+                        "check".into(),
+                        "Failed".into(),
+                        ExpressionDisposition::False,
+                    )],
+                    1,
+                    0,
+                    0.0,
+                )),
+            ),
+            create_test_crate("unevaluated_crate", "0.1.0", None),
+        ];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        // Summary section should be present
+        assert!(output.contains("class=\"summary\""));
+        assert!(output.contains("class=\"summary-row\""));
+        assert!(output.contains("Low Risk"));
+        assert!(output.contains("Medium Risk"));
+        assert!(output.contains("High Risk"));
+        assert!(output.contains("Not Evaluated"));
+
+        // Pie chart
+        assert!(output.contains("pie-chart"));
+
+        // Filter bar should not be present (removed feature)
+        assert!(!output.contains("data-filter="));
+        assert!(!output.contains("filterByRisk"));
+
+        // Risk lists as collapsible details
+        assert!(output.contains("<details"));
+        assert!(output.contains("<summary>"));
+        assert!(output.contains("high_crate"));
+        assert!(output.contains("medium_crate"));
+
+        // Panel titles include counts
+        assert!(output.contains("1 High Risk Crate<"));
+        assert!(output.contains("1 Medium Risk Crate<"));
+        assert!(output.contains("1 Low Risk Crate<"));
+        assert!(output.contains("1 Not Evaluated Crate<"));
+
+        // Card headers with risk classes
+        assert!(output.contains("risk-low"));
+        assert!(output.contains("risk-medium"));
+        assert!(output.contains("risk-high"));
+
+        // Risk badges
+        assert!(output.contains("LOW RISK"));
+        assert!(output.contains("MEDIUM RISK"));
+        assert!(output.contains("HIGH RISK"));
+        assert!(output.contains("Not Evaluated"));
+
+        // Score text
+        assert!(output.contains("score 100"));
+        assert!(output.contains("score 50"));
+        assert!(output.contains("score 0"));
+
+        // Version prefix
+        assert!(output.contains("v1.0.0"));
+        assert!(output.contains("v2.0.0"));
+        assert!(output.contains("v3.0.0"));
+    }
+
+    // --- appraisal table disposition variants ---
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_with_failed_disposition() {
+        use crate::expr::ExpressionOutcome;
+
+        let crates = vec![create_test_crate(
+            "err_crate",
+            "1.0.0",
+            Some(Appraisal::new(
+                Risk::Low,
+                vec![ExpressionOutcome::new(
+                    "broken_check".into(),
+                    "Required facts <must> be available.".into(),
+                    ExpressionDisposition::Failed("variable <not> found".into()),
+                )],
+                0,
+                0,
+                100.0,
+            )),
+        )];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        assert!(output.contains("INCONCLUSIVE"));
+        assert!(output.contains("Required facts &lt;must&gt; be available."));
+        assert!(output.contains("<strong>Evaluation error:</strong> variable &lt;not&gt; found"));
+        assert!(output.contains("broken_check"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_appraisal_passed_and_failed() {
+        use crate::expr::ExpressionOutcome;
+
+        let crates = vec![create_test_crate(
+            "mixed_crate",
+            "1.0.0",
+            Some(Appraisal::new(
+                Risk::Medium,
+                vec![
+                    ExpressionOutcome::new(
+                        "ok_check".into(),
+                        "Passing description should be hidden".into(),
+                        ExpressionDisposition::True,
+                    ),
+                    ExpressionOutcome::new(
+                        "bad_check".into(),
+                        "Failed requirement remains visible".into(),
+                        ExpressionDisposition::False,
+                    ),
+                ],
+                2,
+                1,
+                50.0,
+            )),
+        )];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        assert!(output.contains("PASSED"));
+        assert!(output.contains("FAILED"));
+        assert!(output.contains("ok_check"));
+        assert!(output.contains("bad_check"));
+        assert!(!output.contains("Passing description should be hidden"));
+        assert!(output.contains("Failed requirement remains visible"));
+    }
+
+    // --- crate with empty expression outcomes (appraisal but no appraisal tab) ---
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_appraisal_no_outcomes() {
+        let crates = vec![create_test_crate(
+            "empty_eval",
+            "1.0.0",
+            Some(Appraisal::new(Risk::Low, vec![], 0, 0, 100.0)),
+        )];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        // Should still have the card header with risk badge
+        assert!(output.contains("LOW RISK"));
+        // Should not have the appraisal tab button, but should have metric tabs
+        assert!(!output.contains("data-tab=\"card-0-appraisal\""));
+        // The first metric tab should be active
+        assert!(output.contains("tab-btn active"));
+    }
+
+    // --- metrics rendering: URL, n/a, categories ---
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_with_url_metric() {
+        static URL_DEF: MetricDef = MetricDef {
+            name: "crate.repository",
+            description: "Repository URL",
+            category: MetricCategory::Metadata,
+            extractor: |_| None,
+            default_value: || None,
+        };
+
+        let metrics = vec![
+            Metric::with_value(&NAME_DEF, MetricValue::String("url_crate".into())),
+            Metric::with_value(&VERSION_DEF, MetricValue::String("1.0.0".into())),
+            Metric::with_value(&URL_DEF, MetricValue::String("https://github.com/example/repo".into())),
+        ];
+        let crates = vec![ReportableCrate::new(
+            "url_crate".into(),
+            Arc::new("1.0.0".parse().unwrap()),
+            metrics,
+            None,
+        )];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        assert!(output.contains("href=\"https://github.com/example/repo\""));
+        assert!(output.contains("target=\"_blank\""));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_with_na_metric() {
+        static OPT_DEF: MetricDef = MetricDef {
+            name: "crate.optional",
+            description: "Optional metric",
+            category: MetricCategory::Metadata,
+            extractor: |_| None,
+            default_value: || None,
+        };
+
+        let metrics = vec![
+            Metric::with_value(&NAME_DEF, MetricValue::String("na_crate".into())),
+            Metric::with_value(&VERSION_DEF, MetricValue::String("1.0.0".into())),
+            Metric::new(&OPT_DEF),
+        ];
+        let crates = vec![ReportableCrate::new(
+            "na_crate".into(),
+            Arc::new("1.0.0".parse().unwrap()),
+            metrics,
+            None,
+        )];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        assert!(output.contains("<span class=\"na\">n/a</span>"));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_with_categories_metric() {
+        static CAT_DEF: MetricDef = MetricDef {
+            name: "crate.categories",
+            description: "Crate categories",
+            category: MetricCategory::Metadata,
+            extractor: |_| None,
+            default_value: || None,
+        };
+
+        let metrics = vec![
+            Metric::with_value(&NAME_DEF, MetricValue::String("cat_crate".into())),
+            Metric::with_value(&VERSION_DEF, MetricValue::String("1.0.0".into())),
+            Metric::with_value(
+                &CAT_DEF,
+                MetricValue::List(vec![MetricValue::String("web".into()), MetricValue::String("async".into())]),
+            ),
+        ];
+        let crates = vec![ReportableCrate::new(
+            "cat_crate".into(),
+            Arc::new("1.0.0".parse().unwrap()),
+            metrics,
+            None,
+        )];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        assert!(output.contains("https://crates.io/categories/"));
+        assert!(output.contains("#web"));
+    }
+
+    // --- generate without appraisals (no summary) ---
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_no_appraisals_no_summary() {
+        let crates = vec![
+            create_test_crate("crate_a", "1.0.0", None),
+            create_test_crate("crate_b", "2.0.0", None),
+        ];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        // No summary when no appraisals
+        assert!(!output.contains("class=\"summary\""));
+    }
+
+    // --- anchor navigation ---
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_anchor_links_in_summary() {
+        use crate::expr::ExpressionOutcome;
+
+        // Single crate: no summary section, but card anchor still present
+        let crates = vec![create_test_crate(
+            "risky_crate",
+            "0.5.0",
+            Some(Appraisal::new(
+                Risk::High,
+                vec![ExpressionOutcome::new("check".into(), "desc".into(), ExpressionDisposition::False)],
+                1,
+                0,
+                0.0,
+            )),
+        )];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        // No summary for a single crate
+        assert!(!output.contains("class=\"summary\""));
+        // Card should still have anchor id
+        assert!(output.contains("id=\"crate-risky-crate-0.5.0\""));
+
+        // Multiple crates: summary should link to crate card anchor
+        let crates = vec![
+            create_test_crate(
+                "risky_crate",
+                "0.5.0",
+                Some(Appraisal::new(
+                    Risk::High,
+                    vec![ExpressionOutcome::new("check".into(), "desc".into(), ExpressionDisposition::False)],
+                    1,
+                    0,
+                    0.0,
+                )),
+            ),
+            create_test_crate(
+                "safe_crate",
+                "1.0.0",
+                Some(Appraisal::new(
+                    Risk::Low,
+                    vec![ExpressionOutcome::new("check".into(), "desc".into(), ExpressionDisposition::True)],
+                    1,
+                    1,
+                    100.0,
+                )),
+            ),
+        ];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        // Summary pills should use selectCrate onclick for crate card selection
+        assert!(output.contains("selectCrate('crate-risky-crate-0.5.0'"));
+        // Card should have matching id
+        assert!(output.contains("id=\"crate-risky-crate-0.5.0\""));
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn summary_is_rendered_only_for_multiple_crates_with_appraisals() {
+        let appraised = vec![create_test_crate(
+            "single",
+            "1.0.0",
+            Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0)),
+        )];
+        let mut output = String::new();
+        generate(&appraised, test_timestamp(), &mut output).unwrap();
+        assert!(
+            !output.contains("class=\"summary-row\""),
+            "single appraised crate has no summary: {output}"
+        );
+        assert!(
+            !output.contains("style=\"display:none\""),
+            "without risk lists, the single crate card must remain visible: {output}"
+        );
+
+        let unappraised = vec![create_test_crate("a", "1.0.0", None), create_test_crate("b", "1.0.0", None)];
+        output.clear();
+        generate(&unappraised, test_timestamp(), &mut output).unwrap();
+        assert!(
+            !output.contains("class=\"summary-row\""),
+            "multiple unappraised crates have no summary: {output}"
+        );
+        assert!(
+            !output.contains("style=\"display:none\""),
+            "without risk lists, unappraised crate cards must remain visible: {output}"
+        );
+    }
+
+    // --- special characters in crate name ---
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_html_escapes_crate_name() {
+        let crates = vec![create_test_crate("crate<xss>", "1.0.0", None)];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        // Name should be escaped
+        assert!(output.contains("crate&lt;xss&gt;"));
+        assert!(!output.contains("crate<xss>"));
+    }
+
+    // --- switchTab script ---
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_contains_tab_switching_script() {
+        use crate::expr::ExpressionOutcome;
+
+        let crates = vec![create_test_crate(
+            "tabbed",
+            "1.0.0",
+            Some(Appraisal::new(
+                Risk::Low,
+                vec![ExpressionOutcome::new("c".into(), "d".into(), ExpressionDisposition::True)],
+                1,
+                1,
+                100.0,
+            )),
+        )];
+        let mut output = String::new();
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        assert!(output.contains("switchTab"));
+        assert!(output.contains("tab-btn"));
+        assert!(output.contains("tab-panel"));
+    }
+
+    // --- write_risk_crate_list ---
+
+    #[test]
+    fn test_write_risk_crate_list_renders_entries() {
+        let entries = vec![
+            ("tokio", "1.35.0".to_string(), "An async runtime".to_string(), 85.0),
+            ("serde", "1.0.195".to_string(), "Serialization framework".to_string(), 92.0),
+        ];
+        let mut output = String::new();
+        let mut first = false;
+        write_risk_crate_list(&mut output, "high", "2 High Risk Crates", &entries, true, &mut first).unwrap();
+
+        assert!(output.contains("2 High Risk Crates"));
+        // Pills show only the name, not version
+        assert!(output.contains(">tokio</span>"));
+        assert!(output.contains(">serde</span>"));
+        assert!(!output.contains("v1.35.0</span>"));
+        // Tooltip contains name, version, and description
+        assert!(output.contains("title=\"tokio v1.35.0\nAn async runtime\""));
+        assert!(output.contains("title=\"serde v1.0.195\nSerialization framework\""));
+        assert!(output.contains("selectCrate('crate-tokio-1.35.0'"));
+        assert!(output.contains("selectCrate('crate-serde-1.0.195'"));
+        // First pill should be marked active
+        assert!(output.contains("crate-name active"));
+        assert!(first);
+        // Should be a collapsible details element, expanded
+        assert!(output.contains("<details"));
+        assert!(output.contains(" open"));
+        assert!(output.contains("<summary>"));
+    }
+
+    #[test]
+    fn test_write_risk_crate_list_empty() {
+        let entries: Vec<(&str, String, String, f64)> = vec![];
+        let mut output = String::new();
+        let mut first = false;
+        write_risk_crate_list(&mut output, "medium", "0 Medium Risk Crates", &entries, false, &mut first).unwrap();
+
+        assert!(output.contains("0 Medium Risk Crates"));
+        assert!(output.contains("crate-names"));
+        assert!(!first);
+        // Should not be expanded
+        assert!(!output.contains(" open"));
+    }
+
+    static CRATE_NAME_DEF: MetricDef = MetricDef {
+        name: "crate.name",
+        description: "Crate name",
+        category: MetricCategory::Metadata,
+        extractor: |_| None,
+        default_value: || None,
+    };
+
+    static CRATE_VERSION_DEF: MetricDef = MetricDef {
+        name: "crate.version",
+        description: "Crate version",
+        category: MetricCategory::Metadata,
+        extractor: |_| None,
+        default_value: || None,
+    };
+
+    static KEYWORDS_DEF: MetricDef = MetricDef {
+        name: "crate.keywords",
+        description: "Crate keywords",
+        category: MetricCategory::Metadata,
+        extractor: |_| None,
+        default_value: || None,
+    };
+
+    static CATEGORIES_DEF: MetricDef = MetricDef {
+        name: "crate.categories",
+        description: "Crate categories",
+        category: MetricCategory::Metadata,
+        extractor: |_| None,
+        default_value: || None,
+    };
+
+    static REPOSITORY_DEF: MetricDef = MetricDef {
+        name: "crate.repository",
+        description: "Repository URL",
+        category: MetricCategory::Metadata,
+        extractor: |_| None,
+        default_value: || None,
+    };
+
+    static MISSING_DEF: MetricDef = MetricDef {
+        name: "crate.missing",
+        description: "A metric with no value",
+        category: MetricCategory::Metadata,
+        extractor: |_| None,
+        default_value: || None,
+    };
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_covers_every_risk_category() {
+        let crates = vec![
+            create_test_crate("high", "1.0.0", Some(Appraisal::new(Risk::High, vec![], 1, 0, 0.0))),
+            create_test_crate("medium", "1.0.0", Some(Appraisal::new(Risk::Medium, vec![], 1, 1, 50.0))),
+            create_test_crate("low", "1.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
+            create_test_crate("unevaluated", "1.0.0", None),
+        ];
+        let mut output = String::new();
+
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        assert!(output.contains("High Risk"));
+        assert!(output.contains("Medium Risk"));
+        assert!(output.contains("Low Risk"));
+        assert!(output.contains("Not Evaluated"));
+        // Four categories means the pie chart is drawn as wedges rather than a single circle.
+        assert!(output.contains("<path d=\"M 80,80"));
+    }
+
+    #[test]
+    fn test_pie_chart_is_omitted_when_there_are_no_crates() {
+        let mut output = String::new();
+        write_pie_chart(&mut output, 0, 0, 0, 0).unwrap();
+        assert_eq!(output, "");
+    }
+
+    #[test]
+    fn test_pie_chart_is_a_full_circle_for_a_single_category() {
+        let mut output = String::new();
+        write_pie_chart(&mut output, 0, 0, 3, 0).unwrap();
+
+        assert!(
+            output.contains("<circle cx=\"80\" cy=\"80\" r=\"72\" fill=\"var(--risk-high)\"/>"),
+            "{output}"
+        );
+        assert!(!output.contains("<path"), "{output}");
+    }
+
+    #[test]
+    fn test_summary_omits_zero_count_not_evaluated_card() {
+        let entries = vec![("safe", "1.0.0".to_owned(), String::new(), 100.0)];
+        let empty = Vec::new();
+        let mut output = String::new();
+
+        write_summary(&mut output, 1, &empty, &empty, &entries, &empty).unwrap();
+
+        assert!(
+            !output.contains("summary-card not-eval"),
+            "zero unevaluated crates must not render a clickable card: {output}"
+        );
+    }
+
+    #[test]
+    fn test_pie_chart_half_circle_uses_small_arc_flag() {
+        let mut output = String::new();
+
+        write_pie_chart(&mut output, 1, 0, 1, 0).unwrap();
+
+        assert!(
+            output.contains(" A 72,72 0 0,1 "),
+            "a half-pie slice must not use the large-arc flag: {output}"
+        );
+        assert!(!output.contains(" A 72,72 0 1,1 "), "{output}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_formats_metric_values_by_kind() {
+        let metrics = vec![
+            Metric::with_value(&CRATE_NAME_DEF, MetricValue::String("serde".into())),
+            Metric::with_value(&CRATE_VERSION_DEF, MetricValue::String("1.0.0".into())),
+            Metric::with_value(
+                &KEYWORDS_DEF,
+                MetricValue::List(vec![
+                    MetricValue::String("serialization".into()),
+                    MetricValue::String("parsing".into()),
+                ]),
+            ),
+            Metric::with_value(&CATEGORIES_DEF, MetricValue::List(vec![MetricValue::String("encoding".into())])),
+            Metric::with_value(&REPOSITORY_DEF, MetricValue::String("https://github.com/serde-rs/serde".into())),
+            Metric::new(&MISSING_DEF),
+        ];
+        let crates = vec![ReportableCrate::new(
+            "serde".into(),
+            Arc::new("1.0.0".parse().unwrap()),
+            metrics,
+            None,
+        )];
+        let mut output = String::new();
+
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        assert!(
+            output.contains("https://crates.io/crates/serde/1.0.0"),
+            "crate name must link to crates.io"
+        );
+        assert!(output.contains("keywords"), "keywords must be rendered");
+        assert!(output.contains("categories"), "categories must be rendered");
+        assert!(
+            output.contains("href=\"https://github.com/serde-rs/serde\""),
+            "URLs must be rendered as links"
+        );
+        assert!(
+            output.contains("<span class=\"na\">n/a</span>"),
+            "missing values must render as n/a"
+        );
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_renders_crate_name_without_a_version_metric() {
+        let metrics = vec![Metric::with_value(&CRATE_NAME_DEF, MetricValue::String("serde".into()))];
+        let crates = vec![ReportableCrate::new(
+            "serde".into(),
+            Arc::new("1.0.0".parse().unwrap()),
+            metrics,
+            None,
+        )];
+        let mut output = String::new();
+
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        assert!(
+            !output.contains("https://crates.io/crates/serde/"),
+            "no version metric means no crates.io link"
+        );
+    }
+
+    /// A writer that accepts `budget` writes and then fails, to drive every `?` in the generator.
+    struct FailAfter {
+        budget: usize,
+        writes: usize,
+    }
+
+    impl Write for FailAfter {
+        fn write_str(&mut self, _s: &str) -> core::fmt::Result {
+            if self.writes >= self.budget {
+                return Err(core::fmt::Error);
+            }
+            self.writes += 1;
+            Ok(())
+        }
+    }
+
+    /// A report that reaches every conditional rendering path: all three risk levels, an
+    /// unevaluated crate, scored and unscored appraisals, and every metric formatting branch.
+    fn every_branch_report() -> Vec<ReportableCrate> {
+        let metrics = || {
+            vec![
+                Metric::with_value(&CRATE_NAME_DEF, MetricValue::String("serde".into())),
+                Metric::with_value(&CRATE_VERSION_DEF, MetricValue::String("1.0.0".into())),
+                Metric::with_value(
+                    &KEYWORDS_DEF,
+                    MetricValue::List(vec![
+                        MetricValue::String("serialization".into()),
+                        MetricValue::String("parsing".into()),
+                    ]),
+                ),
+                Metric::with_value(&CATEGORIES_DEF, MetricValue::List(vec![MetricValue::String("encoding".into())])),
+                Metric::with_value(&REPOSITORY_DEF, MetricValue::String("https://github.com/serde-rs/serde".into())),
+                Metric::new(&MISSING_DEF),
+            ]
+        };
+
+        let outcomes = vec![
+            ExpressionOutcome::new("Passing".into(), "Passes.".into(), ExpressionDisposition::True),
+            ExpressionOutcome::new("Failing".into(), "Fails.".into(), ExpressionDisposition::False),
+            ExpressionOutcome::new(
+                "Inconclusive".into(),
+                "Cannot evaluate.".into(),
+                ExpressionDisposition::Failed("service unavailable".into()),
+            ),
+        ];
+
+        let appraisals = [
+            Some(Appraisal::new(Risk::High, outcomes.clone(), 4, 0, 0.0)),
+            Some(Appraisal::new(Risk::Medium, outcomes.clone(), 4, 2, 50.0)),
+            Some(Appraisal::new(Risk::Low, outcomes.clone(), 4, 4, 100.0)),
+            Some(Appraisal::required_check_failure(outcomes)),
+            None,
+        ];
+
+        appraisals
+            .into_iter()
+            .enumerate()
+            .map(|(i, appraisal)| {
+                ReportableCrate::new(format!("crate{i}").into(), Arc::new("1.0.0".parse().unwrap()), metrics(), appraisal)
+            })
+            .collect()
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_propagates_writer_errors_from_every_write() {
+        let crates = every_branch_report();
+
+        let mut counter = FailAfter {
+            budget: usize::MAX,
+            writes: 0,
+        };
+        generate(&crates, test_timestamp(), &mut counter).expect("a writer that never fails must succeed");
+        let total = counter.writes;
+        assert!(total > 0, "the generator must write something");
+
+        for budget in 0..total {
+            let mut writer = FailAfter { budget, writes: 0 };
+            assert!(
+                generate(&crates, test_timestamp(), &mut writer).is_err(),
+                "the writer failed on write {budget} of {total}, so generation must fail too"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri cannot call GetTimeZoneInformationForYear")]
+    fn test_generate_omits_empty_risk_panels() {
+        // The risk panels are only rendered for an appraised report of more than one crate.
+        let crates = vec![
+            create_test_crate("low", "1.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
+            create_test_crate("also-low", "1.0.0", Some(Appraisal::new(Risk::Low, vec![], 1, 1, 100.0))),
+        ];
+        let mut output = String::new();
+
+        generate(&crates, test_timestamp(), &mut output).unwrap();
+
+        assert!(
+            output.contains("2 Low Risk Crates"),
+            "the low risk panel must be rendered: {output}"
+        );
+        assert!(!output.contains("High Risk Crate"), "there is no high risk panel: {output}");
+        assert!(!output.contains("Medium Risk Crate"), "there is no medium risk panel: {output}");
+        assert!(!output.contains("Not Evaluated Crate"), "there is no unevaluated panel: {output}");
+    }
+
+    #[test]
+    fn test_write_metrics_category_writes_nothing_for_an_unknown_category() {
+        let mut output = String::new();
+
+        write_metrics_category(
+            &mut output,
+            MetricCategory::Metadata,
+            &crate::HashMap::default(),
+            &crate::HashMap::default(),
+        )
+        .unwrap();
+
+        assert!(output.is_empty(), "a category with no metrics has no table: {output}");
+    }
+}

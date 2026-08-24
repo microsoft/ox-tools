@@ -1,0 +1,60 @@
+---
+source: cargo-aprz-lib/src/reports/mod.rs
+expression: json_output
+---
+{
+  "crates": [
+    {
+      "appraisal": {
+        "available_points": 3,
+        "awarded_points": 3,
+        "outcomes": [
+          {
+            "description": "Excellent coverage",
+            "disposition": "passed",
+            "evaluation_error": null,
+            "name": "coverage"
+          },
+          {
+            "description": "Active development",
+            "disposition": "passed",
+            "evaluation_error": null,
+            "name": "active"
+          },
+          {
+            "description": "Well maintained",
+            "disposition": "passed",
+            "evaluation_error": null,
+            "name": "maintained"
+          }
+        ],
+        "reasons": [
+          "coverage",
+          "active",
+          "maintained"
+        ],
+        "required_check_failure": false,
+        "result": "LOW RISK (score = 100, awarded points = 3, available points = 3)",
+        "risk": "low",
+        "score": 100.0,
+        "weighted_evaluation_failure": false
+      },
+      "metrics": {
+        "community.repo_stars": 12345,
+        "crate.keywords": [
+          "test",
+          "comprehensive",
+          "snapshot"
+        ],
+        "crate.name": "comprehensive-crate",
+        "crate.version": "2.0.0",
+        "stability.crate_created_at": "2023-06-01",
+        "trust.ci_workflows": true,
+        "trust.code_coverage_percentage": 99.99,
+        "usage.total_downloads": 9876543
+      },
+      "name": "comprehensive-crate",
+      "version": "2.0.0"
+    }
+  ]
+}

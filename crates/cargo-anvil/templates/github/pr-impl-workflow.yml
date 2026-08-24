@@ -31,6 +31,12 @@ on:
           configured at Codecov; required for private repos.
         required: false
 
+# The caller grants the maximum token scopes available to this reusable
+# workflow. Reset jobs to read-only here, then restore only pr-fast's pull
+# request scope below. See docs/design/github.md §9.
+permissions:
+  contents: read
+
 # Note on matrices: every multi-OS job below hardcodes its OS axis as
 # an inline YAML array. Per-leg runner *labels* are inputs (so adopters
 # can swap in self-hosted runners), but the OS axis itself is part of
@@ -59,6 +65,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          lfs: true
           fetch-depth: 0
       - id: delta
         uses: ./.github/actions/anvil-impact
@@ -72,11 +79,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          lfs: true
           fetch-depth: 0
       - id: delta
         uses: ./.github/actions/anvil-impact
 
   pr-fast:
+    permissions:
+      contents: read
+      pull-requests: write
     # Cross-OS / cross-arch because pr-fast contains compile-sensitive
     # checks (clippy, doc-build, udeps, semver-check, external-types)
     # whose results can differ across host for crates that use
@@ -93,6 +104,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          lfs: true
           # anvil-semver-check compares the affected crates' current API
           # against the PR's target branch (origin/<base>) via
           # `cargo semver-checks --baseline-rev`. That resolves the
@@ -149,6 +161,8 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
       - uses: ./.github/actions/anvil-pr-test
         with:
           free-disk-space: true
@@ -194,6 +208,8 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
       - uses: ./.github/actions/anvil-pr-runtime-analysis
         with:
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
@@ -218,6 +234,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          lfs: true
           fetch-depth: 0
       - uses: ./.github/actions/anvil-pr-mutants
         with:

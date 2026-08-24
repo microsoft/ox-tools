@@ -1,0 +1,9 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# A virtual workspace used by the `deps` command tests. The single member depends
+# on a path-only stand-in for `itoa`, so `cargo metadata` resolves it offline.
+
+[workspace]
+members = ["member", "vendor/itoa"]
+resolver = "3"
