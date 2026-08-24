@@ -4245,12 +4245,14 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 # then run cargo-semver-checks per-package and tolerate the remaining
 # "no-comparable-baseline" failure modes.
 #
-# Findings policy: this recipe is *advisory*. Real SemVer findings do
-# NOT fail the recipe -- breaking changes between unreleased commits
-# are normal (the major-version bump happens at release time, not on
-# every PR). Instead, when there are findings we write a markdown
-# advisory body to `target/anvil/comments/semver.md`; when the
-# tree is clean we remove that file. cloud-workflow wiring (GH:
+# Findings policy: cargo-semver-checks is *advisory*. Real SemVer
+# findings and operational failures do NOT fail the recipe -- breaking
+# changes between unreleased commits are normal, while an unbuildable
+# baseline is not evidence that the PR broke the API. Instead, either
+# outcome writes a markdown advisory body to
+# `target/anvil/comments/semver.md`; when the tree is clean we remove
+# that file. Anvil preflight failures before cargo-semver-checks still
+# fail because no comparison can be configured. cloud-workflow wiring (GH:
 # marocchino/sticky-pull-request-comment; ADO: pwsh + REST API)
 # inspects the file after the recipe and upserts / clears a sticky
 # PR comment accordingly. Local invocation gets the same file
@@ -4262,9 +4264,8 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 # bin-only workspaces), intersect ANVIL_INCLUDE_AFFECTED with that
 # set, verify the PR branch baseline is present, skip newly-added
 # manifest paths, then invoke per-crate against that baseline with
-# selective error tolerance for renamed crates ("package `<name>` not
-# found in ...") and bin->bin+lib transitions (reported as a missing
-# lib target).
+# special handling for renamed crates ("package `<name>` not found in
+# ...") and bin->bin+lib transitions (reported as a missing lib target).
 
 # Check affected crates for semantic versioning violations.
 [script("pwsh", "-NoProfile")]
@@ -4345,6 +4346,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
         exit 1
     }
     $findings = New-Object System.Collections.Generic.List[string]
+    $inconclusive = New-Object System.Collections.Generic.List[string]
     foreach ($p in $packages) {
         # A manifest absent at its current workspace-relative path did
         # not exist on the PR base, so this is a newly-added crate (or a
@@ -4369,7 +4371,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
             # cargo-semver-checks 0.49+ reserves exit 100 for a completed
             # check with deny-level SemVer findings. These are advisory.
             Write-Host $output
-            $findings.Add('### `' + $p + '`') | Out-Null
+            $findings.Add('#### `' + $p + '`') | Out-Null
             $findings.Add('') | Out-Null
             $findings.Add('```') | Out-Null
             foreach ($line in ($output.TrimEnd() -split "`r?`n")) {
@@ -4389,16 +4391,30 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
             if ($renamedPackage -or $baselineLibraryMissing) {
                 Write-Host "  $p has no comparable branch baseline; skipping (likely renamed or bin->lib transition)" -ForegroundColor Yellow
             } else {
-                Write-Error "anvil-semver-check: $p could not be checked (cargo-semver-checks exit 101):`n$output"
-                exit 1
+                Write-Warning "anvil-semver-check: $p could not be checked (cargo-semver-checks exit 101):`n$output"
+                $inconclusive.Add('#### `' + $p + '` (exit 101)') | Out-Null
+                $inconclusive.Add('') | Out-Null
+                $inconclusive.Add('```') | Out-Null
+                foreach ($line in ($output.TrimEnd() -split "`r?`n")) {
+                    $inconclusive.Add($line.TrimEnd()) | Out-Null
+                }
+                $inconclusive.Add('```') | Out-Null
+                $inconclusive.Add('') | Out-Null
             }
         } elseif ($semverExit -ne 0) {
-            Write-Error "anvil-semver-check: $p failed with unexpected cargo-semver-checks exit code ${semverExit}:`n$output"
-            exit 1
+            Write-Warning "anvil-semver-check: $p failed with unexpected cargo-semver-checks exit code ${semverExit}:`n$output"
+            $inconclusive.Add('#### `' + $p + '` (exit ' + $semverExit + ')') | Out-Null
+            $inconclusive.Add('') | Out-Null
+            $inconclusive.Add('```') | Out-Null
+            foreach ($line in ($output.TrimEnd() -split "`r?`n")) {
+                $inconclusive.Add($line.TrimEnd()) | Out-Null
+            }
+            $inconclusive.Add('```') | Out-Null
+            $inconclusive.Add('') | Out-Null
         }
     }
     [System.IO.Directory]::CreateDirectory((Split-Path -Parent $commentFile)) | Out-Null
-    if ($findings.Count -gt 0) {
+    if ($findings.Count -gt 0 -or $inconclusive.Count -gt 0) {
         # Body starts with an HTML-comment marker so the ADO wiring can
         # locate the existing thread on subsequent runs (ADO has no
         # native "sticky comment header"; the marker is invisible to
@@ -4407,11 +4423,23 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
         # single source of truth across backends.
         $lines = New-Object System.Collections.Generic.List[string]
         $lines.Add('<!-- anvil-semver -->') | Out-Null
-        $lines.Add('## :warning: Potential breaking changes detected') | Out-Null
-        $lines.Add('') | Out-Null
-        $lines.Add('`cargo semver-checks` flagged the following on this PR. This is **informational** -- breaking changes between commits are expected; the major-version bump happens at release time, not on every PR.') | Out-Null
-        $lines.Add('') | Out-Null
-        foreach ($f in $findings) { $lines.Add($f) | Out-Null }
+        $lines.Add('## :warning: SemVer check advisory') | Out-Null
+        if ($findings.Count -gt 0) {
+            $lines.Add('') | Out-Null
+            $lines.Add('### Potential breaking changes') | Out-Null
+            $lines.Add('') | Out-Null
+            $lines.Add('`cargo semver-checks` flagged the following on this PR. This is **informational** -- breaking changes between commits are expected; the major-version bump happens at release time, not on every PR.') | Out-Null
+            $lines.Add('') | Out-Null
+            foreach ($f in $findings) { $lines.Add($f) | Out-Null }
+        }
+        if ($inconclusive.Count -gt 0) {
+            $lines.Add('') | Out-Null
+            $lines.Add('### Inconclusive comparisons') | Out-Null
+            $lines.Add('') | Out-Null
+            $lines.Add('`cargo semver-checks` could not complete the following comparisons. These failures are **informational** because an unbuildable baseline is not evidence of a breaking API change.') | Out-Null
+            $lines.Add('') | Out-Null
+            foreach ($f in $inconclusive) { $lines.Add($f) | Out-Null }
+        }
         $body = ($lines -join "`n") + "`n"
         Set-Content -LiteralPath $commentFile -Value $body -Encoding UTF8 -NoNewline
         Write-Host ''
@@ -4419,8 +4447,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
     } else {
         Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
     }
-    # Completed SemVer findings are advisory. Operational failures have
-    # already exited non-zero above.
+    # cargo-semver-checks findings and operational failures are advisory.
     exit 0
 
 # Install prerequisites for the `anvil-semver-check` recipe.
