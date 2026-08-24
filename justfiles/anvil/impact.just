@@ -36,8 +36,10 @@
 # Private. Produces the two cargo-delta snapshots under
 # target/anvil/impact/snapshots/ with two independent cache keys:
 #   * baseline.json  -- snapshot of the base ref. EXPENSIVE (needs a throwaway
-#     git worktree). Keyed solely on the base commit sha (baseline.sha), so the
-#     worktree is only recreated when the base actually moves.
+#     git worktree). Keyed on the composite of the base commit sha and the
+#     effective .delta.toml identity (baseline.sha stores "<base-sha>
+#     <config-hash>"), so the worktree is recreated when the base moves OR the
+#     cargo-delta config changes.
 #   * current.json   -- snapshot of the working tree. Cheap. Keyed on
 #     <HEAD sha> (current.state); the dirty-tree guard means a clean tree
 #     corresponds exactly to HEAD.
