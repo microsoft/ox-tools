@@ -97,6 +97,13 @@
 //! PR run does. The scheduled and full tiers deliberately opt out
 //! (`ANVIL_IMPACT=off`) and run every check over the whole workspace.
 //!
+//! The generated GitHub scheduled workflow publishes failures as GitHub
+//! issues. On failure, it best-effort reuses an open marker-owned issue and
+//! comments when later scheduled runs also fail. A maintainer closes the issue
+//! after resolving the incident; successful runs do not close it automatically.
+//! Repositories can disable this behavior by setting the
+//! `ANVIL_PUBLISH_FAILURE_ISSUE` Actions repository variable to `false`.
+//!
 //! ## Containerized local checks
 //!
 //! Anvil can run any generated recipe in a content-addressed Linux container.
@@ -293,6 +300,16 @@
 //! 4. **Take ownership by editing inside** an owned file or managed
 //!    region. The next `update` detects the dirt and writes a
 //!    `.anvil-proposed` sibling instead of overwriting.
+//!
+//! ### Scheduled failure issue publication (GitHub)
+//!
+//! The generated GitHub scheduled workflow creates or updates
+//! `[Anvil] Scheduled checks failed` when a scheduled group fails.
+//! To disable this behavior without editing an Anvil-owned workflow,
+//! set the Actions repository variable `ANVIL_PUBLISH_FAILURE_ISSUE`
+//! to `false` under **Settings → Secrets and variables → Actions →
+//! Variables**. Removing the variable or setting any other value
+//! restores the default publication behavior.
 //!
 //! ## In-tree tool customization
 //!

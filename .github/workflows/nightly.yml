@@ -35,6 +35,7 @@ jobs:
     if: ${{ needs.nightly-gatekeeper.outputs.should_skip != 'true' }}
     runs-on: ubuntu-latest
     permissions:
+      contents: read
       issues: write
     steps:
       # prep
@@ -57,19 +58,26 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          ISSUE_TITLE="🚨 Nightly Build Failed"
-          ISSUE_DATE="$(date +'%Y-%m-%d')"
-          ISSUE_FULL_TITLE="$ISSUE_TITLE: $ISSUE_DATE"
-          ISSUE_BODY="The nightly scheduled build failed. Please check the logs here: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          # Search for open issues with the same base title and label
-          EXISTING_ISSUE=$(gh issue list --label "bug" --state open --search "$ISSUE_TITLE" --json number,title | jq -r '.[] | select(.title | startswith("'"$ISSUE_TITLE"'")) | .number' | head -n 1)
+          ISSUE_TITLE="[Anvil] Scheduled checks failed"
+          MARKER="<!-- anvil scheduled failure -->"
+          ISSUE_BODY="$MARKER
+
+          The legacy nightly mutation-testing workflow failed.
+
+          [View workflow run]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID)"
+          # Share Anvil's marker-owned incident so overlapping mutation
+          # failures produce one durable issue and one notification stream.
+          EXISTING_ISSUE=$(gh issue list \
+            --state open \
+            --search '"anvil scheduled failure" in:body' \
+            --limit 100 \
+            --json number,body \
+            --jq '.[] | select(.body | contains("<!-- anvil scheduled failure -->")) | .number' \
+            | head -n 1)
           if [[ -n "$EXISTING_ISSUE" ]]; then
-            # Add a comment to the existing issue
             gh issue comment "$EXISTING_ISSUE" --body "$ISSUE_BODY"
           else
-            # Create a new issue
             gh issue create \
-              --title "$ISSUE_FULL_TITLE" \
-              --body "$ISSUE_BODY" \
-              --label "bug"
+              --title "$ISSUE_TITLE" \
+              --body "$ISSUE_BODY"
           fi
