@@ -380,7 +380,7 @@ dependencies = [
  "tar",
  "tempfile",
  "terminal_size",
- "tick",
+ "tick 0.4.0",
  "tokio",
  "toml",
  "url",
@@ -3256,9 +3256,9 @@ dependencies = [
 
 [[package]]
 name = "recoverable"
-version = "0.1.7"
+version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11c6fffc9f964068ce84feb6a86872528488b5379e533fada05e442c071e1449"
+checksum = "ade79e711f06d92833cfc93f6fd462cc14fe40934e0dc0253db5fd2e5cce1941"
 
 [[package]]
 name = "redox_syscall"
@@ -3669,15 +3669,15 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "seatbelt"
-version = "0.6.1"
+version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9792397b51172fa457e6a7e2da8dafeb77bc42a9754a087948acc1042c8f2128"
+checksum = "6298fd7c15dfe1e0bd75ed0c0484550e006c010efc503ea1f963b745e111b7bf"
 dependencies = [
  "fastrand",
  "layered",
  "recoverable",
- "thread_aware",
- "tick",
+ "thread_aware 0.9.0",
+ "tick 0.5.0",
 ]
 
 [[package]]
@@ -4143,6 +4143,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e8e2e87580ff3c5422b991735ee62fd6100a7aada3f7ad9a21ecc9fb12edcae"
 
 [[package]]
+name = "thread_aware"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1d62dcaf3eec4b3d50494a244af37d0e169c37075ccfe02144ad98e86c6901"
+
+[[package]]
 name = "thread_local"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4159,8 +4165,19 @@ checksum = "4d5b1614b34b2b4edcde4b95ad409647e398d9cece3998f58d23645de0e4f1d6"
 dependencies = [
  "futures-core",
  "pin-project-lite",
- "thread_aware",
+ "thread_aware 0.8.0",
  "tokio",
+]
+
+[[package]]
+name = "tick"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cac1a2e273c0e12c23b85ed62b9e7ae46342ed73a4082f95ed28cdbd807b1fce"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
+ "thread_aware 0.9.0",
 ]
 
 [[package]]
