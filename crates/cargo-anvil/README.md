@@ -247,7 +247,7 @@ sub-groups run sequentially within the one job per OS leg):
     <tr><td><a href="https://embarkstudios.github.io/cargo-deny/">deny</a></td><td></td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-audit">audit</a></td><td></td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-udeps">udeps</a></td><td>runs twice: with and without <code>--all-targets</code></td></tr>
-    <tr><td><a href="https://crates.io/crates/cargo-semver-checks">semver-check</a></td><td>advisory-only; never fails the build (posts a PR comment)</td></tr>
+    <tr><td><a href="https://crates.io/crates/cargo-semver-checks">semver-check</a></td><td>findings and inconclusive comparisons are advisory (posts a PR comment); Anvil preflight failures remain enforcing</td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-check-external-types">external-types</a></td><td></td></tr>
     <tr><td rowspan="8"><code>pr-slow</code></td><td rowspan="3"><code>pr-test</code></td><td><a href="https://crates.io/crates/cargo-llvm-cov">llvm-cov</a></td><td>dual feature-config; gated by <a href="https://crates.io/crates/cargo-coverage-gate">cargo-coverage-gate</a></td></tr>
     <tr><td><a href="https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html">doc-test</a></td><td>runs both feature configs</td></tr>
@@ -445,7 +445,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbg_i30X-3gcQbjz6zC6ezNMsbVz7h7GJnnrkbJGtVmGgCMnJhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbeFb-nxTpm-wbhOQfDHkvAlQbBwf8vTz7H_sbBEjy6es7J7BhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

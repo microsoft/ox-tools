@@ -279,10 +279,11 @@ mod tests {
             "all affected packages opted out of coverage",
             "could not resolve the cargo-careful executable",
             "anvil-mutants-full: aarch64-pc-windows-msvc",
-            "cargo-semver-checks exit 101",
-            "unexpected cargo-semver-checks exit code",
         ] {
             assert!(checks.contains(needle), "checks tree missing safety behavior '{needle}'");
+        }
+        for needle in ["Inconclusive comparisons", "an unbuildable baseline is not evidence"] {
+            assert!(checks.contains(needle), "checks tree missing advisory behavior '{needle}'");
         }
         assert!(
             checks.contains("bolero list --profile release --package $packageName"),

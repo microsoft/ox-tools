@@ -174,7 +174,7 @@ that provided the strongest version of the check.
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
 | `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` run **twice** — once with default targets (lib + bins) and once with `--all-targets`. cargo-udeps only analyzes the targets it's told to, and each run catches a variant the other masks: the default-targets run surfaces a dep in `[dependencies]` referenced only by tests/benches/examples (it should be a dev-dep; `--all-targets` would see it as "used"), while the `--all-targets` run surfaces unused `[dev-dependencies]` (never compiled by the default-targets run). Together they cover unused deps, unused dev-deps, and deps that should be dev-deps. | oxidizer, oxidizer-github |
-| `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected library crate. The PR target is the baseline. Exit 100 is a completed check with deny-level findings: it writes `target/anvil/comments/semver.md` and remains advisory. Exit 101 or any unexpected nonzero status is operational failure and fails the recipe, except for proven rename and bin→lib transitions with no comparable baseline. | oxidizer-github |
+| `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected library crate. The PR target is the baseline. Exit 100 is a completed check with deny-level findings; exit 101 or another nonzero status means the comparison was inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory, matching the repository's native `semver` job (`continue-on-error: true`). Proven rename and bin→lib transitions with no comparable baseline are skipped without a comment. Anvil preflight failures such as invalid current-workspace metadata or an unavailable baseline ref still fail because the recipe cannot establish what to compare. | oxidizer-github |
 | `external-types`               | `cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path` per library crate (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are skipped). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
 
 ### `pr-slow`
@@ -418,6 +418,16 @@ the PR. The canonical example is `semver-check`: breaking changes between unrele
 commits are normal, and forcing every breaking-API PR to bump the major version (or wait
 on a release) would push enforcement to the wrong moment in the lifecycle. The change is
 verifiable at release time, not per PR.
+
+The SemVer comparison is also inconclusive when `cargo-semver-checks` cannot materialize
+or build the target-branch baseline, for example because that baseline resolves a yanked
+dependency. Such an operational failure is reported in the same advisory comment and does
+not block the PR: a broken baseline is not evidence that the PR broke the public API, and
+blocking would prevent the PR that repairs the baseline from merging. This deliberately
+matches the repository's native `semver` job, whose comparison step uses
+`continue-on-error: true`. Failures in Anvil's own preflight (before invoking
+`cargo-semver-checks`) remain enforcing because they indicate that the recipe cannot
+identify the current packages or requested baseline.
 
 To carry this signal without making the recipe non-zero, anvil uses a single shared
 convention:
