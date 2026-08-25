@@ -3986,10 +3986,10 @@ anvil-container *target:
         # Already inside: pass straight through instead of nesting.
         if ($targetParts.Count -eq 0) {
             # The no-argument form asks for a shell in the image, and this *is*
-            # that shell. Running nothing and exiting 0 would be the one outcome
-            # that looks like it worked.
+            # that shell. Nothing runs, so exiting 0 would report success for a
+            # request that was not carried out.
             [Console]::Error.WriteLine("anvil: already inside the container; run the command directly")
-            exit 0
+            exit 1
         }
         just @targetParts
         exit $LASTEXITCODE
@@ -4295,6 +4295,12 @@ anvil-container-status:
 
     $env:ANVIL_CONTAINER_NO_REBUILD = '1'
     $env:ANVIL_CONTAINER_NO_RESOLVE = '1'
+    # And explicitly *not* NO_CACHE. A caller who exported it is asking the next
+    # build to ignore the layer cache, which is a statement about building --
+    # but it also makes the resolver skip the local `image inspect`
+    # short-circuit, so a present image would be reported absent by a command
+    # that is only ever asking what is on this machine.
+    $env:ANVIL_CONTAINER_NO_CACHE = $null
     & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-image *> $null
     if ($LASTEXITCODE -eq 0) {
         Write-Output "status:  present and current"
