@@ -184,7 +184,10 @@ excluded: a credential must never influence a tag.
 ### 4.2 Digest
 
 Inputs are sorted by relative path with an ordinal comparison, then serialized into one stream in which each entry
-contributes a literal `file`, its relative path, and its content, each newline-terminated. Tagging entries this way
+contributes a literal `file`, the byte length of its relative path, the path, the byte length of its content, and the
+content. Length-prefixing the two variable-length fields is what makes the stream self-delimiting: newline framing
+would let a file whose body happened to contain `file`, a path and a newline serialize identically to two files
+splitting at that point, so two different input sets could name one image. Tagging entries this way
 prevents a rearrangement of names and contents from colliding. Line endings are normalized to LF, so CRLF and LF
 checkouts agree on the tag. The sort is ordinal because a case-insensitive one would drop one of two inputs differing
 only in case on the case-sensitive filesystem where the image is built.
@@ -208,6 +211,14 @@ its registry. Publish to a registry with immutable tags and restricted push.
 Two properties sit outside the digest. The base image is not resolved during hashing, so `ARG BASE_IMAGE` must remain
 digest-pinned; a floating tag could otherwise change beneath a tag that claims to name fixed content. The platform is
 pinned to `linux/amd64` on build and run, so hosts of differing architecture cannot compute one tag for two images.
+
+A third sits outside it by necessity: the `apt-get install` layer names packages without versions, and Ubuntu's
+archive moves. Two clean builds of a byte-identical Dockerfile weeks apart can therefore install different package
+versions under one tag. Pinning every apt version would trade this for a harder failure, since the archive drops
+superseded versions and the build would simply stop working. So the guarantee the tag gives is precise: **the inputs
+that define the image are fixed, and everything anvil itself installs is version-pinned** — the toolchain, the tool
+catalog, `just`, `pwsh`, `rustup` and `cargo-binstall`, each with a checksum. The system packages beneath them track
+the base distribution. `ANVIL_CONTAINER_NO_CACHE=1` forces a from-scratch rebuild when that distinction matters.
 
 The base tracks the Linux runner the generated workflows use, `ubuntu-latest` (currently 24.04). The catalog is
 installed with `binstall`, and those prebuilt binaries require that runner's glibc, which is backward but not forward
@@ -483,9 +494,15 @@ Three properties are load-bearing:
   not actually fetched would otherwise fail later and further from the cause. This is a presence check, not a
   verification: `image inspect` proves something carries that reference, not that its contents match the digest the tag
   claims. Trusting the publisher is the contract (§4.3).
-- **Every failure falls through to a local build**, with the reason printed — including a hook that cannot be loaded at
-  all, which is why the dot-source sits inside the same `try`. A publisher that has not caught up with a change must
-  not block the developer who made it.
+- **Every resolve failure falls through to a local build**, with the reason printed — including a hook that cannot be
+  loaded at all, which is why the dot-source sits inside the same `try`. A publisher that has not caught up with a
+  change must not block the developer who made it.
+
+  That tolerance is scoped to *resolution*. The build and run phases load the same file again to obtain credentials
+  (§7.1, §7.2) and are deliberately fail-closed, so a `hooks.ps1` that cannot be parsed stops the run there instead —
+  after resolution has already forgiven it. The two are not in conflict: a hook that yields no image costs nothing,
+  while a hook that cannot yield its credentials would otherwise produce an image built without them and tag it as if
+  it had them.
 
 ### 7.4 Trust boundary
 

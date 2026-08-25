@@ -3711,9 +3711,20 @@ anvil-container-tag:
     # from file text, and no file contains the tag -- and it belongs in the set
     # because it passes the build arguments, the secret mounts and the hook's
     # `Anvil-BuildSecrets` output into the build, all of which shape the result.
+    # Every file in the generated recipe tree, not only `*.just`. The build
+    # context admits the whole `justfiles/anvil/` directory (see the ignore
+    # file), so anything an adopter drops there is copied into the image. The
+    # catalog refuses to *own* a non-recipe file there, but a repository can
+    # still add one by hand, and a file that reaches the image without reaching
+    # the tag is precisely the hole this digest exists to close. Hashing what
+    # the context copies keeps the two sets identical by construction.
+    #
+    # -Force because Get-ChildItem omits hidden entries otherwise: a
+    # dot-prefixed file is copied like any other, and skipping it would let its
+    # edits ride under an unchanged tag -- and make Windows and Unix disagree.
     $recipeRoot = Join-Path $repoRoot 'justfiles/anvil'
     if (Test-Path -LiteralPath $recipeRoot) {
-        foreach ($file in Get-ChildItem -LiteralPath $recipeRoot -Recurse -File -Force -Filter '*.just') {
+        foreach ($file in Get-ChildItem -LiteralPath $recipeRoot -Recurse -File -Force) {
             $inputs += [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName) -replace '\\', '/'
         }
     }
@@ -3745,8 +3756,16 @@ anvil-container-tag:
         [void]$stream.Append('file ').Append($rel.Length).Append(' ').Append($rel)
         [void]$stream.Append(' ').Append($text.Length).Append(' ').Append($text)
     }
-    $digest = [System.Security.Cryptography.SHA256]::HashData(
-        [System.Text.Encoding]::UTF8.GetBytes($stream.ToString()))
+    # ComputeHash rather than the static HashData: the latter arrived in .NET 5,
+    # and the prerequisite check accepts any PowerShell 7, including 7.0 on
+    # .NET Core 3.1 where the static overload does not exist. Failing there
+    # would be a MethodNotFound at tag time, before anything useful happened.
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($stream.ToString()))
+    } finally {
+        $sha.Dispose()
+    }
     # 16 hex characters (64 bits) is far past any practical collision risk for a
     # local image set, and keeps `docker images` readable.
     $imageId = -join ($digest[0..7] | ForEach-Object { $_.ToString('x2') })
@@ -4295,9 +4314,20 @@ anvil-container-status:
     & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-image *> $null
     if ($LASTEXITCODE -eq 0) {
         Write-Output "status:  present and current"
-    } else {
-        Write-Output "status:  not present locally (the next run resolves or builds it)"
+        exit 0
     }
+
+    # A cache miss and an unreachable daemon both make `image inspect` fail, and
+    # reporting the second as the first tells a developer to expect a build that
+    # will not start either. Ask the engine whether it is answering at all: only
+    # then is absence the honest reading.
+    $engineCmd = $engine -split '\|'
+    & $engineCmd[0] @($engineCmd | Select-Object -Skip 1) version *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Output "status:  unknown -- the engine is not responding (is the daemon running?)"
+        exit 1
+    }
+    Write-Output "status:  not present locally (the next run resolves or builds it)"
     exit 0
 
 # Only the download caches are volumes, so this discards fetched crates and git

@@ -229,7 +229,7 @@ mod tests {
         // the consumer performs: a second copy of the hash would let the two
         // drift and turn a published tag into a claim nobody checks.
         assert_eq!(
-            RECIPE.matches("SHA256]::HashData").count(),
+            RECIPE.matches("ComputeHash(").count(),
             1,
             "the content hash must be computed once, by anvil-container-tag"
         );
@@ -495,10 +495,17 @@ mod tests {
         // installed as surely as tools.just decides *how*. Hashing only the
         // install definitions would let a group drop a `-setup` dependency,
         // changing the installed set, without renaming the image.
-        // -Force so a dot-prefixed recipe is hashed. It is copied into the image
-        // either way, and Get-ChildItem omits hidden entries without it, so the
-        // tag would ignore edits to it and Windows and Unix could disagree.
-        assert!(RECIPE.contains("-Recurse -File -Force -Filter '*.just'"));
+        // Every file, not only `*.just`: the build context admits the whole
+        // directory, so a non-recipe file an adopter adds by hand is copied
+        // into the image. Filtering here would let it change the image's
+        // contents without changing its tag. -Force because a dot-prefixed
+        // file is copied like any other and would otherwise be skipped.
+        assert!(RECIPE.contains("-Recurse -File -Force"));
+        assert!(!RECIPE.contains("-Recurse -File -Force -Filter '*.just'"));
+        // ComputeHash, not the static HashData: the latter needs .NET 5, and
+        // the prerequisite check accepts PowerShell 7.0 on .NET Core 3.1.
+        assert!(!RECIPE.contains("SHA256]::HashData"));
+        assert!(RECIPE.contains("SHA256]::Create()"));
         // Including this driver, which passes the build arguments, the secret
         // mounts and the hook's PreBuild output into the build.
         assert!(!RECIPE.contains("-cne 'justfiles/anvil/container.just'"));
