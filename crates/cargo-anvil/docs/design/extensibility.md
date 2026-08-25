@@ -482,7 +482,7 @@ in a tool-owned directory of their own, such as `.anvil/`.
 Containerized execution is itself an ordinary artifact group, customized with
 the same `replace_artifact` / `with_artifact` / `without_artifact` levers as
 anything else. The artifacts it exposes and the contract each one carries are
-specified in [containers.md](./containers.md#9-customization).
+specified in [containers.md](./containers.md#8-customization).
 
 The public engine contains no environment-specific image, registry, cloud, or
 credential-provider details.

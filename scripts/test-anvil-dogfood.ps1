@@ -182,10 +182,10 @@ function Resolve-Engine([string]$Name) {
     # Mirrors what container.just does: prefer the engine on PATH, and fall
     # back to the default WSL distribution on Windows. The script must not
     # assume more than the product does.
-    if (Get-Command $Name -ErrorAction SilentlyContinue) {
+    if (Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue) {
         return [pscustomobject]@{ Exe = $Name; Prefix = @(); ViaWsl = $false }
     }
-    if ($IsWindows -and (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
+    if ($IsWindows -and (Get-Command wsl.exe -CommandType Application -ErrorAction SilentlyContinue)) {
         & wsl.exe --exec $Name --version *> $null
         if ($LASTEXITCODE -eq 0) {
             return [pscustomobject]@{ Exe = 'wsl.exe'; Prefix = @('--exec', $Name); ViaWsl = $true }
@@ -455,7 +455,7 @@ Write-Host "repository: $RepoRoot" -ForegroundColor DarkGray
 Write-Host "tier:       $(if ($SkipTier) { '(skipped)' } else { $Tier -join ', ' })" -ForegroundColor DarkGray
 
 foreach ($tool in @('just', 'cargo')) {
-    if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+    if (-not (Get-Command $tool -CommandType Application -ErrorAction SilentlyContinue)) {
         Write-Host "FAIL  $tool is required on PATH" -ForegroundColor Red
         exit 1
     }

@@ -183,12 +183,19 @@ exactly the reference a consumer will later look up.
 |`ANVIL_CONTAINER_NO_RESOLVE=1`|Skip the resolve hook, so a query never pulls.|
 |`ANVIL_CONTAINER_NO_CACHE=1`|Rebuild a tag that already resolves, ignoring the hook.|
 |`ANVIL_IN_CONTAINER=1`|Set inside the image; makes a nested invocation run natively.|
-|`GITHUB_TOKEN`|Forwarded into the run when set on the host, so `anvil-aprz` is not rate-limited.|
+|`GITHUB_TOKEN`|Forwarded when set on the host. When it is not, one is derived from `gh auth token` — but only for a target whose plan reads the variable, or for the interactive shell.|
 
 Supporting recipes: `anvil-container-tag`, `anvil-container-status`
 (reports the engine and image without building or pulling), and
 `anvil-container-down` (removes this repository’s cache volumes). To rebuild
-a tag that already resolves, set `ANVIL_CONTAINER_NO_CACHE=1` above.
+a tag that already resolves, scope `ANVIL_CONTAINER_NO_CACHE` to the one
+invocation — an exported value is read by *every* later container command,
+so a forgotten one rebuilds from scratch each time:
+
+```text
+$env:ANVIL_CONTAINER_NO_CACHE = '1'
+try { just anvil-container anvil-fmt } finally { Remove-Item Env:ANVIL_CONTAINER_NO_CACHE }
+```
 
 #### The hook
 
@@ -461,7 +468,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbSYqfQlDuez4bxOpm9tVy5dwb5v23EdpLmHAb3Yt_7tHlH1thZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQb-v7S1O3ujgwbrHNxDZB-H40b07anVywfLZ8bKnb9-uilr1BhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts

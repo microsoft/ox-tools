@@ -32,8 +32,8 @@ wraps, and [extensibility.md](./extensibility.md) for the catalog seam a downstr
   - [6.2 Docker](#62-docker)
   - [6.3 Podman](#63-podman)
 - [7. The hook](#7-the-hook)
-  - [7.1 Anvil-BuildSecrets](#71-Anvil-BuildSecrets)
-  - [7.2 Anvil-RunEnv](#72-Anvil-RunEnv)
+  - [7.1 Anvil-BuildSecrets](#71-anvil-buildsecrets)
+  - [7.2 Anvil-RunEnv](#72-anvil-runenv)
   - [7.3 Anvil-ResolveImage](#73-anvil-resolveimage)
   - [7.4 Trust boundary](#74-trust-boundary)
 - [8. Customization](#8-customization)
@@ -81,6 +81,16 @@ There is deliberately no `anvil-container-rebuild`. Its whole body would be `ANV
 the ordinary resolve, and that variable is already public below — where it also composes with `NO_REBUILD` and
 `NO_RESOLVE`, which a recipe form does not.
 
+What the recipe did supply was **scope**: it set the variable in its own process and exited, so exactly one build
+ignored the cache. An exported variable is sticky, and every container command reads it, so a forgotten
+`ANVIL_CONTAINER_NO_CACHE` rebuilds from scratch on each later invocation with nothing to indicate why. Scope it to
+the one run:
+
+```powershell
+$env:ANVIL_CONTAINER_NO_CACHE = '1'
+try { just anvil-container anvil-fmt } finally { Remove-Item Env:ANVIL_CONTAINER_NO_CACHE }
+```
+
 | Variable | Effect |
 | --- | --- |
 | `ANVIL_CONTAINER_ENGINE` | `docker` (default) or `podman`. Read at run time (§6.1). |
@@ -107,8 +117,9 @@ repo/
     └── hooks.ps1                          optional; not emitted by default (§7)
 ```
 
-`container.just` is reconciled on every run, so local edits to it are replaced. The `Dockerfile` and its ignore file
-are generated but intended to be edited; anvil's drift handling preserves a repository's changes to them (§8).
+`container.just` and the `Dockerfile` are both owned files with the same drift handling: anvil preserves a repository's
+edit and reports a proposal rather than overwriting it (`updates.md` §2). They differ in header wording and in whether
+editing is *invited* — the Dockerfile is meant to be extended (§8), the driver is not.
 
 The image installs its tools by running `just anvil-setup`, the same recipe the checks use, reading the same
 generated pins. There is no second tool list to keep synchronized, and consequently a tool-pin change renames the

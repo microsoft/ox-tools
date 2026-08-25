@@ -3,20 +3,24 @@
 
 //! Containerized execution: the `anvil-container` recipe and the image it runs.
 //!
-//! Two artifacts define the whole feature. The recipe drives the engine and
-//! computes the image identity; the Dockerfile (with its build-context ignore
-//! file) defines what the image contains. There is no configuration file:
-//! whether the group is emitted at all is a catalog decision, and the only
-//! host-specific value — which engine to call — is an environment variable read
-//! by the recipe at run time.
+//! Three artifacts define the whole feature. The recipe drives the engine and
+//! computes the image identity; the Dockerfile defines what the image contains;
+//! its build-context ignore file decides what reaches the build at all, and the
+//! two must be replaced together. There is no configuration file: whether the
+//! group is emitted at all is a catalog decision, and the only host-specific
+//! value — which engine to call — is an environment variable read by the recipe
+//! at run time.
 //!
 //! A downstream catalog customizes exactly two things, and inherits everything
 //! else:
 //!
 //! - [`dockerfile`] plus [`Artifact::with_body`] to build on a different base
-//!   or install the toolchain from a different source.
-//! - [`hooks`] to supply credentials, which the recipe loads when the file is
-//!   present regardless of who put it there.
+//!   or install the toolchain from a different source. A replacement that
+//!   copies more of the tree must replace [`dockerignore`] with it, or the
+//!   added paths never reach the build context.
+//! - [`hooks`] to supply credentials, or to resolve a published image through
+//!   `Anvil-ResolveImage`. The recipe loads the file when it is present,
+//!   regardless of who put it there.
 
 use crate::catalog::Artifact;
 

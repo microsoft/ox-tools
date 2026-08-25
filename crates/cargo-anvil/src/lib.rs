@@ -184,12 +184,19 @@
 //! | `ANVIL_CONTAINER_NO_RESOLVE=1` | Skip the resolve hook, so a query never pulls. |
 //! | `ANVIL_CONTAINER_NO_CACHE=1` | Rebuild a tag that already resolves, ignoring the hook. |
 //! | `ANVIL_IN_CONTAINER=1` | Set inside the image; makes a nested invocation run natively. |
-//! | `GITHUB_TOKEN` | Forwarded into the run when set on the host, so `anvil-aprz` is not rate-limited. |
+//! | `GITHUB_TOKEN` | Forwarded when set on the host. When it is not, one is derived from `gh auth token` — but only for a target whose plan reads the variable, or for the interactive shell. |
 //!
 //! Supporting recipes: `anvil-container-tag`, `anvil-container-status`
 //! (reports the engine and image without building or pulling), and
 //! `anvil-container-down` (removes this repository's cache volumes). To rebuild
-//! a tag that already resolves, set `ANVIL_CONTAINER_NO_CACHE=1` above.
+//! a tag that already resolves, scope `ANVIL_CONTAINER_NO_CACHE` to the one
+//! invocation — an exported value is read by *every* later container command,
+//! so a forgotten one rebuilds from scratch each time:
+//!
+//! ```text
+//! $env:ANVIL_CONTAINER_NO_CACHE = '1'
+//! try { just anvil-container anvil-fmt } finally { Remove-Item Env:ANVIL_CONTAINER_NO_CACHE }
+//! ```
 //!
 //! ### The hook
 //!

@@ -416,7 +416,14 @@ anvil-container *target:
     $targetParts = @('{{ replace(target, "'", "''") }}' -split '\s+' | Where-Object { $_ })
     if ($env:ANVIL_IN_CONTAINER -eq '1') {
         # Already inside: pass straight through instead of nesting.
-        if ($targetParts.Count -gt 0) { just @targetParts }
+        if ($targetParts.Count -eq 0) {
+            # The no-argument form asks for a shell in the image, and this *is*
+            # that shell. Running nothing and exiting 0 would be the one outcome
+            # that looks like it worked.
+            [Console]::Error.WriteLine("anvil: already inside the container; run the command directly")
+            exit 0
+        }
+        just @targetParts
         exit $LASTEXITCODE
     }
 
@@ -704,12 +711,10 @@ anvil-container-status:
     }
     exit 0
 
-# Remove this repository's cache volumes. The image is left in place.
-#
 # Only the download caches are volumes, so this discards fetched crates and git
 # checkouts and nothing else: the next run re-fetches them, and the image's own
-# tools are untouched. The counterpart to a rebuild, which discards the image
-# and keeps these.
+# tools are untouched. To discard the image instead, set
+# ANVIL_CONTAINER_NO_CACHE=1 for a single run.
 
 # Remove this repository's cache volumes. The image is left in place.
 [group("anvil-container")]
