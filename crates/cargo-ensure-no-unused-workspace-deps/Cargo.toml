@@ -1,0 +1,35 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-ensure-no-unused-workspace-deps"
+description = "A cargo subcommand that ensures every [workspace.dependencies] entry is inherited by a workspace member"
+version = "0.0.0"
+keywords = ["oxidizer", "cargo", "subcommand", "dependencies", "ci"]
+categories = ["command-line-utilities", "development-tools::cargo-plugins"]
+
+# Skeleton. The design is under review and the implementation has not
+# landed, so there is nothing worth publishing yet. The implementation
+# change drops this line and takes the crate to its first release.
+publish = false
+
+authors.workspace = true
+edition.workspace = true
+homepage.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ensure-no-unused-workspace-deps"
+
+# Coverage opt-out. The crate carries no executable code yet, so the
+# nightly anvil-llvm-cov run attributes no instrumented regions to it and
+# cargo-coverage-gate would classify it as NO DATA (exit 2).
+# `min-lines-percent = 0.0` is the gate's documented opt-out and resolves
+# to Status::Ok even with no attributed data. The implementation change
+# removes this opt-out along with the reason for it.
+[package.metadata.coverage-gate]
+min-lines-percent = 0.0
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints

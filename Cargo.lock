@@ -443,6 +443,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-ensure-no-unused-workspace-deps"
+version = "0.0.0"
+
+[[package]]
 name = "cargo-heather"
 version = "0.3.0"
 dependencies = [
