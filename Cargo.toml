@@ -4,6 +4,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# `members` globs `crates/*`, so a crate directory holding only a design doc --
+# the design-docs-first workflow lands the design before the code -- would be
+# read as a member with no manifest and break every cargo invocation. Excluded
+# until the crate itself lands, which removes this entry.
+exclude = ["crates/cargo-ensure-no-unused-workspace-deps"]
 
 [workspace.package]
 edition = "2024"
