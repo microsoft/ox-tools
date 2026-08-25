@@ -2853,9 +2853,9 @@ dependencies = [
 
 [[package]]
 name = "ohno"
-version = "0.3.2"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82a7fa4809797026017b08adb583cf85b8e1ca2861935871f6ed62d41174469f"
+checksum = "4665329d9a246af05b488837c3736801fedbec2ef3a1b1484fde1bc47550cf63"
 dependencies = [
  "ohno_macros",
  "typeid",
@@ -2863,13 +2863,13 @@ dependencies = [
 
 [[package]]
 name = "ohno_macros"
-version = "0.3.0"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c13afa6566040d0a66174d23ddd75fdee2c93e205cd57ff9abbecfb709014f6b"
+checksum = "565bae93429e274bfbb568535b43dd6458538908014e44faec44dddfafcb5fd3"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
