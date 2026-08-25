@@ -358,8 +358,13 @@ mod tests {
         // would break `anvil-container anvil-setup binstall` -- and around
         // fifty generated recipes take a parameter.
         assert!(RECIPE.contains(r"-split '\s+'"));
-        assert!(RECIPE.contains("just @targetParts"));
+        assert!(RECIPE.contains("}}' @targetParts"));
         assert!(RECIPE.contains("@('just') + $targetParts"));
+        // Every nested call goes through the launching binary, including the
+        // in-container passthrough: ANVIL_IN_CONTAINER is a documented control
+        // a developer can set on a host, where a bare name resolves against
+        // PATH rather than the `just` that is running.
+        assert!(!RECIPE.contains("\n        just @targetParts"));
     }
 
     #[test]

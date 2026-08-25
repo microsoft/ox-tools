@@ -184,10 +184,12 @@ excluded: a credential must never influence a tag.
 ### 4.2 Digest
 
 Inputs are sorted by relative path with an ordinal comparison, then serialized into one stream in which each entry
-contributes a literal `file`, the byte length of its relative path, the path, the byte length of its content, and the
-content. Length-prefixing the two variable-length fields is what makes the stream self-delimiting: newline framing
-would let a file whose body happened to contain `file`, a path and a newline serialize identically to two files
-splitting at that point, so two different input sets could name one image. Tagging entries this way
+contributes a literal `file`, the UTF-8 byte length of its relative path, the path, the UTF-8 byte length of its
+content, and the content. Length-prefixing the two variable-length fields is what makes the stream self-delimiting:
+newline framing would let a file whose body happened to contain `file`, a path and a newline serialize identically to
+two files splitting at that point, so two different input sets could name one image. The lengths are byte counts of
+the same UTF-8 encoding the stream is hashed in, so an independent re-implementation arrives at the same bytes.
+Tagging entries this way
 prevents a rearrangement of names and contents from colliding. Line endings are normalized to LF, so CRLF and LF
 checkouts agree on the tag. The sort is ordinal because a case-insensitive one would drop one of two inputs differing
 only in case on the case-sensitive filesystem where the image is built.
@@ -249,7 +251,9 @@ resolves nothing inside the container and each of them fails a long way from the
 The redirection is confined to the checkout: a git command run elsewhere in the container, such as `git init` in a
 scratch directory, is unaffected. That is why a generated `.git` file is used rather than `GIT_DIR`, which is ambient
 and would be inherited by every process in the container. An ordinary clone carries its git directory inside the bind
-mount and takes none of this. Nothing is written to the host, and no flag or variable selects the behaviour.
+mount and takes none of this. The generated `.git` file is written to the host temp directory, bind-mounted from
+there, and removed when the run ends; nothing is written into the checkout, and no flag or variable selects the
+behaviour.
 
 Only cargo's content-addressed download caches are volumes, so the write-heavy download path never crosses the host
 boundary and the host's own toolchain is untouched. `$CARGO_HOME` and `$RUSTUP_HOME` themselves are **not** mounted:

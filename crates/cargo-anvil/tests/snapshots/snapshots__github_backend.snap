@@ -3743,6 +3743,11 @@ anvil-container-tag:
     # a hook that exists versus an ignore file whose body ends in the hook's
     # path and body, for instance -- and the second state would silently reuse
     # the first state's image. Byte counts cannot be forged by content.
+    #
+    # UTF-8 byte counts, not String.Length: the stream is hashed as UTF-8, and a
+    # publisher re-implementing this from the design document has to arrive at
+    # the same bytes. UTF-16 code units would differ for any non-ASCII path or
+    # content and make the spec unimplementable outside .NET.
     $stream = [System.Text.StringBuilder]::new()
     $ordered = [System.Collections.Generic.SortedSet[string]]::new(
         [string[]]$inputs, [System.StringComparer]::Ordinal)
@@ -3753,8 +3758,8 @@ anvil-container-tag:
             exit 1
         }
         $text = [System.IO.File]::ReadAllText($path) -replace "`r`n", "`n"
-        [void]$stream.Append('file ').Append($rel.Length).Append(' ').Append($rel)
-        [void]$stream.Append(' ').Append($text.Length).Append(' ').Append($text)
+        [void]$stream.Append('file ').Append([System.Text.Encoding]::UTF8.GetByteCount($rel)).Append(' ').Append($rel)
+        [void]$stream.Append(' ').Append([System.Text.Encoding]::UTF8.GetByteCount($text)).Append(' ').Append($text)
     }
     # ComputeHash rather than the static HashData: the latter arrived in .NET 5,
     # and the prerequisite check accepts any PowerShell 7, including 7.0 on
@@ -4018,7 +4023,12 @@ anvil-container *target:
             [Console]::Error.WriteLine("anvil: already inside the container; run the command directly")
             exit 1
         }
-        just @targetParts
+        # Through the launching binary like every other nested call. Inside the
+        # image `just` is on PATH so the bare name would work, but
+        # ANVIL_IN_CONTAINER is a documented control a developer can set on a
+        # host, and there the bare name resolves against PATH rather than the
+        # `just` that is actually running.
+        & '{{ replace(just_executable(), "'", "''") }}' @targetParts
         exit $LASTEXITCODE
     }
 
