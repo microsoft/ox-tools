@@ -47,7 +47,10 @@ steps:
       }
 
       # Everything lands here first; $path is created only on success.
-      $staging = Join-Path ([System.IO.Path]::GetTempPath()) "$artifact-staging"
+      # $PID-scoped: on a self-hosted agent two concurrent jobs share the
+      # temp directory, and an artifact name is not unique across
+      # overlapping pipeline runs.
+      $staging = Join-Path ([System.IO.Path]::GetTempPath()) "$artifact-staging-$PID"
       Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
       New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
@@ -60,6 +63,10 @@ steps:
               Copy-Item -Path (Join-Path $staging '*') -Destination $path -Recurse -Force
           }
           Write-Host "##vso[task.setvariable variable=ANVIL_BENCH_RESTORE]$state"
+          # The recipe refuses to write anywhere but here, so a wrapper that
+          # retargets `path` cannot silently detach the recipe's store from
+          # the one that is actually published.
+          Write-Host "##vso[task.setvariable variable=ANVIL_BENCH_WIRED_STORE]$path"
       }
 
       $collection = $env:SYSTEM_COLLECTIONURI
@@ -92,8 +99,8 @@ steps:
           if (-not $found.resource.downloadUrl) { continue }
 
           Write-Host "anvil: restoring $artifact from build $($run.id)"
-          $zip = Join-Path ([System.IO.Path]::GetTempPath()) "$artifact.zip"
-          $extract = Join-Path ([System.IO.Path]::GetTempPath()) "$artifact-extract"
+          $zip = Join-Path ([System.IO.Path]::GetTempPath()) "$artifact-$PID.zip"
+          $extract = Join-Path ([System.IO.Path]::GetTempPath()) "$artifact-extract-$PID"
           Remove-Item -Recurse -Force $extract -ErrorAction SilentlyContinue
           Invoke-WebRequest -Uri $found.resource.downloadUrl -Headers $headers -OutFile $zip
           Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force

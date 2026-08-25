@@ -34,6 +34,9 @@
             cp -R "$staging/." target/anvil/bench-history/
           fi
           echo "ANVIL_BENCH_RESTORE=$1" >> "$GITHUB_ENV"
+          # The recipe refuses to write anywhere but here, so an override
+          # cannot silently detach the recipe's store from the published one.
+          echo "ANVIL_BENCH_WIRED_STORE=target/anvil/bench-history" >> "$GITHUB_ENV"
         }
 
         # Walk back from the newest run and take the first that carries this

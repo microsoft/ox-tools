@@ -43,7 +43,29 @@
 anvil-bench-history: anvil-bench-history-validate-prereqs
     $ErrorActionPreference = 'Stop'
 
-    $store = if ($env:ANVIL_BENCH_HISTORY_STORE) { $env:ANVIL_BENCH_HISTORY_STORE } else { 'target/anvil/bench-history' }
+    # The CI wiring restores into, and publishes from, one fixed path. If
+    # the recipe wrote anywhere else the store would never persist: every
+    # run would cold-start and analyze to a clean no-op, reporting green
+    # precisely when it has lost the history it needs to report red. The
+    # wiring therefore announces its path and the recipe refuses to
+    # disagree with it.
+    $wired = $env:ANVIL_BENCH_WIRED_STORE
+    $store = if ($env:ANVIL_BENCH_HISTORY_STORE) {
+        $env:ANVIL_BENCH_HISTORY_STORE
+    } elseif ($wired) {
+        $wired
+    } else {
+        'target/anvil/bench-history'
+    }
+
+    if ($wired) {
+        $wantPath = [System.IO.Path]::GetFullPath($wired)
+        $gotPath = [System.IO.Path]::GetFullPath($store)
+        if ($wantPath -ne $gotPath) {
+            Write-Error "anvil: the benchmark history store is '$store', but the CI wiring restores and publishes '$wired'. Results written to the former would never be persisted, so every run would cold-start and report a false clean."
+            exit 1
+        }
+    }
     $reportDir = 'target/anvil/bench'
     $findingsMd = Join-Path $reportDir 'findings.md'
     $summaryMd = Join-Path $reportDir 'findings-summary.md'

@@ -1712,6 +1712,9 @@ runs:
             cp -R "$staging/." target/anvil/bench-history/
           fi
           echo "ANVIL_BENCH_RESTORE=$1" >> "$GITHUB_ENV"
+          # The recipe refuses to write anywhere but here, so an override
+          # cannot silently detach the recipe's store from the published one.
+          echo "ANVIL_BENCH_WIRED_STORE=target/anvil/bench-history" >> "$GITHUB_ENV"
         }
 
         # Walk back from the newest run and take the first that carries this
@@ -2494,7 +2497,7 @@ on:
 
 # The caller grants the maximum token scopes available to this reusable
 # workflow. Reset jobs to read-only here, then restore only the publisher's
-# issues scope below. See docs/design/github.md §9.
+# issues scope below. See docs/design/github.md.
 permissions:
   contents: read
 
@@ -2707,7 +2710,7 @@ jobs:
     uses: ./.github/workflows/anvil-scheduled-impl.yml
     # A called workflow cannot elevate beyond its caller. The implementation
     # resets this upper bound to read-only and restores issues:write only on
-    # publish-failure. See docs/design/github.md §9.
+    # publish-failure. See docs/design/github.md.
     permissions:
       contents: read
       # The scheduled-benchmarks job restores its history artifact, which
@@ -3036,7 +3039,29 @@ anvil-audit-validate-prereqs: anvil-tool-cargo-audit-validate-prereqs
 anvil-bench-history: anvil-bench-history-validate-prereqs
     $ErrorActionPreference = 'Stop'
 
-    $store = if ($env:ANVIL_BENCH_HISTORY_STORE) { $env:ANVIL_BENCH_HISTORY_STORE } else { 'target/anvil/bench-history' }
+    # The CI wiring restores into, and publishes from, one fixed path. If
+    # the recipe wrote anywhere else the store would never persist: every
+    # run would cold-start and analyze to a clean no-op, reporting green
+    # precisely when it has lost the history it needs to report red. The
+    # wiring therefore announces its path and the recipe refuses to
+    # disagree with it.
+    $wired = $env:ANVIL_BENCH_WIRED_STORE
+    $store = if ($env:ANVIL_BENCH_HISTORY_STORE) {
+        $env:ANVIL_BENCH_HISTORY_STORE
+    } elseif ($wired) {
+        $wired
+    } else {
+        'target/anvil/bench-history'
+    }
+
+    if ($wired) {
+        $wantPath = [System.IO.Path]::GetFullPath($wired)
+        $gotPath = [System.IO.Path]::GetFullPath($store)
+        if ($wantPath -ne $gotPath) {
+            Write-Error "anvil: the benchmark history store is '$store', but the CI wiring restores and publishes '$wired'. Results written to the former would never be persisted, so every run would cold-start and report a false clean."
+            exit 1
+        }
+    }
     $reportDir = 'target/anvil/bench'
     $findingsMd = Join-Path $reportDir 'findings.md'
     $summaryMd = Join-Path $reportDir 'findings-summary.md'

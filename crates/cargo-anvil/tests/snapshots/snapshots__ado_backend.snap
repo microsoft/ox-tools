@@ -1838,7 +1838,10 @@ steps:
       }
 
       # Everything lands here first; $path is created only on success.
-      $staging = Join-Path ([System.IO.Path]::GetTempPath()) "$artifact-staging"
+      # $PID-scoped: on a self-hosted agent two concurrent jobs share the
+      # temp directory, and an artifact name is not unique across
+      # overlapping pipeline runs.
+      $staging = Join-Path ([System.IO.Path]::GetTempPath()) "$artifact-staging-$PID"
       Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
       New-Item -ItemType Directory -Force -Path $staging | Out-Null
 
@@ -1851,6 +1854,10 @@ steps:
               Copy-Item -Path (Join-Path $staging '*') -Destination $path -Recurse -Force
           }
           Write-Host "##vso[task.setvariable variable=ANVIL_BENCH_RESTORE]$state"
+          # The recipe refuses to write anywhere but here, so a wrapper that
+          # retargets `path` cannot silently detach the recipe's store from
+          # the one that is actually published.
+          Write-Host "##vso[task.setvariable variable=ANVIL_BENCH_WIRED_STORE]$path"
       }
 
       $collection = $env:SYSTEM_COLLECTIONURI
@@ -1883,8 +1890,8 @@ steps:
           if (-not $found.resource.downloadUrl) { continue }
 
           Write-Host "anvil: restoring $artifact from build $($run.id)"
-          $zip = Join-Path ([System.IO.Path]::GetTempPath()) "$artifact.zip"
-          $extract = Join-Path ([System.IO.Path]::GetTempPath()) "$artifact-extract"
+          $zip = Join-Path ([System.IO.Path]::GetTempPath()) "$artifact-$PID.zip"
+          $extract = Join-Path ([System.IO.Path]::GetTempPath()) "$artifact-extract-$PID"
           Remove-Item -Recurse -Force $extract -ErrorAction SilentlyContinue
           Invoke-WebRequest -Uri $found.resource.downloadUrl -Headers $headers -OutFile $zip
           Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
@@ -3124,7 +3131,29 @@ anvil-audit-validate-prereqs: anvil-tool-cargo-audit-validate-prereqs
 anvil-bench-history: anvil-bench-history-validate-prereqs
     $ErrorActionPreference = 'Stop'
 
-    $store = if ($env:ANVIL_BENCH_HISTORY_STORE) { $env:ANVIL_BENCH_HISTORY_STORE } else { 'target/anvil/bench-history' }
+    # The CI wiring restores into, and publishes from, one fixed path. If
+    # the recipe wrote anywhere else the store would never persist: every
+    # run would cold-start and analyze to a clean no-op, reporting green
+    # precisely when it has lost the history it needs to report red. The
+    # wiring therefore announces its path and the recipe refuses to
+    # disagree with it.
+    $wired = $env:ANVIL_BENCH_WIRED_STORE
+    $store = if ($env:ANVIL_BENCH_HISTORY_STORE) {
+        $env:ANVIL_BENCH_HISTORY_STORE
+    } elseif ($wired) {
+        $wired
+    } else {
+        'target/anvil/bench-history'
+    }
+
+    if ($wired) {
+        $wantPath = [System.IO.Path]::GetFullPath($wired)
+        $gotPath = [System.IO.Path]::GetFullPath($store)
+        if ($wantPath -ne $gotPath) {
+            Write-Error "anvil: the benchmark history store is '$store', but the CI wiring restores and publishes '$wired'. Results written to the former would never be persisted, so every run would cold-start and report a false clean."
+            exit 1
+        }
+    }
     $reportDir = 'target/anvil/bench'
     $findingsMd = Join-Path $reportDir 'findings.md'
     $summaryMd = Join-Path $reportDir 'findings-summary.md'

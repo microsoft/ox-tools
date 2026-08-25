@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.4.0"
-catalog_checksum = "sha256:712752edd247fcab2f0f011469bfff674aa981958476b0271bbdf0eed4fea446"
+catalog_checksum = "sha256:f88c5b1aa3cd7b274b5533a01f1e727f8fa6e3cf63fba2c48699965076e8b52a"
 
 [[file]]
 path = ".anvil/container/Containerfile"
@@ -61,7 +61,7 @@ checksum = "sha256:aae1d9e983c289d124e217ac6412c0421e4f53064441cef60e20e19d7c737
 
 [[file]]
 path = ".github/actions/anvil-scheduled-benchmarks/action.yml"
-checksum = "sha256:3df218f81287c5f76cbca91ce6d7a69ba968de552e6b9353cdf1e294335ba280"
+checksum = "sha256:1873a7e67180d294713d4d6b1f4d31be570c43616434dd136eb6cb90da02a4e1"
 
 [[file]]
 path = ".github/actions/anvil-scheduled-exhaustive/action.yml"
@@ -89,11 +89,11 @@ checksum = "sha256:18350505aedb0d3e4bc0941016205acbd17b5619b83caa24689fd9d2ddcc1
 
 [[file]]
 path = ".github/workflows/anvil-scheduled-impl.yml"
-checksum = "sha256:a2aed61fd040e3a86ef96991b8ba6a0853c144a954b85211ca8b5e7b1f30a88c"
+checksum = "sha256:16cf6c108a4afe83ea7fd2f37d52410e7f4aff3da6d86f8427c28c5a5393c073"
 
 [[file]]
 path = ".github/workflows/anvil-scheduled.yml"
-checksum = "sha256:e0ed2fc2b6608d775cf461a4b255f53a4bf96e3e7055726f3d5f4bf6dd16daae"
+checksum = "sha256:4e8fdc164ae1963b81bf5215c17fc575c56dfa9a76f6ce13e706524d1099cf18"
 
 [[file]]
 path = "justfiles/anvil/checks/aprz.just"
@@ -105,7 +105,7 @@ checksum = "sha256:54abf96a320bb4b35a3c0ddf2f30b0f4a30e0673e482ca3a71242fa383536
 
 [[file]]
 path = "justfiles/anvil/checks/bench-history.just"
-checksum = "sha256:c0c4cd8c84b1ae778d1f9b8fe9e0f90ca607dd0df626f88da8f52aecc02a23ff"
+checksum = "sha256:7b29f5b7fe0ba09cc951ff1a140f9f5d0b599a4212574b3f70c5d085d1485036"
 
 [[file]]
 path = "justfiles/anvil/checks/bench.just"

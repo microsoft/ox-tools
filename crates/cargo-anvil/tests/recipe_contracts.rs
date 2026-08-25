@@ -899,6 +899,50 @@ fn bench_history_propagates_tool_failure() {
     assert_failed(&output, "a failing collect");
 }
 
+#[test]
+fn bench_history_refuses_a_store_the_wiring_does_not_publish() {
+    if !tools_available() {
+        return;
+    }
+
+    // The wiring announces the one path it restores into and publishes from.
+    // A store pointing anywhere else would never persist, so every run would
+    // cold-start and analyze to a clean no-op -- reporting green exactly when
+    // the history needed to report red has been lost.
+    let (_tmp, output) = run_bench_history(
+        NO_FINDINGS,
+        &[
+            ("ANVIL_BENCH_WIRED_STORE", OsStr::new("target/anvil/bench-history")),
+            ("ANVIL_BENCH_HISTORY_STORE", OsStr::new("target/somewhere-else")),
+        ],
+    );
+    assert_failed(&output, "a store the wiring does not publish");
+
+    // Agreement is not a desync, however it is spelled: the comparison is on
+    // the resolved path, not the literal string.
+    let (_tmp, output) = run_bench_history(
+        NO_FINDINGS,
+        &[
+            ("ANVIL_BENCH_WIRED_STORE", OsStr::new("target/anvil/bench-history")),
+            ("ANVIL_BENCH_HISTORY_STORE", OsStr::new("target/anvil/../anvil/bench-history")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "the same path spelled differently is not a desync:{}",
+        both_streams(&output)
+    );
+
+    // Without wiring there is nothing to disagree with: a local run may put
+    // its store wherever it likes.
+    let (_tmp, output) = run_bench_history(NO_FINDINGS, &[("ANVIL_BENCH_HISTORY_STORE", OsStr::new("target/somewhere-else"))]);
+    assert!(
+        output.status.success(),
+        "an unwired run may choose its own store:{}",
+        both_streams(&output)
+    );
+}
+
 /// Runs the private blessing reconciliation directly, so the prefix-matching
 /// boundary is pinned without going through a whole analysis.
 fn run_bless(blessings_file: &str, applied: &str) -> (TempDir, Output) {
