@@ -539,9 +539,14 @@ mod tests {
             .rfind("$plan -match 'GITHUB_TOKEN'")
             .expect("the plan must decide whether a token is needed");
         let dry_run = RECIPE[..plan]
-            .rfind("just --dry-run @targetParts")
+            .rfind("--dry-run @targetParts")
             .expect("the plan must come from just");
         assert!(dry_run < plan && plan < guard, "compute the plan, match it, then derive");
+        // Through the launching binary, like every other nested call: a bare
+        // `just` here fails silently when the caller invoked it by absolute
+        // path, and an empty plan reads as "no token needed".
+        assert!(!RECIPE.contains("(just --dry-run"));
+        assert!(RECIPE.contains("}}' --dry-run @targetParts"));
         // The predicate is the variable, not the name of a check, so a catalog
         // that adds another GitHub-authenticated check is covered for free.
         assert!(!RECIPE.contains("$plan -match 'aprz'"));

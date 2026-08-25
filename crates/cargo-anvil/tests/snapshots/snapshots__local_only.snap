@@ -2889,7 +2889,18 @@ anvil-container *target:
         $needsToken = $targetParts.Count -eq 0
         if (-not $needsToken) {
             $plan = ''
-            try { $plan = (just --dry-run @targetParts 2>&1 | ForEach-Object { $_.ToString() }) -join "`n" } catch { $plan = '' }
+            # The same executable that launched this tree, for the reason every
+            # other nested call uses it: a caller invoking `just` by absolute
+            # path with its directory off PATH would otherwise fail here. That
+            # failure is silent, because an empty plan reads as "does not need a
+            # token" -- so anvil-aprz would run unauthenticated in an image with
+            # no gh of its own and block on the rate limit for up to an hour.
+            try {
+                $plan = (& '{{ replace(just_executable(), "'", "''") }}' --dry-run @targetParts 2>&1 |
+                    ForEach-Object { $_.ToString() }) -join "`n"
+            } catch {
+                $plan = ''
+            }
             $needsToken = $plan -match 'GITHUB_TOKEN'
         }
         if ($needsToken) {

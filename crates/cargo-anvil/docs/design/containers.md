@@ -162,7 +162,7 @@ define the image. The name derives from the repository directory (§5.1).
 | `.anvil/container/Dockerfile.dockerignore` | always |
 | `rust-toolchain.toml` | always |
 | `.anvil/container/hooks.ps1` | when the file exists |
-| `justfiles/anvil/**/*.just` | always |
+| every file under `justfiles/anvil/` | always |
 
 The recipe tree is hashed in full. `just anvil-setup` reaches the install recipes through the tier, group and check
 recipes, so the routing decides *whether* a tool is installed just as surely as `tools.just` decides *how*: dropping an
@@ -542,9 +542,12 @@ that content inside the Dockerfile itself, where it *is* hashed, or to accept th
 `ANVIL_CONTAINER_NO_CACHE=1` to take effect. A manual escape hatch is not content identity, so treat the second as a
 workaround rather than a supported contract.
 
-`justfiles/anvil/` must contain `.just` recipes and nothing else, which `CatalogBuilder::build` enforces: a non-recipe
-file there would be copied into the image without being part of its identity, so editing it would change the image's
-contents without renaming the tag. Non-recipe assets belong in a tool-owned directory such as `.anvil/`.
+`justfiles/anvil/` must contain `.just` recipes and nothing else, which `CatalogBuilder::build` enforces for
+catalog-owned files. The reason is legibility rather than identity: the directory is the recipe tree, `just` parses
+every file the image copies, and a catalog that hides an installer script there makes the tool set harder to reason
+about than one that keeps it in `.anvil/`. Identity is safe either way, because the digest covers every file the build
+context admits (§4.1), not only the recipes — a repository that adds a non-recipe file by hand still renames the tag
+when it edits it.
 
 A fork inherits everything else: the recipes, the identity scheme, the cache volumes, the mounts, and the re-entry
 guard. A different base OS with a different toolchain source is one Dockerfile replacement plus one hook.

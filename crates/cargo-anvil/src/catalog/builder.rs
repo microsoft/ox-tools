@@ -238,13 +238,13 @@ impl CatalogBuilder {
     }
 }
 
-/// `justfiles/` is the recipe tree: the container image identity considers only
-/// `*.just` files below it, while the Docker build context admits the whole
-/// `justfiles/anvil/` directory. A non-recipe owned file placed there would
-/// therefore be copied into the image without being part of its tag, so editing
-/// it would change what the image contains while the tag still resolved.
-/// Reject it at catalog-construction time instead, so a derived catalog fails
-/// loudly rather than shipping a file that silently breaks image identity.
+/// `justfiles/` is the recipe tree: `just` parses every file the container
+/// build copies from it, so a non-recipe owned file there makes the tool set
+/// harder to reason about than one kept in a tool-owned directory. Image
+/// identity is not at stake — the digest covers every file the build context
+/// admits, not only `*.just` — so this is a legibility rule, enforced at
+/// catalog-construction time to keep a derived catalog honest about where its
+/// assets live.
 fn non_recipe_under_justfiles(artifact: &Artifact) -> Option<String> {
     let Artifact::OwnedFile(spec) = artifact else {
         return None;
@@ -254,7 +254,7 @@ fn non_recipe_under_justfiles(artifact: &Artifact) -> Option<String> {
         return None;
     }
     Some(format!(
-        "owned file '{}' is not a .just recipe; non-recipe artifacts must live outside justfiles/ (only *.just there is part of the container image identity)",
+        "owned file '{}' is not a .just recipe; non-recipe artifacts must live outside justfiles/ (it is the recipe tree, not an asset directory)",
         spec.path
     ))
 }
