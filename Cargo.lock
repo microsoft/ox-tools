@@ -380,7 +380,7 @@ dependencies = [
  "tar",
  "tempfile",
  "terminal_size",
- "tick",
+ "tick 0.5.0",
  "tokio",
  "toml",
  "url",
@@ -3676,8 +3676,8 @@ dependencies = [
  "fastrand",
  "layered",
  "recoverable",
- "thread_aware",
- "tick",
+ "thread_aware 0.8.0",
+ "tick 0.4.0",
 ]
 
 [[package]]
@@ -4143,6 +4143,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e8e2e87580ff3c5422b991735ee62fd6100a7aada3f7ad9a21ecc9fb12edcae"
 
 [[package]]
+name = "thread_aware"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1d62dcaf3eec4b3d50494a244af37d0e169c37075ccfe02144ad98e86c6901"
+
+[[package]]
 name = "thread_local"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4159,7 +4165,18 @@ checksum = "4d5b1614b34b2b4edcde4b95ad409647e398d9cece3998f58d23645de0e4f1d6"
 dependencies = [
  "futures-core",
  "pin-project-lite",
- "thread_aware",
+ "thread_aware 0.8.0",
+]
+
+[[package]]
+name = "tick"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cac1a2e273c0e12c23b85ed62b9e7ae46342ed73a4082f95ed28cdbd807b1fce"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
+ "thread_aware 0.9.0",
  "tokio",
 ]
 
