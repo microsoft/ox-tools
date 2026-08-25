@@ -154,11 +154,3 @@ udeps:
     # Try both with and without feature flags to cover both extremes.
     cargo +$env:RUST_NIGHTLY udeps {{ target_package }} --locked --all-features --all-targets
     cargo +$env:RUST_NIGHTLY udeps {{ target_package }} --locked --all-targets
-
-# Detect entries in [workspace.dependencies] that no member inherits. Pass --fix to remove them.
-[script]
-udeps-workspace *ARGS:
-    $ErrorActionPreference = "Stop"
-    $PSNativeCommandUseErrorActionPreference = $true
-
-    cargo +$env:RUST_NIGHTLY -Zscript scripts/unused-workspace-deps.rs {{ ARGS }}
