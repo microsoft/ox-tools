@@ -86,8 +86,9 @@ _anvil-container-engine:
 [script("pwsh", "-NoProfile")]
 _anvil-container-path host_path:
     $ErrorActionPreference = 'Stop'
-    $engine = (just _anvil-container-engine).Trim()
+    $engine = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-engine
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $engine = "$engine".Trim()
     if (-not $engine.StartsWith('wsl.exe|')) {
         Write-Output '{{ replace(host_path, "'", "''") }}'
         exit 0
@@ -149,7 +150,7 @@ anvil-container-tag:
     # `Anvil-BuildSecrets` output into the build, all of which shape the result.
     $recipeRoot = Join-Path $repoRoot 'justfiles/anvil'
     if (Test-Path -LiteralPath $recipeRoot) {
-        foreach ($file in Get-ChildItem -LiteralPath $recipeRoot -Recurse -File -Filter '*.just') {
+        foreach ($file in Get-ChildItem -LiteralPath $recipeRoot -Recurse -File -Force -Filter '*.just') {
             $inputs += [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName) -replace '\\', '/'
         }
     }
@@ -160,6 +161,14 @@ anvil-container-tag:
     # `Sort-Object -Unique` compares case-insensitively, which would silently drop
     # one of two inputs differing only in case on the case-sensitive filesystem
     # where the image is actually built.
+    # Length-prefix the path and the content rather than relying on newlines as
+    # separators. A bare `file\n<path>\n<content>\n` stream is not
+    # self-delimiting: content is arbitrary, so a file whose body contains
+    # "file\n<some path>\n" serializes identically to two files whose bodies
+    # split at that point. That makes distinct input sets nameable by one tag --
+    # a hook that exists versus an ignore file whose body ends in the hook's
+    # path and body, for instance -- and the second state would silently reuse
+    # the first state's image. Byte counts cannot be forged by content.
     $stream = [System.Text.StringBuilder]::new()
     $ordered = [System.Collections.Generic.SortedSet[string]]::new(
         [string[]]$inputs, [System.StringComparer]::Ordinal)
@@ -170,7 +179,8 @@ anvil-container-tag:
             exit 1
         }
         $text = [System.IO.File]::ReadAllText($path) -replace "`r`n", "`n"
-        [void]$stream.Append("file`n").Append($rel).Append("`n").Append($text).Append("`n")
+        [void]$stream.Append('file ').Append($rel.Length).Append(' ').Append($rel)
+        [void]$stream.Append(' ').Append($text.Length).Append(' ').Append($text)
     }
     $digest = [System.Security.Cryptography.SHA256]::HashData(
         [System.Text.Encoding]::UTF8.GetBytes($stream.ToString()))
@@ -198,8 +208,9 @@ anvil-container-tag:
 [script("pwsh", "-NoProfile")]
 _anvil-container-image:
     $ErrorActionPreference = 'Stop'
-    $engine = (just _anvil-container-engine).Trim()
+    $engine = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-engine
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $engine = "$engine".Trim()
     $engineCmd = $engine -split '\|'
     $engineExe = $engineCmd[0]
     $enginePrefix = @($engineCmd | Select-Object -Skip 1)
@@ -208,8 +219,9 @@ _anvil-container-image:
     $dockerfile = '.anvil/container/Dockerfile'
     $hookRel = '.anvil/container/hooks.ps1'
 
-    $image = (just anvil-container-tag).Trim()
+    $image = & '{{ replace(just_executable(), "'", "''") }}' anvil-container-tag
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $image = "$image".Trim()
 
     if ($env:ANVIL_CONTAINER_NO_CACHE -ne '1') {
         & $engineExe @enginePrefix image inspect $image *> $null
@@ -349,8 +361,9 @@ _anvil-container-image:
         [Console]::Error.WriteLine("anvil: building $image (inputs changed or first run)")
         # The engine may not share this host's filesystem view, so the context
         # and the Dockerfile are given in its terms rather than ours.
-        $engineRoot = (just _anvil-container-path $repoRoot).Trim()
+        $engineRoot = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-path $repoRoot
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        $engineRoot = "$engineRoot".Trim()
         # Pinned, not inferred from the host. The Dockerfile installs amd64
         # toolchains and verifies amd64 checksums, so an arm host would resolve
         # the multi-arch base to arm64 and fail late with an exec-format error.
@@ -427,17 +440,21 @@ anvil-container *target:
         exit $LASTEXITCODE
     }
 
-    $engine = (just _anvil-container-engine).Trim()
+    $engine = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-engine
+
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    $engine = "$engine".Trim()
     $engineCmd = $engine -split '\|'
     $engineExe = $engineCmd[0]
     $enginePrefix = @($engineCmd | Select-Object -Skip 1)
-    $image = (just _anvil-container-image) | Select-Object -Last 1
+    $image = (& '{{ replace(just_executable(), "'", "''") }}' _anvil-container-image) | Select-Object -Last 1
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     $repoRoot = '{{ replace(justfile_directory(), "'", "''") }}'
-    $engineRoot = (just _anvil-container-path $repoRoot).Trim()
+    $engineRoot = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-path $repoRoot
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $engineRoot = "$engineRoot".Trim()
 
     # Map the caller's working directory to its in-container equivalent so
     # relative paths keep working from a subdirectory. `invocation_directory()`
@@ -490,13 +507,15 @@ anvil-container *target:
             $gitCommonAbs = (Resolve-Path -LiteralPath $gitCommon).Path
             if ($gitDirAbs -ne $gitCommonAbs) {
                 $rel = [System.IO.Path]::GetRelativePath($gitCommonAbs, $gitDirAbs) -replace '\\', '/'
-                $engineGitCommon = (just _anvil-container-path $gitCommonAbs).Trim()
+                $engineGitCommon = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-path $gitCommonAbs
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                $engineGitCommon = "$engineGitCommon".Trim()
                 # LF and no trailing newline: git parses this file strictly.
                 $gitFile = Join-Path ([System.IO.Path]::GetTempPath()) "anvil-gitfile-$([System.Guid]::NewGuid().ToString('N'))"
                 [System.IO.File]::WriteAllText($gitFile, "gitdir: /anvil/gitdir/$rel`n")
-                $engineGitFile = (just _anvil-container-path $gitFile).Trim()
+                $engineGitFile = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-path $gitFile
                 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+                $engineGitFile = "$engineGitFile".Trim()
                 $runArgs += @('-v', "${engineGitCommon}:/anvil/gitdir")
                 $runArgs += @('-v', "${engineGitFile}:{{anvil_container_workdir}}/.git:ro")
             }
@@ -689,8 +708,9 @@ anvil-container *target:
 [script("pwsh", "-NoProfile")]
 anvil-container-status:
     $ErrorActionPreference = 'Stop'
-    $engine = (just _anvil-container-engine).Trim()
+    $engine = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-engine
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $engine = "$engine".Trim()
     Write-Output ("engine:  " + ($engine -replace '\|', ' '))
     Write-Output "workdir: {{anvil_container_workdir}}"
 
@@ -703,13 +723,13 @@ anvil-container-status:
     # query cannot paper over -- a declared input is missing -- and reporting
     # that as "not present locally" would be a lie: the next run cannot build
     # it either.
-    $image = (just anvil-container-tag) | Select-Object -Last 1
+    $image = (& '{{ replace(just_executable(), "'", "''") }}' anvil-container-tag) | Select-Object -Last 1
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     Write-Output "image:   $image"
 
     $env:ANVIL_CONTAINER_NO_REBUILD = '1'
     $env:ANVIL_CONTAINER_NO_RESOLVE = '1'
-    just _anvil-container-image *> $null
+    & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-image *> $null
     if ($LASTEXITCODE -eq 0) {
         Write-Output "status:  present and current"
     } else {
@@ -727,8 +747,9 @@ anvil-container-status:
 [script("pwsh", "-NoProfile")]
 anvil-container-down:
     $ErrorActionPreference = 'Stop'
-    $engine = (just _anvil-container-engine).Trim()
+    $engine = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-engine
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $engine = "$engine".Trim()
     $engineCmd = $engine -split '\|'
     $engineExe = $engineCmd[0]
     $enginePrefix = @($engineCmd | Select-Object -Skip 1)

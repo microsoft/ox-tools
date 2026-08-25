@@ -421,7 +421,10 @@ mod tests {
             "import 'helpers.just'",
             "import 'checks/fmt.just'",
             "import 'checks/miri.just'",
-            "import 'container.just'",
+            // Optional: containers.md §8 documents removing the container
+            // artifacts, which deletes this file. A hard import would then fail
+            // parsing for the whole tree, not just the container recipes.
+            "import? 'container.just'",
             "import 'groups/pr-fast.just'",
             "import 'groups/scheduled-exhaustive.just'",
             "import 'tiers.just'",

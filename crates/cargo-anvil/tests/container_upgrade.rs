@@ -30,7 +30,7 @@
 
 use std::path::Path;
 
-use cargo_anvil::test_support::{Cli, Decision, Manifest, RunOutcome, Target, checksum_str, run_update};
+use cargo_anvil::test_support::{Cli, Decision, Manifest, RegionKey, RunOutcome, Target, checksum_str, run_update};
 use cargo_anvil::{Catalog, artifacts};
 use tempfile::TempDir;
 
@@ -49,6 +49,11 @@ const RETIRED_ASSETS: [&str; 8] = [
 
 /// The routing seam's own recipe file, retired with the assets above.
 const RETIRED_RECIPE: &str = "justfiles/anvil/runner.just";
+
+/// The managed region 0.4.0 spliced into the root `Justfile` to carry the
+/// runner selection, and the id it was keyed by.
+const RETIRED_REGION_ID: &str = "anvil-runner";
+const RETIRED_REGION_BODY: &str = "anvil_runner := \"native\"\n";
 
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
@@ -110,6 +115,23 @@ fn rewind_to_runner_layout(root: &Path) -> Manifest {
         manifest.files.insert(path.to_owned(), checksum_str(&body));
     }
 
+    // The managed region 0.4.0 spliced into the root Justfile. Seeding it is
+    // what makes the removal assertion mean anything: without it the Justfile
+    // never contained `anvil-runner`, so asserting its absence afterwards would
+    // hold before the upgrade ran and would keep holding if region removal
+    // broke entirely.
+    let justfile_path = root.join("Justfile");
+    let justfile = std::fs::read_to_string(&justfile_path).unwrap();
+    let region = format!("# >>> anvil-managed: {RETIRED_REGION_ID}\n{RETIRED_REGION_BODY}# <<< anvil-managed: {RETIRED_REGION_ID}\n");
+    write(&justfile_path, &format!("{justfile}\n{region}"));
+    manifest.regions.insert(
+        RegionKey {
+            host: "Justfile".to_owned(),
+            id: RETIRED_REGION_ID.to_owned(),
+        },
+        checksum_str(RETIRED_REGION_BODY),
+    );
+
     // Provenance of the older build. Recorded, never a gate.
     manifest.catalog_checksum = Some("sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned());
     manifest.tool_version = Some("0.4.0".to_owned());
@@ -157,11 +179,29 @@ fn upgrading_from_the_runner_layout_retires_the_seam_and_emits_the_new_backend()
         assert!(manifest.files.contains_key(path), "{path} must be tracked");
     }
 
-    // The root Justfile survives the region excision as a usable file rather
-    // than being emptied or left holding an orphaned sentinel.
+    // The runner region is spliced out of the root Justfile, and nothing else
+    // is: the surrounding content the repository owns must survive intact.
+    // Seeded in the rewind above, so this assertion can actually fail.
+    let region_decision = outcome
+        .plan
+        .items()
+        .iter()
+        .find(|item| matches!(&item.target, Target::Region { host, id } if host == "Justfile" && id == RETIRED_REGION_ID))
+        .map(|item| item.decision);
+    assert_eq!(
+        region_decision,
+        Some(Decision::Remove),
+        "the obsolete runner region must be planned for removal"
+    );
+
     let justfile = std::fs::read_to_string(root.join("Justfile")).unwrap();
-    assert!(!justfile.contains("anvil-runner"), "the runner region must be spliced out");
+    assert!(!justfile.contains(RETIRED_REGION_ID), "the runner region must be spliced out");
+    assert!(!justfile.contains(RETIRED_REGION_BODY.trim()), "the region body must go with it");
     assert!(justfile.contains("anvil"), "the Justfile must still import the anvil tree");
+    assert!(
+        !Manifest::load(root).unwrap().regions.keys().any(|key| key.id == RETIRED_REGION_ID),
+        "the region must be dropped from the lock"
+    );
 }
 
 #[test]

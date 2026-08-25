@@ -234,7 +234,7 @@ mod tests {
             "the content hash must be computed once, by anvil-container-tag"
         );
         assert!(
-            RECIPE.contains("$image = (just anvil-container-tag).Trim()"),
+            RECIPE.contains("$image = & '{{ replace(just_executable(), \"'\", \"''\") }}' anvil-container-tag"),
             "the resolver must ask anvil-container-tag rather than recompute"
         );
     }
@@ -495,7 +495,10 @@ mod tests {
         // installed as surely as tools.just decides *how*. Hashing only the
         // install definitions would let a group drop a `-setup` dependency,
         // changing the installed set, without renaming the image.
-        assert!(RECIPE.contains("-Recurse -File -Filter '*.just'"));
+        // -Force so a dot-prefixed recipe is hashed. It is copied into the image
+        // either way, and Get-ChildItem omits hidden entries without it, so the
+        // tag would ignore edits to it and Windows and Unix could disagree.
+        assert!(RECIPE.contains("-Recurse -File -Force -Filter '*.just'"));
         // Including this driver, which passes the build arguments, the secret
         // mounts and the hook's PreBuild output into the build.
         assert!(!RECIPE.contains("-cne 'justfiles/anvil/container.just'"));

@@ -718,17 +718,31 @@ fn aprz_without_a_token_warns_and_still_runs() {
     if !tools_available() {
         return;
     }
-    let tmp = fixture(&[("aprz.just", APRZ)], &[
-        "anvil-tool-cargo-aprz-validate-prereqs",
-        "anvil-tool-cargo-aprz-install installer=\"install\"",
-    ]);
+    let tmp = fixture(
+        &[("aprz.just", APRZ)],
+        &[
+            "anvil-tool-cargo-aprz-validate-prereqs",
+            "anvil-tool-cargo-aprz-install installer=\"install\"",
+        ],
+    );
     // A gh that yields no token: the recipe must fall through to the warnings
-    // rather than treating a failed lookup as fatal. `.cmd` matters -- `.ps1`
-    // is not in PATHEXT, so a script stub is skipped and the host's real `gh`
-    // answers instead, which on a signed-in machine hands back a live token and
-    // silently tests nothing.
+    // rather than treating a failed lookup as fatal.
+    //
+    // Three stubs because command lookup differs by platform and the fallback
+    // is the developer's real, signed-in `gh`: on Windows only `.cmd` is in
+    // PATHEXT, so a `.ps1` stub is skipped; on Unix a bare `gh` must exist and
+    // be executable. Getting this wrong does not fail the test -- it makes it
+    // pass while exercising the authenticated path, which is the opposite of
+    // what the name claims.
     write(&tmp.path().join("fake-bin/gh.cmd"), "@exit /b 1\r\n");
     write(&tmp.path().join("fake-bin/gh.ps1"), "exit 1\n");
+    let unix_stub = tmp.path().join("fake-bin/gh");
+    write(&unix_stub, "#!/bin/sh\nexit 1\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&unix_stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
     let log = tmp.path().join("cargo.log");
 
     let output = run_just(
@@ -798,11 +812,16 @@ fn mutants_diff_covers_uncommitted_work() {
     git(&["init", "-q"]);
     git(&["config", "user.email", "test@example.com"]);
     git(&["config", "user.name", "test"]);
-    // The host's global config decides line-ending rewriting, and a machine set
-    // to autocrlf rejects these fixtures outright ("LF would be replaced by
-    // CRLF"). Pin it so the test means the same thing on every developer's box.
+    // The host's global config decides line-ending rewriting and commit
+    // signing, and either will stop this fixture: a machine set to autocrlf
+    // rejects the add outright ("LF would be replaced by CRLF"), and one with
+    // commit.gpgsign and no usable key or TTY fails the commit before the
+    // behaviour under test runs. Pin both so the test means the same thing on
+    // every developer's box.
     git(&["config", "core.autocrlf", "false"]);
     git(&["config", "core.safecrlf", "false"]);
+    git(&["config", "commit.gpgsign", "false"]);
+    git(&["config", "tag.gpgsign", "false"]);
     write(&root.join("src/lib.rs"), "pub fn base() {}\n");
     git(&["add", "-A"]);
     git(&["commit", "-qm", "base"]);

@@ -263,6 +263,17 @@ function Invoke-Suite([string]$EngineName) {
 
     $resolved = Resolve-Engine $EngineName
     if (-not $resolved) {
+        # An engine the caller named explicitly is a precondition, not an
+        # option: skipping it and exiting 0 reports "PASS 0/0 checks passed" for
+        # a daemon-backed verification that never reached a daemon. Only the
+        # default `both` sweep may skip one, and even then the run must fail if
+        # neither engine turned up (checked after the loop).
+        if ($Engine -ne 'both') {
+            Assert-That "$EngineName is available" $false `
+                'not on PATH, and not reachable in the default WSL distribution'
+            $script:Results[$EngineName] = 'failed'
+            return
+        }
         Write-Skipped "$EngineName is available" "not on PATH, and not reachable in the default WSL distribution"
         $script:Results[$EngineName] = 'skipped'
         return
@@ -482,6 +493,13 @@ foreach ($name in $script:Results.Keys) {
 }
 $summary = "{0}/{1} checks passed in {2:hh\:mm\:ss}" -f $script:Passed, ($script:Passed + $script:Failed), $elapsed
 if ($script:Skipped) { $summary += " ($($script:Skipped) skipped)" }
+# A sweep where every engine was skipped ran no container at all. Reporting
+# that as a pass is the false green this script exists to prevent. A failed
+# engine is a different thing and already sets the exit code below.
+if (-not ($script:Results.Values | Where-Object { $_ -ne 'skipped' })) {
+    Write-Host "FAIL  no engine was exercised -- install docker or podman, or check the daemon" -ForegroundColor Red
+    exit 1
+}
 if ($script:Failed -eq 0) {
     Write-Host "PASS  $summary" -ForegroundColor Green
     exit 0
