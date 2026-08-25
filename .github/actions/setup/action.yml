@@ -107,7 +107,7 @@ runs:
 
     - name: Install Cargo Tools
       if: inputs.cargo-tools != ''
-      uses: taiki-e/install-action@0631aa6515c7d545823c67cfae7ef4fc7f490154 # v2.81.8
+      uses: taiki-e/install-action@v2.81.8 # immutable release, the tag cannot be moved
       with:
         tool: ${{ steps.expand.outputs.cargo_tools }}
 
