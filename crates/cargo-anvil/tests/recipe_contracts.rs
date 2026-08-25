@@ -325,6 +325,9 @@ fn semver_exit_code_contract_is_executed() {
         String::from_utf8_lossy(&findings.stderr)
     );
     assert!(tmp.path().join("target/anvil/comments/semver.md").is_file());
+    let findings_comment = std::fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
+    assert!(findings_comment.contains("Potential breaking changes"));
+    assert!(findings_comment.contains("breaking change"));
 
     let renamed = run_just(
         tmp.path(),
@@ -364,7 +367,7 @@ fn semver_exit_code_contract_is_executed() {
     }
 
     for (exit, output) in [("101", "operational failure"), ("42", "unexpected failure")] {
-        let failed = run_just(
+        let inconclusive = run_just(
             tmp.path(),
             &["anvil-semver-check"],
             &[
@@ -375,7 +378,15 @@ fn semver_exit_code_contract_is_executed() {
                 ("FAKE_SEMVER_OUTPUT", OsStr::new(output)),
             ],
         );
-        assert_failed(&failed, &format!("cargo-semver-checks exit {exit}"));
+        assert!(
+            inconclusive.status.success(),
+            "cargo-semver-checks exit {exit} should be advisory:\n{}",
+            String::from_utf8_lossy(&inconclusive.stderr)
+        );
+        let comment = std::fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
+        assert!(comment.contains("Inconclusive comparisons"));
+        assert!(comment.contains(&format!("exit {exit}")));
+        assert!(comment.contains(output));
     }
 }
 
