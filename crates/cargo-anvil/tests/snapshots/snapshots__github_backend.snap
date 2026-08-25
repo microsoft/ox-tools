@@ -4199,6 +4199,12 @@ anvil-container *target:
         # where the engine reads their values from when it runs there. Without
         # it, `-e NAME` reaches an engine that cannot see NAME and forwards
         # nothing, leaving the variable unset inside the container.
+        #
+        # It is not restored afterwards because there is nothing to restore to:
+        # `just` runs a [script(...)] recipe as its own pwsh process, so this
+        # assignment dies with that process and never reaches the caller's
+        # shell. The `finally` below unsets the credential names for hygiene
+        # within this process, not to protect the parent.
         if ($engineExe -eq 'wsl.exe' -and $forwardedEnv.Count -gt 0) {
             $env:WSLENV = (@($env:WSLENV) + ($forwardedEnv | ForEach-Object { "$_/u" }) | Where-Object { $_ }) -join ':'
         }
