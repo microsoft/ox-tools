@@ -113,14 +113,18 @@ fn run(manifest_path: &Path, args: &Args) -> Result<(), AppError> {
     println!();
 
     if !args.fix {
-        ohno::bail!("{} unused workspace dependenc(ies) found; re-run with --fix to remove them", unused.len());
+        ohno::bail!(
+            "{} unused workspace dependenc{} found; re-run with --fix to remove them",
+            unused.len(),
+            if unused.len() == 1 { "y" } else { "ies" }
+        );
     }
 
     let removed = remove_workspace_deps(&mut manifest, &unused)?;
     std::fs::write(manifest_path, manifest.to_string()).into_app_err("failed to write workspace manifest")?;
 
     println!("🧹 Removed {removed} entr{} from {}.", if removed == 1 { "y" } else { "ies" }, manifest_path.display());
-    println!("   Run `cargo check --workspace --locked` to refresh Cargo.lock.");
+    println!("   Run `cargo check --workspace` to update Cargo.lock.");
 
     Ok(())
 }
@@ -229,13 +233,20 @@ fn remove_workspace_deps(manifest: &mut DocumentMut, names: &[&String]) -> Resul
     }
 
     if !carried.is_empty() {
-        // The trailing entries were removed; re-attach their comments to the table itself.
+        // The removed entries were the trailing ones, so their comments have no
+        // following key to sit in front of. Append them after the last surviving
+        // entry's value instead, which keeps them at the end of the table where they
+        // were written; attaching them to that key's *prefix* would move them up and
+        // mislabel the entry they landed in front of.
+        //
+        // When every entry is removed the table is left empty and there is nothing to
+        // anchor them to, so comments that only headed removed entries go with them.
         let trailing = table.iter().last().map(|(key, _)| key.to_owned());
         if let Some(last) = trailing
-            && let Some(mut key) = table.key_mut(&last)
+            && let Some(value) = table.get_mut(&last).and_then(Item::as_value_mut)
         {
-            let prefix = key.leaf_decor().prefix().and_then(|p| p.as_str()).unwrap_or("").to_owned();
-            key.leaf_decor_mut().set_prefix(format!("{prefix}{carried}"));
+            let suffix = value.decor().suffix().and_then(|s| s.as_str()).unwrap_or("").to_owned();
+            value.decor_mut().set_suffix(format!("{suffix}{carried}"));
         }
     }
 
