@@ -303,17 +303,41 @@ mod tests {
         // The deleted runner.just escaped every interpolation; this guards
         // against losing that again.
         //
+        // Every `{{` is visited, not just those preceded by an apostrophe,
+        // because the defect found in review was the other case: an
+        // interpolation escaped with `replace(…, "'", "''")` -- correct for a
+        // '…' literal -- that landed inside a "…" literal, where the doubling
+        // renders as a literal '' and `$` stays live. Scanning only for `'{{`
+        // cannot see that site at all, since it does not begin with a quote.
+        //
         // Two variables are exempt and checked explicitly below: the image name
         // is regex-sanitized at definition, and the workdir is a literal.
         const EXEMPT: [&str; 2] = ["{{anvil_container_name}}", "{{anvil_container_workdir}}"];
-        for (index, _) in RECIPE.match_indices("'{{") {
-            let tail = &RECIPE[index + 1..];
+        for (index, _) in RECIPE.match_indices("{{") {
+            let tail = &RECIPE[index..];
+            if EXEMPT.iter().any(|exempt| tail.starts_with(exempt)) {
+                continue;
+            }
+            // The quote this interpolation is being pasted into, if any.
+            let quote = RECIPE[..index].chars().next_back();
             let escaped = tail.starts_with("{{ replace(");
-            assert!(
-                escaped || EXEMPT.iter().any(|exempt| tail.starts_with(exempt)),
-                "unescaped interpolation into a PowerShell literal at byte {index}: {}",
-                &tail[..tail.len().min(60)]
-            );
+            match quote {
+                // A single-quoted literal needs just's doubling form.
+                Some('\'') => assert!(
+                    escaped,
+                    "unescaped interpolation into a PowerShell literal at byte {index}: {}",
+                    &tail[..tail.len().min(60)]
+                ),
+                // A double-quoted literal is the reviewed hazard: `''` doubling
+                // does not escape there and `$` keeps expanding, so only an
+                // exempt name is safe. Interpolating anything else needs a
+                // single-quoted literal instead.
+                Some('"') => panic!(
+                    "interpolation into a double-quoted PowerShell literal at byte {index}: {}",
+                    &tail[..tail.len().min(60)]
+                ),
+                _ => {}
+            }
         }
         // And the escaping that is present uses just's own doubling form.
         assert!(RECIPE.contains(r#"replace(justfile_directory(), "'", "''")"#));
@@ -441,7 +465,7 @@ mod tests {
 
     #[test]
     fn a_host_token_is_resolved_as_the_recipe_does_and_forwarded_by_name() {
-        // anvil-aprz is in pr-fast, and unauthenticated it does not merely
+        // anvil-aprz is in scheduled-advisories, and unauthenticated it does not merely
         // warn: `cargo aprz deps` sleeps until the hourly quota resets, so a
         // containerized tier blocks for up to an hour. The driver therefore
         // resolves a token the same way the recipe does natively -- the

@@ -62,6 +62,25 @@ own agents. The image is pinned to resemble that environment, not to reproduce i
 just anvil-container anvil-setup binstall
 ```
 
+**Upgrading from 0.4.0.** The routing seam is gone, and its removal is silent for the repositories most likely to
+care. 0.4.0 let a repository opt into containers by exporting `ANVIL_RUNNER=container`, which routed a tier through
+`_anvil-run`; anyone who did that left the generated `anvil-runner` region byte-identical, so regeneration classifies
+it `Remove` and deletes it without comment. From the next `just anvil-pr` the tier runs natively on the host
+toolchain, with no diagnostic and no behaviour anvil can detect. What was removed:
+
+| Removed in this release | Replacement |
+| --- | --- |
+| `ANVIL_RUNNER` environment variable | none — name the container explicitly with `just anvil-container <recipe>` |
+| the `anvil-runner` managed region in the root `Justfile` | none |
+| `justfiles/anvil/runner.just` | `justfiles/anvil/container.just` |
+| the `_anvil-pr`, `_anvil-scheduled` and `_anvil-full` shadow recipes | the tiers themselves, which now only run natively |
+| `.anvil/container/run-in-container.{sh,ps1}`, `entrypoint.sh`, `image-id.{sh,ps1}`, `Containerfile*` | `.anvil/container/Dockerfile` and its ignore file |
+
+A 0.4.0 installation also holds cache volumes named `anvil-cargo-registry-<repo-id>`, `anvil-cargo-git-<repo-id>` and
+`anvil-target-<repo-id>-<image-id>`. This release keys volume names on the repository *directory name* instead, so
+none of those are reused and `anvil-container-down` does not remove them; `anvil-target-*` in particular holds a full
+workspace `target/`. Remove them once with the engine directly.
+
 Arguments are whitespace-delimited tokens. `just` joins a variadic `*target` with spaces before the recipe body sees
 it, so the original argv is unrecoverable and an argument containing a space does not round-trip. No catalog recipe
 takes one; a fork whose recipes do should pass them through the environment instead.
@@ -254,7 +273,7 @@ otherwise the engine leaves it as `/`, and anything falling back to `$HOME` writ
 ### 5.3 Environment
 
 The run passes `ANVIL_IN_CONTAINER=1` (§5.4) and forwards `GITHUB_TOKEN` by name, resolved the way the recipe resolves
-it natively: the environment first, then the gh CLI's stored token. `anvil-aprz` runs in the `pr-fast` group and
+it natively: the environment first, then the gh CLI's stored token. `anvil-aprz` runs in the `scheduled-advisories` group and
 queries the GitHub advisory API, which allows 60 requests an hour unauthenticated and then sleeps until the quota
 resets, so a tier needs the token to terminate rather than merely to run quickly.
 
@@ -495,9 +514,16 @@ its own version against a file it can see has diverged. A change that belongs ev
 
 **The Dockerfile and its ignore file must be replaced together.** A replacement that `COPY`s anything beyond
 `justfiles/anvil/` and `rust-toolchain.toml` must also replace `artifacts::container::dockerignore()` (§3), or the
-added paths never reach the build context and the build fails on a missing file. A replacement that installs tools
-from a source outside `justfiles/anvil/` must also add that source to the digest, or a change to it will name a tag
-that already resolves.
+added paths never reach the build context and the build fails on a missing file.
+
+**A replacement cannot extend the digest, so anything extra it copies must not vary independently.** The hashed set
+is fixed (§4.1) and a fork has no way to add to it, which puts this customization path in tension with the identity
+guarantee: an installer script, a config file or a certificate copied by a replacement Dockerfile sits outside the
+tag, so editing it changes what the image contains while naming a reference that already resolves — and the stale
+image is reused rather than rebuilt. Until a catalog can contribute digest inputs, the honest options are to carry
+that content inside the Dockerfile itself, where it *is* hashed, or to accept that changing it needs
+`ANVIL_CONTAINER_NO_CACHE=1` to take effect. A manual escape hatch is not content identity, so treat the second as a
+workaround rather than a supported contract.
 
 `justfiles/anvil/` must contain `.just` recipes and nothing else, which `CatalogBuilder::build` enforces: a non-recipe
 file there would be copied into the image without being part of its identity, so editing it would change the image's

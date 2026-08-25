@@ -433,7 +433,7 @@ Assert-Equal 'a tool installed by the image survives the cache mounts' 0 $probe.
 Assert-That 'the tool resolves inside the image, not a volume' `
     ($probe.StdOut -match '/usr/local/cargo/bin/cargo-binstall') "$($probe.StdOut)$($probe.StdErr)"
 
-# anvil-aprz runs in pr-fast and blocks on the rate limit without a token, so a
+# anvil-aprz runs in scheduled-advisories and blocks on the rate limit without a token, so a
 # host token has to reach the container. The driver resolves it the way the
 # recipe does natively: the environment first, then the gh CLI.
 #

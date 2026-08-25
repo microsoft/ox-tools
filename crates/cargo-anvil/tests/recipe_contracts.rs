@@ -22,6 +22,8 @@ const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-co
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
 const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
+const APRZ: &str = include_str!("../templates/justfiles/anvil/checks/aprz.just");
+const MUTANTS_DIFF: &str = include_str!("../templates/justfiles/anvil/checks/mutants-diff.just");
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
 const FAKE_CARGO_PS1: &str = r#"
 $joined = $args -join ' '
@@ -703,4 +705,153 @@ fn windows_arm64_fallback_accepts_empty_nextest_sets_in_both_configurations() {
     assert!(calls.contains("--no-default-features"), "calls:\n{calls}");
     assert_eq!(calls.matches("--no-tests=pass").count(), 2, "calls:\n{calls}");
     assert!(!calls.contains("llvm-cov"), "coverage commands must not run:\n{calls}");
+}
+
+// --- container-specific behaviour ------------------------------------------
+
+/// `anvil-aprz` warns and proceeds when it cannot obtain a token, rather than
+/// throwing. That change exists so a containerized tier is not aborted by a
+/// missing credential, and nothing else covers it: the dogfood run normally has
+/// a host token, and the tokenless container E2E case runs a custom echo recipe.
+#[test]
+fn aprz_without_a_token_warns_and_still_runs() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("aprz.just", APRZ)], &[
+        "anvil-tool-cargo-aprz-validate-prereqs",
+        "anvil-tool-cargo-aprz-install installer=\"install\"",
+    ]);
+    // A gh that yields no token: the recipe must fall through to the warnings
+    // rather than treating a failed lookup as fatal. `.cmd` matters -- `.ps1`
+    // is not in PATHEXT, so a script stub is skipped and the host's real `gh`
+    // answers instead, which on a signed-in machine hands back a live token and
+    // silently tests nothing.
+    write(&tmp.path().join("fake-bin/gh.cmd"), "@exit /b 1\r\n");
+    write(&tmp.path().join("fake-bin/gh.ps1"), "exit 1\n");
+    let log = tmp.path().join("cargo.log");
+
+    let output = run_just(
+        tmp.path(),
+        &["anvil-aprz"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("GITHUB_TOKEN", OsStr::new("")),
+            ("ANVIL_IN_CONTAINER", OsStr::new("1")),
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "a missing token must not fail the check\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    // PowerShell's warning stream surfaces on stdout once `just` has run the
+    // script, so assert on what the developer actually sees rather than on a
+    // particular stream.
+    let seen = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        seen.contains("GITHUB_TOKEN is not set"),
+        "the warning must name the variable:\n{seen}"
+    );
+    assert!(seen.contains("gh auth login"), "the warning must say how to fix it:\n{seen}");
+
+    // The point of warning rather than throwing: the check still runs.
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(calls.contains("aprz deps"), "cargo aprz must still be invoked:\n{calls}");
+}
+
+/// `anvil-mutants-diff` diffs the base against the WORKING TREE, not against
+/// HEAD. cargo-mutants validates every diff line against the file on disk and
+/// aborts when they disagree, so a commit-to-commit diff fails as soon as
+/// anything is uncommitted -- the normal local state, and the one CI never
+/// exercises because its tree is clean.
+#[test]
+fn mutants_diff_covers_uncommitted_work() {
+    if !tools_available() || Command::new("git").arg("--version").output().is_err() {
+        return;
+    }
+    let tmp = fixture(
+        &[("helpers.just", HELPERS), ("mutants-diff.just", MUTANTS_DIFF)],
+        &[
+            "anvil-tool-cargo-mutants-validate-prereqs",
+            "anvil-tool-cargo-mutants-install installer=\"install\"",
+        ],
+    );
+    let root = tmp.path();
+    // Real git: the stub the fixture installs would make `git diff` a no-op.
+    std::fs::remove_file(root.join("fake-bin/git.ps1")).unwrap();
+
+    let git = |args: &[&str]| {
+        let status = Command::new("git").args(args).current_dir(root).output().unwrap();
+        assert!(
+            status.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&status.stderr)
+        );
+    };
+    git(&["init", "-q"]);
+    git(&["config", "user.email", "test@example.com"]);
+    git(&["config", "user.name", "test"]);
+    // The host's global config decides line-ending rewriting, and a machine set
+    // to autocrlf rejects these fixtures outright ("LF would be replaced by
+    // CRLF"). Pin it so the test means the same thing on every developer's box.
+    git(&["config", "core.autocrlf", "false"]);
+    git(&["config", "core.safecrlf", "false"]);
+    write(&root.join("src/lib.rs"), "pub fn base() {}\n");
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "base"]);
+    let base = String::from_utf8(
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap()
+    .trim()
+    .to_owned();
+
+    // One change committed after the base, and one left uncommitted. A
+    // `base..HEAD` diff sees only the first.
+    write(&root.join("src/lib.rs"), "pub fn base() {}\npub fn committed() {}\n");
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "committed change"]);
+    write(
+        &root.join("src/lib.rs"),
+        "pub fn base() {}\npub fn committed() {}\npub fn uncommitted() {}\n",
+    );
+
+    let log = root.join("cargo.log");
+    let output = run_just(
+        root,
+        &["anvil-mutants-diff"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("BASE_REF", OsStr::new(&base)),
+            ("RUNNER_TEMP", root.as_os_str()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "the recipe must succeed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(calls.contains("--in-diff"), "cargo mutants must be given a diff file:\n{calls}");
+
+    let diff = std::fs::read_to_string(root.join("anvil-mutants-diff.diff")).unwrap();
+    assert!(diff.contains("committed"), "the committed change must be in the diff:\n{diff}");
+    assert!(
+        diff.contains("uncommitted"),
+        "the uncommitted change must be in the diff -- a base..HEAD diff would omit it:\n{diff}"
+    );
 }

@@ -487,6 +487,7 @@ pub(crate) mod workspace;
 /// `artifacts`, `run_app`, …) instead.
 #[doc(hidden)]
 pub mod test_support {
+    pub use crate::checksum::checksum_str;
     pub use crate::cli::Cli;
     pub use crate::decision::Decision;
     pub use crate::manifest::{MANIFEST_FILE_NAME, Manifest};
