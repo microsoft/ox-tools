@@ -1951,7 +1951,7 @@ runs:
     # downloads the release binary from cargo-bins/cargo-binstall, so
     # the bootstrap branch in `tools.just` becomes a no-op on GH.
     - name: Install cargo-binstall
-      uses: cargo-bins/cargo-binstall@ead08b90bd7b2e6d81963fb9cf0b7239f66d5db4 # v1.21.0
+      uses: cargo-bins/cargo-binstall@v1.21.0 # immutable release, the tag cannot be moved
 
     - name: Install just
       shell: bash
@@ -2145,13 +2145,13 @@ jobs:
       # write tokens).
       - name: Upsert anvil-semver advisory
         if: always() && github.event_name == 'pull_request' && matrix.os == 'linux' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('target/anvil/comments/semver.md') != ''
-        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        uses: marocchino/sticky-pull-request-comment@v3.0.5 # immutable release, the tag cannot be moved
         with:
           header: anvil-semver
           path: target/anvil/comments/semver.md
       - name: Clear anvil-semver advisory
         if: always() && github.event_name == 'pull_request' && matrix.os == 'linux' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('target/anvil/comments/semver.md') == ''
-        uses: marocchino/sticky-pull-request-comment@5770ad5eb8f42dd2c4f34da00c94c5381e49af88 # v3.0.5
+        uses: marocchino/sticky-pull-request-comment@v3.0.5 # immutable release, the tag cannot be moved
         with:
           header: anvil-semver
           delete: true
@@ -2197,7 +2197,7 @@ jobs:
         # empty the recipe no-ops and there is no file to upload, so we gate
         # on the impact output. Codecov coalesces the two per-config files.
         if: matrix.os != 'windows-arm' && ((startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected != '--skip') || (matrix.os == 'windows' && needs.impact-windows.outputs.include_affected != '--skip'))
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
         with:
           files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
           flags: ${{ matrix.os }}
@@ -2356,7 +2356,7 @@ jobs:
         # the Codecov UI can distinguish PR-tier uploads from scheduled
         # uploads while still tracking each platform separately.
         if: matrix.os != 'windows-arm'
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
         with:
           files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
           flags: scheduled,${{ matrix.os }}
