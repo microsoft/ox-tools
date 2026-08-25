@@ -42,6 +42,20 @@ holds and fails — as a regression — if coverable lines later appear.
 The two keys are mutually exclusive, and `expect-no-coverable-lines`
 is package-scoped only.
 
+A package can replace that policy for a Cargo-style target selector:
+
+```toml
+[package.metadata.coverage-gate]
+min-lines-percent = 100
+
+[package.metadata.coverage-gate.target.'cfg(not(windows))']
+enabled = false
+```
+
+`enabled = false` disables coverage measurement and gating on the
+matching target, but does not disable test execution in automation
+such as Cargo Anvil.
+
 ### Why lcov, not the JSON?
 
 `cargo-llvm-cov` exports the same instrumentation run in several
@@ -60,6 +74,7 @@ Codecov / ADO numbers confusing.
 
 ```text
 cargo coverage-gate  [--lcov <path>]... [-p|--package <spec>]...
+                     [--target <triple>]
                      [--summary-file <path>] [--quiet]
 ```
 
@@ -105,11 +120,11 @@ plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbDzRwf0qddWQbQiTzhu0-bE0bX-rutkvfDuYbITgXvtMXiRVhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4zLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbNxCFhIlcaZ4bsa602UxpyRQbgFr106dXJHcbhevnlfEoou9hZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
- [__link1]: https://docs.rs/cargo-coverage-gate/0.3.0/cargo_coverage_gate/fn.evaluate.html
- [__link2]: https://docs.rs/cargo-coverage-gate/0.3.0/cargo_coverage_gate/struct.EvaluatedReport.html
- [__link3]: https://docs.rs/cargo-coverage-gate/0.3.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
- [__link4]: https://docs.rs/cargo-coverage-gate/0.3.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
- [__link5]: https://docs.rs/cargo-coverage-gate/0.3.0/cargo_coverage_gate/enum.Verdict.html
- [__link6]: https://docs.rs/cargo-coverage-gate/0.3.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
+ [__link1]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate.html
+ [__link2]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/struct.EvaluatedReport.html
+ [__link3]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
+ [__link4]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
+ [__link5]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/enum.Verdict.html
+ [__link6]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::verdict

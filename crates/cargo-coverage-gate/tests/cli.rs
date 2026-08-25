@@ -286,6 +286,91 @@ fn conflicting_coverage_metadata_exits_2() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
+fn target_disabled_package_is_omitted_from_gate() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace_with_gate(
+        tmp.path(),
+        &[
+            (
+                "alpha",
+                "min-lines-percent = 100\n\n\
+                 [package.metadata.coverage-gate.target.'cfg(not(windows))']\n\
+                 enabled = false",
+            ),
+            ("beta", "min-lines-percent = 80"),
+        ],
+    );
+    let lcov_path = write_lcov(tmp.path(), &[("beta/src/lib.rs", 10, 9)]);
+
+    coverage_gate(tmp.path())
+        .args(["--target", "x86_64-unknown-linux-gnu", "--lcov", &lcov_path])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("beta"))
+        .stdout(predicate::str::contains("alpha").not());
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
+fn print_test_only_packages_does_not_read_lcov() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace_with_gate(
+        tmp.path(),
+        &[
+            (
+                "alpha",
+                "min-lines-percent = 100\n\n\
+                 [package.metadata.coverage-gate.target.'cfg(not(windows))']\n\
+                 enabled = false",
+            ),
+            ("beta", "expect-no-coverable-lines = true"),
+            ("gamma", "min-lines-percent = 0"),
+            (
+                "delta",
+                "min-lines-percent = 100\n\n\
+                 [package.metadata.coverage-gate.target.'cfg(unix)']\n\
+                 min-lines-percent = 0",
+            ),
+        ],
+    );
+
+    coverage_gate(tmp.path())
+        .args([
+            "--target",
+            "x86_64-unknown-linux-gnu",
+            "--print-test-only-packages",
+            "--lcov",
+            "does-not-exist.info",
+        ])
+        .assert()
+        .success()
+        .stdout("alpha\ndelta\ngamma\n");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
+fn target_disabled_package_remains_gated_on_supported_target() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace_with_gate(
+        tmp.path(),
+        &[(
+            "alpha",
+            "min-lines-percent = 100\n\n\
+             [package.metadata.coverage-gate.target.'cfg(not(windows))']\n\
+             enabled = false",
+        )],
+    );
+    let empty_lcov = write_lcov(tmp.path(), &[]);
+
+    coverage_gate(tmp.path())
+        .args(["--target", "x86_64-pc-windows-msvc", "--lcov", &empty_lcov])
+        .assert()
+        .code(2)
+        .stdout(predicate::str::contains("NO DATA"));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn package_flag_restricts_scope() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace(tmp.path(), &[("alpha", Some("80")), ("beta", Some("80"))], None);

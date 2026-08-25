@@ -50,7 +50,13 @@ if ($args -contains 'metadata') {
             manifest_path = $manifestPath
             targets = @([pscustomobject]@{ name = $libName; kind = @('lib') })
             metadata = [pscustomobject]@{
-                'coverage-gate' = [pscustomobject]@{ 'min-lines-percent' = 0 }
+                'coverage-gate' = [pscustomobject]@{
+                    'min-lines-percent' = if ($env:FAKE_MIN_LINES_PERCENT) {
+                        [double]$env:FAKE_MIN_LINES_PERCENT
+                    } else {
+                        0
+                    }
+                }
             }
         }
     )
@@ -80,6 +86,14 @@ if ($args -contains 'metadata') {
 if ($args -contains 'semver-checks') {
     if ($env:FAKE_SEMVER_OUTPUT) { Write-Output $env:FAKE_SEMVER_OUTPUT }
     exit [int]$env:FAKE_SEMVER_EXIT
+}
+if ($args -contains 'coverage-gate') {
+    if ($env:FAKE_DISABLED_PACKAGES) {
+        $env:FAKE_DISABLED_PACKAGES -split ',' | ForEach-Object { Write-Output $_ }
+    } elseif (-not $env:FAKE_MIN_LINES_PERCENT -or [double]$env:FAKE_MIN_LINES_PERCENT -eq 0) {
+        if ($env:FAKE_PACKAGE_NAME) { Write-Output $env:FAKE_PACKAGE_NAME } else { Write-Output 'fixture' }
+    }
+    exit [int]$env:FAKE_COVERAGE_GATE_EXIT
 }
 if ($args -contains 'bolero' -and $args -contains 'list') {
     exit [int]$env:FAKE_BOLERO_LIST_EXIT
@@ -645,7 +659,12 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
     assert!(calls.contains("--no-default-features"), "calls:\n{calls}");
     assert_eq!(calls.matches("--no-tests=pass").count(), 2, "calls:\n{calls}");
     assert!(!calls.contains("llvm-cov"), "coverage commands must not run:\n{calls}");
-    assert!(!calls.contains("coverage-gate"), "the coverage gate must not run:\n{calls}");
+    assert_eq!(
+        calls.matches("coverage-gate").count(),
+        1,
+        "only the metadata-only target-policy query may run:\n{calls}"
+    );
+    assert!(calls.contains("coverage-gate --print-test-only-packages"), "calls:\n{calls}");
 
     let no_tests = run_just(
         tmp.path(),
@@ -671,6 +690,47 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
         ],
     );
     assert_failed(&failed, "plain nextest failure for an opted-out package");
+}
+
+#[test]
+fn target_disabled_packages_run_tests_without_coverage() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("llvm-cov.just", LLVM_COV)],
+        &[
+            "anvil-component-nightly-llvm-tools-validate-prereqs",
+            "anvil-tool-cargo-llvm-cov-validate-prereqs",
+            "anvil-tool-cargo-nextest-validate-prereqs",
+            "anvil-tool-cargo-coverage-gate-validate-prereqs",
+            "anvil-component-nightly-llvm-tools-install",
+            "anvil-tool-cargo-llvm-cov-install installer",
+            "anvil-tool-cargo-nextest-install installer",
+            "anvil-tool-cargo-coverage-gate-install installer",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-llvm-cov"],
+        &[
+            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
+            ("FAKE_MIN_LINES_PERCENT", OsStr::new("100")),
+            ("FAKE_DISABLED_PACKAGES", OsStr::new("fixture")),
+            ("FAKE_NEXTEST_EXIT", OsStr::new("0")),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "target-disabled coverage path should succeed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = std::fs::read_to_string(&log).unwrap();
+    assert_eq!(calls.matches("nextest run").count(), 2, "calls:\n{calls}");
+    assert!(!calls.contains("llvm-cov nextest"), "coverage must not run:\n{calls}");
+    assert!(calls.contains("coverage-gate --print-test-only-packages"), "calls:\n{calls}");
 }
 
 #[cfg(windows)]

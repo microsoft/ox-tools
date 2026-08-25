@@ -33,7 +33,11 @@ use serde_json::Value;
     ThresholdOutOfRangeError,
     InvalidNoCoverableLinesValueError,
     ConflictingCoverageMetadataError,
+    InvalidTargetPolicyError,
+    InvalidTargetSelectorError,
+    AmbiguousTargetPolicyError,
     WorkspaceScopedNoCoverableLinesError,
+    ResolveTargetError,
     ParseLcovError,
     ReadLcovError,
     UnknownPackageSelectorError
@@ -101,6 +105,44 @@ pub(crate) struct ConflictingCoverageMetadataError {
      cannot be set in `[workspace.metadata.coverage-gate]`"
 )]
 pub(crate) struct WorkspaceScopedNoCoverableLinesError;
+
+/// A target policy was not an object or did not select exactly one
+/// effective behavior.
+#[ohno::error]
+#[display("{source}: invalid coverage-gate target policy: {detail}")]
+pub(crate) struct InvalidTargetPolicyError {
+    pub source: String,
+    pub detail: String,
+}
+
+/// A target-policy table key was neither a valid target triple nor a
+/// valid Cargo `cfg(...)` selector.
+#[ohno::error]
+#[display("{source}: invalid coverage-gate target selector `{selector}`: {detail}")]
+pub(crate) struct InvalidTargetSelectorError {
+    pub source: String,
+    pub selector: String,
+    pub detail: String,
+}
+
+/// More than one `cfg(...)` target policy matched the active target.
+#[ohno::error]
+#[display(
+    "{source}: multiple coverage-gate target policies match `{target}`: {selectors}; \
+     use disjoint cfg expressions or an exact target-triple override"
+)]
+pub(crate) struct AmbiguousTargetPolicyError {
+    pub source: String,
+    pub target: String,
+    pub selectors: String,
+}
+
+/// The active Rust target or its cfg values could not be obtained.
+#[ohno::error]
+#[display("failed to resolve coverage target: {detail}")]
+pub(crate) struct ResolveTargetError {
+    pub detail: String,
+}
 
 /// An lcov tracefile was syntactically malformed.
 #[ohno::error]
@@ -187,5 +229,18 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("expect-no-coverable-lines"));
         assert!(rendered.contains("workspace.metadata.coverage-gate"));
+    }
+
+    #[test]
+    fn ambiguous_target_policy_names_target_and_selectors() {
+        let err = AmbiguousTargetPolicyError::new(
+            "alpha".to_owned(),
+            "x86_64-pc-windows-msvc".to_owned(),
+            "cfg(windows), cfg(target_os = \"windows\")".to_owned(),
+        );
+        let rendered = err.to_string();
+        assert!(rendered.contains("alpha"));
+        assert!(rendered.contains("x86_64-pc-windows-msvc"));
+        assert!(rendered.contains("cfg(windows)"));
     }
 }

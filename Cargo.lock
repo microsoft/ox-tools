@@ -393,9 +393,10 @@ dependencies = [
 
 [[package]]
 name = "cargo-coverage-gate"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "assert_cmd",
+ "cargo-platform",
  "cargo_metadata",
  "clap",
  "lcov",

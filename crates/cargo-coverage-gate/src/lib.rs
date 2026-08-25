@@ -33,6 +33,20 @@
 //! The two keys are mutually exclusive, and `expect-no-coverable-lines`
 //! is package-scoped only.
 //!
+//! A package can replace that policy for a Cargo-style target selector:
+//!
+//! ```toml
+//! [package.metadata.coverage-gate]
+//! min-lines-percent = 100
+//!
+//! [package.metadata.coverage-gate.target.'cfg(not(windows))']
+//! enabled = false
+//! ```
+//!
+//! `enabled = false` disables coverage measurement and gating on the
+//! matching target, but does not disable test execution in automation
+//! such as Cargo Anvil.
+//!
 //! ## Why lcov, not the JSON?
 //!
 //! `cargo-llvm-cov` exports the same instrumentation run in several
@@ -51,6 +65,7 @@
 //!
 //! ```text
 //! cargo coverage-gate  [--lcov <path>]... [-p|--package <spec>]...
+//!                      [--target <triple>]
 //!                      [--summary-file <path>] [--quiet]
 //! ```
 //!
@@ -108,6 +123,7 @@ mod attribute;
 mod error;
 mod lcov_cov;
 mod render;
+mod target;
 mod threshold;
 mod verdict;
 mod workspace;
@@ -235,10 +251,56 @@ pub fn evaluate_many(
     manifest_path: Option<&Path>,
     gated_packages: &[String],
 ) -> Result<EvaluatedReport, CoverageGateError> {
+    evaluate_many_for_target(lcov_texts, manifest_path, gated_packages, None)
+}
+
+/// Evaluate one or more lcov tracefiles for an explicit compilation target.
+///
+/// `target` is a Rust target triple such as `x86_64-pc-windows-msvc`.
+/// When omitted, the active `rustc` host target is used. Target-specific
+/// package policy is resolved before the gated package set is evaluated.
+///
+/// # Errors
+///
+/// Returns a [`CoverageGateError`] under the same conditions as
+/// [`evaluate_many`], or when the target/cfg query fails.
+pub fn evaluate_many_for_target(
+    lcov_texts: &[&str],
+    manifest_path: Option<&Path>,
+    gated_packages: &[String],
+    target: Option<&str>,
+) -> Result<EvaluatedReport, CoverageGateError> {
     let report = lcov_cov::CoverageReport::from_strs(lcov_texts)?;
-    let ws = workspace::Workspace::load(manifest_path)?;
+    let target = target::TargetContext::resolve(target)?;
+    let ws = workspace::Workspace::load(manifest_path, &target)?;
     let inner = verdict::evaluate(&report, &ws, gated_packages)?;
     Ok(EvaluatedReport { inner })
+}
+
+/// Return packages that should run tests without coverage for `target`.
+///
+/// This metadata-only query is intended for coverage automation that
+/// must remove packages with `min-lines-percent = 0` or
+/// `enabled = false` from instrumentation while still running their tests
+/// through a plain test runner.
+///
+/// # Errors
+///
+/// Returns a [`CoverageGateError`] when workspace metadata, target
+/// discovery, target policy, or a package selector is invalid.
+pub fn test_only_packages(
+    manifest_path: Option<&Path>,
+    packages: &[String],
+    target: Option<&str>,
+) -> Result<Vec<String>, CoverageGateError> {
+    let target = target::TargetContext::resolve(target)?;
+    let ws = workspace::Workspace::load(manifest_path, &target)?;
+    let selected = verdict::resolve_gated(&ws, packages)?;
+    Ok(selected
+        .into_iter()
+        .filter(|member| member.coverage_disabled || member.min_lines_percent == Some(0.0))
+        .map(|member| member.name.clone())
+        .collect())
 }
 
 #[cfg(test)]

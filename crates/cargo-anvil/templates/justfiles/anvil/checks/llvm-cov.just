@@ -30,23 +30,37 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
     # and `llvm-cov export` aborts with "no coverage data found" whenever
     # such a package is the *only* object in the report (e.g. it is the
     # sole affected crate). Opt-out is declared via
-    # [package.metadata.coverage-gate] min-lines-percent = 0 -- the same
-    # marker cargo-coverage-gate already treats as NO DATA -> OK. Opted-out
-    # packages still run through plain nextest; opting out of measurement
-    # never opts a changed package out of tests.
+    # [package.metadata.coverage-gate] min-lines-percent = 0, or by a matching
+    # target policy with enabled = false. cargo-coverage-gate resolves target
+    # selectors so measurement and gating cannot disagree. Opted-out packages
+    # still run through plain nextest; opting out of measurement never opts a
+    # changed package out of tests.
     $testOnlyPkg = [System.Collections.Generic.List[string]]::new()
-    if ($pkg -contains '--package') {
-        $metadataJson = & cargo metadata --no-deps --format-version 1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error 'anvil-llvm-cov: cargo metadata failed'
-            exit $LASTEXITCODE
-        }
-        $optedOut = @(
-            ($metadataJson | ConvertFrom-Json).packages |
-                Where-Object { $null -ne $_.metadata.'coverage-gate'.'min-lines-percent' -and [double]$_.metadata.'coverage-gate'.'min-lines-percent' -eq 0 } |
-                ForEach-Object { $_.name }
-        )
-        if ($optedOut.Count -gt 0) {
+    $metadataJson = & cargo metadata --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error 'anvil-llvm-cov: cargo metadata failed'
+        exit $LASTEXITCODE
+    }
+    $metadata = $metadataJson | ConvertFrom-Json
+    $optedOut = @(& cargo coverage-gate --print-test-only-packages)
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error 'anvil-llvm-cov: cargo coverage-gate target resolution failed'
+        exit $LASTEXITCODE
+    }
+    if ($optedOut.Count -gt 0) {
+        if ($pkg -contains '--workspace') {
+            $pkg = @(
+                $metadata.packages |
+                    Where-Object { $optedOut -notcontains $_.name } |
+                    ForEach-Object { '--package'; "$($_.name)@$($_.version)" }
+            )
+            $metadata.packages |
+                Where-Object { $optedOut -contains $_.name } |
+                ForEach-Object {
+                    $testOnlyPkg.Add('--package')
+                    $testOnlyPkg.Add("$($_.name)@$($_.version)")
+                }
+        } elseif ($pkg -contains '--package') {
             $filtered = [System.Collections.Generic.List[string]]::new()
             for ($i = 0; $i -lt $pkg.Count; $i++) {
                 # Impact emits version-qualified specs (name@version);

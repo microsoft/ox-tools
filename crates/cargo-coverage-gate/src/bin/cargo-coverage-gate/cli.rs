@@ -45,6 +45,19 @@ pub(crate) struct CoverageGateArgs {
     #[arg(long = "package", short = 'p', value_name = "SPEC")]
     pub(crate) packages: Vec<String>,
 
+    /// Rust target triple whose coverage policy should be evaluated.
+    ///
+    /// Defaults to the active rustc host target.
+    #[arg(long, value_name = "TRIPLE")]
+    pub(crate) target: Option<String>,
+
+    /// Print packages that should run tests without coverage and exit.
+    ///
+    /// Includes packages whose effective policy has
+    /// `min-lines-percent = 0` or `enabled = false`.
+    #[arg(long)]
+    pub(crate) print_test_only_packages: bool,
+
     /// Write the Markdown verdict table to this file.
     ///
     /// When unset, the tool falls back to `$GITHUB_STEP_SUMMARY` and then

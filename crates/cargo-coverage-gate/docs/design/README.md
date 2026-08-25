@@ -161,9 +161,10 @@ min-lines-percent = 75.0
 min-lines-percent = 80.0
 ```
 
-The schema today is one key, `min-lines-percent`, an integer or float percentage
-(`0.0`–`100.0` inclusive). Future extensions can add `min-functions`,
-`min-regions` symmetrically.
+The base schema accepts `min-lines-percent`, an integer or float percentage
+(`0.0`–`100.0` inclusive), or the package-only
+`expect-no-coverable-lines` assertion described below. Future extensions can
+add `min-functions` and `min-regions` symmetrically.
 
 The built-in default of `100.0` means **gating is on by default**: a new
 package with no metadata anywhere will only pass if every measured line is
@@ -222,6 +223,56 @@ Rules:
   there is no such code.
 - A non-boolean value is a configuration error (exit `2`). An explicit
   `false` is identical to omitting the key.
+
+#### Target-specific policy
+
+Packages whose implementation exists only on selected compilation targets use
+Cargo-style target selectors nested under their package metadata:
+
+```toml
+[package.metadata.coverage-gate]
+min-lines-percent = 100
+
+[package.metadata.coverage-gate.target.'cfg(not(windows))']
+enabled = false
+```
+
+Selectors use the same grammar as Cargo's target-specific dependency tables:
+an exact target triple (`x86_64-pc-windows-msvc`) or a quoted `cfg(...)`
+expression (`cfg(windows)`, `cfg(target_os = "linux")`,
+`cfg(all(unix, target_arch = "x86_64"))`). Coverage-gate uses the
+`cargo-platform` parser and matches `cfg(...)` expressions against
+`rustc --print cfg --target <triple>`, so it does not maintain a second target
+language.
+
+`enabled = false` disables coverage measurement and gating for that package on
+the matching target. It does not disable tests: orchestrators run the package
+through their non-instrumented test path. This is distinct from
+`expect-no-coverable-lines = true`, which keeps a target-independent facade or
+re-export package in the instrumented test set so its tests can contribute
+coverage to other packages.
+
+Target tables may alternatively replace the base policy with
+`min-lines-percent` or `expect-no-coverable-lines`. A target table describes
+one complete policy; `enabled = false`, `min-lines-percent`, and
+`expect-no-coverable-lines = true` are mutually exclusive in that table.
+`enabled = true` explicitly inherits the base package/workspace policy and is
+useful when an exact target needs to override a broader `cfg(...)` opt-out.
+
+Resolution follows Cargo's precedence:
+
+1. An exact target-triple table wins over every matching `cfg(...)` table.
+2. Otherwise one matching `cfg(...)` table supplies the target policy.
+3. Multiple matching `cfg(...)` tables are a configuration error rather than
+   depending on TOML declaration order.
+4. With no matching target table, the ordinary package → workspace → built-in
+   policy applies.
+
+The CLI accepts `--target <triple>`. When omitted, it obtains the host triple
+from `rustc -vV`. A dedicated `--print-test-only-packages` mode loads metadata
+and prints packages whose effective policy is `min-lines-percent = 0` or
+`enabled = false`, without reading lcov. Coverage orchestrators use this before
+selecting packages for instrumentation.
 
 ### 5.4 The verdict table
 
@@ -377,6 +428,10 @@ true` (§5.3): for that package, zero attributed lines is the *expected*
 state and classifies as a pass (`EMPTY` / `➖`), not the no-data
 configuration error. Conversely, if such a package *does* have attributed
 coverable lines, it fails the gate (exit `1`) rather than passing.
+
+A package disabled by its target-specific policy (§5.3) is removed from the gated set
+before attribution. It therefore neither produces a table row nor triggers the
+no-data error on an unsupported target.
 
 ### 6.4 Cross-package test attribution
 
