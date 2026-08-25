@@ -277,10 +277,11 @@ mod tests {
             "all affected packages opted out of coverage",
             "could not resolve the cargo-careful executable",
             "anvil-mutants-full: aarch64-pc-windows-msvc",
-            "cargo-semver-checks exit 101",
-            "unexpected cargo-semver-checks exit code",
         ] {
             assert!(checks.contains(needle), "checks tree missing safety behavior '{needle}'");
+        }
+        for needle in ["Inconclusive comparisons", "an unbuildable baseline is not evidence"] {
+            assert!(checks.contains(needle), "checks tree missing advisory behavior '{needle}'");
         }
         assert!(
             checks.contains("bolero list --profile release --package $packageName"),
@@ -347,8 +348,6 @@ mod tests {
             "git rev-parse --verify \"$base^{commit}\"",
             "git cat-file -e $baselineManifest",
             "cargo semver-checks --package $p --baseline-rev $base",
-            "$yankedBaselineDependency",
-            "baseline dependencies are no longer reproducible",
         ] {
             assert!(body.contains(needle), "semver check template missing '{needle}'");
         }
