@@ -157,7 +157,7 @@ that provided the strongest version of the check.
 
 | Check                          | Invocation                                                | Source |
 |--------------------------------|-----------------------------------------------------------|--------|
-| `fmt`                          | `cargo +<pinned-nightly> fmt --manifest-path <package-manifest> --check` for each workspace package. Manifest-scoped invocations avoid platform command-line limits, remain valid for nested packages with independent workspace membership, and need no separate fallback path. | all |
+| `fmt`                          | `cargo each --workspace -- cargo +<pinned-nightly> fmt --manifest-path {manifest} --check`. `cargo-each` resolves workspace membership and invokes rustfmt once per manifest, keeping child commands bounded on every platform. | all |
 | `clippy`                       | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
 | `cargo-sort`                   | `cargo sort --workspace --grouped --check --check-format`. Dependency ordering and Cargo manifest formatting are both enforced; `--grouped` preserves intentional blank-line-separated dependency groups. | oxidizer-github |
 | `license-headers`              | `cargo heather --workspace`                               | oxidizer (`heather`), oxidizer-github |

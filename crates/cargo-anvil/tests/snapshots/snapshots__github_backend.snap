@@ -3283,30 +3283,8 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 anvil-fmt: anvil-fmt-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
-    $metadataJson = & cargo metadata --no-deps --format-version 1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error 'anvil-fmt: cargo metadata failed'
-        exit $LASTEXITCODE
-    }
-    try {
-        $metadata = $metadataJson | ConvertFrom-Json
-    } catch {
-        Write-Error "anvil-fmt: could not parse cargo metadata output: $_"
-        exit 1
-    }
-    $workspaceMembers = @{}
-    foreach ($id in $metadata.workspace_members) {
-        $workspaceMembers[$id] = $true
-    }
-    $packages = @(
-        $metadata.packages |
-            Where-Object { $workspaceMembers.ContainsKey($_.id) } |
-            Sort-Object name, version
-    )
-    foreach ($package in $packages) {
-        & cargo '+{{ rust_nightly }}' fmt --manifest-path $package.manifest_path --check
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    }
+    cargo each --workspace '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' --check
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Per-check setup + validate-prereqs
 #
@@ -3325,11 +3303,11 @@ anvil-fmt: anvil-fmt-validate-prereqs
 
 # Install prerequisites for the `anvil-fmt` recipe.
 [group("anvil-setup")]
-anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install
+anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-fmt` recipe.
 [group("anvil-setup")]
-anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs
+anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
 === justfiles/anvil/checks/license-headers.just ===
 # Copyright (c) Microsoft Corporation.
@@ -6007,6 +5985,14 @@ anvil-tool-cargo-doc2readme-install installer="install": (_install-tool "cargo-d
 [group("anvil-setup")]
 anvil-tool-cargo-doc2readme-validate-prereqs: (_check-tool "cargo-doc2readme" cargo_doc2readme_version)
 
+# Install the pinned `cargo-each` tool.
+[group("anvil-setup")]
+anvil-tool-cargo-each-install installer="install": (_install-tool "cargo-each" cargo_each_version installer)
+
+# Validate that the pinned `cargo-each` tool is available.
+[group("anvil-setup")]
+anvil-tool-cargo-each-validate-prereqs: (_check-tool "cargo-each" cargo_each_version)
+
 # Install the pinned `cargo-ensure-no-cyclic-deps` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-ensure-no-cyclic-deps-install installer="install": (_install-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version installer)
@@ -6177,6 +6163,7 @@ cargo_coverage_gate_version := "0.2.0"
 cargo_delta_version := "0.3.1"
 cargo_deny_version := "0.19.8"
 cargo_doc2readme_version := "0.7.2"
+cargo_each_version := "0.1.0"
 cargo_ensure_no_cyclic_deps_version := "0.2.0"
 cargo_ensure_no_default_features_version := "1.1.0"
 cargo_hack_version := "0.6.45"

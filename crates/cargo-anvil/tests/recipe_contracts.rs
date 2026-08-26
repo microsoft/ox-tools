@@ -29,6 +29,9 @@ $joined = $args -join ' '
 if ($env:FAKE_CARGO_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value $joined
 }
+if ($args -contains 'each') {
+    exit [int]$env:FAKE_EACH_EXIT
+}
 if ($args -contains 'metadata') {
     if ($env:FAKE_METADATA_EXIT) { exit [int]$env:FAKE_METADATA_EXIT }
     if ($env:FAKE_METADATA_INVALID) {
@@ -623,7 +626,7 @@ fn public_api_checks_fail_when_metadata_discovery_fails() {
 }
 
 #[test]
-fn fmt_formats_workspace_packages_individually() {
+fn fmt_delegates_workspace_iteration_to_cargo_each() {
     if !tools_available() {
         return;
     }
@@ -632,17 +635,12 @@ fn fmt_formats_workspace_packages_individually() {
         &[
             "anvil-component-nightly-rustfmt-validate-prereqs",
             "anvil-component-nightly-rustfmt-install",
+            "anvil-tool-cargo-each-validate-prereqs",
+            "anvil-tool-cargo-each-install installer",
         ],
     );
     let log = tmp.path().join("cargo.log");
-    let output = run_just(
-        tmp.path(),
-        &["anvil-fmt"],
-        &[
-            ("FAKE_CARGO_LOG", log.as_os_str()),
-            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("second")),
-        ],
-    );
+    let output = run_just(tmp.path(), &["anvil-fmt"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
     assert!(
         output.status.success(),
         "per-package formatting failed\nstdout:\n{}\nstderr:\n{}",
@@ -650,46 +648,15 @@ fn fmt_formats_workspace_packages_individually() {
         String::from_utf8_lossy(&output.stderr)
     );
     let commands = std::fs::read_to_string(&log).unwrap();
-    assert!(commands.contains("metadata --no-deps --format-version 1"));
-    assert!(commands.contains(&format!(
-        "+nightly-test fmt --manifest-path {} --check",
-        tmp.path().join("Cargo.toml").display()
-    )));
-    assert!(commands.contains(&format!(
-        "+nightly-test fmt --manifest-path {} --check",
-        tmp.path().join("nested").join("Cargo.toml").display()
-    )));
-    assert!(!commands.contains("fmt --all"));
-
-    std::fs::write(&log, "").unwrap();
-    let output = run_just(
-        tmp.path(),
-        &["anvil-fmt"],
-        &[
-            ("FAKE_CARGO_LOG", log.as_os_str()),
-            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("second")),
-            ("FAKE_SECOND_PACKAGE_NON_MEMBER", OsStr::new("1")),
-        ],
-    );
     assert!(
-        output.status.success(),
-        "workspace-member filtering failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
+        commands.contains("each --workspace -- cargo +nightly-test fmt --manifest-path {manifest} --check"),
+        "unexpected cargo invocation: {commands}"
     );
-    let commands = std::fs::read_to_string(log).unwrap();
-    assert!(commands.contains(&format!(
-        "+nightly-test fmt --manifest-path {} --check",
-        tmp.path().join("Cargo.toml").display()
-    )));
-    assert!(!commands.contains(&format!(
-        "fmt --manifest-path {}",
-        tmp.path().join("nested").join("Cargo.toml").display()
-    )));
+    assert!(!commands.contains("fmt --all"));
 }
 
 #[test]
-fn fmt_fails_when_package_discovery_fails() {
+fn fmt_propagates_cargo_each_failure() {
     if !tools_available() {
         return;
     }
@@ -698,12 +665,12 @@ fn fmt_fails_when_package_discovery_fails() {
         &[
             "anvil-component-nightly-rustfmt-validate-prereqs",
             "anvil-component-nightly-rustfmt-install",
+            "anvil-tool-cargo-each-validate-prereqs",
+            "anvil-tool-cargo-each-install installer",
         ],
     );
-    for environment in [("FAKE_METADATA_EXIT", OsStr::new("23")), ("FAKE_METADATA_INVALID", OsStr::new("1"))] {
-        let output = run_just(tmp.path(), &["anvil-fmt"], &[environment]);
-        assert_failed(&output, "anvil-fmt package discovery failure");
-    }
+    let output = run_just(tmp.path(), &["anvil-fmt"], &[("FAKE_EACH_EXIT", OsStr::new("23"))]);
+    assert_failed(&output, "anvil-fmt cargo-each failure");
 }
 
 #[test]

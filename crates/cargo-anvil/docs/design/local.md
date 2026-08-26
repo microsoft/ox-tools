@@ -464,9 +464,8 @@ anvil-fmt:
     @if [ "$ANVIL_INCLUDE_MODIFIED" = "--skip" ]; then \
         echo "anvil-fmt: no modified packages; skipping"; exit 0; \
     fi; \
-    for manifest in $(cargo metadata ...); do \
-        cargo fmt --manifest-path "$manifest" --check; \
-    done
+    cargo each --workspace -- \
+        cargo fmt --manifest-path '{manifest}' --check
 ```
 
 The mapping from check to bucket is fixed in the catalog (see

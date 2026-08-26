@@ -18,30 +18,8 @@
 anvil-fmt: anvil-fmt-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
-    $metadataJson = & cargo metadata --no-deps --format-version 1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error 'anvil-fmt: cargo metadata failed'
-        exit $LASTEXITCODE
-    }
-    try {
-        $metadata = $metadataJson | ConvertFrom-Json
-    } catch {
-        Write-Error "anvil-fmt: could not parse cargo metadata output: $_"
-        exit 1
-    }
-    $workspaceMembers = @{}
-    foreach ($id in $metadata.workspace_members) {
-        $workspaceMembers[$id] = $true
-    }
-    $packages = @(
-        $metadata.packages |
-            Where-Object { $workspaceMembers.ContainsKey($_.id) } |
-            Sort-Object name, version
-    )
-    foreach ($package in $packages) {
-        & cargo '+{{ rust_nightly }}' fmt --manifest-path $package.manifest_path --check
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    }
+    cargo each --workspace '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' --check
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Per-check setup + validate-prereqs
 #
@@ -60,8 +38,8 @@ anvil-fmt: anvil-fmt-validate-prereqs
 
 # Install prerequisites for the `anvil-fmt` recipe.
 [group("anvil-setup")]
-anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install
+anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-fmt` recipe.
 [group("anvil-setup")]
-anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs
+anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs anvil-tool-cargo-each-validate-prereqs
