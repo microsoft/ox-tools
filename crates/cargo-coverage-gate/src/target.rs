@@ -158,6 +158,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns a fake rustc process; miri isolation forbids both")]
     fn resolves_host_and_cfg_from_rustc() {
         let temp = fake_rustc(
             "rustc 1.97.0\nhost: x86_64-pc-windows-msvc",
@@ -172,6 +173,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns fake rustc processes; miri isolation forbids both")]
     fn rejects_failed_or_malformed_rustc_output() {
         let missing = fake_rustc_path(&tempfile::tempdir().expect("tempdir"));
         let error = TargetContext::resolve_with_rustc(None, missing.as_os_str()).expect_err("missing rustc must fail");
