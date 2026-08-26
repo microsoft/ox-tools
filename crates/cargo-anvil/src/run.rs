@@ -351,7 +351,7 @@ fn push_region_at(
     let body = match delta_region_body(current.as_deref(), spec) {
         DeltaRegionBody::Managed => spec.body.as_str(),
         DeltaRegionBody::PreserveRepositoryKey(note) => {
-            plan.note(note);
+            plan.note(format!("{host}: {note}"));
             ""
         }
         DeltaRegionBody::Malformed(reason) => {
@@ -425,10 +425,11 @@ enum DeltaRegionBody {
 ///
 /// - `anvil-delta` against a top-level `trip_wire_patterns`, which would become
 ///   a duplicate TOML key.
-/// - `anvil-lints` against a crate that declares its own `[lints.*]`, which
-///   cargo rejects with "cannot override `workspace.lints` in `lints`" --
-///   taking down `cargo metadata`, and with it every check in the workspace,
-///   not just the offending crate.
+/// - `anvil-lints` against a crate that already has a `lints` table, whether
+///   written as a plain `[lints]` or implied by `[lints.rust]` /
+///   `[lints.clippy]`. A duplicate `[lints]` header takes down `cargo
+///   metadata`, and with it every check in the workspace, not just the
+///   offending crate.
 fn delta_region_body(host_text: Option<&str>, spec: &RegionSpec) -> DeltaRegionBody {
     let id = spec.id.as_str();
     if id != DELTA_REGION_ID && id != CRATE_LINTS_REGION_ID {
@@ -463,9 +464,10 @@ fn delta_region_body(host_text: Option<&str>, spec: &RegionSpec) -> DeltaRegionB
 
     if document.as_table().contains_key("lints") {
         return DeltaRegionBody::PreserveRepositoryKey(
-            "This crate declares its own `[lints]`; the managed anvil-lints region was left \
-             empty. Cargo rejects a manifest carrying both, which would break `cargo metadata` \
-             for the whole workspace. Remove the crate's own lints to adopt the catalog."
+            "this crate owns its lint set (`[lints]` or `[lints.*]`), so the managed anvil-lints \
+             region was left empty. Cargo rejects a manifest carrying both, which would break \
+             `cargo metadata` for the whole workspace. Adopting the catalog is optional: drop the \
+             crate's own lints to take it."
                 .to_owned(),
         );
     }
@@ -1110,8 +1112,35 @@ mod tests {
             .expect("the region stays tracked, so dropping the crate's lints adopts the catalog");
         assert!(region.is_empty(), "a crate that owns its lints opts out of the managed body");
         assert!(
-            outcome.plan.notes().iter().any(|note| note.contains("declares its own `[lints]`")),
+            outcome.plan.notes().iter().any(|note| note.contains("owns its lint set")),
             "the opt-out must be visible in the plan summary"
+        );
+        assert!(
+            outcome.plan.notes().iter().any(|note| note.contains("crates/alpha/Cargo.toml")),
+            "the note must name the manifest that deferred, not just the condition"
+        );
+
+        // The deferral is not terminal: the region stays tracked, so dropping
+        // the crate's own lints adopts the catalog on the next run, and then
+        // settles.
+        let without_own_lints = content.replace("[lints.clippy]\npedantic = { level = \"warn\", priority = -1 }\n", "");
+        fs::write(&member, &without_own_lints).unwrap();
+
+        run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+
+        let adopted = fs::read_to_string(&member).unwrap();
+        let document: toml_edit::DocumentMut = adopted.parse().expect("member manifest must remain valid TOML");
+        assert_eq!(
+            document["lints"]["workspace"].as_bool(),
+            Some(true),
+            "dropping the crate's own lints must adopt the catalog"
+        );
+
+        run_update(&Catalog::anvil(), &args, tmp.path()).unwrap();
+        assert_eq!(
+            fs::read_to_string(&member).unwrap(),
+            adopted,
+            "adoption must settle rather than rewrite on every run"
         );
     }
 
