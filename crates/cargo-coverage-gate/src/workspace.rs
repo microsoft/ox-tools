@@ -226,12 +226,11 @@ fn extract_target_policies(gate: &Value, source: &str, scope: Scope) -> Result<V
                 .into());
             }
 
-            let policy = match (enabled, min_lines_percent, expect_no_coverable_lines) {
-                (Some(false), None, false) => PolicyOverride::Disabled,
-                (Some(true) | None, None, false) => PolicyOverride::Inherit,
-                (None, Some(value), false) => PolicyOverride::Threshold(value),
-                (None, None, true) => PolicyOverride::ExpectNoCoverableLines,
-                _ => unreachable!("conflicting target policy combinations are rejected above"),
+            let policy = match enabled {
+                Some(false) => PolicyOverride::Disabled,
+                Some(true) => PolicyOverride::Inherit,
+                None if expect_no_coverable_lines => PolicyOverride::ExpectNoCoverableLines,
+                None => min_lines_percent.map_or(PolicyOverride::Inherit, PolicyOverride::Threshold),
             };
             Ok(TargetPolicy {
                 selector_text: selector_text.clone(),
@@ -701,5 +700,77 @@ expect-no-coverable-lines = false
 
         let error = load(&tmp.path().join("Cargo.toml")).expect_err("conflicting target policy must fail");
         assert!(error.to_string().contains("mutually exclusive"));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
+    #[test]
+    fn target_policy_can_expect_no_coverable_lines() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\"]\n";
+        let alpha = member_with_gate(
+            "alpha",
+            "min-lines-percent = 90\n\n\
+             [package.metadata.coverage-gate.target.x86_64-pc-windows-msvc]\n\
+             expect-no-coverable-lines = true",
+        );
+        write_workspace(tmp.path(), root, &[("alpha", &alpha)]);
+        let target = TargetContext::from_parts("x86_64-pc-windows-msvc", &["windows"]);
+
+        let ws = Workspace::load(Some(&tmp.path().join("Cargo.toml")), &target).expect("workspace load should succeed");
+        let alpha = ws.members.iter().find(|member| member.name == "alpha").expect("alpha");
+        assert_eq!(alpha.min_lines_percent, None);
+        assert!(alpha.expect_no_coverable_lines);
+        assert!(!alpha.coverage_disabled);
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
+    #[test]
+    fn rejects_target_policy_at_workspace_scope() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = r#"
+[workspace]
+resolver = "2"
+members = ["alpha"]
+
+[workspace.metadata.coverage-gate.target.'cfg(unix)']
+enabled = false
+"#;
+        write_workspace(tmp.path(), root, &[("alpha", &member("alpha", None))]);
+
+        let error = load(&tmp.path().join("Cargo.toml")).expect_err("workspace target policy must fail");
+        assert!(error.to_string().contains("package-scoped"));
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
+    #[test]
+    fn rejects_malformed_target_policy_shapes() {
+        let cases = [
+            ("target = false", "`target` must be a table"),
+            (
+                "[package.metadata.coverage-gate.target]\n'cfg(unix)' = false",
+                "policy must be a table",
+            ),
+            (
+                "[package.metadata.coverage-gate.target.'not a selector']\nenabled = false",
+                "invalid coverage-gate target selector",
+            ),
+            (
+                "[package.metadata.coverage-gate.target.'cfg(unix)']\nenabled = \"no\"",
+                "`enabled` must be a boolean",
+            ),
+            (
+                "[package.metadata.coverage-gate.target.'cfg(unix)']\nmin-lines-percent = 90\nexpect-no-coverable-lines = true",
+                "cannot set both",
+            ),
+        ];
+
+        for (index, (gate, expected)) in cases.into_iter().enumerate() {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let root = "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\"]\n";
+            write_workspace(tmp.path(), root, &[("alpha", &member_with_gate("alpha", gate))]);
+
+            let error = load(&tmp.path().join("Cargo.toml")).expect_err("malformed target policy must fail");
+            assert!(error.to_string().contains(expected), "case {index}: {error}");
+        }
     }
 }
