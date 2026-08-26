@@ -1773,11 +1773,8 @@ anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
 
 # Modified tier.
 #
-# `--no-format` limits this check to dependency ordering. In check mode,
-# `--check-format` does not rewrite manifests, but it does make cargo-sort's
-# general TOML style part of the pass/fail contract. Anvil does not own
-# whole-manifest formatting, and running the formatter without
-# `--check-format` would still emit formatting warnings.
+# `--check-format` makes formatting differences fail instead of producing
+# warnings, keeping dependency ordering and Cargo manifest style deterministic.
 #
 # `--grouped` keeps the blank lines between groups of key/value pairs
 # (e.g. blank-line-separated dependency blocks) intact.
@@ -1787,7 +1784,7 @@ anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
 anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
-    cargo sort --workspace --grouped --check --no-format
+    cargo sort --workspace --grouped --check --check-format
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-cargo-sort` recipe.
