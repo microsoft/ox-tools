@@ -176,7 +176,6 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 │   ├── anvil-setup/just-problem-matcher.json
 │   │                                  owned   (annotate failing Just recipes)
 │   ├── anvil-run-group/action.yml      owned   (orchestrate any Just group)
-│   ├── anvil-run-group/run-group.sh    owned   (capture the group result)
 │   ├── anvil-report-status/action.yml  owned   (publish per-job commit statuses)
 │   ├── anvil-impact/action.yml        owned   (cargo-delta impact computation)
 └── workflows/
@@ -515,7 +514,15 @@ runs:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
         ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
         ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-      run: bash "$GITHUB_ACTION_PATH/run-group.sh"
+      run: |
+        log="$RUNNER_TEMP/anvil-$ANVIL_GROUP.log"
+        set +e
+        just "anvil-$ANVIL_GROUP" 2>&1 | tee "$log"
+        status=${PIPESTATUS[0]}
+        set -e
+        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed\( on line [0-9][0-9]*\)\? with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+        echo "failed_recipe=${failed_recipe:-anvil-$ANVIL_GROUP}" >> "$GITHUB_OUTPUT"
+        echo "exit_code=$status" >> "$GITHUB_OUTPUT"
     - name: Publish Anvil job status
       if: always() && inputs.publish_job_statuses == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
       continue-on-error: true
@@ -594,11 +601,11 @@ expression extracts the last standard Just failed-recipe line, including the
 `failed on line <line> with exit code <code>` form emitted by ordinary
 line-based recipes, and writes both `failed_recipe` and `exit_code` as step
 outputs. If no such line is present, `failed_recipe` falls back to the group
-recipe, such as `anvil-pr-fast`. This logic lives in the generated
-`.github/actions/anvil-run-group/run-group.sh`; the composite action invokes
-that file, and Cargo Anvil's functional tests execute the same embedded script
-against fake success, both failed-recipe diagnostic forms, and
-no-diagnostic-failure results.
+recipe, such as `anvil-pr-fast`. This logic remains inline in the generated
+`.github/actions/anvil-run-group/action.yml` rather than introducing a
+standalone script. Cargo Anvil's functional tests extract and execute that
+exact YAML-embedded script against fake success, both failed-recipe diagnostic
+forms, and no-diagnostic-failure results.
 
 The run step does not fail immediately because the reporter still needs its
 outputs. A final step guarded by `always()` exits with status 1 whenever the

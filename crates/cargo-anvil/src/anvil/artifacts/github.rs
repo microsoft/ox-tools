@@ -20,9 +20,6 @@ const JUST_PROBLEM_MATCHER: &str = include_str!("../../../templates/github/just-
 /// Shared composite action that runs any Anvil group.
 const RUN_GROUP_ACTION: &str = include_str!("../../../templates/github/run-group-action.yml");
 
-/// Bash implementation used by the shared group action.
-const RUN_GROUP_SCRIPT: &str = include_str!("../../../templates/github/run-group.sh");
-
 /// Shared composite action that publishes dynamic failure commit statuses.
 const REPORT_STATUS_ACTION: &str = include_str!("../../../templates/github/report-status-action.yml");
 
@@ -61,12 +58,6 @@ pub fn just_problem_matcher() -> Artifact {
 #[must_use]
 pub fn run_group_action() -> Artifact {
     Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-run-group/action.yml", RUN_GROUP_ACTION)
-}
-
-/// `.github/actions/anvil-run-group/run-group.sh`.
-#[must_use]
-pub fn run_group_script() -> Artifact {
-    Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-run-group/run-group.sh", RUN_GROUP_SCRIPT)
 }
 
 /// `.github/actions/anvil-report-status/action.yml`.
@@ -120,7 +111,6 @@ pub(crate) fn all() -> Vec<Artifact> {
         setup_action(),
         just_problem_matcher(),
         run_group_action(),
-        run_group_script(),
         report_status_action(),
         impact_action(),
         pr_impl_workflow(),
@@ -151,7 +141,6 @@ mod tests {
         assert!(SETUP_ACTION.contains("name: anvil-setup"));
         assert!(JUST_PROBLEM_MATCHER.contains("\"owner\": \"anvil-just\""));
         assert!(RUN_GROUP_ACTION.contains("name: anvil-run-group"));
-        assert!(RUN_GROUP_SCRIPT.contains("status=${PIPESTATUS[0]}"));
         assert!(REPORT_STATUS_ACTION.contains("name: anvil-report-status"));
         assert!(IMPACT_ACTION.contains("name: anvil-impact"));
         assert!(IMPACT_ACTION.contains("cargo-delta"));
@@ -190,7 +179,7 @@ mod tests {
         assert!(RUN_GROUP_ACTION.contains("uses: ./.github/actions/anvil-setup"));
         assert!(RUN_GROUP_ACTION.contains("group: ${{ inputs.group }}"));
         assert!(RUN_GROUP_ACTION.contains("free-disk-space: ${{ inputs.free-disk-space }}"));
-        assert!(RUN_GROUP_ACTION.contains("bash \"$GITHUB_ACTION_PATH/run-group.sh\""));
+        assert!(RUN_GROUP_ACTION.contains("status=${PIPESTATUS[0]}"));
         assert!(RUN_GROUP_ACTION.contains("Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"));
         assert!(RUN_GROUP_ACTION.contains("uses: ./.github/actions/anvil-report-status"));
         assert!(RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_MODIFIED"));
@@ -198,7 +187,7 @@ mod tests {
         assert!(RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_REQUIRED"));
     }
 
-    fn run_group_script(fake_output: &str, fake_status: i32) -> (std::process::ExitStatus, String) {
+    fn run_group_step(fake_output: &str, fake_status: i32) -> (std::process::ExitStatus, String) {
         let temp = tempfile::tempdir().expect("the test must be able to create a temporary action workspace");
         let output_path = temp.path().join("github-output");
         let harness = r#"
@@ -210,7 +199,22 @@ just() {
 }
 export -f just
 "#;
-        let script = RUN_GROUP_SCRIPT.replace("\r\n", "\n");
+        let action = RUN_GROUP_ACTION.replace("\r\n", "\n");
+        let run_step = action
+            .split_once("    - name: Run Anvil group\n")
+            .expect("group action should contain its run step")
+            .1;
+        let script = run_step
+            .split_once("      run: |\n")
+            .expect("group run step should contain an inline script")
+            .1
+            .split_once("\n    - ")
+            .expect("group run step should be followed by another action step")
+            .0
+            .lines()
+            .map(|line| line.strip_prefix("        ").unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n");
         let program = format!("{harness}\n{script}");
         #[cfg(windows)]
         let bash = std::path::PathBuf::from(
@@ -237,8 +241,8 @@ export -f just
 
     #[test]
     #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
-    fn run_group_script_exports_success() {
-        let (status, outputs) = run_group_script("all checks passed", 0);
+    fn run_group_step_exports_success() {
+        let (status, outputs) = run_group_step("all checks passed", 0);
 
         assert!(
             status.success(),
@@ -250,9 +254,9 @@ export -f just
 
     #[test]
     #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
-    fn run_group_script_exports_terminal_recipe_failure() {
+    fn run_group_step_exports_terminal_recipe_failure() {
         let diagnostic = "error: recipe `anvil-license-headers` failed with exit code 17";
-        let (status, outputs) = run_group_script(diagnostic, 17);
+        let (status, outputs) = run_group_step(diagnostic, 17);
 
         assert!(
             status.success(),
@@ -264,9 +268,9 @@ export -f just
 
     #[test]
     #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
-    fn run_group_script_exports_line_recipe_failure() {
+    fn run_group_step_exports_line_recipe_failure() {
         let diagnostic = "error: recipe `anvil-license-headers` failed on line 42 with exit code 17";
-        let (status, outputs) = run_group_script(diagnostic, 17);
+        let (status, outputs) = run_group_step(diagnostic, 17);
 
         assert!(
             status.success(),
@@ -278,8 +282,8 @@ export -f just
 
     #[test]
     #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
-    fn run_group_script_falls_back_to_group_without_terminal_diagnostic() {
-        let (status, outputs) = run_group_script("unexpected tool failure", 9);
+    fn run_group_step_falls_back_to_group_without_terminal_diagnostic() {
+        let (status, outputs) = run_group_step("unexpected tool failure", 9);
 
         assert!(
             status.success(),
