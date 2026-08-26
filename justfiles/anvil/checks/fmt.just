@@ -18,7 +18,7 @@
 anvil-fmt: anvil-fmt-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
-    cargo '+{{ rust_nightly }}' fmt --all --check
+    cargo each --workspace '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' --check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Per-check setup + validate-prereqs
@@ -38,8 +38,8 @@ anvil-fmt: anvil-fmt-validate-prereqs
 
 # Install prerequisites for the `anvil-fmt` recipe.
 [group("anvil-setup")]
-anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install
+anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-fmt` recipe.
 [group("anvil-setup")]
-anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs
+anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs anvil-tool-cargo-each-validate-prereqs

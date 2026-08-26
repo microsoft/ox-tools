@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.5.0"
-catalog_checksum = "sha256:64436c7a20508d0413fa5659e80cd5afe3d272096be6e892c46c33b169af5d0c"
+catalog_checksum = "sha256:d8b29120429d9e60e7fdcd2a0833ce3acc4217d81805b9545014f4dad4102ae7"
 
 [[file]]
 path = ".anvil/container/Containerfile"
@@ -97,7 +97,7 @@ checksum = "sha256:3e0f0ab3826c4d259fc0bee8465cff17ab390796b584a3b6500f2ef606cfe
 
 [[file]]
 path = "justfiles/anvil/checks/cargo-sort.just"
-checksum = "sha256:7b5c824fe4ac01d317692d971d314cee1eeb9bdc957d73df990edebb1eace94f"
+checksum = "sha256:bb80567fbe3c9c082b73992971931a0316154aafce703252f2eb0cfb5a19ec27"
 
 [[file]]
 path = "justfiles/anvil/checks/clippy.just"
@@ -129,11 +129,11 @@ checksum = "sha256:fd34ede436d8f990f16ef3f5c42e99324e62b39412c199c01501c868a1523
 
 [[file]]
 path = "justfiles/anvil/checks/external-types.just"
-checksum = "sha256:df84846c336b5bcafff2a13bd2c02cb8eb571962dd29c492cf725f31f0439f46"
+checksum = "sha256:8b906cc383b812ac1a3a14a2450854d8c9b44860a8ab9b6e712c41c644aad794"
 
 [[file]]
 path = "justfiles/anvil/checks/fmt.just"
-checksum = "sha256:fc2cfea98e5a31348d4fafc47bf020928c525aa9962523aded8882dde475bb39"
+checksum = "sha256:735a444aa74023f2c02fdc9abca09d35e1c35b3b9309bf9f3ddbc20303aa99b0"
 
 [[file]]
 path = "justfiles/anvil/checks/license-headers.just"
@@ -249,11 +249,11 @@ checksum = "sha256:713c5a2ae28b6b5aa20dd38226278b3b7f71bbc5e6b84a16eaf5244713f27
 
 [[file]]
 path = "justfiles/anvil/tools.just"
-checksum = "sha256:a1e44ca16f172b487afa3997f102512733d3b65a4418cf894cbd749a3abc17dc"
+checksum = "sha256:c1f5181d14a734cde8ccc32bbf5acece485791573b7a95cfff61b63d0f1fcb97"
 
 [[file]]
 path = "justfiles/anvil/versions.just"
-checksum = "sha256:acbea93d5117db747537f4f7b9a5eb90b7d3e0dd3e8684cc0e4dc1dcb15ac93e"
+checksum = "sha256:699fe1053c28257d33516de880caf3224b23365f33dd8c9885c9bb96a0e3f94c"
 
 [[region]]
 host = ".delta.toml"

@@ -9,9 +9,10 @@
 # Affected tier (lints public API of changed crates and rev-deps).
 #
 # cargo-check-external-types is per-manifest: no --package/--workspace,
-# only --manifest-path. Iterate the affected library crates and run
-# the tool once each, pointing at the crate's Cargo.toml. Bin-only
-# crates have no public API surface and are skipped.
+# only --manifest-path. Iterate the affected publishable library crates and run
+# the tool once each, pointing at the crate's Cargo.toml. Bin-only crates have
+# no public API surface, while `publish = false` crates have no registry
+# consumer contract; both are skipped.
 # TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
 # skip/splat preamble, this recipe stays multi-step: cargo-check-
 # external-types is per-manifest (no --package/--workspace), so we
@@ -28,7 +29,7 @@ anvil-external-types: anvil-external-types-validate-prereqs
         exit 0
     }
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
-    # Build pkg-name -> manifest-path map, restricted to library crates.
+    # Build pkg-name -> manifest-path map, restricted to publishable library crates.
     $libPkgs = @{}
     $metadataJson = & cargo metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
@@ -42,7 +43,8 @@ anvil-external-types: anvil-external-types-validate-prereqs
         exit 1
     }
     foreach ($p in $meta.packages) {
-        if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
+        if (($p.targets | Where-Object { $_.kind -contains 'lib' }) -and
+            -not ($p.publish -is [array] -and $p.publish.Count -eq 0)) {
             $libPkgs[$p.name] = $p.manifest_path
         }
     }
