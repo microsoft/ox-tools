@@ -668,7 +668,7 @@ The upload step:
 ```yaml
 - name: Upload coverage to Codecov
   if: matrix.os != 'windows-arm' && needs.impact.outputs.skip != 'true'
-  uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+  uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
   with:
     files: target/coverage/lcov.info
     flags: ${{ matrix.os }}
