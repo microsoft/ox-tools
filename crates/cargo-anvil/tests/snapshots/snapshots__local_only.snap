@@ -1773,23 +1773,19 @@ anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
 
 # Modified tier.
 #
-# `--check-format` makes the formatting diff fail the check, not just the
-# sort order. cargo-sort 2.1.2+ downgraded formatting-only diffs to
-# warnings by default (PR #129); without this flag cargo-sort 2.1.2+
-# would pass on formatting drift. The flag preserves the intended
-# check behavior across the supported range.
+# `--no-format` limits this check to dependency ordering. General TOML
+# formatting can move tables and dotted keys independently of comments,
+# detaching Anvil's managed-region sentinels from the content they delimit.
 #
 # `--grouped` keeps the blank lines between groups of key/value pairs
-# (e.g. blank-line-separated dependency blocks) intact, matching
-# oxidizer-github's convention; without it cargo-sort would flag those
-# blank lines as a formatting diff and fail the check.
+# (e.g. blank-line-separated dependency blocks) intact.
 
 # Check that Cargo.toml dependency tables are sorted.
 [script("pwsh", "-NoProfile")]
 anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
-    cargo sort --workspace --grouped --check --check-format
+    cargo sort --workspace --grouped --check --no-format
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-cargo-sort` recipe.
@@ -2022,9 +2018,10 @@ anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs
 # Affected tier (lints public API of changed crates and rev-deps).
 #
 # cargo-check-external-types is per-manifest: no --package/--workspace,
-# only --manifest-path. Iterate the affected library crates and run
-# the tool once each, pointing at the crate's Cargo.toml. Bin-only
-# crates have no public API surface and are skipped.
+# only --manifest-path. Iterate the affected publishable library crates and run
+# the tool once each, pointing at the crate's Cargo.toml. Bin-only crates have
+# no public API surface, while `publish = false` crates have no registry
+# consumer contract; both are skipped.
 # TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
 # skip/splat preamble, this recipe stays multi-step: cargo-check-
 # external-types is per-manifest (no --package/--workspace), so we
@@ -2041,7 +2038,7 @@ anvil-external-types: anvil-external-types-validate-prereqs
         exit 0
     }
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
-    # Build pkg-name -> manifest-path map, restricted to library crates.
+    # Build pkg-name -> manifest-path map, restricted to publishable library crates.
     $libPkgs = @{}
     $metadataJson = & cargo metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
@@ -2055,7 +2052,8 @@ anvil-external-types: anvil-external-types-validate-prereqs
         exit 1
     }
     foreach ($p in $meta.packages) {
-        if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
+        if (($p.targets | Where-Object { $_.kind -contains 'lib' }) -and
+            -not ($p.publish -is [array] -and $p.publish.Count -eq 0)) {
             $libPkgs[$p.name] = $p.manifest_path
         }
     }
@@ -2127,8 +2125,30 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 anvil-fmt: anvil-fmt-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
-    cargo '+{{ rust_nightly }}' fmt --all --check
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $metadataJson = & cargo metadata --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error 'anvil-fmt: cargo metadata failed'
+        exit $LASTEXITCODE
+    }
+    try {
+        $metadata = $metadataJson | ConvertFrom-Json
+    } catch {
+        Write-Error "anvil-fmt: could not parse cargo metadata output: $_"
+        exit 1
+    }
+    $workspaceMembers = @{}
+    foreach ($id in $metadata.workspace_members) {
+        $workspaceMembers[$id] = $true
+    }
+    $packages = @(
+        $metadata.packages |
+            Where-Object { $workspaceMembers.ContainsKey($_.id) } |
+            Sort-Object name, version
+    )
+    foreach ($package in $packages) {
+        & cargo '+{{ rust_nightly }}' fmt --manifest-path $package.manifest_path --check
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
 
 # Per-check setup + validate-prereqs
 #

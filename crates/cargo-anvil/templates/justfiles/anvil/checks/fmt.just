@@ -18,8 +18,30 @@
 anvil-fmt: anvil-fmt-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
-    cargo '+{{ rust_nightly }}' fmt --all --check
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $metadataJson = & cargo metadata --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error 'anvil-fmt: cargo metadata failed'
+        exit $LASTEXITCODE
+    }
+    try {
+        $metadata = $metadataJson | ConvertFrom-Json
+    } catch {
+        Write-Error "anvil-fmt: could not parse cargo metadata output: $_"
+        exit 1
+    }
+    $workspaceMembers = @{}
+    foreach ($id in $metadata.workspace_members) {
+        $workspaceMembers[$id] = $true
+    }
+    $packages = @(
+        $metadata.packages |
+            Where-Object { $workspaceMembers.ContainsKey($_.id) } |
+            Sort-Object name, version
+    )
+    foreach ($package in $packages) {
+        & cargo '+{{ rust_nightly }}' fmt --manifest-path $package.manifest_path --check
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    }
 
 # Per-check setup + validate-prereqs
 #

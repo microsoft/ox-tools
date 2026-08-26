@@ -18,6 +18,7 @@ use tempfile::TempDir;
 const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
 #[cfg(target_os = "linux")]
 const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.just");
+const FMT: &str = include_str!("../templates/justfiles/anvil/checks/fmt.just");
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
@@ -49,6 +50,11 @@ if ($args -contains 'metadata') {
             id = "$packageName 0.1.0"
             manifest_path = $manifestPath
             targets = @([pscustomobject]@{ name = $libName; kind = @('lib') })
+            publish = if ($env:FAKE_PUBLISH_FALSE) {
+                Write-Output -NoEnumerate @()
+            } else {
+                $null
+            }
             metadata = [pscustomobject]@{
                 'coverage-gate' = [pscustomobject]@{ 'min-lines-percent' = 0 }
             }
@@ -66,12 +72,20 @@ if ($args -contains 'metadata') {
             id = "$($env:FAKE_SECOND_PACKAGE_NAME) 0.1.0"
             manifest_path = [System.IO.Path]::Combine($root, 'nested', $secondDirLeaf, 'Cargo.toml')
             targets = @([pscustomobject]@{ name = $env:FAKE_SECOND_PACKAGE_NAME; kind = @('lib') })
+            publish = $null
             metadata = [pscustomobject]@{}
         }
     }
     $metadata = [pscustomobject]@{
         workspace_root = $root
-        workspace_members = @($packages | ForEach-Object { $_.id })
+        workspace_members = @(
+            $packages |
+                Where-Object {
+                    -not ($env:FAKE_SECOND_PACKAGE_NON_MEMBER -and
+                        $_.name -eq $env:FAKE_SECOND_PACKAGE_NAME)
+                } |
+                ForEach-Object { $_.id }
+        )
         packages = $packages
     }
     $metadata | ConvertTo-Json -Depth 8 -Compress
@@ -117,6 +131,8 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
     // already defines it and Just rejects duplicate definitions.
     if !imports.iter().any(|(name, _)| *name == "versions.just") {
         justfile.push_str("rust_nightly := \"nightly-test\"\n\n");
+        justfile.push_str("rust_nightly_external_types := \"nightly-test\"\n\n");
+        justfile.push_str("cargo_check_external_types_version := \"0.0.0-test\"\n\n");
     }
     for (name, contents) in imports {
         write(&tmp.path().join(name), contents);
@@ -577,9 +593,9 @@ fn public_api_checks_fail_when_metadata_discovery_fails() {
             "anvil-external-types",
             &[
                 "anvil-tool-cargo-check-external-types-validate-prereqs",
-                "anvil-toolchain-external-types-validate-prereqs",
+                "anvil-toolchain-nightly-external-types-validate-prereqs",
                 "anvil-tool-cargo-check-external-types-install installer",
-                "anvil-toolchain-external-types-install",
+                "anvil-toolchain-nightly-external-types-install",
             ][..],
         ),
     ] {
@@ -604,6 +620,125 @@ fn public_api_checks_fail_when_metadata_discovery_fails() {
         );
         assert_failed(&malformed, &format!("{recipe} malformed cargo metadata"));
     }
+}
+
+#[test]
+fn fmt_formats_workspace_packages_individually() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("fmt.just", FMT)],
+        &[
+            "anvil-component-nightly-rustfmt-validate-prereqs",
+            "anvil-component-nightly-rustfmt-install",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-fmt"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("second")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "per-package formatting failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commands = std::fs::read_to_string(&log).unwrap();
+    assert!(commands.contains("metadata --no-deps --format-version 1"));
+    assert!(commands.contains(&format!(
+        "+nightly-test fmt --manifest-path {} --check",
+        tmp.path().join("Cargo.toml").display()
+    )));
+    assert!(commands.contains(&format!(
+        "+nightly-test fmt --manifest-path {} --check",
+        tmp.path().join("nested").join("Cargo.toml").display()
+    )));
+    assert!(!commands.contains("fmt --all"));
+
+    std::fs::write(&log, "").unwrap();
+    let output = run_just(
+        tmp.path(),
+        &["anvil-fmt"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("second")),
+            ("FAKE_SECOND_PACKAGE_NON_MEMBER", OsStr::new("1")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "workspace-member filtering failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commands = std::fs::read_to_string(log).unwrap();
+    assert!(commands.contains(&format!(
+        "+nightly-test fmt --manifest-path {} --check",
+        tmp.path().join("Cargo.toml").display()
+    )));
+    assert!(!commands.contains(&format!(
+        "fmt --manifest-path {}",
+        tmp.path().join("nested").join("Cargo.toml").display()
+    )));
+}
+
+#[test]
+fn fmt_fails_when_package_discovery_fails() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("fmt.just", FMT)],
+        &[
+            "anvil-component-nightly-rustfmt-validate-prereqs",
+            "anvil-component-nightly-rustfmt-install",
+        ],
+    );
+    for environment in [("FAKE_METADATA_EXIT", OsStr::new("23")), ("FAKE_METADATA_INVALID", OsStr::new("1"))] {
+        let output = run_just(tmp.path(), &["anvil-fmt"], &[environment]);
+        assert_failed(&output, "anvil-fmt package discovery failure");
+    }
+}
+
+#[test]
+fn external_types_skips_non_publishable_libraries() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("external-types.just", EXTERNAL_TYPES)],
+        &[
+            "anvil-tool-cargo-check-external-types-validate-prereqs",
+            "anvil-toolchain-nightly-external-types-validate-prereqs",
+            "anvil-tool-cargo-check-external-types-install installer",
+            "anvil-toolchain-nightly-external-types-install",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-external-types"],
+        &[
+            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_PUBLISH_FALSE", OsStr::new("1")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "private library filtering failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commands = std::fs::read_to_string(log).unwrap();
+    assert!(commands.contains("metadata --no-deps --format-version 1"));
+    assert!(!commands.contains("check-external-types --manifest-path"));
 }
 
 #[test]

@@ -8,23 +8,19 @@
 
 # Modified tier.
 #
-# `--check-format` makes the formatting diff fail the check, not just the
-# sort order. cargo-sort 2.1.2+ downgraded formatting-only diffs to
-# warnings by default (PR #129); without this flag cargo-sort 2.1.2+
-# would pass on formatting drift. The flag preserves the intended
-# check behavior across the supported range.
+# `--no-format` limits this check to dependency ordering. General TOML
+# formatting can move tables and dotted keys independently of comments,
+# detaching Anvil's managed-region sentinels from the content they delimit.
 #
 # `--grouped` keeps the blank lines between groups of key/value pairs
-# (e.g. blank-line-separated dependency blocks) intact, matching
-# oxidizer-github's convention; without it cargo-sort would flag those
-# blank lines as a formatting diff and fail the check.
+# (e.g. blank-line-separated dependency blocks) intact.
 
 # Check that Cargo.toml dependency tables are sorted.
 [script("pwsh", "-NoProfile")]
 anvil-cargo-sort: anvil-cargo-sort-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
-    cargo sort --workspace --grouped --check --check-format
+    cargo sort --workspace --grouped --check --no-format
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-cargo-sort` recipe.

@@ -456,15 +456,17 @@ anvil-clippy:
     cargo clippy ${ANVIL_INCLUDE_AFFECTED:---workspace} --all-targets --all-features --locked -- -D warnings
 ```
 
-A typical modified-tier recipe (the tool is workspace-wide, so there's nothing to
-splice — only the skip guard matters):
+A typical modified-tier recipe checks the whole workspace while keeping each
+rustfmt child command bounded:
 
 ```just
 anvil-fmt:
     @if [ "$ANVIL_INCLUDE_MODIFIED" = "--skip" ]; then \
         echo "anvil-fmt: no modified packages; skipping"; exit 0; \
     fi; \
-    cargo fmt --all --check
+    for manifest in $(cargo metadata ...); do \
+        cargo fmt --manifest-path "$manifest" --check; \
+    done
 ```
 
 The mapping from check to bucket is fixed in the catalog (see
