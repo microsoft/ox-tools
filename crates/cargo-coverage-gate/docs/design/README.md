@@ -234,7 +234,7 @@ Cargo-style target selectors nested under their package metadata:
 min-lines-percent = 100
 
 [package.metadata.coverage-gate.target.'cfg(not(windows))']
-enabled = false
+min-lines-percent = 0
 ```
 
 Selectors use the same grammar as Cargo's target-specific dependency tables:
@@ -245,19 +245,17 @@ expression (`cfg(windows)`, `cfg(target_os = "linux")`,
 `rustc --print cfg --target <triple>`, so it does not maintain a second target
 language.
 
-`enabled = false` disables coverage measurement and gating for that package on
-the matching target. It does not disable tests: orchestrators run the package
-through their non-instrumented test path. This is distinct from
+`min-lines-percent = 0` disables coverage measurement and gating for that
+package on the matching target. It does not disable tests: orchestrators run
+the package through their non-instrumented test path. This is distinct from
 `expect-no-coverable-lines = true`, which keeps a target-independent facade or
 re-export package in the instrumented test set so its tests can contribute
 coverage to other packages.
 
-Target tables may alternatively replace the base policy with
-`min-lines-percent` or `expect-no-coverable-lines`. A target table describes
-one complete policy; `enabled = false`, `min-lines-percent`, and
-`expect-no-coverable-lines = true` are mutually exclusive in that table.
-`enabled = true` explicitly inherits the base package/workspace policy and is
-useful when an exact target needs to override a broader `cfg(...)` opt-out.
+Target tables replace the base policy with either `min-lines-percent` or
+`expect-no-coverable-lines = true`. The two are mutually exclusive. An exact
+target that overrides a broader `cfg(...)` opt-out repeats its positive
+threshold.
 
 Resolution follows Cargo's precedence:
 
@@ -270,9 +268,9 @@ Resolution follows Cargo's precedence:
 
 The CLI accepts `--target <triple>`. When omitted, it obtains the host triple
 from `rustc -vV`. A dedicated `--print-test-only-packages` mode loads metadata
-and prints packages whose effective policy is `min-lines-percent = 0` or
-`enabled = false`, without reading lcov. Coverage orchestrators use this before
-selecting packages for instrumentation.
+and prints packages whose effective policy is `min-lines-percent = 0`, without
+reading lcov. Coverage orchestrators use this before selecting packages for
+instrumentation.
 
 ### 5.4 The verdict table
 
@@ -429,9 +427,10 @@ state and classifies as a pass (`EMPTY` / `➖`), not the no-data
 configuration error. Conversely, if such a package *does* have attributed
 coverable lines, it fails the gate (exit `1`) rather than passing.
 
-A package disabled by its target-specific policy (§5.3) is removed from the gated set
-before attribution. It therefore neither produces a table row nor triggers the
-no-data error on an unsupported target.
+A package whose effective target policy sets `min-lines-percent = 0` passes,
+including when it has no attributed data. Coverage orchestrators use
+`--print-test-only-packages` to remove it from instrumentation while still
+running its tests through a plain test runner.
 
 ### 6.4 Cross-package test attribution
 

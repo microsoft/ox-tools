@@ -54,7 +54,7 @@ pub(crate) struct CoverageGateArgs {
     /// Print packages that should run tests without coverage and exit.
     ///
     /// Includes packages whose effective policy has
-    /// `min-lines-percent = 0` or `enabled = false`.
+    /// `min-lines-percent = 0`.
     #[arg(long)]
     pub(crate) print_test_only_packages: bool,
 

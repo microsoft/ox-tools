@@ -49,12 +49,12 @@ A package can replace that policy for a Cargo-style target selector:
 min-lines-percent = 100
 
 [package.metadata.coverage-gate.target.'cfg(not(windows))']
-enabled = false
+min-lines-percent = 0
 ```
 
-`enabled = false` disables coverage measurement and gating on the
-matching target, but does not disable test execution in automation
-such as Cargo Anvil.
+A zero target-specific threshold disables coverage measurement and
+gating on the matching target, but does not disable test execution
+in automation such as Cargo Anvil.
 
 ### Why lcov, not the JSON?
 
@@ -120,7 +120,7 @@ plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbNxCFhIlcaZ4bsa602UxpyRQbgFr106dXJHcbhevnlfEoou9hZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbLvZZTPMnX1MbqhSMPfjasNcbUGTGpUxEN_4bq9cT9Euzu55hZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate.html
  [__link2]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/struct.EvaluatedReport.html

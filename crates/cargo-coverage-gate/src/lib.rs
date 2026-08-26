@@ -40,12 +40,12 @@
 //! min-lines-percent = 100
 //!
 //! [package.metadata.coverage-gate.target.'cfg(not(windows))']
-//! enabled = false
+//! min-lines-percent = 0
 //! ```
 //!
-//! `enabled = false` disables coverage measurement and gating on the
-//! matching target, but does not disable test execution in automation
-//! such as Cargo Anvil.
+//! A zero target-specific threshold disables coverage measurement and
+//! gating on the matching target, but does not disable test execution
+//! in automation such as Cargo Anvil.
 //!
 //! ## Why lcov, not the JSON?
 //!
@@ -280,9 +280,9 @@ pub fn evaluate_many_for_target(
 /// Return packages that should run tests without coverage for `target`.
 ///
 /// This metadata-only query is intended for coverage automation that
-/// must remove packages with `min-lines-percent = 0` or
-/// `enabled = false` from instrumentation while still running their tests
-/// through a plain test runner.
+/// must remove packages with an effective `min-lines-percent = 0` from
+/// instrumentation while still running their tests through a plain test
+/// runner.
 ///
 /// # Errors
 ///
@@ -298,7 +298,7 @@ pub fn test_only_packages(
     let selected = verdict::resolve_gated(&ws, packages)?;
     Ok(selected
         .into_iter()
-        .filter(|member| member.coverage_disabled || member.min_lines_percent == Some(0.0))
+        .filter(|member| member.min_lines_percent == Some(0.0))
         .map(|member| member.name.clone())
         .collect())
 }

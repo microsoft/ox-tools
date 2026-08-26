@@ -286,7 +286,7 @@ fn conflicting_coverage_metadata_exits_2() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
-fn target_disabled_package_is_omitted_from_gate() {
+fn target_zero_threshold_opts_package_out_of_gate() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace_with_gate(
         tmp.path(),
@@ -295,7 +295,7 @@ fn target_disabled_package_is_omitted_from_gate() {
                 "alpha",
                 "min-lines-percent = 100\n\n\
                  [package.metadata.coverage-gate.target.'cfg(not(windows))']\n\
-                 enabled = false",
+                min-lines-percent = 0",
             ),
             ("beta", "min-lines-percent = 80"),
         ],
@@ -307,7 +307,9 @@ fn target_disabled_package_is_omitted_from_gate() {
         .assert()
         .success()
         .stdout(predicate::str::contains("beta"))
-        .stdout(predicate::str::contains("alpha").not());
+        .stdout(predicate::str::contains("alpha"))
+        .stdout(predicate::str::contains("(no data)"))
+        .stdout(predicate::str::contains("0.0%"));
 }
 
 #[test]
@@ -321,7 +323,7 @@ fn print_test_only_packages_does_not_read_lcov() {
                 "alpha",
                 "min-lines-percent = 100\n\n\
                  [package.metadata.coverage-gate.target.'cfg(not(windows))']\n\
-                 enabled = false",
+                min-lines-percent = 0",
             ),
             ("beta", "expect-no-coverable-lines = true"),
             ("gamma", "min-lines-percent = 0"),
@@ -349,7 +351,7 @@ fn print_test_only_packages_does_not_read_lcov() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
-fn target_disabled_package_remains_gated_on_supported_target() {
+fn target_zero_threshold_package_remains_gated_on_supported_target() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace_with_gate(
         tmp.path(),
@@ -357,7 +359,7 @@ fn target_disabled_package_remains_gated_on_supported_target() {
             "alpha",
             "min-lines-percent = 100\n\n\
              [package.metadata.coverage-gate.target.'cfg(not(windows))']\n\
-             enabled = false",
+            min-lines-percent = 0",
         )],
     );
     let empty_lcov = write_lcov(tmp.path(), &[]);

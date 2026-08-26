@@ -54,8 +54,6 @@ pub(crate) struct Member {
     /// and fails (as a regression) if coverable lines appear. Mutually
     /// exclusive with [`Member::min_lines_percent`].
     pub(crate) expect_no_coverable_lines: bool,
-    /// A matching target policy disabled coverage measurement and gating.
-    pub(crate) coverage_disabled: bool,
 }
 
 impl Workspace {
@@ -91,13 +89,12 @@ impl Workspace {
                     .as_std_path()
                     .to_path_buf();
                 let mut gate = extract_coverage_gate(&pkg.metadata, &pkg.name, Scope::Package)?;
-                let coverage_disabled = apply_target_policy(&mut gate, target, &pkg.name)?;
+                apply_target_policy(&mut gate, target, &pkg.name)?;
                 Ok::<Member, CoverageGateError>(Member {
                     name: pkg.name.to_string(),
                     manifest_dir,
                     min_lines_percent: gate.min_lines_percent,
                     expect_no_coverable_lines: gate.expect_no_coverable_lines,
-                    coverage_disabled,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -143,8 +140,6 @@ struct TargetPolicy {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PolicyOverride {
-    Inherit,
-    Disabled,
     Threshold(f64),
     ExpectNoCoverableLines,
 }
@@ -201,7 +196,7 @@ fn extract_target_policies(gate: &Value, source: &str, scope: Scope) -> Result<V
             let policy_source = format!("{source} target `{selector_text}`");
             let selector = Platform::from_str(selector_text)
                 .map_err(|error| InvalidTargetSelectorError::new(source.to_owned(), selector_text.clone(), error.to_string()))?;
-            let policy_table = raw_policy
+            raw_policy
                 .as_object()
                 .ok_or_else(|| InvalidTargetPolicyError::new(policy_source.clone(), "policy must be a table".to_owned()))?;
 
@@ -211,26 +206,16 @@ fn extract_target_policies(gate: &Value, source: &str, scope: Scope) -> Result<V
                 return Err(ConflictingCoverageMetadataError::new(policy_source).into());
             }
 
-            let enabled = match policy_table.get("enabled") {
-                Some(Value::Bool(value)) => Some(*value),
-                Some(value) => {
-                    return Err(InvalidTargetPolicyError::new(policy_source, format!("`enabled` must be a boolean, got {value}")).into());
-                }
-                None => None,
-            };
-            if enabled.is_some() && (min_lines_percent.is_some() || expect_no_coverable_lines) {
+            let policy = if expect_no_coverable_lines {
+                PolicyOverride::ExpectNoCoverableLines
+            } else if let Some(value) = min_lines_percent {
+                PolicyOverride::Threshold(value)
+            } else {
                 return Err(InvalidTargetPolicyError::new(
                     policy_source,
-                    "`enabled`, `min-lines-percent`, and `expect-no-coverable-lines = true` are mutually exclusive".to_owned(),
+                    "policy must set `min-lines-percent` or `expect-no-coverable-lines = true`".to_owned(),
                 )
                 .into());
-            }
-
-            let policy = match enabled {
-                Some(false) => PolicyOverride::Disabled,
-                Some(true) => PolicyOverride::Inherit,
-                None if expect_no_coverable_lines => PolicyOverride::ExpectNoCoverableLines,
-                None => min_lines_percent.map_or(PolicyOverride::Inherit, PolicyOverride::Threshold),
             };
             Ok(TargetPolicy {
                 selector_text: selector_text.clone(),
@@ -241,7 +226,7 @@ fn extract_target_policies(gate: &Value, source: &str, scope: Scope) -> Result<V
         .collect()
 }
 
-fn apply_target_policy(metadata: &mut CoverageGateMetadata, target: &TargetContext, source: &str) -> Result<bool, CoverageGateError> {
+fn apply_target_policy(metadata: &mut CoverageGateMetadata, target: &TargetContext, source: &str) -> Result<(), CoverageGateError> {
     let exact = metadata
         .target_policies
         .iter()
@@ -266,17 +251,16 @@ fn apply_target_policy(metadata: &mut CoverageGateMetadata, target: &TargetConte
     };
 
     match selected.map(|policy| policy.policy) {
-        None | Some(PolicyOverride::Inherit) => Ok(false),
-        Some(PolicyOverride::Disabled) => Ok(true),
+        None => Ok(()),
         Some(PolicyOverride::Threshold(value)) => {
             metadata.min_lines_percent = Some(value);
             metadata.expect_no_coverable_lines = false;
-            Ok(false)
+            Ok(())
         }
         Some(PolicyOverride::ExpectNoCoverableLines) => {
             metadata.min_lines_percent = None;
             metadata.expect_no_coverable_lines = true;
-            Ok(false)
+            Ok(())
         }
     }
 }
@@ -607,18 +591,18 @@ expect-no-coverable-lines = false
 
     #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
     #[test]
-    fn matching_cfg_policy_disables_package() {
+    fn matching_cfg_policy_opts_package_out_with_zero_threshold() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\"]\n";
         let alpha = member_with_gate(
             "alpha",
-            "min-lines-percent = 100\n\n[package.metadata.coverage-gate.target.'cfg(not(windows))']\nenabled = false",
+            "min-lines-percent = 100\n\n[package.metadata.coverage-gate.target.'cfg(not(windows))']\nmin-lines-percent = 0",
         );
         write_workspace(tmp.path(), root, &[("alpha", &alpha)]);
 
         let ws = load(&tmp.path().join("Cargo.toml")).expect("workspace load should succeed");
         let alpha = ws.members.iter().find(|member| member.name == "alpha").expect("alpha");
-        assert!(alpha.coverage_disabled);
+        assert_eq!(alpha.min_lines_percent, Some(0.0));
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
@@ -630,9 +614,9 @@ expect-no-coverable-lines = false
             "alpha",
             "min-lines-percent = 90\n\n\
              [package.metadata.coverage-gate.target.'cfg(windows)']\n\
-             enabled = false\n\n\
+             min-lines-percent = 0\n\n\
              [package.metadata.coverage-gate.target.x86_64-pc-windows-msvc]\n\
-             enabled = true",
+             min-lines-percent = 90",
         );
         write_workspace(tmp.path(), root, &[("alpha", &alpha)]);
         let target = TargetContext::from_parts(
@@ -642,7 +626,6 @@ expect-no-coverable-lines = false
 
         let ws = Workspace::load(Some(&tmp.path().join("Cargo.toml")), &target).expect("workspace load should succeed");
         let alpha = ws.members.iter().find(|member| member.name == "alpha").expect("alpha");
-        assert!(!alpha.coverage_disabled);
         assert_eq!(alpha.min_lines_percent, Some(90.0));
     }
 
@@ -672,7 +655,7 @@ expect-no-coverable-lines = false
             "alpha",
             "min-lines-percent = 90\n\n\
              [package.metadata.coverage-gate.target.'cfg(unix)']\n\
-             enabled = false\n\n\
+             min-lines-percent = 0\n\n\
              [package.metadata.coverage-gate.target.'cfg(target_os = \"linux\")']\n\
              min-lines-percent = 75",
         );
@@ -686,20 +669,18 @@ expect-no-coverable-lines = false
 
     #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
     #[test]
-    fn target_policy_rejects_conflicting_enabled_and_threshold() {
+    fn target_policy_rejects_missing_policy_value() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\"]\n";
         let alpha = member_with_gate(
             "alpha",
             "min-lines-percent = 90\n\n\
-             [package.metadata.coverage-gate.target.'cfg(unix)']\n\
-             enabled = false\n\
-             min-lines-percent = 0",
+             [package.metadata.coverage-gate.target.'cfg(unix)']",
         );
         write_workspace(tmp.path(), root, &[("alpha", &alpha)]);
 
-        let error = load(&tmp.path().join("Cargo.toml")).expect_err("conflicting target policy must fail");
-        assert!(error.to_string().contains("mutually exclusive"));
+        let error = load(&tmp.path().join("Cargo.toml")).expect_err("empty target policy must fail");
+        assert!(error.to_string().contains("policy must set"));
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
@@ -720,7 +701,6 @@ expect-no-coverable-lines = false
         let alpha = ws.members.iter().find(|member| member.name == "alpha").expect("alpha");
         assert_eq!(alpha.min_lines_percent, None);
         assert!(alpha.expect_no_coverable_lines);
-        assert!(!alpha.coverage_disabled);
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
@@ -733,7 +713,7 @@ resolver = "2"
 members = ["alpha"]
 
 [workspace.metadata.coverage-gate.target.'cfg(unix)']
-enabled = false
+min-lines-percent = 0
 "#;
         write_workspace(tmp.path(), root, &[("alpha", &member("alpha", None))]);
 
@@ -751,12 +731,12 @@ enabled = false
                 "policy must be a table",
             ),
             (
-                "[package.metadata.coverage-gate.target.'not a selector']\nenabled = false",
+                "[package.metadata.coverage-gate.target.'not a selector']\nmin-lines-percent = 0",
                 "invalid coverage-gate target selector",
             ),
             (
-                "[package.metadata.coverage-gate.target.'cfg(unix)']\nenabled = \"no\"",
-                "`enabled` must be a boolean",
+                "[package.metadata.coverage-gate.target.'cfg(unix)']\nunknown = false",
+                "policy must set",
             ),
             (
                 "[package.metadata.coverage-gate.target.'cfg(unix)']\nmin-lines-percent = 90\nexpect-no-coverable-lines = true",

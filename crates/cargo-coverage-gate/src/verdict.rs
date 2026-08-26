@@ -104,10 +104,7 @@ impl Report {
 /// glob pattern (`*` and `?`). A literal that matches no workspace
 /// member, or a glob that matches none, produces a [`CoverageGateError`].
 pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_packages: &[String]) -> Result<Report, CoverageGateError> {
-    let gated: Vec<&Member> = resolve_gated(workspace, gated_packages)?
-        .into_iter()
-        .filter(|member| !member.coverage_disabled)
-        .collect();
+    let gated = resolve_gated(workspace, gated_packages)?;
 
     let AttributionOutcome { by_member, unattributed } = attribute(&report.files, &workspace.members);
 
@@ -300,7 +297,6 @@ mod tests {
             manifest_dir: PathBuf::from(manifest_dir),
             min_lines_percent,
             expect_no_coverable_lines: false,
-            coverage_disabled: false,
         }
     }
 
@@ -310,7 +306,6 @@ mod tests {
             manifest_dir: PathBuf::from(manifest_dir),
             min_lines_percent: None,
             expect_no_coverable_lines: true,
-            coverage_disabled: false,
         }
     }
 

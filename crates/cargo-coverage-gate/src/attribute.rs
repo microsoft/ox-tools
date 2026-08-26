@@ -70,7 +70,6 @@ mod tests {
             manifest_dir: PathBuf::from(manifest_dir),
             min_lines_percent: None,
             expect_no_coverable_lines: false,
-            coverage_disabled: false,
         }
     }
 
