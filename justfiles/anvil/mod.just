@@ -66,10 +66,10 @@ import 'checks/readme-check.just'
 import 'checks/semver-check.just'
 import 'checks/spellcheck.just'
 import 'checks/udeps.just'
-# Optional: containers.md §8 documents removing the container artifacts through
-# `without_artifact`, which deletes this file. A hard import would then fail
-# parsing for every recipe in the tree, not merely the container ones, so the
-# documented opt-out would break the whole Justfile.
+# Optional: the container artifacts can be removed through `without_artifact`,
+# which deletes this file. A hard import would then fail parsing for every
+# recipe in the tree, not merely the container ones, so the documented opt-out
+# would break the whole Justfile.
 import? 'container.just'
 import 'groups/pr-fast.just'
 import 'groups/pr-slow.just'

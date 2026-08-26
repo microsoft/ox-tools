@@ -468,15 +468,15 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbCpN2n89Kx1AbOat1oo99_c4babhpCrfrqV8bSQWuf-vfBINhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbCpN2n89Kx1AbOat1oo99_c4babhpCrfrqV8bSQWuf-vfBINhZIGDa2NhcmdvLWFudmlsZTAuNS4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
- [__link1]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts::container
- [__link10]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts
+ [__link1]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=artifacts::container
+ [__link10]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=artifacts
  [__link2]: https://crates.io/crates/cargo-spellcheck
  [__link3]: https://crates.io/crates/cargo-coverage-gate
- [__link4]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=Catalog
- [__link5]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=Catalog::anvil
- [__link6]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CliMeta
- [__link7]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CatalogBuilder::with_artifact
- [__link8]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
- [__link9]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CatalogBuilder::without_artifact
+ [__link4]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=Catalog
+ [__link5]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=Catalog::anvil
+ [__link6]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CliMeta
+ [__link7]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CatalogBuilder::with_artifact
+ [__link8]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
+ [__link9]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CatalogBuilder::without_artifact

@@ -229,10 +229,14 @@ mod tests {
         // the consumer performs: a second copy of the hash would let the two
         // drift and turn a published tag into a claim nobody checks.
         assert_eq!(
-            RECIPE.matches("ComputeHash(").count(),
+            RECIPE.matches("TransformFinalBlock").count(),
             1,
             "the content hash must be computed once, by anvil-container-tag"
         );
+        // Bytes, not decoded text: ReadAllText replaces every invalid sequence
+        // with U+FFFD, so two files differing only in invalid bytes would hash
+        // alike while COPY put their real bytes in the image.
+        assert!(RECIPE.contains("[System.IO.File]::ReadAllBytes($path)"));
         assert!(
             RECIPE.contains("$image = & '{{ replace(just_executable(), \"'\", \"''\") }}' anvil-container-tag"),
             "the resolver must ask anvil-container-tag rather than recompute"

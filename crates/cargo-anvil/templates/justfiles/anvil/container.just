@@ -130,6 +130,14 @@ anvil-container-tag:
     $hookRel = '.anvil/container/hooks.ps1'
 
     $inputs = @($dockerfile, "$dockerfile.dockerignore", 'rust-toolchain.toml')
+    # The declared inputs are text this tree owns, so their line endings are
+    # normalized before hashing and a CRLF checkout agrees with an LF one.
+    # Everything discovered under justfiles/anvil/ is treated as text only when
+    # it is a `.just` recipe; anything else is hashed as the bytes the build
+    # context actually copies.
+    $declaredText = [System.Collections.Generic.HashSet[string]]::new(
+        [string[]]$inputs, [System.StringComparer]::Ordinal)
+    [void]$declaredText.Add($hookRel)
     if (Test-Path -LiteralPath (Join-Path $repoRoot $hookRel) -PathType Leaf) {
         # The hook decides what the build installs, so its content defines the
         # image as surely as the Dockerfile does. Its *output* is deliberately
@@ -181,30 +189,49 @@ anvil-container-tag:
     # path and body, for instance -- and the second state would silently reuse
     # the first state's image. Byte counts cannot be forged by content.
     #
-    # UTF-8 byte counts, not String.Length: the stream is hashed as UTF-8, and a
-    # publisher re-implementing this from the design document has to arrive at
-    # the same bytes. UTF-16 code units would differ for any non-ASCII path or
-    # content and make the spec unimplementable outside .NET.
-    $stream = [System.Text.StringBuilder]::new()
+    # Content is hashed as BYTES, not as decoded text. `ReadAllText` decodes
+    # UTF-8 with a replacing fallback, so every invalid sequence becomes U+FFFD
+    # before it is hashed: a one-byte file of 0xFF and one of 0xFE both collapse
+    # to the same replacement character and produce the same tag, while `COPY`
+    # puts their real, different bytes in the image. That was unreachable while
+    # only `*.just` was hashed and became reachable the moment the input set
+    # widened to everything the build context copies -- which is precisely the
+    # class of file (a stray `.png`, a `.DS_Store`, a UTF-16 fragment) that the
+    # widening admitted.
+    #
+    # Line endings are still normalized, but only for the text this tree owns:
+    # a `.just` recipe and the declared inputs, which a CRLF checkout and an LF
+    # checkout must agree on. Normalizing bytes generally would reintroduce the
+    # same collision from the other direction.
     $ordered = [System.Collections.Generic.SortedSet[string]]::new(
         [string[]]$inputs, [System.StringComparer]::Ordinal)
-    foreach ($rel in $ordered) {
-        $path = Join-Path $repoRoot $rel
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
-            Write-Error "anvil: container image input is missing: $rel"
-            exit 1
-        }
-        $text = [System.IO.File]::ReadAllText($path) -replace "`r`n", "`n"
-        [void]$stream.Append('file ').Append([System.Text.Encoding]::UTF8.GetByteCount($rel)).Append(' ').Append($rel)
-        [void]$stream.Append(' ').Append([System.Text.Encoding]::UTF8.GetByteCount($text)).Append(' ').Append($text)
-    }
     # ComputeHash rather than the static HashData: the latter arrived in .NET 5,
     # and the prerequisite check accepts any PowerShell 7, including 7.0 on
     # .NET Core 3.1 where the static overload does not exist. Failing there
     # would be a MethodNotFound at tag time, before anything useful happened.
     $sha = [System.Security.Cryptography.SHA256]::Create()
     try {
-        $digest = $sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($stream.ToString()))
+        foreach ($rel in $ordered) {
+            $path = Join-Path $repoRoot $rel
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                Write-Error "anvil: container image input is missing: $rel"
+                exit 1
+            }
+            if ([System.IO.Path]::GetExtension($rel) -eq '.just' -or $declaredText.Contains($rel)) {
+                $content = [System.Text.Encoding]::UTF8.GetBytes(
+                    ([System.IO.File]::ReadAllText($path) -replace "`r`n", "`n"))
+            } else {
+                $content = [System.IO.File]::ReadAllBytes($path)
+            }
+            $header = [System.Text.Encoding]::UTF8.GetBytes(
+                'file ' + [System.Text.Encoding]::UTF8.GetByteCount($rel) + ' ' + $rel + ' ' + $content.Length + ' ')
+            [void]$sha.TransformBlock($header, 0, $header.Length, $null, 0)
+            if ($content.Length -gt 0) {
+                [void]$sha.TransformBlock($content, 0, $content.Length, $null, 0)
+            }
+        }
+        [void]$sha.TransformFinalBlock([byte[]]::new(0), 0, 0)
+        $digest = $sha.Hash
     } finally {
         $sha.Dispose()
     }
