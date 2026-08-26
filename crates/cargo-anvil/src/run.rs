@@ -464,10 +464,10 @@ fn delta_region_body(host_text: Option<&str>, spec: &RegionSpec) -> DeltaRegionB
 
     if document.as_table().contains_key("lints") {
         return DeltaRegionBody::PreserveRepositoryKey(
-            "this crate owns its lint set (`[lints]` or `[lints.*]`), so the managed anvil-lints \
-             region was left empty. Cargo rejects a manifest carrying both, which would break \
-             `cargo metadata` for the whole workspace. Adopting the catalog is optional: drop the \
-             crate's own lints to take it."
+            "This crate already declares `[lints]` or `[lints.*]`, so the managed anvil-lints \
+             region was left empty; a second `[lints]` table would make cargo reject the \
+             manifest and break `cargo metadata` for the whole workspace. Adopting the catalog \
+             is optional: drop the crate's own declaration to take it."
                 .to_owned(),
         );
     }
@@ -1112,7 +1112,7 @@ mod tests {
             .expect("the region stays tracked, so dropping the crate's lints adopts the catalog");
         assert!(region.is_empty(), "a crate that owns its lints opts out of the managed body");
         assert!(
-            outcome.plan.notes().iter().any(|note| note.contains("owns its lint set")),
+            outcome.plan.notes().iter().any(|note| note.contains("already declares")),
             "the opt-out must be visible in the plan summary"
         );
         assert!(
