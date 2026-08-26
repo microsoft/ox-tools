@@ -462,7 +462,7 @@ fn region_placement(region_id: &str) -> RegionPlacement {
 /// Most region hosts are files the repository already has (`Cargo.toml`,
 /// `deny.toml`) or files whose first region can simply be appended to nothing.
 /// The container Dockerfile is neither: `# syntax=docker/dockerfile:1` is a
-/// BuildKit parser directive that is honored only when nothing precedes it,
+/// `BuildKit` parser directive that is honored only when nothing precedes it,
 /// not even a comment — so it cannot live inside a region, whose opening
 /// sentinel *is* a comment.
 fn host_scaffold(host_relpath: &str) -> Option<&'static str> {
@@ -498,23 +498,34 @@ fn host_carries_any_region(host_relpath: &str, text: &str) -> bool {
 /// silently wrong or unbuildable image. Detect it and refuse instead.
 fn host_composition_violation(host_relpath: &str, text: &str) -> Option<String> {
     let order = host_region_order(host_relpath)?;
-    let mut previous: Option<(&str, usize)> = None;
-    for id in order {
-        // A malformed region is reported by the planner itself, with a better
-        // message than this check could give; a region that is simply absent is
-        // about to be written.
-        let Ok(Some(region)) = find_region(text, id, CommentSyntax::Hash) else {
-            continue;
-        };
-        let start = region.start_line.start;
-        if let Some((earlier_id, earlier_start)) = previous
-            && start < earlier_start
-        {
-            return Some(format!("region '{id}' appears before '{earlier_id}', but must follow it"));
-        }
-        previous = Some((id, start));
-    }
-    None
+    // The regions actually present, in the order the catalog declares them. A
+    // malformed region is reported by the planner itself, with a better message
+    // than this check could give; one that is simply absent is about to be
+    // written.
+    let declared: Vec<(&str, usize)> = order
+        .iter()
+        .filter_map(|id| match find_region(text, id, CommentSyntax::Hash) {
+            Ok(Some(region)) => Some((*id, region.start_line.start)),
+            _ => None,
+        })
+        .collect();
+
+    // The same regions, in the order the file carries them. Comparing the two
+    // sequences rather than adjacent offsets keeps the check free of an
+    // ordering operator whose boundary cannot be exercised: two distinct
+    // regions can never share a start offset, so `<` and `<=` over positions
+    // would be indistinguishable by any test.
+    let mut by_position = declared.clone();
+    by_position.sort_by_key(|&(_, start)| start);
+
+    let (expected, found) = declared
+        .iter()
+        .zip(by_position.iter())
+        .find(|(expected, found)| expected.0 != found.0)?;
+    Some(format!(
+        "region '{}' appears before '{}', but must follow it",
+        found.0, expected.0
+    ))
 }
 
 enum DeltaRegionBody {

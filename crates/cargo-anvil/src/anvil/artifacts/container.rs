@@ -55,7 +55,7 @@ const DOCKERIGNORE: &str = include_str!("../../../templates/anvil/container/Dock
 /// Seeded into the Dockerfile when the file does not exist, and never
 /// reconciled afterwards — it is the user's half of a composed file.
 ///
-/// It carries `# syntax=docker/dockerfile:1`, which BuildKit honors only as
+/// It carries `# syntax=docker/dockerfile:1`, which `BuildKit` honors only as
 /// the very first line of the file. A region's opening sentinel is a comment,
 /// so the directive cannot live inside a region without being demoted to an
 /// ordinary comment — silently, with the build falling back to the default

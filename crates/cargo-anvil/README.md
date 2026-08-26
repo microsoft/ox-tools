@@ -236,13 +236,14 @@ you trust.
 #### Customizing the image
 
 `.anvil/container/Dockerfile` is a **user-composed file with managed
-regions**: anvil owns four regions inside it and reconciles them on every
-run, and the three gaps between them are the repository’s. Add extra
-packages in the gap that suits when they are needed – before the first
-download for a root CA or a proxy, before `anvil-setup` for libraries a
-catalog tool compiles against, after it for what the checks need at run
-time. Nothing anvil owns is touched, so base and tool-pin bumps keep
-landing.
+regions**: anvil owns four regions inside it and keeps them current, and the
+three gaps between them are the repository’s. Add extra packages in the gap
+that suits when they are needed – before the first download for a root CA
+or a proxy, before `anvil-setup` for libraries a catalog tool compiles
+against, after it for what the checks need at run time. Adding in a gap
+leaves anvil’s content alone, so base and tool-pin bumps keep landing;
+editing inside a region is preserved rather than overwritten, but freezes
+those pins at the moment of the edit, which is why the gaps exist.
 
 A downstream catalog that needs a different base OS for every repository it
 manages replaces the base and tool regions instead, inheriting the catalog
@@ -479,7 +480,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQb6i_TmlHRql4bFUHGYxLMHPgbSgKMOCwLAF4bQ9SS643u-FthZIGDa2NhcmdvLWFudmlsZTAuNS4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQb0_sOYsKJMp8bpzOrXba6KmQb91-G89nTbKMbiEX1pLcp3IRhZIGDa2NhcmdvLWFudmlsZTAuNS4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=artifacts
