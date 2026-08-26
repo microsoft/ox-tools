@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.5.0] - 2026-08-25
+
+- ✨ Features
+
+  - publish scheduled failures as issues ([#65](https://github.com/microsoft/ox-tools/pull/65))
+  - name dynamic failure statuses
+  - report concrete GitHub failures
+  - add cargo-aprz and cargo-ensure-no-default-features ([#76](https://github.com/microsoft/ox-tools/pull/76))
+
+- 🐛 Bug Fixes
+
+  - skip group runner tests under Miri
+  - address Anvil status review feedback
+  - refine GitHub check hierarchy
+  - clarify aggregate check names
+  - shorten failure status descriptions
+  - prioritize detailed PR statuses
+  - improve PR title check diagnostics ([#64](https://github.com/microsoft/ox-tools/pull/64))
+
+- 📚 Documentation
+
+  - design per-job status reporting
+
+- 🏗️ Build System
+
+  - unbreak CI by bumping the static-analysis toolchain and cargo-spellcheck ([#88](https://github.com/microsoft/ox-tools/pull/88))
+
+- 🧩 Miscellaneous
+
+  - Tolerate unreproducible SemVer baselines
+  - Handle all Just failure diagnostics
+  - Align Anvil permission documentation
+  - Harden Anvil group validation output
+  - Fix Anvil reusable workflow permissions
+  - Merge origin/main into anvil-job-status-reporting
+
 ## [0.4.0] - 2026-08-04
 
 - ✨ Features

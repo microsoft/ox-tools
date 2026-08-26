@@ -31,9 +31,8 @@ on:
           configured at Codecov; required for private repos.
         required: false
 
-# The caller grants the maximum token scopes available to this reusable
-# workflow. Reset jobs to read-only here, then restore only the publisher's
-# issues scope below. See docs/design/github.md §9.
+# A called workflow cannot elevate beyond its caller. Reset ordinary jobs here,
+# then restore only the publisher's issue scope below.
 permissions:
   contents: read
 
@@ -54,8 +53,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           lfs: true
-      - uses: ./.github/actions/anvil-scheduled-test
+      - uses: ./.github/actions/anvil-run-group
         with:
+          group: scheduled-test
           free-disk-space: true
       - name: Upload coverage to Codecov
         # Upload from every leg except windows-11-arm (see the matching
@@ -87,7 +87,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           lfs: true
-      - uses: ./.github/actions/anvil-scheduled-advisories
+      - uses: ./.github/actions/anvil-run-group
+        with:
+          group: scheduled-advisories
 
   scheduled-runtime-analysis:
     # Full-workspace counterpart of pr-runtime-analysis. OS matrix
@@ -112,7 +114,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           lfs: true
-      - uses: ./.github/actions/anvil-scheduled-runtime-analysis
+      - uses: ./.github/actions/anvil-run-group
+        with:
+          group: scheduled-runtime-analysis
 
   scheduled-exhaustive:
     # x86_64-only by design: this group includes mutants-full (which
@@ -127,7 +131,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           lfs: true
-      - uses: ./.github/actions/anvil-scheduled-exhaustive
+      - uses: ./.github/actions/anvil-run-group
+        with:
+          group: scheduled-exhaustive
 
   publish-failure:
     name: Publish scheduled failure

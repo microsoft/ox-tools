@@ -15,8 +15,11 @@ need to change:
    impact job and the per-group jobs with all the `needs.impact.outputs.*` plumbing.
    These change when anvil's groups or impact wiring evolve; most users won't ever edit
    them.
-3. **Per-group composite actions** (`.github/actions/anvil-*/`). Each is a multi-step
-   composite that runs setup + the matching `just anvil-<tier>-<group>` recipe.
+3. **Shared composite actions** (`.github/actions/anvil-*/`). The reusable
+   workflows pass a constant group name to one `anvil-run-group` action, which
+   runs setup plus the matching `just anvil-<tier>-<group>` recipe and surfaces
+   the concrete failure without duplicating group membership. See
+   [Failure attribution and commit statuses](#failure-attribution-and-commit-statuses).
 
 See also:
 
@@ -24,6 +27,11 @@ See also:
 - [checks.md](./checks.md) for what each group runs.
 - [local.md](./local.md) for the `just` recipes the composite actions invoke.
 - [ado.md](./ado.md) for the ADO counterpart.
+
+Concrete failed-recipe presentation is GitHub-specific. Azure Pipelines retains
+the group stage and Just diagnostic in its logs but does not emit an equivalent
+supplemental GitHub-style commit status; cross-backend parity is outside this
+feature's scope.
 
 ## 1. Why three layers
 
@@ -36,7 +44,7 @@ See also:
   root workflow is intentionally minimal.
 - The reusable-workflow seam ([`workflow_call`][1]) is GitHub's first-class mechanism for
   exactly this: a workflow can call another workflow in the same repo, passing inputs and
-  secrets. We use it so the root workflow stays ~10 lines.
+  secrets. We use it so the root workflow stays small and policy-focused.
 
 [1]: https://docs.github.com/en/actions/sharing-automations/reusing-workflows
 
@@ -46,7 +54,7 @@ The PR pipeline:
 %%{init: {"flowchart": {"nodeSpacing": 10, "rankSpacing": 35, "padding": 3}, "themeVariables": {"fontSize": "16px"}}}%%
 flowchart LR
     pr_evt([pull_request<br/>merge_group]):::trigger
-    pr_root[".github/workflows/<br/>anvil-pr.yml<br/>(root, ~10 lines)"]:::root
+    pr_root[".github/workflows/<br/>anvil-pr.yml<br/>(policy root)"]:::root
     pr_impl[".github/workflows/<br/>anvil-pr-impl.yml<br/>(reusable workflow_call)"]:::impl
     impact["impact-linux + impact-windows<br/>(2 jobs;<br/>outputs consumed by every group below)"]:::job
     pr_fast_job["pr-fast<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
@@ -54,26 +62,15 @@ flowchart LR
     pr_runtime_analysis_job["pr-runtime-analysis<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_mutants_job["pr-mutants<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     impact_act[".github/actions/<br/>anvil-impact"]:::action
-    impact_setup[".github/actions/<br/>anvil-setup"]:::action
-    fast_setup[".github/actions/<br/>anvil-setup"]:::action
-    test_setup[".github/actions/<br/>anvil-setup"]:::action
-    runtime_setup[".github/actions/<br/>anvil-setup"]:::action
-    mutants_setup[".github/actions/<br/>anvil-setup"]:::action
-    fast_act[".github/actions/<br/>anvil-pr-fast"]:::action
-    test_act[".github/actions/<br/>anvil-pr-test"]:::action
-    runtime_act[".github/actions/<br/>anvil-pr-runtime-analysis"]:::action
-    mutants_act[".github/actions/<br/>anvil-pr-mutants"]:::action
+    setup_act[".github/actions/<br/>anvil-setup"]:::action
+    run_group_act[".github/actions/<br/>anvil-run-group"]:::action
     codecov_act["codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f<br/>v7.0.0"]:::external
     impact_just["cargo delta"]:::recipe
     fast_just["just anvil-pr-fast"]:::recipe
-    fast_setup_just["just anvil-setup"]:::recipe
-    impact_setup_just["just anvil-setup"]:::recipe
     test_just["just anvil-pr-test"]:::recipe
-    test_setup_just["just anvil-setup"]:::recipe
     runtime_just["just anvil-pr-runtime-analysis"]:::recipe
-    runtime_setup_just["just anvil-setup"]:::recipe
     mutants_just["just anvil-pr-mutants"]:::recipe
-    mutants_setup_just["just anvil-setup"]:::recipe
+    setup_just["just anvil-&lt;group&gt;-setup"]:::recipe
 
     pr_evt --> pr_root
     pr_root -. uses .-> pr_impl
@@ -84,28 +81,20 @@ flowchart LR
     pr_impl --> pr_mutants_job
 
     impact ==> impact_act
-    pr_fast_job ==> fast_act
-    pr_test_job ==> test_act
+    pr_fast_job ==> run_group_act
+    pr_test_job ==> run_group_act
     pr_test_job ==> codecov_act
-    pr_runtime_analysis_job ==> runtime_act
-    pr_mutants_job ==> mutants_act
+    pr_runtime_analysis_job ==> run_group_act
+    pr_mutants_job ==> run_group_act
 
-    impact_act ==> impact_setup
+    impact_act ==> setup_act
     impact_act ==> impact_just
-    fast_act ==> fast_setup
-    fast_act ==> fast_just
-    test_act ==> test_setup
-    test_act ==> test_just
-    runtime_act ==> runtime_setup
-    runtime_act ==> runtime_just
-    mutants_act ==> mutants_setup
-    mutants_act ==> mutants_just
-
-    impact_setup ==> impact_setup_just
-    fast_setup ==> fast_setup_just
-    test_setup ==> test_setup_just
-    runtime_setup ==> runtime_setup_just
-    mutants_setup ==> mutants_setup_just
+    run_group_act ==> setup_act
+    run_group_act ==> fast_just
+    run_group_act ==> test_just
+    run_group_act ==> runtime_just
+    run_group_act ==> mutants_just
+    setup_act ==> setup_just
 
     classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
     classDef root fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
@@ -122,31 +111,22 @@ The scheduled pipeline (same colour key):
 %%{init: {"flowchart": {"nodeSpacing": 10, "rankSpacing": 35, "padding": 3}, "themeVariables": {"fontSize": "16px"}}}%%
 flowchart LR
     sched_evt([schedule<br/>workflow_dispatch]):::trigger
-    sched_root[".github/workflows/<br/>anvil-scheduled.yml<br/>(root, ~10 lines)"]:::root
+    sched_root[".github/workflows/<br/>anvil-scheduled.yml<br/>(policy root)"]:::root
     sched_impl[".github/workflows/<br/>anvil-scheduled-impl.yml<br/>(reusable workflow_call)"]:::impl
     stest_job["scheduled-test<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     sadv_job["scheduled-advisories<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     srun_job["scheduled-runtime-analysis<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     sexh_job["scheduled-exhaustive<br/>matrix: linux, windows"]:::job
     publish_job["publish-failure<br/>upsert incident issue"]:::job
-    stest_setup[".github/actions/<br/>anvil-setup"]:::action
-    sadv_setup[".github/actions/<br/>anvil-setup"]:::action
-    srun_setup[".github/actions/<br/>anvil-setup"]:::action
-    sexh_setup[".github/actions/<br/>anvil-setup"]:::action
-    stest_act[".github/actions/<br/>anvil-scheduled-test"]:::action
-    sadv_act[".github/actions/<br/>anvil-scheduled-advisories"]:::action
-    srun_act[".github/actions/<br/>anvil-scheduled-runtime-analysis"]:::action
-    sexh_act[".github/actions/<br/>anvil-scheduled-exhaustive"]:::action
+    setup_act[".github/actions/<br/>anvil-setup"]:::action
+    run_group_act[".github/actions/<br/>anvil-run-group"]:::action
     codecov_act["codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f<br/>v7.0.0"]:::external
     github_issues["GitHub Issues"]:::external
     stest_just["just anvil-scheduled-test"]:::recipe
-    stest_setup_just["just anvil-setup"]:::recipe
     sadv_just["just anvil-scheduled-advisories"]:::recipe
-    sadv_setup_just["just anvil-setup"]:::recipe
     srun_just["just anvil-scheduled-runtime-analysis"]:::recipe
-    srun_setup_just["just anvil-setup"]:::recipe
     sexh_just["just anvil-scheduled-exhaustive"]:::recipe
-    sexh_setup_just["just anvil-setup"]:::recipe
+    setup_just["just anvil-&lt;group&gt;-setup"]:::recipe
 
     sched_evt --> sched_root
     sched_root -. uses .-> sched_impl
@@ -159,26 +139,19 @@ flowchart LR
     srun_job --> publish_job
     sexh_job --> publish_job
 
-    stest_job ==> stest_act
+    stest_job ==> run_group_act
     stest_job ==> codecov_act
-    sadv_job ==> sadv_act
-    srun_job ==> srun_act
-    sexh_job ==> sexh_act
+    sadv_job ==> run_group_act
+    srun_job ==> run_group_act
+    sexh_job ==> run_group_act
     publish_job ==> github_issues
 
-    stest_act ==> stest_setup
-    stest_act ==> stest_just
-    sadv_act ==> sadv_setup
-    sadv_act ==> sadv_just
-    srun_act ==> srun_setup
-    srun_act ==> srun_just
-    sexh_act ==> sexh_setup
-    sexh_act ==> sexh_just
-
-    stest_setup ==> stest_setup_just
-    sadv_setup ==> sadv_setup_just
-    srun_setup ==> srun_setup_just
-    sexh_setup ==> sexh_setup_just
+    run_group_act ==> setup_act
+    run_group_act ==> stest_just
+    run_group_act ==> sadv_just
+    run_group_act ==> srun_just
+    run_group_act ==> sexh_just
+    setup_act ==> setup_just
 
     classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
     classDef root fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
@@ -197,15 +170,11 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 .github/
 ├── actions/
 │   ├── anvil-setup/action.yml         owned   (install just + group-scoped catalog tools)
+│   ├── anvil-setup/just-problem-matcher.json
+│   │                                  owned   (annotate failing Just recipes)
+│   ├── anvil-run-group/action.yml      owned   (orchestrate any Just group)
+│   ├── anvil-report-status/action.yml  owned   (publish per-job commit statuses)
 │   ├── anvil-impact/action.yml        owned   (cargo-delta impact computation)
-│   ├── anvil-pr-fast/action.yml       owned   (one composite action per group)
-│   ├── anvil-pr-test/action.yml      owned
-│   ├── anvil-pr-runtime-analysis/action.yml      owned
-│   ├── anvil-pr-mutants/action.yml      owned
-│   ├── anvil-scheduled-test/action.yml  owned
-│   ├── anvil-scheduled-advisories/action.yml  owned
-│   ├── anvil-scheduled-runtime-analysis/action.yml  owned
-│   └── anvil-scheduled-exhaustive/action.yml  owned
 └── workflows/
     ├── anvil-pr-impl.yml              owned   (reusable workflow doing the wiring)
     ├── anvil-scheduled-impl.yml         owned   (reusable workflow for the scheduled tier)
@@ -225,16 +194,48 @@ workflow:
 
 ```yaml
 # .github/workflows/anvil-pr.yml
-name: anvil-pr
+name: Anvil
 on:
   pull_request: {}
   merge_group: {}
 permissions:
   contents: read
 jobs:
-  anvil:
+  validation:
+    name: PR Job
+    if: github.event_name == 'pull_request'
     uses: ./.github/workflows/anvil-pr-impl.yml
+    permissions:
+      contents: read
+      statuses: write
+      pull-requests: write
+    with:
+      base_ref: ${{ github.event.pull_request.base.sha }}
+      publish_commit_statuses: true
+    secrets: inherit
+  merge-validation:
+    name: PR Job
+    if: github.event_name == 'merge_group'
+    uses: ./.github/workflows/anvil-pr-impl.yml
+    permissions:
+      contents: read
+    secrets: inherit
 ```
+
+The two conditional callers keep the workflow name and reusable implementation
+the same across events while granting write permissions only to pull-request
+runs. Their internal IDs remain `validation` and `merge-validation`, while
+both display names are `PR Job`. Together with the workflow display name,
+GitHub renders the same user-facing `Anvil / PR Job / ...` hierarchy in the
+pull-request checks UI for both event types without exposing implementation
+IDs. The workflow display name is UI grouping rather than part of a check-run
+name; branch protection sees contexts beginning with `PR Job / ...`.
+Merge-group execution does not publish the supplemental status and never
+receives `statuses: write` or `pull-requests: write`. The called PR
+implementation intentionally declares no `permissions` blocks, so its jobs
+inherit the selected caller's ceiling. Static job-level write requests would
+make the read-only merge caller fail workflow validation before any check could
+run.
 
 The scheduled root workflow adds a schedule and `workflow_dispatch`:
 
@@ -289,10 +290,11 @@ remove if they have specific reasons:
 
 ## 4. Owned reusable workflows
 
-`anvil-pr-impl.yml` is where the wiring lives. Every per-group composite action takes
-the same three impact-exclude inputs unconditionally; which ones a group's checks
-actually consume is the catalog's concern, not the wiring layer's. Moving a check
-between groups never changes the reusable workflow.
+`anvil-pr-impl.yml` is where the wiring lives. Every group job invokes the same
+`anvil-run-group` action and passes the same three impact-exclude inputs
+unconditionally; which ones a group's checks actually consume is the catalog's
+concern, not the wiring layer's. Moving a check between groups never changes
+the reusable workflow.
 
 Approximate shape (anvil writes this verbatim; users never edit it):
 
@@ -308,6 +310,7 @@ on:
 
 jobs:
   impact:
+    name: "Preparation: Impact Analysis (linux)"
     runs-on: ${{ inputs.linux_runner }}
     outputs:
       include_modified: ${{ steps.delta.outputs.include_modified }}
@@ -320,6 +323,7 @@ jobs:
         uses: ./.github/actions/anvil-impact
 
   pr-fast:
+    name: "Check Group: Fast Checks (${{ matrix.os }})"
     needs: impact
     strategy:
       fail-fast: false
@@ -332,8 +336,9 @@ jobs:
     steps:
       - uses: actions/checkout
         with: { fetch-depth: 0 }  # semver-check needs origin/<base> resolvable for --baseline-rev
-      - uses: ./.github/actions/anvil-pr-fast
+      - uses: ./.github/actions/anvil-run-group
         with:
+          group: pr-fast
           include_modified: ${{ needs.impact.outputs.include_modified }}
           include_affected: ${{ needs.impact.outputs.include_affected }}
           include_required: ${{ needs.impact.outputs.include_required }}
@@ -341,6 +346,7 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
 
   pr-test:
+    name: "Check Group: Tests and Coverage (${{ matrix.os }})"
     # Tests + coverage: llvm-cov, doc-test, examples. Coverage upload
     # is gated to the canonical x86_64 Linux leg (omitted here for brevity).
     needs: impact
@@ -354,8 +360,9 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout
-      - uses: ./.github/actions/anvil-pr-test
+      - uses: ./.github/actions/anvil-run-group
         with:
+          group: pr-test
           free-disk-space: true
           include_modified: ${{ needs.impact.outputs.include_modified }}
           include_affected: ${{ needs.impact.outputs.include_affected }}
@@ -413,10 +420,10 @@ caller anvil-scheduled.yml
             job override: issues:write only
 ```
 
-Scheduled composite actions don't receive any `include_*` inputs at all — their inputs
-default to empty strings (recipes default to `--workspace`) and the reusable workflow
-omits the passthrough. Threading them through is purely a PR-tier optimization;
-the scheduled tier never benefits.
+Every scheduled group invokes the shared `anvil-run-group` action. Those invocations
+don't receive any `include_*` inputs — their inputs default to empty strings (recipes
+default to `--workspace`) and the reusable workflow omits the passthrough. Threading
+them through is purely a PR-tier optimization; the scheduled tier never benefits.
 
 Cloud impact explicitly loads the repository's `.delta.toml`, including the managed
 trip-wire patterns and any repository-owned parser, exclusion, or fixed comparison-
@@ -444,19 +451,28 @@ We deliberately keep this input surface minimal. Anything more elaborate (e.g.
 per-job runner overrides) lives in the user's own workflow, which can compose its own
 `uses:`-of-reusable-workflow shape.
 
-## 5. Per-group composite actions
+## 5. Shared group composite action
 
-Each per-group composite action has the **same** uniform input surface — the three
-impact-include variables and the disk-cleanup switch. PR context is passed as environment
-variables by the reusable workflow. This means the reusable workflow doesn't need to know which include
-vars a group's checks consume; it threads all three to every action. Moving a check
-between groups (or between buckets) is a pure catalog change.
+Anvil emits one `anvil-run-group` action, used by every group job in both
+reusable workflows. The group name is data, not an emitted action path. This
+keeps setup, output capture, failed-recipe extraction, status publication, and
+failure propagation in one file in every adopting repository.
+
+The action has one uniform input surface: the group name, three impact-include
+variables, the disk-cleanup switch, and the status-publication switch. PR
+context is passed as environment variables by the reusable workflow. The
+reusable workflow does not need to know which include vars a group's checks
+consume; it threads all three to the shared action. Moving a check between
+groups or buckets remains a pure catalog change.
 
 ```yaml
-# .github/actions/anvil-pr-fast/action.yml  (owned)
-name: anvil-pr-fast
-description: anvil PR fast group
+# .github/actions/anvil-run-group/action.yml  (owned)
+name: anvil-run-group
+description: Run an Anvil Just group and report its result.
 inputs:
+  group:
+    description: Anvil group recipe name without the anvil- prefix.
+    required: true
   include_modified:
     description: |
       Pre-formatted --package args from anvil-impact for the modified
@@ -476,41 +492,201 @@ inputs:
     description: Remove unused toolchains from GitHub-hosted runners before setup.
     required: false
     default: "false"
+  publish_commit_statuses:
+    description: Manage supplemental failure commit statuses for eligible PRs.
+    required: false
+    default: "false"
 runs:
   using: composite
   steps:
-    - uses: ./.github/actions/anvil-setup
+    - id: setup
+      uses: ./.github/actions/anvil-setup
       with:
+        group: ${{ inputs.group }}
         free-disk-space: ${{ inputs.free-disk-space }}
-    - shell: bash
+    - id: run
+      if: steps.setup.outcome == 'success'
+      shell: bash
       env:
+        ANVIL_GROUP: ${{ inputs.group }}
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
         ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
         ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
-      run: just anvil-pr-fast
+      run: |
+        log="$RUNNER_TEMP/anvil-$ANVIL_GROUP.log"
+        set +e
+        just "anvil-$ANVIL_GROUP" 2>&1 | tee "$log"
+        status=${PIPESTATUS[0]}
+        set -e
+        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed\( on line [0-9][0-9]*\)\{0,1\} with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+        echo "failed_recipe=${failed_recipe:-anvil-$ANVIL_GROUP}" >> "$GITHUB_OUTPUT"
+        echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+    - name: Publish supplemental Anvil commit status
+      if: always() && inputs.publish_commit_statuses == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+      continue-on-error: true
+      uses: ./.github/actions/anvil-report-status
+      with:
+        group: ${{ inputs.group }}
+        setup_outcome: ${{ steps.setup.outcome }}
+        exit_code: ${{ steps.run.outputs.exit_code }}
+        failed_recipe: ${{ steps.run.outputs.failed_recipe }}
+    - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
+      if: always() && steps.run.outputs.exit_code != '' && steps.run.outputs.exit_code != '0'
+      shell: bash
+      run: exit 1
 ```
 
-Uniform input set on every per-group composite action:
+Input set on the shared group action:
 
 | Input              | Default   | Notes                                                                                                                                  |
 |--------------------|-----------|----------------------------------------------------------------------------------------------------------------------------------------|
+| `group`            | required  | Group recipe suffix, such as `pr-fast` or `scheduled-test`.                                                                           |
 | `include_modified` | `""`      | Forwarded as `ANVIL_INCLUDE_MODIFIED`. `--skip` → recipe exits 0. Empty → recipe defaults to `--workspace`.                          |
 | `include_affected` | `""`      | Forwarded as `ANVIL_INCLUDE_AFFECTED`. Same semantics.                                                                              |
 | `include_required` | `""`      | Forwarded as `ANVIL_INCLUDE_REQUIRED`. Same semantics.                                                                              |
 | `free-disk-space`  | `"false"` | Forwarded to `anvil-setup`; ignored on macOS and self-hosted runners.                                                               |
+| `publish_commit_statuses` | `"false"` | Best-effort management of supplemental failure commit statuses for same-repository pull requests. Requires `statuses: write`; clean runs only supersede prior failures. |
 
-The reusable workflow sets `PR_TITLE` on the `anvil-pr-fast` action step and
-`BASE_REF` on the `anvil-pr-mutants` step. They are environment variables rather
+Generated workflows pass constant catalog group names. Both `anvil-run-group`
+and `anvil-setup` carry the value through an `ANVIL_GROUP` environment
+variable and quote the composed recipe name; they do not interpolate an action
+input directly into shell source. The nested `anvil-setup` action rejects group
+names outside `[a-z0-9-]+`; `anvil-run-group` invokes Just only when that setup
+step succeeds, so validation necessarily precedes use of the value in the log
+path and recipe name.
+
+The reusable workflow sets `PR_TITLE` on the `pr-fast` group step and
+`BASE_REF` on the `pr-mutants` group step. They are environment variables rather
 than action inputs because only the recipes consume them.
 
 The recipes themselves consume only the env vars they need; the catalog records the
 mapping (see [checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)).
-Threading all three to every action costs a few lines per composite but is the right
-separation: wiring is about "which jobs depend on impact and feed it forward", not about
-"which check needs which env var."
+Threading all three through every group-action invocation costs a few workflow
+lines but is the right separation: wiring is about "which jobs depend on impact
+and feed it forward", not about "which check needs which env var."
 
-These actions are consumed primarily by anvil's own reusable workflow. Users who want to
-plug individual groups into an unrelated workflow can `uses:` them directly.
+The shared action is an implementation detail of Anvil's generated reusable
+workflows. Anvil does not emit or support public per-group action paths.
+
+### Failure attribution and commit statuses
+
+GitHub fixes workflow job names before a job runs, so a matrix check named
+`PR Job / Check Group: Fast Checks (linux)` cannot rename itself after
+discovering that `anvil-license-headers` failed. The checks UI groups that name
+under the `Anvil` workflow. Anvil instead presents the concrete failure through
+the following mechanisms, all driven by Just's existing terminal diagnostic:
+
+1. The problem matcher registered by `anvil-setup` promotes
+   ``error: recipe `anvil-license-headers` failed with exit code 1`` to a
+   GitHub annotation.
+2. The group composite ends with a failing step named
+   `Failed Just recipe: anvil-license-headers`, putting the recipe name in the
+   job's step list.
+3. On eligible pull requests, `anvil-report-status` publishes a commit status
+   whose reserved context namespace names the failed recipe and runner:
+
+   ```text
+   Anvil / license-headers [pr-fast] (linux-x64)
+   ```
+
+The group action streams normal Just output, captures the terminal failed
+recipe, reports supplemental presentation on a best-effort basis, and then
+propagates Just's result to the authoritative workflow job. The reporter
+neither invokes checks nor contains group membership. Internal capture,
+parsing, status reconciliation, and test-harness details are documented in the
+[implementation guide](../implementation.md#github-group-execution-and-status-reporting).
+
+When `publish_commit_statuses` is enabled, the shared reporter manages statuses
+with:
+
+| Field | Value |
+|-------|-------|
+| Commit | `github.event.pull_request.head.sha` |
+| Failure context | `Anvil / <recipe> [<group>] (<runner>)` |
+| State after setup failure | `error` |
+| State after recipe failure | `failure` |
+| Fresh success | No supplemental status |
+| Superseded failure | `success` with a superseded description |
+| Failure description | `<failed-recipe-without-anvil-prefix> failed` |
+| Setup description | `setup failed before <group> ran` |
+| Target URL | The originating GitHub Actions workflow run |
+
+The runner suffix is derived from `RUNNER_OS` and `RUNNER_ARCH`, producing
+values such as `linux-x64` and `windows-arm64`. The group segment prevents two
+groups that reach the same recipe on the same runner from sharing a persistent
+status identity. Contexts are limited to 100 characters by truncating only the
+recipe portion.
+When Just reports an `anvil-` recipe, the reporter removes that conventional
+prefix from the context and description to keep the limited inline text
+concise.
+
+The concise `Anvil / <recipe>` context puts the failed check name immediately
+after the product name. In GitHub's current alphabetical PR-check rendering it
+also places typical check names before `PR Job / Check Group: ...`.
+This is a presentation hint, not a correctness dependency: GitHub does not
+document the ordering as a stable contract.
+
+Cleanup runs after the group result is known. Keeping the old failure visible
+while a rerun is pending avoids a temporary green result. On failure the
+reporter publishes the current dynamic context before superseding another
+failure from the same group and runner. On success it supersedes active prior
+failures and creates no fresh supplemental row.
+
+GitHub does not allow commit-status deletion. Superseded contexts therefore
+remain as green historical rows with a description explaining that a later run
+replaced them. The native workflow job remains the stable, authoritative
+required check; supplemental statuses are presentation only. Each new commit
+has its own status set, so discovery and supersession matter only for reruns of
+the same commit.
+
+Dynamic contexts are permanent repository metadata: every distinct
+`Anvil / <recipe> [<group>] (<runner>)` context that is published can continue to appear
+in GitHub's required-check picker even after it has been superseded. Repositories
+must not configure these supplemental contexts as required checks. The bounded
+native `PR Job / Check Group: ...` jobs are the only branch-protection
+surface. Status cleanup is a best-effort, non-atomic operation; concurrent
+reruns can temporarily race, but their native jobs remain authoritative.
+Supplemental contexts must not be required, so a stale presentation row cannot
+block correctly configured branch protection.
+
+The reporter runs under `always()` and receives the setup outcome as well as
+the Just outputs. A setup failure can therefore publish an `error` description
+even though the group recipe never ran. Cancellation may prevent final steps
+from running; the native GitHub Actions job remains the authoritative required
+check in that case. The reporter validates that its event payload contains a
+pull-request head SHA and fails with an explicit precondition error if it is
+invoked directly from an unsupported event.
+
+The reusable workflow input defaults to `false`. The generated pull-request
+caller opts in and grants `statuses: write`; a customized root that has not
+accepted the permission continues without supplemental statuses. Publication
+is guarded to same-repository `pull_request` events. Fork PR tokens are
+read-only, so forks retain the annotation and dynamically named step but skip
+the status call.
+
+Merge-group runs use a separate conditional caller with only `contents: read`.
+Both conditional callers have the display name `PR Job`, so their called jobs
+produce identical required-check contexts on pull-request and merge-group
+commits even though their internal IDs and permissions differ. Merge-group runs
+retain the normal Anvil jobs, annotations, and dynamically named steps but do
+not publish supplemental statuses. This avoids exposing a write-capable token
+while executing a synthetic merge that may contain fork-originated code, and
+avoids redundant statuses on ephemeral merge-group commits.
+
+Branch protection and rulesets must select the bounded
+`PR Job / Check Group: <display name> (<platform>)` contexts. Pull-request and
+merge-queue runs intentionally emit the same contexts, so one required-check
+configuration applies to both event types. Supplemental
+`Anvil / <recipe> [<group>] (<runner>)` statuses must never be selected.
+
+Commit statuses are intentionally preferred over custom Check Runs for this
+contract. GitHub Actions has no native workflow field for the inline status
+description, so one REST call is still required. Check Runs provide richer
+Markdown and annotations that this feature does not need, require more
+lifecycle logic for dynamic names, and—when created with `GITHUB_TOKEN`—can be
+placed in an unrelated GitHub Actions check suite such as Advanced CodeQL.
+Commit statuses provide the required prominent name, inline description,
+result, and log link without check-suite attribution.
 
 ### `anvil-setup`
 
@@ -524,9 +700,17 @@ plug individual groups into an unrelated workflow can `uses:` them directly.
   needs `cargo-delta` and installs it itself afterwards.
 - any other value (e.g. `pr-fast`, `scheduled-advisories`): runs
   `just anvil-<group>-setup binstall` -- only the tools, components, and
-  toolchains that group actually needs. Every per-group composite action
-  (`.github/actions/anvil-<group>`) passes its own group name here, so a
-  `pr-fast` matrix leg never installs cargo-mutants.
+  toolchains that group actually needs. Ordinary group names contain only
+  lowercase letters, digits, and hyphens. `anvil-run-group` passes its group
+  input here, so a `pr-fast` matrix leg never installs cargo-mutants.
+
+Before invoking Just, the action registers the generated
+`just-problem-matcher.json`. Just already prints the exact failed dependency
+recipe (for example, ``error: recipe `anvil-license-headers` failed with exit
+code 1``), but GitHub otherwise exposes only its generic process-exit
+annotation. The matcher promotes that existing diagnostic without wrapping
+Just, parsing its output in a custom runner, or repeating group membership
+in the action.
 
 The action does not install Rust; it expects `cargo` on PATH (see §7).
 `anvil-impact` is described in §6 below.
@@ -600,9 +784,10 @@ jobs:
     # toolchain to a shared cache, then reference it here.
 ```
 
-Since reusable workflows can't accept "previous step" handoff, self-hosted users usually
-forgo the reusable-workflow shape and write a single workflow that calls the composite
-actions directly. anvil's composite actions are exposed for that use case.
+Since reusable workflows cannot accept a "previous step" handoff, self-hosted
+users that need additional preparation take ownership of the generated reusable
+implementation workflow and add the preparation there. The generated composite
+actions remain implementation details rather than a separately supported API.
 
 `anvil-tool-rustc-validate-prereqs` (depended on by every check that needs rustc)
 validates the installed `rustc` against the catalog minimum at recipe time; a
@@ -635,17 +820,23 @@ Recommended root workflow shape:
 
 - `permissions: contents: read` at the workflow level. anvil's default ships with
   this.
+- The pull-request reusable-workflow call grants `pull-requests: write` for
+  advisory comments and `statuses: write` for opt-in supplemental commit statuses. The
+  shared called workflow declares no permission overrides and inherits that
+  caller ceiling. This gives its impact jobs the same scopes on trusted
+  same-repository PR runs; the tradeoff avoids duplicating the implementation
+  workflow while allowing the separate merge-group caller to remain read-only.
+- The merge-group caller grants only `contents: read`; it cannot publish
+  comments or statuses. Because the called workflow does not statically request
+  write scopes, GitHub accepts and runs it under that ceiling.
+- Status publishing is guarded to same-repository `pull_request` events. Fork
+  PR tokens are read-only and never reach the status API step.
 - The scheduled reusable-workflow call grants `issues: write` at job scope so its
   publisher can create or comment on the failure issue. The called workflow resets its
   default permissions to `contents: read`, then restores `issues: write` only on the
   publishing job. That job-level map omits `contents`, so the publisher cannot read
   repository contents; scheduled check jobs retain read-only access. The PR workflow
   never receives this permission.
-- The PR reusable-workflow call grants `pull-requests: write` for advisory comments.
-  The called workflow resets its default permissions to `contents: read`, then restores
-  `pull-requests: write` only on `pr-fast`, where the sticky-comment steps run. Other PR
-  jobs do not inherit write access. The PR-title check itself reads the title from the
-  event payload and does not use the write permission.
 - Scheduled-tier secrets, if any, live on `anvil-scheduled.yml` only — never on `anvil-pr.yml`.
 - All cargo-tool installs done by the catalog setup recipes use `--locked` (with
   `cargo install` or `cargo binstall` depending on `installer`).
@@ -794,9 +985,11 @@ Conditions explained:
   `pull-requests: write` to fork-PR workflow runs by default, so the action would 403.
 
 Permissions: the reusable workflow's caller (`anvil-pr.yml`) declares
-`pull-requests: write` on the `anvil-pr` job that calls `anvil-pr-impl.yml`. The called
-workflow resets its default to `contents: read` and restores `pull-requests: write` only
-on `pr-fast`, where the sticky-comment steps run. Other called jobs remain read-only.
+`pull-requests: write` on the `validation` job that calls
+`anvil-pr-impl.yml`. The called workflow declares no permission overrides, so all
+of its jobs inherit that caller ceiling. Only the guarded sticky-comment steps
+use `pull-requests: write`. The separate merge-group caller grants only
+`contents: read`, and fork-PR tokens remain read-only.
 
 Adding a new advisory check is a two-step change: the recipe writes
 `target/anvil/comments/<NEW>.md` (and removes it on a clean run); the workflow gains
