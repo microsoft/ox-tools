@@ -350,11 +350,12 @@ fn upgrading_from_the_owned_dockerfile_reseeds_the_composed_host() {
 }
 
 /// A Dockerfile the repository wrote itself -- never tracked as an owned file --
-/// is not a superseded render, so it must survive with the regions added to it
-/// rather than being replaced.
+/// cannot be composed by appending regions to it: everything already in the file
+/// would end up above `FROM`. Anvil must refuse and say so, leaving the file
+/// untouched, rather than writing something that cannot build.
 #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
 #[test]
-fn a_repository_authored_dockerfile_is_not_reseeded() {
+fn a_repository_authored_dockerfile_is_refused_not_appended_to() {
     let tmp = generated_tree();
     let root = tmp.path();
     let dockerfile = root.join(".anvil/container/Dockerfile");
@@ -366,14 +367,109 @@ fn a_repository_authored_dockerfile_is_not_reseeded() {
     manifest.regions.retain(|key, _| key.host != ".anvil/container/Dockerfile");
     manifest.save(root).unwrap();
 
-    run_update(&Catalog::anvil(), &local(), root).unwrap();
+    let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
 
-    let composed = std::fs::read_to_string(&dockerfile).unwrap();
-    assert!(
-        composed.contains("# hand written by the repository"),
-        "content anvil never owned must be preserved:\n{composed}"
+    assert_eq!(
+        std::fs::read_to_string(&dockerfile).unwrap(),
+        hand_written,
+        "content anvil never owned must be left exactly as found"
     );
-    assert!(composed.contains("# >>> anvil-managed: anvil-container-base"));
+    let refusals: Vec<&String> = outcome
+        .plan
+        .refusals()
+        .iter()
+        .filter(|r| r.contains(".anvil/container/Dockerfile"))
+        .collect();
+    assert_eq!(refusals.len(), 1, "one diagnostic per host: {refusals:?}");
+    assert!(
+        refusals[0].contains("anvil has never owned it"),
+        "the diagnostic must explain why it cannot be composed: {}",
+        refusals[0]
+    );
+}
+
+/// The upgrade re-seed replaces the previous release's whole-file render. It
+/// must not do that when the repository edited that file: the file is not
+/// tracked region-by-region, so there is no proposal to fall back on and
+/// nothing to recover the edit from.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn an_edited_superseded_dockerfile_is_never_overwritten() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let dockerfile = root.join(".anvil/container/Dockerfile");
+
+    // Tracked as an owned file, but the recorded checksum is of a *different*
+    // body: the repository edited it after anvil last wrote it.
+    let previous_render = "# syntax=docker/dockerfile:1\nFROM docker.io/library/ubuntu:24.04\n";
+    let edited = format!("{previous_render}RUN apt-get install -y our-internal-tool\n");
+    write(&dockerfile, &edited);
+    let mut manifest = Manifest::load(root).unwrap();
+    manifest
+        .files
+        .insert(".anvil/container/Dockerfile".to_owned(), checksum_str(previous_render));
+    manifest.regions.retain(|key, _| key.host != ".anvil/container/Dockerfile");
+    manifest.save(root).unwrap();
+
+    let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&dockerfile).unwrap(),
+        edited,
+        "an edit made after the last render must survive the upgrade untouched"
+    );
+    let refusals: Vec<&String> = outcome
+        .plan
+        .refusals()
+        .iter()
+        .filter(|r| r.contains(".anvil/container/Dockerfile"))
+        .collect();
+    assert_eq!(refusals.len(), 1, "one diagnostic per host: {refusals:?}");
+    assert!(
+        refusals[0].contains("edited after anvil last wrote it"),
+        "the diagnostic must name the reason: {}",
+        refusals[0]
+    );
+}
+
+/// A half-composed file: some of anvil's regions present, others missing.
+/// `upsert_region` appends a missing region at end-of-file, which would land it
+/// after regions it must precede, so this has to be refused too.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn a_partially_composed_dockerfile_is_refused() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let dockerfile = root.join(".anvil/container/Dockerfile");
+
+    // Drop the base region, keeping the rest. Appending it back would put
+    // `FROM` after the layers that depend on it.
+    let text = std::fs::read_to_string(&dockerfile).unwrap();
+    let open = text.find("# >>> anvil-managed: anvil-container-base").unwrap();
+    let close_marker = "# <<< anvil-managed: anvil-container-base\n";
+    let close = text.find(close_marker).unwrap() + close_marker.len();
+    let without_base = format!("{}{}", &text[..open], &text[close..]);
+    write(&dockerfile, &without_base);
+
+    let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&dockerfile).unwrap(),
+        without_base,
+        "a refused host must not be modified"
+    );
+    let refusals: Vec<&String> = outcome
+        .plan
+        .refusals()
+        .iter()
+        .filter(|r| r.contains(".anvil/container/Dockerfile"))
+        .collect();
+    assert_eq!(refusals.len(), 1, "one diagnostic per host: {refusals:?}");
+    assert!(
+        refusals[0].contains("anvil-container-base"),
+        "the diagnostic must name the missing region: {}",
+        refusals[0]
+    );
 }
 
 /// The Dockerfile is the first managed-region host whose region *order* is

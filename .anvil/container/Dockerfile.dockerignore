@@ -16,8 +16,19 @@
 # recipes are copied to drive `just anvil-setup`, which needs the whole tree to
 # parse, and the whole tree is hashed into the image tag: the tier, group and
 # check recipes decide which tools `anvil-setup` reaches, not just the catalog.
+#
+# `.anvil/container/` is admitted because the Dockerfile is composed: the gaps
+# between anvil's regions exist for a repository to add its own instructions,
+# and the headline case -- `COPY`ing a corporate root CA in before the first
+# download -- needs the file to be in the context. Denying it would leave the
+# gap documented but unusable for anything but `RUN`. It is also the directory
+# the image tag digests, so what the context admits and what the tag covers stay
+# the same set.
 *
 !justfiles
 justfiles/*
 !justfiles/anvil
+!.anvil
+.anvil/*
+!.anvil/container
 !rust-toolchain.toml

@@ -162,7 +162,7 @@ fn build_plan(
     let mut hosts = HostTextCache::default();
     // Hosts already reported as unsafe to compose. Every region targeting one
     // hits the same fault, and four copies of one message is noise.
-    let mut refused_hosts = BTreeSet::new();
+    let mut composed = ComposedHosts::default();
 
     for artifact in catalog.artifacts() {
         match artifact {
@@ -174,7 +174,7 @@ fn build_plan(
                 }
             }
             Artifact::Region(spec) => {
-                push_region(repo_root, workspace, manifest, &mut plan, &mut hosts, &mut refused_hosts, spec)?;
+                push_region(repo_root, workspace, manifest, &mut plan, &mut hosts, &mut composed, spec)?;
             }
         }
     }
@@ -307,26 +307,26 @@ fn push_region(
     manifest: &Manifest,
     plan: &mut Plan,
     hosts: &mut HostTextCache,
-    refused_hosts: &mut BTreeSet<String>,
+    composed: &mut ComposedHosts,
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
     match &spec.host {
         HostSelector::Path(path) => {
-            push_region_at(repo_root, manifest, plan, hosts, refused_hosts, path, spec)?;
+            push_region_at(repo_root, manifest, plan, hosts, composed, path, spec)?;
         }
         HostSelector::WorkspaceCargoToml => {
             if workspace.has_workspace_table {
-                push_region_at(repo_root, manifest, plan, hosts, refused_hosts, "Cargo.toml", spec)?;
+                push_region_at(repo_root, manifest, plan, hosts, composed, "Cargo.toml", spec)?;
             }
         }
         HostSelector::SingleCrateCargoToml => {
             if !workspace.has_workspace_table {
-                push_region_at(repo_root, manifest, plan, hosts, refused_hosts, "Cargo.toml", spec)?;
+                push_region_at(repo_root, manifest, plan, hosts, composed, "Cargo.toml", spec)?;
             }
         }
         HostSelector::EachMemberManifest => {
             for member in &workspace.members {
-                push_region_at(repo_root, manifest, plan, hosts, refused_hosts, &member.manifest_relpath, spec)?;
+                push_region_at(repo_root, manifest, plan, hosts, composed, &member.manifest_relpath, spec)?;
             }
         }
     }
@@ -347,46 +347,33 @@ fn push_region_at(
     manifest: &Manifest,
     plan: &mut Plan,
     hosts: &mut HostTextCache,
-    refused_hosts: &mut BTreeSet<String>,
+    composed: &mut ComposedHosts,
     host: &str,
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
     let host = resolve_existing_case_insensitive(repo_root, host);
-    let current = hosts.get_or_read(repo_root, &host)?;
-    // A composed host anvil seeds: when the file does not exist yet, the
-    // scaffold becomes the base the first region splices into, so the parts of
-    // the file that cannot live inside a region — a Dockerfile's
-    // `# syntax=` parser directive above all — are present from the first run.
-    // It is written once and never reconciled: everything outside the sentinels
-    // is the repository's.
-    //
-    // A file left behind by a release that owned this path outright is re-seeded
-    // too. Its content is a previous render, not user composition, so appending
-    // the regions to it would produce a file carrying both the old whole-file
-    // definition and the new regions. Recognizing it needs both conditions:
-    // tracked as an owned file in the lock we are superseding, and carrying none
-    // of this host's regions yet. A Dockerfile the repository wrote by hand is
-    // in neither state and is left alone.
-    let scaffold = host_scaffold(&host);
-    let superseded_owned_file = scaffold.is_some()
-        && manifest.files.contains_key(host.as_str())
-        && current.as_deref().is_some_and(|text| !host_carries_any_region(&host, text));
-    let current = match (current, scaffold) {
-        (None, Some(scaffold)) => Some(scaffold.to_owned()),
-        (Some(_), Some(scaffold)) if superseded_owned_file => Some(scaffold.to_owned()),
-        (current, _) => current,
-    };
-    if let Some(text) = current.as_deref()
-        && let Some(reason) = host_composition_violation(&host, text)
-    {
-        // One diagnostic per host: every region targeting it hits the same
-        // fault, and repeating it once per region buries the one line that
-        // says which region moved.
-        if refused_hosts.insert(host.clone()) {
+    if host_scaffold(&host).is_some() && !composed.states.contains_key(&host) {
+        let state = match hosts.get_or_read(repo_root, &host)? {
+            Some(text) => composed_host_state(&host, &text, manifest),
+            // Nothing on disk. The scaffold becomes the base the first region
+            // splices into, carrying the parts of the file that cannot live
+            // inside a region -- the `# syntax=` parser directive above all. It
+            // is written once and never reconciled; everything outside the
+            // sentinels is the repository's from then on.
+            None => ComposedHostState::SeedFromScaffold,
+        };
+        if matches!(state, ComposedHostState::SeedFromScaffold)
+            && let Some(scaffold) = host_scaffold(&host)
+        {
+            hosts.set(&host, scaffold.to_owned());
+        }
+        composed.states.insert(host.clone(), state);
+    }
+    if let Some(ComposedHostState::Unsafe(reason)) = composed.states.get(&host) {
+        if composed.reported.insert(host.clone()) {
             plan.refusal(format!(
-                "Refused to manage {host} because its managed regions could not be safely \
-                 updated: {reason}. Restore the documented order and re-run. Other artifacts \
-                 were still planned."
+                "Refused to manage {host}: {reason}. Nothing was written to it, and other \
+                 artifacts were still planned."
             ));
         }
         plan.push(PlanItem::noop(
@@ -398,6 +385,7 @@ fn push_region_at(
         ));
         return Ok(());
     }
+    let current = hosts.get_or_read(repo_root, &host)?;
     let placement = region_placement(spec.id.as_str());
     let body = match delta_region_body(current.as_deref(), spec) {
         DeltaRegionBody::Managed => spec.body.as_str(),
@@ -475,34 +463,45 @@ fn host_region_order(host_relpath: &str) -> Option<&'static [&'static str]> {
     (host_relpath == container::DOCKERFILE_PATH).then_some(container::DOCKERFILE_REGION_ORDER)
 }
 
-/// Whether the host already carries any of the regions anvil owns in it.
-///
-/// Distinguishes a composed file mid-update from a file a previous release
-/// owned outright, which must be re-seeded rather than appended to.
-fn host_carries_any_region(host_relpath: &str, text: &str) -> bool {
-    host_region_order(host_relpath).is_some_and(|order| {
-        order
-            .iter()
-            .any(|id| matches!(find_region(text, id, CommentSyntax::Hash), Ok(Some(_))))
-    })
+/// What a composed host's current content allows anvil to do with it.
+enum ComposedHostState {
+    /// Carries every region anvil owns, in the declared order. Update in place.
+    Composable,
+    /// Either absent, or a byte-identical render from the release that owned
+    /// this path outright. Every byte of it is anvil's, so the scaffold
+    /// replaces it and the regions rebuild the file.
+    SeedFromScaffold,
+    /// Anvil cannot reach a valid file from here without either destroying
+    /// repository content or writing something that will not build.
+    Unsafe(String),
 }
 
-/// Reject a host whose managed regions can no longer be updated into a valid
-/// file.
+/// Per-host bookkeeping for composed hosts, for the length of one pass.
+#[derive(Default)]
+struct ComposedHosts {
+    /// Classification per host, computed once from its on-disk state. Later
+    /// regions targeting the same host see text this pass has already spliced,
+    /// which is partially composed by construction — re-classifying that would
+    /// refuse the file halfway through writing it.
+    states: HashMap<String, ComposedHostState>,
+    /// Hosts whose refusal has already been reported, so one fault produces one
+    /// diagnostic rather than one per region.
+    reported: BTreeSet<String>,
+}
+
+/// Classify a composed host before anything is written to it.
 ///
-/// Every other managed-region host is order-independent — TOML tables, line
-/// sets — so `upsert_region` replacing a region wherever it is found is enough.
-/// A Dockerfile is the first host where relative order is semantic: `FROM` must
-/// precede every instruction that depends on it, the toolchain must exist
-/// before `anvil-setup` runs, and a reordered file is not a diagnostic but a
-/// silently wrong or unbuildable image. Detect it and refuse instead.
-fn host_composition_violation(host_relpath: &str, text: &str) -> Option<String> {
-    let order = host_region_order(host_relpath)?;
-    // The regions actually present, in the order the catalog declares them. A
-    // malformed region is reported by the planner itself, with a better message
-    // than this check could give; one that is simply absent is about to be
-    // written.
-    let declared: Vec<(&str, usize)> = order
+/// A Dockerfile is the first managed-region host where the file is only valid
+/// in one arrangement, so the states an ordinary region host can ignore all
+/// matter here. Each rejected case is one anvil could "handle" by splicing
+/// regions in anyway, and each would produce a file that is silently wrong:
+/// `upsert_region` appends a missing region at end-of-file, which is the right
+/// answer only when the file is already the composed shape.
+fn composed_host_state(host_relpath: &str, text: &str, manifest: &Manifest) -> ComposedHostState {
+    let Some(order) = host_region_order(host_relpath) else {
+        return ComposedHostState::Composable;
+    };
+    let present: Vec<(&str, usize)> = order
         .iter()
         .filter_map(|id| match find_region(text, id, CommentSyntax::Hash) {
             Ok(Some(region)) => Some((*id, region.start_line.start)),
@@ -510,19 +509,68 @@ fn host_composition_violation(host_relpath: &str, text: &str) -> Option<String> 
         })
         .collect();
 
+    if present.is_empty() {
+        // Nothing of anvil's is in the file. Either it is the previous
+        // release's whole-file render -- safe to replace, because every byte of
+        // it came from anvil -- or it is content anvil has never owned.
+        //
+        // The checksum comparison is the whole safety property: without it, a
+        // repository that edited the previously-owned Dockerfile would have
+        // that edit silently destroyed on upgrade. Appending the regions
+        // instead is not a kinder answer, because everything already in the
+        // file would then sit above `FROM`.
+        return match manifest.files.get(host_relpath) {
+            Some(recorded) if *recorded == checksum_str(text) => ComposedHostState::SeedFromScaffold,
+            Some(_) => ComposedHostState::Unsafe(
+                "it was edited after anvil last wrote it, and this release composes the file from \
+                 managed regions instead of owning it whole. Move the edits you want to keep into \
+                 the gaps of a freshly generated file, or delete it and re-run to have one written"
+                    .to_owned(),
+            ),
+            None => ComposedHostState::Unsafe(
+                "it exists but anvil has never owned it, so there is nowhere to splice the managed \
+                 regions that would not put your content above `FROM`. Delete it and re-run to have \
+                 a composed file written, then move your instructions into the gaps"
+                    .to_owned(),
+            ),
+        };
+    }
+
+    if present.len() != order.len() {
+        // A partially composed file. The missing regions would be appended at
+        // end-of-file, which lands them after regions they must precede.
+        let missing: Vec<&str> = order
+            .iter()
+            .copied()
+            .filter(|id| !present.iter().any(|(present_id, _)| present_id == id))
+            .collect();
+        return ComposedHostState::Unsafe(format!(
+            "it carries some of anvil's regions but not all of them (missing: {}). Restoring the \
+             missing ones by appending would place them after regions they must precede. Delete \
+             the file and re-run to have a complete one written",
+            missing.join(", ")
+        ));
+    }
+
     // The same regions, in the order the file carries them. Comparing the two
     // sequences rather than adjacent offsets keeps the check free of an
     // ordering operator whose boundary cannot be exercised: two distinct
     // regions can never share a start offset, so `<` and `<=` over positions
     // would be indistinguishable by any test.
-    let mut by_position = declared.clone();
+    let mut by_position = present.clone();
     by_position.sort_by_key(|&(_, start)| start);
-
-    let (expected, found) = declared
+    match present
         .iter()
         .zip(by_position.iter())
-        .find(|(expected, found)| expected.0 != found.0)?;
-    Some(format!("region '{}' appears before '{}', but must follow it", found.0, expected.0))
+        .find(|(expected, found)| expected.0 != found.0)
+    {
+        None => ComposedHostState::Composable,
+        Some((expected, found)) => ComposedHostState::Unsafe(format!(
+            "region '{}' appears before '{}', but must follow it. Restore the documented order and \
+             re-run",
+            found.0, expected.0
+        )),
+    }
 }
 
 enum DeltaRegionBody {

@@ -197,10 +197,21 @@ CMD ["bash"]
 # recipes are copied to drive `just anvil-setup`, which needs the whole tree to
 # parse, and the whole tree is hashed into the image tag: the tier, group and
 # check recipes decide which tools `anvil-setup` reaches, not just the catalog.
+#
+# `.anvil/container/` is admitted because the Dockerfile is composed: the gaps
+# between anvil's regions exist for a repository to add its own instructions,
+# and the headline case -- `COPY`ing a corporate root CA in before the first
+# download -- needs the file to be in the context. Denying it would leave the
+# gap documented but unusable for anything but `RUN`. It is also the directory
+# the image tag digests, so what the context admits and what the tag covers stay
+# the same set.
 *
 !justfiles
 justfiles/*
 !justfiles/anvil
+!.anvil
+.anvil/*
+!.anvil/container
 !rust-toolchain.toml
 
 === .delta.toml ===
@@ -1619,7 +1630,7 @@ anvil-aprz: anvil-aprz-validate-prereqs
             $env:GITHUB_TOKEN = $tok.Trim()
         } else {
             Write-Warning 'anvil-aprz: GITHUB_TOKEN is not set and no token could be obtained from the gh CLI.'
-            Write-Warning 'cargo-aprz will use the unauthenticated GitHub API, which allows 60 requests an hour. On a full workspace it exhausts that and then WAITS, up to an hour, for the quota to reset.'
+            Write-Warning 'cargo-aprz will use the unauthenticated GitHub API, which allows 60 requests an hour. On a full workspace it exhausts that and then blocks, for up to an hour, waiting for the quota to reset.'
             Write-Warning 'To fix: run `gh auth login` (recommended), or set $env:GITHUB_TOKEN to a GitHub token, then re-run.'
         }
     }
