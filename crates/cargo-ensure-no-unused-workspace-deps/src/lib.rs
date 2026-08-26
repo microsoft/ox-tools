@@ -354,6 +354,9 @@ fn lines(count: usize) -> &'static str {
 }
 
 #[cfg(test)]
+// Miri runs with filesystem isolation, and these tests need real files in a
+// real temp directory.
+#[cfg(not(miri))]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use std::fs;
