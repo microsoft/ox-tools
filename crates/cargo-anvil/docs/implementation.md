@@ -42,9 +42,13 @@ The subsystem is deliberately split so each fact has exactly one owner:
   template change that isn't regenerated fails CI.
 - **The catalog registers the file.** `src/anvil/artifacts/justfile.rs::impact()` registers
   the recipe as an owned artifact; `src/anvil/artifacts/mod.rs` wires it into the built-in
-  registry and holds the shared tier→mode policy (`impact_mode`). Both GitHub and ADO backend
-  renderers (`github.rs`, `ado.rs`) substitute the same `__IMPACT_MODE__` token via that one
-  policy, so a group's mode can never diverge between backends.
+  registry and holds the shared tier→mode policy (`impact_mode`). The ADO renderer (`ado.rs`)
+  substitutes that policy's value into the `__IMPACT_MODE__` token of each per-group job.
+  GitHub does not template the mode per group: its reusable-workflow YAML fixes it statically
+  (`pr-impl-workflow.yml` passes `impact_mode: consume`; the scheduled workflow omits it, so
+  `run-group-action`'s default `off` applies). Both paths encode the same tier rule — PR
+  groups consume, scheduled groups run full — so a group's mode can never diverge between
+  backends.
 - **Design docs are the contract.** They describe observable behavior; they are not consulted
   by the code and must not be cited from it (see the root `AGENTS.md`).
 
@@ -113,3 +117,36 @@ as a per-OS artifact, rather than threading it through stage/output variables:
 The producer/consumer split means the same recipe code runs locally (produce + consume in one
 process) and in CI (produce in one job, consume in many), which is what lets the behavioral
 tests in `tests/impact.rs` exercise the real recipe rather than a CI-only path.
+
+## GitHub group execution and status reporting
+
+The generated `anvil-run-group` composite action owns the capture-before-failure
+protocol. Its inline Bash step invokes Just through `tee`, temporarily disables
+immediate exit, and reads `PIPESTATUS[0]` so the saved result belongs to Just
+rather than `tee`. It selects the final standard Just failed-recipe diagnostic,
+including the optional line-number form, and falls back to the group recipe
+when a tool exits without that diagnostic. The step writes the recipe and exit
+code as outputs without failing so the reporter can consume them. After
+best-effort reporting, a final guarded step propagates the captured failure.
+
+The status reporter is an inline `actions/github-script` body. It validates the
+pull-request head SHA, reads same-commit status history newest-first, and keeps
+only the newest value for each context. An encoded group marker in the workflow
+run URL identifies statuses owned by the current group. The visible context
+also contains the group so identical recipe failures reached from different
+groups remain independent. A new failure is published before old contexts are
+superseded, preventing a temporary failure-free rollup. Clean runs only
+supersede active failures; they do not add a fresh supplemental status.
+
+The reporter's API errors are ignored by the composite action because the
+native workflow job is authoritative. The generated root workflow grants the
+required status permission only to the same-repository pull-request caller.
+Merge-group and fork execution retain annotations and the named failure step
+without a write-capable status token.
+
+Tests extract and execute the exact YAML-embedded Bash and JavaScript bodies.
+The Bash harness covers success, both Just diagnostic forms, and a failure
+without a diagnostic. The JavaScript harness mocks status-history pagination
+and publication to cover setup and recipe failures, cleanup, ownership,
+deduplication, ordering, truncation, and missing event data. Snapshot tests pin
+the complete emitted artifacts.
