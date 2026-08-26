@@ -522,10 +522,7 @@ fn host_composition_violation(host_relpath: &str, text: &str) -> Option<String> 
         .iter()
         .zip(by_position.iter())
         .find(|(expected, found)| expected.0 != found.0)?;
-    Some(format!(
-        "region '{}' appears before '{}', but must follow it",
-        found.0, expected.0
-    ))
+    Some(format!("region '{}' appears before '{}', but must follow it", found.0, expected.0))
 }
 
 enum DeltaRegionBody {
