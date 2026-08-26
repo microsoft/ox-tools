@@ -447,6 +447,20 @@ the on-disk emptiness is preserved and a one-shot `.anvil-proposed` is written s
 user can see what they're opting out of. Delete the proposal to dismiss; thereafter
 silent unless the template changes.
 
+### The one region anvil may empty on its own
+
+`anvil-lints` is the sole region anvil renders empty itself, when a workspace member
+already declares its own `lints` and emitting the catalog body would produce a
+manifest cargo refuses to parse (see [README.md](./README.md), `Cargo.toml` lints
+regions). The empty body is a deferral, not an opt-out: the region stays tracked, and
+once the member drops its own lints the catalog is adopted on the next run.
+
+That makes the empty body ambiguous where every other region's is not — an emptied
+`anvil-lints` region may be anvil's deferral or the user's opt-out, and the two want
+opposite outcomes once the member's own lints go away. Distinguishing them is left to
+a follow-up; today a member that declares its own lints and is then emptied by hand
+behaves as a deferral.
+
 ### Re-enabling
 
 - A region: delete both sentinel lines; the next `update` re-inserts the region at the

@@ -283,6 +283,15 @@ Detail on each host:
   manipulation. In a single-crate repo (no `[workspace]` table), the workspace region
   becomes `anvil-lints` and contains a single `[lints]` table with the same
   dotted-key layout.
+
+  A member may already declare `lints` itself, either as a plain `[lints]` or through
+  `[lints.rust]` / `[lints.clippy]`. Emitting the region regardless would give the
+  manifest two `[lints]` headers; cargo rejects that during `cargo metadata`, so the
+  whole workspace stops loading and every check fails, not only that crate. Anvil
+  therefore leaves such a member alone, creates an **empty** `anvil-lints` region, and
+  names the manifest in the plan summary. The deferral is not terminal: the region
+  stays tracked, so a crate that later gives up its own lint set adopts the catalog on
+  the next run with no further gesture.
 - **`deny.toml`** — one managed region per top-level section (`[advisories]`, `[licenses]`,
   `[bans]`, `[sources]`) carrying the tool's baseline license/advisory rules. Splitting the
   sections into separate regions lets users add their own keys in the gaps between them
