@@ -751,7 +751,7 @@ Other groups retain the action's disabled default.
    set.** (Group setup jobs also install cargo-delta as a prerequisite, but in
    `consume` mode they never run it -- they read the downloaded impact cache.)
 3. `just anvil-impact`, which resolves the base ref (`_anvil-base-ref`), snapshots the
-   base merge target (in a throwaway worktree) and the current tree, runs
+   base ref (in a throwaway worktree) and the working tree, runs
    `cargo delta impact`, and writes the durable cache under `target/anvil/impact/`:
    the per-tier `include_<tier>.txt` lists (via `_anvil-impact-format`), `impact.json`,
    and the `snapshots/`.
@@ -773,27 +773,27 @@ threading pre-formatted strings that local runs never see. The chain in
    artifact. Impact is computed per OS *family* because an OS-conditional dependency
    (`[target.'cfg(target_os = …)'.dependencies]`) changes the reverse-dep set only in
    that host's `cargo metadata` graph, so a single-OS computation could scope out a
-   cross-OS rev-dep; the two arm legs reuse their OS-family counterpart's artifact.
+   cross-OS reverse-dependency; the two arm legs reuse their OS-family counterpart's artifact.
 2. **Every group job** declares `needs: [impact-linux, impact-windows]` and, after
    checkout, downloads the matching leg's artifact into `target/anvil/impact/`,
    selecting by matrix OS — e.g.
    `name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}`.
 3. **The group composite action** (`group-action.yml`) runs `just anvil-<group>` with an
-   impact mode fixed **by tier at emit time** (never probed from a file). PR groups —
+   impact mode fixed **by group class at emit time** (never probed from a file). PR groups —
    which always download the artifact — export `ANVIL_IMPACT=consume`. In consume mode
    `anvil-impact` is a pure no-op — it trusts the downloaded cache verbatim and
    **neither snapshots nor recomputes**, so it needs neither cargo-delta nor a fetched
    base ref (a group job installs the former and shallow-checks-out without the latter).
-   Each scoped check then reads its tier's scope from
+   Each scoped check then reads its category's scope from
    `target/anvil/impact/include_<tier>.txt` via `_anvil-impact-include` (into a local
    `$include` variable). This is why the group jobs stay lean and can't be tripped up by
    an environmental difference from the impact job.
 4. **Scheduled group jobs download nothing** and always validate the full workspace, so
    their group action exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by
-   tier at emit time and is **not** derived from `target/anvil/impact/impact.state`: the
-   mode is a property of the tier, not something probed at runtime. (`anvil-setup` no
+   group class at emit time and is **not** derived from `target/anvil/impact/impact.state`: the
+   mode is a property of the group class, not something probed at runtime. (`anvil-setup` no
    longer caches `target/` at all — see §setup — so the durable `impact.state` never
-   travels through the build cache; the tier-fixed mode also means no leftover on-disk
+   travels through the build cache; the group-class-fixed mode also means no leftover on-disk
    state could ever flip a scheduled job into impact scoping and skip the full-workspace
    backstop.)
 

@@ -8,7 +8,7 @@
 # Impact analysis lives in one place: the `anvil-impact` recipe. It runs
 # cargo-delta against the working tree vs. the base ref and writes durable
 # artifacts under target/anvil/impact/ that the per-crate check recipes
-# consume via _anvil-impact-include. The SAME recipe runs locally and in
+# consume via _anvil-impact-include. The same recipe runs locally and in
 # cloud workflows: a cloud impact job runs `just anvil-impact` and uploads
 # target/anvil/impact/ as an artifact; each downstream group job downloads
 # it, so the checks read the cache instead of recomputing.
@@ -65,8 +65,8 @@ _anvil-impact-snapshot:
     # below. anvil-impact widens every tier to --workspace when the tree is
     # dirty (see its safety net) and never reads these snapshots, so computing
     # them would be wasted work -- and the recompute path needs cargo-delta +
-    # a resolvable, non-shallow base ref, which a first-time / local WIP
-    # checkout may lack. Without this, a dirty run that could not recompute
+    # a resolvable, non-shallow base ref, which a first-time checkout or local
+    # working-tree edit may lack. Without this, a dirty run that could not recompute
     # would hard-fail here instead of gracefully widening. Same probe as
     # anvil-impact (excluding target/, which holds our own cache artifacts).
     # Let git itself exclude target/ via an :(exclude) pathspec rather than
@@ -596,13 +596,13 @@ _anvil-impact-format tier impactJson:
         Write-Output ($specs -join ' ')
     }
 
-# Private. Resolves a tier's scope for a check recipe and echoes it on stdout.
+# Private. Resolves an impact category's scope for a check recipe and echoes it on stdout.
 #   1. ANVIL_IMPACT=off            -> tier default (full-workspace / run).
 #   2. include_<tier>.txt present  -> its contents (a --package list or --skip).
 #   3. otherwise                   -> tier default.
 # Tier default: --workspace for affected/required; empty (run) for modified.
 # Each scoped check calls this directly (into a local $include variable) to
-# read its tier's scope from the target/anvil/impact cache -- the same cache
+# read its category's scope from the target/anvil/impact cache -- the same cache
 # both locally and in cloud workflows (where the group job downloaded it).
 
 # Resolve a tier's package scope from the impact cache.

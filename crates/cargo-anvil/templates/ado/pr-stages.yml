@@ -32,8 +32,8 @@ stages:
   # the Windows depgraph, so the Windows leg could skip tests that
   # ought to run. The two per-OS computations are two *jobs* in a single
   # `impact` stage (matching how the pr-* stages run per-OS jobs), so they
-  # run in parallel. Each job PUBLISHES its target/anvil/impact/ cache as the
-  # `anvil-impact-<os>` pipeline artifact (via job.yml's `artifacts:` param);
+  # run in parallel. Each job publishes its target/anvil/impact/ cache as the
+  # `anvil-impact-<os>` pipeline artifact (via job.yml's `artifacts:` parameter);
   # downstream stages download it and their checks read the cache directly --
   # the same code path as a local run, with no stage-output variables.
   - stage: impact

@@ -362,7 +362,7 @@ Bucket assignments per check:
 \* cargo-delta's README recommends `clippy` with the modified tier. anvil deliberately
 runs it on the affected set instead: a change in a crate's API can introduce clippy lints
 (trait-bound mismatches, obviously-truthy-condition warnings keying off changed types) in a
-dependent crate, so downstream rev-deps need to lint too. The cost is small — clippy is
+dependent crate, so downstream reverse dependencies need to lint too. The cost is small — clippy is
 incremental — and the recall benefit avoids a class of merge surprises.
 
 `required` is `affected ∪ workspace-internal transitive deps`, not "the whole workspace".

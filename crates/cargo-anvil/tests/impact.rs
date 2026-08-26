@@ -756,7 +756,7 @@ fn consumer_reuses_cache_with_unresolvable_base_only_under_consume() {
     if !tools_available() {
         return;
     }
-    // A downstream cloud-workflow group job DOWNLOADED the impact artifact but
+    // A downstream cloud-workflow group job downloaded the impact artifact but
     // its checkout neither installs cargo-delta nor fetches the base ref. The
     // supported way to reuse that cache is ANVIL_IMPACT=consume, which trusts
     // the present cache verbatim. In normal (unset) mode an unresolvable base

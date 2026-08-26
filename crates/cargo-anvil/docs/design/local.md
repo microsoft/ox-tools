@@ -29,7 +29,7 @@ repo/
 │   │                       PR base ref), reused across the impact recipe, the
 │   │                       cloud impact steps, and anvil-mutants-diff.
 │   ├── impact.just         the single `anvil-impact` building block: snapshots the
-│   │                       base ref + working tree (two independent cache keys),
+│   │                       base ref and working tree (two independent cache keys),
 │   │                       runs `cargo delta impact`, and writes the
 │   │                       target/anvil/impact/ artifacts that scoped checks read
 │   │                       via _anvil-impact-include. Also owns _anvil-impact-format

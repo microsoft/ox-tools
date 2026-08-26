@@ -10,7 +10,7 @@
 # rather than the modified set: a change in a crate can introduce a
 # clippy issue in a dependent crate (e.g., trait-bound or
 # obviously-truthy-condition lints that key off the changed type), so
-# we want downstream rev-deps to lint as well. cargo-clippy is a
+# we want downstream reverse dependencies to lint as well. cargo-clippy is a
 # rustup component; same reasoning as fmt for the require.
 
 # Lint affected workspace packages with Clippy.

@@ -6,7 +6,7 @@
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Affected tier (lints public API of changed crates and rev-deps).
+# Affected tier (lints public API of changed crates and reverse dependencies).
 #
 # cargo-check-external-types is per-manifest: no --package/--workspace,
 # only --manifest-path. Iterate the affected library crates and run

@@ -85,7 +85,7 @@ a reported identifier resolves to **zero** packages (an unmapped gap) or **more 
 ambiguity), the recipe fails hard rather than guessing — under-scoping would silently skip
 affected work. Complementarily, a dirty working tree (any uncommitted change outside `target/`,
 detected via a git `:(exclude)` pathspec) widens *every* tier to `--workspace` locally, because
-cargo-delta scopes on the committed diff and cannot see WIP. Cloud checkouts are clean, so this
+cargo-delta scopes on the committed diff and cannot see working-tree edits. Cloud checkouts are clean, so this
 only affects local runs.
 
 ### Mode routing before dependency evaluation
@@ -110,7 +110,7 @@ as a per-OS artifact, rather than threading it through stage/output variables:
   path/metadata inputs), and the setup action excludes `target/` from its cache so the
   downloaded impact cache is neither dwarfed nor clobbered.
 - **ADO** (`steps/impact.yml`, `steps/job.yml`): the impact step publishes the cache as a
-  pipeline artifact; `job.yml`'s `inputArtifacts` param defaults to `DownloadPipelineArtifact@2`
+  pipeline artifact; `job.yml`'s `inputArtifacts` parameter defaults to `DownloadPipelineArtifact@2`
   but is overridable so 1ESPT-compliant pipelines can substitute their own download mechanism.
   The impact step does not set `CARGO_INCREMENTAL` because it compiles no workspace code.
 

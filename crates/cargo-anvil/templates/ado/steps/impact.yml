@@ -6,7 +6,7 @@
 # Runs the shared `anvil-impact` recipe and leaves its cache under
 # target/anvil/impact/. The compute job (pr-stages.yml) publishes that
 # directory as the `anvil-impact-<os>` pipeline artifact (via job.yml's
-# `artifacts:` param), which each downstream group stage downloads and its
+# `artifacts:` parameter), which each downstream group stage downloads and its
 # scoped checks read directly -- the same code path as a local run. No stage
 # output variables / env threading are involved.
 steps:
@@ -20,9 +20,9 @@ steps:
   - bash: just anvil-tool-cargo-delta-install install
     displayName: anvil impact (install cargo-delta)
   - bash: just anvil-impact
-    # Run the shared anvil-impact recipe -- the SAME impact building block
+    # Run the shared anvil-impact recipe -- the same impact building block
     # adopters run locally. It resolves the base ref (_anvil-base-ref),
-    # snapshots the base merge target in a throwaway worktree + the current
+    # snapshots the base ref in a throwaway worktree and the working
     # tree, runs `cargo delta impact`, and writes the cache under
     # target/anvil/impact/. This is the only job that needs cargo-delta; the
     # group stages just download the artifact it produces.

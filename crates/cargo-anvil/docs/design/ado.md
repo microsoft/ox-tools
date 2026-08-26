@@ -488,9 +488,9 @@ stages:
     displayName: anvil impact
     jobs:
       # Two per-OS jobs in ONE impact stage (parallel). Each runs
-      # `just anvil-impact` via impact.yml and PUBLISHES its
+      # `just anvil-impact` via impact.yml and publishes its
       # target/anvil/impact cache as the `anvil-impact-<os>` artifact (through
-      # job.yml's `artifacts:` param); downstream stages download it.
+      # job.yml's `artifacts:` parameter); downstream stages download it.
       - template: steps/job.yml
         parameters:
           name: compute_linux
@@ -516,7 +516,7 @@ stages:
     # Gate on impact via the default succeeded() condition (no explicit
     # `condition:`). A failed impact stage skips pr-* and fails the pipeline,
     # rather than leaving it green with a lone red impact stage. Each job
-    # DOWNLOADS its OS's impact artifact into target/anvil/impact/ (job.yml's
+    # downloads its OS's impact artifact into target/anvil/impact/ (job.yml's
     # `inputArtifacts:`), and the group's checks read that cache -- no stage
     # output variables are threaded.
     jobs:
@@ -564,18 +564,18 @@ threading pre-formatted strings the local run never produces. The chain:
    `inputArtifacts:` parameter (a `DownloadPipelineArtifact@2` task by default, overridable
    by a 1ESPT `job.yml`).
 3. **The group step template** runs `just anvil-<group>` with an impact mode fixed **by
-   tier at emit time** (never probed from a file). PR groups — which always download the
+   group class at emit time** (never probed from a file). PR groups — which always download the
    artifact — export `ANVIL_IMPACT=consume`. In consume mode `anvil-impact` is a pure
    no-op — it trusts the downloaded cache verbatim and **neither snapshots nor
    recomputes**, so it needs neither cargo-delta nor a fetched base ref. Each scoped
-   check reads its tier's scope from the cache file via `_anvil-impact-include` (into a
+   check reads its category's scope from the cache file via `_anvil-impact-include` (into a
    local `$include` variable).
 4. **Scheduled stages download nothing** and always validate the full workspace, so the
-   group step exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by tier at
-   emit time and is **not** derived from `target/anvil/impact/impact.state`: the mode is a
-   property of the tier, not something probed at runtime. (`setup.yml` no longer caches
-   `target/` at all, so the durable `impact.state` never travels through the build cache;
-   the tier-fixed mode also means no leftover on-disk state could ever flip a scheduled
+   group step exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by group
+   class at emit time and is **not** derived from `target/anvil/impact/impact.state`: the
+   mode is a property of the group class, not something probed at runtime. (`setup.yml` no
+   longer caches `target/` at all, so the durable `impact.state` never travels through the
+   build cache; the group-class-fixed mode also means no leftover on-disk state could ever flip a scheduled
    stage into impact scoping and skip the full-workspace backstop.)
 
 The pr-* stages gate on the impact stage *succeeding* (the default `succeeded()`
@@ -644,7 +644,7 @@ steps:
     # Scope comes from the downloaded target/anvil/impact cache: a PR group
     # always downloads the artifact, so it exports ANVIL_IMPACT=consume (trust
     # the cache; no snapshot/cargo-delta/base ref), whereas a scheduled group
-    # exports ANVIL_IMPACT=off. The mode is fixed by tier at emit time -- never
+    # exports ANVIL_IMPACT=off. The mode is fixed by group class at emit time -- never
     # probed from the cacheable impact.state marker. See §4.3.
 ```
 
@@ -699,7 +699,7 @@ user's msrustup step in 1ESPT pipelines or by a previous step in OSS pipelines
 via `anvil-tool-cargo-delta-install` and runs the shared **`just anvil-impact`**
 recipe — the same building block adopters run locally. The recipe resolves the base
 ref (`_anvil-base-ref`, which reads `$(System.PullRequest.TargetBranch)` or `$BASE_REF`),
-snapshots the base merge target + the current tree, runs `cargo delta impact`, and
+snapshots the base ref and the working tree, runs `cargo delta impact`, and
 writes the cache under `target/anvil/impact/` (the per-tier `include_<tier>.txt` lists,
 `impact.json`, and the `snapshots/`). The `compute_<os>` job then publishes that whole
 directory as the `anvil-impact-<os>` pipeline artifact (via `job.yml`'s `artifacts:`

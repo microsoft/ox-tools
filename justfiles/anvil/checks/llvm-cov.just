@@ -148,7 +148,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     # threshold, so coverage regressions fail the PR locally and in cloud
     # workflows -- the Codecov upload stays purely for display, not the gate.
     #
-    # Scope the gate to the SAME package set we measured. When impact
+    # Scope the gate to the same package set we measured. When impact
     # scoping is active, $pkg holds `--package X@ver ...` (already opt-out
     # filtered above); pass those through so the gate only gates packages
     # that were actually instrumented -- otherwise unmeasured members would

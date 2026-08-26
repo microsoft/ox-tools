@@ -335,7 +335,7 @@ export -f just
     #[test]
     fn impact_action_uses_group_none_and_runs_the_shared_recipe() {
         // The impact action reuses anvil-setup (group=none) + the cargo-delta
-        // install, then runs the SAME `just anvil-impact` recipe adopters run
+        // install, then runs the same `just anvil-impact` recipe adopters run
         // locally and uploads the whole cache as a per-OS artifact. The include
         // lists reach group jobs through that downloaded cache, never job
         // outputs, so CI and local execution stay identical by construction.

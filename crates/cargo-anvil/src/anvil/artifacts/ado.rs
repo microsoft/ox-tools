@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn scheduled_group_step_forces_impact_off_unconditionally() {
         // The scheduled tier always validates the full workspace. Its impact
-        // mode is fixed by tier at emit time, never probed at runtime from
+        // mode is fixed by group class at emit time, never probed at runtime from
         // target/anvil/impact/impact.state, so no leftover state on the agent
         // can wrongly enable scoping and skip the full-workspace backstop.
         let body = render_group_step("scheduled-test");

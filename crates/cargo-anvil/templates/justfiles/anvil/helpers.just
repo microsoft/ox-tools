@@ -33,7 +33,7 @@
 #     unscoped by design.
 #
 # Each scoped check depends on `anvil-impact` (which produces the
-# target/anvil/impact cache) and captures its tier's scope into a local
+# target/anvil/impact cache) and captures its category's scope into a local
 # variable by calling the shared resolver:
 #
 #   $include = (& "{{ just_executable() }}" _anvil-impact-include <tier>)

@@ -45,7 +45,7 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # The impact mode is fixed by tier at emit time -- never probed from a
+      # The impact mode is fixed by group class at emit time -- never probed from a
       # marker file. PR group jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
       # cargo-delta, or base ref); scheduled group jobs force off so every

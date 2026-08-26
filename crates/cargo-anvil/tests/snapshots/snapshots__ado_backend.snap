@@ -1344,8 +1344,8 @@ stages:
   # the Windows depgraph, so the Windows leg could skip tests that
   # ought to run. The two per-OS computations are two *jobs* in a single
   # `impact` stage (matching how the pr-* stages run per-OS jobs), so they
-  # run in parallel. Each job PUBLISHES its target/anvil/impact/ cache as the
-  # `anvil-impact-<os>` pipeline artifact (via job.yml's `artifacts:` param);
+  # run in parallel. Each job publishes its target/anvil/impact/ cache as the
+  # `anvil-impact-<os>` pipeline artifact (via job.yml's `artifacts:` parameter);
   # downstream stages download it and their checks read the cache directly --
   # the same code path as a local run, with no stage-output variables.
   - stage: impact
@@ -1740,7 +1740,7 @@ steps:
 # Runs the shared `anvil-impact` recipe and leaves its cache under
 # target/anvil/impact/. The compute job (pr-stages.yml) publishes that
 # directory as the `anvil-impact-<os>` pipeline artifact (via job.yml's
-# `artifacts:` param), which each downstream group stage downloads and its
+# `artifacts:` parameter), which each downstream group stage downloads and its
 # scoped checks read directly -- the same code path as a local run. No stage
 # output variables / env threading are involved.
 steps:
@@ -1754,9 +1754,9 @@ steps:
   - bash: just anvil-tool-cargo-delta-install install
     displayName: anvil impact (install cargo-delta)
   - bash: just anvil-impact
-    # Run the shared anvil-impact recipe -- the SAME impact building block
+    # Run the shared anvil-impact recipe -- the same impact building block
     # adopters run locally. It resolves the base ref (_anvil-base-ref),
-    # snapshots the base merge target in a throwaway worktree + the current
+    # snapshots the base ref in a throwaway worktree and the working
     # tree, runs `cargo delta impact`, and writes the cache under
     # target/anvil/impact/. This is the only job that needs cargo-delta; the
     # group stages just download the artifact it produces.
@@ -1888,7 +1888,7 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # The impact mode is fixed by tier at emit time -- never probed from a
+      # The impact mode is fixed by group class at emit time -- never probed from a
       # marker file. PR group jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
       # cargo-delta, or base ref); scheduled group jobs force off so every
@@ -1953,7 +1953,7 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # The impact mode is fixed by tier at emit time -- never probed from a
+      # The impact mode is fixed by group class at emit time -- never probed from a
       # marker file. PR group jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
       # cargo-delta, or base ref); scheduled group jobs force off so every
@@ -2018,7 +2018,7 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # The impact mode is fixed by tier at emit time -- never probed from a
+      # The impact mode is fixed by group class at emit time -- never probed from a
       # marker file. PR group jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
       # cargo-delta, or base ref); scheduled group jobs force off so every
@@ -2083,7 +2083,7 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # The impact mode is fixed by tier at emit time -- never probed from a
+      # The impact mode is fixed by group class at emit time -- never probed from a
       # marker file. PR group jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
       # cargo-delta, or base ref); scheduled group jobs force off so every
@@ -2148,7 +2148,7 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # The impact mode is fixed by tier at emit time -- never probed from a
+      # The impact mode is fixed by group class at emit time -- never probed from a
       # marker file. PR group jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
       # cargo-delta, or base ref); scheduled group jobs force off so every
@@ -2213,7 +2213,7 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # The impact mode is fixed by tier at emit time -- never probed from a
+      # The impact mode is fixed by group class at emit time -- never probed from a
       # marker file. PR group jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
       # cargo-delta, or base ref); scheduled group jobs force off so every
@@ -2278,7 +2278,7 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # The impact mode is fixed by tier at emit time -- never probed from a
+      # The impact mode is fixed by group class at emit time -- never probed from a
       # marker file. PR group jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
       # cargo-delta, or base ref); scheduled group jobs force off so every
@@ -2343,7 +2343,7 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: |
       set -euo pipefail
-      # The impact mode is fixed by tier at emit time -- never probed from a
+      # The impact mode is fixed by group class at emit time -- never probed from a
       # marker file. PR group jobs downloaded the target/anvil/impact artifact
       # and trust it verbatim (consume: anvil-impact no-ops -- no snapshot,
       # cargo-delta, or base ref); scheduled group jobs force off so every
@@ -3065,7 +3065,7 @@ anvil-cargo-sort-validate-prereqs: anvil-tool-cargo-sort-validate-prereqs
 # rather than the modified set: a change in a crate can introduce a
 # clippy issue in a dependent crate (e.g., trait-bound or
 # obviously-truthy-condition lints that key off the changed type), so
-# we want downstream rev-deps to lint as well. cargo-clippy is a
+# we want downstream reverse dependencies to lint as well. cargo-clippy is a
 # rustup component; same reasoning as fmt for the require.
 
 # Lint affected workspace packages with Clippy.
@@ -3277,7 +3277,7 @@ anvil-examples-validate-prereqs: anvil-tool-rustc-validate-prereqs
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Affected tier (lints public API of changed crates and rev-deps).
+# Affected tier (lints public API of changed crates and reverse dependencies).
 #
 # cargo-check-external-types is per-manifest: no --package/--workspace,
 # only --manifest-path. Iterate the affected library crates and run
@@ -3592,7 +3592,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     # threshold, so coverage regressions fail the PR locally and in cloud
     # workflows -- the Codecov upload stays purely for display, not the gate.
     #
-    # Scope the gate to the SAME package set we measured. When impact
+    # Scope the gate to the same package set we measured. When impact
     # scoping is active, $pkg holds `--package X@ver ...` (already opt-out
     # filtered above); pass those through so the gate only gates packages
     # that were actually instrumented -- otherwise unmeasured members would
@@ -5007,7 +5007,7 @@ anvil-scheduled-test-validate-prereqs: \
 #     unscoped by design.
 #
 # Each scoped check depends on `anvil-impact` (which produces the
-# target/anvil/impact cache) and captures its tier's scope into a local
+# target/anvil/impact cache) and captures its category's scope into a local
 # variable by calling the shared resolver:
 #
 #   $include = (& "{{ just_executable() }}" _anvil-impact-include <tier>)
@@ -5106,7 +5106,7 @@ _anvil-base-ref:
 # Impact analysis lives in one place: the `anvil-impact` recipe. It runs
 # cargo-delta against the working tree vs. the base ref and writes durable
 # artifacts under target/anvil/impact/ that the per-crate check recipes
-# consume via _anvil-impact-include. The SAME recipe runs locally and in
+# consume via _anvil-impact-include. The same recipe runs locally and in
 # cloud workflows: a cloud impact job runs `just anvil-impact` and uploads
 # target/anvil/impact/ as an artifact; each downstream group job downloads
 # it, so the checks read the cache instead of recomputing.
@@ -5163,8 +5163,8 @@ _anvil-impact-snapshot:
     # below. anvil-impact widens every tier to --workspace when the tree is
     # dirty (see its safety net) and never reads these snapshots, so computing
     # them would be wasted work -- and the recompute path needs cargo-delta +
-    # a resolvable, non-shallow base ref, which a first-time / local WIP
-    # checkout may lack. Without this, a dirty run that could not recompute
+    # a resolvable, non-shallow base ref, which a first-time checkout or local
+    # working-tree edit may lack. Without this, a dirty run that could not recompute
     # would hard-fail here instead of gracefully widening. Same probe as
     # anvil-impact (excluding target/, which holds our own cache artifacts).
     # Let git itself exclude target/ via an :(exclude) pathspec rather than
@@ -5694,13 +5694,13 @@ _anvil-impact-format tier impactJson:
         Write-Output ($specs -join ' ')
     }
 
-# Private. Resolves a tier's scope for a check recipe and echoes it on stdout.
+# Private. Resolves an impact category's scope for a check recipe and echoes it on stdout.
 #   1. ANVIL_IMPACT=off            -> tier default (full-workspace / run).
 #   2. include_<tier>.txt present  -> its contents (a --package list or --skip).
 #   3. otherwise                   -> tier default.
 # Tier default: --workspace for affected/required; empty (run) for modified.
 # Each scoped check calls this directly (into a local $include variable) to
-# read its tier's scope from the target/anvil/impact cache -- the same cache
+# read its category's scope from the target/anvil/impact cache -- the same cache
 # both locally and in cloud workflows (where the group job downloaded it).
 
 # Resolve a tier's package scope from the impact cache.

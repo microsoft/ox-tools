@@ -8,11 +8,11 @@ description: |
   Compute the cargo-delta impact set for this PR and publish it as the
   `anvil-impact-<runner.os>` workflow artifact.
 
-  This runs the SAME `anvil-impact` recipe adopters run locally: it snapshots
-  the base merge target + the current tree, runs `cargo delta impact`, and
+  This runs the same `anvil-impact` recipe adopters run locally: it snapshots
+  the base ref and the working tree, runs `cargo delta impact`, and
   writes the durable cache under `target/anvil/impact/` (the per-tier
   `include_<tier>.txt` lists, `impact.json`, and the `snapshots/`). The whole
-  directory is uploaded so each downstream group job can DOWNLOAD it and read
+  directory is uploaded so each downstream group job can download it and read
   the cache exactly as a local run does -- rather than threading the include
   lists through job outputs / environment variables. This keeps CI and local
   execution identical by construction.
@@ -36,11 +36,11 @@ runs:
       run: just anvil-tool-cargo-delta-install binstall
     - name: Compute impact
       shell: bash
-      # Run the shared anvil-impact recipe -- the SAME impact building block
+      # Run the shared anvil-impact recipe -- the same impact building block
       # adopters run locally. It resolves the base ref (_anvil-base-ref),
-      # snapshots the base merge target in a throwaway worktree + the current
+      # snapshots the base ref in a throwaway worktree and the working
       # tree, runs `cargo delta impact`, and writes the cache under
-      # target/anvil/impact/. This is the only job that RUNS cargo-delta to
+      # target/anvil/impact/. This is the only job that runs cargo-delta to
       # compute the impact set; group jobs install it as a setup prereq (for
       # local recompute-capable runs) but consume the downloaded artifact
       # instead of recomputing.
