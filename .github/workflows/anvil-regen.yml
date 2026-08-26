@@ -1,0 +1,226 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# Reconciles cargo-anvil's emitted tree on Dependabot branches.
+#
+# Dependabot keeps doing what it is good at -- discovering action releases,
+# honouring the cooldown, writing the changelog -- but it cannot run a binary,
+# so it can neither regenerate the files anvil owns nor refresh the checksums
+# in .anvil.lock. A Dependabot pull request that touches an anvil artifact is
+# therefore always incomplete, and merging it as-is is actively harmful: anvil
+# compares disk, lock and template checksums, so an edit it did not make marks
+# the file as repository-customized and it stops updating that file (see
+# crates/cargo-anvil/docs/design/updates.md section 5).
+#
+# This workflow closes that gap. For every open Dependabot pull request that
+# touches an anvil artifact it restores the emitted files to their base-branch
+# state, re-runs anvil so the bump flows from the template through the
+# generator, refreshes the insta snapshots, and pushes the result back onto the
+# Dependabot branch.
+#
+# Why a schedule rather than a trigger on the pull request itself: workflows
+# initiated by Dependabot get a read-only GITHUB_TOKEN and no access to Actions
+# secrets, and that also holds for pull_request_target when the base ref was
+# created by Dependabot. A scheduled run is not initiated by Dependabot, so it
+# gets a normal token and can read secrets.
+#
+# ANVIL_REGEN_TOKEN is required and must NOT be the default GITHUB_TOKEN:
+# pushes made with GITHUB_TOKEN deliberately do not start new workflow runs, so
+# the pull request would keep the check results of the pre-regeneration commit
+# and could never go green. Use a GitHub App installation token or a
+# fine-grained PAT with "Contents: read and write" on this repository.
+name: anvil-regen
+
+on:
+  schedule:
+    # Dependabot's own schedule is monthly, but a pull request that opens just
+    # after a run would otherwise sit broken until the next one.
+    - cron: '17 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: Reconcile only this pull request number.
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: anvil-regen
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      prs: ${{ steps.find.outputs.prs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Find Dependabot pull requests touching anvil artifacts
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ONLY_PR: ${{ inputs.pr }}
+        run: |
+          set -euo pipefail
+
+          # Anvil owns every path recorded as a [[file]] entry in the lock,
+          # plus the templates those files are rendered from. Region entries
+          # ([[region]], keyed by "host") are deliberately excluded: their
+          # hosts are co-owned files whose non-region content belongs to the
+          # repository.
+          mapfile -t owned < <(sed -n 's/^path = "\(.*\)"$/\1/p' .anvil.lock)
+          owned+=("crates/cargo-anvil/templates/")
+
+          if [[ -n "$ONLY_PR" ]]; then
+            numbers="$ONLY_PR"
+          else
+            numbers=$(gh pr list \
+              --state open \
+              --author 'app/dependabot' \
+              --limit 100 \
+              --json number \
+              --jq '.[].number')
+          fi
+
+          selected=()
+          for pr in $numbers; do
+            # --json files is capped at 100 entries per page by the API; an
+            # action bump is a handful of files, and a Dependabot pull request
+            # that large would not be one we want to touch unattended anyway.
+            mapfile -t changed < <(gh pr view "$pr" --json files --jq '.files[].path')
+            for file in "${changed[@]}"; do
+              for path in "${owned[@]}"; do
+                if [[ "$file" == "$path" || "$file" == "$path"* ]]; then
+                  selected+=("$pr")
+                  break 2
+                fi
+              done
+            done
+          done
+
+          if [[ ${#selected[@]} -eq 0 ]]; then
+            echo "No Dependabot pull requests touch anvil artifacts."
+            echo 'prs=[]' >> "$GITHUB_OUTPUT"
+          else
+            printf 'Selected pull requests: %s\n' "${selected[*]}"
+            printf 'prs=%s\n' "$(printf '%s\n' "${selected[@]}" | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
+          fi
+
+  reconcile:
+    needs: [discover]
+    if: needs.discover.outputs.prs != '' && needs.discover.outputs.prs != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJSON(needs.discover.outputs.prs) }}
+    env:
+      # Surfaced as env vars because the secrets context is not available in a
+      # step-level if:, and because nearly every step below needs the token.
+      GH_TOKEN: ${{ secrets.ANVIL_REGEN_TOKEN }}
+      PR: ${{ matrix.pr }}
+    steps:
+      - name: Require the push token
+        if: ${{ env.GH_TOKEN == '' }}
+        run: |
+          echo "::error::ANVIL_REGEN_TOKEN is not configured. Without it the" \
+               "regeneration commit cannot start a new check run and the" \
+               "pull request can never go green. See the header of this file."
+          exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so the base branch is available to restore from, and
+          # the elevated token so the later push starts check runs.
+          fetch-depth: 0
+          lfs: true
+          token: ${{ secrets.ANVIL_REGEN_TOKEN }}
+
+      - name: Check out the Dependabot branch
+        run: |
+          set -euo pipefail
+          gh pr checkout "$PR"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Restore anvil-owned files to their base-branch state
+        run: |
+          set -euo pipefail
+
+          base=$(gh pr view "$PR" --json baseRefName --jq '.baseRefName')
+          git fetch --no-tags origin "$base"
+
+          # Anvil's decision table keys each artifact on disk-vs-lock and
+          # template-vs-lock, never disk-vs-template. Dependabot's edit to a
+          # generated file therefore reads as "the repository customized this"
+          # and earns a .anvil-proposed sibling instead of an overwrite -- even
+          # when its content is byte-identical to what anvil would render.
+          # Reverting the emitted files first puts disk back in step with the
+          # lock, so the template bump takes the plain overwrite path.
+          mapfile -t owned < <(sed -n 's/^path = "\(.*\)"$/\1/p' .anvil.lock)
+          if [[ ${#owned[@]} -gt 0 ]]; then
+            git checkout "origin/$base" -- "${owned[@]}"
+          fi
+          git checkout "origin/$base" -- .anvil.lock
+
+      - name: Regenerate the anvil tree
+        run: cargo run --locked -p cargo-anvil -- anvil
+
+      - name: Refresh snapshots
+        env:
+          INSTA_UPDATE: always
+        run: cargo test --locked -p cargo-anvil --test snapshots
+
+      - name: Verify the tree is now consistent
+        run: |
+          set -euo pipefail
+
+          # A proposal means anvil declined to take ownership of a file, so the
+          # bump did not actually land. Catch it explicitly: the dry-run below
+          # cannot, because writing a proposal also advances the lock, leaving
+          # the next run a clean no-op.
+          proposals=$(find . -name '*.anvil-proposed' -not -path './target/*')
+          if [[ -n "$proposals" ]]; then
+            echo "::error::anvil wrote proposals instead of updating its own" \
+                 "files; reconcile pull request $PR by hand."
+            echo "$proposals"
+            exit 1
+          fi
+
+          cargo build --locked -p cargo-anvil
+          export PATH="$PWD/target/debug:$PATH"
+          if ! cargo anvil --dry-run ; then
+            echo "::error::anvil still reports pending changes after" \
+                 "regeneration; reconcile pull request $PR by hand."
+            exit 1
+          fi
+
+      - name: Push the regenerated tree
+        run: |
+          set -euo pipefail
+
+          # git checkout <ref> -- <paths> stages what it restores, so the
+          # comparison has to be against HEAD rather than against the index.
+          git add --all
+          if git diff --cached --quiet ; then
+            echo "Nothing to reconcile on pull request $PR."
+            exit 0
+          fi
+
+          # Guardrail: this job runs unattended against a branch nobody has
+          # reviewed, so it may only ever move anvil's own artifacts. Anything
+          # else means an assumption above no longer holds.
+          if git diff --cached --name-only \
+            | grep -qvE '^(\.anvil\.lock|\.anvil/|\.github/workflows/anvil-|\.github/actions/anvil-|justfiles/anvil/|crates/cargo-anvil/tests/snapshots/)' ; then
+            echo "::error::Regeneration touched files outside anvil's" \
+                 "artifacts; refusing to push. Diff:"
+            git diff --cached --name-only
+            exit 1
+          fi
+
+          git commit --message 'chore: regenerate anvil artifacts'
+          git push
