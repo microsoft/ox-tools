@@ -47,6 +47,10 @@ permissions:
   contents: read
   pull-requests: read
 
+defaults:
+  run:
+    shell: pwsh
+
 concurrency:
   group: anvil-regen
   cancel-in-progress: false
@@ -65,50 +69,51 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           ONLY_PR: ${{ inputs.pr }}
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
 
           # Anvil owns every path recorded as a [[file]] entry in the lock,
           # plus the templates those files are rendered from. Region entries
           # ([[region]], keyed by "host") are deliberately excluded: their
           # hosts are co-owned files whose non-region content belongs to the
           # repository.
-          mapfile -t owned < <(sed -n 's/^path = "\(.*\)"$/\1/p' .anvil.lock)
-          owned+=("crates/cargo-anvil/templates/")
+          $owned = @(
+            Select-String -Path '.anvil.lock' -Pattern '^path = "(.*)"$' |
+              ForEach-Object { $_.Matches[0].Groups[1].Value }
+          )
+          $owned += 'crates/cargo-anvil/templates/'
 
-          if [[ -n "$ONLY_PR" ]]; then
-            numbers="$ONLY_PR"
-          else
-            numbers=$(gh pr list \
-              --state open \
-              --author 'app/dependabot' \
-              --limit 100 \
-              --json number \
-              --jq '.[].number')
-          fi
+          if ($env:ONLY_PR) {
+            $numbers = @($env:ONLY_PR)
+          } else {
+            $numbers = @(
+              gh pr list --state open --author 'app/dependabot' --limit 100 --json number --jq '.[].number'
+            )
+          }
 
-          selected=()
-          for pr in $numbers; do
-            # --json files is capped at 100 entries per page by the API; an
-            # action bump is a handful of files, and a Dependabot pull request
-            # that large would not be one we want to touch unattended anyway.
-            mapfile -t changed < <(gh pr view "$pr" --json files --jq '.files[].path')
-            for file in "${changed[@]}"; do
-              for path in "${owned[@]}"; do
-                if [[ "$file" == "$path" || "$file" == "$path"* ]]; then
-                  selected+=("$pr")
-                  break 2
-                fi
-              done
-            done
-          done
+          $selected = @()
+          foreach ($pr in $numbers) {
+            $changed = @(gh pr view $pr --json files --jq '.files[].path')
+            $touches = $changed | Where-Object {
+              $file = $_
+              $owned | Where-Object { $file -eq $_ -or $file.StartsWith($_) }
+            }
+            if ($touches) {
+              $selected += $pr
+            }
+          }
 
-          if [[ ${#selected[@]} -eq 0 ]]; then
-            echo "No Dependabot pull requests touch anvil artifacts."
-            echo 'prs=[]' >> "$GITHUB_OUTPUT"
-          else
-            printf 'Selected pull requests: %s\n' "${selected[*]}"
-            printf 'prs=%s\n' "$(printf '%s\n' "${selected[@]}" | jq -R . | jq -sc .)" >> "$GITHUB_OUTPUT"
-          fi
+          if ($selected.Count -eq 0) {
+            Write-Host 'No Dependabot pull requests touch anvil artifacts.'
+            Add-Content -Path $env:GITHUB_OUTPUT -Value 'prs=[]'
+          } else {
+            Write-Host "Selected pull requests: $($selected -join ', ')"
+            # -InputObject rather than the pipeline: piping a single-element
+            # array unrolls it and would emit a bare string, which fromJSON
+            # cannot expand into a matrix.
+            $json = ConvertTo-Json -InputObject @($selected) -Compress
+            Add-Content -Path $env:GITHUB_OUTPUT -Value "prs=$json"
+          }
 
   reconcile:
     needs: [discover]
@@ -127,9 +132,7 @@ jobs:
       - name: Require the push token
         if: ${{ env.GH_TOKEN == '' }}
         run: |
-          echo "::error::ANVIL_REGEN_TOKEN is not configured. Without it the" \
-               "regeneration commit cannot start a new check run and the" \
-               "pull request can never go green. See the header of this file."
+          Write-Host '::error::ANVIL_REGEN_TOKEN is not configured. Without it the regeneration commit cannot start a new check run and the pull request can never go green. See the header of this file.'
           exit 1
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -142,17 +145,20 @@ jobs:
 
       - name: Check out the Dependabot branch
         run: |
-          set -euo pipefail
-          gh pr checkout "$PR"
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+
+          gh pr checkout $env:PR
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
 
       - name: Restore anvil-owned files to their base-branch state
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
 
-          base=$(gh pr view "$PR" --json baseRefName --jq '.baseRefName')
-          git fetch --no-tags origin "$base"
+          $base = gh pr view $env:PR --json baseRefName --jq '.baseRefName'
+          git fetch --no-tags origin $base
 
           # Anvil's decision table keys each artifact on disk-vs-lock and
           # template-vs-lock, never disk-vs-template. Dependabot's edit to a
@@ -161,10 +167,13 @@ jobs:
           # when its content is byte-identical to what anvil would render.
           # Reverting the emitted files first puts disk back in step with the
           # lock, so the template bump takes the plain overwrite path.
-          mapfile -t owned < <(sed -n 's/^path = "\(.*\)"$/\1/p' .anvil.lock)
-          if [[ ${#owned[@]} -gt 0 ]]; then
-            git checkout "origin/$base" -- "${owned[@]}"
-          fi
+          $owned = @(
+            Select-String -Path '.anvil.lock' -Pattern '^path = "(.*)"$' |
+              ForEach-Object { $_.Matches[0].Groups[1].Value }
+          )
+          if ($owned.Count -gt 0) {
+            git checkout "origin/$base" -- $owned
+          }
           git checkout "origin/$base" -- .anvil.lock
 
       - name: Regenerate the anvil tree
@@ -177,50 +186,56 @@ jobs:
 
       - name: Verify the tree is now consistent
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
 
           # A proposal means anvil declined to take ownership of a file, so the
           # bump did not actually land. Catch it explicitly: the dry-run below
           # cannot, because writing a proposal also advances the lock, leaving
           # the next run a clean no-op.
-          proposals=$(find . -name '*.anvil-proposed' -not -path './target/*')
-          if [[ -n "$proposals" ]]; then
-            echo "::error::anvil wrote proposals instead of updating its own" \
-                 "files; reconcile pull request $PR by hand."
-            echo "$proposals"
+          $proposals = @(
+            Get-ChildItem -Recurse -File -Force -Filter '*.anvil-proposed' |
+              Where-Object { $_.FullName -notmatch '[\\/]target[\\/]' }
+          )
+          if ($proposals.Count -gt 0) {
+            Write-Host "::error::anvil wrote proposals instead of updating its own files; reconcile pull request $env:PR by hand."
+            $proposals | ForEach-Object { Write-Host $_.FullName }
             exit 1
-          fi
+          }
 
           cargo build --locked -p cargo-anvil
-          export PATH="$PWD/target/debug:$PATH"
-          if ! cargo anvil --dry-run ; then
-            echo "::error::anvil still reports pending changes after" \
-                 "regeneration; reconcile pull request $PR by hand."
+          $env:PATH = "$PWD/target/debug" + [IO.Path]::PathSeparator + $env:PATH
+          try {
+            cargo anvil --dry-run
+          } catch {
+            Write-Host "::error::anvil still reports pending changes after regeneration; reconcile pull request $env:PR by hand."
             exit 1
-          fi
+          }
 
       - name: Push the regenerated tree
         run: |
-          set -euo pipefail
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
 
           # git checkout <ref> -- <paths> stages what it restores, so the
           # comparison has to be against HEAD rather than against the index.
           git add --all
-          if git diff --cached --quiet ; then
-            echo "Nothing to reconcile on pull request $PR."
+          $changed = @(git diff --cached --name-only)
+          if ($changed.Count -eq 0) {
+            Write-Host "Nothing to reconcile on pull request $env:PR."
             exit 0
-          fi
+          }
 
           # Guardrail: this job runs unattended against a branch nobody has
           # reviewed, so it may only ever move anvil's own artifacts. Anything
           # else means an assumption above no longer holds.
-          if git diff --cached --name-only \
-            | grep -qvE '^(\.anvil\.lock|\.anvil/|\.github/workflows/anvil-|\.github/actions/anvil-|justfiles/anvil/|crates/cargo-anvil/tests/snapshots/)' ; then
-            echo "::error::Regeneration touched files outside anvil's" \
-                 "artifacts; refusing to push. Diff:"
-            git diff --cached --name-only
+          $allowed = '^(\.anvil\.lock|\.anvil/|\.github/workflows/anvil-|\.github/actions/anvil-|justfiles/anvil/|crates/cargo-anvil/tests/snapshots/)'
+          $unexpected = @($changed | Where-Object { $_ -notmatch $allowed })
+          if ($unexpected.Count -gt 0) {
+            Write-Host "::error::Regeneration touched files outside anvil's artifacts; refusing to push."
+            $unexpected | ForEach-Object { Write-Host $_ }
             exit 1
-          fi
+          }
 
           git commit --message 'chore: regenerate anvil artifacts'
           git push
