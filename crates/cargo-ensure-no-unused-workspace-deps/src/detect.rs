@@ -34,11 +34,20 @@ pub struct WorkspaceCatalog {
     pub allowed: BTreeSet<String>,
 }
 
-/// Read and parse a manifest.
-pub fn read_manifest(path: &Path) -> Result<DocumentMut> {
-    let text = std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+/// Read a manifest's text.
+pub fn read_manifest_text(path: &Path) -> Result<String> {
+    std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))
+}
+
+/// Parse manifest text that came from `path`.
+pub fn parse_manifest(text: &str, path: &Path) -> Result<DocumentMut> {
     text.parse::<DocumentMut>()
         .with_context(|| format!("failed to parse {}", path.display()))
+}
+
+/// Read and parse a manifest.
+pub fn read_manifest(path: &Path) -> Result<DocumentMut> {
+    parse_manifest(&read_manifest_text(path)?, path)
 }
 
 /// Classify a parsed manifest and, when it is a workspace root, collect its

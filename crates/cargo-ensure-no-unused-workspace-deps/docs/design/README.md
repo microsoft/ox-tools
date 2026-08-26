@@ -165,6 +165,27 @@ dropped.
 contributed a node to the dependency graph. The tool never touches the lockfile, and
 a lockfile that changes after a fix indicates unrelated drift.
 
+The workspace root is the one file whose loss breaks every other tool in the
+repository, so it is never truncated in place. The replacement is written to a
+temporary file in the manifest's own directory and renamed over the original, which
+is atomic on a single filesystem. Before that rename the file is re-read and compared
+against the bytes that were parsed: `cargo metadata` runs in between as a subprocess,
+which is a wide enough window for an editor to save into, and an edit that lands there
+aborts the fix rather than being overwritten.
+
+#### Carried comments can be misattributed
+
+A group header and a note about one specific dependency are the same thing to the
+parser — comment lines in an entry's decor. When the noted entry is the one removed,
+its note lands on the next surviving entry and reads as if it were written about that
+one, which is worse than dropping it: a dropped comment shows up in the `--fix` diff,
+a wrong attribution outlives it.
+
+The carry-forward still earns its keep for headers, so it stays, and the relocation is
+made visible instead: every move is reported on stderr, naming the entries the
+comments came from and the entry they landed on, so whoever reviews the diff knows
+which lines to check.
+
 ## 6. Relationship to the other dependency checks
 
 | Question                                                | Answered by                  |
@@ -188,12 +209,15 @@ since) was likewise rejected as a pinned dependency.
 
 ## 7. CI integration
 
-The check joins the `modified` tier and runs in the `pr-fast` group as
-`cargo ensure-no-unused-workspace-deps`, alongside `ensure-no-cyclic-deps` and
-`ensure-no-default-features`. It is a text/metadata check: one platform is enough,
-no toolchain pin is required, and it is wired through cargo-anvil like its siblings —
-a pinned version in `versions.just`, install and validate recipes in `tools.just`,
-and a check recipe in `checks/`.
+The check belongs in the `modified` tier, running in the `pr-fast` group as
+`cargo ensure-no-unused-workspace-deps` alongside `ensure-no-cyclic-deps` and
+`ensure-no-default-features`. It is a text/metadata check: one platform is enough and
+no toolchain pin is required.
+
+**Not yet wired.** Anvil installs pinned tools from crates.io, so the wiring — a
+pinned version in `versions.just`, install and validate recipes in `tools.just`, a
+check recipe in `checks/`, and the `pr-fast` entry — follows the crate's first
+release. Until then the tool is published and runnable but enforces nothing here.
 
 Because the tool reads the workspace root, it runs once from the repository root
 rather than per affected package. Single-crate repositories run the same command and

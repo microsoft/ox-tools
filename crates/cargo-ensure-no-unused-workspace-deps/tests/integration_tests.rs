@@ -324,6 +324,133 @@ fn fix_on_a_fully_unused_catalog_empties_the_table() {
 }
 
 #[test]
+fn fix_keeps_an_allowed_entry_while_removing_the_others() {
+    // The destructive path must honour the allow-list too: reporting suppresses
+    // an allowed finding, and `--fix` has to leave that entry on disk.
+    let root = concat!(
+        "[workspace]\nmembers = [\"member\"]\n\n",
+        "[workspace.metadata.ensure-no-unused-workspace-deps]\nallowed = [\"kept\"]\n\n",
+        "[workspace.dependencies]\nkept = \"1\"\nonce_cell = \"1\"\nserde = \"1\"\n",
+    );
+    let dir = workspace(root, &[("member", "[dependencies]\nserde = { workspace = true }\n")]);
+    let manifest = dir.path().join("Cargo.toml");
+
+    let (success, stdout, stderr) = outcome(&run(&manifest, &["--fix"]));
+
+    assert!(success, "--fix should succeed: {stderr}");
+    assert!(
+        stdout.contains("Removed 1 unused workspace dependency"),
+        "unexpected stdout: {stdout}"
+    );
+
+    let fixed = fs::read_to_string(&manifest).expect("failed to read the fixed manifest");
+    assert!(fixed.contains("kept = \"1\""), "an allowed entry must survive --fix: {fixed}");
+    assert!(fixed.contains("serde = \"1\""), "an inherited entry must survive --fix: {fixed}");
+    assert!(!fixed.contains("once_cell"), "the ordinary unused entry should be gone: {fixed}");
+}
+
+#[test]
+fn member_globs_and_exclusions_follow_cargo() {
+    // The reason this tool shells out to `cargo metadata` rather than reading
+    // `members` itself: globs expand and `exclude` subtracts. A literal reading
+    // of `members` would treat the excluded package as a member and call
+    // `only_excluded_uses` inherited.
+    let dir = TempDir::new().expect("failed to create temp dir");
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        concat!(
+            "[workspace]\nmembers = [\"crates/*\"]\nexclude = [\"crates/excluded\"]\n\n",
+            "[workspace.dependencies]\nboth_use = \"1\"\nonly_excluded_uses = \"1\"\n",
+        ),
+    )
+    .expect("failed to write workspace manifest");
+
+    for (name, dep) in [("included", "both_use"), ("excluded", "only_excluded_uses")] {
+        let member = dir.path().join("crates").join(name);
+        fs::create_dir_all(member.join("src")).expect("failed to create member dir");
+        fs::write(member.join("src").join("lib.rs"), "").expect("failed to write member source");
+        fs::write(
+            member.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\n{dep} = {{ workspace = true }}\n"
+            ),
+        )
+        .expect("failed to write member manifest");
+    }
+
+    let (success, _, stderr) = outcome(&run(&dir.path().join("Cargo.toml"), &[]));
+
+    assert!(!success, "the entry only the excluded package inherits is unused");
+    assert!(stderr.contains("- only_excluded_uses"), "unexpected stderr: {stderr}");
+    assert!(
+        !stderr.contains("- both_use"),
+        "the glob-expanded member's entry is inherited: {stderr}"
+    );
+}
+
+#[test]
+fn a_stale_allow_entry_is_reported_against_an_empty_catalog() {
+    // The degenerate boundary: with no catalog at all, every allowed name
+    // suppresses nothing, so every one of them is stale.
+    let root = concat!(
+        "[workspace]\nmembers = [\"member\"]\n\n",
+        "[workspace.metadata.ensure-no-unused-workspace-deps]\nallowed = [\"old\"]\n",
+    );
+    let dir = workspace(root, &[("member", "")]);
+    let manifest = dir.path().join("Cargo.toml");
+
+    let (success, stdout, stderr) = outcome(&run(&manifest, &[]));
+
+    assert!(success, "an empty catalog still passes");
+    assert!(stdout.contains("declares no workspace dependencies"), "unexpected stdout: {stdout}");
+    assert!(
+        stderr.contains("'old' is allowed but"),
+        "a stale allow entry must still be reported: {stderr}"
+    );
+}
+
+#[test]
+fn fix_reports_which_comments_moved_and_where() {
+    // A note about one entry and a group header are indistinguishable, so the
+    // relocation has to be visible in the run's output.
+    let root = concat!(
+        "[workspace]\nmembers = [\"member\"]\n\n",
+        "[workspace.dependencies]\n",
+        "# pinned to 1.2 until upstream #42 is fixed\n",
+        "# revisit after the 2.0 release\n",
+        "once_cell = \"1\"\n",
+        "serde = \"1\"\n",
+    );
+    let dir = workspace(root, &[("member", "[dependencies]\nserde = { workspace = true }\n")]);
+    let manifest = dir.path().join("Cargo.toml");
+
+    let (success, _, stderr) = outcome(&run(&manifest, &["--fix"]));
+
+    assert!(success, "--fix should succeed: {stderr}");
+    // The count has to be the real number of comment lines, not a placeholder:
+    // it tells the reviewer how much text to re-read.
+    assert!(
+        stderr.contains("Carried 2 comment lines from 'once_cell' onto 'serde'"),
+        "the move must be reported with its size: {stderr}"
+    );
+}
+
+#[test]
+fn fix_reports_comments_dropped_with_an_emptied_table() {
+    let root = "[workspace]\nmembers = [\"member\"]\n\n[workspace.dependencies]\n# --- all of it ---\nonce_cell = \"1\"\n";
+    let dir = workspace(root, &[("member", "")]);
+    let manifest = dir.path().join("Cargo.toml");
+
+    let (success, _, stderr) = outcome(&run(&manifest, &["--fix"]));
+
+    assert!(success, "--fix should succeed: {stderr}");
+    assert!(
+        stderr.contains("Dropped 1 comment line from 'once_cell'"),
+        "the drop must be reported: {stderr}"
+    );
+}
+
+#[test]
 fn a_manifest_without_a_workspace_table_passes_with_a_note() {
     let dir = TempDir::new().expect("failed to create temp dir");
     let manifest = dir.path().join("Cargo.toml");

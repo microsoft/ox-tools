@@ -60,6 +60,18 @@ allowed = ["kept-on-purpose"]
 An `allowed` name that suppresses nothing is reported as stale, on stderr,
 without failing the run.
 
+## Fixing
+
+`--fix` replaces the manifest atomically – a temporary file in the same
+directory, renamed over the original – and refuses to write at all if the
+file changed after it was read, so a concurrent edit is never clobbered.
+
+Comments on a removed entry are carried to the next surviving entry, which
+keeps a group header attached to the group it introduces. A note about one
+specific dependency is indistinguishable from such a header, so every move
+is reported on stderr: check that carried text still describes the entry it
+landed on.
+
 ## Installation
 
 ```bash

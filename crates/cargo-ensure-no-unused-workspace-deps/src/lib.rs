@@ -54,6 +54,18 @@
 //! An `allowed` name that suppresses nothing is reported as stale, on stderr,
 //! without failing the run.
 //!
+//! # Fixing
+//!
+//! `--fix` replaces the manifest atomically -- a temporary file in the same
+//! directory, renamed over the original -- and refuses to write at all if the
+//! file changed after it was read, so a concurrent edit is never clobbered.
+//!
+//! Comments on a removed entry are carried to the next surviving entry, which
+//! keeps a group header attached to the group it introduces. A note about one
+//! specific dependency is indistinguishable from such a header, so every move
+//! is reported on stderr: check that carried text still describes the entry it
+//! landed on.
+//!
 //! # Installation
 //!
 //! ```bash
@@ -77,16 +89,19 @@ mod detect;
 mod fix;
 
 use std::collections::BTreeSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use cargo_metadata::MetadataCommand;
 use clap::builder::Styles;
 use clap::builder::styling::{AnsiColor, Effects};
 use clap::{Parser, Subcommand};
+use tempfile::NamedTempFile;
 
 use crate::detect::{Catalog, WorkspaceCatalog};
+use crate::fix::Carry;
 
 const CLAP_STYLES: Styles = Styles::styled()
     .header(AnsiColor::Green.on_default().effects(Effects::BOLD))
@@ -150,7 +165,8 @@ pub fn run() -> Result<ExitCode> {
 /// The check itself, split from [`run`] so tests can drive it without a process
 /// boundary or a parsed command line.
 fn check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Result<ExitCode> {
-    let mut manifest = detect::read_manifest(manifest_path)?;
+    let original = detect::read_manifest_text(manifest_path)?;
+    let mut manifest = detect::parse_manifest(&original, manifest_path)?;
 
     let catalog = match detect::catalog(&manifest) {
         Catalog::Workspace(catalog) => catalog,
@@ -169,6 +185,11 @@ fn check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Result<Exi
     };
 
     if catalog.declared.is_empty() {
+        // An empty catalog is the boundary where *every* allowed name
+        // suppresses nothing, so the stale report is due here too.
+        let (_, stale) = detect::partition(&catalog, &BTreeSet::new());
+        report_stale(&stale);
+
         println!("✅ {} declares no workspace dependencies.", manifest_path.display());
         return Ok(ExitCode::SUCCESS);
     }
@@ -189,19 +210,53 @@ fn check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Result<Exi
         return Ok(ExitCode::FAILURE);
     }
 
-    let removed = fix::remove(&mut manifest, &unused);
-    // Formatted eagerly rather than in a `with_context` closure: the closure
-    // only runs when the write fails, which no test can force portably.
-    let failure = format!("failed to write {}", manifest_path.display());
-    std::fs::write(manifest_path, manifest.to_string()).context(failure)?;
+    let outcome = fix::remove(&mut manifest, &unused);
+    write_back(manifest_path, &original, &manifest.to_string())?;
 
     println!(
-        "🧹 Removed {removed} unused workspace {} from {}.",
-        entries(removed),
+        "🧹 Removed {} unused workspace {} from {}.",
+        outcome.removed,
+        entries(outcome.removed),
+        manifest_path.display()
+    );
+    report_carries(&outcome.carries);
+
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Replace `manifest_path` with `contents`, atomically and only if the file
+/// still holds what was read.
+///
+/// The workspace root manifest is the one file whose loss breaks every other
+/// tool in the repository, so it is never truncated in place: the replacement
+/// is written to a temporary file in the same directory and renamed over the
+/// original, which is atomic on one filesystem. `cargo metadata` runs between
+/// the read and the write, and it is a child process, so that window is wide
+/// enough for an editor to save into it -- hence the unchanged-input guard.
+fn write_back(manifest_path: &Path, original: &str, contents: &str) -> Result<()> {
+    // Eagerly formatted rather than built in `with_context` closures: those
+    // closures only run on failures no test can force portably.
+    let read_failure = format!("failed to re-read {} before writing it", manifest_path.display());
+    let write_failure = format!("failed to write {}", manifest_path.display());
+    let persist_failure = format!("failed to replace {}", manifest_path.display());
+
+    let current = std::fs::read_to_string(manifest_path).context(read_failure)?;
+    ensure!(
+        current == original,
+        "{} changed on disk while the check was running; not writing",
         manifest_path.display()
     );
 
-    Ok(ExitCode::SUCCESS)
+    let directory = manifest_path
+        .parent()
+        .expect("the manifest path always names a file, so it always has a parent directory");
+
+    // Same directory as the manifest, so the rename stays on one filesystem.
+    let mut staged = NamedTempFile::new_in(directory).context(write_failure.clone())?;
+    staged.write_all(contents.as_bytes()).context(write_failure)?;
+    staged.persist(manifest_path).context(persist_failure)?;
+
+    Ok(())
 }
 
 /// Manifest paths of every workspace member, as Cargo resolves them.
@@ -227,6 +282,30 @@ fn members_of(manifest_path: &Path) -> Result<Vec<PathBuf>> {
 fn report_stale(stale: &[String]) {
     for name in stale {
         eprintln!("⚠️ '{name}' is allowed but is inherited or not declared; the allow-list entry can be removed.");
+    }
+}
+
+/// Report comments that moved off a removed entry.
+///
+/// A group header and a note about one specific dependency have identical
+/// decor, so carrying the note onto the next entry makes it read as if it were
+/// about that one. Naming what moved and where puts the reviewer of the `--fix`
+/// diff on the right lines.
+fn report_carries(carries: &[Carry]) {
+    for carry in carries {
+        let sources = carry.from.join("', '");
+        match carry.onto.as_ref() {
+            Some(onto) => eprintln!(
+                "⚠️ Carried {} comment {} from '{sources}' onto '{onto}'; check that the text still describes '{onto}'.",
+                carry.lines,
+                lines(carry.lines)
+            ),
+            None => eprintln!(
+                "⚠️ Dropped {} comment {} from '{sources}': every entry in the table was removed.",
+                carry.lines,
+                lines(carry.lines)
+            ),
+        }
     }
 }
 
@@ -267,4 +346,53 @@ fn report_unused(manifest_path: &Path, unused: &[String]) {
 /// Pluralize `dependency` for `count`.
 fn entries(count: usize) -> &'static str {
     if count == 1 { "dependency" } else { "dependencies" }
+}
+
+/// Pluralize `line` for `count`.
+fn lines(count: usize) -> &'static str {
+    if count == 1 { "line" } else { "lines" }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::write_back;
+
+    /// The unchanged-input guard cannot be driven from an integration test: the
+    /// window it protects is between the read and the write of a single run, so
+    /// forcing a change inside it would mean racing a child process. Exercised
+    /// directly instead.
+    #[test]
+    fn write_back_replaces_a_manifest_that_is_unchanged() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let path = dir.path().join("Cargo.toml");
+        fs::write(&path, "original").expect("failed to seed the manifest");
+
+        write_back(&path, "original", "replacement").expect("an unchanged manifest is replaced");
+
+        assert_eq!(fs::read_to_string(&path).expect("failed to read back"), "replacement");
+    }
+
+    #[test]
+    fn write_back_refuses_a_manifest_that_changed_under_it() {
+        let dir = TempDir::new().expect("failed to create temp dir");
+        let path = dir.path().join("Cargo.toml");
+        fs::write(&path, "edited by someone else").expect("failed to seed the manifest");
+
+        let error = write_back(&path, "original", "replacement").expect_err("a changed manifest is refused");
+
+        assert!(
+            error.to_string().contains("changed on disk while the check was running"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            fs::read_to_string(&path).expect("failed to read back"),
+            "edited by someone else",
+            "the competing edit must survive"
+        );
+    }
 }
