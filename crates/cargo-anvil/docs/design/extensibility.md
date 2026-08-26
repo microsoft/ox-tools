@@ -219,7 +219,7 @@ pub mod artifacts {
         pub fn setup_action() -> Artifact;      // .github/actions/anvil-setup/action.yml
         pub fn impact_action() -> Artifact;     // .github/actions/anvil-impact/action.yml
         pub fn pr_root_workflow() -> Artifact;  // .github/workflows/anvil-pr.yml
-        // …shared group/status actions, reusable workflows, scheduled workflows.
+        // …shared group runner and status reporter actions, reusable workflows, scheduled workflows.
     }
     pub mod ado {
         pub fn setup_step() -> Artifact;        // .pipelines/anvil/steps/setup.yml

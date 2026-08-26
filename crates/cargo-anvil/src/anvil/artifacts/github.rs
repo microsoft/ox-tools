@@ -39,12 +39,14 @@ const PR_ROOT_WORKFLOW: &str = include_str!("../../../templates/github/pr-root-w
 const SCHEDULED_ROOT_WORKFLOW: &str = include_str!("../../../templates/github/scheduled-root-workflow.yml");
 
 /// `.github/actions/anvil-setup/action.yml`.
+#[inline]
 #[must_use]
 pub fn setup_action() -> Artifact {
     Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-setup/action.yml", SETUP_ACTION)
 }
 
 /// `.github/actions/anvil-setup/just-problem-matcher.json`.
+#[inline]
 #[must_use]
 pub fn just_problem_matcher() -> Artifact {
     Artifact::backend_file(
@@ -55,12 +57,14 @@ pub fn just_problem_matcher() -> Artifact {
 }
 
 /// `.github/actions/anvil-run-group/action.yml`.
+#[inline]
 #[must_use]
 pub fn run_group_action() -> Artifact {
     Artifact::backend_file(Backend::GitHub, ".github/actions/anvil-run-group/action.yml", RUN_GROUP_ACTION)
 }
 
 /// `.github/actions/anvil-report-status/action.yml`.
+#[inline]
 #[must_use]
 pub fn report_status_action() -> Artifact {
     Artifact::backend_file(
@@ -123,8 +127,13 @@ pub(crate) fn all() -> Vec<Artifact> {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    #[cfg(windows)]
+    use std::env::var_os;
     use std::fs;
-    use std::process::Command;
+    use std::path::PathBuf;
+    use std::process::{Command, ExitStatus};
+
+    use tempfile::tempdir;
 
     use super::*;
 
@@ -187,8 +196,8 @@ mod tests {
         assert!(RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_REQUIRED"));
     }
 
-    fn run_group_step(fake_output: &str, fake_status: i32) -> (std::process::ExitStatus, String) {
-        let temp = tempfile::tempdir().expect("the test must be able to create a temporary action workspace");
+    fn run_group_step(fake_output: &str, fake_status: i32) -> (ExitStatus, String) {
+        let temp = tempdir().expect("the test must be able to create a temporary action workspace");
         let output_path = temp.path().join("github-output");
         let harness = r#"
 just() {
@@ -217,14 +226,15 @@ export -f just
             .join("\n");
         let program = format!("{harness}\n{script}");
         #[cfg(windows)]
-        let bash = std::path::PathBuf::from(
-            std::env::var_os("ProgramFiles").expect("Git for Windows must be installed under Program Files on Windows test runners"),
-        )
-        .join("Git")
-        .join("bin")
-        .join("bash.exe");
+        // `bash` resolves to WSL in the Windows test environment, whose
+        // filesystem namespace cannot address this Windows temporary path.
+        let bash =
+            PathBuf::from(var_os("ProgramFiles").expect("Git for Windows must be installed under Program Files on Windows test runners"))
+                .join("Git")
+                .join("bin")
+                .join("bash.exe");
         #[cfg(not(windows))]
-        let bash = std::path::PathBuf::from("bash");
+        let bash = PathBuf::from("bash");
         let status = Command::new(bash)
             .args(["-c", &program])
             .current_dir(temp.path())
@@ -318,9 +328,9 @@ export -f just
         assert!(REPORT_STATUS_ACTION.contains("if (seen.has(status.context))"));
         assert!(REPORT_STATUS_ACTION.contains("status.context.endsWith(statusSuffix)"));
         assert!(REPORT_STATUS_ACTION.contains("status.target_url?.endsWith(groupMarker)"));
-        assert!(REPORT_STATUS_ACTION.contains("100 - statusPrefix.length - statusSuffix.length"));
+        assert!(REPORT_STATUS_ACTION.contains("MAX_CONTEXT_LENGTH - statusPrefix.length - statusSuffix.length"));
         assert!(REPORT_STATUS_ACTION.contains("failedRecipe.replace(/^anvil-/, \"\")"));
-        assert!(REPORT_STATUS_ACTION.contains("statusDescription.slice(0, 140)"));
+        assert!(REPORT_STATUS_ACTION.contains("statusDescription.slice(0, MAX_DESCRIPTION_LENGTH)"));
     }
 
     #[test]
@@ -359,7 +369,12 @@ export -f just
         ] {
             assert!(PR_IMPL_WORKFLOW.contains(name), "PR impl workflow missing display name '{name}'");
         }
-        assert!(PR_IMPL_WORKFLOW.contains("publish_job_statuses:"));
+        assert!(PR_IMPL_WORKFLOW.contains("publish_commit_statuses:"));
+        assert_eq!(
+            PR_IMPL_WORKFLOW.matches("BASE_REF: ${{ inputs.base_ref }}").count(),
+            4,
+            "both impact jobs plus SemVer and mutation checks must use the event-specific base"
+        );
         for group in PR_GROUPS {
             assert!(
                 PR_IMPL_WORKFLOW.contains(&format!("group: {group}")),
@@ -373,7 +388,7 @@ export -f just
         );
         assert_eq!(
             PR_IMPL_WORKFLOW
-                .matches("publish_job_statuses: ${{ inputs.publish_job_statuses }}")
+                .matches("publish_commit_statuses: ${{ inputs.publish_commit_statuses }}")
                 .count(),
             4,
             "every PR group job must receive the status opt-in"
@@ -475,6 +490,8 @@ const baseEnv = {
   GITHUB_REPOSITORY: "microsoft/ox-tools",
   GITHUB_RUN_ID: "42",
 };
+const GITHUB_MAX_STATUS_PAGE_SIZE = 100;
+const OVER_LIMIT_RECIPE_LENGTH = 150;
 
 async function scenario({ env = {}, history = [], context = baseContext } = {}) {
   const calls = { paginate: [], publish: [] };
@@ -502,7 +519,7 @@ async function scenario({ env = {}, history = [], context = baseContext } = {}) 
 
 (async () => {
   const groupMarker = "#anvil-group=pr-fast";
-  const staleContext = "Anvil / clippy (linux-x64)";
+  const staleContext = "Anvil / clippy [pr-fast] (linux-x64)";
   const failure = await scenario({
     history: [
       {
@@ -516,22 +533,22 @@ async function scenario({ env = {}, history = [], context = baseContext } = {}) 
         target_url: `https://github.com/microsoft/ox-tools/actions/runs/40${groupMarker}`,
       },
       {
-        context: "Anvil / already-clear (linux-x64)",
+        context: "Anvil / already-clear [pr-fast] (linux-x64)",
         state: "success",
         target_url: `https://github.com/microsoft/ox-tools/actions/runs/41${groupMarker}`,
       },
       {
-        context: "Anvil / already-clear (linux-x64)",
+        context: "Anvil / already-clear [pr-fast] (linux-x64)",
         state: "failure",
         target_url: `https://github.com/microsoft/ox-tools/actions/runs/40${groupMarker}`,
       },
       {
-        context: "Anvil / other-group (linux-x64)",
+        context: "Anvil / license-headers [pr-test] (linux-x64)",
         state: "failure",
         target_url: "https://github.com/microsoft/ox-tools/actions/runs/41#anvil-group=pr-test",
       },
       {
-        context: "Anvil / other-runner (windows-x64)",
+        context: "Anvil / other-runner [pr-fast] (windows-x64)",
         state: "failure",
         target_url: `https://github.com/microsoft/ox-tools/actions/runs/41${groupMarker}`,
       },
@@ -540,14 +557,17 @@ async function scenario({ env = {}, history = [], context = baseContext } = {}) 
   assert.equal(failure.error, undefined);
   assert.equal(failure.calls.paginate.length, 1);
   assert.equal(failure.calls.paginate[0].args.ref, "head-sha");
-  assert.equal(failure.calls.paginate[0].args.per_page, 100);
+  assert.equal(
+    failure.calls.paginate[0].args.per_page,
+    GITHUB_MAX_STATUS_PAGE_SIZE,
+  );
   assert.equal(failure.calls.publish.length, 2);
   assert.deepEqual(failure.calls.publish[0], {
     owner: "microsoft",
     repo: "ox-tools",
     sha: "head-sha",
     state: "failure",
-    context: "Anvil / license-headers (linux-x64)",
+    context: "Anvil / license-headers [pr-fast] (linux-x64)",
     description: "license-headers failed",
     target_url: `https://github.com/microsoft/ox-tools/actions/runs/42${groupMarker}`,
   });
@@ -575,7 +595,7 @@ async function scenario({ env = {}, history = [], context = baseContext } = {}) 
   });
   assert.equal(setup.calls.publish.length, 1);
   assert.equal(setup.calls.publish[0].state, "error");
-  assert.equal(setup.calls.publish[0].context, "Anvil / pr-fast setup (linux-x64)");
+  assert.equal(setup.calls.publish[0].context, "Anvil / pr-fast setup [pr-fast] (linux-x64)");
   assert.equal(setup.calls.publish[0].description, "setup failed before pr-fast ran");
 
   const noResult = await scenario({
@@ -583,12 +603,13 @@ async function scenario({ env = {}, history = [], context = baseContext } = {}) 
   });
   assert.equal(noResult.calls.publish.length, 1);
   assert.equal(noResult.calls.publish[0].state, "error");
-  assert.equal(noResult.calls.publish[0].context, "Anvil / pr-fast no result (linux-x64)");
+  assert.equal(noResult.calls.publish[0].context, "Anvil / pr-fast no result [pr-fast] (linux-x64)");
 
-  const longRecipe = `anvil-${"x".repeat(150)}`;
+  // Deliberately exceed the API context limit to verify label-only truncation.
+  const longRecipe = `anvil-${"x".repeat(OVER_LIMIT_RECIPE_LENGTH)}`;
   const truncated = await scenario({ env: { ANVIL_FAILED_RECIPE: longRecipe } });
   assert.equal(truncated.calls.publish[0].context.length, 100);
-  assert.match(truncated.calls.publish[0].context, /^Anvil \/ x+ \(linux-x64\)$/);
+  assert.match(truncated.calls.publish[0].context, /^Anvil \/ x+ \[pr-fast\] \(linux-x64\)$/);
 
   const missingPullRequest = await scenario({ context: { repo: baseContext.repo, payload: {} } });
   assert.match(
@@ -607,7 +628,7 @@ async function scenario({ env = {}, history = [], context = baseContext } = {}) 
             return;
         }
 
-        let dir = tempfile::tempdir().expect("create temporary test directory");
+        let dir = tempdir().expect("create temporary test directory");
         let path = dir.path().join("report-status.test.cjs");
         fs::write(&path, harness).expect("write status reporter behavior test");
         let output = Command::new("node")
@@ -720,7 +741,7 @@ async function scenario(items) {
             return;
         }
 
-        let dir = tempfile::tempdir().expect("create temporary test directory");
+        let dir = tempdir().expect("create temporary test directory");
         let path = dir.path().join("scheduled-failure.test.cjs");
         fs::write(&path, harness).expect("write JavaScript behavior test");
         let output = Command::new("node")
@@ -741,7 +762,9 @@ async function scenario(items) {
         assert!(PR_ROOT_WORKFLOW.contains("pull_request:"));
         assert!(PR_ROOT_WORKFLOW.contains("merge_group:"));
         assert!(PR_ROOT_WORKFLOW.contains("statuses: write"));
-        assert!(PR_ROOT_WORKFLOW.contains("publish_job_statuses: true"));
+        assert!(PR_ROOT_WORKFLOW.contains("publish_commit_statuses: true"));
+        assert!(PR_ROOT_WORKFLOW.contains("base_ref: ${{ github.event.pull_request.base.sha }}"));
+        assert!(PR_ROOT_WORKFLOW.contains("base_ref: ${{ github.event.merge_group.base_sha }}"));
         assert!(PR_ROOT_WORKFLOW.contains("name: Anvil"));
         assert!(PR_ROOT_WORKFLOW.contains("\n  validation:\n"));
         assert!(PR_ROOT_WORKFLOW.contains("name: PR Job"));

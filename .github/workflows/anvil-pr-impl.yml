@@ -24,8 +24,14 @@ on:
         description: Runner label for aarch64 Windows jobs.
         type: string
         default: windows-11-arm
-      publish_job_statuses:
-        description: Publish named failure commit statuses for Anvil group jobs.
+      base_ref:
+        description: Event-specific target commit SHA used by base-dependent checks.
+        type: string
+        required: true
+      publish_commit_statuses:
+        description: >-
+          Best-effort management of supplemental failure commit statuses for
+          same-repository pull requests. Requires statuses: write.
         type: boolean
         default: false
     secrets:
@@ -35,8 +41,8 @@ on:
           configured at Codecov; required for private repos.
         required: false
 
-# Jobs inherit the selected caller's permission ceiling. The PR caller grants
-# status/comment writes; the merge-group caller grants read-only contents.
+# Event-specific callers select permissions because a called workflow cannot
+# elevate beyond its caller. This implementation declares no broader scopes.
 
 # Note on matrices: every multi-OS job below hardcodes its OS axis as
 # an inline YAML array. Per-leg runner *labels* are inputs (so adopters
@@ -71,6 +77,8 @@ jobs:
           fetch-depth: 0
       - id: delta
         uses: ./.github/actions/anvil-impact
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
 
   impact-windows:
     name: "Preparation: Impact Analysis (windows)"
@@ -86,7 +94,11 @@ jobs:
           fetch-depth: 0
       - id: delta
         uses: ./.github/actions/anvil-impact
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
 
+  # These job display names form repository-ruleset contexts. Treat cosmetic
+  # changes as compatibility changes and keep PR and merge-group callers aligned.
   pr-fast:
     name: "Check Group: Fast Checks (${{ matrix.os }})"
     # Cross-OS / cross-arch because pr-fast contains compile-sensitive
@@ -118,11 +130,12 @@ jobs:
       - uses: ./.github/actions/anvil-run-group
         with:
           group: pr-fast
-          publish_job_statuses: ${{ inputs.publish_job_statuses }}
+          publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
         env:
+          BASE_REF: ${{ inputs.base_ref }}
           PR_TITLE: ${{ github.event.pull_request.title }}
       # Advisory PR comments. Recipes that surface non-blocking findings
       # (e.g. cargo-semver-checks) write a markdown body to
@@ -170,7 +183,7 @@ jobs:
       - uses: ./.github/actions/anvil-run-group
         with:
           group: pr-test
-          publish_job_statuses: ${{ inputs.publish_job_statuses }}
+          publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           free-disk-space: true
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
@@ -220,7 +233,7 @@ jobs:
       - uses: ./.github/actions/anvil-run-group
         with:
           group: pr-runtime-analysis
-          publish_job_statuses: ${{ inputs.publish_job_statuses }}
+          publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
@@ -249,9 +262,9 @@ jobs:
       - uses: ./.github/actions/anvil-run-group
         with:
           group: pr-mutants
-          publish_job_statuses: ${{ inputs.publish_job_statuses }}
+          publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
         env:
-          BASE_REF: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ inputs.base_ref }}

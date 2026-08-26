@@ -1361,7 +1361,7 @@ runs:
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 name: anvil-report-status
-description: Publish a named Anvil failure status and supersede stale failures.
+description: Manage supplemental Anvil failure commit statuses on a pull-request head.
 inputs:
   group:
     description: Anvil group recipe name without the anvil- prefix.
@@ -1406,8 +1406,17 @@ runs:
           const targetUrl =
             `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}` +
             `/actions/runs/${process.env.GITHUB_RUN_ID}${groupMarker}`;
+          // GitHub's commit-status API limits descriptions to 140 characters
+          // and contexts to 100 characters:
+          // https://docs.github.com/rest/commits/statuses
+          const MAX_DESCRIPTION_LENGTH = 140;
+          const MAX_CONTEXT_LENGTH = 100;
+          const MAX_STATUS_PAGE_SIZE = 100;
+          const MIN_FAILURE_LABEL_LENGTH = 1;
           const statusPrefix = "Anvil / ";
-          const statusSuffix = ` (${runner})`;
+          // Include the group in the persistent identity so two groups that
+          // reach the same recipe on one runner cannot overwrite each other.
+          const statusSuffix = ` [${group}] (${runner})`;
 
           let state;
           let description;
@@ -1431,7 +1440,7 @@ runs:
 
           const history = await github.paginate(
             github.rest.repos.listCommitStatusesForRef,
-            { ...context.repo, ref: headSha, per_page: 100 },
+            { ...context.repo, ref: headSha, per_page: MAX_STATUS_PAGE_SIZE },
           );
           const seen = new Set();
           const activePriorContexts = [];
@@ -1457,15 +1466,15 @@ runs:
               sha: headSha,
               state: statusState,
               context: statusContext,
-              description: statusDescription.slice(0, 140),
+              description: statusDescription.slice(0, MAX_DESCRIPTION_LENGTH),
               target_url: targetUrl,
             });
 
           let currentContext;
           if (state !== "success") {
             const availableLabelLength = Math.max(
-              1,
-              100 - statusPrefix.length - statusSuffix.length,
+              MIN_FAILURE_LABEL_LENGTH,
+              MAX_CONTEXT_LENGTH - statusPrefix.length - statusSuffix.length,
             );
             currentContext =
               statusPrefix + failureLabel.slice(0, availableLabelLength) + statusSuffix;
@@ -1522,8 +1531,11 @@ inputs:
     description: Remove unused toolchains from GitHub-hosted runners before setup.
     default: "false"
     required: false
-  publish_job_statuses:
-    description: Publish a GitHub commit status for this Anvil group job.
+  publish_commit_statuses:
+    description: >-
+      Best-effort management of supplemental failure commit statuses for
+      same-repository pull requests. The caller must grant statuses: write.
+      Clean runs only supersede prior failures.
     default: "false"
     required: false
 runs:
@@ -1549,18 +1561,25 @@ runs:
         # to this action.
         GITHUB_TOKEN: ${{ github.token }}
       run: |
+        # Capture the group result before propagating failure so the
+        # best-effort reporter can consume both outputs.
         log="$RUNNER_TEMP/anvil-$ANVIL_GROUP.log"
         set +e
         just "anvil-$ANVIL_GROUP" 2>&1 | tee "$log"
+        # Preserve Just's status rather than tee's pipeline status.
         status=${PIPESTATUS[0]}
         set -e
 
-        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed\( on line [0-9][0-9]*\)\? with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+        # The final terminal Just diagnostic identifies the concrete failure;
+        # fall back to the group when a tool exits without that diagnostic.
+        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed\( on line [0-9][0-9]*\)\{0,1\} with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
         echo "failed_recipe=${failed_recipe:-anvil-$ANVIL_GROUP}" >> "$GITHUB_OUTPUT"
         echo "exit_code=$status" >> "$GITHUB_OUTPUT"
 
-    - name: Publish Anvil job status
-      if: always() && inputs.publish_job_statuses == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    # Reporting is supplemental: run after success or failure, but never let
+    # an API outage determine the authoritative workflow-job result.
+    - name: Publish supplemental Anvil commit status
+      if: always() && inputs.publish_commit_statuses == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
       continue-on-error: true
       uses: ./.github/actions/anvil-report-status
       with:
@@ -1593,7 +1612,8 @@ inputs:
         - "none": skip tool installation entirely; just bootstrap the
           rust toolchain + just + binstall + cache. Used by
           anvil-impact, which installs only cargo-delta afterwards.
-        - anything else: install only that group's prerequisites via
+        - a name containing only lowercase letters, digits, and hyphens:
+          install only that group's prerequisites via
           `just anvil-<group>-setup`.
     default: ""
     required: false
@@ -1733,6 +1753,9 @@ runs:
 
     - name: Install anvil toolchains + tools
       shell: bash
+      # Carry action data through the environment instead of interpolating it
+      # into shell source. Validation below occurs before path or recipe-name
+      # composition.
       env:
         ANVIL_GROUP: ${{ inputs.group }}
       # When `group` is empty (the default), installs the full catalog
@@ -1750,6 +1773,7 @@ runs:
       run: |
         if [[ -n "$ANVIL_GROUP" && "$ANVIL_GROUP" != "none" && ! "$ANVIL_GROUP" =~ ^[a-z0-9-]+$ ]]; then
           echo "::error::Invalid Anvil group; expected lowercase letters, digits, and hyphens."
+          # Distinguish invalid action input from a setup-recipe failure.
           exit 2
         fi
 
@@ -1831,8 +1855,14 @@ on:
         description: Runner label for aarch64 Windows jobs.
         type: string
         default: windows-11-arm
-      publish_job_statuses:
-        description: Publish named failure commit statuses for Anvil group jobs.
+      base_ref:
+        description: Event-specific target commit SHA used by base-dependent checks.
+        type: string
+        required: true
+      publish_commit_statuses:
+        description: >-
+          Best-effort management of supplemental failure commit statuses for
+          same-repository pull requests. Requires statuses: write.
         type: boolean
         default: false
     secrets:
@@ -1842,8 +1872,8 @@ on:
           configured at Codecov; required for private repos.
         required: false
 
-# Jobs inherit the selected caller's permission ceiling. The PR caller grants
-# status/comment writes; the merge-group caller grants read-only contents.
+# Event-specific callers select permissions because a called workflow cannot
+# elevate beyond its caller. This implementation declares no broader scopes.
 
 # Note on matrices: every multi-OS job below hardcodes its OS axis as
 # an inline YAML array. Per-leg runner *labels* are inputs (so adopters
@@ -1878,6 +1908,8 @@ jobs:
           fetch-depth: 0
       - id: delta
         uses: ./.github/actions/anvil-impact
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
 
   impact-windows:
     name: "Preparation: Impact Analysis (windows)"
@@ -1893,7 +1925,11 @@ jobs:
           fetch-depth: 0
       - id: delta
         uses: ./.github/actions/anvil-impact
+        env:
+          BASE_REF: ${{ inputs.base_ref }}
 
+  # These job display names form repository-ruleset contexts. Treat cosmetic
+  # changes as compatibility changes and keep PR and merge-group callers aligned.
   pr-fast:
     name: "Check Group: Fast Checks (${{ matrix.os }})"
     # Cross-OS / cross-arch because pr-fast contains compile-sensitive
@@ -1925,11 +1961,12 @@ jobs:
       - uses: ./.github/actions/anvil-run-group
         with:
           group: pr-fast
-          publish_job_statuses: ${{ inputs.publish_job_statuses }}
+          publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
         env:
+          BASE_REF: ${{ inputs.base_ref }}
           PR_TITLE: ${{ github.event.pull_request.title }}
       # Advisory PR comments. Recipes that surface non-blocking findings
       # (e.g. cargo-semver-checks) write a markdown body to
@@ -1977,7 +2014,7 @@ jobs:
       - uses: ./.github/actions/anvil-run-group
         with:
           group: pr-test
-          publish_job_statuses: ${{ inputs.publish_job_statuses }}
+          publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           free-disk-space: true
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
@@ -2027,7 +2064,7 @@ jobs:
       - uses: ./.github/actions/anvil-run-group
         with:
           group: pr-runtime-analysis
-          publish_job_statuses: ${{ inputs.publish_job_statuses }}
+          publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
@@ -2056,12 +2093,12 @@ jobs:
       - uses: ./.github/actions/anvil-run-group
         with:
           group: pr-mutants
-          publish_job_statuses: ${{ inputs.publish_job_statuses }}
+          publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
           include_modified: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_modified || needs.impact-windows.outputs.include_modified }}
           include_affected: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_affected || needs.impact-windows.outputs.include_affected }}
           include_required: ${{ startsWith(matrix.os, 'linux') && needs.impact-linux.outputs.include_required || needs.impact-windows.outputs.include_required }}
         env:
-          BASE_REF: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: ${{ inputs.base_ref }}
 
 === .github/workflows/anvil-pr.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -2070,6 +2107,8 @@ jobs:
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 name: Anvil
+# Workflow and caller display names contribute to GitHub's check hierarchy.
+# Treat changes as compatibility changes for repository rulesets.
 
 on:
   pull_request: {}
@@ -2087,10 +2126,11 @@ jobs:
     name: PR Job
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/anvil-pr-impl.yml
-    # The called workflow inherits this PR-only write-capable ceiling.
+    # A called workflow cannot elevate beyond its caller. Grant only the
+    # capabilities required by same-repository pull-request presentation.
     permissions:
       contents: read
-      # Publish named failure statuses so the PR checks rollup identifies the
+      # Publish supplemental failure commit statuses so the PR checks rollup identifies the
       # concrete failed Just recipe before the aggregate workflow job.
       statuses: write
       # Write needed so the pr-fast job can upsert/clear the sticky PR
@@ -2098,7 +2138,8 @@ jobs:
       # future advisory checks that emit target/anvil/comments/*).
       pull-requests: write
     with:
-      publish_job_statuses: true
+      base_ref: ${{ github.event.pull_request.base.sha }}
+      publish_commit_statuses: true
     secrets: inherit
 
   merge-validation:
@@ -2107,9 +2148,11 @@ jobs:
     name: PR Job
     if: github.event_name == 'merge_group'
     uses: ./.github/workflows/anvil-pr-impl.yml
-    # The same called workflow inherits this read-only merge-group ceiling.
+    # Synthetic merge-group code needs validation but no presentation writes.
     permissions:
       contents: read
+    with:
+      base_ref: ${{ github.event.merge_group.base_sha }}
     secrets: inherit
 
 === .github/workflows/anvil-scheduled-impl.yml ===
@@ -2146,9 +2189,8 @@ on:
           configured at Codecov; required for private repos.
         required: false
 
-# The caller grants the maximum token scopes available to this reusable
-# workflow. Reset jobs to read-only here, then restore only the publisher's
-# issues scope below.
+# A called workflow cannot elevate beyond its caller. Reset ordinary jobs here,
+# then restore only the publisher's issue scope below.
 permissions:
   contents: read
 
@@ -2338,8 +2380,9 @@ permissions:
 jobs:
   anvil-scheduled:
     uses: ./.github/workflows/anvil-scheduled-impl.yml
-    # The implementation resets this upper bound to read-only and restores
-    # issues:write only on publish-failure.
+    # A called workflow cannot elevate beyond its caller, so the root grants
+    # issues:write while the implementation resets ordinary jobs to read-only
+    # and restores that scope only on publish-failure.
     permissions:
       contents: read
       issues: write

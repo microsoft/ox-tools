@@ -16,7 +16,8 @@ inputs:
         - "none": skip tool installation entirely; just bootstrap the
           rust toolchain + just + binstall + cache. Used by
           anvil-impact, which installs only cargo-delta afterwards.
-        - anything else: install only that group's prerequisites via
+        - a name containing only lowercase letters, digits, and hyphens:
+          install only that group's prerequisites via
           `just anvil-<group>-setup`.
     default: ""
     required: false
@@ -156,6 +157,9 @@ runs:
 
     - name: Install anvil toolchains + tools
       shell: bash
+      # Carry action data through the environment instead of interpolating it
+      # into shell source. Validation below occurs before path or recipe-name
+      # composition.
       env:
         ANVIL_GROUP: ${{ inputs.group }}
       # When `group` is empty (the default), installs the full catalog
@@ -173,6 +177,7 @@ runs:
       run: |
         if [[ -n "$ANVIL_GROUP" && "$ANVIL_GROUP" != "none" && ! "$ANVIL_GROUP" =~ ^[a-z0-9-]+$ ]]; then
           echo "::error::Invalid Anvil group; expected lowercase letters, digits, and hyphens."
+          # Distinguish invalid action input from a setup-recipe failure.
           exit 2
         fi
 

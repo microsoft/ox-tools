@@ -31,9 +31,8 @@ on:
           configured at Codecov; required for private repos.
         required: false
 
-# The caller grants the maximum token scopes available to this reusable
-# workflow. Reset jobs to read-only here, then restore only the publisher's
-# issues scope below.
+# A called workflow cannot elevate beyond its caller. Reset ordinary jobs here,
+# then restore only the publisher's issue scope below.
 permissions:
   contents: read
 

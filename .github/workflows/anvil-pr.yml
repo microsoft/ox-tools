@@ -4,6 +4,8 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 name: Anvil
+# Workflow and caller display names contribute to GitHub's check hierarchy.
+# Treat changes as compatibility changes for repository rulesets.
 
 on:
   pull_request: {}
@@ -21,10 +23,11 @@ jobs:
     name: PR Job
     if: github.event_name == 'pull_request'
     uses: ./.github/workflows/anvil-pr-impl.yml
-    # The called workflow inherits this PR-only write-capable ceiling.
+    # A called workflow cannot elevate beyond its caller. Grant only the
+    # capabilities required by same-repository pull-request presentation.
     permissions:
       contents: read
-      # Publish named failure statuses so the PR checks rollup identifies the
+      # Publish supplemental failure commit statuses so the PR checks rollup identifies the
       # concrete failed Just recipe before the aggregate workflow job.
       statuses: write
       # Write needed so the pr-fast job can upsert/clear the sticky PR
@@ -32,7 +35,8 @@ jobs:
       # future advisory checks that emit target/anvil/comments/*).
       pull-requests: write
     with:
-      publish_job_statuses: true
+      base_ref: ${{ github.event.pull_request.base.sha }}
+      publish_commit_statuses: true
     secrets: inherit
 
   merge-validation:
@@ -41,7 +45,9 @@ jobs:
     name: PR Job
     if: github.event_name == 'merge_group'
     uses: ./.github/workflows/anvil-pr-impl.yml
-    # The same called workflow inherits this read-only merge-group ceiling.
+    # Synthetic merge-group code needs validation but no presentation writes.
     permissions:
       contents: read
+    with:
+      base_ref: ${{ github.event.merge_group.base_sha }}
     secrets: inherit

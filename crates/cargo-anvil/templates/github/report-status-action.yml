@@ -4,7 +4,7 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 name: anvil-report-status
-description: Publish a named Anvil failure status and supersede stale failures.
+description: Manage supplemental Anvil failure commit statuses on a pull-request head.
 inputs:
   group:
     description: Anvil group recipe name without the anvil- prefix.
@@ -49,8 +49,17 @@ runs:
           const targetUrl =
             `${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}` +
             `/actions/runs/${process.env.GITHUB_RUN_ID}${groupMarker}`;
+          // GitHub's commit-status API limits descriptions to 140 characters
+          // and contexts to 100 characters:
+          // https://docs.github.com/rest/commits/statuses
+          const MAX_DESCRIPTION_LENGTH = 140;
+          const MAX_CONTEXT_LENGTH = 100;
+          const MAX_STATUS_PAGE_SIZE = 100;
+          const MIN_FAILURE_LABEL_LENGTH = 1;
           const statusPrefix = "Anvil / ";
-          const statusSuffix = ` (${runner})`;
+          // Include the group in the persistent identity so two groups that
+          // reach the same recipe on one runner cannot overwrite each other.
+          const statusSuffix = ` [${group}] (${runner})`;
 
           let state;
           let description;
@@ -74,7 +83,7 @@ runs:
 
           const history = await github.paginate(
             github.rest.repos.listCommitStatusesForRef,
-            { ...context.repo, ref: headSha, per_page: 100 },
+            { ...context.repo, ref: headSha, per_page: MAX_STATUS_PAGE_SIZE },
           );
           const seen = new Set();
           const activePriorContexts = [];
@@ -100,15 +109,15 @@ runs:
               sha: headSha,
               state: statusState,
               context: statusContext,
-              description: statusDescription.slice(0, 140),
+              description: statusDescription.slice(0, MAX_DESCRIPTION_LENGTH),
               target_url: targetUrl,
             });
 
           let currentContext;
           if (state !== "success") {
             const availableLabelLength = Math.max(
-              1,
-              100 - statusPrefix.length - statusSuffix.length,
+              MIN_FAILURE_LABEL_LENGTH,
+              MAX_CONTEXT_LENGTH - statusPrefix.length - statusSuffix.length,
             );
             currentContext =
               statusPrefix + failureLabel.slice(0, availableLabelLength) + statusSuffix;

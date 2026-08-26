@@ -17,17 +17,9 @@ need to change:
    them.
 3. **Shared composite actions** (`.github/actions/anvil-*/`). The reusable
    workflows pass a constant group name to one `anvil-run-group` action, which
-   runs setup + the matching `just anvil-<tier>-<group>` recipe.
-   The shared setup action registers a problem matcher that promotes Just's
-   standard failing-recipe diagnostic to a GitHub check annotation. Group
-   membership therefore remains solely in the Just recipe while the check UI
-   identifies the individual recipe that failed. The shared group action also captures
-   that same terminal diagnostic and fails through a final, dynamically named
-   step such as `Failed Just recipe: anvil-license-headers`, making the failed
-   recipe visible in the job's step list without copying group membership into
-   YAML. For same-repository pull requests, it also publishes a dynamically
-   named failure status per group job. The status name identifies the failed
-   recipe directly in the PR check list.
+   runs setup plus the matching `just anvil-<tier>-<group>` recipe and surfaces
+   the concrete failure without duplicating group membership. See
+   [Failure attribution and commit statuses](#failure-attribution-and-commit-statuses).
 
 See also:
 
@@ -35,6 +27,11 @@ See also:
 - [checks.md](./checks.md) for what each group runs.
 - [local.md](./local.md) for the `just` recipes the composite actions invoke.
 - [ado.md](./ado.md) for the ADO counterpart.
+
+Concrete failed-recipe presentation is GitHub-specific. Azure Pipelines retains
+the group stage and Just diagnostic in its logs but does not emit an equivalent
+supplemental GitHub-style commit status; cross-backend parity is outside this
+feature's scope.
 
 ## 1. Why three layers
 
@@ -213,7 +210,8 @@ jobs:
       statuses: write
       pull-requests: write
     with:
-      publish_job_statuses: true
+      base_ref: ${{ github.event.pull_request.base.sha }}
+      publish_commit_statuses: true
     secrets: inherit
   merge-validation:
     name: PR Job
@@ -494,8 +492,8 @@ inputs:
     description: Remove unused toolchains from GitHub-hosted runners before setup.
     required: false
     default: "false"
-  publish_job_statuses:
-    description: Publish a GitHub commit status for this Anvil group job.
+  publish_commit_statuses:
+    description: Manage supplemental failure commit statuses for eligible PRs.
     required: false
     default: "false"
 runs:
@@ -520,11 +518,11 @@ runs:
         just "anvil-$ANVIL_GROUP" 2>&1 | tee "$log"
         status=${PIPESTATUS[0]}
         set -e
-        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed\( on line [0-9][0-9]*\)\? with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed\( on line [0-9][0-9]*\)\{0,1\} with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
         echo "failed_recipe=${failed_recipe:-anvil-$ANVIL_GROUP}" >> "$GITHUB_OUTPUT"
         echo "exit_code=$status" >> "$GITHUB_OUTPUT"
-    - name: Publish Anvil job status
-      if: always() && inputs.publish_job_statuses == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    - name: Publish supplemental Anvil commit status
+      if: always() && inputs.publish_commit_statuses == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
       continue-on-error: true
       uses: ./.github/actions/anvil-report-status
       with:
@@ -547,7 +545,7 @@ Input set on the shared group action:
 | `include_affected` | `""`      | Forwarded as `ANVIL_INCLUDE_AFFECTED`. Same semantics.                                                                              |
 | `include_required` | `""`      | Forwarded as `ANVIL_INCLUDE_REQUIRED`. Same semantics.                                                                              |
 | `free-disk-space`  | `"false"` | Forwarded to `anvil-setup`; ignored on macOS and self-hosted runners.                                                               |
-| `publish_job_statuses` | `"false"` | Publishes named failure statuses for the group and runner. Enabled by the generated PR root workflow. |
+| `publish_commit_statuses` | `"false"` | Best-effort management of supplemental failure commit statuses for same-repository pull requests. Requires `statuses: write`; clean runs only supersede prior failures. |
 
 Generated workflows pass constant catalog group names. Both `anvil-run-group`
 and `anvil-setup` carry the value through an `ANVIL_GROUP` environment
@@ -575,8 +573,8 @@ workflows. Anvil does not emit or support public per-group action paths.
 GitHub fixes workflow job names before a job runs, so a matrix check named
 `PR Job / Check Group: Fast Checks (linux)` cannot rename itself after
 discovering that `anvil-license-headers` failed. The checks UI groups that name
-under the `Anvil` workflow. Anvil instead presents the concrete failure at
-three levels, all driven by Just's existing terminal diagnostic:
+under the `Anvil` workflow. Anvil instead presents the concrete failure through
+the following mechanisms, all driven by Just's existing terminal diagnostic:
 
 1. The problem matcher registered by `anvil-setup` promotes
    ``error: recipe `anvil-license-headers` failed with exit code 1`` to a
@@ -588,41 +586,23 @@ three levels, all driven by Just's existing terminal diagnostic:
    whose reserved context namespace names the failed recipe and runner:
 
    ```text
-   Anvil / license-headers (linux-x64)
+   Anvil / license-headers [pr-fast] (linux-x64)
    ```
 
-The group action uses Bash as a cross-platform capture wrapper, including on
-Windows runners, and invokes `just anvil-<group>` through `tee` so users retain
-live logs while the action keeps a copy in `$RUNNER_TEMP`. The Anvil recipe
-bodies that Just dispatches continue to use their declared
-`[script("pwsh", "-NoProfile")]` interpreter. Bash's `PIPESTATUS[0]` preserves
-Just's exit code rather than `tee`'s. After Just exits, a narrow `sed`
-expression extracts the last standard Just failed-recipe line, including the
-`failed on line <line> with exit code <code>` form emitted by ordinary
-line-based recipes, and writes both `failed_recipe` and `exit_code` as step
-outputs. If no such line is present, `failed_recipe` falls back to the group
-recipe, such as `anvil-pr-fast`. This logic remains inline in the generated
-`.github/actions/anvil-run-group/action.yml` rather than introducing a
-standalone script. Cargo Anvil's functional tests extract and execute that
-exact YAML-embedded script against fake success, both failed-recipe diagnostic
-forms, and no-diagnostic-failure results.
+The group action streams normal Just output, captures the terminal failed
+recipe, reports supplemental presentation on a best-effort basis, and then
+propagates Just's result to the authoritative workflow job. The reporter
+neither invokes checks nor contains group membership. Internal capture,
+parsing, status reconciliation, and test-harness details are documented in the
+[implementation guide](../implementation.md#github-group-execution-and-status-reporting).
 
-The run step does not fail immediately because the reporter still needs its
-outputs. A final step guarded by `always()` exits with status 1 whenever the
-captured Just status was nonzero. The composite action and its workflow job
-therefore retain their normal failing conclusions. Status publication uses
-`continue-on-error` because it is supplemental presentation: an API outage
-must not turn a successful validation job red or hide the original failure.
-The reporter neither invokes checks nor contains the membership of any group.
-
-When `publish_job_statuses` is enabled, the shared reporter uses pinned
-`actions/github-script`, `github.rest.repos.listCommitStatusesForRef`, and
-`github.rest.repos.createCommitStatus` to manage statuses with:
+When `publish_commit_statuses` is enabled, the shared reporter manages statuses
+with:
 
 | Field | Value |
 |-------|-------|
 | Commit | `github.event.pull_request.head.sha` |
-| Failure context | `Anvil / <recipe> (<runner>)` |
+| Failure context | `Anvil / <recipe> [<group>] (<runner>)` |
 | State after setup failure | `error` |
 | State after recipe failure | `failure` |
 | Fresh success | No supplemental status |
@@ -632,12 +612,10 @@ When `publish_job_statuses` is enabled, the shared reporter uses pinned
 | Target URL | The originating GitHub Actions workflow run |
 
 The runner suffix is derived from `RUNNER_OS` and `RUNNER_ARCH`, producing
-values such as `linux-x64` and `windows-arm64`. The reserved `Anvil / ` prefix
-and runner suffix identify statuses owned by this mechanism. The reporter adds
-an `#anvil-group=<group>` marker to the workflow-run target URL so cleanup is
-scoped to one group without exposing that implementation name in the check
-label. Contexts are limited to 100 characters by truncating only the recipe
-portion.
+values such as `linux-x64` and `windows-arm64`. The group segment prevents two
+groups that reach the same recipe on the same runner from sharing a persistent
+status identity. Contexts are limited to 100 characters by truncating only the
+recipe portion.
 When Just reports an `anvil-` recipe, the reporter removes that conventional
 prefix from the context and description to keep the limited inline text
 concise.
@@ -649,14 +627,10 @@ This is a presentation hint, not a correctness dependency: GitHub does not
 document the ordering as a stable contract.
 
 Cleanup runs after the group result is known. Keeping the old failure visible
-while a rerun is pending avoids a temporary green result and unnecessary API
-writes. At the end, the reporter queries status history for the PR head and
-finds the newest value of every context with its reserved prefix, runner suffix,
-and group marker. On failure it publishes the current dynamic context first,
-then posts `success` to other active contexts for that leg. On success it posts
-`success` to every active prior failure and creates no new supplemental row.
-Publishing the new failure first ensures cleanup never creates a moment with no
-visible failure.
+while a rerun is pending avoids a temporary green result. On failure the
+reporter publishes the current dynamic context before superseding another
+failure from the same group and runner. On success it supersedes active prior
+failures and creates no fresh supplemental row.
 
 GitHub does not allow commit-status deletion. Superseded contexts therefore
 remain as green historical rows with a description explaining that a later run
@@ -666,21 +640,14 @@ has its own status set, so discovery and supersession matter only for reruns of
 the same commit.
 
 Dynamic contexts are permanent repository metadata: every distinct
-`Anvil / <recipe> (<runner>)` context that is published can continue to appear
+`Anvil / <recipe> [<group>] (<runner>)` context that is published can continue to appear
 in GitHub's required-check picker even after it has been superseded. Repositories
 must not configure these supplemental contexts as required checks. The bounded
 native `PR Job / Check Group: ...` jobs are the only branch-protection
-surface. Status cleanup is a best-effort, non-atomic read-then-write operation;
-concurrent reruns can temporarily race, but their native jobs remain
-authoritative. Group ownership is carried in the target-URL fragment, while the
-visible context is intentionally check-centric. If two groups fail the same
-recipe on the same runner, they share the visible context; newest-status
-deduplication prevents an older group-specific history entry from overriding a
-newer value. This mechanism relies on the commit-status API returning the
-stored `target_url` verbatim. Supplemental contexts must not be required, so a
-future platform change that stopped round-tripping the fragment could leave a
-stale presentation row but could not block correctly configured branch
-protection.
+surface. Status cleanup is a best-effort, non-atomic operation; concurrent
+reruns can temporarily race, but their native jobs remain authoritative.
+Supplemental contexts must not be required, so a stale presentation row cannot
+block correctly configured branch protection.
 
 The reporter runs under `always()` and receives the setup outcome as well as
 the Just outputs. A setup failure can therefore publish an `error` description
@@ -706,14 +673,11 @@ not publish supplemental statuses. This avoids exposing a write-capable token
 while executing a synthetic merge that may contain fork-originated code, and
 avoids redundant statuses on ephemeral merge-group commits.
 
-Adopting this workflow naming changes existing required-check contexts from
-`anvil-pr / <job>` to
-`PR Job / Check Group: <display name> (<platform>)`. Repository
-maintainers must update branch-protection rules or rulesets in coordination
-with regeneration. The pull-request and merge-queue runs intentionally emit
-the same new contexts, so one required-check configuration applies to both
-event types. Supplemental `Anvil / <recipe> (<runner>)` statuses must not be
-selected.
+Branch protection and rulesets must select the bounded
+`PR Job / Check Group: <display name> (<platform>)` contexts. Pull-request and
+merge-queue runs intentionally emit the same contexts, so one required-check
+configuration applies to both event types. Supplemental
+`Anvil / <recipe> [<group>] (<runner>)` statuses must never be selected.
 
 Commit statuses are intentionally preferred over custom Check Runs for this
 contract. GitHub Actions has no native workflow field for the inline status
@@ -736,7 +700,8 @@ result, and log link without check-suite attribution.
   needs `cargo-delta` and installs it itself afterwards.
 - any other value (e.g. `pr-fast`, `scheduled-advisories`): runs
   `just anvil-<group>-setup binstall` -- only the tools, components, and
-  toolchains that group actually needs. `anvil-run-group` passes its group
+  toolchains that group actually needs. Ordinary group names contain only
+  lowercase letters, digits, and hyphens. `anvil-run-group` passes its group
   input here, so a `pr-fast` matrix leg never installs cargo-mutants.
 
 Before invoking Just, the action registers the generated
@@ -744,7 +709,7 @@ Before invoking Just, the action registers the generated
 recipe (for example, ``error: recipe `anvil-license-headers` failed with exit
 code 1``), but GitHub otherwise exposes only its generic process-exit
 annotation. The matcher promotes that existing diagnostic without wrapping
-Just, parsing its output in a custom runner, or repeating a group's check list
+Just, parsing its output in a custom runner, or repeating group membership
 in the action.
 
 The action does not install Rust; it expects `cargo` on PATH (see §7).
@@ -856,7 +821,7 @@ Recommended root workflow shape:
 - `permissions: contents: read` at the workflow level. anvil's default ships with
   this.
 - The pull-request reusable-workflow call grants `pull-requests: write` for
-  advisory comments and `statuses: write` for opt-in per-job statuses. The
+  advisory comments and `statuses: write` for opt-in supplemental commit statuses. The
   shared called workflow declares no permission overrides and inherits that
   caller ceiling. This gives its impact jobs the same scopes on trusted
   same-repository PR runs; the tradeoff avoids duplicating the implementation

@@ -250,7 +250,7 @@ repo/
 ├── .github/                                       only if --backend github (or autodetected) — see github.md
 │   ├── actions/anvil-setup/                         owned   (setup action and Just problem matcher)
 │   ├── actions/anvil-run-group/                     owned   (shared group action and capture script)
-│   ├── actions/anvil-report-status/                 owned   (supplemental failure-status reporter)
+│   ├── actions/anvil-report-status/                 owned   (supplemental commit-status reporter)
 │   ├── actions/anvil-impact/                        owned   (impact analysis action)
 │   ├── workflows/anvil-pr-impl.yml                  owned   (reusable workflow doing the wiring)
 │   ├── workflows/anvil-scheduled-impl.yml             owned

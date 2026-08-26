@@ -35,8 +35,11 @@ inputs:
     description: Remove unused toolchains from GitHub-hosted runners before setup.
     default: "false"
     required: false
-  publish_job_statuses:
-    description: Publish a GitHub commit status for this Anvil group job.
+  publish_commit_statuses:
+    description: >-
+      Best-effort management of supplemental failure commit statuses for
+      same-repository pull requests. The caller must grant statuses: write.
+      Clean runs only supersede prior failures.
     default: "false"
     required: false
 runs:
@@ -62,18 +65,25 @@ runs:
         # to this action.
         GITHUB_TOKEN: ${{ github.token }}
       run: |
+        # Capture the group result before propagating failure so the
+        # best-effort reporter can consume both outputs.
         log="$RUNNER_TEMP/anvil-$ANVIL_GROUP.log"
         set +e
         just "anvil-$ANVIL_GROUP" 2>&1 | tee "$log"
+        # Preserve Just's status rather than tee's pipeline status.
         status=${PIPESTATUS[0]}
         set -e
 
-        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed\( on line [0-9][0-9]*\)\? with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
+        # The final terminal Just diagnostic identifies the concrete failure;
+        # fall back to the group when a tool exits without that diagnostic.
+        failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed\( on line [0-9][0-9]*\)\{0,1\} with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
         echo "failed_recipe=${failed_recipe:-anvil-$ANVIL_GROUP}" >> "$GITHUB_OUTPUT"
         echo "exit_code=$status" >> "$GITHUB_OUTPUT"
 
-    - name: Publish Anvil job status
-      if: always() && inputs.publish_job_statuses == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    # Reporting is supplemental: run after success or failure, but never let
+    # an API outage determine the authoritative workflow-job result.
+    - name: Publish supplemental Anvil commit status
+      if: always() && inputs.publish_commit_statuses == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
       continue-on-error: true
       uses: ./.github/actions/anvil-report-status
       with:
