@@ -266,11 +266,18 @@ fn fix_carries_a_removed_group_header_to_the_next_survivor() {
     let fixed = fs::read_to_string(&manifest).expect("failed to read the fixed manifest");
     let header = fixed.find("# --- kept group ---").expect("the surviving header is kept");
     let survivor = fixed.find("serde =").expect("the survivor is kept");
-    assert!(header < survivor, "the header still introduces its group: {fixed}");
+    let carried = fixed
+        .find("# --- unused group ---")
+        .expect("the removed entry's comment is carried");
+
+    // Position matters, not mere presence: the carried comment has to land
+    // ahead of the next surviving entry. Leaving it at the end of the table
+    // would also keep it in the file, while silently moving it out of place.
     assert!(
-        fixed.contains("# --- unused group ---"),
-        "the removed entry's comment is carried: {fixed}"
+        carried < header,
+        "the carried comment must precede the next entry's own decor: {fixed}"
     );
+    assert!(header < survivor, "the header still introduces its group: {fixed}");
 }
 
 #[test]
