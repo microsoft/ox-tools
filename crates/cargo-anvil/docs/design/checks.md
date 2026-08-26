@@ -159,7 +159,7 @@ that provided the strongest version of the check.
 |--------------------------------|-----------------------------------------------------------|--------|
 | `fmt`                          | `cargo +<pinned-nightly> fmt --manifest-path <package-manifest> --check` for each workspace package. Manifest-scoped invocations avoid platform command-line limits, remain valid for nested packages with independent workspace membership, and need no separate fallback path. | all |
 | `clippy`                       | `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings` | all |
-| `cargo-sort`                   | `cargo sort --workspace --grouped --check --no-format`. Anvil checks dependency ordering but leaves general TOML formatting alone so formatter reordering cannot detach managed-region sentinels. | oxidizer-github |
+| `cargo-sort`                   | `cargo sort --workspace --grouped --check --no-format`. Anvil owns dependency-order validation, not whole-manifest TOML style. In check mode `--check-format` is read-only but makes cargo-sort formatting differences fail, while omitting both format flags still emits formatting warnings; `--no-format` keeps the contract and diagnostics limited to ordering. | oxidizer-github |
 | `license-headers`              | `cargo heather --workspace`                               | oxidizer (`heather`), oxidizer-github |
 | `ensure-no-cyclic-deps`        | `cargo ensure-no-cyclic-deps --workspace`                 | oxidizer-github (sibling crate in `ox-tools-gh`) |
 | `ensure-no-default-features`   | `cargo ensure-no-default-features --workspace`            | oxidizer-github |

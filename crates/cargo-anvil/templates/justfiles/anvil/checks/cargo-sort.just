@@ -8,9 +8,11 @@
 
 # Modified tier.
 #
-# `--no-format` limits this check to dependency ordering. General TOML
-# formatting can move tables and dotted keys independently of comments,
-# detaching Anvil's managed-region sentinels from the content they delimit.
+# `--no-format` limits this check to dependency ordering. In check mode,
+# `--check-format` does not rewrite manifests, but it does make cargo-sort's
+# general TOML style part of the pass/fail contract. Anvil does not own
+# whole-manifest formatting, and running the formatter without
+# `--check-format` would still emit formatting warnings.
 #
 # `--grouped` keeps the blank lines between groups of key/value pairs
 # (e.g. blank-line-separated dependency blocks) intact.
