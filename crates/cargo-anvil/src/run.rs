@@ -363,7 +363,7 @@ fn push_region_at(
     // A file left behind by a release that owned this path outright is re-seeded
     // too. Its content is a previous render, not user composition, so appending
     // the regions to it would produce a file carrying both the old whole-file
-    // definition and the new regions. Recognising it needs both conditions:
+    // definition and the new regions. Recognizing it needs both conditions:
     // tracked as an owned file in the lock we are superseding, and carrying none
     // of this host's regions yet. A Dockerfile the repository wrote by hand is
     // in neither state and is left alone.
@@ -462,7 +462,7 @@ fn region_placement(region_id: &str) -> RegionPlacement {
 /// Most region hosts are files the repository already has (`Cargo.toml`,
 /// `deny.toml`) or files whose first region can simply be appended to nothing.
 /// The container Dockerfile is neither: `# syntax=docker/dockerfile:1` is a
-/// BuildKit parser directive that is honoured only when nothing precedes it,
+/// BuildKit parser directive that is honored only when nothing precedes it,
 /// not even a comment — so it cannot live inside a region, whose opening
 /// sentinel *is* a comment.
 fn host_scaffold(host_relpath: &str) -> Option<&'static str> {

@@ -218,7 +218,7 @@ fn upgrading_from_the_runner_layout_retires_the_seam_and_emits_the_new_backend()
     }
 
     // The composed Dockerfile keeps its seeded parser directive on line 1:
-    // BuildKit honours it nowhere else, and a region sentinel above it would
+    // BuildKit honors it nowhere else, and a region sentinel above it would
     // demote it silently.
     let dockerfile = std::fs::read_to_string(root.join(".anvil/container/Dockerfile")).unwrap();
     assert!(

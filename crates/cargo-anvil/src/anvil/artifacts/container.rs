@@ -14,15 +14,15 @@
 //!
 //! The Dockerfile is a **user-composed file with managed regions**, not a
 //! wholly-owned file. An owned file that invites in-place edits fails silently
-//! here: `updates.md` §2 preserves the edit and writes anvil's version to
+//! here: anvil preserves the edit and writes its own version to
 //! `.anvil-proposed`, with no three-way merge and no recorded ancestor, so a
 //! repository that edits it once keeps building on the base digest and the four
 //! tool pins frozen at that moment — while `anvil-container-tag` keeps
 //! resolving, because the tag hashes *their* file. The identity scheme works
 //! perfectly and still names a stale image.
 //!
-//! Splitting anvil's content into regions does not make it unwritable — §2's
-//! ownership rules apply to a region body as they do to a file, and anvil never
+//! Splitting anvil's content into regions does not make it read-only: the same
+//! ownership rules apply to a region body as to a file, and anvil never
 //! overwrites repository content. What it removes is the *reason* to edit: each
 //! of the three gaps between the regions is the correct home for one class of
 //! addition, defined by what must already be true at that point in the build.
@@ -55,7 +55,7 @@ const DOCKERIGNORE: &str = include_str!("../../../templates/anvil/container/Dock
 /// Seeded into the Dockerfile when the file does not exist, and never
 /// reconciled afterwards — it is the user's half of a composed file.
 ///
-/// It carries `# syntax=docker/dockerfile:1`, which BuildKit honours only as
+/// It carries `# syntax=docker/dockerfile:1`, which BuildKit honors only as
 /// the very first line of the file. A region's opening sentinel is a comment,
 /// so the directive cannot live inside a region without being demoted to an
 /// ordinary comment — silently, with the build falling back to the default
@@ -160,7 +160,7 @@ pub fn dockerfile_setup() -> Artifact {
     dockerfile_region("anvil-container-setup", DOCKERFILE_SETUP)
 }
 
-/// The entry contract: `ANVIL_IN_CONTAINER`, the workdir the repository is
+/// The entry contract: `ANVIL_IN_CONTAINER`, the mount point the repository is
 /// bind-mounted at, and the default command.
 ///
 /// Every line here is a contract with the recipe rather than an opinion about
@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn the_syntax_directive_leads_the_seeded_header() {
-        // BuildKit honours the parser directive only when nothing precedes it.
+        // BuildKit honors the parser directive only when nothing precedes it.
         // If this ever moves, the frontend pin stops applying and nothing
         // fails to say so.
         assert_eq!(

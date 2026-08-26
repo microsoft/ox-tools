@@ -894,14 +894,14 @@ fn mutants_diff_covers_uncommitted_work() {
     );
 }
 
-/// The ARM64 Windows bail-out is a documented behaviour, not an accident:
+/// The ARM64 Windows bail-out is a documented behavior, not an accident:
 /// cargo-mutants does not build for `aarch64-pc-windows-msvc`, so the recipe
 /// exits cleanly rather than failing the merged `pr-slow` group on that leg.
 ///
 /// Asserting it here is what keeps the sibling test above honest. That one pins
 /// the architecture to AMD64 so it exercises the real path; without this test
 /// the skip branch would be exercised by nothing, and an ARM64 runner would be
-/// the only place either behaviour was observed.
+/// the only place either behavior was observed.
 #[test]
 fn mutants_diff_skips_on_arm64_windows() {
     // Only meaningful where the recipe's `$IsWindows` guard can be true; on
