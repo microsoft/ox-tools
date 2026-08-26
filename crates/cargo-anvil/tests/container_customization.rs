@@ -321,7 +321,7 @@ fn every_requested_recipe_is_checked_for_github_authentication() {
 }
 
 #[test]
-fn pr_recipes_run_without_github_token_plumbing() {
+fn pr_recipes_run_without_github_token_handling() {
     // main #76 moved the token-requiring GitHub work into `anvil-aprz`, so the
     // PR recipes (`anvil-pr`, `_anvil-pr`, `anvil-pr-fast`) are deliberately NOT
     // token-required. Run one with GITHUB_TOKEN set and assert the container
@@ -338,7 +338,11 @@ fn pr_recipes_run_without_github_token_plumbing() {
         &[("FAKE_DOCKER_IMAGE_EXISTS", "1"), ("GITHUB_TOKEN", "test-token")],
     );
 
-    assert!(run.status.success(), "a PR recipe must run without token plumbing: {}", run.stderr);
+    assert!(
+        run.status.success(),
+        "a PR recipe must run without GitHub token handling: {}",
+        run.stderr
+    );
     assert!(
         run.docker_log.lines().any(|line| line.contains("just anvil-pr-fast")),
         "the requested PR recipe must still be forwarded to a container: {}",

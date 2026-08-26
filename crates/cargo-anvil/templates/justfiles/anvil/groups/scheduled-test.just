@@ -10,10 +10,10 @@
 
 # Scheduled groups are the full-workspace backstop for PR-tier impact scoping,
 # so route through _anvil-run with impact "off": it exports ANVIL_IMPACT=off
-# before the check deps run, so the group is full-workspace however it is
-# invoked (CI, `just anvil-scheduled`, or `just anvil-scheduled-test`
-# directly). Because these groups never recompute the impact set, they no
-# longer need cargo-delta as a prerequisite.
+# before the check dependencies run, so the group is full-workspace regardless
+# of how it is invoked (CI, `just anvil-scheduled`, or
+# `just anvil-scheduled-test` directly). Because these groups never recompute
+# the impact set, they no longer need cargo-delta as a prerequisite.
 
 # Run the scheduled tests.
 [group("anvil")]

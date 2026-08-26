@@ -69,7 +69,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          lfs: true
+          # No lfs: true -- the impact job only runs cargo-delta snapshot/impact
+          # + cargo metadata over paths and dependency metadata; it never reads
+          # LFS payload contents (the baseline worktree even disables LFS
+          # smudging). Hydrating LFS assets here would add two large downloads
+          # to the critical path for no impact-selection benefit. Downstream
+          # group jobs keep lfs: true because they run arbitrary checks.
           fetch-depth: 0
       - uses: ./.github/actions/anvil-impact
 
@@ -78,7 +83,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          lfs: true
+          # See impact-linux: impact needs only path/metadata inputs, not LFS
+          # payloads, so it checks out without lfs: true.
           fetch-depth: 0
       - uses: ./.github/actions/anvil-impact
 

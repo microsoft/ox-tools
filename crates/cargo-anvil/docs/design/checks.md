@@ -395,7 +395,7 @@ Advisory checks may report policy findings without failing, but failure to execu
 the advisory tool is still an operational error.
 
 The recipe-side mechanics are in
-[local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe). the cloud workflow-side wiring (the
+[local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe). The cloud workflow-side wiring (the
 `anvil-impact` building block, how downstream jobs consume the include files) is in
 [github.md](./github.md#impact-scoping) and [ado.md](./ado.md#impact-scoping).
 

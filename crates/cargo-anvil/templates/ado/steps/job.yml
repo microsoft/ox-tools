@@ -54,6 +54,12 @@ jobs:
     pool: ${{ parameters.pool }}
     steps:
       - ${{ each artifact in parameters.inputArtifacts }}:
+          # DownloadPipelineArtifact@2 is the current major of the built-in
+          # download task; v2 takes the `artifact` + `path` inputs used here
+          # (v1 used the older `artifactName`/`downloadPath` contract). Pinning
+          # the major keeps this default wrapper on that stable input shape --
+          # 1ESPT-compliant pipelines that cannot use this task override
+          # `inputArtifacts` and translate it into their own download mechanism.
           - task: DownloadPipelineArtifact@2
             displayName: Download ${{ artifact.name }}
             inputs:

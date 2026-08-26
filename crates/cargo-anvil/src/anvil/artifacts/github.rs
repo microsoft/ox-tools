@@ -9,6 +9,7 @@
 //!
 //! See [`github.md`](../../../docs/design/github.md).
 
+use crate::anvil::artifacts::impact_mode;
 use crate::backend::Backend;
 use crate::catalog::Artifact;
 
@@ -60,9 +61,14 @@ const IMPACT_MODE_PLACEHOLDER: &str = "__IMPACT_MODE__";
 /// Render the `action.yml` for one check group's composite action.
 #[must_use]
 fn render_group_action(group: &str) -> String {
-    GROUP_ACTION_TEMPLATE
-        .replace(GROUP_PLACEHOLDER, group)
-        .replace(IMPACT_MODE_PLACEHOLDER, super::impact_mode(group))
+    // Substitute the group name first, then replace the single impact-mode
+    // token in place -- reusing the already-allocated buffer instead of
+    // allocating a second full-template String for the second substitution.
+    let mut rendered = GROUP_ACTION_TEMPLATE.replace(GROUP_PLACEHOLDER, group);
+    if let Some(pos) = rendered.find(IMPACT_MODE_PLACEHOLDER) {
+        rendered.replace_range(pos..pos + IMPACT_MODE_PLACEHOLDER.len(), impact_mode(group));
+    }
+    rendered
 }
 
 /// Repo-root-relative path for a per-group composite action.

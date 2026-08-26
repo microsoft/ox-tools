@@ -249,6 +249,10 @@ pub fn tiers() -> Artifact {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use ImpactPolicy::{Affected, Modified, Required, Unscoped};
+
     use super::*;
 
     /// A check's impact-scoping policy: either unscoped (always runs the full
@@ -279,7 +283,6 @@ mod tests {
     /// against the emitted recipes. Keep in sync with the check mapping table
     /// in the design docs.
     const EXPECTED_CHECK_POLICY: &[(&str, ImpactPolicy)] = {
-        use ImpactPolicy::{Affected, Modified, Required, Unscoped};
         &[
             ("aprz", Unscoped),
             ("audit", Unscoped),
@@ -442,8 +445,6 @@ mod tests {
 
     #[test]
     fn every_check_matches_its_declared_impact_policy() {
-        use std::collections::{BTreeMap, BTreeSet};
-
         // Single source of truth for each check's impact policy. The catalog
         // encodes the policy structurally -- an `_anvil-impact-include
         // <category>` call, or its absence for unscoped checks -- and this

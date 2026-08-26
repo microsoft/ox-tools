@@ -8,10 +8,14 @@
 //!
 //! These exercise the *runtime* behavior of the emitted `impact.just`
 //! recipe (not just its emitted text): the expensive base-ref snapshot
-//! (`baseline.json`, keyed on the base commit sha) is regenerated only
-//! when the base moves, the cheap working-tree snapshot (`current.json`,
-//! keyed on the HEAD sha) is regenerated only when HEAD moves, and a
-//! no-op invocation reuses both.
+//! (`baseline.json`, keyed on the *composite* of the base commit sha and the
+//! effective `.delta.toml` identity) is regenerated when the base moves *or*
+//! the cargo-delta config changes, the cheap working-tree snapshot
+//! (`current.json`, keyed on the HEAD sha) is regenerated only when HEAD
+//! moves, and a no-op invocation reuses both. (The config half of the
+//! baseline key is what `baseline_regenerates_when_delta_config_changes_without_moving_the_base`
+//! pins -- it stops a warm cache from diffing snapshots taken under different
+//! cargo-delta rules.)
 //!
 //! The recipe prints a distinct line for each path -- "snapshotting
 //! baseline" / "baseline snapshot up to date" and "snapshotting working
@@ -24,17 +28,21 @@
 //! the schema-validation tests). See `docs/verification.md`.
 
 use std::ffi::OsString;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{env, fs};
 
+use cargo_anvil::Catalog;
 use cargo_anvil::test_support::{Cli, run_update};
 use tempfile::TempDir;
 
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
+        fs::create_dir_all(parent).unwrap();
     }
-    std::fs::write(path, contents).unwrap();
+    fs::write(path, contents).unwrap();
 }
 
 /// Returns true if every external tool the recipe needs is on PATH.
@@ -98,14 +106,20 @@ impl ShimBin {
             write(&dir.path().join(name), body);
         }
         let mut paths = vec![dir.path().to_path_buf()];
-        paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
-        let path = std::env::join_paths(paths).unwrap();
+        paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+        let path = env::join_paths(paths).unwrap();
         Self { _dir: dir, path, log }
     }
 
     /// A `cargo` shim that records every invocation to `ANVIL_TEST_LOG` and then
     /// fails hard (exit 97). Used to assert a recipe path never shells out to
     /// cargo-delta: any call both fails the recipe and leaves a log entry.
+    ///
+    /// 97 is an arbitrary recognizable test-only sentinel: no assertion checks
+    /// for it specifically (callers verify the log is empty / the recipe
+    /// succeeded), so any nonzero value would do -- it is chosen to be visually
+    /// distinct from the recipe contract exit codes (1/2) so an unexpected
+    /// failure surfacing this code is obviously the tripwire firing.
     fn tripwire_cargo() -> Self {
         Self::new(&[(
             "cargo.ps1",
@@ -117,7 +131,7 @@ impl ShimBin {
 
     /// The lines logged by the shims so far (empty when nothing was invoked).
     fn log_lines(&self) -> Vec<String> {
-        std::fs::read_to_string(&self.log)
+        fs::read_to_string(&self.log)
             .unwrap_or_default()
             .lines()
             .map(str::to_owned)
@@ -175,7 +189,7 @@ fn workspace_at_base() -> TempDir {
         dry_run: false,
         force: false,
     };
-    run_update(&cargo_anvil::Catalog::anvil(), &args, root).unwrap();
+    run_update(&Catalog::anvil(), &args, root).unwrap();
 
     // Initialize git, commit the base, and record it as origin/master (the
     // base ref the recipe and cargo-delta both resolve to in this bare repo).
@@ -272,9 +286,9 @@ fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
     // The durable artifacts exist.
     for f in [
         "snapshots/baseline.json",
-        "snapshots/baseline.sha",
+        "snapshots/baseline.key",
         "snapshots/current.json",
-        "snapshots/current.state",
+        "snapshots/current.key",
         "impact.json",
         "include_modified.txt",
         "include_affected.txt",
@@ -296,7 +310,7 @@ fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
 
     // --- 3. HEAD moves (a new commit): only `current.json` is regenerated. ---
     // A committed change advances HEAD without moving the base ref
-    // (origin/master), so current.state changes while the baseline key does
+    // (origin/master), so current.key changes while the baseline key does
     // not. The tree stays clean, so scoping is NOT widened.
     write(&root.join("crates/alpha/src/lib.rs"), "pub fn a() {}\npub fn a2() {}\n");
     git(root, &["add", "crates/alpha/src/lib.rs"]);
@@ -477,15 +491,13 @@ fn impact_empty_output_when_head_equals_base() {
     // HEAD == base with a clean tree scopes by impact (empty), never widens.
     assert!(!first.contains("widening"), "a clean HEAD==base tree must not widen:\n{first}");
     assert_eq!(
-        std::fs::read_to_string(impact_dir.join("impact.json")).unwrap().trim(),
+        fs::read_to_string(impact_dir.join("impact.json")).unwrap().trim(),
         "{}",
         "an empty diff must persist an empty impact object so impact.json always exists"
     );
     for tier in ["modified", "affected", "required"] {
         assert_eq!(
-            std::fs::read_to_string(impact_dir.join(format!("include_{tier}.txt")))
-                .unwrap()
-                .trim(),
+            fs::read_to_string(impact_dir.join(format!("include_{tier}.txt"))).unwrap().trim(),
             "--skip",
             "an empty impact set must project tier '{tier}' to the --skip sentinel"
         );
@@ -550,7 +562,7 @@ fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
     // be mistaken for a dirty tree.
     let clean = run_impact(root);
     assert!(!clean.contains("widening"), "a clean tree must not widen:\n{clean}");
-    let affected_clean = std::fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
+    let affected_clean = fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
     assert!(
         affected_clean.contains("alpha") && !affected_clean.contains("--workspace"),
         "clean run should scope the affected tier to the committed crate, got: {affected_clean}"
@@ -566,15 +578,15 @@ fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
         "a dirty tree must widen every tier to the full workspace:\n{dirty}"
     );
     assert_eq!(
-        std::fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap().trim(),
+        fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap().trim(),
         "--workspace"
     );
     assert_eq!(
-        std::fs::read_to_string(impact_dir.join("include_required.txt")).unwrap().trim(),
+        fs::read_to_string(impact_dir.join("include_required.txt")).unwrap().trim(),
         "--workspace"
     );
     // modified is empty (not --skip), so its workspace-wide tools still run.
-    assert_eq!(std::fs::read_to_string(impact_dir.join("include_modified.txt")).unwrap().trim(), "");
+    assert_eq!(fs::read_to_string(impact_dir.join("include_modified.txt")).unwrap().trim(), "");
 
     // The warning must fire on EVERY dirty invocation, not just the first --
     // running again with the same dirty tree still warns (the dirty check runs
@@ -585,21 +597,21 @@ fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
         "a repeated dirty run must warn again, not silently reuse a cache:\n{dirty_again}"
     );
 
-    // Committing the WIP restores impact scoping on the next run.
+    // Committing the change restores impact scoping on the next run.
     git(root, &["add", "-A"]);
     git(root, &["commit", "-q", "-m", "commit beta wip"]);
     let recommitted = run_impact(root);
     assert!(
         !recommitted.contains("widening"),
-        "committing the WIP must restore scoping:\n{recommitted}"
+        "committing the uncommitted change must restore scoping:\n{recommitted}"
     );
     // Scoping is not just un-widened -- the newly committed crate must actually
     // land in the affected tier (guards against a regression that drops it or
     // widens without printing the warning).
-    let affected_after = std::fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
+    let affected_after = fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
     assert!(
         affected_after.contains("--package beta@"),
-        "committing the WIP must scope beta into the affected tier, got: {affected_after}"
+        "committing the uncommitted change must scope beta into the affected tier, got: {affected_after}"
     );
 }
 
@@ -620,7 +632,7 @@ fn impact_include_reads_zero_byte_modified_file_without_throwing() {
     run_impact(root);
     let modified_file = root.join("target/anvil/impact/include_modified.txt");
     assert_eq!(
-        std::fs::metadata(&modified_file).unwrap().len(),
+        fs::metadata(&modified_file).unwrap().len(),
         0,
         "the dirty widen must write a 0-byte include_modified.txt for this test to be meaningful"
     );
@@ -644,8 +656,8 @@ fn impact_dirty_tree_widens_without_needing_a_resolvable_base() {
         return;
     }
     // Regression: the dirty-tree safety net must win even when the recompute
-    // path could NOT run. A first-time / local WIP checkout can have a dirty
-    // tree AND an unresolvable base ref (origin/<base> never fetched);
+    // path could NOT run. A first-time or local checkout can have a dirty
+    // working tree AND an unresolvable base ref (origin/<base> never fetched);
     // _anvil-impact-snapshot must short-circuit on the dirty tree rather than
     // fail base-ref resolution before anvil-impact's widen runs.
     let tmp = workspace();
@@ -657,7 +669,8 @@ fn impact_dirty_tree_widens_without_needing_a_resolvable_base() {
     // BASE_REF points at a ref that does not exist, so the recompute path
     // would hard-fail base-ref resolution. The dirty short-circuit must make
     // that unreachable -- and reach the widen WITHOUT cargo-delta, which a
-    // WIP checkout may not even have installed. The tripwire cargo shim proves
+    // first-time checkout with uncommitted changes may not even have installed.
+    // The tripwire cargo shim proves
     // the widen path never shells out to it.
     let shim = ShimBin::tripwire_cargo();
     let out = just_cmd(root, &["anvil-impact"])
@@ -686,7 +699,7 @@ fn impact_dirty_tree_widens_without_needing_a_resolvable_base() {
         shim.log_lines()
     );
     assert_eq!(
-        std::fs::read_to_string(root.join("target/anvil/impact/include_affected.txt"))
+        fs::read_to_string(root.join("target/anvil/impact/include_affected.txt"))
             .unwrap()
             .trim(),
         "--workspace"
@@ -707,7 +720,7 @@ fn impact_consume_mode_trusts_cache_without_recompute() {
     let tmp = workspace();
     let root = tmp.path();
     run_impact(root); // the "impact job" produces the cache
-    let expected = std::fs::read_to_string(root.join("target/anvil/impact/include_affected.txt"))
+    let expected = fs::read_to_string(root.join("target/anvil/impact/include_affected.txt"))
         .unwrap()
         .trim()
         .to_owned();
@@ -836,7 +849,7 @@ fn impact_falls_back_to_full_workspace_when_base_has_no_workspace() {
         dry_run: false,
         force: false,
     };
-    run_update(&cargo_anvil::Catalog::anvil(), &args, root).unwrap();
+    run_update(&Catalog::anvil(), &args, root).unwrap();
     git(root, &["add", "-A"]);
     git(root, &["commit", "-q", "-m", "introduce anvil"]);
 
@@ -849,11 +862,11 @@ fn impact_falls_back_to_full_workspace_when_base_has_no_workspace() {
     // and the impact set is still produced (no failure).
     let impact_dir = root.join("target/anvil/impact");
     assert_eq!(
-        std::fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap().trim(),
+        fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap().trim(),
         "--workspace"
     );
     assert_eq!(
-        std::fs::read_to_string(impact_dir.join("include_required.txt")).unwrap().trim(),
+        fs::read_to_string(impact_dir.join("include_required.txt")).unwrap().trim(),
         "--workspace"
     );
 }
@@ -863,32 +876,31 @@ fn impact_falls_back_to_full_workspace_when_base_has_no_workspace() {
 /// observed without running real cargo. `dir` is meant to be prepended to
 /// PATH via [`path_with_prefix`].
 fn fake_cargo(dir: &Path, log: &Path) {
-    std::fs::create_dir_all(dir).unwrap();
+    fs::create_dir_all(dir).unwrap();
     #[cfg(windows)]
     {
         // `.cmd` so pwsh's `& cargo` resolves it via PATHEXT before any real
         // `cargo.exe` on a later PATH entry.
         let script = format!("@echo off\r\n>>\"{}\" echo %*\r\nexit /b 0\r\n", log.display());
-        std::fs::write(dir.join("cargo.cmd"), script).unwrap();
+        fs::write(dir.join("cargo.cmd"), script).unwrap();
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         let script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nexit 0\n", log.display());
         let path = dir.join("cargo");
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
 
 /// The process `PATH` with `dir` prepended, so an executable in `dir` shadows
 /// the same-named tool elsewhere on PATH.
-fn path_with_prefix(dir: &Path) -> std::ffi::OsString {
+fn path_with_prefix(dir: &Path) -> OsString {
     let mut paths = vec![dir.to_path_buf()];
-    if let Some(existing) = std::env::var_os("PATH") {
-        paths.extend(std::env::split_paths(&existing));
+    if let Some(existing) = env::var_os("PATH") {
+        paths.extend(env::split_paths(&existing));
     }
-    std::env::join_paths(paths).unwrap()
+    env::join_paths(paths).unwrap()
 }
 
 #[test]
@@ -910,7 +922,7 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
 
     // The "impact job" produces the cache; affected scopes to the committed crate.
     run_impact(root);
-    let affected = std::fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
+    let affected = fs::read_to_string(impact_dir.join("include_affected.txt")).unwrap();
     let affected = affected.trim().to_owned();
     assert!(
         affected.contains("--package alpha@"),
@@ -932,15 +944,15 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
         .unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "scoped anvil-examples run failed:\n{combined}");
-    let argv = std::fs::read_to_string(&log).unwrap_or_default();
+    let argv = fs::read_to_string(&log).unwrap_or_default();
     assert!(
         argv.contains("build") && argv.contains(&affected) && argv.contains("--examples"),
         "the cached --package list must reach the tool; captured argv:\n{argv}\nexpected to contain: build ... {affected} ... --examples"
     );
 
     // The `--skip` sentinel must short-circuit: the tool is never invoked.
-    std::fs::write(impact_dir.join("include_affected.txt"), "--skip").unwrap();
-    std::fs::write(&log, "").unwrap();
+    fs::write(impact_dir.join("include_affected.txt"), "--skip").unwrap();
+    fs::write(&log, "").unwrap();
     let skipped = just_cmd(root, &["anvil-examples"])
         .env("ANVIL_IMPACT", "consume")
         .env("PATH", &path)
@@ -952,7 +964,7 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
         String::from_utf8_lossy(&skipped.stderr)
     );
     assert!(skipped.status.success(), "skipped anvil-examples run failed:\n{skip_combined}");
-    let argv_skip = std::fs::read_to_string(&log).unwrap_or_default();
+    let argv_skip = fs::read_to_string(&log).unwrap_or_default();
     assert!(
         !argv_skip.contains("build"),
         "the --skip sentinel must short-circuit the tool (no cargo build); captured argv:\n{argv_skip}"
@@ -964,7 +976,7 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
 /// (one per line) to `log`, exiting 0. Lets `anvil-loom` be driven with a
 /// synthetic workspace shape without a real loom crate.
 fn fake_cargo_with_metadata(dir: &Path, log: &Path, metadata_json: &Path) {
-    std::fs::create_dir_all(dir).unwrap();
+    fs::create_dir_all(dir).unwrap();
     #[cfg(windows)]
     {
         let script = format!(
@@ -972,19 +984,18 @@ fn fake_cargo_with_metadata(dir: &Path, log: &Path, metadata_json: &Path) {
             meta = metadata_json.display(),
             log = log.display()
         );
-        std::fs::write(dir.join("cargo.cmd"), script).unwrap();
+        fs::write(dir.join("cargo.cmd"), script).unwrap();
     }
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
         let script = format!(
             "#!/bin/sh\nif [ \"$1\" = metadata ]; then cat '{meta}'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{log}'\nexit 0\n",
             meta = metadata_json.display(),
             log = log.display()
         );
         let path = dir.join("cargo");
-        std::fs::write(&path, script).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(&path, script).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
     }
 }
 
@@ -1007,7 +1018,7 @@ fn loom_runs_declared_targets_in_full_workspace_mode() {
     // A synthetic single-crate workspace whose only test target requires the
     // `loom` feature -- the shape `anvil-loom` looks for.
     let metadata = root.join("metadata.json");
-    std::fs::write(
+    fs::write(
         &metadata,
         r#"{"packages":[{"name":"gamma","version":"0.1.0","features":{"loom":[]},"dependencies":[],"targets":[{"kind":["test"],"name":"loomtest","required-features":["loom"]}]}]}"#,
     )
@@ -1028,7 +1039,7 @@ fn loom_runs_declared_targets_in_full_workspace_mode() {
         .unwrap();
     let combined = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     assert!(out.status.success(), "anvil-loom (full-workspace) run failed:\n{combined}");
-    let argv = std::fs::read_to_string(&log).unwrap_or_default();
+    let argv = fs::read_to_string(&log).unwrap_or_default();
     assert!(
         argv.contains("test") && argv.contains("-p gamma") && argv.contains("--test loomtest"),
         "loom must run the declared loom target in full-workspace mode; captured argv:\n{argv}"
@@ -1196,7 +1207,7 @@ fn consume_without_downloaded_cache_fails_loudly() {
     // all-three-files contract against regressing to a directory or
     // representative-file check, which would let one tier silently fall back to
     // its default.
-    std::fs::remove_file(cache.join("include_affected.txt")).unwrap();
+    fs::remove_file(cache.join("include_affected.txt")).unwrap();
     let partial = consume(&["anvil-impact"]);
     let partial_combined = format!(
         "{}{}",
@@ -1289,7 +1300,7 @@ fn impact_format_maps_proc_macro_target_name_to_its_package() {
         dry_run: false,
         force: false,
     };
-    run_update(&cargo_anvil::Catalog::anvil(), &args, root).unwrap();
+    run_update(&Catalog::anvil(), &args, root).unwrap();
 
     let fixture = "impact-fixture.json";
     write(&root.join(fixture), "{\"Affected\":[\"my_macro\"]}\n");

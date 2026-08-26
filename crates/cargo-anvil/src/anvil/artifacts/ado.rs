@@ -7,6 +7,7 @@
 //! Holds the embedded templates, the per-group fan-out, and the registry
 //! functions. See [`ado.md`](../../../docs/design/ado.md).
 
+use crate::anvil::artifacts::impact_mode;
 use crate::backend::Backend;
 use crate::catalog::Artifact;
 
@@ -69,9 +70,14 @@ const IMPACT_MODE_PLACEHOLDER: &str = "__IMPACT_MODE__";
 /// Render the step template for one group.
 #[must_use]
 fn render_group_step(group: &str) -> String {
-    GROUP_STEP_TEMPLATE
-        .replace(GROUP_PLACEHOLDER, group)
-        .replace(IMPACT_MODE_PLACEHOLDER, super::impact_mode(group))
+    // Substitute the group name first, then replace the single impact-mode
+    // token in place -- reusing the already-allocated buffer instead of
+    // allocating a second full-template String for the second substitution.
+    let mut rendered = GROUP_STEP_TEMPLATE.replace(GROUP_PLACEHOLDER, group);
+    if let Some(pos) = rendered.find(IMPACT_MODE_PLACEHOLDER) {
+        rendered.replace_range(pos..pos + IMPACT_MODE_PLACEHOLDER.len(), impact_mode(group));
+    }
+    rendered
 }
 
 /// Repo-root-relative path for one group's step template.

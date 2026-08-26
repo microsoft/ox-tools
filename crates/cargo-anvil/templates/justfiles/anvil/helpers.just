@@ -15,12 +15,12 @@
 #     directory-scoped (cargo fmt --all, cargo heather), so
 #     it doesn't take --package; it short-circuits on the "--skip" sentinel.
 #
-#   - "affected": run on the affected set (modified U reverse-deps within the
+#   - "affected": run on the affected set (modified ∪ reverse-deps within the
 #     workspace). The tool takes --package; the recipe splices the resolved
 #     package list into the cargo invocation, defaulting to --workspace when
 #     the tier is unscoped.
 #
-#   - "required": run on the required set (affected U workspace-internal
+#   - "required": run on the required set (affected ∪ workspace-internal
 #     transitive deps). Same splice/default as affected, for checks whose tool
 #     resolves through the dep graph (cargo doc -> intra-doc links; cargo hack
 #     -> feature powerset; cargo udeps -> unused-deps).

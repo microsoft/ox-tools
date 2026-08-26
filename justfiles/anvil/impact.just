@@ -37,17 +37,24 @@
 # target/anvil/impact/snapshots/ with two independent cache keys:
 #   * baseline.json  -- snapshot of the base ref. EXPENSIVE (needs a throwaway
 #     git worktree). Keyed on the composite of the base commit sha and the
-#     effective .delta.toml identity (baseline.sha stores "<base-sha>
+#     effective .delta.toml identity (baseline.key stores "<base-sha>
 #     <config-hash>"), so the worktree is recreated when the base moves OR the
 #     cargo-delta config changes.
 #   * current.json   -- snapshot of the working tree. Cheap. Keyed on
-#     <HEAD sha> (current.state); the dirty-tree guard means a clean tree
+#     <HEAD sha> (current.key); the dirty-tree guard means a clean tree
 #     corresponds exactly to HEAD.
 
 # Snapshot the base ref and working tree for impact analysis.
 [script("pwsh", "-NoProfile")]
 _anvil-impact-snapshot:
     $ErrorActionPreference = 'Stop'
+    # Exit 2 (not the generic 1 used for operational failures below) marks
+    # *invalid caller configuration*: an unrecognized ANVIL_IMPACT value is a
+    # mistake in how the recipe was invoked, not a runtime failure of the work
+    # it does. Keeping the two distinct lets a caller (or CI) tell a bad-mode
+    # misconfiguration apart from a genuine snapshot/impact failure. All three
+    # ANVIL_IMPACT readers (_anvil-impact-snapshot, anvil-impact,
+    # _anvil-impact-include) use the same 2/1 split; keep them in sync.
     if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
         [Console]::Error.WriteLine("anvil: ANVIL_IMPACT='$($env:ANVIL_IMPACT)' is not recognized (expected 'off', 'consume', or unset).")
         exit 2
@@ -62,16 +69,21 @@ _anvil-impact-snapshot:
     # checkout may lack. Without this, a dirty run that could not recompute
     # would hard-fail here instead of gracefully widening. Same probe as
     # anvil-impact (excluding target/, which holds our own cache artifacts).
-    if (@(git status --porcelain | Where-Object { $_ -and ($_.Substring(3) -notmatch '^"?target/') }).Count -gt 0) {
+    # Let git itself exclude target/ via an :(exclude) pathspec rather than
+    # string-slicing porcelain records -- git then reports both sides of a
+    # rename and applies the checkout's real path-case rules, so a change whose
+    # only out-of-target/ side is a rename destination (or a case-distinct
+    # path) is still seen as dirty.
+    if (@(git status --porcelain -- . ':(exclude)target/' | Where-Object { $_ }).Count -gt 0) {
         exit 0
     }
 
     $impactDir = 'target/anvil/impact'
     $snapDir = Join-Path $impactDir 'snapshots'
     $baselineJson = Join-Path $snapDir 'baseline.json'
-    $baselineShaFile = Join-Path $snapDir 'baseline.sha'
+    $baselineKeyFile = Join-Path $snapDir 'baseline.key'
     $currentJson = Join-Path $snapDir 'current.json'
-    $currentStateFile = Join-Path $snapDir 'current.state'
+    $currentKeyFile = Join-Path $snapDir 'current.key'
     $noWorkspaceMarker = Join-Path $snapDir 'baseline-no-workspace'
 
     # Effective cargo-delta config identity -- part of the baseline cache key.
@@ -96,7 +108,7 @@ _anvil-impact-snapshot:
     # rules and silently mis-scope. So hash the resolved config (or mark its
     # absence) and fold it into the composite baseline key `$baseSha $configId`
     # below (which also flows into anvil-impact's projection cache via
-    # baseline.sha). Absent a config file, `$deltaArgs` stays empty and the id
+    # baseline.key). Absent a config file, `$deltaArgs` stays empty and the id
     # is `<none>`, so adopters without a `.delta.toml` are unaffected.
     #
     # anvil manages `.delta.toml` (the anvil-delta artifact owns its
@@ -115,6 +127,11 @@ _anvil-impact-snapshot:
     if (Test-Path '.delta.toml') {
         $deltaConfigPath = (Resolve-Path '.delta.toml').Path
         $deltaArgs = @('--config', $deltaConfigPath)
+        # SHA-256 is an arbitrary but stable choice: the key only needs a
+        # deterministic content fingerprint to detect config edits, not any
+        # cryptographic property. Get-FileHash defaults to SHA-256, so this
+        # avoids pulling in another algorithm. Changing it only invalidates
+        # already-cached baselines (they recompute once); it is not a contract.
         $deltaConfigId = (Get-FileHash -LiteralPath $deltaConfigPath -Algorithm SHA256).Hash
     } else {
         [Console]::Error.WriteLine("anvil-impact: warning: no .delta.toml found at the repo root; cargo-delta will run under its defaults (trip_wire_patterns and file_exclude_patterns inactive), which can under-scope the impact set. Restore the anvil-managed .delta.toml to get conservative scoping.")
@@ -142,8 +159,8 @@ _anvil-impact-snapshot:
     # $baseSha stays $null, the baseline is treated as not fresh, and we fall
     # through to the recompute path, which fails fast with git-fetch guidance
     # rather than scoping against a stale baseline.
-    $currentFresh = (Test-Path $currentJson) -and (Test-Path $currentStateFile) -and `
-        ("$(Get-Content -Raw $currentStateFile)".Trim() -eq $currentState)
+    $currentFresh = (Test-Path $currentJson) -and (Test-Path $currentKeyFile) -and `
+        ("$(Get-Content -Raw $currentKeyFile)".Trim() -eq $currentState)
     $baseSha = $null
     $base = (& "{{ just_executable() }}" _anvil-base-ref 2>$null)
     if (($LASTEXITCODE -eq 0) -and $base) {
@@ -156,9 +173,9 @@ _anvil-impact-snapshot:
     # cargo-delta config both invalidate it, so the baseline is never diffed
     # against a current snapshot captured under different rules.
     $baselineKey = "$baseSha $deltaConfigId"
-    $baselineFresh = (Test-Path $baselineShaFile) -and `
+    $baselineFresh = (Test-Path $baselineKeyFile) -and `
         ((Test-Path $baselineJson) -or (Test-Path $noWorkspaceMarker)) -and `
-        ("$(Get-Content -Raw $baselineShaFile)".Trim() -eq $baselineKey)
+        ("$(Get-Content -Raw $baselineKeyFile)".Trim() -eq $baselineKey)
     if ($currentFresh -and $baselineFresh) {
         Write-Host 'anvil-impact: snapshots up to date'
         exit 0
@@ -206,8 +223,8 @@ _anvil-impact-snapshot:
     # Re-derive the composite key now that `$baseSha` is authoritatively
     # resolved (the fast-path value above may have been $null on a cache miss).
     $baselineKey = "$baseSha $deltaConfigId"
-    $haveBaseline = (Test-Path $baselineShaFile) -and `
-        ("$(Get-Content -Raw $baselineShaFile)".Trim() -eq $baselineKey) -and `
+    $haveBaseline = (Test-Path $baselineKeyFile) -and `
+        ("$(Get-Content -Raw $baselineKeyFile)".Trim() -eq $baselineKey) -and `
         ((Test-Path $baselineJson) -or (Test-Path $noWorkspaceMarker))
     if ($haveBaseline) {
         Write-Host "anvil-impact: baseline snapshot up to date (base $baseSha)"
@@ -223,9 +240,24 @@ _anvil-impact-snapshot:
         # the current checkout, where it is installed -- which overrides the
         # worktree's rust-toolchain.toml. Best-effort: skip if rustup is absent.
         $activeToolchain = $null
-        $rt = (rustup show active-toolchain 2>$null)
-        if (($LASTEXITCODE -eq 0) -and $rt) { $activeToolchain = (($rt | Select-Object -First 1) -split '\s+')[0] }
+        # `rustup` may be absent (e.g. ADO msrustup provides `cargo` directly
+        # without a `rustup` command). Under `$ErrorActionPreference = 'Stop'`
+        # a bare `rustup` call would raise a terminating command-not-found
+        # error before the `$LASTEXITCODE` guard runs, so probe for the command
+        # first and leave `$activeToolchain` null when it is unavailable.
+        if (Get-Command rustup -ErrorAction SilentlyContinue) {
+            $rt = (rustup show active-toolchain 2>$null)
+            if (($LASTEXITCODE -eq 0) -and $rt) { $activeToolchain = (($rt | Select-Object -First 1) -split '\s+')[0] }
+        }
 
+        # Temp-root precedence follows the runner-managed scratch dir on each
+        # host: RUNNER_TEMP on GitHub Actions, AGENT_TEMPDIRECTORY on Azure
+        # Pipelines -- both are job-owned and cleaned up by the runner, so the
+        # throwaway worktree never leaks into the workspace or survives the job.
+        # Local runs have neither, so fall back to the system temp dir. The
+        # worktree name includes $PID so concurrent impact runs (e.g. several
+        # local checks, or matrix legs sharing a temp root) each get a distinct
+        # path and never remove or overwrite another run's baseline checkout.
         $tmpRoot = $env:RUNNER_TEMP
         if (-not $tmpRoot) { $tmpRoot = $env:AGENT_TEMPDIRECTORY }
         if (-not $tmpRoot) { $tmpRoot = [System.IO.Path]::GetTempPath() }
@@ -235,7 +267,7 @@ _anvil-impact-snapshot:
         # the credential helper, so LFS smudge would fail. cargo-delta only
         # needs file content hashes; LFS pointer files hash consistently.
         $env:GIT_LFS_SKIP_SMUDGE = '1'
-        git worktree add --detach $wt $baseSha 2>&1 | Select-Object -Last 1 | Out-Null
+        git worktree add --detach $wt $baseSha 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) { Write-Error "anvil-impact: failed to create baseline worktree at $wt"; exit 1 }
         try {
             if (-not (Test-Path (Join-Path $wt 'Cargo.toml'))) {
@@ -245,7 +277,7 @@ _anvil-impact-snapshot:
                 # back to full-workspace validation rather than failing.
                 Write-Host "anvil-impact: base '$base' has no root Cargo.toml (first-time adoption?); falling back to full-workspace"
                 New-Item -ItemType File -Path $noWorkspaceMarker -Force | Out-Null
-                Set-Content -LiteralPath $baselineShaFile -Value $baselineKey -Encoding UTF8 -NoNewline
+                Set-Content -LiteralPath $baselineKeyFile -Value $baselineKey -Encoding UTF8 -NoNewline
             } else {
                 Push-Location $wt
                 # Preserve any caller-provided RUSTUP_TOOLCHAIN: we override it
@@ -267,7 +299,7 @@ _anvil-impact-snapshot:
                     Pop-Location
                 }
                 Set-Content -LiteralPath $baselineJson -Value $baseSnap -Encoding UTF8
-                Set-Content -LiteralPath $baselineShaFile -Value $baselineKey -Encoding UTF8 -NoNewline
+                Set-Content -LiteralPath $baselineKeyFile -Value $baselineKey -Encoding UTF8 -NoNewline
             }
         } finally {
             git worktree remove --force $wt 2>$null | Out-Null
@@ -276,8 +308,8 @@ _anvil-impact-snapshot:
 
     # --- Current snapshot: only when the working tree changed
     # ($currentState was computed at the top of this recipe). ---
-    $haveCurrent = (Test-Path $currentJson) -and (Test-Path $currentStateFile) -and `
-        ("$(Get-Content -Raw $currentStateFile)".Trim() -eq $currentState)
+    $haveCurrent = (Test-Path $currentJson) -and (Test-Path $currentKeyFile) -and `
+        ("$(Get-Content -Raw $currentKeyFile)".Trim() -eq $currentState)
     if ($haveCurrent) {
         Write-Host 'anvil-impact: current snapshot up to date'
     } else {
@@ -285,7 +317,7 @@ _anvil-impact-snapshot:
         $curSnap = cargo delta @deltaArgs snapshot
         if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-impact: cargo delta snapshot (current) failed'; exit 1 }
         Set-Content -LiteralPath $currentJson -Value $curSnap -Encoding UTF8
-        Set-Content -LiteralPath $currentStateFile -Value $currentState -Encoding UTF8 -NoNewline
+        Set-Content -LiteralPath $currentKeyFile -Value $currentState -Encoding UTF8 -NoNewline
     }
 
 # Public. Computes the impact set from the two snapshots and projects each
@@ -300,6 +332,8 @@ _anvil-impact-snapshot:
 [script("pwsh", "-NoProfile")]
 anvil-impact: _anvil-impact-snapshot
     $ErrorActionPreference = 'Stop'
+    # Exit 2 = invalid caller configuration (bad ANVIL_IMPACT), distinct from
+    # the generic 1 used for operational failures -- see _anvil-impact-snapshot.
     if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
         [Console]::Error.WriteLine("anvil: ANVIL_IMPACT='$($env:ANVIL_IMPACT)' is not recognized (expected 'off', 'consume', or unset).")
         exit 2
@@ -326,8 +360,8 @@ anvil-impact: _anvil-impact-snapshot
     $snapDir = Join-Path $impactDir 'snapshots'
     $baselineJson = Join-Path $snapDir 'baseline.json'
     $currentJson = Join-Path $snapDir 'current.json'
-    $baselineShaFile = Join-Path $snapDir 'baseline.sha'
-    $currentStateFile = Join-Path $snapDir 'current.state'
+    $baselineKeyFile = Join-Path $snapDir 'baseline.key'
+    $currentKeyFile = Join-Path $snapDir 'current.key'
     $impactJson = Join-Path $impactDir 'impact.json'
     $impactStateFile = Join-Path $impactDir 'impact.state'
 
@@ -343,8 +377,10 @@ anvil-impact: _anvil-impact-snapshot
     # checkouts are clean, so this only affects local runs. cargo-delta and
     # anvil write only under target/ (snapshots, include files), and target/
     # may not be gitignored in every adopter repo, so exclude it from the probe
-    # -- otherwise anvil's own artifacts would make every run look dirty.
-    $dirty = @(git status --porcelain | Where-Object { $_ -and ($_.Substring(3) -notmatch '^"?target/') })
+    # -- otherwise anvil's own artifacts would make every run look dirty. git
+    # itself does the excluding via an :(exclude) pathspec, so renames report
+    # both sides and path-case follows the checkout's real behavior.
+    $dirty = @(git status --porcelain -- . ':(exclude)target/' | Where-Object { $_ })
     if ($dirty.Count -gt 0) {
         Write-Host "anvil-impact: warning: $($dirty.Count) uncommitted change(s) in the working tree are invisible to cargo-delta (it scopes on the committed diff vs the base ref); widening all tiers to --workspace so nothing you are editing is skipped -- commit to scope by impact, or set ANVIL_IMPACT=off to disable scoping." -ForegroundColor Yellow
         [System.IO.Directory]::CreateDirectory($impactDir) | Out-Null
@@ -360,7 +396,7 @@ anvil-impact: _anvil-impact-snapshot
     # Content cache key: regenerate the projection only when a snapshot moved
     # or an output is missing. Keyed on the snapshot markers, not mtimes, so a
     # downstream cloud-workflow job that downloaded the artifact recognizes it.
-    $wantState = ("$(Get-Content -Raw $baselineShaFile)".Trim()) + ' ' + ("$(Get-Content -Raw $currentStateFile)".Trim())
+    $wantState = ("$(Get-Content -Raw $baselineKeyFile)".Trim()) + ' ' + ("$(Get-Content -Raw $currentKeyFile)".Trim())
     $includeFiles = @('modified', 'affected', 'required') | ForEach-Object { Join-Path $impactDir "include_$_.txt" }
     $fresh = (Test-Path $impactJson) -and (Test-Path $impactStateFile) -and `
         ("$(Get-Content -Raw $impactStateFile)".Trim() -eq $wantState) -and `
@@ -456,7 +492,7 @@ _anvil-impact-format tier impactJson:
         'affected' { 'Affected' }
         'required' { 'Required' }
         default {
-            Write-Error "anvil impact: unknown tier '$tier' (expected modified/affected/required)"
+            Write-Error "anvil-impact: unknown tier '$tier' (expected modified/affected/required)"
             exit 1
         }
     }
@@ -475,18 +511,26 @@ _anvil-impact-format tier impactJson:
     # resolves to the *same* workspace package.
     $metadataJson = & cargo metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
-        Write-Error 'anvil impact: cargo metadata failed'
+        Write-Error 'anvil-impact: cargo metadata failed'
         exit $LASTEXITCODE
     }
     try {
         $meta = $metadataJson | ConvertFrom-Json
     } catch {
-        Write-Error "anvil impact: could not parse cargo metadata output: $_"
+        Write-Error "anvil-impact: could not parse cargo metadata output: $_"
         exit 1
     }
-    $byName = @{}
-    $byLib = @{}
-    $byDirLeaf = @{}
+    # These identifiers (package name, lib/proc-macro target name, manifest
+    # directory leaf) are case-sensitive: both `cargo metadata` and cargo-delta
+    # derive them from the same on-disk workspace, so their casing agrees
+    # exactly. Use Ordinal dictionaries rather than PowerShell's default
+    # case-insensitive hashtables so that case-distinct identifiers on a
+    # case-sensitive checkout (`Foo` vs `foo`) stay separate instead of
+    # collapsing into one key and triggering a spurious ambiguous-identifier
+    # error.
+    $byName = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+    $byLib = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
+    $byDirLeaf = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
     foreach ($p in $meta.packages) {
         if (-not $byName.ContainsKey($p.name)) {
             $byName[$p.name] = [System.Collections.Generic.List[object]]::new()
@@ -511,10 +555,10 @@ _anvil-impact-format tier impactJson:
     $specs = [System.Collections.Generic.List[string]]::new()
     foreach ($name in $names) {
         if ([string]::IsNullOrWhiteSpace($name)) { continue }
-        # Union the candidates from every namespace, de-duplicated by package
-        # id so that a name matching the same package as both a cargo name and
-        # a directory leaf collapses to a single candidate.
-        $matches = @{}
+        # Union candidates from every namespace, de-duplicated by package id
+        # (case-sensitive, so Ordinal) so that a name matching the same package
+        # as both a cargo name and a directory leaf collapses to one candidate.
+        $matches = [System.Collections.Generic.Dictionary[string, object]]::new([System.StringComparer]::Ordinal)
         if ($byName.ContainsKey($name)) {
             foreach ($candidate in $byName[$name]) { $matches[$candidate.id] = $candidate }
         }
@@ -530,7 +574,7 @@ _anvil-impact-format tier impactJson:
             # package -- a gap in our reverse-mapping of the (non-unique) library
             # identifier cargo-delta emits. Fail hard so the mapping gap is
             # surfaced and fixed rather than silently under-scoping the tier.
-            Write-Error "anvil impact: cargo-delta returned unknown package '$name' in the $tier set. Re-run with ANVIL_IMPACT=off to proceed unscoped, and report the unmapped identifier."
+            Write-Error "anvil-impact: cargo-delta returned unknown package '$name' in the $tier set. Re-run with ANVIL_IMPACT=off to proceed unscoped, and report the unmapped identifier."
             exit 1
         }
         if ($candidates.Count -ne 1) {
@@ -540,7 +584,7 @@ _anvil-impact-format tier impactJson:
             # workspaces). We cannot know which cargo-delta meant, so fail hard
             # rather than guess and risk under-scoping the tier.
             $candidateNames = ($candidates | ForEach-Object { $_.name } | Sort-Object) -join ', '
-            Write-Error "anvil impact: cargo-delta returned ambiguous package identifier '$name' in the $tier set (matches: $candidateNames). Re-run with ANVIL_IMPACT=off to proceed unscoped, and report the identifier."
+            Write-Error "anvil-impact: cargo-delta returned ambiguous package identifier '$name' in the $tier set (matches: $candidateNames). Re-run with ANVIL_IMPACT=off to proceed unscoped, and report the identifier."
             exit 1
         }
         $p = $candidates[0]
@@ -567,6 +611,8 @@ _anvil-impact-include tier:
     $ErrorActionPreference = 'Stop'
     $tier = '{{ tier }}'
     $default = if ($tier -eq 'modified') { '' } else { '--workspace' }
+    # Exit 2 = invalid caller configuration (bad ANVIL_IMPACT), distinct from
+    # the generic 1 used for operational failures -- see _anvil-impact-snapshot.
     if ($env:ANVIL_IMPACT -and $env:ANVIL_IMPACT -notin @('off', 'consume')) {
         [Console]::Error.WriteLine("anvil: ANVIL_IMPACT='$($env:ANVIL_IMPACT)' is not recognized (expected 'off', 'consume', or unset).")
         exit 2

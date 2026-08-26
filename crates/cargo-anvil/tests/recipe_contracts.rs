@@ -10,6 +10,7 @@
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
+use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -116,9 +117,9 @@ exit 0
 
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
+        fs::create_dir_all(parent).unwrap();
     }
-    std::fs::write(path, contents).unwrap();
+    fs::write(path, contents).unwrap();
 }
 
 /// Seed the impact cache that scoped check recipes read via
@@ -158,7 +159,7 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
     );
 
     let bin = tmp.path().join("fake-bin");
-    std::fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&bin).unwrap();
     write(&bin.join("cargo.ps1"), FAKE_CARGO_PS1);
     write(&bin.join("git.ps1"), "exit 0\n");
     tmp
@@ -369,7 +370,7 @@ fn bolero_full_workspace_discovery_enumerates_every_member() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    let calls = fs::read_to_string(&log).unwrap_or_default();
     assert!(
         calls.contains("metadata"),
         "full-workspace discovery must enumerate members via `cargo metadata`, got:\n{calls}"
@@ -421,7 +422,7 @@ fn semver_exit_code_contract_is_executed() {
         String::from_utf8_lossy(&findings.stderr)
     );
     assert!(tmp.path().join("target/anvil/comments/semver.md").is_file());
-    let findings_comment = std::fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
+    let findings_comment = fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
     assert!(findings_comment.contains("Potential breaking changes"));
     assert!(findings_comment.contains("breaking change"));
 
@@ -476,7 +477,7 @@ fn semver_exit_code_contract_is_executed() {
             "cargo-semver-checks exit {exit} should be advisory:\n{}",
             String::from_utf8_lossy(&inconclusive.stderr)
         );
-        let comment = std::fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
+        let comment = fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
         assert!(comment.contains("Inconclusive comparisons"));
         assert!(comment.contains(&format!("exit {exit}")));
         assert!(comment.contains(output));
@@ -490,7 +491,7 @@ fn install_tool_controls_source_fallback_and_prerequisite_ordering() {
     }
     let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
     let justfile_path = tmp.path().join("Justfile");
-    let mut justfile = std::fs::read_to_string(&justfile_path).unwrap();
+    let mut justfile = fs::read_to_string(&justfile_path).unwrap();
     justfile.push_str(
         r#"
 [script("pwsh", "-NoProfile")]
@@ -517,7 +518,7 @@ source-prereq:
         "controlled source fallback should succeed:\n{}",
         String::from_utf8_lossy(&fallback.stderr)
     );
-    let log_contents = std::fs::read_to_string(&log).unwrap();
+    let log_contents = fs::read_to_string(&log).unwrap();
     let lines = log_contents.lines().collect::<Vec<_>>();
     let binstall = lines
         .iter()
@@ -533,7 +534,7 @@ source-prereq:
         .expect("Anvil must perform the controlled source install at the exact pin");
     assert!(binstall < prerequisite && prerequisite < source_install);
 
-    std::fs::remove_file(&log).unwrap();
+    fs::remove_file(&log).unwrap();
     let prerequisite_failure = run_just(
         tmp.path(),
         &["_install-tool", "cargo-spellcheck", "0.15.7", "binstall", "source-prereq"],
@@ -544,14 +545,14 @@ source-prereq:
         ],
     );
     assert_failed(&prerequisite_failure, "source prerequisite failure");
-    let failed_log = std::fs::read_to_string(&log).unwrap();
+    let failed_log = fs::read_to_string(&log).unwrap();
     assert!(failed_log.contains("source-prereq"));
     assert!(
         !failed_log.contains("install --locked cargo-spellcheck --version =0.15.7"),
         "source installation must not run after prerequisite failure"
     );
 
-    std::fs::remove_file(&log).unwrap();
+    fs::remove_file(&log).unwrap();
     let ordinary_tool = run_just(
         tmp.path(),
         &["_install-tool", "cargo-other", "1.2.3", "binstall", ""],
@@ -562,7 +563,7 @@ source-prereq:
         ],
     );
     assert!(ordinary_tool.status.success());
-    let ordinary_log = std::fs::read_to_string(&log).unwrap();
+    let ordinary_log = fs::read_to_string(&log).unwrap();
     let ordinary_binstall = ordinary_log
         .lines()
         .find(|line| line.contains("binstall --no-confirm --locked"))
@@ -580,7 +581,7 @@ fn repository_constants_match_shared_anvil_versions() {
         return;
     }
 
-    let repository_constants = std::fs::read_to_string(constants_path).unwrap();
+    let repository_constants = fs::read_to_string(constants_path).unwrap();
     let constants = repository_constants.lines().filter_map(|line| {
         let (name, value) = line.split_once('=')?;
         Some((name.to_ascii_lowercase(), value.trim().to_owned()))
@@ -719,7 +720,7 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
         "all-opted-out coverage path should succeed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let calls = std::fs::read_to_string(&log).unwrap();
+    let calls = fs::read_to_string(&log).unwrap();
     assert_eq!(calls.matches("nextest run").count(), 2, "calls:\n{calls}");
     assert!(calls.contains("--all-features"), "calls:\n{calls}");
     assert!(calls.contains("--no-default-features"), "calls:\n{calls}");
@@ -778,7 +779,7 @@ fn windows_arm64_fallback_accepts_empty_nextest_sets_in_both_configurations() {
         "Windows ARM64 fallback should accept empty nextest sets:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let calls = std::fs::read_to_string(&log).unwrap();
+    let calls = fs::read_to_string(&log).unwrap();
     assert_eq!(calls.matches("nextest run").count(), 2, "calls:\n{calls}");
     assert!(calls.contains("--all-features"), "calls:\n{calls}");
     assert!(calls.contains("--no-default-features"), "calls:\n{calls}");

@@ -450,8 +450,8 @@ file uses; the wrapper isn't special — it just happens to be the one file most
 internal adopters will customize.
 
 **Adding a parameter is a breaking change for already-customized wrappers.** The
-`inputArtifacts` parameter (added to share the impact cache) is the one sharp
-edge of the owned-wrapper model: `pr-stages.yml` / `scheduled-stages.yml` stay
+`inputArtifacts` parameter (added to share the impact cache) is the one compatibility
+constraint of the owned-wrapper model: `pr-stages.yml` / `scheduled-stages.yml` stay
 managed and start passing `inputArtifacts` to every job, but an adopter who
 edited their `job.yml` *before* this parameter existed has a `LeaveAlone` wrapper
 that only declares `{name, pool, steps, artifacts}`. On their next anvil update
@@ -548,20 +548,20 @@ stages:
 The impact set propagates as a **published pipeline artifact** — the entire
 `target/anvil/impact/` cache — not as stage output variables. Each group stage
 **downloads** it and its scoped checks read the cache directly, exactly as a local run
-does (`anvil-impact` → `include_<tier>.txt` → `_anvil-impact-include`). This is the
-whole point: CI and local execution take the identical code path rather than CI
+does (`anvil-impact` → `include_<tier>.txt` → `_anvil-impact-include`). This ensures
+CI and local execution take the identical code path rather than CI
 threading pre-formatted strings the local run never produces. The chain:
 
 1. **The `impact` stage** runs two per-OS jobs, `compute_linux` and `compute_windows`,
    each executing `just anvil-impact` (via `steps/impact.yml`) and publishing its
    `target/anvil/impact/` cache as the `anvil-impact-<os>` artifact via `job.yml`'s
-   `artifacts:` param (a `PublishPipelineArtifact@1` task, or the 1ESPT
+   `artifacts:` parameter (a `PublishPipelineArtifact@1` task, or the 1ESPT
    `templateContext.outputs` equivalent). Impact is computed per OS because an
    OS-conditional dependency (`[target.'cfg(target_os = …)'.dependencies]`) changes the
    reverse-dep set only in that host's `cargo metadata` graph.
 2. **Each pr-* stage** declares `dependsOn: [impact]` and each of its jobs downloads the
    matching `anvil-impact-<os>` artifact into `target/anvil/impact/` via `job.yml`'s
-   `inputArtifacts:` param (a `DownloadPipelineArtifact@2` task by default, overridable
+   `inputArtifacts:` parameter (a `DownloadPipelineArtifact@2` task by default, overridable
    by a 1ESPT `job.yml`).
 3. **The group step template** runs `just anvil-<group>` with an impact mode fixed **by
    tier at emit time** (never probed from a file). PR groups — which always download the
@@ -703,12 +703,12 @@ snapshots the base merge target + the current tree, runs `cargo delta impact`, a
 writes the cache under `target/anvil/impact/` (the per-tier `include_<tier>.txt` lists,
 `impact.json`, and the `snapshots/`). The `compute_<os>` job then publishes that whole
 directory as the `anvil-impact-<os>` pipeline artifact (via `job.yml`'s `artifacts:`
-param). This is the only job that runs cargo-delta to compute the impact set.
+parameter). This is the only job that runs cargo-delta to compute the impact set.
 (Group setup jobs also install cargo-delta as a prerequisite, but in `consume`
 mode they never run it -- they read the downloaded impact cache.)
 
 Downstream stages download that artifact into `target/anvil/impact/` (via `job.yml`'s
-`inputArtifacts:` param) and their checks read the cache directly — no ADO output
+`inputArtifacts:` parameter) and their checks read the cache directly — no ADO output
 variables are threaded. The stages template handles all that — users don't write it.
 
 The check → bucket mapping is in
@@ -754,14 +754,17 @@ The cache covers:
 The `target/` build directory is deliberately **not** cached: large per-OS/arch `target/`
 snapshots dwarf the high-value tool cache and add only modest dependency-recompile savings
 once the tools are cached. Excluding it also guarantees the impact stage's downloaded
-`target/anvil/impact/` artifact survives the cache restore unclobbered — so `job.yml`'s
+`target/anvil/impact/` artifact is not overwritten by the cache restore — so `job.yml`'s
 `inputArtifacts` download can stay its overridable, 1ESPT-friendly contract point without
 being reordered after `setup.yml`.
 
 Because dependency artifacts aren't cached, the compile steps set `CARGO_INCREMENTAL=0`
-(the `env:` on the `just anvil-<group>` step in `steps/group.yml` and the impact step in
-`steps/impact.yml`): each job compiles from scratch anyway, and cargo's incremental mode
-only adds overhead with no cross-run benefit in that setting.
+(the `env:` on the `just anvil-<group>` step in `steps/group.yml`): each group job compiles
+from scratch anyway, and cargo's incremental mode only adds overhead with no cross-run
+benefit in that setting. The impact step (`steps/impact.yml`) does **not** set this — it
+runs `just anvil-impact`, which does git worktree, cargo-delta snapshot/impact, and
+`cargo metadata` work but compiles no workspace code, so an incremental-compilation policy
+would have no effect there.
 
 Cache scoping inside 1ESPT-compliant pipelines is bounded by the template's allowed cache
 namespaces; the emitted cache step uses the project-scoped namespace by default and the

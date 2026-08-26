@@ -561,7 +561,7 @@ Other groups retain the action's disabled default.
 
 ### 6.1 How the impact result propagates to the group jobs
 
-The impact set propagates as an **uploaded pipeline artifact** — the entire
+The impact set propagates as an **uploaded workflow artifact** — the entire
 `target/anvil/impact/` cache — not as job outputs or environment variables. Each group
 job **downloads** it and its scoped checks read the cache directly, exactly as a local
 run does: this is the whole point — CI and local execution take the identical code

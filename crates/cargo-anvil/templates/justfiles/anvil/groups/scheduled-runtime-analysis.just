@@ -13,8 +13,9 @@
 # provenance, race-coverage) which are too expensive for PR.
 
 # Full-workspace backstop: routed through _anvil-run with impact "off" so
-# ANVIL_IMPACT=off is set before the check deps run, however the group is
-# invoked. Never recomputes, so no cargo-delta.
+# ANVIL_IMPACT=off is set before the check dependencies run, regardless of how
+# the group is invoked. The group does not recompute impact and therefore does
+# not require cargo-delta.
 
 # Run the scheduled runtime analysis.
 [group("anvil")]

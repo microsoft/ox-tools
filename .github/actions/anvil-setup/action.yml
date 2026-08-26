@@ -104,6 +104,13 @@ runs:
         # see the cached binaries — every run then tries to reinstall
         # on top of them and fails with "binary X already exists in
         # destination".
+        #
+        # target/ (the compilation output dir) is deliberately NOT cached here:
+        # per the GitHub backend design's caching policy, multi-GB per-job
+        # target/ trees dwarf the high-value tool cache under the repo cache
+        # quota, give only modest recompile savings once tools are cached, and
+        # could overwrite the downloaded target/anvil/impact/ cache. Only the
+        # ~/.cargo tool + registry state below is cached.
         path: |
           ~/.cargo/registry/cache/
           ~/.cargo/registry/index/
@@ -187,6 +194,8 @@ runs:
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+        # target/ deliberately excluded from the save path too -- see the
+        # restore step above for why (cache-quota / impact-cache-clobber).
         path: |
           ~/.cargo/registry/cache/
           ~/.cargo/registry/index/
