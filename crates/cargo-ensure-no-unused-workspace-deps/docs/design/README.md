@@ -1,6 +1,6 @@
 # cargo-ensure-no-unused-workspace-deps — Design
 
-> Status: **Proposed**.
+> Status: **Adopted**.
 > Crate name: `cargo-ensure-no-unused-workspace-deps`.
 > Home: `github.com/microsoft/ox-tools`, published to crates.io.
 
@@ -81,13 +81,30 @@ deliberately permissive: it errs toward *used*.
 ### Invocation
 
 ```bash
-cargo ensure-no-unused-workspace-deps [--manifest-path <PATH>] [--fix]
+cargo ensure-no-unused-workspace-deps [--manifest-path <PATH>] [--fix] [--require-workspace]
 ```
 
-| Option            | Default      | Meaning                                                              |
-|-------------------|--------------|----------------------------------------------------------------------|
-| `--manifest-path` | `Cargo.toml` | Workspace root manifest to check, relative to the current directory. |
-| `--fix`           | *(off)*      | Remove the unused entries instead of only reporting them.            |
+| Option                | Default      | Meaning                                                              |
+|-----------------------|--------------|----------------------------------------------------------------------|
+| `--manifest-path`     | `Cargo.toml` | Workspace root manifest to check, relative to the current directory. |
+| `--fix`               | *(off)*      | Remove the unused entries instead of only reporting them.            |
+| `--require-workspace` | *(off)*      | Treat a manifest with no `[workspace]` table as an error.            |
+
+### Manifests that are not workspace roots
+
+A manifest with no `[workspace]` table has no catalog, so there is nothing this
+check can be wrong about. It reports that on stderr and succeeds.
+
+That default exists because the check is invoked from cargo-anvil, which manages
+single-crate repositories as well as workspaces. A generated recipe runs the same
+command everywhere, so a hard error here would make the check unusable in exactly
+the repositories that never had the problem, and each of them would need a local
+opt-out. Succeeding is also the honest answer: the property "no catalog entry goes
+uninherited" holds vacuously.
+
+`--require-workspace` restores the strict reading for callers that know they are
+pointing at a workspace root and want a misdirected `--manifest-path` to fail rather
+than pass quietly.
 
 ### Allowed entries
 
@@ -117,9 +134,9 @@ the file. The success line goes to stdout.
 | 0    | No unused entries — or, under `--fix`, all unused entries were removed and the manifest written. |
 | 1    | Unused entries found without `--fix`, or a manifest could not be read, parsed, or enumerated.     |
 
-A manifest with no `[workspace]` table is an error: it means the wrong file was
-pointed at. A `[workspace]` table with no `dependencies` catalog is a clean pass —
-there is nothing to be stale.
+A `[workspace]` table with no `dependencies` catalog is a clean pass — there is
+nothing to be stale. A manifest with no `[workspace]` table at all is a pass with a
+note on stderr, or an error under `--require-workspace`.
 
 The exit code is returned from `run` as an `ExitCode` rather than raised with
 `std::process::exit`, so `main` unwinds normally. That matters under coverage
@@ -179,7 +196,8 @@ a pinned version in `versions.just`, install and validate recipes in `tools.just
 and a check recipe in `checks/`.
 
 Because the tool reads the workspace root, it runs once from the repository root
-rather than per affected package.
+rather than per affected package. Single-crate repositories run the same command and
+pass without configuration.
 
 ## 8. Out of scope
 
