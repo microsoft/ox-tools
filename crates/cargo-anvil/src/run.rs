@@ -12,6 +12,7 @@ use std::path::Path;
 use ohno::{AppError, bail};
 use tracing::info;
 
+use crate::anvil::artifacts::container;
 use crate::anvil::artifacts::region::DELTA_REGION_ID;
 use crate::backend::{self, Backend};
 use crate::catalog::Catalog;
@@ -159,6 +160,9 @@ fn build_plan(
 ) -> Result<Plan, AppError> {
     let mut plan = Plan::default();
     let mut hosts = HostTextCache::default();
+    // Hosts already reported as unsafe to compose. Every region targeting one
+    // hits the same fault, and four copies of one message is noise.
+    let mut refused_hosts = BTreeSet::new();
 
     for artifact in catalog.artifacts() {
         match artifact {
@@ -170,7 +174,7 @@ fn build_plan(
                 }
             }
             Artifact::Region(spec) => {
-                push_region(repo_root, workspace, manifest, &mut plan, &mut hosts, spec)?;
+                push_region(repo_root, workspace, manifest, &mut plan, &mut hosts, &mut refused_hosts, spec)?;
             }
         }
     }
@@ -303,25 +307,26 @@ fn push_region(
     manifest: &Manifest,
     plan: &mut Plan,
     hosts: &mut HostTextCache,
+    refused_hosts: &mut BTreeSet<String>,
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
     match &spec.host {
         HostSelector::Path(path) => {
-            push_region_at(repo_root, manifest, plan, hosts, path, spec)?;
+            push_region_at(repo_root, manifest, plan, hosts, refused_hosts, path, spec)?;
         }
         HostSelector::WorkspaceCargoToml => {
             if workspace.has_workspace_table {
-                push_region_at(repo_root, manifest, plan, hosts, "Cargo.toml", spec)?;
+                push_region_at(repo_root, manifest, plan, hosts, refused_hosts, "Cargo.toml", spec)?;
             }
         }
         HostSelector::SingleCrateCargoToml => {
             if !workspace.has_workspace_table {
-                push_region_at(repo_root, manifest, plan, hosts, "Cargo.toml", spec)?;
+                push_region_at(repo_root, manifest, plan, hosts, refused_hosts, "Cargo.toml", spec)?;
             }
         }
         HostSelector::EachMemberManifest => {
             for member in &workspace.members {
-                push_region_at(repo_root, manifest, plan, hosts, &member.manifest_relpath, spec)?;
+                push_region_at(repo_root, manifest, plan, hosts, refused_hosts, &member.manifest_relpath, spec)?;
             }
         }
     }
@@ -342,11 +347,57 @@ fn push_region_at(
     manifest: &Manifest,
     plan: &mut Plan,
     hosts: &mut HostTextCache,
+    refused_hosts: &mut BTreeSet<String>,
     host: &str,
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
     let host = resolve_existing_case_insensitive(repo_root, host);
     let current = hosts.get_or_read(repo_root, &host)?;
+    // A composed host anvil seeds: when the file does not exist yet, the
+    // scaffold becomes the base the first region splices into, so the parts of
+    // the file that cannot live inside a region — a Dockerfile's
+    // `# syntax=` parser directive above all — are present from the first run.
+    // It is written once and never reconciled: everything outside the sentinels
+    // is the repository's.
+    //
+    // A file left behind by a release that owned this path outright is re-seeded
+    // too. Its content is a previous render, not user composition, so appending
+    // the regions to it would produce a file carrying both the old whole-file
+    // definition and the new regions. Recognising it needs both conditions:
+    // tracked as an owned file in the lock we are superseding, and carrying none
+    // of this host's regions yet. A Dockerfile the repository wrote by hand is
+    // in neither state and is left alone.
+    let scaffold = host_scaffold(&host);
+    let superseded_owned_file = scaffold.is_some()
+        && manifest.files.contains_key(host.as_str())
+        && current.as_deref().is_some_and(|text| !host_carries_any_region(&host, text));
+    let current = match (current, scaffold) {
+        (None, Some(scaffold)) => Some(scaffold.to_owned()),
+        (Some(_), Some(scaffold)) if superseded_owned_file => Some(scaffold.to_owned()),
+        (current, _) => current,
+    };
+    if let Some(text) = current.as_deref()
+        && let Some(reason) = host_composition_violation(&host, text)
+    {
+        // One diagnostic per host: every region targeting it hits the same
+        // fault, and repeating it once per region buries the one line that
+        // says which region moved.
+        if refused_hosts.insert(host.clone()) {
+            plan.refusal(format!(
+                "Refused to manage {host} because its managed regions could not be safely \
+                 updated: {reason}. Restore the documented order and re-run. Other artifacts \
+                 were still planned."
+            ));
+        }
+        plan.push(PlanItem::noop(
+            Target::Region {
+                host,
+                id: spec.id.as_str().to_owned(),
+            },
+            Decision::LeaveAlone,
+        ));
+        return Ok(());
+    }
     let placement = region_placement(spec.id.as_str());
     let body = match delta_region_body(current.as_deref(), spec) {
         DeltaRegionBody::Managed => spec.body.as_str(),
@@ -405,6 +456,67 @@ fn region_placement(region_id: &str) -> RegionPlacement {
     }
 }
 
+/// The initial content for a host anvil composes but does not own, used only
+/// when the file is absent.
+///
+/// Most region hosts are files the repository already has (`Cargo.toml`,
+/// `deny.toml`) or files whose first region can simply be appended to nothing.
+/// The container Dockerfile is neither: `# syntax=docker/dockerfile:1` is a
+/// BuildKit parser directive that is honoured only when nothing precedes it,
+/// not even a comment — so it cannot live inside a region, whose opening
+/// sentinel *is* a comment.
+fn host_scaffold(host_relpath: &str) -> Option<&'static str> {
+    (host_relpath == container::DOCKERFILE_PATH).then_some(container::DOCKERFILE_HEADER)
+}
+
+/// The order anvil's regions must appear in inside a composed host, when order
+/// is semantically load-bearing.
+fn host_region_order(host_relpath: &str) -> Option<&'static [&'static str]> {
+    (host_relpath == container::DOCKERFILE_PATH).then_some(container::DOCKERFILE_REGION_ORDER)
+}
+
+/// Whether the host already carries any of the regions anvil owns in it.
+///
+/// Distinguishes a composed file mid-update from a file a previous release
+/// owned outright, which must be re-seeded rather than appended to.
+fn host_carries_any_region(host_relpath: &str, text: &str) -> bool {
+    host_region_order(host_relpath).is_some_and(|order| {
+        order
+            .iter()
+            .any(|id| matches!(find_region(text, id, CommentSyntax::Hash), Ok(Some(_))))
+    })
+}
+
+/// Reject a host whose managed regions can no longer be updated into a valid
+/// file.
+///
+/// Every other managed-region host is order-independent — TOML tables, line
+/// sets — so `upsert_region` replacing a region wherever it is found is enough.
+/// A Dockerfile is the first host where relative order is semantic: `FROM` must
+/// precede every instruction that depends on it, the toolchain must exist
+/// before `anvil-setup` runs, and a reordered file is not a diagnostic but a
+/// silently wrong or unbuildable image. Detect it and refuse instead.
+fn host_composition_violation(host_relpath: &str, text: &str) -> Option<String> {
+    let order = host_region_order(host_relpath)?;
+    let mut previous: Option<(&str, usize)> = None;
+    for id in order {
+        // A malformed region is reported by the planner itself, with a better
+        // message than this check could give; a region that is simply absent is
+        // about to be written.
+        let Ok(Some(region)) = find_region(text, id, CommentSyntax::Hash) else {
+            continue;
+        };
+        let start = region.start_line.start;
+        if let Some((earlier_id, earlier_start)) = previous
+            && start < earlier_start
+        {
+            return Some(format!("region '{id}' appears before '{earlier_id}', but must follow it"));
+        }
+        previous = Some((id, start));
+    }
+    None
+}
+
 enum DeltaRegionBody {
     Managed,
     PreserveRepositoryKey,
@@ -461,9 +573,20 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan, hosts: 
             Target::File { .. } => None,
         })
         .collect();
+    let live_region_hosts: BTreeSet<String> = live_regions.iter().map(|(host, _)| host.clone()).collect();
 
     for (path, last) in &previous.files {
         if live_files.contains(path) {
+            continue;
+        }
+        // A path that is no longer an owned file but *is* the host of a live
+        // managed region has not been retired -- it has changed ownership
+        // model. Deleting it here would erase what the region writes planned
+        // for the same pass just produced, and the user content around them
+        // with it. Drop the stale manifest entry and leave the file alone; the
+        // region entries now describe what anvil owns inside it.
+        if live_region_hosts.contains(path) {
+            plan.push(PlanItem::orphaned_kept(Target::File { path: path.clone() }));
             continue;
         }
         let disk = read_file_if_present(&repo_root.join(path))?;

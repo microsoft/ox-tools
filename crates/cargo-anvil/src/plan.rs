@@ -347,7 +347,7 @@ impl Plan {
         write_section(&mut out, "Will update", &updates);
         write_section(&mut out, "Will propose", &proposes);
         write_section(&mut out, "Will remove", &removes);
-        write_section(&mut out, "Orphaned (customized; transferring ownership)", &orphans_kept);
+        write_section(&mut out, "No longer managed (left in place; ownership transferred)", &orphans_kept);
         write_section(&mut out, "Will leave alone (silent)", &leave_alones);
 
         if !in_syncs.is_empty() {
@@ -672,7 +672,7 @@ mod tests {
         let s = plan.summary(None);
         assert!(s.contains("Will remove: 1 item(s)"));
         assert!(s.contains("- dropped.txt"));
-        assert!(s.contains("Orphaned (customized; transferring ownership): 1 item(s)"));
+        assert!(s.contains("No longer managed (left in place; ownership transferred): 1 item(s)"));
         assert!(s.contains("- Justfile [anvil-old]"));
     }
 

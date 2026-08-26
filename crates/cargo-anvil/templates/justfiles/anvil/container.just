@@ -129,20 +129,41 @@ anvil-container-tag:
     $dockerfile = '.anvil/container/Dockerfile'
     $hookRel = '.anvil/container/hooks.ps1'
 
-    $inputs = @($dockerfile, "$dockerfile.dockerignore", 'rust-toolchain.toml')
+    $inputs = @('rust-toolchain.toml')
     # The declared inputs are text this tree owns, so their line endings are
     # normalized before hashing and a CRLF checkout agrees with an LF one.
-    # Everything discovered under justfiles/anvil/ is treated as text only when
+    # Everything discovered by walking a directory is treated as text only when
     # it is a `.just` recipe; anything else is hashed as the bytes the build
     # context actually copies.
     $declaredText = [System.Collections.Generic.HashSet[string]]::new(
         [string[]]$inputs, [System.StringComparer]::Ordinal)
+    [void]$declaredText.Add($dockerfile)
+    [void]$declaredText.Add("$dockerfile.dockerignore")
     [void]$declaredText.Add($hookRel)
-    if (Test-Path -LiteralPath (Join-Path $repoRoot $hookRel) -PathType Leaf) {
-        # The hook decides what the build installs, so its content defines the
-        # image as surely as the Dockerfile does. Its *output* is deliberately
-        # never hashed: a credential must not influence a tag.
-        $inputs += $hookRel
+    # Everything under `.anvil/container/`, not a fixed list of three files.
+    # The Dockerfile is composed -- anvil owns regions inside it and the
+    # repository owns the gaps -- and a repository that adds a `COPY` in one of
+    # those gaps names a file that shapes the image: a corporate root CA, an
+    # install script, a patch. A replacement region from a downstream catalog
+    # does the same. Hashing only the three files anvil happens to know about
+    # would let any of them change the image under a reference that already
+    # resolves, which is precisely the hole this digest exists to close.
+    #
+    # The hook is picked up by the same walk. Its *output* is deliberately
+    # never hashed: a credential must not influence a tag.
+    $containerRoot = Join-Path $repoRoot '.anvil/container'
+    if (Test-Path -LiteralPath $containerRoot) {
+        foreach ($file in Get-ChildItem -LiteralPath $containerRoot -Recurse -File -Force) {
+            $inputs += [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName) -replace '\\', '/'
+        }
+    }
+    # The walk cannot assert this on its own: a missing Dockerfile would simply
+    # contribute nothing and yield a confident tag for an image that can never
+    # be built. It is the one file under that directory that must exist, so it
+    # is checked by name.
+    if (-not (Test-Path -LiteralPath (Join-Path $repoRoot $dockerfile) -PathType Leaf)) {
+        Write-Error "anvil: container image input is missing: $dockerfile"
+        exit 1
     }
     # Every generated recipe file. The image installs its tools by running
     # `just anvil-setup`, and that dependency chain runs through the tier,

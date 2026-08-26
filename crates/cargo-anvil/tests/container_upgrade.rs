@@ -86,6 +86,14 @@ fn local() -> Cli {
     }
 }
 
+/// A workspace that has already been generated once, so the lock and the
+/// composed tree exist and a test can rewind one part of them.
+fn generated_tree() -> TempDir {
+    let tmp = workspace();
+    run_update(&Catalog::anvil(), &local(), tmp.path()).unwrap();
+    tmp
+}
+
 /// Rewrite a freshly generated tree into the shape 0.4.0 produced: the retired
 /// assets present on disk and tracked in the lock, and none of this release's
 /// container artifacts present at all.
@@ -98,9 +106,12 @@ fn rewind_to_runner_layout(root: &Path) -> Manifest {
     let mut manifest = Manifest::load(root).unwrap();
 
     for artifact in artifacts::container::all() {
+        // The Dockerfile is composed now, so the group is a mix: the recipe and
+        // the ignore file are owned, the image definition is four regions in a
+        // host this rewind deletes outright.
         let path = match artifact {
             cargo_anvil::Artifact::OwnedFile(spec) => spec.path,
-            cargo_anvil::Artifact::Region(_) => panic!("container artifacts are owned files"),
+            cargo_anvil::Artifact::Region(_) => continue,
         };
         let full = root.join(path);
         if full.exists() {
@@ -108,6 +119,14 @@ fn rewind_to_runner_layout(root: &Path) -> Manifest {
         }
         manifest.files.remove(path);
     }
+
+    let dockerfile = root.join(".anvil/container/Dockerfile");
+    if dockerfile.exists() {
+        std::fs::remove_file(&dockerfile).unwrap();
+    }
+    manifest
+        .regions
+        .retain(|key, _| !key.host.starts_with(".anvil/container/Dockerfile"));
 
     for path in RETIRED_ASSETS.iter().copied().chain(std::iter::once(RETIRED_RECIPE)) {
         let body = format!("# 0.4.0 generated {path}\n");
@@ -171,13 +190,41 @@ fn upgrading_from_the_runner_layout_retires_the_seam_and_emits_the_new_backend()
 
     // This release's artifacts take their place and are tracked.
     for artifact in artifacts::container::all() {
-        let path = match artifact {
-            cargo_anvil::Artifact::OwnedFile(spec) => spec.path,
-            cargo_anvil::Artifact::Region(_) => panic!("container artifacts are owned files"),
-        };
-        assert!(root.join(path).is_file(), "{path} must be written");
-        assert!(manifest.files.contains_key(path), "{path} must be tracked");
+        match artifact {
+            cargo_anvil::Artifact::OwnedFile(spec) => {
+                assert!(root.join(spec.path).is_file(), "{} must be written", spec.path);
+                assert!(manifest.files.contains_key(spec.path), "{} must be tracked", spec.path);
+            }
+            cargo_anvil::Artifact::Region(spec) => {
+                let cargo_anvil::HostSelector::Path(host) = &spec.host else {
+                    panic!("container regions target a literal path");
+                };
+                let composed = std::fs::read_to_string(root.join(host)).unwrap();
+                assert!(
+                    composed.contains(&format!("# >>> anvil-managed: {}", spec.id)),
+                    "{} must be spliced into {host}",
+                    spec.id
+                );
+                assert!(
+                    manifest.regions.contains_key(&RegionKey {
+                        host: host.clone(),
+                        id: spec.id.as_str().to_owned(),
+                    }),
+                    "{} must be tracked",
+                    spec.id
+                );
+            }
+        }
     }
+
+    // The composed Dockerfile keeps its seeded parser directive on line 1:
+    // BuildKit honours it nowhere else, and a region sentinel above it would
+    // demote it silently.
+    let dockerfile = std::fs::read_to_string(root.join(".anvil/container/Dockerfile")).unwrap();
+    assert!(
+        dockerfile.starts_with("# syntax=docker/dockerfile:1\n"),
+        "the composed Dockerfile must lead with the parser directive"
+    );
 
     // The runner region is spliced out of the root Justfile, and nothing else
     // is: the surrounding content the repository owns must survive intact.
@@ -236,5 +283,144 @@ fn an_edited_retired_asset_is_handed_back_rather_than_deleted() {
     assert!(
         !Manifest::load(root).unwrap().files.contains_key(edited),
         "the lock entry must be dropped so the file becomes the repository's"
+    );
+}
+
+/// The release before this one owned `.anvil/container/Dockerfile` outright: a
+/// single generated file a repository was invited to edit in place. This
+/// release composes the same path from four managed regions.
+///
+/// The upgrade must replace that file, not append to it. Appending would leave
+/// the whole previous definition above the regions -- a second `FROM`, a second
+/// set of pins, and an image built from whichever the frontend saw first.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn upgrading_from_the_owned_dockerfile_reseeds_the_composed_host() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let dockerfile = root.join(".anvil/container/Dockerfile");
+
+    // Rewind to the owned-file shape: one generated file, tracked in the lock
+    // by the checksum of exactly what is on disk, and no regions recorded.
+    let previous_render =
+        "# syntax=docker/dockerfile:1\n# Managed by cargo-anvil.\nFROM docker.io/library/ubuntu:24.04\nRUN apt-get update\n";
+    write(&dockerfile, previous_render);
+    let mut manifest = Manifest::load(root).unwrap();
+    manifest
+        .files
+        .insert(".anvil/container/Dockerfile".to_owned(), checksum_str(previous_render));
+    manifest.regions.retain(|key, _| key.host != ".anvil/container/Dockerfile");
+    manifest.save(root).unwrap();
+
+    run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    let composed = std::fs::read_to_string(&dockerfile).unwrap();
+    assert_eq!(
+        composed.matches("\nFROM ").count() + usize::from(composed.starts_with("FROM ")),
+        1,
+        "the superseded definition must be replaced, not appended to:\n{composed}"
+    );
+    assert!(
+        !composed.contains("RUN apt-get update\n# >>>"),
+        "no line of the previous render may survive above the regions"
+    );
+    assert!(composed.starts_with("# syntax=docker/dockerfile:1\n"));
+    for id in [
+        "anvil-container-base",
+        "anvil-container-tools",
+        "anvil-container-setup",
+        "anvil-container-entry",
+    ] {
+        assert!(composed.contains(&format!("# >>> anvil-managed: {id}")), "{id} must be spliced in");
+    }
+
+    // The stale owned-file entry is gone; the regions are tracked in its place.
+    let after = Manifest::load(root).unwrap();
+    assert!(
+        !after.files.contains_key(".anvil/container/Dockerfile"),
+        "the superseded owned-file entry must be dropped from the lock"
+    );
+    assert!(
+        after.regions.contains_key(&RegionKey {
+            host: ".anvil/container/Dockerfile".to_owned(),
+            id: "anvil-container-base".to_owned(),
+        }),
+        "the composed regions must be tracked instead"
+    );
+}
+
+/// A Dockerfile the repository wrote itself -- never tracked as an owned file --
+/// is not a superseded render, so it must survive with the regions added to it
+/// rather than being replaced.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn a_repository_authored_dockerfile_is_not_reseeded() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let dockerfile = root.join(".anvil/container/Dockerfile");
+
+    let hand_written = "# hand written by the repository\nRUN echo mine\n";
+    write(&dockerfile, hand_written);
+    let mut manifest = Manifest::load(root).unwrap();
+    manifest.files.remove(".anvil/container/Dockerfile");
+    manifest.regions.retain(|key, _| key.host != ".anvil/container/Dockerfile");
+    manifest.save(root).unwrap();
+
+    run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    let composed = std::fs::read_to_string(&dockerfile).unwrap();
+    assert!(
+        composed.contains("# hand written by the repository"),
+        "content anvil never owned must be preserved:\n{composed}"
+    );
+    assert!(composed.contains("# >>> anvil-managed: anvil-container-base"));
+}
+
+/// The Dockerfile is the first managed-region host whose region *order* is
+/// semantic: `FROM` must precede everything, and the toolchain must exist
+/// before `anvil-setup` runs. `upsert_region` replaces a region wherever it
+/// finds it, so a reordered file would otherwise be updated in place into a
+/// Dockerfile that is silently wrong or cannot build at all.
+///
+/// Anvil must refuse the host and say which region moved, exactly once, rather
+/// than once per region.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn a_reordered_composed_dockerfile_is_refused_with_one_diagnostic() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let dockerfile = root.join(".anvil/container/Dockerfile");
+
+    // Move the base region below the others, which is exactly the mistake a
+    // repository makes by dropping its own instructions above `FROM`.
+    let text = std::fs::read_to_string(&dockerfile).unwrap();
+    let open = text.find("# >>> anvil-managed: anvil-container-base").unwrap();
+    let close_marker = "# <<< anvil-managed: anvil-container-base\n";
+    let close = text.find(close_marker).unwrap() + close_marker.len();
+    let base = &text[open..close];
+    let reordered = format!("{}{}\n{}", &text[..open], &text[close..], base);
+    write(&dockerfile, &reordered);
+
+    let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    let refusals: Vec<&String> = outcome
+        .plan
+        .refusals()
+        .iter()
+        .filter(|r| r.contains(".anvil/container/Dockerfile"))
+        .collect();
+    assert_eq!(refusals.len(), 1, "one diagnostic per host, not one per region: {refusals:?}");
+    assert!(
+        refusals[0].contains("'anvil-container-tools' appears before 'anvil-container-base'"),
+        "the diagnostic must name the region that moved: {}",
+        refusals[0]
+    );
+
+    // Refusing means leaving the file exactly as it was found. Rewriting it
+    // would destroy whatever the repository put between the regions.
+    assert_eq!(
+        std::fs::read_to_string(&dockerfile).unwrap(),
+        reordered,
+        "a refused host must not be modified"
     );
 }

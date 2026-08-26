@@ -866,6 +866,14 @@ fn mutants_diff_covers_uncommitted_work() {
             ("FAKE_CARGO_LOG", log.as_os_str()),
             ("BASE_REF", OsStr::new(&base)),
             ("RUNNER_TEMP", root.as_os_str()),
+            // Pin the architecture the recipe branches on. It bails out early on
+            // aarch64-pc-windows-msvc, where cargo-mutants does not build, so on
+            // an ARM64 Windows runner this test would otherwise assert against a
+            // recipe that deliberately did nothing. Both variables are set
+            // because a 32-bit host process reports the real machine in the
+            // second one.
+            ("PROCESSOR_ARCHITECTURE", OsStr::new("AMD64")),
+            ("PROCESSOR_ARCHITEW6432", OsStr::new("")),
         ],
     );
     assert!(
@@ -883,5 +891,56 @@ fn mutants_diff_covers_uncommitted_work() {
     assert!(
         diff.contains("uncommitted"),
         "the uncommitted change must be in the diff -- a base..HEAD diff would omit it:\n{diff}"
+    );
+}
+
+/// The ARM64 Windows bail-out is a documented behaviour, not an accident:
+/// cargo-mutants does not build for `aarch64-pc-windows-msvc`, so the recipe
+/// exits cleanly rather than failing the merged `pr-slow` group on that leg.
+///
+/// Asserting it here is what keeps the sibling test above honest. That one pins
+/// the architecture to AMD64 so it exercises the real path; without this test
+/// the skip branch would be exercised by nothing, and an ARM64 runner would be
+/// the only place either behaviour was observed.
+#[test]
+fn mutants_diff_skips_on_arm64_windows() {
+    // Only meaningful where the recipe's `$IsWindows` guard can be true; on
+    // Linux and macOS the architecture variable is not consulted at all.
+    if !cfg!(windows) {
+        return;
+    }
+    let tmp = fixture(
+        &[("helpers.just", HELPERS), ("mutants-diff.just", MUTANTS_DIFF)],
+        &[
+            "anvil-tool-cargo-mutants-validate-prereqs",
+            "anvil-tool-cargo-mutants-install installer=\"install\"",
+        ],
+    );
+    let root = tmp.path();
+
+    let log = root.join("cargo.log");
+    let output = run_just(
+        root,
+        &["anvil-mutants-diff"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("RUNNER_TEMP", root.as_os_str()),
+            ("PROCESSOR_ARCHITECTURE", OsStr::new("ARM64")),
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "the recipe must skip cleanly, not fail, on aarch64-pc-windows-msvc\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("cargo-mutants does not build here"),
+        "the skip must say why, or a silent no-op looks like a passing run:\n{stdout}"
+    );
+    assert!(
+        std::fs::read_to_string(&log).unwrap_or_default().is_empty(),
+        "cargo must not be invoked at all on the skipped leg"
     );
 }

@@ -48,16 +48,19 @@ repo/
 │                           Read by recipes via `{{ var }}` interpolation. See §3.
 │
 └── .anvil/container/                              the container image definition
-    ├── Dockerfile                                 editable; drift is preserved
+    ├── Dockerfile                                 composed: anvil-managed regions, your content between
     ├── Dockerfile.dockerignore
     └── hooks.ps1                                  optional; credentials, not emitted by default
 ```
 
-The Justfile region is the only file anvil adds to that the user co-owns, and it's
-a single `import` line. Generated recipes live inside `justfiles/anvil/`; the
-container image definition lives inside `.anvil/container/`. Generated files in
+The Justfile region is not the only file anvil adds to that the user co-owns: the
+container `Dockerfile` is composed the same way, from four managed regions with
+the repository's own instructions in the gaps between them (see
+[containers.md](./containers.md)). Generated recipes live inside `justfiles/anvil/`;
+the container image definition lives inside `.anvil/container/`. Generated files in
 both directories are tool-owned (tracked by full-file checksum in the sidecar
-manifest). If the user wants to add project-specific recipes, they add them to
+manifest), except the composed `Dockerfile`, whose regions are tracked
+individually. If the user wants to add project-specific recipes, they add them to
 the top-level `Justfile` outside the managed region, or to their own additional
 imported `.just` files. The alias `anvil := anvil-pr` lives in `mod.just`, not in
 the user's `Justfile`, so renaming or retargeting the alias is a template update

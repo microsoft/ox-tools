@@ -1,15 +1,11 @@
 version = 1
 tool = "anvil"
 tool_version = "0.5.0"
-catalog_checksum = "sha256:799d1dc17b2e3f7ef1af299996d4f5b0d829692132b4a13fabcedcee6411422b"
-
-[[file]]
-path = ".anvil/container/Dockerfile"
-checksum = "sha256:a3e106b7dbde0bb6a9c2b94dae0f9cb82b9055ea97f100438f3d3d20ec66e971"
+catalog_checksum = "sha256:05e7198e42dce094505776df73581e933f89db4d961ef2f1127967d211e5a818"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
-checksum = "sha256:6e0f2fa763766c09ba05e5f48aeca8fbc3894125208e1ee2de8d433a5dbbfcef"
+checksum = "sha256:bcffa702f6802244b798c6587c6ade9ef1baa586c3952bdcbe8f4e88cb8f73d4"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"
@@ -169,7 +165,7 @@ checksum = "sha256:dbfde2179d7008f6ee0647aaca37f01241c2f126af7636917381ff3f95bc0
 
 [[file]]
 path = "justfiles/anvil/container.just"
-checksum = "sha256:34a1383e17f3d6ac909fc3206bb3f59885256620bab178e7cdf650ba520d150b"
+checksum = "sha256:345497c7865dc5962cb80f4d7ff28846cb56d8ee93915c8e638d772b04dd215a"
 
 [[file]]
 path = "justfiles/anvil/groups/pr-fast.just"
@@ -226,6 +222,26 @@ checksum = "sha256:a1e44ca16f172b487afa3997f102512733d3b65a4418cf894cbd749a3abc1
 [[file]]
 path = "justfiles/anvil/versions.just"
 checksum = "sha256:acbea93d5117db747537f4f7b9a5eb90b7d3e0dd3e8684cc0e4dc1dcb15ac93e"
+
+[[region]]
+host = ".anvil/container/Dockerfile"
+id = "anvil-container-base"
+checksum = "sha256:52ed0faca8dec1cf4ad09602feb7ae627a0d5f1cabc903a8052c6b771c1302f6"
+
+[[region]]
+host = ".anvil/container/Dockerfile"
+id = "anvil-container-entry"
+checksum = "sha256:7b409a9b560c214e10b50f74330fb6f8c0c12c3d83494e0dcf016f2411b50365"
+
+[[region]]
+host = ".anvil/container/Dockerfile"
+id = "anvil-container-setup"
+checksum = "sha256:80e0b29f9e8eec3b8c98976c718f11e5afc9c63131fcf4b0a0998c04895ace5b"
+
+[[region]]
+host = ".anvil/container/Dockerfile"
+id = "anvil-container-tools"
+checksum = "sha256:0faa15c3d2a9d6fafb0748c92ffc15564e8cbfd3dbfd8284c2eacf701f4efe72"
 
 [[region]]
 host = ".delta.toml"

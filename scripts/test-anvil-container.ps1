@@ -549,21 +549,46 @@ $reverted = Get-ImageReference -Repo $repo
 Assert-Equal 'the original reference is restored' $reference $reverted
 Assert-That 'the original image is still present' (Test-ImagePresent $reverted)
 
-# ------------------------------------------------- 6. editing the Dockerfile --
+# ---------------------------------------------- 6. composing the Dockerfile --
 
-Write-Section '6. A repository can edit the Dockerfile'
+Write-Section '6. A repository composes the Dockerfile around anvil''s regions'
 
 $dockerfileBody = Get-Content -LiteralPath $dockerfile -Raw
-Write-Fixture $dockerfile ($dockerfileBody + "`n# a repository-owned edit`n")
-$editedReference = Get-ImageReference -Repo $repo
-Assert-That 'editing the Dockerfile selects a new tag' ($editedReference -ne $reference)
 
-Write-Step 're-running the generator over the edited file'
+# The gap between the base and tool regions: where a root CA or a proxy goes,
+# and the reason the file is composed rather than owned outright.
+$gapMarker = "# <<< anvil-managed: anvil-container-base`n"
+Assert-That 'the composed Dockerfile carries the base region' ($dockerfileBody.Contains($gapMarker))
+$composed = $dockerfileBody.Replace($gapMarker, $gapMarker + "`n# a repository-owned edit`nENV ANVIL_E2E_GAP=1`n")
+Write-Fixture $dockerfile $composed
+$editedReference = Get-ImageReference -Repo $repo
+Assert-That 'adding to a gap selects a new tag' ($editedReference -ne $reference)
+
+Write-Step 're-running the generator over the composed file'
 $regen = Invoke-Native -Command $anvilExe -Arguments @('anvil', '--no-backends') -WorkingDirectory $repo -AllowFailure
-Assert-Equal 'the generator succeeds over a user-modified owned file' 0 $regen.ExitCode
+Assert-Equal 'the generator succeeds over a composed file' 0 $regen.ExitCode
 $afterRegen = Get-Content -LiteralPath $dockerfile -Raw
-Assert-That 'the edit survives regeneration' ($afterRegen -match 'a repository-owned edit') `
-    'anvil must preserve a user-modified owned file'
+Assert-That 'content in a gap survives regeneration' ($afterRegen -match 'a repository-owned edit') `
+    'anvil must preserve everything outside its own sentinels'
+Assert-Equal 'the composed tag is unchanged by regeneration' $editedReference (Get-ImageReference -Repo $repo)
+
+# Anvil never overwrites repository content, and a region body is no exception:
+# an edit inside one is preserved, exactly as `updates.md` §2 preserves an
+# edited owned file. That is why the gaps matter -- editing inside a region
+# silently freezes the base digest and the tool pins at today's values while
+# the tag keeps resolving, so the layout has to make the gaps the obvious place
+# to add things rather than relying on the engine to police it.
+Write-Step 'editing inside a region, which anvil preserves rather than overwrites'
+$frozen = $afterRegen.Replace('ARG JUST_VERSION=', 'ARG JUST_VERSION=0.0.0 # ')
+Assert-That 'the edit landed inside the region' ($frozen -ne $afterRegen)
+Write-Fixture $dockerfile $frozen
+$regen = Invoke-Native -Command $anvilExe -Arguments @('anvil', '--no-backends') -WorkingDirectory $repo -AllowFailure
+Assert-Equal 'the generator succeeds over an edited region' 0 $regen.ExitCode
+$reclaimed = Get-Content -LiteralPath $dockerfile -Raw
+Assert-That 'an edit inside a region is preserved, not overwritten' ($reclaimed -match 'JUST_VERSION=0\.0\.0') `
+    'anvil must never destroy repository content, in a region or a file'
+Assert-That 'the surrounding gap content is untouched' ($reclaimed -match 'a repository-owned edit')
+Assert-That 'the sentinels survive the edit' ($reclaimed -match '# <<< anvil-managed: anvil-container-base')
 
 Write-Fixture $dockerfile $dockerfileBody
 Assert-Equal 'restoring the Dockerfile restores the tag' $reference (Get-ImageReference -Repo $repo)

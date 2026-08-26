@@ -1,0 +1,34 @@
+# The base tracks the Linux runner the generated workflows use
+# (`ubuntu-latest`, currently 24.04). `anvil-setup binstall` installs the
+# catalog as prebuilt binaries, which require that runner's glibc; it is
+# backward but not forward compatible, so the pin moves when the runner does.
+#
+# BASE_IMAGE stays digest-pinned. `anvil-container-tag` hashes this file, so a
+# change here renames the image -- but it does not resolve or validate the
+# base, and a floating tag could therefore change underneath a reference that
+# claims to name fixed content.
+ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
+FROM ${BASE_IMAGE}
+
+ARG JUST_VERSION=1.56.0
+ARG JUST_SHA256=fa2a8ec1015d9df5330941ade12437488fc40d33f9c9f8cd4eb70a26de11b639
+ARG POWERSHELL_VERSION=7.6.3
+ARG POWERSHELL_SHA256=856d0765d2332377f9d7a4aea76efdfde4de51446e7738dde2dfda41dba9e2a7
+ARG RUSTUP_VERSION=1.29.0
+ARG RUSTUP_SHA256=4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
+ARG CARGO_BINSTALL_VERSION=1.21.1
+ARG CARGO_BINSTALL_SHA256=630c8f8803a686aa6779497f0f0fb51d49822fb5fc3c514d8ced33b34e338e6e
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    RUSTUP_NO_UPDATE_CHECK=1 \
+    PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# --- your turn -------------------------------------------------------------
+# The gap below this region runs before anvil's first download. Put whatever
+# the image needs in order to reach the network here: a corporate root CA,
+# `http_proxy` / `no_proxy`, apt sources pointed at an internal mirror.
+# Without it, a TLS-intercepting proxy makes every `curl` in the next region
+# fail and the image cannot be built at all.
+# ---------------------------------------------------------------------------

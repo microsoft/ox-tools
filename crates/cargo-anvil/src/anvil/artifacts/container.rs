@@ -3,34 +3,91 @@
 
 //! Containerized execution: the `anvil-container` recipe and the image it runs.
 //!
-//! Three artifacts define the whole feature. The recipe drives the engine and
-//! computes the image identity; the Dockerfile defines what the image contains;
-//! its build-context ignore file decides what reaches the build at all, and the
-//! two must be replaced together. There is no configuration file: whether the
-//! group is emitted at all is a catalog decision, and the only host-specific
-//! value — which engine to call — is an environment variable read by the recipe
-//! at run time.
+//! The recipe drives the engine and computes the image identity; the Dockerfile
+//! defines what the image contains; its build-context ignore file decides what
+//! reaches the build at all, and the two must be replaced together. There is no
+//! configuration file: whether the group is emitted at all is a catalog
+//! decision, and the only host-specific value — which engine to call — is an
+//! environment variable read by the recipe at run time.
 //!
-//! A downstream catalog customizes exactly two things, and inherits everything
-//! else:
+//! # Why the Dockerfile is composed, not owned
 //!
-//! - [`dockerfile`] plus [`Artifact::with_body`] to build on a different base
-//!   or install the toolchain from a different source. A replacement that
-//!   copies more of the tree must replace [`dockerignore`] with it, or the
-//!   added paths never reach the build context.
+//! The Dockerfile is a **user-composed file with managed regions**, not a
+//! wholly-owned file. An owned file that invites in-place edits fails silently
+//! here: `updates.md` §2 preserves the edit and writes anvil's version to
+//! `.anvil-proposed`, with no three-way merge and no recorded ancestor, so a
+//! repository that edits it once keeps building on the base digest and the four
+//! tool pins frozen at that moment — while `anvil-container-tag` keeps
+//! resolving, because the tag hashes *their* file. The identity scheme works
+//! perfectly and still names a stale image.
+//!
+//! Splitting anvil's content into regions does not make it unwritable — §2's
+//! ownership rules apply to a region body as they do to a file, and anvil never
+//! overwrites repository content. What it removes is the *reason* to edit: each
+//! of the three gaps between the regions is the correct home for one class of
+//! addition, defined by what must already be true at that point in the build.
+//!
+//! | Gap | Runs | Exists for |
+//! | --- | --- | --- |
+//! | after [`dockerfile_base`] | before the first download | root CA, proxy, internal apt mirror |
+//! | after [`dockerfile_tools`] | after the toolchain, before `anvil-setup` | libraries a catalog tool needs to *compile* |
+//! | after [`dockerfile_setup`] | after the catalog is installed | what the repository's own checks need at run time |
+//!
+//! A downstream catalog customizes by replacing individual regions, and
+//! inherits the rest:
+//!
+//! - [`dockerfile_base`] / [`dockerfile_tools`] plus [`Artifact::with_body`] to
+//!   build on a different base OS or install the toolchain from a different
+//!   source. [`dockerfile_setup`] and [`dockerfile_entry`] are the contract with
+//!   the recipe and are rarely replaced.
+//! - [`dockerignore`] alongside them when the replacement copies more of the
+//!   tree, or the added paths never reach the build context.
 //! - [`hooks`] to supply credentials, or to resolve a published image through
 //!   `Anvil-ResolveImage`. The recipe loads the file when it is present,
 //!   regardless of who put it there.
 
-use crate::catalog::Artifact;
+use crate::catalog::{Artifact, HostSelector, RegionId, RegionSpec};
+use crate::region::CommentSyntax;
 
 const RECIPE: &str = include_str!("../../../templates/justfiles/anvil/container.just");
-const DOCKERFILE: &str = include_str!("../../../templates/anvil/container/Dockerfile");
 const DOCKERIGNORE: &str = include_str!("../../../templates/anvil/container/Dockerfile.dockerignore");
 
+/// Seeded into the Dockerfile when the file does not exist, and never
+/// reconciled afterwards — it is the user's half of a composed file.
+///
+/// It carries `# syntax=docker/dockerfile:1`, which BuildKit honours only as
+/// the very first line of the file. A region's opening sentinel is a comment,
+/// so the directive cannot live inside a region without being demoted to an
+/// ordinary comment — silently, with the build falling back to the default
+/// frontend and nothing failing to say so.
+pub(crate) const DOCKERFILE_HEADER: &str = include_str!("../../../templates/anvil/container/Dockerfile.header");
+
+const DOCKERFILE_BASE: &str = include_str!("../../../templates/anvil/container/Dockerfile.base.region");
+const DOCKERFILE_TOOLS: &str = include_str!("../../../templates/anvil/container/Dockerfile.tools.region");
+const DOCKERFILE_SETUP: &str = include_str!("../../../templates/anvil/container/Dockerfile.setup.region");
+const DOCKERFILE_ENTRY: &str = include_str!("../../../templates/anvil/container/Dockerfile.entry.region");
+
 const RECIPE_PATH: &str = "justfiles/anvil/container.just";
-const DOCKERFILE_PATH: &str = ".anvil/container/Dockerfile";
+
+/// The composed Dockerfile the managed regions are spliced into.
+pub(crate) const DOCKERFILE_PATH: &str = ".anvil/container/Dockerfile";
+
 const DOCKERIGNORE_PATH: &str = ".anvil/container/Dockerfile.dockerignore";
+
+/// The region ids anvil owns inside [`DOCKERFILE_PATH`], in the order a valid
+/// Dockerfile must carry them.
+///
+/// Order is load-bearing in a way no other managed-region host is: `FROM` must
+/// precede every instruction, the toolchain must exist before `anvil-setup`
+/// runs, and `WORKDIR`/`CMD` close the file. The engine checks the on-disk
+/// sequence against this list and refuses rather than emitting a Dockerfile
+/// that is silently wrong.
+pub(crate) const DOCKERFILE_REGION_ORDER: &[&str] = &[
+    "anvil-container-base",
+    "anvil-container-tools",
+    "anvil-container-setup",
+    "anvil-container-entry",
+];
 
 /// The path the recipe loads credentials from, when a file is present there.
 pub const HOOKS_PATH: &str = ".anvil/container/hooks.ps1";
@@ -38,7 +95,14 @@ pub const HOOKS_PATH: &str = ".anvil/container/hooks.ps1";
 /// The full container artifact group.
 #[must_use]
 pub fn all() -> Vec<Artifact> {
-    vec![recipe(), dockerfile(), dockerignore()]
+    vec![
+        recipe(),
+        dockerignore(),
+        dockerfile_base(),
+        dockerfile_tools(),
+        dockerfile_setup(),
+        dockerfile_entry(),
+    ]
 }
 
 /// The `anvil-container` recipe and its private helpers.
@@ -47,32 +111,71 @@ pub fn recipe() -> Artifact {
     Artifact::owned_file(RECIPE_PATH, RECIPE)
 }
 
-/// The default execution image: a digest-pinned base tracking the Linux CI
-/// runner, which installs the pinned toolchain and the generated tool catalog
-/// by running `just anvil-setup`.
+fn dockerfile_region(id: &'static str, body: &'static str) -> Artifact {
+    Artifact::region(RegionSpec {
+        host: HostSelector::Path(DOCKERFILE_PATH.to_owned()),
+        id: RegionId::new(id),
+        body: body.to_owned(),
+        syntax: CommentSyntax::Hash,
+    })
+}
+
+/// The base image and the pinned tool versions: a digest-pinned base tracking
+/// the Linux CI runner, the four download pins, and the environment every later
+/// region depends on.
 ///
-/// The catalog is installed as prebuilt binaries, which require that runner's
-/// glibc. A catalog on an older base installs from source instead.
-///
-/// A downstream catalog that needs a different base OS or toolchain source
-/// replaces the body wholesale:
+/// A downstream catalog that needs a different base OS replaces this and
+/// usually [`dockerfile_tools`] with it:
 ///
 /// ```ignore
 /// catalog.replace_artifact(
-///     artifacts::container::dockerfile().with_body(include_str!("../templates/Dockerfile")),
+///     artifacts::container::dockerfile_base()
+///         .with_body(include_str!("../templates/base.dockerfile")),
 /// )
 /// ```
 #[must_use]
-pub fn dockerfile() -> Artifact {
-    Artifact::owned_file(DOCKERFILE_PATH, DOCKERFILE)
+pub fn dockerfile_base() -> Artifact {
+    dockerfile_region("anvil-container-base", DOCKERFILE_BASE)
 }
 
-/// The build-context ignore file for [`dockerfile`].
+/// The toolchain layer: the system packages, then `pwsh`, `just`, `rustup` and
+/// `cargo-binstall` installed against published checksums.
+///
+/// This is the region a catalog on a different package ecosystem replaces —
+/// `tdnf` rather than `apt-get`, an internal toolchain source rather than
+/// `rustup`.
+#[must_use]
+pub fn dockerfile_tools() -> Artifact {
+    dockerfile_region("anvil-container-tools", DOCKERFILE_TOOLS)
+}
+
+/// The catalog install: copies the generated recipe tree and runs
+/// `just anvil-setup`, so the image installs exactly what the checks pin.
+///
+/// Rarely replaced. Installing by running the same recipe the checks use is
+/// what makes "the image has the right tools" true by construction; a
+/// replacement reintroduces the second tool list this exists to avoid.
+#[must_use]
+pub fn dockerfile_setup() -> Artifact {
+    dockerfile_region("anvil-container-setup", DOCKERFILE_SETUP)
+}
+
+/// The entry contract: `ANVIL_IN_CONTAINER`, the workdir the repository is
+/// bind-mounted at, and the default command.
+///
+/// Every line here is a contract with the recipe rather than an opinion about
+/// the image, so replacing it breaks the driver.
+#[must_use]
+pub fn dockerfile_entry() -> Artifact {
+    dockerfile_region("anvil-container-entry", DOCKERFILE_ENTRY)
+}
+
+/// The build-context ignore file for the composed Dockerfile.
 ///
 /// `BuildKit` reads `<dockerfile>.dockerignore` in preference to a root
 /// `.dockerignore`, so the build context is scoped without the repository
-/// having to own a root ignore file. A catalog that replaces the Dockerfile
-/// with one that copies more of the tree must replace this too.
+/// having to own a root ignore file. A catalog that replaces a region with one
+/// that copies more of the tree must replace this too.
 #[must_use]
 pub fn dockerignore() -> Artifact {
     Artifact::owned_file(DOCKERIGNORE_PATH, DOCKERIGNORE)
@@ -128,25 +231,99 @@ mod tests {
             .iter()
             .map(|artifact| match artifact {
                 Artifact::OwnedFile(spec) => spec.path,
-                Artifact::Region(_) => panic!("container group must contain owned files only"),
+                Artifact::Region(_) => panic!("expected an owned file"),
             })
             .collect()
     }
 
+    fn region_ids(artifacts: &[Artifact]) -> Vec<&str> {
+        artifacts
+            .iter()
+            .filter_map(|artifact| match artifact {
+                Artifact::Region(spec) => Some(spec.id.as_str()),
+                Artifact::OwnedFile(_) => None,
+            })
+            .collect()
+    }
+
+    /// The Dockerfile as a fresh repository first receives it: the seeded
+    /// header followed by every region body in the order the engine enforces.
+    fn composed_dockerfile() -> String {
+        let mut out = DOCKERFILE_HEADER.to_owned();
+        for body in [DOCKERFILE_BASE, DOCKERFILE_TOOLS, DOCKERFILE_SETUP, DOCKERFILE_ENTRY] {
+            out.push_str(body);
+        }
+        out
+    }
+
     #[test]
-    fn group_is_exactly_three_files() {
-        assert_eq!(paths(&all()), [RECIPE_PATH, DOCKERFILE_PATH, DOCKERIGNORE_PATH]);
+    fn group_is_two_owned_files_and_four_dockerfile_regions() {
+        let all = all();
+        let owned: Vec<_> = all
+            .iter()
+            .filter(|artifact| matches!(artifact, Artifact::OwnedFile(_)))
+            .cloned()
+            .collect();
+        assert_eq!(paths(&owned), [RECIPE_PATH, DOCKERIGNORE_PATH]);
+        assert_eq!(region_ids(&all), DOCKERFILE_REGION_ORDER);
+    }
+
+    #[test]
+    fn every_dockerfile_region_targets_the_one_composed_host() {
+        for artifact in all() {
+            if let Artifact::Region(spec) = artifact {
+                assert_eq!(spec.host, HostSelector::Path(DOCKERFILE_PATH.to_owned()));
+                assert_eq!(spec.syntax, CommentSyntax::Hash);
+            }
+        }
+    }
+
+    #[test]
+    fn the_syntax_directive_leads_the_seeded_header() {
+        // BuildKit honours the parser directive only when nothing precedes it.
+        // If this ever moves, the frontend pin stops applying and nothing
+        // fails to say so.
+        assert_eq!(
+            DOCKERFILE_HEADER.lines().next(),
+            Some("# syntax=docker/dockerfile:1"),
+            "the parser directive must be the first line of the seeded header"
+        );
+    }
+
+    #[test]
+    fn no_region_body_carries_the_parser_directive() {
+        // Inside a region the directive would sit below an opening sentinel --
+        // a comment -- and be silently demoted.
+        for body in [DOCKERFILE_BASE, DOCKERFILE_TOOLS, DOCKERFILE_SETUP, DOCKERFILE_ENTRY] {
+            assert!(!body.contains("# syntax="), "a region body must not carry the parser directive");
+        }
     }
 
     #[test]
     fn image_installs_the_generated_toolset() {
         // The image must not carry a second tool list: it installs by running
         // the same recipe the checks use, from the same generated pins.
-        assert!(DOCKERFILE.contains("just anvil-setup binstall"));
-        assert!(DOCKERFILE.contains("COPY justfiles"));
-        assert!(DOCKERFILE.contains("COPY rust-toolchain.toml"));
+        let composed = composed_dockerfile();
+        assert!(composed.contains("just anvil-setup binstall"));
+        assert!(composed.contains("COPY justfiles"));
+        assert!(composed.contains("COPY rust-toolchain.toml"));
         // The re-entry guard the recipe relies on to avoid nesting.
-        assert!(DOCKERFILE.contains("ENV ANVIL_IN_CONTAINER=1"));
+        assert!(composed.contains("ENV ANVIL_IN_CONTAINER=1"));
+    }
+
+    #[test]
+    fn the_composed_order_is_a_buildable_dockerfile() {
+        // The region order is not cosmetic: everything depends on FROM, and
+        // the catalog install needs the toolchain that precedes it.
+        let composed = composed_dockerfile();
+        let at = |needle: &str| {
+            composed
+                .find(needle)
+                .unwrap_or_else(|| panic!("missing from composed Dockerfile: {needle}"))
+        };
+        assert!(at("FROM ${BASE_IMAGE}") < at("RUN apt-get update"));
+        assert!(at("RUN apt-get update") < at("just anvil-setup binstall"));
+        assert!(at("just anvil-setup binstall") < at("WORKDIR /workspace"));
     }
 
     #[test]
@@ -154,10 +331,10 @@ mod tests {
         // A floating base tag can change underneath an identity hash that
         // claims to name fixed content, which would make every cached image a
         // potential lie.
-        let base = DOCKERFILE
+        let base = DOCKERFILE_BASE
             .lines()
             .find(|line| line.starts_with("ARG BASE_IMAGE="))
-            .expect("the Dockerfile must declare a default BASE_IMAGE");
+            .expect("the base region must declare a default BASE_IMAGE");
         assert!(base.contains("@sha256:"), "BASE_IMAGE must be digest-pinned: {base}");
     }
 
@@ -403,8 +580,29 @@ mod tests {
     #[test]
     fn hook_file_is_an_image_input_but_hook_output_is_not() {
         // A changed hook must rename the tag; a minted credential must not.
-        assert!(RECIPE.contains("$inputs += $hookRel"));
+        // The hook is no longer named individually -- it is picked up by the
+        // walk of `.anvil/container/`, which is what also catches a file a
+        // repository `COPY`s from one of the Dockerfile's user gaps.
+        assert!(RECIPE.contains("$containerRoot = Join-Path $repoRoot '.anvil/container'"));
         assert!(RECIPE.contains("id=$id,env=$name"));
+    }
+
+    #[test]
+    fn every_file_under_the_container_directory_is_an_image_input() {
+        // The Dockerfile is composed: a repository adds `COPY` lines in the
+        // gaps between anvil's regions, naming files anvil never hears about.
+        // Hashing a fixed list would let those change the image under a
+        // reference that already resolves.
+        let walk = RECIPE
+            .find("$containerRoot = Join-Path $repoRoot '.anvil/container'")
+            .expect("the tag must walk the container directory");
+        let recurse = RECIPE[walk..]
+            .find("Get-ChildItem -LiteralPath $containerRoot -Recurse -File -Force")
+            .expect("the walk must be recursive and include hidden entries");
+        // A missing Dockerfile must still be fatal: the walk alone would let
+        // it contribute nothing and yield a confident tag for an unbuildable
+        // image.
+        assert!(RECIPE[walk + recurse..].contains("container image input is missing: $dockerfile"));
     }
 
     #[test]
@@ -644,9 +842,20 @@ mod tests {
     }
 
     #[test]
-    fn dockerfile_body_can_be_replaced_by_a_fork() {
-        let replaced = dockerfile().with_body("FROM example.invalid/base\n");
-        assert_eq!(paths(std::slice::from_ref(&replaced)), [DOCKERFILE_PATH]);
+    fn a_fork_replaces_one_region_without_touching_the_others() {
+        // The point of splitting the file: a catalog on another base OS
+        // rewrites the base and tool layers and inherits the catalog install
+        // and the entry contract, instead of forking the whole Dockerfile and
+        // freezing every pin in it.
+        let replaced = dockerfile_base().with_body("FROM example.invalid/base\n");
+        match &replaced {
+            Artifact::Region(spec) => {
+                assert_eq!(spec.id.as_str(), "anvil-container-base");
+                assert_eq!(spec.host, HostSelector::Path(DOCKERFILE_PATH.to_owned()));
+            }
+            Artifact::OwnedFile(_) => panic!("the Dockerfile regions must stay regions"),
+        }
         assert_eq!(replaced.body(), "FROM example.invalid/base\n");
+        assert_eq!(dockerfile_setup().body(), DOCKERFILE_SETUP);
     }
 }

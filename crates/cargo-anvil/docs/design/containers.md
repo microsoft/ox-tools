@@ -131,14 +131,53 @@ repo/
 │   ├── container.just                     the anvil-container recipes
 │   └── …                                  checks, groups, tiers, executed natively *inside* the image
 └── .anvil/container/
-    ├── Dockerfile                         what the image contains
+    ├── Dockerfile                         composed: anvil's four regions, your content in the gaps
     ├── Dockerfile.dockerignore            what the build context admits
     └── hooks.ps1                          optional; not emitted by default (§7)
 ```
 
-`container.just` and the `Dockerfile` are both owned files with the same drift handling: anvil preserves a repository's
-edit and reports a proposal rather than overwriting it (`updates.md` §2). They differ in header wording and in whether
-editing is *invited* — the Dockerfile is meant to be extended (§8), the driver is not.
+`container.just` and `Dockerfile.dockerignore` are owned files carrying the usual `DO NOT EDIT DIRECTLY` marker.
+
+The **Dockerfile is a user-composed file with managed regions**, not an owned file. Anvil owns four regions inside it
+and keeps them current; everything outside the sentinels — including the header and the three gaps between them — is
+the repository's and is preserved byte-for-byte.
+
+| Region | Contains | Gap that follows it is for |
+| --- | --- | --- |
+| `anvil-container-base` | `ARG BASE_IMAGE`, `FROM`, the four download pins, `ENV` | a root CA, `http_proxy`, an internal apt mirror — anything needed to reach the network at all |
+| `anvil-container-tools` | system packages, `pwsh`, `just`, `rustup`, `cargo-binstall` | libraries a catalog tool needs to *compile*, when `binstall` falls back to a source build |
+| `anvil-container-setup` | `COPY` of the recipe tree, `just anvil-setup` | what the repository's own checks need at run time; also the cheapest layer to add to |
+| `anvil-container-entry` | `ANVIL_IN_CONTAINER`, `WORKDIR`, `CMD` | — |
+
+**Why not an owned file that invites edits.** `updates.md` §2 preserves an edited owned file and writes anvil's version
+to `.anvil-proposed`. There is no three-way merge and no recorded common ancestor, so every upgrade hands the
+repository two files to reconcile by hand — and a side file does not get reconciled indefinitely. Here that failure is
+silent in a way that matters: the file carries the base digest and four tool pins, so a repository that edits it once
+keeps building on the base and versions frozen at that moment, while `anvil-container-tag` resolves happily *because
+the tag hashes their file*. The identity scheme works perfectly and still names a stale image.
+
+**What regions actually change.** They do not make anvil's content unwritable: §2's ownership rules apply to a region
+body exactly as they do to a file, so an edit *inside* a region is still preserved and still produces a proposal rather
+than being overwritten. Anvil never destroys repository content, and a special case here would be the one place it did.
+What changes is that there is no longer a reason to edit: every legitimate addition — a root CA, a build dependency, a
+run-time tool — has a gap that is the *correct* place for it, chosen by what must already be true at that point in the
+build. Editing anvil's content stops being the only way to extend the image and becomes a mistake the layout steers
+away from, and the pin freeze goes with it for every repository that takes the gaps.
+
+**Two constraints the region engine had to grow for this.** Both are specific to a Dockerfile and neither applies to the
+order-independent TOML and line-set hosts anvil already had:
+
+- **`# syntax=docker/dockerfile:1` must be line 1.** BuildKit honours a parser directive only when nothing precedes it,
+  not even a comment — and a region's opening sentinel *is* a comment, so the directive cannot live inside one without
+  being silently demoted, leaving the build on the default frontend with nothing failing to say so. It is therefore
+  part of a **scaffold** anvil writes when the file does not exist, and never reconciles afterwards.
+- **Region order is semantic.** `FROM` must precede everything, and the toolchain must exist before `anvil-setup` runs.
+  Fresh files get catalog order; thereafter the engine checks the on-disk sequence against the declared one and
+  **refuses** the host, reporting which region is out of place, rather than emitting a Dockerfile that is wrong.
+
+A repository upgrading from the release that owned this path outright is re-seeded rather than appended to: a file
+tracked as an owned file in the lock and carrying none of the regions is a previous render, not composition. A
+Dockerfile the repository wrote itself is in neither state and is left alone, with the regions added to it.
 
 The image installs its tools by running `just anvil-setup`, the same recipe the checks use, reading the same
 generated pins. There is no second tool list to keep synchronized, and consequently a tool-pin change renames the
@@ -158,11 +197,16 @@ define the image. The name derives from the repository directory (§5.1).
 
 | Input | Hashed |
 | --- | --- |
-| `.anvil/container/Dockerfile` | always |
-| `.anvil/container/Dockerfile.dockerignore` | always |
+| every file under `.anvil/container/` | always |
 | `rust-toolchain.toml` | always |
-| `.anvil/container/hooks.ps1` | when the file exists |
 | every file under `justfiles/anvil/` | always |
+
+`.anvil/container/` is hashed by walking it, not as a fixed list of three known files. The Dockerfile is composed, so a
+repository can `COPY` something from one of its gaps — a root CA, an install script, a patch — and a downstream
+catalog's replacement region can do the same. Naming only the files anvil happens to know about would let any of those
+change the image under a reference that already resolves, which is the hole the digest exists to close. A missing
+Dockerfile is still a hard error, checked by name: the walk alone would let it contribute nothing and yield a confident
+tag for an image that cannot be built.
 
 The recipe tree is hashed in full. `just anvil-setup` reaches the install recipes through the tier, group and check
 recipes, so the routing decides *whether* a tool is installed just as surely as `tools.just` decides *how*: dropping an
@@ -175,8 +219,7 @@ it belongs in the set because it passes the build arguments, the secret mounts a
 into the build.
 
 The cost is that editing any recipe renames the image and the next run rebuilds it. That is the correct trade: a tag
-that can name contents the image does not have makes every guarantee below meaningless. A declared input that does not
-exist is a hard error, not an omission from the digest.
+that can name contents the image does not have makes every guarantee below meaningless.
 
 The hook file's **content** is an input, since it determines what the build installs. Its **output** is deliberately
 excluded: a credential must never influence a tag.
@@ -525,26 +568,28 @@ an ordinary artifact group and uses the same levers as any other.
 
 | Goal | Mechanism | Owner |
 | --- | --- | --- |
-| Extra packages in one repository | Edit `.anvil/container/Dockerfile` in place | repository |
-| A different base OS or toolchain source, everywhere | `replace_artifact(artifacts::container::dockerfile().with_body(…))` | catalog |
+| Extra packages in one repository | Add them in one of the three gaps in `.anvil/container/Dockerfile` (§3) | repository |
+| A different base OS, everywhere | `replace_artifact(artifacts::container::dockerfile_base().with_body(…))`, usually with `dockerfile_tools()` | catalog |
 | Credentials, or a published image | Add `.anvil/container/hooks.ps1`, or ship `artifacts::container::hooks(…)` | either |
-| No containerized execution at all | `without_artifact` for each of the three artifacts | catalog |
+| No containerized execution at all | `without_artifact` for each artifact in the group | catalog |
 
-Editing the Dockerfile in one repository is supported and the drift flow preserves the edit, but anvil keeps offering
-its own version against a file it can see has diverged. A change that belongs everywhere is better made in a catalog.
+A repository adds to the Dockerfile without editing anything anvil owns, so pin bumps keep landing (§3). A change that
+belongs everywhere is still better made in a catalog, where every consumer gets it.
 
-**The Dockerfile and its ignore file must be replaced together.** A replacement that `COPY`s anything beyond
-`justfiles/anvil/` and `rust-toolchain.toml` must also replace `artifacts::container::dockerignore()` (§3), or the
-added paths never reach the build context and the build fails on a missing file.
+Replacing a *region* rather than the whole file is what makes a downstream catalog cheap to keep current:
+`dockerfile_setup()` and `dockerfile_entry()` are the contract with the driver and are inherited, so an Azure Linux or
+msrustup catalog rewrites the base and tool layers and nothing else. Replacing `dockerfile_setup()` reintroduces the
+second tool list the design exists to avoid, and is almost never right.
 
-**A replacement cannot extend the digest, so anything extra it copies must not vary independently.** The hashed set
-is fixed (§4.1) and a fork has no way to add to it, which puts this customization path in tension with the identity
-guarantee: an installer script, a config file or a certificate copied by a replacement Dockerfile sits outside the
-tag, so editing it changes what the image contains while naming a reference that already resolves — and the stale
-image is reused rather than rebuilt. Until a catalog can contribute digest inputs, the honest options are to carry
-that content inside the Dockerfile itself, where it *is* hashed, or to accept that changing it needs
-`ANVIL_CONTAINER_NO_CACHE=1` to take effect. A manual escape hatch is not content identity, so treat the second as a
-workaround rather than a supported contract.
+**A replacement must keep the ignore file in step.** A region that `COPY`s anything beyond `justfiles/anvil/` and
+`rust-toolchain.toml` must also replace `artifacts::container::dockerignore()` (§3), or the added paths never reach the
+build context and the build fails on a missing file.
+
+**Anything extra it copies is digested, provided it lives under `.anvil/container/`.** The hashed set is that whole
+directory (§4.1), so an installer script, a config file or a certificate placed beside the Dockerfile is an input:
+editing it renames the tag and the next run rebuilds. Content copied from elsewhere in the repository is not, and the
+tag will not move when it changes — keep it under `.anvil/container/` and the identity guarantee holds without a
+manual `ANVIL_CONTAINER_NO_CACHE=1`.
 
 `justfiles/anvil/` must contain `.just` recipes and nothing else, which `CatalogBuilder::build` enforces for
 catalog-owned files. The reason is legibility rather than identity: the directory is the recipe tree, `just` parses
@@ -554,7 +599,7 @@ context admits (§4.1), not only the recipes — a repository that adds a non-re
 when it edits it.
 
 A fork inherits everything else: the recipes, the identity scheme, the cache volumes, the mounts, and the re-entry
-guard. A different base OS with a different toolchain source is one Dockerfile replacement plus one hook.
+guard. A different base OS with a different toolchain source is two region replacements plus one hook.
 
 ## 9. Limitations
 

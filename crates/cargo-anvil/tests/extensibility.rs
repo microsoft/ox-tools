@@ -55,7 +55,7 @@ fn containerforge() -> Catalog {
         .subcommand("containerforge")
         .about("ContainerForge: an anvil container catalog for tests")
         .version("9.9.9")
-        .replace_artifact(artifacts::container::dockerfile().with_body("FROM example.invalid/base\n"))
+        .replace_artifact(artifacts::container::dockerfile_base().with_body("FROM example.invalid/base\n"))
         .with_artifact(artifacts::container::hooks("# test credential hook\n"))
         .build()
         .unwrap()
@@ -173,9 +173,17 @@ fn public_container_artifacts_can_be_specialized_by_downstream_catalogs() {
         "downstream catalog must inherit the public container command unchanged"
     );
     let configured_dockerfile = std::fs::read_to_string(configured.path().join(DOCKERFILE)).unwrap();
-    assert_eq!(
-        configured_dockerfile, "FROM example.invalid/base\n",
-        "downstream catalog must replace the public Dockerfile"
+    assert!(
+        configured_dockerfile.contains("# >>> anvil-managed: anvil-container-base\nFROM example.invalid/base\n"),
+        "downstream catalog must replace the public Dockerfile base region"
+    );
+    assert!(
+        configured_dockerfile.contains("just anvil-setup binstall"),
+        "downstream catalog must inherit the catalog-install region it did not replace"
+    );
+    assert!(
+        configured_dockerfile.starts_with("# syntax=docker/dockerfile:1\n"),
+        "the seeded parser directive must lead the composed Dockerfile"
     );
     let configured_ignore = std::fs::read_to_string(configured.path().join(DOCKERIGNORE)).unwrap();
     assert_eq!(

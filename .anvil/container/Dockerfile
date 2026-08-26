@@ -1,32 +1,36 @@
 # syntax=docker/dockerfile:1
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-# Managed by cargo-anvil. Update the corresponding template in the cargo-anvil
-# crate unless the change is repository-specific.
 #
-# Default Anvil execution image, emitted for every repository. The image
-# installs exactly the tools the generated catalog pins, by running
-# `just anvil-setup` -- the same recipe the checks themselves use. That is what
-# makes "the image has the right tools" true by construction rather than by
-# convention: there is no second list to keep in step.
+# Anvil execution image.
 #
-# BASE_IMAGE should stay digest-pinned. `_anvil-container-image` hashes this
-# file's text, so an edit here renames the image -- but it does not resolve or
-# validate the base, and a floating tag can therefore change underneath a tag
-# that claims to name fixed content.
+# The `anvil-managed:` regions below belong to cargo-anvil and are reconciled
+# on every run, so an edit inside one is replaced. Everything outside them is
+# yours and is preserved byte-for-byte, including this header.
 #
+# Add your own instructions in the gaps between the regions. Each region ends
+# by describing what the gap after it is for, because position decides whether
+# a line works at all: a corporate root CA has to land before the first
+# download, and a library needed to *compile* a catalog tool has to land
+# before `anvil-setup` runs.
+#
+# `# syntax=` must stay on line 1. It pins the BuildKit frontend, and BuildKit
+# honours the directive only when nothing precedes it -- not even a comment.
+# That is also why it sits out here rather than inside a region: a region's
+# opening sentinel is a comment, and would silently demote the directive to an
+# ordinary one, leaving the build on the default frontend with nothing failing
+# to say so.
+
+# >>> anvil-managed: anvil-container-base
 # The base tracks the Linux runner the generated workflows use
 # (`ubuntu-latest`, currently 24.04). `anvil-setup binstall` installs the
 # catalog as prebuilt binaries, which require that runner's glibc; it is
 # backward but not forward compatible, so the pin moves when the runner does.
 #
-# To build on a different base (a lower glibc baseline, or an internal
-# distribution), a downstream catalog replaces this artifact wholesale via
-# `replace_artifact(artifacts::container::dockerfile(...))`; a single
-# repository can edit this file in place, which anvil's drift handling
-# preserves. A lower baseline means the catalog must also install from source
-# rather than with `binstall`.
-
+# BASE_IMAGE stays digest-pinned. `anvil-container-tag` hashes this file, so a
+# change here renames the image -- but it does not resolve or validate the
+# base, and a floating tag could therefore change underneath a reference that
+# claims to name fixed content.
 ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 FROM ${BASE_IMAGE}
 
@@ -45,9 +49,19 @@ ENV DEBIAN_FRONTEND=noninteractive \
     RUSTUP_NO_UPDATE_CHECK=1 \
     PATH=/usr/local/cargo/bin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
+# --- your turn -------------------------------------------------------------
+# The gap below this region runs before anvil's first download. Put whatever
+# the image needs in order to reach the network here: a corporate root CA,
+# `http_proxy` / `no_proxy`, apt sources pointed at an internal mirror.
+# Without it, a TLS-intercepting proxy makes every `curl` in the next region
+# fail and the image cannot be built at all.
+# ---------------------------------------------------------------------------
+# <<< anvil-managed: anvil-container-base
+
+# >>> anvil-managed: anvil-container-tools
 # clang/libclang are required by cargo-spellcheck; the rest is the usual Rust
-# link-time set. A bare slim base has no C runtime development files, so every
-# link step fails without build-essential.
+# link-time set. A bare base has no C runtime development files, so every link
+# step fails without build-essential.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential ca-certificates clang libclang-dev curl git libicu-dev \
@@ -91,6 +105,16 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
     && chmod 755 "${CARGO_HOME}/bin/cargo-binstall" \
     && rm /tmp/cargo-binstall.tgz
 
+# --- your turn -------------------------------------------------------------
+# The gap below this region runs after the toolchain is in place and before
+# `anvil-setup` installs the catalog. Put system libraries a catalog tool
+# needs in order to *compile* here: `binstall` falls back to a source build
+# when a pinned tool publishes no prebuilt for this platform, and that build
+# links against whatever headers the image has.
+# ---------------------------------------------------------------------------
+# <<< anvil-managed: anvil-container-tools
+
+# >>> anvil-managed: anvil-container-setup
 # Install the pinned toolchain and cargo subcommands from the generated
 # catalog. The whole recipe tree is copied because `just` has to parse it, and
 # the whole tree is hashed into the tag: `anvil-setup` reaches the install
@@ -124,9 +148,20 @@ RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
     && mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
     && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
 
+# --- your turn -------------------------------------------------------------
+# The gap below this region runs after the catalog is installed. Put what your
+# own checks need at run time here: a database client, a protobuf compiler, a
+# linter that is not a cargo subcommand. It is also the cheapest place to add
+# anything, because an edit here invalidates one layer rather than the
+# multi-minute `anvil-setup` above.
+# ---------------------------------------------------------------------------
+# <<< anvil-managed: anvil-container-setup
+
+# >>> anvil-managed: anvil-container-entry
 # Consumed by `anvil-container` itself: a nested invocation from inside the
 # image runs the recipe natively instead of launching another container.
 ENV ANVIL_IN_CONTAINER=1
 
 WORKDIR /workspace
 CMD ["bash"]
+# <<< anvil-managed: anvil-container-entry

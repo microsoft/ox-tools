@@ -156,9 +156,12 @@
 //!
 //! ### Image identity
 //!
-//! The tag *is* a SHA-256 digest over the inputs that define the image: the
-//! Dockerfile and its ignore file, `rust-toolchain.toml`, the optional hook,
-//! and the whole generated `justfiles/anvil/` tree. The tree is included in
+//! The tag *is* a SHA-256 digest over the inputs that define the image:
+//! everything under `.anvil/container/`, `rust-toolchain.toml`, and the whole
+//! generated `justfiles/anvil/` tree. The container directory is walked rather
+//! than named file by file, because the Dockerfile is composed and a
+//! repository can `COPY` a certificate or an install script it places there.
+//! The recipe tree is included in
 //! full because the image installs its tools by running `just anvil-setup`,
 //! whose dependency chain runs through the tier, group and check recipes
 //! before it reaches the install recipes -- so the routing decides *whether* a
@@ -233,14 +236,23 @@
 //!
 //! ### Customizing the image
 //!
-//! `.anvil/container/Dockerfile` is an ordinary owned file: edit it in place
-//! for extra packages, and anvil's drift handling preserves the change. A
-//! downstream catalog that needs a different base OS or toolchain source for
-//! every repository it manages replaces the artifact instead. A replacement
-//! that copies more of the tree must replace the ignore file with it, since
-//! the build context admits only `justfiles/anvil/` and `rust-toolchain.toml`. See
-//! [`artifacts::container`] and the design document for the full contract,
-//! the host setup for each engine, and the known limitations.
+//! `.anvil/container/Dockerfile` is a **user-composed file with managed
+//! regions**: anvil owns four regions inside it and keeps them current, and the
+//! three gaps between them are the repository's. Add extra packages in the gap
+//! that suits when they are needed -- before the first download for a root CA
+//! or a proxy, before `anvil-setup` for libraries a catalog tool compiles
+//! against, after it for what the checks need at run time. Adding in a gap
+//! leaves anvil's content alone, so base and tool-pin bumps keep landing;
+//! editing inside a region is preserved rather than overwritten, but freezes
+//! those pins at the moment of the edit, which is why the gaps exist.
+//!
+//! A downstream catalog that needs a different base OS for every repository it
+//! manages replaces the base and tool regions instead, inheriting the catalog
+//! install and the entry contract. A replacement that copies more of the tree
+//! must replace the ignore file with it, since the build context admits only
+//! `justfiles/anvil/` and `rust-toolchain.toml`. See [`artifacts::container`]
+//! and the design document for the full contract, the host setup for each
+//! engine, and the known limitations.
 //!
 //! ## Checks and tiers
 //!
