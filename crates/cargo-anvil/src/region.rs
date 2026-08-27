@@ -476,6 +476,60 @@ mod tests {
         assert_eq!(new, "# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n");
     }
 
+    /// `At` exists for hosts whose region order is semantic: a region added in a
+    /// later release has to land at its declared position, not at end-of-file.
+    /// The offset the caller computes points at the end of the preceding
+    /// region's sentinel, so the split must fall on the following line boundary.
+    #[test]
+    fn at_placement_inserts_after_the_line_containing_the_offset() {
+        let host = "# syntax=docker/dockerfile:1\nFROM base\n";
+        // Offset lands mid-way through line 1; the region must go *after* that
+        // whole line, never inside it.
+        let new = upsert_region_with_placement(host, "x", "body\n", SYN, RegionPlacement::At(5)).unwrap();
+        assert_eq!(
+            new,
+            "# syntax=docker/dockerfile:1\n\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n\nFROM base\n"
+        );
+    }
+
+    #[test]
+    fn at_placement_into_empty_text_adds_no_leading_blank() {
+        let new = upsert_region_with_placement("", "x", "body\n", SYN, RegionPlacement::At(0)).unwrap();
+        assert_eq!(new, "# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n");
+    }
+
+    #[test]
+    fn at_placement_does_not_double_the_separating_blank_line() {
+        // Preceding content already ends with a blank line, so no second one.
+        let host = "FROM base\n\nRUN later\n";
+        let new = upsert_region_with_placement(host, "x", "body\n", SYN, RegionPlacement::At(10)).unwrap();
+        assert_eq!(
+            new,
+            "FROM base\n\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n\nRUN later\n"
+        );
+    }
+
+    #[test]
+    fn at_placement_separates_the_region_from_the_content_that_follows() {
+        // The tail does not start with a newline, so one is inserted -- without
+        // it the closing sentinel and the next instruction would share a line.
+        let host = "FROM base\nRUN later\n";
+        let new = upsert_region_with_placement(host, "x", "body\n", SYN, RegionPlacement::At(0)).unwrap();
+        assert_eq!(
+            new,
+            "FROM base\n\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n\nRUN later\n"
+        );
+    }
+
+    #[test]
+    fn at_placement_updates_an_existing_region_where_it_already_is() {
+        // The offset only decides where an *absent* region lands. One already
+        // present is replaced in place, so a stale offset cannot move it.
+        let host = "FROM base\n# >>> anvil-managed: x\nold\n# <<< anvil-managed: x\nRUN later\n";
+        let new = upsert_region_with_placement(host, "x", "new\n", SYN, RegionPlacement::At(0)).unwrap();
+        assert_eq!(new, "FROM base\n# >>> anvil-managed: x\nnew\n# <<< anvil-managed: x\nRUN later\n");
+    }
+
     #[test]
     fn start_placement_prepends_absent_region() {
         let new = upsert_region_with_placement(

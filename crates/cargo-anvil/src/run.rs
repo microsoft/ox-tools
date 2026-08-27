@@ -778,6 +778,91 @@ mod tests {
         fs::write(path, contents).unwrap();
     }
 
+    /// `composed_placement` decides where an *absent* region lands in a host
+    /// whose order is semantic. Every branch matters: getting it wrong puts a
+    /// newly added region after ones it must precede, which for a Dockerfile
+    /// means `FROM` below the layers that depend on it.
+    mod composed_placement {
+        use super::*;
+
+        const SCAFFOLD: &str = "# syntax=docker/dockerfile:1\n";
+        const ORDER: &[&str] = &["a", "b", "c"];
+
+        fn region(id: &str, body: &str) -> String {
+            format!("# >>> anvil-managed: {id}\n{body}# <<< anvil-managed: {id}\n")
+        }
+
+        #[test]
+        fn a_host_that_does_not_exist_yet_appends() {
+            // Nothing to order against; the regions are written in catalog
+            // order onto the scaffold.
+            assert_eq!(super::super::composed_placement(ORDER, SCAFFOLD, "b", None), RegionPlacement::End);
+        }
+
+        #[test]
+        fn a_region_already_present_is_replaced_where_it_is() {
+            let host = format!("{SCAFFOLD}{}", region("b", "body\n"));
+            assert_eq!(
+                super::super::composed_placement(ORDER, SCAFFOLD, "b", Some(&host)),
+                RegionPlacement::End,
+                "an existing region is upserted in place, so the offset is never consulted"
+            );
+        }
+
+        #[test]
+        fn a_region_outside_the_declared_order_appends() {
+            let host = format!("{SCAFFOLD}{}", region("a", "body\n"));
+            assert_eq!(
+                super::super::composed_placement(ORDER, SCAFFOLD, "unknown", Some(&host)),
+                RegionPlacement::End
+            );
+        }
+
+        #[test]
+        fn a_missing_region_lands_after_its_nearest_present_predecessor() {
+            // `c` is absent and both `a` and `b` are present, so it must follow
+            // `b` -- the nearest, not merely the first.
+            let host = format!("{SCAFFOLD}{}{}", region("a", "first\n"), region("b", "second\n"));
+            let RegionPlacement::At(offset) = super::super::composed_placement(ORDER, SCAFFOLD, "c", Some(&host)) else {
+                panic!("a missing region with a present predecessor must be placed by offset");
+            };
+            assert_eq!(offset, host.len(), "it belongs after the close of `b`");
+        }
+
+        #[test]
+        fn a_missing_region_skips_predecessors_that_are_absent_too() {
+            // `c` is missing and so is its nearest predecessor `b`, so the
+            // search has to walk past `b` and anchor on `a`. A fixture where
+            // the first candidate matches would never exercise the skip.
+            let host = format!("{SCAFFOLD}{}", region("a", "first\n"));
+            let RegionPlacement::At(offset) = super::super::composed_placement(ORDER, SCAFFOLD, "c", Some(&host)) else {
+                panic!("expected an offset placement");
+            };
+            assert_eq!(offset, host.len(), "it belongs after the close of `a`, the only one present");
+        }
+
+        #[test]
+        fn the_first_region_lands_below_the_scaffold_never_above_it() {
+            // The scaffold is the parser directive, which BuildKit honors only
+            // as line 1. Placing the first region at byte 0 would push it down.
+            let host = format!("{SCAFFOLD}{}", region("b", "second\n"));
+            let RegionPlacement::At(offset) = super::super::composed_placement(ORDER, SCAFFOLD, "a", Some(&host)) else {
+                panic!("expected an offset placement");
+            };
+            assert_eq!(offset, SCAFFOLD.trim_end_matches('\n').len());
+            assert!(offset > 0, "the directive must keep line 1");
+        }
+
+        #[test]
+        fn a_host_without_the_scaffold_places_the_first_region_at_the_top() {
+            let host = region("b", "second\n");
+            assert_eq!(
+                super::super::composed_placement(ORDER, SCAFFOLD, "a", Some(&host)),
+                RegionPlacement::At(0)
+            );
+        }
+    }
+
     fn empty_workspace() -> TempDir {
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
