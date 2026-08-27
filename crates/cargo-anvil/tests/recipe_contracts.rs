@@ -890,7 +890,12 @@ fn mutants_diff_covers_uncommitted_work() {
     );
 
     let calls = std::fs::read_to_string(&log).unwrap_or_default();
-    assert!(calls.contains("--in-diff"), "cargo mutants must be given a diff file:\n{calls}");
+    assert!(
+        calls.contains("--in-diff"),
+        "cargo mutants must be given a diff file.\ncargo log:\n{calls}\nrecipe stdout:\n{}\nrecipe stderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let diff = std::fs::read_to_string(root.join("anvil-mutants-diff.diff")).unwrap();
     assert!(diff.contains("committed"), "the committed change must be in the diff:\n{diff}");
