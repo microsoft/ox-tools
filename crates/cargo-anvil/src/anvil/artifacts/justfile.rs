@@ -534,6 +534,14 @@ mod tests {
                 .to_owned()
         }
 
+        fn diagnostic(output: &Output) -> String {
+            format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            )
+        }
+
         #[test]
         fn honors_environment_files_and_msrv_in_precedence_order() {
             let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
@@ -575,7 +583,11 @@ mod tests {
             let missing = fixture("[workspace]\nresolver = \"2\"\n");
             let output = run(missing.path(), &[], None);
             assert!(!output.status.success());
-            assert!(String::from_utf8_lossy(&output.stderr).contains("no root [workspace.package]"));
+            assert!(
+                diagnostic(&output).contains("no root [workspace.package]"),
+                "unexpected resolver diagnostic: {}",
+                diagnostic(&output)
+            );
 
             let heterogeneous =
                 fixture("[workspace]\nresolver = \"2\"\nmembers = [\"a\", \"b\"]\n[workspace.package]\nrust-version = \"1.92\"\n");
@@ -594,7 +606,11 @@ mod tests {
 
             let output = run(heterogeneous.path(), &["-ValidateWorkspaceMsrv"], None);
             assert!(!output.status.success());
-            assert!(String::from_utf8_lossy(&output.stderr).contains("must resolve to the root MSRV"));
+            assert!(
+                diagnostic(&output).contains("must resolve to the root MSRV"),
+                "unexpected resolver diagnostic: {}",
+                diagnostic(&output)
+            );
 
             let output = run(heterogeneous.path(), &["-ValidateWorkspaceMsrv"], Some("explicit-toolchain"));
             assert!(output.status.success(), "explicit override must permit heterogeneous MSRVs");
