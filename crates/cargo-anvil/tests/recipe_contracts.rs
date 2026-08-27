@@ -874,6 +874,12 @@ fn mutants_diff_covers_uncommitted_work() {
             // second one.
             ("PROCESSOR_ARCHITECTURE", OsStr::new("AMD64")),
             ("PROCESSOR_ARCHITEW6432", OsStr::new("")),
+            // The other early exit. Impact scoping sets this to `--skip` when a
+            // job has no affected packages, and the value is inherited from
+            // whatever environment the test runs in -- so on a CI leg that
+            // skipped, this test would assert against a recipe that returned
+            // before doing anything. Pin it to a scope that runs.
+            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
         ],
     );
     assert!(
@@ -898,15 +904,17 @@ fn mutants_diff_covers_uncommitted_work() {
 /// cargo-mutants does not build for `aarch64-pc-windows-msvc`, so the recipe
 /// exits cleanly rather than failing the merged `pr-slow` group on that leg.
 ///
+/// This runs only on a real ARM64 Windows host, which CI has. Faking the
+/// architecture is not an option: `PROCESSOR_ARCHITECTURE` is load-bearing for
+/// the Windows loader, and setting it to ARM64 on an x64 host makes spawning
+/// `just` fail outright rather than exercise the branch.
+///
 /// Asserting it here is what keeps the sibling test above honest. That one pins
 /// the architecture to AMD64 so it exercises the real path; without this test
-/// the skip branch would be exercised by nothing, and an ARM64 runner would be
-/// the only place either behavior was observed.
+/// the skip branch would be exercised by nothing.
 #[test]
 fn mutants_diff_skips_on_arm64_windows() {
-    // Only meaningful where the recipe's `$IsWindows` guard can be true; on
-    // Linux and macOS the architecture variable is not consulted at all.
-    if !cfg!(windows) {
+    if !(cfg!(windows) && cfg!(target_arch = "aarch64")) {
         return;
     }
     let tmp = fixture(
@@ -925,7 +933,10 @@ fn mutants_diff_skips_on_arm64_windows() {
         &[
             ("FAKE_CARGO_LOG", log.as_os_str()),
             ("RUNNER_TEMP", root.as_os_str()),
-            ("PROCESSOR_ARCHITECTURE", OsStr::new("ARM64")),
+            // Not the architecture -- that is the host's, and real here. This
+            // is the *other* early exit, pinned so a skipped impact scope
+            // cannot be mistaken for the architecture bail-out.
+            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
         ],
     );
 
