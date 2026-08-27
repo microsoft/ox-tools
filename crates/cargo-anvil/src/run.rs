@@ -179,7 +179,7 @@ fn build_plan(
         }
     }
 
-    plan_removals(repo_root, manifest, &mut plan, &mut hosts)?;
+    plan_removals(repo_root, manifest, &mut plan, &mut hosts, &composed)?;
 
     // Region proposals are computed eagerly as each region is visited, so a
     // `Propose` planned before a sibling `Write`/`Remove` on the same host
@@ -497,13 +497,24 @@ struct ComposedHosts {
 /// `upsert_region` appends a missing region at end-of-file, which is the right
 /// answer only when the file is already the composed shape.
 fn composed_host_state(order: &[&str], host_relpath: &str, text: &str, manifest: &Manifest) -> ComposedHostState {
+    // A malformed sentinel is its own diagnosis. Folding it in with "absent"
+    // would report a broken region as a missing one, sending the reader looking
+    // for content that is in fact right there with a mismatched marker.
+    let mut malformed: Option<String> = None;
     let present: Vec<(&str, usize)> = order
         .iter()
         .filter_map(|id| match find_region(text, id, CommentSyntax::Hash) {
             Ok(Some(region)) => Some((*id, region.start_line.start)),
-            _ => None,
+            Ok(None) => None,
+            Err(err) => {
+                malformed.get_or_insert_with(|| format!("its '{id}' region cannot be read: {err}"));
+                None
+            }
         })
         .collect();
+    if let Some(reason) = malformed {
+        return ComposedHostState::Unsafe(reason);
+    }
 
     if present.is_empty() {
         // Nothing of anvil's is in the file. Either it is the previous
@@ -608,7 +619,13 @@ fn delta_region_body(host_text: Option<&str>, spec: &RegionSpec) -> DeltaRegionB
 /// This is what removes orphaned cloud-workflow artifacts, dropped catalog entries,
 /// disabled-backend files, and any other previously-tracked item that
 /// is no longer in scope.
-fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan, hosts: &mut HostTextCache) -> Result<(), AppError> {
+fn plan_removals(
+    repo_root: &Path,
+    previous: &Manifest,
+    plan: &mut Plan,
+    hosts: &mut HostTextCache,
+    composed: &ComposedHosts,
+) -> Result<(), AppError> {
     let live_files: BTreeSet<String> = plan
         .items()
         .iter()
@@ -637,8 +654,18 @@ fn plan_removals(repo_root: &Path, previous: &Manifest, plan: &mut Plan, hosts: 
         // for the same pass just produced, and the user content around them
         // with it. Drop the stale manifest entry and leave the file alone; the
         // region entries now describe what anvil owns inside it.
+        //
+        // Unless the host was *refused*, in which case anvil declined to touch
+        // it and the lock entry is the provenance the next run reclassifies
+        // from. Dropping it would make a file anvil rendered look like one it
+        // has never owned, flip the diagnostic to the wrong wording, and
+        // destroy the clean recovery -- reverting the edit -- that the refusal
+        // message tells the reader to use. "Nothing was written to it" has to
+        // be true of the lock as well as the file.
         if live_region_hosts.contains(path) {
-            plan.push(PlanItem::orphaned_kept(Target::File { path: path.clone() }));
+            if !matches!(composed.states.get(path), Some(ComposedHostState::Unsafe(_))) {
+                plan.push(PlanItem::orphaned_kept(Target::File { path: path.clone() }));
+            }
             continue;
         }
         let disk = read_file_if_present(&repo_root.join(path))?;
@@ -1511,7 +1538,14 @@ mod tests {
         let mut previous = Manifest::default();
         previous.set_region("Justfile", "anvil-r", "sha256:body");
         let mut plan = Plan::default();
-        plan_removals(tmp.path(), &previous, &mut plan, &mut HostTextCache::default()).unwrap();
+        plan_removals(
+            tmp.path(),
+            &previous,
+            &mut plan,
+            &mut HostTextCache::default(),
+            &ComposedHosts::default(),
+        )
+        .unwrap();
         let orphans: Vec<(&str, &str)> = plan
             .items()
             .iter()
@@ -1542,7 +1576,14 @@ mod tests {
         // decide_removal classifies the region as a customized orphan.
         previous.set_region("Justfile", "anvil-r", "sha256:stored-different");
         let mut plan = Plan::default();
-        plan_removals(tmp.path(), &previous, &mut plan, &mut HostTextCache::default()).unwrap();
+        plan_removals(
+            tmp.path(),
+            &previous,
+            &mut plan,
+            &mut HostTextCache::default(),
+            &ComposedHosts::default(),
+        )
+        .unwrap();
         let orphans: Vec<(&str, &str)> = plan
             .items()
             .iter()

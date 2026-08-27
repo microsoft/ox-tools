@@ -520,3 +520,96 @@ fn a_reordered_composed_dockerfile_is_refused_with_one_diagnostic() {
         "a refused host must not be modified"
     );
 }
+
+/// A refusal says "nothing was written to it". That has to be true of the lock
+/// as well as the file: the recorded checksum is the provenance the next run
+/// reclassifies from, and the clean recovery -- revert the edit, get a valid
+/// re-seed -- only exists while it survives. Dropping it would make a file
+/// anvil rendered look like one it has never owned, and the second run would
+/// give the wrong diagnostic.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn refusing_a_composed_host_leaves_its_lock_entry_intact() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let dockerfile = root.join(".anvil/container/Dockerfile");
+
+    let previous_render = "# syntax=docker/dockerfile:1\nFROM docker.io/library/ubuntu:24.04\n";
+    let edited = format!("{previous_render}RUN apt-get install -y our-internal-tool\n");
+    write(&dockerfile, &edited);
+    let mut manifest = Manifest::load(root).unwrap();
+    manifest
+        .files
+        .insert(".anvil/container/Dockerfile".to_owned(), checksum_str(previous_render));
+    manifest.regions.retain(|key, _| key.host != ".anvil/container/Dockerfile");
+    manifest.save(root).unwrap();
+    let lock_before = std::fs::read_to_string(root.join(".anvil.lock")).unwrap();
+
+    run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    let after = Manifest::load(root).unwrap();
+    assert_eq!(
+        after.files.get(".anvil/container/Dockerfile"),
+        Some(&checksum_str(previous_render)),
+        "a refused host keeps its recorded checksum, or its provenance is gone"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(".anvil.lock")).unwrap(),
+        lock_before,
+        "refusing must not rewrite the lock at all"
+    );
+
+    // And the recovery the message advertises still works: revert the edit and
+    // the next run composes the file cleanly.
+    write(&dockerfile, previous_render);
+    run_update(&Catalog::anvil(), &local(), root).unwrap();
+    let composed = std::fs::read_to_string(&dockerfile).unwrap();
+    assert!(composed.starts_with("# syntax=docker/dockerfile:1\n"));
+    for id in [
+        "anvil-container-base",
+        "anvil-container-tools",
+        "anvil-container-setup",
+        "anvil-container-entry",
+    ] {
+        assert!(
+            composed.contains(&format!("# >>> anvil-managed: {id}")),
+            "{id} must be spliced in after recovery"
+        );
+    }
+}
+
+/// A malformed sentinel must be reported as such, not folded in with "this
+/// region is missing" -- the content is right there, with a broken marker.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn a_malformed_sentinel_is_named_in_the_refusal() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let dockerfile = root.join(".anvil/container/Dockerfile");
+
+    // Duplicate the opening sentinel, leaving the close unmatched.
+    let text = std::fs::read_to_string(&dockerfile).unwrap();
+    let opener = "# >>> anvil-managed: anvil-container-base";
+    let broken = text.replacen(opener, &format!("{opener}\n{opener}"), 1);
+    write(&dockerfile, &broken);
+
+    let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&dockerfile).unwrap(),
+        broken,
+        "a refused host must not be modified"
+    );
+    let refusals: Vec<&String> = outcome
+        .plan
+        .refusals()
+        .iter()
+        .filter(|r| r.contains(".anvil/container/Dockerfile"))
+        .collect();
+    assert_eq!(refusals.len(), 1, "one diagnostic per host: {refusals:?}");
+    assert!(
+        refusals[0].contains("cannot be read"),
+        "a broken sentinel must not be reported as a missing region: {}",
+        refusals[0]
+    );
+}
