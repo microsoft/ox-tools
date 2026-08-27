@@ -1204,7 +1204,9 @@ docker "${run_args[@]}" "$image" just "$@"
 param(
     [switch] $ValidateWorkspaceMsrv,
     [switch] $InstallIfMissing,
-    [switch] $ForEnvironment
+    [switch] $ForEnvironment,
+    [switch] $MsrvCompatibilityToolchain,
+    [switch] $InstallMsrvCompatibilityIfNeeded
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1221,7 +1223,13 @@ function Get-SelectingToolchainFile {
 
         $content = Get-Content -LiteralPath $path -Raw
         if ($name -eq 'rust-toolchain' -and $content.TrimStart() -notmatch '^\[') {
-            return [pscustomobject]@{ Path = $path; Value = $content.Trim(); Source = 'file'; Installable = $false }
+            return [pscustomobject]@{
+                Path = $path
+                Value = $content.Trim()
+                Selector = 'channel'
+                Source = 'file'
+                Installable = $false
+            }
         }
 
         $inToolchain = $false
@@ -1242,6 +1250,7 @@ function Get-SelectingToolchainFile {
                 return [pscustomobject]@{
                     Path = $path
                     Value = $value
+                    Selector = $Matches[1]
                     Source = 'file'
                     Installable = $false
                 }
@@ -1252,7 +1261,7 @@ function Get-SelectingToolchainFile {
     return $null
 }
 
-function Get-RootMsrv {
+function Get-RootMsrv([switch] $AllowMissing) {
     $manifestPath = Join-Path $repoRoot 'Cargo.toml'
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
         throw "anvil: Cargo.toml not found at repository root '$repoRoot'"
@@ -1278,6 +1287,9 @@ function Get-RootMsrv {
         return $values['package']
     }
 
+    if ($AllowMissing) {
+        return $null
+    }
     throw 'anvil: no selecting rust-toolchain(.toml) and no root [workspace.package] or [package] rust-version; declare an MSRV or select a toolchain explicitly'
 }
 
@@ -1305,6 +1317,50 @@ function Assert-UniformWorkspaceMsrv {
     }
 }
 
+function Get-MsrvCompatibilitySelection {
+    if ($null -eq $fileSelection) {
+        return $null
+    }
+
+    $msrv = Get-RootMsrv -AllowMissing
+    if ([string]::IsNullOrWhiteSpace($msrv)) {
+        return $null
+    }
+    $selectedMatch = [regex]::Match($fileSelection.Value, '^(\d+)\.(\d+)(?:\.\d+)?(?:-.+)?$')
+    $msrvMatch = [regex]::Match($msrv, '^(\d+)\.(\d+)(?:\.\d+)?(?:-.+)?$')
+    if ($fileSelection.Selector -eq 'channel' -and $selectedMatch.Success -and $msrvMatch.Success) {
+        if ($selectedMatch.Groups[1].Value -eq $msrvMatch.Groups[1].Value -and
+            $selectedMatch.Groups[2].Value -eq $msrvMatch.Groups[2].Value) {
+            return $null
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:ANVIL_MSRV_TOOLCHAIN)) {
+        return [pscustomobject]@{ Value = $env:ANVIL_MSRV_TOOLCHAIN; Installable = $false; Mapped = $true }
+    }
+    return [pscustomobject]@{ Value = $msrv; Installable = $true; Mapped = $false }
+}
+
+function Install-Toolchain([object] $toolchain, [string] $label) {
+    if (-not $toolchain.Installable) {
+        return
+    }
+
+    $installed = rustup toolchain list
+    if ($LASTEXITCODE -ne 0) {
+        throw 'anvil: rustup toolchain list failed'
+    }
+    if ($installed -match "(?m)^$([regex]::Escape($toolchain.Value))(?:-|$)") {
+        return
+    }
+
+    Write-Host "anvil: installing $label toolchain '$($toolchain.Value)'"
+    rustup toolchain install $toolchain.Value --profile minimal
+    if ($LASTEXITCODE -ne 0) {
+        throw "anvil: failed to install $label toolchain '$($toolchain.Value)'"
+    }
+}
+
 $fileSelection = Get-SelectingToolchainFile
 if ($ValidateWorkspaceMsrv) {
     $skipWorkspaceMsrvValidation = if ([string]::IsNullOrWhiteSpace($env:ANVIL_STABLE_TOOLCHAIN_SOURCE)) {
@@ -1318,6 +1374,26 @@ if ($ValidateWorkspaceMsrv) {
     exit 0
 }
 
+if ($MsrvCompatibilityToolchain -or $InstallMsrvCompatibilityIfNeeded) {
+    $compatibilitySelection = Get-MsrvCompatibilitySelection
+    if ($null -eq $compatibilitySelection) {
+        exit 0
+    }
+    if ($InstallMsrvCompatibilityIfNeeded) {
+        if ($compatibilitySelection.Mapped) {
+            & cargo "+$($compatibilitySelection.Value)" --version *> $null
+            if ($LASTEXITCODE -ne 0) {
+                throw "anvil: mapped MSRV toolchain '$($compatibilitySelection.Value)' is unavailable; provision ANVIL_MSRV_TOOLCHAIN or unset it to let Anvil install the declared public MSRV"
+            }
+        } else {
+            Install-Toolchain $compatibilitySelection 'MSRV compatibility'
+        }
+    } else {
+        $compatibilitySelection.Value
+    }
+    exit 0
+}
+
 $selection = if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
     [pscustomobject]@{ Value = $env:RUSTUP_TOOLCHAIN; Source = 'environment'; Installable = $false }
 } elseif ($null -ne $fileSelection) {
@@ -1327,23 +1403,7 @@ $selection = if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
 }
 
 if ($InstallIfMissing) {
-    if (-not $selection.Installable) {
-        exit 0
-    }
-
-    $installed = rustup toolchain list
-    if ($LASTEXITCODE -ne 0) {
-        throw 'anvil: rustup toolchain list failed'
-    }
-    if ($installed -match "(?m)^$([regex]::Escape($selection.Value))(?:-|$)") {
-        exit 0
-    }
-
-    Write-Host "anvil: installing stable toolchain '$($selection.Value)'"
-    rustup toolchain install $selection.Value --profile minimal
-    if ($LASTEXITCODE -ne 0) {
-        throw "anvil: failed to install stable toolchain '$($selection.Value)'"
-    }
+    Install-Toolchain $selection 'stable'
     exit 0
 }
 
@@ -1579,12 +1639,12 @@ stages:
                 include_affected: $(include_affected_windows)
                 include_required: $(include_required_windows)
 
-  # The PR-tier slow checks are split into three independent stages
-  # (pr_test, pr_runtime_analysis, pr_mutants) so they run in parallel rather
+  # The PR-tier slow checks are split into four independent stages
+  # (pr_test, pr_msrv, pr_runtime_analysis, pr_mutants) so they run in parallel rather
   # than sequentially in one job. Each stage owns its own dependsOn
   # link to the impact stages and its own variable hookup. ADO has
   # no hosted ARM agents, so the matrix stays Linux + Windows x86_64
-  # across all three stages.
+  # across the multi-OS stages.
 
   - stage: pr_test
     displayName: anvil pr-test (tests + coverage)
@@ -1640,6 +1700,23 @@ stages:
               inputs:
                 summaryFileLocation: target/coverage/cobertura-*.xml
                 failIfCoverageEmpty: false
+
+  - stage: pr_msrv
+    displayName: anvil pr-msrv (MSRV compatibility)
+    dependsOn: [impact]
+    condition: and(succeeded(), eq(variables['msrv_compatibility_required'], 'true'))
+    variables:
+      include_affected_linux: $[ stageDependencies.impact.compute_linux.outputs['compute.include_affected'] ]
+      msrv_compatibility_required: $[ stageDependencies.impact.compute_linux.outputs['compute.msrv_compatibility_required'] ]
+    jobs:
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          steps:
+            - template: steps/pr-msrv.yml
+              parameters:
+                include_affected: $(include_affected_linux)
 
   - stage: pr_runtime_analysis
     displayName: anvil pr-runtime-analysis (miri + careful)
@@ -1933,6 +2010,8 @@ steps:
 #   include_affected - same shape, for the affected set (modified ∪ rev-deps).
 #   include_required - same shape, for the required set
 #                      (affected ∪ workspace-internal transitive deps).
+#   msrv_compatibility_required - "true" when a selecting toolchain file
+#                                 differs from the root MSRV.
 #
 # Unscoped recipes (deny, audit, aprz, pr-title) ignore all three.
 steps:
@@ -1964,6 +2043,12 @@ steps:
       # worktree's rust-toolchain.toml. Capture it here, in the PR checkout,
       # where the active toolchain is resolved and installed.
       active_toolchain="$(rustup show active-toolchain | head -n1 | cut -d' ' -f1)"
+      compatibility_toolchain="$(pwsh -NoProfile -File .anvil/resolve-stable-toolchain.ps1 -MsrvCompatibilityToolchain)"
+      if [ -n "$compatibility_toolchain" ]; then
+          echo "##vso[task.setvariable variable=msrv_compatibility_required;isOutput=true]true"
+      else
+          echo "##vso[task.setvariable variable=msrv_compatibility_required;isOutput=true]false"
+      fi
       # Two snapshots + impact compare (cargo-delta has no --base
       # shortcut). The baseline runs in a worktree at the merge target
       # so the checked-out tree is untouched.
@@ -2120,6 +2205,64 @@ steps:
       SYSTEM_ACCESSTOKEN: $(System.AccessToken)
   - bash: just anvil-pr-fast
     displayName: anvil-pr-fast
+    env:
+      # Resolved by the preceding step; empty only outside PR builds.
+      PR_TITLE: $(PR_TITLE)
+      ANVIL_INCLUDE_MODIFIED: ${{ parameters.include_modified }}
+      ANVIL_INCLUDE_AFFECTED: ${{ parameters.include_affected }}
+      ANVIL_INCLUDE_REQUIRED: ${{ parameters.include_required }}
+
+=== .pipelines/anvil/steps/pr-msrv.yml ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# GENERATED BY cargo-anvil. DO NOT EDIT DIRECTLY.
+# Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+# The token pr-msrv is substituted by cargo-anvil at emit time with
+# the concrete check-group name (pr-fast, pr-test, scheduled-runtime-analysis, ...).
+parameters:
+  - name: include_modified
+    type: string
+    default: ''
+  - name: include_affected
+    type: string
+    default: ''
+  - name: include_required
+    type: string
+    default: ''
+steps:
+  - template: setup.yml
+    parameters:
+      group: pr-msrv
+  # ADO has no PR-title predefined variable: `System.PullRequest.Title`
+  # does NOT exist, so `$(System.PullRequest.Title)` would expand to the
+  # literal unexpanded macro text (non-empty) and make anvil-pr-title
+  # validate that string. Resolve the real title from the REST API on PR
+  # builds and publish it as the PR_TITLE pipeline variable. Only
+  # anvil-pr-title (in pr-fast) consults it; other groups ignore it, but we
+  # resolve uniformly to keep group.yml the same across groups. Non-PR builds
+  # skip; a known PR whose metadata cannot be retrieved fails closed.
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      $prId = $env:SYSTEM_PULLREQUEST_PULLREQUESTID
+      if (-not $prId) {
+          Write-Host 'anvil: not a PR build; leaving PR_TITLE empty'
+          Write-Host '##vso[task.setvariable variable=PR_TITLE]'
+          exit 0
+      }
+      $uri = "$($env:SYSTEM_COLLECTIONURI)$($env:SYSTEM_TEAMPROJECTID)/_apis/git/repositories/$($env:BUILD_REPOSITORY_ID)/pullRequests/${prId}?api-version=7.0"
+      try {
+          $resp = Invoke-RestMethod -Uri $uri -Headers @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }
+          Write-Host "##vso[task.setvariable variable=PR_TITLE]$($resp.title)"
+      } catch {
+          Write-Error "anvil: could not resolve PR title for PR $prId ($_). Ensure the job can access the repository OAuth token."
+          exit 1
+      }
+    displayName: anvil-pr-msrv (resolve PR title)
+    env:
+      SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+  - bash: just anvil-pr-msrv
+    displayName: anvil-pr-msrv
     env:
       # Resolved by the preceding step; empty only outside PR builds.
       PR_TITLE: $(PR_TITLE)
@@ -2575,7 +2718,7 @@ steps:
       # lockfile hashes + catalog hash. Including arch keeps any
       # future ARM pool an adopter adds from colliding with x86_64 on
       # the same OS namespace.
-      key: 'anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(anvil_rustc_version) | Cargo.lock | .cargo/config.toml | rust-toolchain.toml | justfiles/anvil/versions.just'
+      key: 'anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(anvil_rustc_version) | Cargo.toml | Cargo.lock | .cargo/config.toml | rust-toolchain | rust-toolchain.toml | justfiles/anvil/versions.just'
       restoreKeys: |
         anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(anvil_rustc_version)
         anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)"
@@ -4090,6 +4233,56 @@ anvil-miri-setup installer="install": anvil-component-nightly-miri-install anvil
 [group("anvil-setup")]
 anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil-component-nightly-rust-src-validate-prereqs
 
+=== justfiles/anvil/checks/msrv-test.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# GENERATED BY cargo-anvil. DO NOT EDIT DIRECTLY.
+# Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+
+# Run affected-package tests under the declared MSRV when a selecting root
+# toolchain file chooses a different compiler.
+[script("pwsh", "-NoProfile")]
+anvil-msrv-test: anvil-msrv-test-validate-prereqs
+    $ErrorActionPreference = 'Stop'
+    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' -MsrvCompatibilityToolchain | Out-String).Trim()
+    if ([string]::IsNullOrWhiteSpace($toolchain)) {
+        Write-Host 'anvil-msrv-test: selected toolchain matches the MSRV; skipping'
+        exit 0
+    }
+    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    & cargo "+$toolchain" test @pkg --all-targets --all-features --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & cargo "+$toolchain" test @pkg --all-targets --locked
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Install the MSRV compatibility toolchain only when this check is required.
+[group("anvil-setup")]
+[script("pwsh", "-NoProfile")]
+anvil-msrv-test-setup installer="install":
+    & '.anvil/resolve-stable-toolchain.ps1' -InstallMsrvCompatibilityIfNeeded
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Validate the conditional MSRV compatibility prerequisite.
+[group("anvil-setup")]
+[script("pwsh", "-NoProfile")]
+anvil-msrv-test-validate-prereqs:
+    $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' -MsrvCompatibilityToolchain | Out-String).Trim()
+    if ([string]::IsNullOrWhiteSpace($toolchain)) { exit 0 }
+    & cargo "+$toolchain" --version
+    if ($LASTEXITCODE -ne 0) {
+        $hint = if ($env:ANVIL_MSRV_TOOLCHAIN) {
+            'provision ANVIL_MSRV_TOOLCHAIN or unset it to let Anvil install the declared public MSRV'
+        } else {
+            'run: just anvil-msrv-test-setup'
+        }
+        Write-Error "anvil: MSRV compatibility toolchain '$toolchain' is unavailable; $hint"
+        exit $LASTEXITCODE
+    }
+
 === justfiles/anvil/checks/mutants-diff.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
@@ -4843,6 +5036,27 @@ anvil-pr-fast-validate-prereqs: \
     anvil-semver-check-validate-prereqs \
     anvil-external-types-validate-prereqs
 
+=== justfiles/anvil/groups/pr-msrv.just ===
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# GENERATED BY cargo-anvil. DO NOT EDIT DIRECTLY.
+# Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
+# Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
+
+# See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
+
+# Run pull request compatibility tests under the declared MSRV.
+[group("anvil")]
+anvil-pr-msrv: anvil-pr-msrv-validate-prereqs anvil-msrv-test
+
+# Install prerequisites for the `anvil-pr-msrv` recipe.
+[group("anvil-setup")]
+anvil-pr-msrv-setup installer="install": (anvil-msrv-test-setup installer)
+
+# Validate prerequisites for the `anvil-pr-msrv` recipe.
+[group("anvil-setup")]
+anvil-pr-msrv-validate-prereqs: anvil-msrv-test-validate-prereqs
+
 === justfiles/anvil/groups/pr-mutants.just ===
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
@@ -4908,7 +5122,7 @@ anvil-pr-runtime-analysis-validate-prereqs: \
 
 # pr-slow is the single PR-tier group for everything that takes more
 # than ~30s per crate (tests, stricter runtimes, mutation testing).
-# It's internally split into three sub-recipes so individual concerns
+# It's internally split into four sub-recipes so individual concerns
 # can be invoked locally without dragging the others along:
 #
 #   slow1: tests + coverage (replaces the former pr-test group)
@@ -4926,12 +5140,13 @@ anvil-pr-runtime-analysis-validate-prereqs: \
 
 # Run the slow pull request checks.
 [group("anvil")]
-anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants
+anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants
 
 # Install prerequisites for the `anvil-pr-slow` recipe.
 [group("anvil-setup")]
 anvil-pr-slow-setup installer="install": \
     (anvil-pr-test-setup installer) \
+    (anvil-pr-msrv-setup installer) \
     (anvil-pr-runtime-analysis-setup installer) \
     (anvil-pr-mutants-setup installer)
 
@@ -4939,6 +5154,7 @@ anvil-pr-slow-setup installer="install": \
 [group("anvil-setup")]
 anvil-pr-slow-validate-prereqs: \
     anvil-pr-test-validate-prereqs \
+    anvil-pr-msrv-validate-prereqs \
     anvil-pr-runtime-analysis-validate-prereqs \
     anvil-pr-mutants-validate-prereqs
 
@@ -5435,6 +5651,7 @@ import 'checks/miri.just'
 import 'checks/miri-race-coverage.just'
 import 'checks/miri-strict-provenance.just'
 import 'checks/miri-tree-borrows.just'
+import 'checks/msrv-test.just'
 import 'checks/mutants-diff.just'
 import 'checks/mutants-full.just'
 import 'checks/pr-title.just'
@@ -5444,6 +5661,7 @@ import 'checks/spellcheck.just'
 import 'checks/udeps.just'
 import 'container.just'
 import 'groups/pr-fast.just'
+import 'groups/pr-msrv.just'
 import 'groups/pr-slow.just'
 import 'groups/pr-test.just'
 import 'groups/pr-runtime-analysis.just'

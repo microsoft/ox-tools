@@ -368,10 +368,21 @@ jobs:
           include_affected: ${{ needs.impact.outputs.include_affected }}
           include_required: ${{ needs.impact.outputs.include_required }}
 
-  # pr-runtime-analysis (miri + careful) and pr-mutants (mutants) follow the same
-  # shape; pr-mutants additionally sets `env: BASE_REF` for diff-scoped
-  # cargo-mutants, and the anvil-mutants-diff recipe self-skips on
-  # aarch64-pc-windows-msvc (where cargo-mutants doesn't build).
+  pr-msrv:
+    name: "Check Group: MSRV Compatibility (linux)"
+    needs: impact-linux
+    if: needs.impact-linux.outputs.msrv_compatibility_required == 'true'
+    runs-on: ${{ inputs.linux_runner }}
+    steps:
+      - uses: actions/checkout
+      - uses: ./.github/actions/anvil-run-group
+        with:
+          group: pr-msrv
+          include_affected: ${{ needs.impact-linux.outputs.include_affected }}
+
+  # pr-runtime-analysis (miri + careful) and pr-mutants (mutants) follow the
+  # multi-OS shape; pr-mutants additionally sets `env: BASE_REF` for
+  # diff-scoped cargo-mutants.
 ```
 
 Every multi-OS job hardcodes its OS axis as an inline YAML array. Per-leg runner
@@ -383,6 +394,13 @@ was rejected because it added a silent failure mode (mis-formatted inputs produc
 empty matrices that GitHub Actions silently treats as "no legs to run") without
 meaningfully expanding what adopters could customize — anyone who wants to change
 the OS axis is almost certainly making other changes too.
+
+The MSRV compatibility group is deliberately a single Linux x86_64 job rather
+than another four-leg matrix. Compiler-version compatibility is substantially
+less host-specific than the ordinary test suite, and running it in parallel keeps
+the extra test pass from extending `pr-test` serially. The Linux impact job exposes
+whether a selecting toolchain file differs from the root MSRV, so GitHub skips the
+compatibility job before setup when no extra run is needed.
 
 The pr-* jobs gate on the impact jobs *succeeding*: their `needs: [impact-linux,
 impact-windows]` uses GitHub's default behavior, so if an impact job fails the pr-*
@@ -752,11 +770,13 @@ Outputs:
 | `include_modified` | `--package X@ver --package Y@ver …` for cargo-delta's `modified` tier, or `--skip` when empty.                                                                          |
 | `include_affected` | Same shape, for the `affected` tier (modified ∪ workspace rev-deps).                                                                                                    |
 | `include_required` | Same shape, for the `required` tier (affected ∪ workspace-internal transitive deps).                                                                                    |
+| `msrv_compatibility_required` | `true` when a selecting toolchain file differs from the declared root MSRV; otherwise `false`. |
 
-The wiring never gates jobs on these outputs — every job runs regardless of `--skip`
-status. Per-recipe interpretation lives in the recipes themselves (see [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars)).
-This is intentional: unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,
-`mutants-full`) must run on every PR even when every tier reports `--skip`.
+The include-list outputs never gate jobs; recipes interpret their `--skip`
+sentinels (see [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars)).
+The boolean compatibility output is the sole exception and gates the dedicated
+`pr-msrv` job before setup. Unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,
+`mutants-full`) still run on every PR even when every tier reports `--skip`.
 
 The check → bucket mapping is in
 [checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping).

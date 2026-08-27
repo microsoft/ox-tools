@@ -137,7 +137,7 @@ mod tests {
 
     use super::*;
 
-    const PR_GROUPS: &[&str] = &["pr-fast", "pr-test", "pr-runtime-analysis", "pr-mutants"];
+    const PR_GROUPS: &[&str] = &["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-mutants"];
     const SCHEDULED_GROUPS: &[&str] = &[
         "scheduled-test",
         "scheduled-advisories",
@@ -307,6 +307,8 @@ export -f just
     fn impact_action_uses_group_none_and_installs_only_cargo_delta() {
         assert!(IMPACT_ACTION.contains("group: none"));
         assert!(IMPACT_ACTION.contains("anvil-tool-cargo-delta-install"));
+        assert!(IMPACT_ACTION.contains("steps.msrv_compatibility.outputs.required"));
+        assert!(IMPACT_ACTION.contains("-MsrvCompatibilityToolchain"));
         assert!(IMPACT_ACTION.contains("delta_config=\"$(pwd)/.delta.toml\""));
         assert!(!IMPACT_ACTION.contains("remote_branch ="));
         assert_eq!(
@@ -345,6 +347,7 @@ export -f just
             "impact-windows:",
             "pr-fast:",
             "pr-test:",
+            "pr-msrv:",
             "pr-runtime-analysis:",
             "pr-mutants:",
         ] {
@@ -357,6 +360,8 @@ export -f just
             );
         }
         assert!(PR_IMPL_WORKFLOW.contains("needs: [impact-linux, impact-windows]"));
+        assert!(PR_IMPL_WORKFLOW.contains("msrv_compatibility_required: ${{ steps.delta.outputs.msrv_compatibility_required }}"));
+        assert!(PR_IMPL_WORKFLOW.contains("if: needs.impact-linux.outputs.msrv_compatibility_required == 'true'"));
         assert!(PR_IMPL_WORKFLOW.contains("os: [linux, windows, linux-arm, windows-arm]"));
         assert!(!PR_IMPL_WORKFLOW.contains("fromJSON"));
         assert!(PR_IMPL_WORKFLOW.contains("PR_TITLE"));
@@ -390,7 +395,7 @@ export -f just
             PR_IMPL_WORKFLOW
                 .matches("publish_commit_statuses: ${{ inputs.publish_commit_statuses }}")
                 .count(),
-            4,
+            PR_GROUPS.len(),
             "every PR group job must receive the status opt-in"
         );
         assert_eq!(
@@ -407,8 +412,8 @@ export -f just
         );
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("free-disk-space: true").count(),
-            1,
-            "disk cleanup should be enabled for the PR test group"
+            2,
+            "disk cleanup should be enabled for the PR test and MSRV groups"
         );
     }
 

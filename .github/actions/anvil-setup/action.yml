@@ -118,9 +118,9 @@ runs:
         # the save -- leaving the cache empty forever. The restore-keys
         # fall back across jobs so the install work is still shared
         # across sibling legs on subsequent runs.
-        key: anvil-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/anvil/versions.just') }}-${{ github.job }}
+        key: anvil-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', 'justfiles/anvil/versions.just') }}-${{ github.job }}
         restore-keys: |
-          anvil-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.lock', '.cargo/config.toml', 'rust-toolchain.toml', 'justfiles/anvil/versions.just') }}-
+          anvil-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-${{ hashFiles('Cargo.toml', 'Cargo.lock', '.cargo/config.toml', 'rust-toolchain', 'rust-toolchain.toml', 'justfiles/anvil/versions.just') }}-
           anvil-v1-${{ runner.os }}-${{ runner.arch }}-rust${{ steps.rustc-version.outputs.version }}-
           anvil-v1-${{ runner.os }}-${{ runner.arch }}-
         # `.crates.toml` and `.crates2.json` track which cargo-installed

@@ -48,6 +48,7 @@ const SCHEDULED_ROOT_PIPELINE: &str = include_str!("../../../templates/ado/sched
 const GROUPS: &[&str] = &[
     "pr-fast",
     "pr-test",
+    "pr-msrv",
     "pr-runtime-analysis",
     "pr-mutants",
     "scheduled-test",
@@ -155,6 +156,7 @@ pub fn scheduled_root_pipeline() -> Artifact {
 pub(crate) const GROUP_STEPS: &[(&str, &str)] = &[
     ("pr-fast", ".pipelines/anvil/steps/pr-fast.yml"),
     ("pr-test", ".pipelines/anvil/steps/pr-test.yml"),
+    ("pr-msrv", ".pipelines/anvil/steps/pr-msrv.yml"),
     ("pr-runtime-analysis", ".pipelines/anvil/steps/pr-runtime-analysis.yml"),
     ("pr-mutants", ".pipelines/anvil/steps/pr-mutants.yml"),
     ("scheduled-test", ".pipelines/anvil/steps/scheduled-test.yml"),
@@ -318,6 +320,9 @@ mod tests {
         // Downstream stages consume the per-OS job outputs from the one stage.
         assert!(PR_STAGES.contains("stageDependencies.impact.compute_linux.outputs"));
         assert!(PR_STAGES.contains("stageDependencies.impact.compute_windows.outputs"));
+        assert!(PR_STAGES.contains("compute.msrv_compatibility_required"));
+        assert!(PR_STAGES.contains("eq(variables['msrv_compatibility_required'], 'true')"));
+        assert!(IMPACT_STEP.contains("-MsrvCompatibilityToolchain"));
         assert!(PR_STAGES.contains("- template: steps/job.yml"));
         assert!(
             !PR_STAGES.contains("\n      - job: "),
@@ -331,8 +336,8 @@ mod tests {
         // Every pr-* stage depends on the single impact stage.
         assert_eq!(
             PR_STAGES.matches("dependsOn: [impact]").count(),
-            4,
-            "each of the four pr-* stages must depend on the single impact stage"
+            5,
+            "each of the five pr-* stages must depend on the single impact stage"
         );
     }
 

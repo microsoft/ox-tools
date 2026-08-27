@@ -128,6 +128,7 @@ const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
         "miri-race-coverage",
         "miri-strict-provenance",
         "miri-tree-borrows",
+        "msrv-test",
         "mutants-diff",
         "mutants-full",
         "pr-title",
@@ -144,6 +145,7 @@ const GROUP_FILES: &[(&str, &str)] = split_recipe_files!(
     "groups",
     [
         "pr-fast",
+        "pr-msrv",
         "pr-slow",
         "pr-test",
         "pr-runtime-analysis",
@@ -372,6 +374,7 @@ mod tests {
             "anvil-pr-fast:",
             "anvil-pr-slow:",
             "anvil-pr-test:",
+            "anvil-pr-msrv:",
             "anvil-pr-runtime-analysis:",
             "anvil-pr-mutants:",
             "anvil-scheduled-test:",
@@ -383,12 +386,15 @@ mod tests {
         for needle in ["anvil-pr-slow1:", "anvil-pr-slow2:", "anvil-pr-slow3:"] {
             assert!(!groups.contains(needle), "groups tree still contains stale '{needle}'");
         }
-        assert!(groups.contains("anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants"));
+        assert!(groups.contains(
+            "anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants"
+        ));
         // Every group recipe lists its own validate-prereqs aggregate first so
         // all tool checks run up front (just dedups the per-check ones).
         for needle in [
             "anvil-pr-fast: anvil-pr-fast-validate-prereqs",
             "anvil-pr-test: anvil-pr-test-validate-prereqs",
+            "anvil-pr-msrv: anvil-pr-msrv-validate-prereqs",
             "anvil-pr-runtime-analysis: anvil-pr-runtime-analysis-validate-prereqs",
             "anvil-pr-mutants: anvil-pr-mutants-validate-prereqs",
             "anvil-scheduled-test: anvil-scheduled-test-validate-prereqs",
@@ -474,6 +480,8 @@ mod tests {
         assert!(STABLE_TOOLCHAIN_RESOLVER.contains("rust-version"));
         assert!(STABLE_TOOLCHAIN_RESOLVER.contains("ValidateWorkspaceMsrv"));
         assert!(STABLE_TOOLCHAIN_RESOLVER.contains("InstallIfMissing"));
+        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("MsrvCompatibilityToolchain"));
+        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("InstallMsrvCompatibilityIfNeeded"));
     }
 
     mod stable_toolchain_resolver_tests {
@@ -500,7 +508,8 @@ mod tests {
                 .args(["-NoProfile", "-File", ".anvil/resolve-stable-toolchain.ps1"])
                 .args(args)
                 .current_dir(root)
-                .env_remove("ANVIL_STABLE_TOOLCHAIN_SOURCE");
+                .env_remove("ANVIL_STABLE_TOOLCHAIN_SOURCE")
+                .env_remove("ANVIL_MSRV_TOOLCHAIN");
             match rustup_toolchain {
                 Some(value) => {
                     command.env("RUSTUP_TOOLCHAIN", value);
@@ -589,6 +598,71 @@ mod tests {
 
             let output = run(heterogeneous.path(), &["-ValidateWorkspaceMsrv"], Some("explicit-toolchain"));
             assert!(output.status.success(), "explicit override must permit heterogeneous MSRVs");
+        }
+
+        #[test]
+        fn requests_compatibility_only_for_a_different_selecting_toolchain() {
+            let no_msrv = fixture("[workspace]\nresolver = \"2\"\n");
+            fs::write(no_msrv.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n")
+                .expect("toolchain fixture must be writable");
+            let output = run(no_msrv.path(), &["-MsrvCompatibilityToolchain"], None);
+            assert!(
+                output.status.success(),
+                "a repository without a declared MSRV must skip compatibility"
+            );
+            assert!(
+                String::from_utf8(output.stdout)
+                    .expect("resolver output must be UTF-8")
+                    .trim()
+                    .is_empty()
+            );
+
+            let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
+            let root = temp.path();
+            let compatibility = |root: &Path| {
+                let output = run(root, &["-MsrvCompatibilityToolchain"], None);
+                assert!(
+                    output.status.success(),
+                    "compatibility resolution failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                String::from_utf8(output.stdout)
+                    .expect("resolver output must be UTF-8")
+                    .trim()
+                    .to_owned()
+            };
+
+            assert!(compatibility(root).is_empty());
+            fs::write(root.join("rust-toolchain.toml"), "[toolchain]\ncomponents = [\"clippy\"]\n")
+                .expect("toolchain fixture must be writable");
+            assert!(compatibility(root).is_empty());
+
+            fs::write(root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.93.0\"\n").expect("toolchain fixture must be writable");
+            assert!(compatibility(root).is_empty());
+
+            fs::write(root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n").expect("toolchain fixture must be writable");
+            assert_eq!(compatibility(root), "1.93");
+            let output = Command::new("pwsh")
+                .args([
+                    "-NoProfile",
+                    "-File",
+                    ".anvil/resolve-stable-toolchain.ps1",
+                    "-MsrvCompatibilityToolchain",
+                ])
+                .current_dir(root)
+                .env_remove("RUSTUP_TOOLCHAIN")
+                .env("ANVIL_MSRV_TOOLCHAIN", "ms-prod-1.93")
+                .output()
+                .expect("pwsh must be available to test the generated resolver");
+            assert!(output.status.success());
+            assert_eq!(
+                String::from_utf8(output.stdout).expect("resolver output must be UTF-8").trim(),
+                "ms-prod-1.93"
+            );
+
+            fs::write(root.join("rust-toolchain.toml"), "[toolchain]\npath = \"toolchains/custom\"\n")
+                .expect("toolchain fixture must be writable");
+            assert_eq!(compatibility(root), "1.93");
         }
     }
 

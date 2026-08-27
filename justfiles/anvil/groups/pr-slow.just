@@ -8,7 +8,7 @@
 
 # pr-slow is the single PR-tier group for everything that takes more
 # than ~30s per crate (tests, stricter runtimes, mutation testing).
-# It's internally split into three sub-recipes so individual concerns
+# It's internally split into four sub-recipes so individual concerns
 # can be invoked locally without dragging the others along:
 #
 #   slow1: tests + coverage (replaces the former pr-test group)
@@ -26,12 +26,13 @@
 
 # Run the slow pull request checks.
 [group("anvil")]
-anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants
+anvil-pr-slow: anvil-pr-slow-validate-prereqs anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants
 
 # Install prerequisites for the `anvil-pr-slow` recipe.
 [group("anvil-setup")]
 anvil-pr-slow-setup installer="install": \
     (anvil-pr-test-setup installer) \
+    (anvil-pr-msrv-setup installer) \
     (anvil-pr-runtime-analysis-setup installer) \
     (anvil-pr-mutants-setup installer)
 
@@ -39,5 +40,6 @@ anvil-pr-slow-setup installer="install": \
 [group("anvil-setup")]
 anvil-pr-slow-validate-prereqs: \
     anvil-pr-test-validate-prereqs \
+    anvil-pr-msrv-validate-prereqs \
     anvil-pr-runtime-analysis-validate-prereqs \
     anvil-pr-mutants-validate-prereqs

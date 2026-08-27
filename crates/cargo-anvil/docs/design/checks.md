@@ -45,6 +45,7 @@ flowchart LR
     pr --> pr_fast[anvil-pr-fast]:::group
     pr --> pr_slow[anvil-pr-slow]:::group
     pr_slow --> pr_test[anvil-pr-test]:::group
+    pr_slow --> pr_msrv[anvil-pr-msrv]:::group
     pr_slow --> pr_runtime_analysis[anvil-pr-runtime-analysis]:::group
     pr_slow --> pr_mutants[anvil-pr-mutants]:::group
 
@@ -73,6 +74,7 @@ flowchart LR
     pr_test --> llvm_cov[llvm-cov]:::check
     pr_test --> doc_test[doc-test]:::check
     pr_test --> examples[examples]:::check
+    pr_msrv --> msrv_test[msrv-test]:::check
 
     pr_runtime_analysis --> miri[miri]:::check
     pr_runtime_analysis --> careful[careful]:::check
@@ -104,18 +106,26 @@ flowchart LR
     classDef check fill:#f3e8ff,stroke:#6f42c1,stroke-width:1px,font-size:10px;
 ```
 
-(Tier nodes are the user-facing entry points; group nodes are the unit of cloud workflows parallelization; check nodes are the individual `anvil-<check>` recipes. `pr-test`, `pr-runtime-analysis`, and `pr-mutants` were split out from a single `pr-slow` group so the three workloads run as parallel cloud-workflow jobs per OS leg rather than sequentially in one job. Locally, `just anvil-pr-slow` is an umbrella recipe that invokes the three sub-recipes in order, and `just anvil` is an alias for `just anvil-pr`.)
+(Tier nodes are the user-facing entry points; group nodes are the unit of cloud
+workflows parallelization; check nodes are the individual `anvil-<check>` recipes.
+The four `pr-slow` workloads run as parallel cloud-workflow jobs/stages rather
+than sequentially. Locally, `just anvil-pr-slow` invokes the four sub-recipes in
+order, and `just anvil` is an alias for `just anvil-pr`.)
 
-### PR tier (4 groups)
+### PR tier (5 groups)
 
 | Group              | OS scope                              | Purpose                                                                                                              |
 |--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `semver-check`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
 | `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `llvm-cov` (instrumented `nextest`), `doc-test`, `examples`. Coverage is uploaded once from the canonical x86_64 Linux leg. |
+| `pr-msrv`         | Linux x86_64 only                     | Compatibility tests under the declared MSRV when a selecting root toolchain file uses a different compiler. The job is a cheap no-op when no compatibility run is needed. |
 | `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped via `ANVIL_INCLUDE_AFFECTED` so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
 | `pr-mutants`         | Linux x86_64 + Windows x86_64 + Linux aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | Diff-scoped mutation testing (`mutants --in-diff`). The recipe self-skips on `aarch64-pc-windows-msvc` (cargo-mutants doesn't build there), so the GH windows-arm leg is a no-op rather than a job failure. |
 
-The three `pr-slow*` groups are independent: failures in `pr-test` don't block `pr-runtime-analysis` or `pr-mutants` from running, and overall PR wall-clock is `max(pr-test, pr-runtime-analysis, pr-mutants)` per leg rather than the sum. Locally, `just anvil-pr-slow` is an umbrella recipe that runs all three sub-recipes sequentially so adopters who want "run everything slow" don't have to type three commands.
+The four `pr-slow*` groups are independent: failures in `pr-test` don't block
+`pr-msrv`, `pr-runtime-analysis`, or `pr-mutants`, and overall PR wall-clock is
+their maximum rather than their sum. Locally, `just anvil-pr-slow` is an umbrella
+recipe that runs all four sub-recipes sequentially.
 
 ### scheduled tier (4 groups)
 
@@ -138,7 +148,7 @@ backend-specific knobs ([github.md §4](./github.md#4-owned-reusable-workflows) 
 the per-leg runner-label inputs and forking the workflow when the matrix shape itself
 needs to change, [ado.md §4](./ado.md#4-owned-stages-templates) for
 `linuxPool`/`windowsPool`).
-Locally there is no OS matrix; `just anvil-pr-slow` (the umbrella recipe) runs the three sub-recipes in sequence against whatever OS the
+Locally there is no OS matrix; `just anvil-pr-slow` (the umbrella recipe) runs the four sub-recipes in sequence against whatever OS the
 developer is on. See [README.md §8.3](./README.md#83-cross-os-test-matrices) for the
 overall rationale.
 
@@ -175,10 +185,10 @@ that provided the strongest version of the check.
 
 ### `pr-slow`
 
-The PR-tier slow checks are split into three independent cloud-workflow-visible groups —
-`pr-test`, `pr-runtime-analysis`, `pr-mutants` — that each run as their own job (GitHub) or
+The PR-tier slow checks are split into four independent cloud-workflow-visible groups —
+`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-mutants` — that each run as their own job (GitHub) or
 stage (ADO) in parallel. An umbrella `anvil-pr-slow` recipe is also provided in
-`groups.just` for local use; it invokes the three sub-recipes sequentially so
+`groups.just` for local use; it invokes the four sub-recipes sequentially so
 adopters can type one command to run "everything slow" without needing the cloud workflow
 matrix overhead.
 
@@ -191,6 +201,21 @@ matrix overhead.
 | `examples`   | `cargo build --workspace --examples --all-features --locked` -- verifies that example targets compile. Running each example is intentionally not part of the check (examples are not test scaffolding; their runtime behavior isn't part of what we gate on). | oxidizer, oxidizer-github |
 
 This is the same set of checks that used to live in the standalone `pr-test` group; merging into `pr-test` removes one cloud-workflow job from the matrix without changing what runs.
+
+#### `pr-msrv` (minimum-version compatibility)
+
+When a root `rust-toolchain` or `rust-toolchain.toml` selects a compiler whose
+numeric major/minor version differs from the root MSRV, Anvil runs affected-package
+tests under the MSRV with both all features and default features. Non-numeric
+channels such as `stable` and path toolchains conservatively count as different.
+A components-only toolchain file does not select a compiler and therefore does not
+trigger this check.
+
+The compatibility run uses a dedicated Linux x86_64 job/stage in parallel with the
+other PR groups. Impact preparation publishes whether the run is required, allowing
+the cloud workflow to skip the job/stage before setup when it is not.
+`ANVIL_MSRV_TOOLCHAIN` may map the public MSRV to an already-provisioned internal
+toolchain; when it is unset, setup installs the declared MSRV through rustup.
 
 #### `pr-runtime-analysis` (stricter-runtime correctness)
 

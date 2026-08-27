@@ -5,7 +5,9 @@
 param(
     [switch] $ValidateWorkspaceMsrv,
     [switch] $InstallIfMissing,
-    [switch] $ForEnvironment
+    [switch] $ForEnvironment,
+    [switch] $MsrvCompatibilityToolchain,
+    [switch] $InstallMsrvCompatibilityIfNeeded
 )
 
 $ErrorActionPreference = 'Stop'
@@ -22,7 +24,13 @@ function Get-SelectingToolchainFile {
 
         $content = Get-Content -LiteralPath $path -Raw
         if ($name -eq 'rust-toolchain' -and $content.TrimStart() -notmatch '^\[') {
-            return [pscustomobject]@{ Path = $path; Value = $content.Trim(); Source = 'file'; Installable = $false }
+            return [pscustomobject]@{
+                Path = $path
+                Value = $content.Trim()
+                Selector = 'channel'
+                Source = 'file'
+                Installable = $false
+            }
         }
 
         $inToolchain = $false
@@ -43,6 +51,7 @@ function Get-SelectingToolchainFile {
                 return [pscustomobject]@{
                     Path = $path
                     Value = $value
+                    Selector = $Matches[1]
                     Source = 'file'
                     Installable = $false
                 }
@@ -53,7 +62,7 @@ function Get-SelectingToolchainFile {
     return $null
 }
 
-function Get-RootMsrv {
+function Get-RootMsrv([switch] $AllowMissing) {
     $manifestPath = Join-Path $repoRoot 'Cargo.toml'
     if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
         throw "anvil: Cargo.toml not found at repository root '$repoRoot'"
@@ -79,6 +88,9 @@ function Get-RootMsrv {
         return $values['package']
     }
 
+    if ($AllowMissing) {
+        return $null
+    }
     throw 'anvil: no selecting rust-toolchain(.toml) and no root [workspace.package] or [package] rust-version; declare an MSRV or select a toolchain explicitly'
 }
 
@@ -106,6 +118,50 @@ function Assert-UniformWorkspaceMsrv {
     }
 }
 
+function Get-MsrvCompatibilitySelection {
+    if ($null -eq $fileSelection) {
+        return $null
+    }
+
+    $msrv = Get-RootMsrv -AllowMissing
+    if ([string]::IsNullOrWhiteSpace($msrv)) {
+        return $null
+    }
+    $selectedMatch = [regex]::Match($fileSelection.Value, '^(\d+)\.(\d+)(?:\.\d+)?(?:-.+)?$')
+    $msrvMatch = [regex]::Match($msrv, '^(\d+)\.(\d+)(?:\.\d+)?(?:-.+)?$')
+    if ($fileSelection.Selector -eq 'channel' -and $selectedMatch.Success -and $msrvMatch.Success) {
+        if ($selectedMatch.Groups[1].Value -eq $msrvMatch.Groups[1].Value -and
+            $selectedMatch.Groups[2].Value -eq $msrvMatch.Groups[2].Value) {
+            return $null
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($env:ANVIL_MSRV_TOOLCHAIN)) {
+        return [pscustomobject]@{ Value = $env:ANVIL_MSRV_TOOLCHAIN; Installable = $false; Mapped = $true }
+    }
+    return [pscustomobject]@{ Value = $msrv; Installable = $true; Mapped = $false }
+}
+
+function Install-Toolchain([object] $toolchain, [string] $label) {
+    if (-not $toolchain.Installable) {
+        return
+    }
+
+    $installed = rustup toolchain list
+    if ($LASTEXITCODE -ne 0) {
+        throw 'anvil: rustup toolchain list failed'
+    }
+    if ($installed -match "(?m)^$([regex]::Escape($toolchain.Value))(?:-|$)") {
+        return
+    }
+
+    Write-Host "anvil: installing $label toolchain '$($toolchain.Value)'"
+    rustup toolchain install $toolchain.Value --profile minimal
+    if ($LASTEXITCODE -ne 0) {
+        throw "anvil: failed to install $label toolchain '$($toolchain.Value)'"
+    }
+}
+
 $fileSelection = Get-SelectingToolchainFile
 if ($ValidateWorkspaceMsrv) {
     $skipWorkspaceMsrvValidation = if ([string]::IsNullOrWhiteSpace($env:ANVIL_STABLE_TOOLCHAIN_SOURCE)) {
@@ -119,6 +175,26 @@ if ($ValidateWorkspaceMsrv) {
     exit 0
 }
 
+if ($MsrvCompatibilityToolchain -or $InstallMsrvCompatibilityIfNeeded) {
+    $compatibilitySelection = Get-MsrvCompatibilitySelection
+    if ($null -eq $compatibilitySelection) {
+        exit 0
+    }
+    if ($InstallMsrvCompatibilityIfNeeded) {
+        if ($compatibilitySelection.Mapped) {
+            & cargo "+$($compatibilitySelection.Value)" --version *> $null
+            if ($LASTEXITCODE -ne 0) {
+                throw "anvil: mapped MSRV toolchain '$($compatibilitySelection.Value)' is unavailable; provision ANVIL_MSRV_TOOLCHAIN or unset it to let Anvil install the declared public MSRV"
+            }
+        } else {
+            Install-Toolchain $compatibilitySelection 'MSRV compatibility'
+        }
+    } else {
+        $compatibilitySelection.Value
+    }
+    exit 0
+}
+
 $selection = if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
     [pscustomobject]@{ Value = $env:RUSTUP_TOOLCHAIN; Source = 'environment'; Installable = $false }
 } elseif ($null -ne $fileSelection) {
@@ -128,23 +204,7 @@ $selection = if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
 }
 
 if ($InstallIfMissing) {
-    if (-not $selection.Installable) {
-        exit 0
-    }
-
-    $installed = rustup toolchain list
-    if ($LASTEXITCODE -ne 0) {
-        throw 'anvil: rustup toolchain list failed'
-    }
-    if ($installed -match "(?m)^$([regex]::Escape($selection.Value))(?:-|$)") {
-        exit 0
-    }
-
-    Write-Host "anvil: installing stable toolchain '$($selection.Value)'"
-    rustup toolchain install $selection.Value --profile minimal
-    if ($LASTEXITCODE -ne 0) {
-        throw "anvil: failed to install stable toolchain '$($selection.Value)'"
-    }
+    Install-Toolchain $selection 'stable'
     exit 0
 }
 

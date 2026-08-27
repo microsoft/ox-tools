@@ -115,10 +115,10 @@ namespaces are kept disjoint by naming choice: no check is named `<tier>-<group>
 any tier × group combination (e.g. the coverage-instrumented test check is named
 `llvm-cov`, not `test`, so that group names like `anvil-pr-test` unambiguously refer to a group recipe).
 
-The `pr-slow` work is split into three independent cloud-workflow-visible sub-groups
-(`pr-test`, `pr-runtime-analysis`, `pr-mutants`) so they run as parallel cloud-workflow jobs/stages.
+The `pr-slow` work is split into four independent cloud-workflow-visible sub-groups
+(`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-mutants`) so they run as parallel cloud-workflow jobs/stages.
 A convenience umbrella `anvil-pr-slow` recipe is also provided for local
-use; it invokes the three sub-recipes sequentially. `pr-mutants` (mutants) is
+use; it invokes the four sub-recipes sequentially. `pr-mutants` (mutants) is
 diff-scoped against the PR base; `scheduled-exhaustive` runs the
 full-workspace mutants recipe:
 
@@ -129,8 +129,9 @@ anvil-pr-fast: anvil-fmt anvil-clippy anvil-cargo-sort anvil-license-headers \
                anvil-deny anvil-audit anvil-udeps anvil-semver-check \
                anvil-external-types anvil-aprz
 
-anvil-pr-slow: anvil-pr-test anvil-pr-runtime-analysis anvil-pr-mutants
+anvil-pr-slow: anvil-pr-test anvil-pr-msrv anvil-pr-runtime-analysis anvil-pr-mutants
 anvil-pr-test: anvil-llvm-cov anvil-doc-test anvil-examples
+anvil-pr-msrv: anvil-msrv-test
 anvil-pr-runtime-analysis: anvil-miri anvil-careful anvil-loom anvil-bolero
 anvil-pr-mutants: anvil-mutants-diff
 
@@ -391,6 +392,13 @@ When selection falls back to the root MSRV, prerequisite validation reads
 `rust_version`. Workspaces with missing or heterogeneous package MSRVs must choose a
 single catalog toolchain explicitly with a selecting toolchain file. Anvil does not
 build a per-package toolchain matrix for this uncommon case.
+
+When a selecting root toolchain file uses a different compiler from the root MSRV,
+`anvil-msrv-test` runs affected-package tests under the MSRV with all features and
+with default features. Numeric channels are compared by major/minor version, so
+`1.95` and `1.95.0` match; non-numeric channels and path toolchains conservatively
+trigger the compatibility run. `ANVIL_MSRV_TOOLCHAIN` optionally maps the declared
+MSRV to a provisioned internal toolchain without changing when the check is required.
 
 `anvil-tool-rustc-validate-prereqs` verifies the selected compiler and the uniform
 MSRV rule. Per-check toolchain requirements (for example, miri, careful, and udeps

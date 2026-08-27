@@ -353,6 +353,15 @@ checks actually consume is the catalog's concern, not the wiring layer's. This m
 moving a check between groups (e.g. `clippy` from `pr-fast` to `scheduled-advisories`)
 never changes the stages template.
 
+The PR template also contains a Linux-only `pr_msrv` stage. It runs in parallel
+with `pr_test`, `pr_runtime_analysis`, and `pr_mutants`, consumes the Linux
+affected-package impact set, and invokes `anvil-pr-msrv`. The recipe is a no-op
+unless a selecting toolchain file differs from the root MSRV. The Linux impact job
+publishes that condition so ADO skips the stage before setup when no run is needed.
+Internal pipelines set `ANVIL_MSRV_TOOLCHAIN` to the provisioned `ms-prod-*`
+equivalent of that MSRV; public pipelines let Anvil install the declared MSRV
+through rustup.
+
 ### 4.1 Per-job wrapper (`steps/job.yml`) — the 1ESPT extensibility point
 
 Every job in `pr.yml` and `scheduled.yml` is rendered through a wrapper template at
@@ -627,13 +636,15 @@ via `anvil-tool-cargo-delta-install` and runs configured snapshots and
 `cargo delta impact --format json`. The snapshots use `_anvil-base-ref`; cargo-
 delta's changed-file detection uses the fixed `[git].remote_branch` policy from
 the repository's `.delta.toml` when configured. Each tier becomes a pre-built
-`--package …` string or `--skip`; the
-three results are exported as ADO output variables via
+`--package …` string or `--skip`. Impact also detects whether a selecting
+toolchain file differs from the root MSRV. The four results are exported as ADO
+output variables via
 `##vso[task.setvariable variable=…;isOutput=true]`:
 
 - `compute.include_modified`
 - `compute.include_affected`
 - `compute.include_required`
+- `compute.msrv_compatibility_required`
 
 Downstream jobs reference them via `dependencies.impact.outputs['compute.<name>']`
 inside the runtime macro `$[ … ]` (rather than the compile-time `${{ … }}` macro)

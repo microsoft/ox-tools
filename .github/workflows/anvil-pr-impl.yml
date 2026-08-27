@@ -70,6 +70,7 @@ jobs:
       include_modified: ${{ steps.delta.outputs.include_modified }}
       include_affected: ${{ steps.delta.outputs.include_affected }}
       include_required: ${{ steps.delta.outputs.include_required }}
+      msrv_compatibility_required: ${{ steps.delta.outputs.msrv_compatibility_required }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -210,6 +211,22 @@ jobs:
           flags: ${{ matrix.os }}
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
+
+  pr-msrv:
+    name: "Check Group: MSRV Compatibility (linux)"
+    needs: impact-linux
+    if: needs.impact-linux.outputs.msrv_compatibility_required == 'true'
+    runs-on: ${{ inputs.linux_runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          lfs: true
+      - uses: ./.github/actions/anvil-run-group
+        with:
+          group: pr-msrv
+          publish_commit_statuses: ${{ inputs.publish_commit_statuses }}
+          free-disk-space: true
+          include_affected: ${{ needs.impact-linux.outputs.include_affected }}
 
   pr-runtime-analysis:
     name: "Check Group: Runtime Analysis (${{ matrix.os }})"
