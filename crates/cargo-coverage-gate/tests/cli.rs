@@ -202,10 +202,17 @@ fn gated_crate_with_no_data_exits_2() {
 /// `[package.metadata.coverage-gate]` body. Each entry is
 /// `(name, gate_body)`; an empty `gate_body` omits the block entirely.
 fn make_workspace_with_gate(dir: &Path, members: &[(&str, &str)]) {
+    make_workspace_with_gate_and_default(dir, members, None);
+}
+
+fn make_workspace_with_gate_and_default(dir: &Path, members: &[(&str, &str)], workspace_min_lines_percent: Option<&str>) {
     let members_list = members.iter().map(|(n, _)| format!("\"{n}\"")).collect::<Vec<_>>().join(", ");
+    let workspace_meta = workspace_min_lines_percent
+        .map(|m| format!("\n[workspace.metadata.coverage-gate]\nmin-lines-percent = {m}\n"))
+        .unwrap_or_default();
     fs::write(
         dir.join("Cargo.toml"),
-        format!("[workspace]\nresolver = \"2\"\nmembers = [{members_list}]\n"),
+        format!("[workspace]\nresolver = \"2\"\nmembers = [{members_list}]\n{workspace_meta}"),
     )
     .expect("write workspace root Cargo.toml");
 
@@ -347,6 +354,28 @@ fn print_test_only_packages_does_not_read_lcov() {
         .assert()
         .success()
         .stdout("alpha\ndelta\ngamma\n");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
+fn print_test_only_packages_includes_workspace_zero_threshold() {
+    let tmp = TempDir::new().expect("tempdir");
+    make_workspace_with_gate_and_default(
+        tmp.path(),
+        &[
+            ("alpha", ""),
+            ("beta", "expect-no-coverable-lines = true"),
+            ("gamma", "min-lines-percent = 80"),
+        ],
+        Some("0"),
+    );
+
+    coverage_gate(tmp.path())
+        .args(["--print-test-only-packages", "--lcov", "does-not-exist.info"])
+        .env("RUSTC", tmp.path().join("missing-rustc"))
+        .assert()
+        .success()
+        .stdout("alpha\n");
 }
 
 #[test]

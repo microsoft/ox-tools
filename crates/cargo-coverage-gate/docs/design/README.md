@@ -97,6 +97,7 @@ want to reproduce the gate locally.
 
 ```text
 cargo coverage-gate  [--lcov <path>]... [-p <spec>]... [--package <spec>]...
+                     [--target <triple>] [--print-test-only-packages]
                      [--summary-file <path>] [--quiet]
 ```
 
@@ -126,6 +127,13 @@ Flags:
   test-impact step so that impact-scoped runs only gate the packages
   whose tests actually ran. A selector that matches no member is a
   configuration error (exit 2).
+- `--target <triple>` — evaluate target-specific package policies for the
+  supplied Rust target. Defaults to the active rustc host target when target
+  policies exist; workspaces without target policies do not invoke rustc.
+- `--print-test-only-packages` — print packages whose effective policy has
+  `min-lines-percent = 0`, one bare package name per line without `@version`,
+  then exit `0` without reading lcov. Coverage automation uses this output to
+  choose packages for a non-instrumented test path.
 - `--summary-file <path>` — write a Markdown verdict table to this file.
   When unset, the tool honors the environment variables
   `GITHUB_STEP_SUMMARY` (GitHub Actions) and
@@ -245,9 +253,10 @@ expression (`cfg(windows)`, `cfg(target_os = "linux")`,
 `rustc --print cfg --target <triple>`, so it does not maintain a second target
 language.
 
-`min-lines-percent = 0` disables coverage measurement and gating for that
-package on the matching target. It does not disable tests: orchestrators run
-the package through their non-instrumented test path. This is distinct from
+`min-lines-percent = 0` disables gating for that package on the matching
+target. It does not itself disable tests or coverage instrumentation:
+orchestrators can use `--print-test-only-packages` to route the package through
+a non-instrumented test path. This is distinct from
 `expect-no-coverable-lines = true`, which keeps a target-independent facade or
 re-export package in the instrumented test set so its tests can contribute
 coverage to other packages.
@@ -268,9 +277,12 @@ Resolution follows Cargo's precedence:
 
 The CLI accepts `--target <triple>`. When omitted, it obtains the host triple
 from `rustc -vV`. A dedicated `--print-test-only-packages` mode loads metadata
-and prints packages whose effective policy is `min-lines-percent = 0`, without
-reading lcov. Coverage orchestrators use this before selecting packages for
-instrumentation.
+and prints packages whose effective policy is `min-lines-percent = 0`, one bare
+package name per line without `@version`, then exits `0` without reading lcov.
+Coverage orchestrators can use this output before selecting packages for
+instrumentation. Target discovery is lazy: if no package declares target
+policies, evaluation does not invoke rustc and preserves the pre-target-policy
+runtime and error surface.
 
 ### 5.4 The verdict table
 

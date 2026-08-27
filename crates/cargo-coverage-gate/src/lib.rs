@@ -89,11 +89,13 @@
 //! matching `cfg(...)` expressions. Multiple matching cfg policies are a
 //! configuration error rather than depending on declaration order.
 //!
-//! A zero target-specific threshold disables coverage measurement and gating
-//! on the matching target, but does not disable test execution. Coverage
+//! A zero target-specific threshold disables gating on the matching target,
+//! but does not itself control test execution or instrumentation. Coverage
 //! automation can call `cargo coverage-gate
 //! --print-test-only-packages --target <triple>` or [`test_only_packages`] to
 //! identify packages that should run through a non-instrumented test path.
+//! The command prints one bare package name per line (without `@version`) and
+//! exits successfully without reading lcov.
 //!
 //! ## Why lcov, not the JSON?
 //!
@@ -322,8 +324,7 @@ pub fn evaluate_many_for_target(
     target: Option<&str>,
 ) -> Result<EvaluatedReport, CoverageGateError> {
     let report = lcov_cov::CoverageReport::from_strs(lcov_texts)?;
-    let target = target::TargetContext::resolve(target)?;
-    let ws = workspace::Workspace::load(manifest_path, &target)?;
+    let ws = workspace::Workspace::load(manifest_path, target)?;
     let inner = verdict::evaluate(&report, &ws, gated_packages)?;
     Ok(EvaluatedReport { inner })
 }
@@ -344,12 +345,11 @@ pub fn test_only_packages(
     packages: &[String],
     target: Option<&str>,
 ) -> Result<Vec<String>, CoverageGateError> {
-    let target = target::TargetContext::resolve(target)?;
-    let ws = workspace::Workspace::load(manifest_path, &target)?;
+    let ws = workspace::Workspace::load(manifest_path, target)?;
     let selected = verdict::resolve_gated(&ws, packages)?;
     Ok(selected
         .into_iter()
-        .filter(|member| member.min_lines_percent == Some(0.0))
+        .filter(|member| !member.expect_no_coverable_lines && threshold::Threshold::resolve(member, &ws).min_lines_percent == 0.0)
         .map(|member| member.name.clone())
         .collect())
 }

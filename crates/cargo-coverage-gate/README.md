@@ -98,10 +98,12 @@ package’s base policy for that target. Exact triples take precedence over
 matching `cfg(...)` expressions. Multiple matching cfg policies are a
 configuration error rather than depending on declaration order.
 
-A zero target-specific threshold disables coverage measurement and gating
-on the matching target, but does not disable test execution. Coverage
+A zero target-specific threshold disables gating on the matching target,
+but does not itself control test execution or instrumentation. Coverage
 automation can call `cargo coverage-gate --print-test-only-packages --target <triple>` or [`test_only_packages`][__link1] to
 identify packages that should run through a non-instrumented test path.
+The command prints one bare package name per line (without `@version`) and
+exits successfully without reading lcov.
 
 ### Why lcov, not the JSON?
 
@@ -170,7 +172,7 @@ disk and orchestrates rendering plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbgT7C_MCtrmQbNek6QRgrLXcbevBPURuBRDAbnaR9T4OA_sZhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbdKLP7PcbAPsbeHSPlXhUImobKq_kwe1zsH4bcq-jhiXZ7SNhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.test_only_packages.html
  [__link10]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::verdict

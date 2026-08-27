@@ -64,7 +64,14 @@ impl Workspace {
     /// Runs `cargo metadata --no-deps`, which does not fetch or build
     /// dependencies and is therefore fast and side-effect-free.
     #[ohno::enrich_err("failed to load cargo workspace metadata")]
-    pub(crate) fn load(manifest_path: Option<&Path>, target: &TargetContext) -> Result<Self, CoverageGateError> {
+    pub(crate) fn load(manifest_path: Option<&Path>, target: Option<&str>) -> Result<Self, CoverageGateError> {
+        Self::load_with_target_resolver(manifest_path, || TargetContext::resolve(target))
+    }
+
+    fn load_with_target_resolver(
+        manifest_path: Option<&Path>,
+        resolve_target: impl FnOnce() -> Result<TargetContext, CoverageGateError>,
+    ) -> Result<Self, CoverageGateError> {
         let mut cmd = MetadataCommand::new();
         cmd.no_deps();
         if let Some(path) = manifest_path {
@@ -78,7 +85,7 @@ impl Workspace {
         // omitting the key).
         let workspace_default = extract_coverage_gate(&metadata.workspace_metadata, "workspace", Scope::Workspace)?.min_lines_percent;
 
-        let mut members: Vec<Member> = metadata
+        let unresolved_members = metadata
             .workspace_packages()
             .iter()
             .map(|pkg| {
@@ -88,16 +95,30 @@ impl Workspace {
                     .expect("cargo-metadata always reports a manifest file path with a parent directory")
                     .as_std_path()
                     .to_path_buf();
-                let mut gate = extract_coverage_gate(&pkg.metadata, &pkg.name, Scope::Package)?;
-                apply_target_policy(&mut gate, target, &pkg.name)?;
-                Ok::<Member, CoverageGateError>(Member {
-                    name: pkg.name.to_string(),
+                let gate = extract_coverage_gate(&pkg.metadata, &pkg.name, Scope::Package)?;
+                Ok::<_, CoverageGateError>((pkg.name.to_string(), manifest_dir, gate))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let target = unresolved_members
+            .iter()
+            .any(|(_, _, gate)| !gate.target_policies.is_empty())
+            .then(resolve_target)
+            .transpose()?;
+        let mut members = unresolved_members
+            .into_iter()
+            .map(|(name, manifest_dir, mut gate)| {
+                if let Some(target) = &target {
+                    apply_target_policy(&mut gate, target, &name)?;
+                }
+                Ok(Member {
+                    name,
                     manifest_dir,
                     min_lines_percent: gate.min_lines_percent,
                     expect_no_coverable_lines: gate.expect_no_coverable_lines,
                 })
             })
-            .collect::<Result<Vec<_>, _>>()?;
+            .collect::<Result<Vec<_>, CoverageGateError>>()?;
         members.sort_by(|a, b| a.name.cmp(&b.name));
 
         Ok(Self {
@@ -316,7 +337,7 @@ mod tests {
     }
 
     fn load(manifest_path: &Path) -> Result<Workspace, CoverageGateError> {
-        Workspace::load(Some(manifest_path), &test_target())
+        Workspace::load_with_target_resolver(Some(manifest_path), || Ok(test_target()))
     }
 
     /// Write a minimal workspace with the given root `Cargo.toml` body
@@ -383,6 +404,19 @@ edition = "2021"
             assert!(m.min_lines_percent.is_none());
             assert!(m.manifest_dir.is_dir());
         }
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
+    #[test]
+    fn does_not_resolve_target_without_target_policies() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = "[workspace]\nresolver = \"2\"\nmembers = [\"alpha\"]\n";
+        write_workspace(tmp.path(), root, &[("alpha", &member("alpha", None))]);
+
+        let ws = Workspace::load_with_target_resolver(Some(&tmp.path().join("Cargo.toml")), || panic!("target resolution must stay lazy"))
+            .expect("workspace without target policies should load");
+
+        assert_eq!(ws.members.len(), 1);
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem and spawns cargo metadata subprocess; miri allows neither")]
@@ -624,7 +658,8 @@ expect-no-coverable-lines = false
             &["windows", "target_arch=\"x86_64\"", "target_os=\"windows\""],
         );
 
-        let ws = Workspace::load(Some(&tmp.path().join("Cargo.toml")), &target).expect("workspace load should succeed");
+        let ws = Workspace::load_with_target_resolver(Some(&tmp.path().join("Cargo.toml")), || Ok(target))
+            .expect("workspace load should succeed");
         let alpha = ws.members.iter().find(|member| member.name == "alpha").expect("alpha");
         assert_eq!(alpha.min_lines_percent, Some(90.0));
     }
@@ -697,7 +732,8 @@ expect-no-coverable-lines = false
         write_workspace(tmp.path(), root, &[("alpha", &alpha)]);
         let target = TargetContext::from_parts("x86_64-pc-windows-msvc", &["windows"]);
 
-        let ws = Workspace::load(Some(&tmp.path().join("Cargo.toml")), &target).expect("workspace load should succeed");
+        let ws = Workspace::load_with_target_resolver(Some(&tmp.path().join("Cargo.toml")), || Ok(target))
+            .expect("workspace load should succeed");
         let alpha = ws.members.iter().find(|member| member.name == "alpha").expect("alpha");
         assert_eq!(alpha.min_lines_percent, None);
         assert!(alpha.expect_no_coverable_lines);
