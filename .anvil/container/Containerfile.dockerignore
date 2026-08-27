@@ -16,10 +16,13 @@
 # contract in the allow-list too, at every depth, because a deeper candidate
 # always has an ancestor of exactly that shape.
 **
+!Cargo.toml
+!rust-toolchain
 !rust-toolchain.toml
 !justfiles/anvil/*.just
 !justfiles/anvil/checks/*.just
 !justfiles/anvil/groups/*.just
+!.anvil/resolve-stable-toolchain.ps1
 !.anvil/container/*
 .anvil/container/*/*
 .anvil/container/customize.sh

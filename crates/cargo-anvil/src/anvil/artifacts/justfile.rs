@@ -27,6 +27,12 @@ const VERSIONS_JUST: &str = include_str!("../../../templates/justfiles/anvil/ver
 /// Repo-root-relative path of the pinned-versions recipe file.
 const VERSIONS_JUST_PATH: &str = "justfiles/anvil/versions.just";
 
+/// Stable-toolchain resolver shared by local recipes and cloud setup.
+const STABLE_TOOLCHAIN_RESOLVER: &str = include_str!("../../../templates/anvil/resolve-stable-toolchain.ps1");
+
+/// Repo-root-relative path of the stable-toolchain resolver.
+const STABLE_TOOLCHAIN_RESOLVER_PATH: &str = ".anvil/resolve-stable-toolchain.ps1";
+
 /// Contents of `justfiles/anvil/tools.just` baked into the binary.
 const TOOLS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tools.just");
 
@@ -184,6 +190,12 @@ pub fn entry() -> Artifact {
 #[must_use]
 pub fn versions() -> Artifact {
     Artifact::owned_file(VERSIONS_JUST_PATH, VERSIONS_JUST)
+}
+
+/// `.anvil/resolve-stable-toolchain.ps1` — deterministic stable selection.
+#[must_use]
+pub fn stable_toolchain_resolver() -> Artifact {
+    Artifact::owned_file(STABLE_TOOLCHAIN_RESOLVER_PATH, STABLE_TOOLCHAIN_RESOLVER)
 }
 
 /// `justfiles/anvil/tools.just` — tool install / prereq recipes.
@@ -449,6 +461,134 @@ mod tests {
             "cargo_mutants_version",
         ] {
             assert!(VERSIONS_JUST.contains(needle), "versions.just missing variable '{needle}'");
+        }
+    }
+
+    #[test]
+    fn stable_toolchain_resolution_is_exported() {
+        assert!(VERSIONS_JUST.contains("rust_stable_override := env_var_or_default("));
+        assert!(VERSIONS_JUST.contains("shell('pwsh -NoProfile -File .anvil/resolve-stable-toolchain.ps1 -ForEnvironment')"));
+        assert!(VERSIONS_JUST.contains("export RUSTUP_TOOLCHAIN := rust_stable"));
+        assert!(VERSIONS_JUST.contains("export ANVIL_STABLE_TOOLCHAIN_SOURCE :="));
+        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("RUSTUP_TOOLCHAIN"));
+        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("rust-version"));
+        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("ValidateWorkspaceMsrv"));
+        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("InstallIfMissing"));
+    }
+
+    mod stable_toolchain_resolver_tests {
+        use std::fs;
+        use std::path::Path;
+        use std::process::{Command, Output};
+
+        use tempfile::TempDir;
+
+        use super::STABLE_TOOLCHAIN_RESOLVER;
+
+        fn fixture(cargo_toml: &str) -> TempDir {
+            let temp = TempDir::new().expect("temporary repository must be creatable");
+            fs::create_dir(temp.path().join(".anvil")).expect("resolver directory must be creatable");
+            fs::write(temp.path().join(".anvil/resolve-stable-toolchain.ps1"), STABLE_TOOLCHAIN_RESOLVER)
+                .expect("resolver fixture must be writable");
+            fs::write(temp.path().join("Cargo.toml"), cargo_toml).expect("manifest fixture must be writable");
+            temp
+        }
+
+        fn run(root: &Path, args: &[&str], rustup_toolchain: Option<&str>) -> Output {
+            let mut command = Command::new("pwsh");
+            command
+                .args(["-NoProfile", "-File", ".anvil/resolve-stable-toolchain.ps1"])
+                .args(args)
+                .current_dir(root)
+                .env_remove("ANVIL_STABLE_TOOLCHAIN_SOURCE");
+            match rustup_toolchain {
+                Some(value) => {
+                    command.env("RUSTUP_TOOLCHAIN", value);
+                }
+                None => {
+                    command.env_remove("RUSTUP_TOOLCHAIN");
+                }
+            }
+            command.output().expect("pwsh must be available to test the generated resolver")
+        }
+
+        fn resolved(root: &Path, rustup_toolchain: Option<&str>) -> String {
+            let output = run(root, &[], rustup_toolchain);
+            assert!(
+                output.status.success(),
+                "resolver failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .expect("resolver output must be UTF-8")
+                .trim()
+                .to_owned()
+        }
+
+        #[test]
+        fn honors_environment_files_and_msrv_in_precedence_order() {
+            let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
+            let root = temp.path();
+            assert_eq!(resolved(root, None), "1.93");
+            assert_eq!(
+                String::from_utf8(run(root, &["-ForEnvironment"], None).stdout)
+                    .expect("resolver output must be UTF-8")
+                    .trim(),
+                "1.93"
+            );
+
+            fs::write(root.join("rust-toolchain.toml"), "[toolchain]\ncomponents = [\"clippy\"]\n")
+                .expect("toolchain fixture must be writable");
+            assert_eq!(resolved(root, None), "1.93");
+
+            fs::write(root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n").expect("toolchain fixture must be writable");
+            assert_eq!(resolved(root, None), "1.94");
+            assert!(
+                String::from_utf8(run(root, &["-ForEnvironment"], None).stdout)
+                    .expect("resolver output must be UTF-8")
+                    .trim()
+                    .is_empty()
+            );
+
+            fs::write(root.join("rust-toolchain"), "1.92\n").expect("legacy toolchain fixture must be writable");
+            assert_eq!(resolved(root, None), "1.92");
+            assert_eq!(resolved(root, Some("custom-toolchain")), "custom-toolchain");
+            assert_eq!(
+                String::from_utf8(run(root, &["-ForEnvironment"], Some("custom-toolchain")).stdout)
+                    .expect("resolver output must be UTF-8")
+                    .trim(),
+                "custom-toolchain"
+            );
+        }
+
+        #[test]
+        fn rejects_missing_and_heterogeneous_workspace_msrvs() {
+            let missing = fixture("[workspace]\nresolver = \"2\"\n");
+            let output = run(missing.path(), &[], None);
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("no root [workspace.package]"));
+
+            let heterogeneous =
+                fixture("[workspace]\nresolver = \"2\"\nmembers = [\"a\", \"b\"]\n[workspace.package]\nrust-version = \"1.92\"\n");
+            for (name, version) in [("a", "1.92"), ("b", "1.93")] {
+                let member = heterogeneous.path().join(name);
+                fs::create_dir(&member).expect("member directory must be creatable");
+                fs::write(
+                    member.join("Cargo.toml"),
+                    format!(
+                        "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2021\"\nrust-version = \"{version}\"\n[lib]\npath = \"lib.rs\"\n"
+                    ),
+                )
+                .expect("member manifest must be writable");
+                fs::write(member.join("lib.rs"), "").expect("member source must be writable");
+            }
+
+            let output = run(heterogeneous.path(), &["-ValidateWorkspaceMsrv"], None);
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("must resolve to the root MSRV"));
+
+            let output = run(heterogeneous.path(), &["-ValidateWorkspaceMsrv"], Some("explicit-toolchain"));
+            assert!(output.status.success(), "explicit override must permit heterogeneous MSRVs");
         }
     }
 

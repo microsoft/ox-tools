@@ -7,12 +7,6 @@ if ! repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
     exit 1
 fi
 
-toolchain_path="$repo_root/rust-toolchain.toml"
-if [[ ! -f "$toolchain_path" ]]; then
-    echo 'anvil-container requires a repository-owned rust-toolchain.toml.' >&2
-    exit 1
-fi
-
 container_dir="$repo_root/.anvil/container"
 container_recipe="justfiles/anvil/container.just"
 default_base_image="$(sed -n 's/^ARG BASE_IMAGE=//p' "$container_dir/Containerfile" | head -n 1)"
@@ -25,7 +19,12 @@ if [[ ! "$base_image" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
     echo 'anvil-container: ANVIL_CONTAINER_BASE_IMAGE must be pinned by sha256 digest (image@sha256:<64 hex characters>).' >&2
     exit 1
 fi
-inputs=(rust-toolchain.toml)
+inputs=(Cargo.toml .anvil/resolve-stable-toolchain.ps1)
+for toolchain_file in rust-toolchain rust-toolchain.toml; do
+    if [[ -f "$repo_root/$toolchain_file" ]]; then
+        inputs+=("$toolchain_file")
+    fi
+done
 while IFS= read -r path; do
     relative="${path#"$repo_root"/}"
     # The container entry recipe drives execution on the host; it is not

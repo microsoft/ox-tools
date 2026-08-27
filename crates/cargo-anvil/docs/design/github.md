@@ -712,7 +712,8 @@ annotation. The matcher promotes that existing diagnostic without wrapping
 Just, parsing its output in a custom runner, or repeating group membership
 in the action.
 
-The action does not install Rust; it expects `cargo` on PATH (see §7).
+The action expects the rustup proxies on `PATH` and installs a missing selected public
+toolchain (see §7).
 `anvil-impact` is described in §6 below.
 
 Its optional `free-disk-space` input defaults to `false`. When enabled on a
@@ -762,19 +763,21 @@ The check → bucket mapping is in
 
 ## 7. Rust toolchain
 
-anvil does not install Rust on GitHub. The composite actions assume `cargo` is on PATH.
-GH-hosted runners ship with a recent stable Rust and `rustup` pre-installed; if your
-`rust-toolchain.toml` pins a different channel, the first `cargo` invocation in a job
-triggers `rustup` to download the pinned toolchain. For a published stable channel this
-typically takes 10–30 seconds on Linux (somewhat longer on Windows and longer still for
-nightly with components). The auto-install runs once per job and is not cached across
-jobs by anvil — `~/.rustup` has high invalidation churn and the install cost is small
-relative to the cached cargo registry / `target/` paths (§8). Repos that want to skip
-even this per-job overhead can add their own toolchain-install step (e.g.
-`dtolnay/rust-toolchain@stable`) before the anvil composite action runs.
+The setup action resolves the catalog's stable toolchain before reading `rustc` or
+restoring build artifacts. It installs a missing public channel through rustup, exports
+environment/MSRV selections through `GITHUB_ENV`, leaves selecting toolchain files for
+rustup to process natively, and keys the cache on the resulting compiler version. All
+matrix legs therefore use the same repository selection instead of the different stable
+versions that runner images may carry.
 
-On self-hosted runners or pre-baked images without rustup, the user adds a Rust install
-step to their root workflow before the `uses:` of the reusable workflow:
+Selection follows the shared local contract: an existing `RUSTUP_TOOLCHAIN`, then a
+root toolchain file with `channel` or `path`, then the root MSRV. There is no
+runner-default fallback. GH-hosted runners provide the rustup proxy used to install a
+selected public channel. A repository that supplies a path toolchain must provision
+that path before the Anvil action runs.
+
+On self-hosted runners or pre-baked images without rustup, the user provisions the
+selected toolchain before the `uses:` of the reusable workflow:
 
 ```yaml
 jobs:

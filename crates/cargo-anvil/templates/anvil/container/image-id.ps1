@@ -14,11 +14,13 @@ if ($LASTEXITCODE -ne 0 -or -not $repoRoot) {
 }
 
 $inputs = @(
-    'rust-toolchain.toml'
+    'Cargo.toml',
+    '.anvil/resolve-stable-toolchain.ps1'
 )
-$toolchainPath = Join-Path $repoRoot 'rust-toolchain.toml'
-if (-not (Test-Path -LiteralPath $toolchainPath -PathType Leaf)) {
-    throw 'anvil-container requires a repository-owned rust-toolchain.toml.'
+foreach ($toolchainFile in @('rust-toolchain', 'rust-toolchain.toml')) {
+    if (Test-Path -LiteralPath (Join-Path $repoRoot $toolchainFile) -PathType Leaf) {
+        $inputs += $toolchainFile
+    }
 }
 $containerPath = Join-Path $repoRoot '.anvil/container'
 $containerRecipe = 'justfiles/anvil/container.just'

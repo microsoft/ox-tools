@@ -117,7 +117,8 @@ environment without installing those tools directly on the host.
 * Bash on Linux and WSL; `PowerShell` Core (`pwsh`) and WSL 2 on Windows.
 * `[script]` support enabled in the root `Justfile` (`set unstable` when
   required by the installed `just` version).
-* A repository-owned `rust-toolchain.toml`.
+* A root `Cargo.toml` whose MSRV is defined, unless a repository
+  `rust-toolchain` or `rust-toolchain.toml` selects the stable toolchain.
 * On Windows, Docker Engine running in the default WSL distribution:
 
 ```powershell
@@ -444,7 +445,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbjXc_4J4IhEMbUEGBObScOREbL4ona_NAG7cbuZfYsFwUELhhZIGDa2NhcmdvLWFudmlsZTAuNS4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbnLd9XGSG1pUbKkS1MKyxFjEbACJD5-7hMiMbhc9RgQO7NuFhZIGDa2NhcmdvLWFudmlsZTAuNS4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate

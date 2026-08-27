@@ -646,28 +646,33 @@ mechanics are in [local.md §4](./local.md#4-impact-scoping-pass-through-env-var
 
 ## 6. Rust toolchain
 
-anvil does not install Rust on ADO. The step templates assume `cargo` is on PATH. The
-user's root pipeline (or compliance template) installs Rust before the anvil stages run.
+The user's root pipeline or compliance template installs Rust before the Anvil stages
+run. The generated setup step then resolves the catalog toolchain and publishes
+environment/MSRV selections as `RUSTUP_TOOLCHAIN` for subsequent steps before it
+captures `rustc --version` and restores the cache. A selecting toolchain file remains
+unset in the environment so rustup processes the complete file.
 
-Why anvil doesn't ship a Rust install step:
+Selection follows the shared local contract: an existing `RUSTUP_TOOLCHAIN`, then a
+root toolchain file with `channel` or `path`, then the root MSRV. Internal pipelines
+set `RUSTUP_TOOLCHAIN=ms-prod-*` so it overrides a public toolchain file or MSRV,
+while their existing installer-specific setting continues to tell msrustup which
+toolchain to provision. Current msrustup honors the standard override precedence.
 
-- **1ESPT compliance.** Compliance pipelines install Rust via msrustup
-  (Microsoft-internal). The standard `RustInstaller` ADO task is not used. anvil must
-  emit nothing that conflicts with that.
-- **Toolchain choice is a repo decision.** msrustup channels (`ms-prod-1.93`, etc.) are
-  repo-policy questions anvil has no business making.
+Anvil does not install stable Rust on ADO:
+
+- **1ESPT compliance.** Compliance pipelines provision Rust through msrustup.
+- **Backend mapping is a repository decision.** Mapping a public MSRV to an internal
+  `ms-prod-*` channel belongs in the root pipeline, not the catalog.
 
 In the OSS / non-1ESPT case, the user adds a `RustInstaller@1` task (or a rustup
 shell script) to their root pipeline before the anvil stages template runs. A typical
 placement: a setup stage that `dependsOn`s nothing and runs first, followed by the anvil
 stages.
 
-`anvil-tool-rustc-validate-prereqs` (depended on by every check that needs rustc)
-validates the installed `rustc` against the catalog minimum at recipe time; a
-below-minimum `rustc` produces a clean failure message. For nightly-requiring
-checks (miri, careful, udeps), the matching toolchain-validate-prereqs recipe
-fails with a suggestion to ask the team's pipeline owner to add `nightly` to
-msrustup.
+`anvil-tool-rustc-validate-prereqs` validates the selected compiler and the
+uniform-MSRV fallback rule. For nightly-requiring checks, the matching
+toolchain-validate-prereqs recipe fails with a suggestion to ask the team's pipeline
+owner to add that dated nightly to msrustup.
 
 ## 7. Caching
 

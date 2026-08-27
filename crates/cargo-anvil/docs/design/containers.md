@@ -126,8 +126,8 @@ The driver:
 ## 5. Image construction and identity
 
 The public `Containerfile` starts from a pinned public Linux base and installs
-`just`, Rustup, and PowerShell. It copies the generated Anvil tree and the
-repository-owned `rust-toolchain.toml`, then runs:
+`just`, Rustup, and PowerShell. It copies the generated Anvil tree, root
+`Cargo.toml`, and optional repository toolchain file, then runs:
 
 ```text
 just anvil-setup
@@ -138,7 +138,9 @@ of truth for Rust toolchains and Cargo tools.
 
 The local image tag is a SHA-256 hash of build-relevant repository content:
 
-- `rust-toolchain.toml`;
+- root `Cargo.toml`;
+- an optional `rust-toolchain` or `rust-toolchain.toml`;
+- the generated stable-toolchain resolver;
 - generated `justfiles/anvil/**/*.just` recipes;
 - the `Containerfile`, `Containerfile.dockerignore`, entrypoint, and other
   static image inputs.
@@ -159,8 +161,15 @@ The next invocation builds that image, while images for older branches remain
 available. Runtime execution uses `--pull=never` and never substitutes
 `latest`.
 
-Container execution requires a `rust-toolchain.toml` in the repository root. It
-does not choose a default Rust channel when that file is absent.
+Container execution uses the same deterministic stable-toolchain selection as
+native execution: an existing `RUSTUP_TOOLCHAIN`, a selecting repository
+toolchain file, or the root manifest's MSRV. It fails rather than choosing a
+runner or image default when none is available.
+
+The restricted image-construction context does not contain workspace member
+manifests, so uniform per-package MSRV validation runs in native and cloud setup
+rather than during image construction. Container checks still use the selected
+root MSRV; a package that requires a newer compiler fails normally.
 
 The public default is digest-pinned Debian Bookworm. A user or automation can
 select another image compatible with the generated Debian-based
@@ -352,7 +361,8 @@ Host requirements:
   Windows; `wsl -e docker version` must succeed and the driver does not invoke
   Windows `docker.exe`;
 - `linux/amd64` execution support;
-- a repository-owned `rust-toolchain.toml`.
+- a root `Cargo.toml` whose MSRV is defined, unless a repository toolchain file
+  selects the stable toolchain.
 
 Runtime controls:
 

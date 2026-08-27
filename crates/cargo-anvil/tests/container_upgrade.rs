@@ -94,6 +94,12 @@ fn rewind_to_pre_move_layout(root: &Path) {
             .unwrap_or_else(|| panic!("{current} must be tracked by the fresh lock"));
         manifest.files.insert(previous, checksum);
     }
+    let resolver = ".anvil/resolve-stable-toolchain.ps1";
+    std::fs::remove_file(root.join(resolver)).unwrap();
+    manifest
+        .files
+        .remove(resolver)
+        .unwrap_or_else(|| panic!("{resolver} must be tracked by the fresh lock"));
     // Provenance of the older build. It is recorded, never a gate.
     manifest.catalog_checksum = Some("sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned());
     manifest.tool_version = Some("0.2.0".to_owned());

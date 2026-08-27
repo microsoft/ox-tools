@@ -72,12 +72,12 @@ missed, and onboarding new Rust repos requires copying-and-praying.
   emitted templates contain no references to those harnesses; users wrap anvil's stages
   template in their compliance-extending pipeline themselves. See [ado.md](./ado.md).
 - Building a general-purpose cloud workflows compiler/IR. We share **check semantics**, not cloud workflows features.
-- Owning `.cargo/config.toml`, `rust-toolchain.toml`, or workspace layout in `Cargo.toml`.
-- Installing the Rust toolchain. msrustup owns it on 1ESPT; the runner image owns it on
-  GitHub-hosted runners; the user owns it locally. The tool validates `rustc` version at
-  recipe time and produces a clean failure when it doesn't meet the catalog minimum.
-  Future work: warn (not fail) when the locally-installed toolchain drifts materially
-  from the version the catalog targets, so local results stay predictive of cloud workflows.
+- Owning `.cargo/config.toml`, `rust-toolchain`, `rust-toolchain.toml`, or workspace layout in
+  `Cargo.toml`.
+- Owning how private or path toolchains are provisioned. Anvil deterministically selects an
+  existing override, a repository toolchain file, or the repository MSRV. GitHub setup and
+  container construction install a missing public channel through rustup; internal and path
+  toolchains remain the execution environment's responsibility.
 - Managing exact tool versions on the user's behalf — we enforce minimums only. See
   [local.md §3](./local.md#3-tool-versions-and-installation).
 - Hosting a service. The tool is a CLI binary; updates ship via crates.io.
@@ -244,7 +244,7 @@ repo/
 ├── rustfmt.toml                                   managed-region: anvil-rustfmt (opt out with empty stub)
 ├── .delta.toml                                    managed-region: anvil-delta (points to owned cloud config)
 ├── .gitattributes                                 managed-region: anvil-gitattributes (pins *.rs to LF)
-├── rust-toolchain.toml                            user-authored (read only)
+├── rust-toolchain[.toml]                          optional, user-authored (read only)
 ├── .cargo/config.toml                             user-authored (read only)
 │
 ├── .github/                                       only if --backend github (or autodetected) — see github.md
@@ -305,11 +305,12 @@ Detail on each host:
 - **`.gitattributes`** — managed region pinning `*.rs text eol=lf` so Rust sources keep LF
   line endings on every platform (rustfmt and other tools assume LF). Created if absent;
   users add their own attribute rules outside the region.
-- **`rust-toolchain.toml`** and **`.cargo/config.toml`** — never touched. Read-only inputs
-  used by `anvil-tool-rustc-validate-prereqs` to validate the user's `rustc` version
-  against the catalog minimum. the cloud workflow building blocks do not install Rust; that is the
-  user's pipeline's job
-  (msrustup in 1ESPT, rustup on GH runners).
+- **`rust-toolchain`**, **`rust-toolchain.toml`**, and **`.cargo/config.toml`** — never
+  touched. Toolchain files are optional read-only inputs to stable-toolchain selection.
+  When neither selects a toolchain, Anvil selects the root manifest's
+  `[workspace.package].rust-version` or `[package].rust-version`. GitHub setup installs a
+  missing public selection through rustup. ADO pipelines provision their selected internal
+  toolchain before Anvil runs.
 
 The tool's persistent state lives in `.anvil.lock` at the repo root — the sidecar
 manifest tracking last-rendered checksums per owned file and per managed region. See

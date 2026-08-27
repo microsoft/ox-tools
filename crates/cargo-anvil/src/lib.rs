@@ -118,7 +118,8 @@
 //! - Bash on Linux and WSL; `PowerShell` Core (`pwsh`) and WSL 2 on Windows.
 //! - `[script]` support enabled in the root `Justfile` (`set unstable` when
 //!   required by the installed `just` version).
-//! - A repository-owned `rust-toolchain.toml`.
+//! - A root `Cargo.toml` whose MSRV is defined, unless a repository
+//!   `rust-toolchain` or `rust-toolchain.toml` selects the stable toolchain.
 //! - On Windows, Docker Engine running in the default WSL distribution:
 //!
 //! ```powershell

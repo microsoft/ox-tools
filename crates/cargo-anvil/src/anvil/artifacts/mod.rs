@@ -36,6 +36,7 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
         justfile::entry(),
         justfile::tools(),
         justfile::versions(),
+        justfile::stable_toolchain_resolver(),
         justfile::helpers(),
         justfile::runner(),
         justfile::tiers(),
@@ -81,6 +82,7 @@ mod tests {
         let singletons = [
             justfile::entry(),
             justfile::versions(),
+            justfile::stable_toolchain_resolver(),
             justfile::tools(),
             justfile::helpers(),
             justfile::runner(),

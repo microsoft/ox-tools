@@ -144,6 +144,10 @@ anvil-tool-rustc-validate-prereqs:
         Write-Error 'anvil: rustc not found. Install via rustup: https://rustup.rs'
         exit 1
     }
+    & pwsh -NoProfile -File '.anvil/resolve-stable-toolchain.ps1' -ValidateWorkspaceMsrv
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
 
 # Validate that PowerShell Core is available.
 [group("anvil-setup")]

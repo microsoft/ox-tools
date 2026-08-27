@@ -188,7 +188,8 @@ mod tests {
     }
 
     fn write_image_id_fixture(root: &Path) {
-        write(&root.join("rust-toolchain.toml"), "channel = \"1.93\"\n");
+        write(&root.join("Cargo.toml"), "[workspace.package]\nrust-version = \"1.93\"\n");
+        write(&root.join(".anvil/resolve-stable-toolchain.ps1"), "Write-Output '1.93'\n");
         write(&root.join("justfiles/anvil/versions.just"), "tool_version := \"1\"\n");
         write(
             &root.join(CONTAINERFILE_PATH),
@@ -228,9 +229,10 @@ mod tests {
         assert!(CONTAINERFILE.contains("just anvil-setup"));
         assert!(CONTAINERFILE.contains("COPY . ."));
         assert!(IGNORE.contains("!.anvil/container/*"));
+        assert!(IGNORE.contains("!.anvil/resolve-stable-toolchain.ps1"));
         assert!(IGNORE.contains("!justfiles/anvil/checks/*.just"));
         assert!(CONTAINERFILE.contains("anvil_runner := \\\"native\\\""));
-        assert!(CONTAINERFILE.contains("requires rust-toolchain.toml"));
+        assert!(!CONTAINERFILE.contains("requires rust-toolchain.toml"));
         assert!(CONTAINERFILE.contains("anvil-container-entrypoint"));
     }
 
@@ -340,7 +342,11 @@ mod tests {
         crate::anvil::artifacts::anvil_artifacts()
             .into_iter()
             .filter_map(|artifact| match artifact {
-                Artifact::OwnedFile(spec) if spec.path.starts_with("justfiles/") || spec.path.starts_with(".anvil/container/") => {
+                Artifact::OwnedFile(spec)
+                    if spec.path.starts_with("justfiles/")
+                        || spec.path.starts_with(".anvil/container/")
+                        || spec.path == ".anvil/resolve-stable-toolchain.ps1" =>
+                {
                     Some(spec.path)
                 }
                 _ => None,
@@ -359,6 +365,8 @@ mod tests {
         let mut included: Vec<&str> = vec![
             // Repository-owned rather than catalog-owned, but a required
             // image input all the same.
+            "Cargo.toml",
+            "rust-toolchain",
             "rust-toolchain.toml",
         ];
         included.extend(catalog_context_inputs());
@@ -395,7 +403,6 @@ mod tests {
             "justfiles/anvil/container/run-in-container.sh",
             // Everything else stays out: the working tree is bind-mounted at
             // run time rather than baked into the image.
-            "Cargo.toml",
             "crates/example/src/lib.rs",
             "justfiles/basic.just",
             "justfiles/anvil/notes.md",

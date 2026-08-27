@@ -362,21 +362,42 @@ invocations like `just anvil-miri` fail loudly if a required tool is missing or
 predates the catalog minimum, with a one-line hint pointing at the matching
 `anvil-tool-<name>-install` recipe.
 
-### 3.5 The Rust toolchain
+### 3.5 The stable Rust toolchain
 
-`rust-toolchain.toml` is read but never written, and anvil never installs the *project's*
-Rust toolchain itself. Per-backend rationale lives in [github.md](./github.md#rust-toolchain)
-and [ado.md](./ado.md#rust-toolchain); short version: msrustup owns it on ADO/1ESPT, the
-runner image owns it on GH, the user owns it locally.
+Anvil selects one deterministic toolchain for every check that otherwise uses the
+ambient stable toolchain. The selection order is:
 
-`anvil-tool-rustc-validate-prereqs` validates the installed `rustc` against the
-catalog's minimum at recipe time; a below-minimum `rustc` produces a clean failure
-message naming the version mismatch. Per-check toolchain requirements (e.g. miri,
-careful, udeps need nightly) are enforced by the matching
-`anvil-toolchain-<name>-validate-prereqs` recipe, which suggests the
-user-environment-appropriate install command in the failure message
-(`rustup install nightly-YYYY-MM-DD` or "ask your team's pipeline owner to add
-nightly to msrustup").
+1. `RUSTUP_TOOLCHAIN`, when the caller already set it. This is the standard rustup
+   override and lets internal pipelines select an installed `ms-prod-*` toolchain.
+2. The `channel` or `path` selected by a root `rust-toolchain` or
+   `rust-toolchain.toml`. The legacy file name wins when both exist, matching rustup.
+3. The root package or `[workspace.package]` `rust-version`, treated as the
+   repository MSRV.
+
+There is no runner-default fallback. A repository with neither a selecting toolchain
+file nor a root MSRV fails with an actionable setup error rather than inheriting a
+compiler that can change with the machine image.
+
+The generated `.anvil/resolve-stable-toolchain.ps1` implements this contract. For
+an existing environment override or MSRV fallback, the recipe tree exports the
+result as `RUSTUP_TOOLCHAIN`. For a selecting toolchain file it leaves that
+variable empty so rustup processes the complete file, including its components,
+targets, and profile. `just anvil-*` therefore behaves the same locally and in
+cloud workflows without changing the user's global rustup default. Raw `cargo`
+commands outside Anvil retain normal rustup behavior.
+
+When selection falls back to the root MSRV, prerequisite validation reads
+`cargo metadata` and requires every workspace package to resolve to that same
+`rust_version`. Workspaces with missing or heterogeneous package MSRVs must choose a
+single catalog toolchain explicitly with a selecting toolchain file. Anvil does not
+build a per-package toolchain matrix for this uncommon case.
+
+`anvil-tool-rustc-validate-prereqs` verifies the selected compiler and the uniform
+MSRV rule. Per-check toolchain requirements (for example, miri, careful, and udeps
+need nightly) remain enforced by the matching
+`anvil-toolchain-<name>-validate-prereqs` recipe. Explicit `cargo +toolchain`
+arguments retain rustup's higher precedence, so these checks continue to use the
+catalog's dated nightly pins.
 
 ### 3.6 Nightly pinning
 

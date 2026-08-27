@@ -77,6 +77,24 @@ runs:
         }
         "Free after cleanup (GiB): $(Get-FreeDiskGiB)"
 
+    - name: Resolve stable toolchain
+      shell: pwsh -NoProfile -Command ". '{0}'"
+      run: |
+        $source = if ([string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) { 'resolved' } else { 'environment' }
+        & '.anvil/resolve-stable-toolchain.ps1' -InstallIfMissing
+        if ($LASTEXITCODE -ne 0) {
+          throw 'anvil: failed to install stable toolchain'
+        }
+        $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($toolchain)) {
+          throw 'anvil: failed to resolve stable toolchain'
+        }
+        $environmentValue = (& '.anvil/resolve-stable-toolchain.ps1' -ForEnvironment | Out-String).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($environmentValue)) {
+          "RUSTUP_TOOLCHAIN=$environmentValue" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        }
+        "ANVIL_STABLE_TOOLCHAIN_SOURCE=$source" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+        Write-Host "anvil: selected stable toolchain '$toolchain'"
     - id: rustc-version
       shell: bash
       run: echo "version=$(rustc --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
@@ -119,19 +137,6 @@ runs:
           ~/.cargo/.crates.toml
           ~/.cargo/.crates2.json
           target/
-
-    # rustup auto-installs the toolchain from rust-toolchain.toml on
-    # first cargo invocation, but it doesn't pull profile/component
-    # extras. The `anvil-setup` recipe in step "Install anvil
-    # toolchains + tools" below handles that exhaustively (the
-    # per-component install recipes in tools.just install
-    # default-toolchain components and pinned-nightly components for
-    # miri/careful/etc.) -- we don't add components inline here anymore.
-    # This step exists only to ensure rustup itself has the default
-    # toolchain set up so subsequent cargo / just calls work.
-    - name: Ensure default toolchain is installed
-      shell: bash
-      run: rustup show active-toolchain || rustup default stable
 
     # The catalog recipe `anvil-setup` (or `anvil-<group>-setup`
     # when a group is specified via the `group` input) needs `just` to

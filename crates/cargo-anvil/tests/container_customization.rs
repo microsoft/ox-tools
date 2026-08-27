@@ -488,6 +488,7 @@ fn powershell_just_dispatch_treats_interpolated_values_as_data() {
     let runner_output = Command::new("just")
         .args(["_anvil-run", "missing", "x') { Write-Output RUNNER_INJECTED } elseif ('a"])
         .current_dir(root)
+        .env("RUSTUP_TOOLCHAIN", "1.93")
         .output()
         .expect("just must be available");
     assert!(!runner_output.status.success(), "the missing native tier must fail");
@@ -503,6 +504,7 @@ fn powershell_just_dispatch_treats_interpolated_values_as_data() {
     let recipe_output = Command::new("just")
         .args(["anvil-container", "x'); Write-Output RECIPE_INJECTED; @('a"])
         .current_dir(root)
+        .env("RUSTUP_TOOLCHAIN", "1.93")
         .output()
         .expect("just must be available");
     assert!(

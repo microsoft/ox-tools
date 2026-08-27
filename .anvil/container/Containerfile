@@ -49,15 +49,14 @@ RUN curl --proto '=https' --tlsv1.2 -fsSLo /tmp/rustup-init \
 
 WORKDIR /opt/anvil
 COPY . .
-RUN test -f rust-toolchain.toml || { \
-        echo "anvil-container requires rust-toolchain.toml" >&2; \
-        exit 1; \
-    }
 RUN --mount=type=cache,id=anvil-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=anvil-cargo-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=anvil-cargo-target,target=/tmp/anvil-target \
-    printf "anvil_runner := \"native\"\nimport 'justfiles/anvil/mod.just'\n" > Justfile \
-    && CARGO_TARGET_DIR=/tmp/anvil-target just anvil-setup
+    pwsh -NoProfile -File .anvil/resolve-stable-toolchain.ps1 -InstallIfMissing \
+    && toolchain="$(pwsh -NoProfile -File .anvil/resolve-stable-toolchain.ps1 -ForEnvironment)" \
+    && printf "anvil_runner := \"native\"\nimport 'justfiles/anvil/mod.just'\n" > Justfile \
+    && RUSTUP_TOOLCHAIN="$toolchain" ANVIL_STABLE_TOOLCHAIN_SOURCE=container \
+        CARGO_TARGET_DIR=/tmp/anvil-target just anvil-setup
 
 COPY .anvil/container/entrypoint.sh /usr/local/bin/anvil-container-entrypoint
 RUN chmod 755 /usr/local/bin/anvil-container-entrypoint
