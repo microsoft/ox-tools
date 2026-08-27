@@ -744,8 +744,12 @@ fn plan_removals(
         // writes and leave a Dockerfile with no `FROM`. The regions are still
         // there under a key the manifest already carries, so the honest answer
         // is to transfer ownership to the new key and touch nothing on disk.
+        //
+        // No `resolved_host != key.host` guard: the `continue` above has
+        // already established that the recorded key is not live, so when the
+        // resolution changes nothing this lookup repeats it and fails.
         let resolved_host = resolve_existing_case_insensitive(repo_root, &key.host);
-        if resolved_host != key.host && live_regions.contains(&(resolved_host, key.id.clone())) {
+        if live_regions.contains(&(resolved_host, key.id.clone())) {
             plan.push(PlanItem::orphaned_kept(Target::Region {
                 host: key.host.clone(),
                 id: key.id.clone(),
