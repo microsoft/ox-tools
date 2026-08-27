@@ -352,9 +352,11 @@ fn push_region_at(
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
     let host = resolve_existing_case_insensitive(repo_root, host);
-    if host_scaffold(&host).is_some() && !composed.states.contains_key(&host) {
+    if let Some((scaffold, order)) = composed_host_spec(&host)
+        && !composed.states.contains_key(&host)
+    {
         let state = match hosts.get_or_read(repo_root, &host)? {
-            Some(text) => composed_host_state(&host, &text, manifest),
+            Some(text) => composed_host_state(order, &host, &text, manifest),
             // Nothing on disk. The scaffold becomes the base the first region
             // splices into, carrying the parts of the file that cannot live
             // inside a region -- the `# syntax=` parser directive above all. It
@@ -362,9 +364,7 @@ fn push_region_at(
             // sentinels is the repository's from then on.
             None => ComposedHostState::SeedFromScaffold,
         };
-        if matches!(state, ComposedHostState::SeedFromScaffold)
-            && let Some(scaffold) = host_scaffold(&host)
-        {
+        if matches!(state, ComposedHostState::SeedFromScaffold) {
             hosts.set(&host, scaffold.to_owned());
         }
         composed.states.insert(host.clone(), state);
@@ -444,23 +444,22 @@ fn region_placement(region_id: &str) -> RegionPlacement {
     }
 }
 
-/// The initial content for a host anvil composes but does not own, used only
-/// when the file is absent.
+/// The scaffold and region order for a host anvil composes rather than owns.
 ///
 /// Most region hosts are files the repository already has (`Cargo.toml`,
-/// `deny.toml`) or files whose first region can simply be appended to nothing.
-/// The container Dockerfile is neither: `# syntax=docker/dockerfile:1` is a
-/// `BuildKit` parser directive that is honored only when nothing precedes it,
-/// not even a comment — so it cannot live inside a region, whose opening
-/// sentinel *is* a comment.
-fn host_scaffold(host_relpath: &str) -> Option<&'static str> {
-    (host_relpath == container::DOCKERFILE_PATH).then_some(container::DOCKERFILE_HEADER)
-}
-
-/// The order anvil's regions must appear in inside a composed host, when order
-/// is semantically load-bearing.
-fn host_region_order(host_relpath: &str) -> Option<&'static [&'static str]> {
-    (host_relpath == container::DOCKERFILE_PATH).then_some(container::DOCKERFILE_REGION_ORDER)
+/// `deny.toml`) or files whose first region can be appended to nothing, and
+/// whose regions are order-independent — TOML tables, line sets. The container
+/// Dockerfile is neither.
+///
+/// The **scaffold** exists because `# syntax=docker/dockerfile:1` is a `BuildKit`
+/// parser directive honored only when nothing precedes it, not even a comment —
+/// so it cannot live inside a region, whose opening sentinel *is* a comment. It
+/// is written when the file is absent and never reconciled afterwards.
+///
+/// The **order** is load-bearing: `FROM` must precede every instruction that
+/// depends on it, and the toolchain must exist before `anvil-setup` runs.
+fn composed_host_spec(host_relpath: &str) -> Option<(&'static str, &'static [&'static str])> {
+    (host_relpath == container::DOCKERFILE_PATH).then_some((container::DOCKERFILE_HEADER, container::DOCKERFILE_REGION_ORDER))
 }
 
 /// What a composed host's current content allows anvil to do with it.
@@ -497,10 +496,7 @@ struct ComposedHosts {
 /// regions in anyway, and each would produce a file that is silently wrong:
 /// `upsert_region` appends a missing region at end-of-file, which is the right
 /// answer only when the file is already the composed shape.
-fn composed_host_state(host_relpath: &str, text: &str, manifest: &Manifest) -> ComposedHostState {
-    let Some(order) = host_region_order(host_relpath) else {
-        return ComposedHostState::Composable;
-    };
+fn composed_host_state(order: &[&str], host_relpath: &str, text: &str, manifest: &Manifest) -> ComposedHostState {
     let present: Vec<(&str, usize)> = order
         .iter()
         .filter_map(|id| match find_region(text, id, CommentSyntax::Hash) {
