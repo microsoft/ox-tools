@@ -250,7 +250,10 @@ repo/
 ├── .cargo/config.toml                             user-authored (read only)
 │
 ├── .github/                                       only if --backend github (or autodetected) — see github.md
-│   ├── actions/anvil-*/                             owned   (per-group composite actions)
+│   ├── actions/anvil-setup/                         owned   (setup action and Just problem matcher)
+│   ├── actions/anvil-run-group/                     owned   (shared group action and capture script)
+│   ├── actions/anvil-report-status/                 owned   (supplemental commit-status reporter)
+│   ├── actions/anvil-impact/                        owned   (impact analysis action)
 │   ├── workflows/anvil-pr-impl.yml                  owned   (reusable workflow doing the wiring)
 │   ├── workflows/anvil-scheduled-impl.yml             owned
 │   ├── workflows/anvil-pr.yml                       owned   (root workflow: triggers/permissions/runner)

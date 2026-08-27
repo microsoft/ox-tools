@@ -1849,10 +1849,21 @@ steps:
       # the restore ended, so the publish step can tell a continuation of
       # the chain from a job that never established one.
       function Complete-Restore([string]$state) {
-          New-Item -ItemType Directory -Force -Path $path | Out-Null
+          # Assembled beside the published path and moved into place in one
+          # step. A copy that failed partway would otherwise leave a partial
+          # store exactly where a wrapper forked before `artifacts[].condition`
+          # existed -- which ignores that field silently -- would publish it
+          # over the accumulated chain.
+          $parent = Split-Path -Parent $path
+          if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+          $pending = "$path.pending-$PID"
+          Remove-Item -Recurse -Force $pending -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $pending | Out-Null
           if (Test-Path (Join-Path $staging '*')) {
-              Copy-Item -Path (Join-Path $staging '*') -Destination $path -Recurse -Force
+              Copy-Item -Path (Join-Path $staging '*') -Destination $pending -Recurse -Force
           }
+          Remove-Item -Recurse -Force $path -ErrorAction SilentlyContinue
+          Move-Item -LiteralPath $pending -Destination $path
           Write-Host "##vso[task.setvariable variable=ANVIL_BENCH_RESTORE]$state"
           # The recipe refuses to write anywhere but here, so a wrapper that
           # retargets `path` cannot silently detach the recipe's store from
@@ -1863,9 +1874,18 @@ steps:
       $collection = $env:SYSTEM_COLLECTIONURI
       $project = $env:SYSTEM_TEAMPROJECTID
       $definition = $env:SYSTEM_DEFINITIONID
-      $branch = $env:BUILD_SOURCEBRANCH
       $headers = @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }
 
+      # The series is keyed on the repository's default branch, matching the
+      # GitHub backend and the documented contract. Keying on the branch the
+      # build happened to run on would fork a fresh, one-sample history for
+      # every manual or release-branch run and report that as clean.
+      $definitionUri = "$collection$project/_apis/build/definitions/$definition" + "?api-version=7.0"
+      $branch = (Invoke-RestMethod -Uri $definitionUri -Headers $headers).repository.defaultBranch
+      if (-not $branch) {
+          Write-Error "anvil: could not resolve the pipeline's default branch, so the history series cannot be identified; refusing to continue rather than fork a new chain under the current branch."
+          exit 1
+      }
       # Newest first, whatever the outcome: a flagged regression fails the
       # build, so restricting to successful builds would discard exactly
       # the stretch of history that matters most.
@@ -3149,7 +3169,12 @@ anvil-bench-history: anvil-bench-history-validate-prereqs
     if ($wired) {
         $wantPath = [System.IO.Path]::GetFullPath($wired)
         $gotPath = [System.IO.Path]::GetFullPath($store)
-        if ($wantPath -ne $gotPath) {
+        # Case-sensitively off Windows: PowerShell's -ne is case-insensitive on
+        # every platform, so on Linux two genuinely different directories would
+        # compare equal and the detached-store failure this guard exists to
+        # catch would slip through.
+        $same = if ($IsWindows) { $wantPath -eq $gotPath } else { $wantPath -ceq $gotPath }
+        if (-not $same) {
             Write-Error "anvil: the benchmark history store is '$store', but the CI wiring restores and publishes '$wired'. Results written to the former would never be persisted, so every run would cold-start and report a false clean."
             exit 1
         }
@@ -3298,6 +3323,17 @@ _anvil-bench-history-bless store blessings:
                 exit 1
             }
         }
+        # `benchmark` and `commit` are passed to cbh and git. A leading `-`
+        # would be read as an option there, so reject it here rather than let
+        # the file's documented subset be reinterpreted: `benchmark = "--all"`
+        # would otherwise accept every benchmark at the commit while the log
+        # claimed a benchmark of that name.
+        foreach ($guarded in @('benchmark', 'commit')) {
+            if ($e[$guarded].StartsWith('-')) {
+                Write-Error "anvil-bench-history: '$guarded' in $blessingsFile must not begin with '-' (got '$($e[$guarded])'); it is a benchmark id or commit, not an option"
+                exit 1
+            }
+        }
     }
 
     $key = @()
@@ -3316,6 +3352,24 @@ _anvil-bench-history-bless store blessings:
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $applied = @((Get-Content -LiteralPath $listJson -Raw | ConvertFrom-Json).blessings)
 
+    # A blessing can only be applied at a commit the store still holds a clean
+    # run for: cbh rejects a context commit with no data point, and `collect`
+    # only ever records the current commit, so a commit the store has forgotten
+    # can never be re-established by a later run. Without this, any cold start
+    # or artifact eviction past a blessed commit would turn the group
+    # permanently red until a human edited the ledger -- a blessing whose
+    # commit has aged out is inapplicable, not invalid.
+    $runsJson = Join-Path $tmpDir "anvil-bench-runs-$PID.json"
+    & cargo bench-history list runs --local="$store" `
+        --since 1970-01-01 --no-text --json $runsJson @key
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $stored = [System.Collections.Generic.List[string]]::new()
+    foreach ($set in (Get-Content -LiteralPath $runsJson -Raw | ConvertFrom-Json).sets) {
+        foreach ($c in $set.commits) {
+            if ($c.clean -ge 1 -and $c.commit) { $stored.Add($c.commit) | Out-Null }
+        }
+    }
+
     foreach ($e in $entries) {
         $commit = $e['commit']
         $benchmark = $e['benchmark']
@@ -3328,21 +3382,30 @@ _anvil-bench-history-bless store blessings:
             exit 1
         }
         $resolved = $resolved.Trim()
-        # Compare the persisted identity exactly. A `StartsWith` in either
-        # direction is wrong: a stored concrete `foo/bar` would satisfy a
-        # prefix test for the broader `foo`, so a committed blessing of
-        # `foo` would be skipped while still leaving the build red -- with
-        # a log line claiming it was already in effect.
+        # Compare the persisted identity exactly. `list blessings --all` is the
+        # window view: it reports resolved, concrete benchmark ids and never
+        # populates `prefixes`. Since cbh's positional is a prefix, a ledger
+        # entry naming a family expands to several concrete rows and matches
+        # none of them, so such an entry is re-applied each run. That is the
+        # safe direction to be wrong in: re-blessing is idempotent in effect,
+        # whereas a loose prefix test would skip an entry that is only
+        # partially applied and leave the build red while claiming otherwise.
         $already = $applied | Where-Object {
-            $resolved.StartsWith($_.commit) -and
-            (($_.prefixes -contains $benchmark) -or ($_.benchmark -eq $benchmark))
+            $resolved.StartsWith($_.commit) -and ($_.benchmark -eq $benchmark)
         }
         if ($already) {
             Write-Host "anvil-bench-history: blessing already in effect: $benchmark at $commit"
             continue
         }
+        if (-not ($stored | Where-Object { $resolved.StartsWith($_) })) {
+            Write-Host "anvil-bench-history: skipping blessing of $benchmark at $commit -- the store holds no run at that commit, so there is nothing to accept. It applies again if that commit is measured again."
+            continue
+        }
         Write-Host "anvil-bench-history: blessing $benchmark at $commit -- $($e['reason'])"
-        & cargo bench-history bless --local="$store" --context $resolved @key $benchmark
+        # `--` so a benchmark id is never parsed as a flag: bless's positional
+        # takes no hyphen values, and it has an `--all` sibling that would
+        # otherwise accept every benchmark at the commit.
+        & cargo bench-history bless --local="$store" --context $resolved @key -- $benchmark
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 

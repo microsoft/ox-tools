@@ -58,10 +58,21 @@ steps:
       # the restore ended, so the publish step can tell a continuation of
       # the chain from a job that never established one.
       function Complete-Restore([string]$state) {
-          New-Item -ItemType Directory -Force -Path $path | Out-Null
+          # Assembled beside the published path and moved into place in one
+          # step. A copy that failed partway would otherwise leave a partial
+          # store exactly where a wrapper forked before `artifacts[].condition`
+          # existed -- which ignores that field silently -- would publish it
+          # over the accumulated chain.
+          $parent = Split-Path -Parent $path
+          if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+          $pending = "$path.pending-$PID"
+          Remove-Item -Recurse -Force $pending -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $pending | Out-Null
           if (Test-Path (Join-Path $staging '*')) {
-              Copy-Item -Path (Join-Path $staging '*') -Destination $path -Recurse -Force
+              Copy-Item -Path (Join-Path $staging '*') -Destination $pending -Recurse -Force
           }
+          Remove-Item -Recurse -Force $path -ErrorAction SilentlyContinue
+          Move-Item -LiteralPath $pending -Destination $path
           Write-Host "##vso[task.setvariable variable=ANVIL_BENCH_RESTORE]$state"
           # The recipe refuses to write anywhere but here, so a wrapper that
           # retargets `path` cannot silently detach the recipe's store from
@@ -72,9 +83,18 @@ steps:
       $collection = $env:SYSTEM_COLLECTIONURI
       $project = $env:SYSTEM_TEAMPROJECTID
       $definition = $env:SYSTEM_DEFINITIONID
-      $branch = $env:BUILD_SOURCEBRANCH
       $headers = @{ Authorization = "Bearer $($env:SYSTEM_ACCESSTOKEN)" }
 
+      # The series is keyed on the repository's default branch, matching the
+      # GitHub backend and the documented contract. Keying on the branch the
+      # build happened to run on would fork a fresh, one-sample history for
+      # every manual or release-branch run and report that as clean.
+      $definitionUri = "$collection$project/_apis/build/definitions/$definition" + "?api-version=7.0"
+      $branch = (Invoke-RestMethod -Uri $definitionUri -Headers $headers).repository.defaultBranch
+      if (-not $branch) {
+          Write-Error "anvil: could not resolve the pipeline's default branch, so the history series cannot be identified; refusing to continue rather than fork a new chain under the current branch."
+          exit 1
+      }
       # Newest first, whatever the outcome: a flagged regression fails the
       # build, so restricting to successful builds would discard exactly
       # the stretch of history that matters most.

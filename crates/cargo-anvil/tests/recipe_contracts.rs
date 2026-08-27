@@ -135,7 +135,16 @@ if ($args -contains 'bench-history') {
         exit [int]$env:FAKE_CBH_ANALYZE_EXIT
     }
     if ($cbhArgs -contains 'list') {
-        Write-Report $cbhArgs '--json' $env:FAKE_CBH_BLESSINGS
+        if ($cbhArgs -contains 'runs') {
+            $runs = if ($env:FAKE_CBH_RUNS) {
+                $env:FAKE_CBH_RUNS
+            } else {
+                '{"sets":[{"commits":[{"commit":"8392995a3b94","runs":1,"clean":1,"dirty":0}]}]}'
+            }
+            Write-Report $cbhArgs '--json' $runs
+        } else {
+            Write-Report $cbhArgs '--json' $env:FAKE_CBH_BLESSINGS
+        }
         exit 0
     }
     if ($cbhArgs -contains 'bless') { exit [int]$env:FAKE_CBH_BLESS_EXIT }
@@ -989,14 +998,61 @@ fn bench_history_bless_reconciles_on_exact_prefix_identity() {
         both_streams(&output)
     );
 
-    // The exact same prefix already recorded is a no-op, so a scheduled run
-    // never re-appends a sidecar that is already in effect.
-    let exact = r#"{"blessings":[{"commit":"8392995a3b94","prefixes":["emit_alloc"]}]}"#;
+    // The exact same id already recorded is a no-op, so a scheduled run never
+    // re-appends a sidecar that is already in effect. Window-shaped, because
+    // `list blessings --all` reports concrete ids and never `prefixes` --
+    // fixtures in the HEAD shape would cover a branch that never runs here.
+    let exact = r#"{"blessings":[{"commit":"8392995a3b94","benchmark":"emit_alloc"}]}"#;
     let (tmp, output) = run_bless(requested, exact);
     assert!(output.status.success());
     assert!(
         !cargo_calls(tmp.path()).contains("bench-history bless"),
         "an already-applied blessing must not be re-appended:{}",
+        both_streams(&output)
+    );
+}
+
+#[test]
+fn bench_history_bless_skips_commits_the_store_has_forgotten() {
+    if !tools_available() {
+        return;
+    }
+    let requested = "[[blessing]]\n\
+        benchmark = \"emit_alloc\"\n\
+        commit = \"8392995a\"\n\
+        reason = \"arena allocator tradeoff\"\n";
+
+    // cbh refuses to bless a context commit it holds no run for, and `collect`
+    // only ever records the current commit, so a commit lost to a cold start
+    // or artifact eviction can never come back. Applying it anyway would fail
+    // the recipe before analyze on every run, leaving the group permanently
+    // red until a human edited the ledger.
+    let tmp = fixture(
+        &[("bench-history.just", BENCH_HISTORY)],
+        &[
+            "anvil-tool-cargo-bench-history-validate-prereqs",
+            "anvil-tool-cargo-bench-history-install installer=\"install\"",
+        ],
+    );
+    write(&tmp.path().join(".config/bench-blessings.toml"), requested);
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["_anvil-bench-history-bless", "store", ".config/bench-blessings.toml"],
+        &[
+            ("FAKE_CBH_BLESSINGS", OsStr::new(r#"{"blessings":[]}"#)),
+            ("FAKE_CBH_RUNS", OsStr::new(r#"{"sets":[]}"#)),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "a forgotten commit must not fail the recipe:{}",
+        both_streams(&output)
+    );
+    assert!(
+        !cargo_calls(tmp.path()).contains("bench-history bless"),
+        "nothing to accept at a commit the store has forgotten:{}",
         both_streams(&output)
     );
 }
@@ -1033,6 +1089,17 @@ fn bench_history_bless_rejects_malformed_entries() {
         ("[[blessing]]\nbenchmark = emit_alloc\n", "unquoted value"),
         ("[[blessing]]\nbenchmark = \"a\"\ncommit = \"b\"\n", "missing reason"),
         ("[[other]]\nbenchmark = \"a\"\n", "unexpected table"),
+        // A leading `-` would reach cbh as a flag rather than a benchmark id.
+        // `--all` in particular has a real meaning there: accept *every*
+        // benchmark at the commit, while the log claims one named `--all`.
+        (
+            "[[blessing]]\nbenchmark = \"--all\"\ncommit = \"8392995a\"\nreason = \"r\"\n",
+            "an option-shaped benchmark",
+        ),
+        (
+            "[[blessing]]\nbenchmark = \"emit_alloc\"\ncommit = \"--all\"\nreason = \"r\"\n",
+            "an option-shaped commit",
+        ),
     ] {
         let (_tmp, output) = run_bless(body, applied);
         assert_failed(&output, label);
@@ -1049,7 +1116,7 @@ fn bench_history_bless_rejects_malformed_entries() {
 // transports.
 // ---------------------------------------------------------------------------
 
-const GH_BENCH_RESTORE: &str = include_str!("../templates/github/bench-history-restore.yml");
+const GH_BENCH_RESTORE: &str = include_str!("../templates/github/scheduled-impl-workflow.yml");
 const ADO_RESTORE: &str = include_str!("../templates/ado/steps/bench-history-restore.yml");
 
 /// Extracts a block scalar (`run: |` / `pwsh: |`) from `yaml`, starting the
@@ -1082,7 +1149,7 @@ fn git_bash() -> Option<&'static str> {
 ///
 /// `runs` are the run ids the listing yields, newest first; `artifact_runs`
 /// are those the artifacts API reports as carrying the artifact.
-fn run_github_restore(runs: &str, artifact_runs: &str, download_exit: &str) -> (TempDir, Output, String, String) {
+fn run_github_restore(runs: &str, artifact_runs: &str, download_exit: &str, runs_exit: &str) -> (TempDir, Output, String, String) {
     let bash = git_bash().expect("git bash checked by caller");
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
@@ -1091,6 +1158,10 @@ fn run_github_restore(runs: &str, artifact_runs: &str, download_exit: &str) -> (
         &root.join("bin/gh"),
         r#"#!/usr/bin/env bash
 if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  if [ -n "$FAKE_GH_RUNS_EXIT" ] && [ "$FAKE_GH_RUNS_EXIT" != "0" ]; then
+    echo "gh: HTTP 502 Bad Gateway (api.github.com)" >&2
+    exit "$FAKE_GH_RUNS_EXIT"
+  fi
   for id in $FAKE_GH_RUNS; do echo "$id"; done
   exit 0
 fi
@@ -1118,18 +1189,27 @@ exit 0
     let script = block_scalar(GH_BENCH_RESTORE, "- name: Restore benchmark history", "run: |");
     write(&root.join("restore.sh"), &script);
 
+    // `gh` is bound as a shell function rather than found on PATH. Git for
+    // Windows' bash prepends its own entries to whatever PATH it is handed,
+    // so a stub placed on PATH can be shadowed by a real `gh` earlier in the
+    // resolution order -- which silently exercises the developer's GitHub CLI
+    // instead of the fixture. Function lookup precedes PATH, so this cannot
+    // be shadowed.
+    write(&root.join("run.sh"), "gh() { bash \"$STUB_GH\" \"$@\"; }\n. ./restore.sh\n");
+
     let github_env = root.join("env.txt");
     let summary = root.join("summary.md");
     write(&github_env, "");
     write(&summary, "");
 
     let output = Command::new(bash)
-        .arg("restore.sh")
+        .arg("run.sh")
         .current_dir(root)
-        .env("PATH", format!("{}:/usr/bin:/bin", root.join("bin").display()).replace('\\', "/"))
+        .env("STUB_GH", root.join("bin/gh").display().to_string().replace('\\', "/"))
         .env("FAKE_GH_RUNS", runs)
         .env("FAKE_GH_ARTIFACT_RUNS", artifact_runs)
         .env("FAKE_GH_DOWNLOAD_EXIT", download_exit)
+        .env("FAKE_GH_RUNS_EXIT", runs_exit)
         .env("ARTIFACT", "bench-history-linux")
         .env("DEFAULT_BRANCH", "main")
         .env("WORKFLOW", "anvil-scheduled")
@@ -1154,7 +1234,7 @@ fn github_restore_separates_absence_from_failure() {
 
     // (1) The newest run has no artifact; an older one does. The walk must
     // reach it rather than cold-starting on the first miss.
-    let (_tmp, output, env, _summary) = run_github_restore("30 20 10", "10", "0");
+    let (_tmp, output, env, _summary) = run_github_restore("30 20 10", "10", "0", "0");
     assert!(
         output.status.success(),
         "walking back should succeed:\n{}",
@@ -1169,7 +1249,7 @@ fn github_restore_separates_absence_from_failure() {
 
     // (2) No run in the window carries it: a genuine cold start, and it must
     // be visible on the summary rather than only in the log.
-    let (_tmp, output, env, summary) = run_github_restore("30 20 10", "", "0");
+    let (_tmp, output, env, summary) = run_github_restore("30 20 10", "", "0", "0");
     assert!(output.status.success());
     assert!(env.contains("ANVIL_BENCH_RESTORE=cold-start"), "env:\n{env}");
     assert!(summary.contains("cold start"), "summary:\n{summary}");
@@ -1177,12 +1257,20 @@ fn github_restore_separates_absence_from_failure() {
     // (3) The artifact exists but the download fails. This is the branch whose
     // silent reintroduction re-creates the history-loss bug: it must fail and
     // leave no publishable restore state.
-    let (_tmp, output, env, _summary) = run_github_restore("30 20 10", "30", "1");
+    let (_tmp, output, env, _summary) = run_github_restore("30 20 10", "30", "1", "0");
     assert_failed(&output, "a failing download");
     assert!(
         !env.contains("ANVIL_BENCH_RESTORE"),
         "a failed restore must not mark a publishable state:\n{env}"
     );
+
+    // (4) Listing the runs fails outright. `set -e` does not apply to a
+    // command substitution consumed as a `for` word list, so this branch
+    // would otherwise fall through to a cold start and publish a truncated
+    // store over the chain while reporting green.
+    let (_tmp, output, env, _summary) = run_github_restore("30 20 10", "10", "0", "1");
+    assert_failed(&output, "a failing run listing");
+    assert!(!env.contains("ANVIL_BENCH_RESTORE"), "a failed listing is not a cold start:\n{env}");
 }
 
 /// Runs the ADO restore block with mocked REST/download/extract cmdlets.
@@ -1190,7 +1278,7 @@ fn github_restore_separates_absence_from_failure() {
 /// `artifact_builds` are the build ids whose artifact query succeeds; every
 /// other build answers 404 (absence). `failure` injects an operational fault:
 /// "query" (non-404 status), "download", or "extract".
-fn run_ado_restore(builds: &str, artifact_builds: &str, failure: &str) -> (TempDir, Output, String) {
+fn run_ado_restore(builds: &str, artifact_builds: &str, failure: &str, no_default_branch: bool) -> (TempDir, Output, String) {
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
 
@@ -1212,6 +1300,14 @@ class FakeHttpException : System.Exception {
 }
 function Invoke-RestMethod {
     param([string]$Uri, $Headers)
+    if ($Uri -like '*/definitions/*') {
+        # The pipeline definition carries the default branch the series is
+        # keyed on. FAKE_ADO_NO_DEFAULT_BRANCH withholds it.
+        if ($env:FAKE_ADO_NO_DEFAULT_BRANCH) {
+            return [pscustomobject]@{ repository = [pscustomobject]@{ defaultBranch = $null } }
+        }
+        return [pscustomobject]@{ repository = [pscustomobject]@{ defaultBranch = 'refs/heads/main' } }
+    }
     if ($Uri -notlike '*/artifacts*') {
         $ids = $env:FAKE_ADO_BUILDS -split ' ' | Where-Object { $_ }
         return [pscustomobject]@{ value = @($ids | ForEach-Object { [pscustomobject]@{ id = $_ } }) }
@@ -1243,6 +1339,7 @@ function Expand-Archive {
         .env("FAKE_ADO_BUILDS", builds)
         .env("FAKE_ADO_ARTIFACT_BUILDS", artifact_builds)
         .env("FAKE_ADO_FAILURE", failure)
+        .env("FAKE_ADO_NO_DEFAULT_BRANCH", if no_default_branch { "1" } else { "" })
         .env("SYSTEM_ACCESSTOKEN", "token")
         .env("SYSTEM_COLLECTIONURI", "https://example/")
         .env("SYSTEM_TEAMPROJECTID", "project")
@@ -1264,7 +1361,7 @@ fn ado_restore_separates_absence_from_failure() {
     }
 
     // A 404 on the newest build walks back to an older one that has it.
-    let (_tmp, output, stdout) = run_ado_restore("30 20 10", "10", "");
+    let (_tmp, output, stdout) = run_ado_restore("30 20 10", "10", "", false);
     assert!(
         output.status.success(),
         "walking back should succeed:\n{}",
@@ -1274,7 +1371,7 @@ fn ado_restore_separates_absence_from_failure() {
     assert!(stdout.contains("ANVIL_BENCH_RESTORE]restored"), "stdout:\n{stdout}");
 
     // Nothing in the window carries it: a genuine cold start.
-    let (_tmp, output, stdout) = run_ado_restore("30 20 10", "", "");
+    let (_tmp, output, stdout) = run_ado_restore("30 20 10", "", "", false);
     assert!(output.status.success());
     assert!(stdout.contains("ANVIL_BENCH_RESTORE]cold-start"), "stdout:\n{stdout}");
 
@@ -1282,13 +1379,24 @@ fn ado_restore_separates_absence_from_failure() {
     // which is what the guarded publish depends on to avoid overwriting a
     // good chain with a truncated store.
     for failure in ["query", "download", "extract"] {
-        let (_tmp, output, stdout) = run_ado_restore("30 20 10", "30", failure);
+        let (_tmp, output, stdout) = run_ado_restore("30 20 10", "30", failure, false);
         assert_failed(&output, failure);
         assert!(
             !stdout.contains("ANVIL_BENCH_RESTORE]"),
             "{failure} must not set a restore state:\n{stdout}"
         );
     }
+
+    // The series is keyed on the default branch. If that cannot be resolved
+    // the leg does not know which chain it is extending, and silently keying
+    // on the branch this build ran on would fork a one-sample history and
+    // report it as clean.
+    let (_tmp, output, stdout) = run_ado_restore("30 20 10", "10", "", true);
+    assert_failed(&output, "an unresolvable default branch");
+    assert!(
+        !stdout.contains("ANVIL_BENCH_RESTORE]"),
+        "an unidentified series must not set a restore state:\n{stdout}"
+    );
 }
 
 #[test]

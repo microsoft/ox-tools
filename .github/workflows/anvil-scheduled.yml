@@ -16,9 +16,9 @@ permissions:
 jobs:
   anvil-scheduled:
     uses: ./.github/workflows/anvil-scheduled-impl.yml
-    # A called workflow cannot elevate beyond its caller. The implementation
-    # resets this upper bound to read-only and restores issues:write only on
-    # publish-failure. See docs/design/github.md.
+    # A called workflow cannot elevate beyond its caller, so the root grants
+    # issues:write while the implementation resets ordinary jobs to read-only
+    # and restores that scope only on publish-failure.
     permissions:
       contents: read
       # The scheduled-benchmarks job restores its history artifact, which

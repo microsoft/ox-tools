@@ -48,8 +48,8 @@ const SCHEDULED_ROOT_PIPELINE: &str = include_str!("../../../templates/ado/sched
 
 /// All check groups that get a per-group step template.
 ///
-/// See `github::GROUPS` for the rationale around splitting `pr-slow` into
-/// three cloud-workflow-visible sub-stages.
+/// The former umbrella group is split so cloud workflow UIs identify the
+/// category that failed while Just remains the source of recipe membership.
 #[cfg(test)]
 const GROUPS: &[&str] = &[
     "pr-fast",
@@ -442,7 +442,7 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_stages_has_four_groups() {
+    fn scheduled_stages_has_five_groups() {
         for needle in [
             "stage: scheduled_test",
             "stage: scheduled_advisories",
@@ -505,15 +505,21 @@ mod tests {
         assert!(BENCH_HISTORY_RESTORE_STEP.contains("if ($status -eq 404) { continue }"));
         assert!(BENCH_HISTORY_RESTORE_STEP.contains("Complete-Restore 'restored'"));
         assert!(BENCH_HISTORY_RESTORE_STEP.contains("Complete-Restore 'cold-start'"));
-        // Fail-closed by construction: the store path is created only inside
-        // Complete-Restore, so an operational failure leaves nothing for a
-        // wrapper that ignores the artifact condition to upload.
+        // Fail-closed by construction, and atomically: the store is assembled
+        // beside the published path and moved into place in one step, so
+        // neither an operational failure nor a copy that dies partway leaves
+        // anything for a wrapper that ignores the artifact condition to
+        // upload over the accumulated chain.
         assert_eq!(
             BENCH_HISTORY_RESTORE_STEP
-                .matches("New-Item -ItemType Directory -Force -Path $path")
+                .matches("Move-Item -LiteralPath $pending -Destination $path")
                 .count(),
             1,
-            "the store path must be created only on a completed restore"
+            "the store path must appear only via the atomic move"
+        );
+        assert!(
+            !BENCH_HISTORY_RESTORE_STEP.contains("Copy-Item -Path (Join-Path $staging '*') -Destination $path"),
+            "copying straight into the published path can leave a partial store there"
         );
         assert!(
             !BENCH_HISTORY_RESTORE_STEP.contains("continueOnError"),
