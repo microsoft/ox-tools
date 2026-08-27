@@ -801,6 +801,16 @@ fn mutants_diff_covers_uncommitted_work() {
     if !tools_available() || Command::new("git").arg("--version").output().is_err() {
         return;
     }
+    // On aarch64-pc-windows-msvc the recipe bails out before doing any of this,
+    // because cargo-mutants does not build there -- so there is no `--in-diff`
+    // behavior to assert. The architecture cannot be faked past: Windows
+    // re-derives PROCESSOR_ARCHITECTURE for every new process from its real
+    // architecture, so an override does not survive the spawn. The skip itself
+    // is covered by `mutants_diff_skips_on_arm64_windows`, and this contract is
+    // exercised on the other three legs.
+    if cfg!(windows) && cfg!(target_arch = "aarch64") {
+        return;
+    }
     let tmp = fixture(
         &[("helpers.just", HELPERS), ("mutants-diff.just", MUTANTS_DIFF)],
         &[
@@ -866,19 +876,17 @@ fn mutants_diff_covers_uncommitted_work() {
             ("FAKE_CARGO_LOG", log.as_os_str()),
             ("BASE_REF", OsStr::new(&base)),
             ("RUNNER_TEMP", root.as_os_str()),
-            // Pin the architecture the recipe branches on. It bails out early on
-            // aarch64-pc-windows-msvc, where cargo-mutants does not build, so on
-            // an ARM64 Windows runner this test would otherwise assert against a
-            // recipe that deliberately did nothing. Both variables are set
-            // because a 32-bit host process reports the real machine in the
-            // second one.
-            ("PROCESSOR_ARCHITECTURE", OsStr::new("AMD64")),
-            ("PROCESSOR_ARCHITEW6432", OsStr::new("")),
             // The other early exit. Impact scoping sets this to `--skip` when a
             // job has no affected packages, and the value is inherited from
             // whatever environment the test runs in -- so on a CI leg that
             // skipped, this test would assert against a recipe that returned
             // before doing anything. Pin it to a scope that runs.
+            //
+            // The architecture guard is deliberately *not* pinned: Windows
+            // re-derives PROCESSOR_ARCHITECTURE for each new process from the
+            // process's real architecture, so it cannot be overridden across a
+            // spawn. That is why this test returns early on ARM64 above rather
+            // than faking its way past the branch.
             ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
         ],
     );
