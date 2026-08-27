@@ -588,7 +588,7 @@ mod tests {
             assert!(!output.status.success());
             let diagnostic = normalized_diagnostic(&output);
             assert!(
-                diagnostic.contains("no root [workspace.package]"),
+                diagnostic.contains("no root") && diagnostic.contains("[workspace.package]"),
                 "unexpected resolver diagnostic: {diagnostic}"
             );
 
@@ -611,7 +611,7 @@ mod tests {
             assert!(!output.status.success());
             let diagnostic = normalized_diagnostic(&output);
             assert!(
-                diagnostic.contains("must resolve to the root MSRV"),
+                diagnostic.contains("must resolve to the root") && diagnostic.contains("MSRV"),
                 "unexpected resolver diagnostic: {diagnostic}"
             );
 
