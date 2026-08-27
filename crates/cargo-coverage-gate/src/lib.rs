@@ -13,7 +13,23 @@
 //! three-layer lookup, and emits a verdict table to stdout (and,
 //! optionally, to a Markdown summary file for CI step summaries).
 //!
-//! ## Threshold resolution
+//! ## Configuration
+//!
+//! ### Numeric thresholds
+//!
+//! A workspace can define the default line-coverage threshold:
+//!
+//! ```toml
+//! [workspace.metadata.coverage-gate]
+//! min-lines-percent = 80
+//! ```
+//!
+//! Individual packages can override it:
+//!
+//! ```toml
+//! [package.metadata.coverage-gate]
+//! min-lines-percent = 95
+//! ```
 //!
 //! For each workspace member, the effective threshold is the first match
 //! among:
@@ -25,13 +41,26 @@
 //! 3. The built-in default of `100.0` — full coverage required.
 //!
 //! Setting `min-lines-percent = 0.0` explicitly opts a package out of
-//! gating (it always passes, regardless of attributed data). A package
-//! that legitimately contains no coverable lines (pure re-exports, type
-//! definitions, a thin binary shim) instead declares
-//! `expect-no-coverable-lines = true`: the gate passes only while that
-//! holds and fails — as a regression — if coverable lines later appear.
-//! The two keys are mutually exclusive, and `expect-no-coverable-lines`
-//! is package-scoped only.
+//! gating: it always passes, regardless of attributed data. Thresholds must
+//! be in the inclusive range `0.0..=100.0`.
+//!
+//! ### Packages with no coverable lines
+//!
+//! A package that legitimately contains no coverable lines (pure re-exports,
+//! type definitions, or a thin binary shim) can make that invariant explicit:
+//!
+//! ```toml
+//! [package.metadata.coverage-gate]
+//! expect-no-coverable-lines = true
+//! ```
+//!
+//! The gate passes only while the package has no attributed coverable lines
+//! and fails as a regression if coverable code later appears. This differs
+//! from `min-lines-percent = 0`, which keeps passing if the package grows
+//! coverable code. The two keys are mutually exclusive, and
+//! `expect-no-coverable-lines` is package-scoped only.
+//!
+//! ### Target-specific policies
 //!
 //! A package can replace that policy for a Cargo-style target selector:
 //!
@@ -41,11 +70,30 @@
 //!
 //! [package.metadata.coverage-gate.target.'cfg(not(windows))']
 //! min-lines-percent = 0
+//!
+//! [package.metadata.coverage-gate.target.x86_64-pc-windows-msvc]
+//! min-lines-percent = 100
 //! ```
 //!
-//! A zero target-specific threshold disables coverage measurement and
-//! gating on the matching target, but does not disable test execution
-//! in automation such as Cargo Anvil.
+//! A target-specific no-coverable-lines assertion uses the same nesting:
+//!
+//! ```toml
+//! [package.metadata.coverage-gate.target.thumbv7em-none-eabihf]
+//! expect-no-coverable-lines = true
+//! ```
+//!
+//! Target keys accept exact Rust target triples or quoted `cfg(...)`
+//! expressions using Cargo's target grammar. A target table sets either
+//! `min-lines-percent` or `expect-no-coverable-lines = true`, replacing the
+//! package's base policy for that target. Exact triples take precedence over
+//! matching `cfg(...)` expressions. Multiple matching cfg policies are a
+//! configuration error rather than depending on declaration order.
+//!
+//! A zero target-specific threshold disables coverage measurement and gating
+//! on the matching target, but does not disable test execution. Coverage
+//! automation can call `cargo coverage-gate
+//! --print-test-only-packages --target <triple>` or [`test_only_packages`] to
+//! identify packages that should run through a non-instrumented test path.
 //!
 //! ## Why lcov, not the JSON?
 //!
@@ -66,6 +114,7 @@
 //! ```text
 //! cargo coverage-gate  [--lcov <path>]... [-p|--package <spec>]...
 //!                      [--target <triple>]
+//!                      [--print-test-only-packages]
 //!                      [--summary-file <path>] [--quiet]
 //! ```
 //!
@@ -99,13 +148,15 @@
 //!
 //! ## Public API
 //!
-//! The library exposes [`evaluate`], which returns an
-//! [`EvaluatedReport`]. The report can be rendered as plain text via
-//! [`EvaluatedReport::render_text`] or as GitHub-flavored Markdown
-//! via [`EvaluatedReport::render_markdown`], and reduced to a single
-//! [`Verdict`] via [`EvaluatedReport::verdict`]. The accompanying
-//! binary loads the lcov tracefile from disk and orchestrates rendering
-//! plus the appropriate exit code.
+//! [`evaluate`] gates one lcov tracefile for the host target, while
+//! [`evaluate_many`] merges multiple tracefiles at line level.
+//! [`evaluate_many_for_target`] evaluates an explicit target triple, and
+//! [`test_only_packages`] performs the metadata-only package query described
+//! above. Evaluation returns an [`EvaluatedReport`], which renders as plain
+//! text via [`EvaluatedReport::render_text`] or GitHub-flavored Markdown via
+//! [`EvaluatedReport::render_markdown`] and reduces to a [`Verdict`] via
+//! [`EvaluatedReport::verdict`]. The accompanying binary loads tracefiles from
+//! disk and orchestrates rendering plus the appropriate exit code.
 //!
 //! [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
 

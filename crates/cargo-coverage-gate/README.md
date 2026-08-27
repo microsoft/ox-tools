@@ -22,7 +22,23 @@ coverage lcov tracefile, resolves each package’s threshold from a small
 three-layer lookup, and emits a verdict table to stdout (and,
 optionally, to a Markdown summary file for CI step summaries).
 
-### Threshold resolution
+### Configuration
+
+#### Numeric thresholds
+
+A workspace can define the default line-coverage threshold:
+
+```toml
+[workspace.metadata.coverage-gate]
+min-lines-percent = 80
+```
+
+Individual packages can override it:
+
+```toml
+[package.metadata.coverage-gate]
+min-lines-percent = 95
+```
 
 For each workspace member, the effective threshold is the first match
 among:
@@ -34,13 +50,26 @@ among:
 1. The built-in default of `100.0` — full coverage required.
 
 Setting `min-lines-percent = 0.0` explicitly opts a package out of
-gating (it always passes, regardless of attributed data). A package
-that legitimately contains no coverable lines (pure re-exports, type
-definitions, a thin binary shim) instead declares
-`expect-no-coverable-lines = true`: the gate passes only while that
-holds and fails — as a regression — if coverable lines later appear.
-The two keys are mutually exclusive, and `expect-no-coverable-lines`
-is package-scoped only.
+gating: it always passes, regardless of attributed data. Thresholds must
+be in the inclusive range `0.0..=100.0`.
+
+#### Packages with no coverable lines
+
+A package that legitimately contains no coverable lines (pure re-exports,
+type definitions, or a thin binary shim) can make that invariant explicit:
+
+```toml
+[package.metadata.coverage-gate]
+expect-no-coverable-lines = true
+```
+
+The gate passes only while the package has no attributed coverable lines
+and fails as a regression if coverable code later appears. This differs
+from `min-lines-percent = 0`, which keeps passing if the package grows
+coverable code. The two keys are mutually exclusive, and
+`expect-no-coverable-lines` is package-scoped only.
+
+#### Target-specific policies
 
 A package can replace that policy for a Cargo-style target selector:
 
@@ -50,11 +79,29 @@ min-lines-percent = 100
 
 [package.metadata.coverage-gate.target.'cfg(not(windows))']
 min-lines-percent = 0
+
+[package.metadata.coverage-gate.target.x86_64-pc-windows-msvc]
+min-lines-percent = 100
 ```
 
-A zero target-specific threshold disables coverage measurement and
-gating on the matching target, but does not disable test execution
-in automation such as Cargo Anvil.
+A target-specific no-coverable-lines assertion uses the same nesting:
+
+```toml
+[package.metadata.coverage-gate.target.thumbv7em-none-eabihf]
+expect-no-coverable-lines = true
+```
+
+Target keys accept exact Rust target triples or quoted `cfg(...)`
+expressions using Cargo’s target grammar. A target table sets either
+`min-lines-percent` or `expect-no-coverable-lines = true`, replacing the
+package’s base policy for that target. Exact triples take precedence over
+matching `cfg(...)` expressions. Multiple matching cfg policies are a
+configuration error rather than depending on declaration order.
+
+A zero target-specific threshold disables coverage measurement and gating
+on the matching target, but does not disable test execution. Coverage
+automation can call `cargo coverage-gate --print-test-only-packages --target <triple>` or [`test_only_packages`][__link1] to
+identify packages that should run through a non-instrumented test path.
 
 ### Why lcov, not the JSON?
 
@@ -75,6 +122,7 @@ Codecov / ADO numbers confusing.
 ```text
 cargo coverage-gate  [--lcov <path>]... [-p|--package <spec>]...
                      [--target <triple>]
+                     [--print-test-only-packages]
                      [--summary-file <path>] [--quiet]
 ```
 
@@ -106,13 +154,15 @@ let code = report.verdict().as_exit_code();
 
 ### Public API
 
-The library exposes [`evaluate`][__link1], which returns an
-[`EvaluatedReport`][__link2]. The report can be rendered as plain text via
-[`EvaluatedReport::render_text`][__link3] or as GitHub-flavored Markdown
-via [`EvaluatedReport::render_markdown`][__link4], and reduced to a single
-[`Verdict`][__link5] via [`EvaluatedReport::verdict`][__link6]. The accompanying
-binary loads the lcov tracefile from disk and orchestrates rendering
-plus the appropriate exit code.
+[`evaluate`][__link2] gates one lcov tracefile for the host target, while
+[`evaluate_many`][__link3] merges multiple tracefiles at line level.
+[`evaluate_many_for_target`][__link4] evaluates an explicit target triple, and
+[`test_only_packages`][__link5] performs the metadata-only package query described
+above. Evaluation returns an [`EvaluatedReport`][__link6], which renders as plain
+text via [`EvaluatedReport::render_text`][__link7] or GitHub-flavored Markdown via
+[`EvaluatedReport::render_markdown`][__link8] and reduces to a [`Verdict`][__link9] via
+[`EvaluatedReport::verdict`][__link10]. The accompanying binary loads tracefiles from
+disk and orchestrates rendering plus the appropriate exit code.
 
 
 <hr/>
@@ -120,11 +170,15 @@ plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbLvZZTPMnX1MbqhSMPfjasNcbUGTGpUxEN_4bq9cT9Euzu55hZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbgT7C_MCtrmQbNek6QRgrLXcbevBPURuBRDAbnaR9T4OA_sZhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
- [__link1]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate.html
- [__link2]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/struct.EvaluatedReport.html
- [__link3]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
- [__link4]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
- [__link5]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/enum.Verdict.html
- [__link6]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
+ [__link1]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.test_only_packages.html
+ [__link10]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
+ [__link2]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate.html
+ [__link3]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate_many.html
+ [__link4]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate_many_for_target.html
+ [__link5]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.test_only_packages.html
+ [__link6]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/struct.EvaluatedReport.html
+ [__link7]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
+ [__link8]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
+ [__link9]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/enum.Verdict.html
