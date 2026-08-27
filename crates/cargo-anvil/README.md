@@ -236,12 +236,12 @@ you trust.
 #### Customizing the image
 
 `.anvil/container/Dockerfile` is a **user-composed file with managed
-regions**: anvil owns four regions inside it and keeps them current, and the
-three gaps between them are the repository’s. Add extra packages in the gap
-that suits when they are needed – before the first download for a root CA
-or a proxy, before `anvil-setup` for libraries a catalog tool compiles
-against, after it for what the checks need at run time. Adding in a gap
-leaves anvil’s content alone, so base and tool-pin bumps keep landing;
+regions**: anvil owns six regions inside it and keeps them current, and the
+gaps between them are the repository’s. Add to the gap that matches when the
+addition is needed – re-declare `ARG BASE_IMAGE` to build on another base,
+a root CA or proxy before the first download, libraries a catalog tool
+compiles against before `anvil-setup`, run-time tools after it. Adding in a
+gap leaves anvil’s content alone, so base and tool-pin bumps keep landing;
 editing inside a region is preserved rather than overwritten, but freezes
 those pins at the moment of the edit, which is why the gaps exist.
 
@@ -480,7 +480,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQb0_sOYsKJMp8bpzOrXba6KmQb91-G89nTbKMbiEX1pLcp3IRhZIGDa2NhcmdvLWFudmlsZTAuNS4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbcyN35C50s70b7icANpGEc88bQlr3I2a8WwobrcveTzoRNR9hZIGDa2NhcmdvLWFudmlsZTAuNS4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=artifacts

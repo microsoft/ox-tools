@@ -41,6 +41,15 @@ pub enum RegionPlacement {
     Start,
     /// Place the region after user content.
     End,
+    /// Insert a *new* region at this byte offset. An existing region is still
+    /// updated where it is found, so this only decides where an absent one
+    /// lands.
+    ///
+    /// Needed by hosts whose region order is semantic: appending a newly added
+    /// region at end-of-file would put it after regions it must precede, which
+    /// for a Dockerfile means `FROM` below the layers that depend on it. The
+    /// caller knows the declared order, so it computes the offset.
+    At(usize),
 }
 
 impl CommentSyntax {
@@ -205,6 +214,26 @@ pub fn upsert_region_with_placement(
 
     if placement == RegionPlacement::Start {
         return Ok(prepend_region(text, &rendered));
+    }
+
+    if let RegionPlacement::At(offset) = placement {
+        let offset = offset.min(text.len());
+        // Land on a line boundary. An offset in the middle of a line would
+        // split it around the sentinels, which for a Dockerfile is the
+        // difference between a valid instruction and two invalid halves.
+        let offset = text[offset..].find('\n').map_or(text.len(), |index| offset + index + 1);
+        let (before, after) = text.split_at(offset);
+        let mut out = String::with_capacity(text.len() + rendered.len() + 2);
+        out.push_str(before);
+        if !before.is_empty() && !before.ends_with("\n\n") {
+            out.push('\n');
+        }
+        out.push_str(&rendered);
+        if !after.is_empty() && !after.starts_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(after);
+        return Ok(out);
     }
 
     // No region present — append at the end with one blank line of separation

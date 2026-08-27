@@ -1,0 +1,19 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+#
+# Anvil execution image.
+#
+# The `anvil-managed:` regions are cargo-anvil's and are kept current. The gaps
+# between them are yours and are preserved. Add to a gap, not inside a region:
+# anvil will not overwrite an edit inside one, so editing there silently freezes
+# the base digest and the tool pins at that moment.
+#
+# Which gap, since position decides whether a line works at all:
+#
+#   after base-image   re-declare ARG BASE_IMAGE to build on your own base
+#   after base         root CA, proxy, apt mirror -- anything the first download needs
+#   after tools        libraries a catalog tool needs to compile from source
+#   after setup        what your own checks need at run time
+#
+# `# syntax=` stays on line 1: BuildKit honors it only when nothing precedes it,
+# and a region sentinel is a comment.

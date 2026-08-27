@@ -386,7 +386,10 @@ fn push_region_at(
         return Ok(());
     }
     let current = hosts.get_or_read(repo_root, &host)?;
-    let placement = region_placement(spec.id.as_str());
+    let placement = composed_host_spec(&host).map_or_else(
+        || region_placement(spec.id.as_str()),
+        |(scaffold, order)| composed_placement(order, scaffold, spec.id.as_str(), current.as_deref()),
+    );
     let body = match delta_region_body(current.as_deref(), spec) {
         DeltaRegionBody::Managed => spec.body.as_str(),
         DeltaRegionBody::PreserveRepositoryKey => {
@@ -434,6 +437,44 @@ fn push_region_at(
     }
     plan.push(item);
     Ok(())
+}
+
+/// Where a region belongs inside a composed host whose order is semantic.
+///
+/// An existing region is updated where it is found, so this only decides where
+/// an *absent* one lands — which matters whenever anvil adds a region to a
+/// release. Appending it at end-of-file, the default for every other host,
+/// would put it after regions it must precede: a newly added base-image
+/// argument would land below the `FROM` that consumes it. Without this, adding
+/// a region would either corrupt or (with the composition check) refuse every
+/// file that already exists.
+fn composed_placement(order: &[&str], scaffold: &str, id: &str, text: Option<&str>) -> RegionPlacement {
+    let Some(text) = text else {
+        return RegionPlacement::End;
+    };
+    if matches!(find_region(text, id, CommentSyntax::Hash), Ok(Some(_))) {
+        // Present: `upsert_region` replaces it where it is, and the offset is
+        // never consulted.
+        return RegionPlacement::End;
+    }
+    let Some(position) = order.iter().position(|candidate| *candidate == id) else {
+        return RegionPlacement::End;
+    };
+    // The nearest declared predecessor that is actually in the file. Anything
+    // after it and before the next present region is the gap this region opens.
+    for earlier in order[..position].iter().rev() {
+        if let Ok(Some(region)) = find_region(text, earlier, CommentSyntax::Hash) {
+            return RegionPlacement::At(region.end_line.end);
+        }
+    }
+    // Nothing precedes it, so it goes to the top -- but below the scaffold,
+    // which for a Dockerfile is the `# syntax=` parser directive that BuildKit
+    // honors only as the very first line.
+    RegionPlacement::At(if text.starts_with(scaffold.trim_end_matches('\n')) {
+        scaffold.trim_end_matches('\n').len()
+    } else {
+        0
+    })
 }
 
 fn region_placement(region_id: &str) -> RegionPlacement {
@@ -543,22 +584,13 @@ fn composed_host_state(order: &[&str], host_relpath: &str, text: &str, manifest:
         };
     }
 
-    if present.len() != order.len() {
-        // A partially composed file. The missing regions would be appended at
-        // end-of-file, which lands them after regions they must precede.
-        let missing: Vec<&str> = order
-            .iter()
-            .copied()
-            .filter(|id| !present.iter().any(|(present_id, _)| present_id == id))
-            .collect();
-        return ComposedHostState::Unsafe(format!(
-            "it carries some of anvil's regions but not all of them (missing: {}). Restoring the \
-             missing ones by appending would place them after regions they must precede. Delete \
-             the file and re-run to have a complete one written",
-            missing.join(", ")
-        ));
-    }
-
+    // A file carrying some regions but not all is what every adopter has the
+    // first time anvil adds one to the set -- a normal upgrade, not damage.
+    // `composed_placement` inserts each missing region at its declared position
+    // rather than at end-of-file, so the result stays ordered and the gap
+    // content is untouched. Refusing here would make every future region
+    // addition mean "delete your file".
+    //
     // The same regions, in the order the file carries them. Comparing the two
     // sequences rather than adjacent offsets keeps the check free of an
     // ordering operator whose boundary cannot be exercised: two distinct

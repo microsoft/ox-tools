@@ -44,10 +44,3 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
     && chmod 755 "${CARGO_HOME}/bin/cargo-binstall" \
     && rm /tmp/cargo-binstall.tgz
 
-# --- your turn -------------------------------------------------------------
-# The gap below this region runs after the toolchain is in place and before
-# `anvil-setup` installs the catalog. Put system libraries a catalog tool
-# needs in order to *compile* here: `binstall` falls back to a source build
-# when a pinned tool publishes no prebuilt for this platform, and that build
-# links against whatever headers the image has.
-# ---------------------------------------------------------------------------

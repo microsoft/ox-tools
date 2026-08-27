@@ -24,22 +24,29 @@
 //! Splitting anvil's content into regions does not make it read-only: the same
 //! ownership rules apply to a region body as to a file, and anvil never
 //! overwrites repository content. What it removes is the *reason* to edit: each
-//! of the three gaps between the regions is the correct home for one class of
-//! addition, defined by what must already be true at that point in the build.
+//! gap between the regions is the correct home for one class of addition,
+//! defined by what must already be true at that point in the build.
 //!
 //! | Gap | Runs | Exists for |
 //! | --- | --- | --- |
+//! | after [`dockerfile_base_image`] | before `FROM` | re-declaring `ARG BASE_IMAGE` to build on your own base |
 //! | after [`dockerfile_base`] | before the first download | root CA, proxy, internal apt mirror |
 //! | after [`dockerfile_tools`] | after the toolchain, before `anvil-setup` | libraries a catalog tool needs to *compile* |
 //! | after [`dockerfile_setup`] | after the catalog is installed | what the repository's own checks need at run time |
 //!
+//! The base image is the case that most needed a gap of its own: it is the
+//! setting a repository is likeliest to want, and leaving it inside a region
+//! would have made overriding it mean editing anvil's content — freezing every
+//! pin in the file to buy one substitution.
+//!
 //! A downstream catalog customizes by replacing individual regions, and
 //! inherits the rest:
 //!
-//! - [`dockerfile_base`] / [`dockerfile_tools`] plus [`Artifact::with_body`] to
-//!   build on a different base OS or install the toolchain from a different
-//!   source. [`dockerfile_setup`] and [`dockerfile_entry`] are the contract with
-//!   the recipe and are rarely replaced.
+//! - [`dockerfile_base_image`] / [`dockerfile_tools`] plus
+//!   [`Artifact::with_body`] to build on a different base OS or install the
+//!   toolchain from a different source. [`dockerfile_setup`] and
+//!   [`dockerfile_entry`] are the contract with the recipe and are rarely
+//!   replaced.
 //! - [`dockerignore`] alongside them when the replacement copies more of the
 //!   tree, or the added paths never reach the build context.
 //! - [`hooks`] to supply credentials, or to resolve a published image through
@@ -53,15 +60,18 @@ const RECIPE: &str = include_str!("../../../templates/justfiles/anvil/container.
 const DOCKERIGNORE: &str = include_str!("../../../templates/anvil/container/Dockerfile.dockerignore");
 
 /// Seeded into the Dockerfile when the file does not exist, and never
-/// reconciled afterwards — it is the user's half of a composed file.
+/// reconciled afterwards — it is the one line anvil cannot own.
 ///
-/// It carries `# syntax=docker/dockerfile:1`, which `BuildKit` honors only as
-/// the very first line of the file. A region's opening sentinel is a comment,
-/// so the directive cannot live inside a region without being demoted to an
-/// ordinary comment — silently, with the build falling back to the default
-/// frontend and nothing failing to say so.
+/// `# syntax=docker/dockerfile:1` pins the `BuildKit` frontend, and `BuildKit`
+/// honors the directive only as the very first line, before any comment. A
+/// region's opening sentinel *is* a comment, so the directive cannot live inside
+/// one without being silently demoted, dropping the build to the default
+/// frontend with nothing failing to say so. Everything else in the file is a
+/// region, so anvil can keep it current.
 pub(crate) const DOCKERFILE_HEADER: &str = include_str!("../../../templates/anvil/container/Dockerfile.header");
 
+const DOCKERFILE_HEADER_REGION: &str = include_str!("../../../templates/anvil/container/Dockerfile.header.region");
+const DOCKERFILE_BASE_IMAGE: &str = include_str!("../../../templates/anvil/container/Dockerfile.baseimage.region");
 const DOCKERFILE_BASE: &str = include_str!("../../../templates/anvil/container/Dockerfile.base.region");
 const DOCKERFILE_TOOLS: &str = include_str!("../../../templates/anvil/container/Dockerfile.tools.region");
 const DOCKERFILE_SETUP: &str = include_str!("../../../templates/anvil/container/Dockerfile.setup.region");
@@ -77,12 +87,15 @@ const DOCKERIGNORE_PATH: &str = ".anvil/container/Dockerfile.dockerignore";
 /// The region ids anvil owns inside [`DOCKERFILE_PATH`], in the order a valid
 /// Dockerfile must carry them.
 ///
-/// Order is load-bearing in a way no other managed-region host is: `FROM` must
-/// precede every instruction, the toolchain must exist before `anvil-setup`
-/// runs, and `WORKDIR`/`CMD` close the file. The engine checks the on-disk
-/// sequence against this list and refuses rather than emitting a Dockerfile
-/// that is silently wrong.
+/// Order is load-bearing in a way no other managed-region host is: the base
+/// image argument must precede the `FROM` that consumes it, `FROM` must precede
+/// every instruction, the toolchain must exist before `anvil-setup` runs, and
+/// `WORKDIR`/`CMD` close the file. The engine checks the on-disk sequence
+/// against this list and refuses rather than emitting a Dockerfile that is
+/// silently wrong.
 pub(crate) const DOCKERFILE_REGION_ORDER: &[&str] = &[
+    "anvil-container-header",
+    "anvil-container-base-image",
     "anvil-container-base",
     "anvil-container-tools",
     "anvil-container-setup",
@@ -98,6 +111,8 @@ pub fn all() -> Vec<Artifact> {
     vec![
         recipe(),
         dockerignore(),
+        dockerfile_header(),
+        dockerfile_base_image(),
         dockerfile_base(),
         dockerfile_tools(),
         dockerfile_setup(),
@@ -120,19 +135,31 @@ fn dockerfile_region(id: &'static str, body: &'static str) -> Artifact {
     })
 }
 
-/// The base image and the pinned tool versions: a digest-pinned base tracking
-/// the Linux CI runner, the four download pins, and the environment every later
-/// region depends on.
+/// The file's explanatory header: what the regions are, which gap takes what,
+/// and why the parser directive sits outside them.
 ///
-/// A downstream catalog that needs a different base OS replaces this and
-/// usually [`dockerfile_tools`] with it:
+/// A region rather than part of the scaffold, so a correction to the guidance
+/// reaches repositories that already generated the file. Scaffold content is
+/// written once and never reconciled, which makes a mistake in it permanent.
+#[must_use]
+pub fn dockerfile_header() -> Artifact {
+    dockerfile_region("anvil-container-header", DOCKERFILE_HEADER_REGION)
+}
+
+/// The default base image, digest-pinned, alone in its own region.
 ///
-/// ```ignore
-/// catalog.replace_artifact(
-///     artifacts::container::dockerfile_base()
-///         .with_body(include_str!("../templates/base.dockerfile")),
-/// )
-/// ```
+/// Separate from [`dockerfile_base`] so the gap between them is a place to
+/// override it: a second `ARG BASE_IMAGE=…` there wins over this default, and
+/// `FROM` in the next region consumes the repository's value. That is what lets
+/// a repository choose its own base **without** editing anvil's content, which
+/// would otherwise freeze every pin in the file at the moment of the edit.
+#[must_use]
+pub fn dockerfile_base_image() -> Artifact {
+    dockerfile_region("anvil-container-base-image", DOCKERFILE_BASE_IMAGE)
+}
+
+/// `FROM`, the four download pins, and the environment every later region
+/// depends on.
 #[must_use]
 pub fn dockerfile_base() -> Artifact {
     dockerfile_region("anvil-container-base", DOCKERFILE_BASE)
@@ -246,18 +273,28 @@ mod tests {
             .collect()
     }
 
+    /// Every region body, in the order the engine enforces.
+    const REGION_BODIES: [&str; 6] = [
+        DOCKERFILE_HEADER_REGION,
+        DOCKERFILE_BASE_IMAGE,
+        DOCKERFILE_BASE,
+        DOCKERFILE_TOOLS,
+        DOCKERFILE_SETUP,
+        DOCKERFILE_ENTRY,
+    ];
+
     /// The Dockerfile as a fresh repository first receives it: the seeded
-    /// header followed by every region body in the order the engine enforces.
+    /// directive followed by every region body in order.
     fn composed_dockerfile() -> String {
         let mut out = DOCKERFILE_HEADER.to_owned();
-        for body in [DOCKERFILE_BASE, DOCKERFILE_TOOLS, DOCKERFILE_SETUP, DOCKERFILE_ENTRY] {
+        for body in REGION_BODIES {
             out.push_str(body);
         }
         out
     }
 
     #[test]
-    fn group_is_two_owned_files_and_four_dockerfile_regions() {
+    fn group_is_two_owned_files_and_six_dockerfile_regions() {
         let all = all();
         let owned: Vec<_> = all
             .iter()
@@ -293,9 +330,13 @@ mod tests {
     #[test]
     fn no_region_body_carries_the_parser_directive() {
         // Inside a region the directive would sit below an opening sentinel --
-        // a comment -- and be silently demoted.
-        for body in [DOCKERFILE_BASE, DOCKERFILE_TOOLS, DOCKERFILE_SETUP, DOCKERFILE_ENTRY] {
-            assert!(!body.contains("# syntax="), "a region body must not carry the parser directive");
+        // a comment -- and be silently demoted. Mentioning it in prose is fine;
+        // what must not appear is a line that *is* the directive.
+        for body in REGION_BODIES {
+            assert!(
+                !body.lines().any(|line| line.starts_with("# syntax=")),
+                "a region body must not carry the parser directive as a line"
+            );
         }
     }
 
@@ -321,9 +362,31 @@ mod tests {
                 .find(needle)
                 .unwrap_or_else(|| panic!("missing from composed Dockerfile: {needle}"))
         };
+        assert!(at("ARG BASE_IMAGE=") < at("FROM ${BASE_IMAGE}"));
         assert!(at("FROM ${BASE_IMAGE}") < at("RUN apt-get update"));
         assert!(at("RUN apt-get update") < at("just anvil-setup binstall"));
         assert!(at("just anvil-setup binstall") < at("WORKDIR /workspace"));
+    }
+
+    #[test]
+    fn the_base_image_is_overridable_without_editing_a_region() {
+        // The whole point of giving the default its own region: a repository
+        // that wants another base re-declares the argument in the gap that
+        // follows, where a later declaration wins, instead of editing anvil's
+        // content and freezing every other pin in the file.
+        assert!(
+            DOCKERFILE_BASE_IMAGE.contains("ARG BASE_IMAGE="),
+            "the default must live in its own region"
+        );
+        assert!(
+            !DOCKERFILE_BASE_IMAGE.contains("FROM "),
+            "FROM must not share the region, or there is no gap to override in"
+        );
+        assert!(
+            DOCKERFILE_BASE.starts_with("FROM ${BASE_IMAGE}"),
+            "the consuming FROM must open the next region: {}",
+            DOCKERFILE_BASE.lines().next().unwrap_or_default()
+        );
     }
 
     #[test]
@@ -331,11 +394,24 @@ mod tests {
         // A floating base tag can change underneath an identity hash that
         // claims to name fixed content, which would make every cached image a
         // potential lie.
-        let base = DOCKERFILE_BASE
+        let base = DOCKERFILE_BASE_IMAGE
             .lines()
             .find(|line| line.starts_with("ARG BASE_IMAGE="))
-            .expect("the base region must declare a default BASE_IMAGE");
+            .expect("the base-image region must declare a default BASE_IMAGE");
         assert!(base.contains("@sha256:"), "BASE_IMAGE must be digest-pinned: {base}");
+    }
+
+    #[test]
+    fn only_the_parser_directive_is_left_outside_the_regions() {
+        // Anything anvil owns that sits outside a region can never be corrected
+        // on a repository that has already generated the file, because the
+        // scaffold is written once and never reconciled. Exactly one line has
+        // to pay that price.
+        assert_eq!(
+            DOCKERFILE_HEADER.lines().collect::<Vec<_>>(),
+            ["# syntax=docker/dockerfile:1"],
+            "the scaffold must carry the parser directive and nothing else"
+        );
     }
 
     #[test]
@@ -847,15 +923,15 @@ mod tests {
         // rewrites the base and tool layers and inherits the catalog install
         // and the entry contract, instead of forking the whole Dockerfile and
         // freezing every pin in it.
-        let replaced = dockerfile_base().with_body("FROM example.invalid/base\n");
+        let replaced = dockerfile_base_image().with_body("ARG BASE_IMAGE=example.invalid/base\n");
         match &replaced {
             Artifact::Region(spec) => {
-                assert_eq!(spec.id.as_str(), "anvil-container-base");
+                assert_eq!(spec.id.as_str(), "anvil-container-base-image");
                 assert_eq!(spec.host, HostSelector::Path(DOCKERFILE_PATH.to_owned()));
             }
             Artifact::OwnedFile(_) => panic!("the Dockerfile regions must stay regions"),
         }
-        assert_eq!(replaced.body(), "FROM example.invalid/base\n");
+        assert_eq!(replaced.body(), "ARG BASE_IMAGE=example.invalid/base\n");
         assert_eq!(dockerfile_setup().body(), DOCKERFILE_SETUP);
     }
 }

@@ -131,20 +131,22 @@ repo/
 │   ├── container.just                     the anvil-container recipes
 │   └── …                                  checks, groups, tiers, executed natively *inside* the image
 └── .anvil/container/
-    ├── Dockerfile                         composed: anvil's four regions, your content in the gaps
+    ├── Dockerfile                         composed: anvil's six regions, your content in the gaps
     ├── Dockerfile.dockerignore            what the build context admits
     └── hooks.ps1                          optional; not emitted by default (§7)
 ```
 
 `container.just` and `Dockerfile.dockerignore` are owned files carrying the usual `DO NOT EDIT DIRECTLY` marker.
 
-The **Dockerfile is a user-composed file with managed regions**, not an owned file. Anvil owns four regions inside it
-and keeps them current; everything outside the sentinels — including the header and the three gaps between them — is
-the repository's and is preserved byte-for-byte.
+The **Dockerfile is a user-composed file with managed regions**, not an owned file. Anvil owns six regions inside it
+and keeps them current; the gaps between them are the repository's and are preserved byte-for-byte. Exactly one line —
+`# syntax=docker/dockerfile:1` — sits outside a region, because it cannot live inside one.
 
 | Region | Contains | Gap that follows it is for |
 | --- | --- | --- |
-| `anvil-container-base` | `ARG BASE_IMAGE`, `FROM`, the four download pins, `ENV` | a root CA, `http_proxy`, an internal apt mirror — anything needed to reach the network at all |
+| `anvil-container-header` | what the regions are and which gap takes what | — |
+| `anvil-container-base-image` | `ARG BASE_IMAGE`, digest-pinned | re-declaring `ARG BASE_IMAGE` to build on your own base |
+| `anvil-container-base` | `FROM`, the four download pins, `ENV` | a root CA, `http_proxy`, an internal apt mirror — anything needed to reach the network at all |
 | `anvil-container-tools` | system packages, `pwsh`, `just`, `rustup`, `cargo-binstall` | libraries a catalog tool needs to *compile*, when `binstall` falls back to a source build |
 | `anvil-container-setup` | `COPY` of the recipe tree, `just anvil-setup` | what the repository's own checks need at run time; also the cheapest layer to add to |
 | `anvil-container-entry` | `ANVIL_IN_CONTAINER`, `WORKDIR`, `CMD` | — |
@@ -159,25 +161,39 @@ the tag hashes their file*. The identity scheme works perfectly and still names 
 **What regions actually change.** They do not make anvil's content unwritable: §2's ownership rules apply to a region
 body exactly as they do to a file, so an edit *inside* a region is still preserved and still produces a proposal rather
 than being overwritten. Anvil never destroys repository content, and a special case here would be the one place it did.
-What changes is that there is no longer a reason to edit: every legitimate addition — a root CA, a build dependency, a
-run-time tool — has a gap that is the *correct* place for it, chosen by what must already be true at that point in the
-build. Editing anvil's content stops being the only way to extend the image and becomes a mistake the layout steers
-away from, and the pin freeze goes with it for every repository that takes the gaps.
+What changes is that there is no longer a reason to edit: every legitimate addition — another base image, a root CA, a
+build dependency, a run-time tool — has a gap that is the *correct* place for it, chosen by what must already be true
+at that point in the build.
 
-**Two constraints the region engine had to grow for this.** Both are specific to a Dockerfile and neither applies to the
+**The base image is the case that most needed a gap of its own.** It is the setting a repository is likeliest to want,
+and a single region holding both `ARG BASE_IMAGE` and the `FROM` that consumes it would have made overriding it mean
+editing anvil's content — freezing every other pin in the file to buy one substitution. Split across two regions, a
+second `ARG BASE_IMAGE=…` in the gap wins (a later declaration replaces the default) and anvil keeps updating
+everything the repository did not touch. The residual risk is real and worth stating: a base with an older glibc breaks
+`binstall`, and switching the catalog to source installs is not a repository-level lever.
+
+**Three constraints the region engine had to grow for this.** All are specific to a Dockerfile; none applies to the
 order-independent TOML and line-set hosts anvil already had:
 
 - **`# syntax=docker/dockerfile:1` must be line 1.** BuildKit honours a parser directive only when nothing precedes it,
   not even a comment — and a region's opening sentinel *is* a comment, so the directive cannot live inside one without
   being silently demoted, leaving the build on the default frontend with nothing failing to say so. It is therefore
-  part of a **scaffold** anvil writes when the file does not exist, and never reconciles afterwards.
-- **Region order is semantic.** `FROM` must precede everything, and the toolchain must exist before `anvil-setup` runs.
-  Fresh files get catalog order; thereafter the engine checks the on-disk sequence against the declared one and
-  **refuses** the host, reporting which region is out of place, rather than emitting a Dockerfile that is wrong.
+  the whole of the **scaffold** anvil writes when the file does not exist and never reconciles afterwards. Keeping the
+  scaffold to that one line is deliberate: anything anvil owns that sits outside a region can never be corrected on a
+  repository that already generated the file.
+- **Region order is semantic.** `ARG BASE_IMAGE` must precede the `FROM` that consumes it, `FROM` must precede
+  everything, and the toolchain must exist before `anvil-setup` runs. The engine checks the on-disk sequence against
+  the declared one and **refuses** the host, reporting which region is out of place, rather than emitting a Dockerfile
+  that is wrong.
+- **A missing region is inserted in order, not appended.** Appending at end-of-file is right for every other host and
+  wrong here: a region added in a later release would land after the ones it must precede. Anvil splices it at its
+  declared position instead — after the nearest preceding region that is present, or directly below the scaffold — so
+  adding a region is an ordinary update that leaves the repository's gap content untouched.
 
 A repository upgrading from the release that owned this path outright is re-seeded rather than appended to: a file
 tracked as an owned file in the lock and carrying none of the regions is a previous render, not composition. A
-Dockerfile the repository wrote itself is in neither state and is left alone, with the regions added to it.
+Dockerfile the repository wrote itself is in neither state and is refused, since there is nowhere to splice the regions
+that would not put its content above `FROM`.
 
 The image installs its tools by running `just anvil-setup`, the same recipe the checks use, reading the same
 generated pins. There is no second tool list to keep synchronized, and consequently a tool-pin change renames the
@@ -568,8 +584,8 @@ an ordinary artifact group and uses the same levers as any other.
 
 | Goal | Mechanism | Owner |
 | --- | --- | --- |
-| Extra packages in one repository | Add them in one of the three gaps in `.anvil/container/Dockerfile` (§3) | repository |
-| A different base OS, everywhere | `replace_artifact(artifacts::container::dockerfile_base().with_body(…))`, usually with `dockerfile_tools()` | catalog |
+| Extra packages, or another base image, in one repository | Add them in the matching gap in `.anvil/container/Dockerfile` (§3) | repository |
+| A different base OS, everywhere | `replace_artifact(artifacts::container::dockerfile_base_image().with_body(…))`, usually with `dockerfile_tools()` | catalog |
 | Credentials, or a published image | Add `.anvil/container/hooks.ps1`, or ship `artifacts::container::hooks(…)` | either |
 | No containerized execution at all | `without_artifact` for each artifact in the group | catalog |
 

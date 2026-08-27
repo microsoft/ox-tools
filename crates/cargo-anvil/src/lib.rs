@@ -237,12 +237,12 @@
 //! ### Customizing the image
 //!
 //! `.anvil/container/Dockerfile` is a **user-composed file with managed
-//! regions**: anvil owns four regions inside it and keeps them current, and the
-//! three gaps between them are the repository's. Add extra packages in the gap
-//! that suits when they are needed -- before the first download for a root CA
-//! or a proxy, before `anvil-setup` for libraries a catalog tool compiles
-//! against, after it for what the checks need at run time. Adding in a gap
-//! leaves anvil's content alone, so base and tool-pin bumps keep landing;
+//! regions**: anvil owns six regions inside it and keeps them current, and the
+//! gaps between them are the repository's. Add to the gap that matches when the
+//! addition is needed -- re-declare `ARG BASE_IMAGE` to build on another base,
+//! a root CA or proxy before the first download, libraries a catalog tool
+//! compiles against before `anvil-setup`, run-time tools after it. Adding in a
+//! gap leaves anvil's content alone, so base and tool-pin bumps keep landing;
 //! editing inside a region is preserved rather than overwritten, but freezes
 //! those pins at the moment of the edit, which is why the gaps exist.
 //!

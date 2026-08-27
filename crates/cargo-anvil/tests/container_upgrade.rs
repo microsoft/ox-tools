@@ -432,44 +432,53 @@ fn an_edited_superseded_dockerfile_is_never_overwritten() {
     );
 }
 
-/// A half-composed file: some of anvil's regions present, others missing.
-/// `upsert_region` appends a missing region at end-of-file, which would land it
-/// after regions it must precede, so this has to be refused too.
+/// A half-composed file — some of anvil's regions present, others missing — is
+/// what an adopter has the first time anvil adds a region to the set. That is a
+/// normal upgrade: each missing region is inserted at its declared position, so
+/// the file stays ordered and the repository's own content between the regions
+/// survives untouched.
 #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
 #[test]
-fn a_partially_composed_dockerfile_is_refused() {
+fn a_newly_added_region_is_inserted_in_order_not_appended() {
     let tmp = generated_tree();
     let root = tmp.path();
     let dockerfile = root.join(".anvil/container/Dockerfile");
 
-    // Drop the base region, keeping the rest. Appending it back would put
+    // Drop the base region and put repository content in the gaps around it,
+    // exactly as an adopter would have. Appending the region back would land
     // `FROM` after the layers that depend on it.
     let text = std::fs::read_to_string(&dockerfile).unwrap();
-    let open = text.find("# >>> anvil-managed: anvil-container-base").unwrap();
+    let open = text.find("# >>> anvil-managed: anvil-container-base\n").unwrap();
     let close_marker = "# <<< anvil-managed: anvil-container-base\n";
     let close = text.find(close_marker).unwrap() + close_marker.len();
-    let without_base = format!("{}{}", &text[..open], &text[close..]);
+    let without_base = format!("{}# MINE-BEFORE\n{}# MINE-AFTER\n", &text[..open], &text[close..]);
     write(&dockerfile, &without_base);
+    let mut manifest = Manifest::load(root).unwrap();
+    manifest
+        .regions
+        .retain(|key, _| !(key.host == ".anvil/container/Dockerfile" && key.id == "anvil-container-base"));
+    manifest.save(root).unwrap();
 
     let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
-
-    assert_eq!(
-        std::fs::read_to_string(&dockerfile).unwrap(),
-        without_base,
-        "a refused host must not be modified"
-    );
-    let refusals: Vec<&String> = outcome
-        .plan
-        .refusals()
-        .iter()
-        .filter(|r| r.contains(".anvil/container/Dockerfile"))
-        .collect();
-    assert_eq!(refusals.len(), 1, "one diagnostic per host: {refusals:?}");
     assert!(
-        refusals[0].contains("anvil-container-base"),
-        "the diagnostic must name the missing region: {}",
-        refusals[0]
+        outcome.plan.refusals().is_empty(),
+        "adding a region is an upgrade, not a refusal: {:?}",
+        outcome.plan.refusals()
     );
+
+    let composed = std::fs::read_to_string(&dockerfile).unwrap();
+    let at = |needle: &str| {
+        composed
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing from recomposed Dockerfile: {needle}\n{composed}"))
+    };
+    // Restored in order, not at the end.
+    assert!(at("ARG BASE_IMAGE=") < at("FROM ${BASE_IMAGE}"));
+    assert!(at("FROM ${BASE_IMAGE}") < at("RUN apt-get update"));
+    assert!(at("RUN apt-get update") < at("WORKDIR /workspace"));
+    // And the repository's own lines are still there.
+    assert!(composed.contains("# MINE-BEFORE"), "gap content before the region must survive");
+    assert!(composed.contains("# MINE-AFTER"), "gap content after the region must survive");
 }
 
 /// The Dockerfile is the first managed-region host whose region *order* is
@@ -490,7 +499,7 @@ fn a_reordered_composed_dockerfile_is_refused_with_one_diagnostic() {
     // Move the base region below the others, which is exactly the mistake a
     // repository makes by dropping its own instructions above `FROM`.
     let text = std::fs::read_to_string(&dockerfile).unwrap();
-    let open = text.find("# >>> anvil-managed: anvil-container-base").unwrap();
+    let open = text.find("# >>> anvil-managed: anvil-container-base\n").unwrap();
     let close_marker = "# <<< anvil-managed: anvil-container-base\n";
     let close = text.find(close_marker).unwrap() + close_marker.len();
     let base = &text[open..close];

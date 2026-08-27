@@ -1,26 +1,21 @@
-# Install the pinned toolchain and cargo subcommands from the generated
-# catalog. The whole recipe tree is copied because `just` has to parse it, and
-# the whole tree is hashed into the tag: `anvil-setup` reaches the install
-# recipes through the tier, group and check recipes, so any of them can change
-# what this layer installs. The synthetic Justfile below imports only the anvil
-# tree, avoiding repository-specific imports that may not exist yet.
+# Install the pinned toolchain and cargo subcommands from the generated catalog.
+# The whole recipe tree is copied because `just` has to parse it, and the whole
+# tree is hashed into the image tag: `anvil-setup` reaches the install recipes
+# through the tier, group and check recipes, so any of them can change what this
+# layer installs.
 #
-# `binstall` matches what CI passes. It is not just a speed-up: some catalog
-# tools do not compile from source on every pinned toolchain, so a source
-# install can fail here while CI stays green.
+# `binstall` matches what CI passes. Not only a speed-up: some catalog tools do
+# not compile from source on every pinned toolchain.
 #
 # The credential files are removed in the same layer as the install. A build
-# secret is mounted, never committed to a layer, but anything the install
-# *writes* with it is ordinary content -- and the `chmod` on the next line
-# would otherwise publish it world-readable. Deleting them in a later `RUN`
-# would not help: the earlier layer still carries the file.
+# secret never lands in a layer, but anything the install *writes* with it is
+# ordinary content, and the `chmod` below would publish it world-readable.
+# Deleting them in a later `RUN` would not help -- the earlier layer keeps them.
 #
 # `registry` and `git` are created before the `chmod` because the run mounts a
-# named volume over each. An engine seeds a new volume from the image path it
-# covers, and a path that does not exist is seeded as a root-owned 0755
-# directory -- which the `--user` mapping on Linux then cannot write, so the
-# first cargo fetch fails with EACCES. Creating them here means the widened
-# permissions are what the volume inherits.
+# named volume over each, and an engine seeds a new volume from the image path
+# it covers. A path that does not exist seeds as root-owned 0755, which the
+# `--user` mapping cannot write, so the first cargo fetch fails with EACCES.
 WORKDIR /opt/anvil
 COPY justfiles ./justfiles
 COPY rust-toolchain.toml ./
@@ -30,11 +25,3 @@ RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
     && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME}/.netrc" \
     && mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
     && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
-
-# --- your turn -------------------------------------------------------------
-# The gap below this region runs after the catalog is installed. Put what your
-# own checks need at run time here: a database client, a protobuf compiler, a
-# linter that is not a cargo subcommand. It is also the cheapest place to add
-# anything, because an edit here invalidates one layer rather than the
-# multi-minute `anvil-setup` above.
-# ---------------------------------------------------------------------------
