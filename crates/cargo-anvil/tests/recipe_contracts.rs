@@ -927,6 +927,9 @@ fn mutants_diff_covers_uncommitted_work() {
 /// the skip branch would be exercised by nothing.
 #[test]
 fn mutants_diff_skips_on_arm64_windows() {
+    if !tools_available() {
+        return;
+    }
     if !(cfg!(windows) && cfg!(target_arch = "aarch64")) {
         return;
     }
