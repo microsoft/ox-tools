@@ -250,6 +250,36 @@ impl Manifest {
             checksum.into(),
         );
     }
+
+    /// The checksum recorded for an owned file, tolerating a case-only
+    /// difference between the lock and the path the caller resolved from disk.
+    ///
+    /// Plan items carry the host's real on-disk casing; a lock entry carries
+    /// whatever casing it had when it was written. Comparing the two exactly
+    /// makes a case-only rename look like a file anvil has never seen, which
+    /// costs the file its provenance: it is planned as repository-authored and
+    /// earns a spurious proposal, and the removal pass retires the very entry
+    /// that names it.
+    pub fn file_checksum(&self, path: &str) -> Option<&str> {
+        self.files.get(path).map(String::as_str).or_else(|| {
+            self.files
+                .iter()
+                .find(|(key, _)| key.as_str().eq_ignore_ascii_case(path))
+                .map(|(_, checksum)| checksum.as_str())
+        })
+    }
+
+    /// Whether the lock records any managed region hosted by `path`, comparing
+    /// the host without case for the reason [`Self::file_checksum`] gives.
+    ///
+    /// This is the provenance that separates "a file anvil composes, whose
+    /// regions have been removed" from "a file anvil has never owned". The two
+    /// have opposite recoveries, so the distinction decides which one a refusal
+    /// tells the reader to reach for.
+    #[must_use]
+    pub fn has_region_host(&self, path: &str) -> bool {
+        self.regions.keys().any(|key| key.host.as_str().eq_ignore_ascii_case(path))
+    }
 }
 
 // Suppress an unused-import lint when no callers reference `Array`/`Value`
@@ -433,5 +463,46 @@ mod tests {
     fn toml_ends_with_newline() {
         let text = sample_manifest().to_toml();
         assert!(text.ends_with('\n'));
+    }
+
+    /// The lock keeps whatever casing a path had when it was written, while a
+    /// plan item carries the casing resolved from disk. An exact-only lookup
+    /// loses the provenance of anvil's own file on a case-only rename, which
+    /// is what makes the removal pass delete it.
+    #[test]
+    fn file_checksum_tolerates_a_case_only_difference() {
+        let mut manifest = Manifest::default();
+        manifest.set_file("justfiles/anvil/tools.just", "sha256:body");
+
+        assert_eq!(manifest.file_checksum("justfiles/anvil/tools.just"), Some("sha256:body"));
+        assert_eq!(manifest.file_checksum("justfiles/anvil/Tools.just"), Some("sha256:body"));
+        assert_eq!(manifest.file_checksum("justfiles/anvil/other.just"), None);
+    }
+
+    /// An exact match must win over a case-insensitive one, so a repository
+    /// holding two entries differing only in case still reads its own.
+    #[test]
+    fn file_checksum_prefers_the_exact_entry() {
+        let mut manifest = Manifest::default();
+        manifest.set_file("a/Thing.just", "sha256:upper");
+        manifest.set_file("a/thing.just", "sha256:lower");
+
+        assert_eq!(manifest.file_checksum("a/Thing.just"), Some("sha256:upper"));
+        assert_eq!(manifest.file_checksum("a/thing.just"), Some("sha256:lower"));
+    }
+
+    /// The provenance that separates "a composed file whose regions were
+    /// removed" from "a file anvil has never owned". The two have opposite
+    /// recoveries, so a missed match sends the reader to delete a file anvil
+    /// rendered.
+    #[test]
+    fn has_region_host_matches_without_case() {
+        let mut manifest = Manifest::default();
+        manifest.set_region(".anvil/container/Dockerfile", "anvil-container-base", "sha256:body");
+
+        assert!(manifest.has_region_host(".anvil/container/Dockerfile"));
+        assert!(manifest.has_region_host(".anvil/container/dockerfile"));
+        assert!(!manifest.has_region_host(".anvil/container/Other"));
+        assert!(!Manifest::default().has_region_host(".anvil/container/Dockerfile"));
     }
 }

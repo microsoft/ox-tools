@@ -29,6 +29,7 @@
 !justfiles
 justfiles/*
 !justfiles/anvil
+justfiles/anvil/**/*.anvil-proposed
 !.anvil
 .anvil/*
 !.anvil/container

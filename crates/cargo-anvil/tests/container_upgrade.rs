@@ -737,3 +737,100 @@ fn on_disk_dockerfile_name(root: &Path) -> String {
         .find(|n| n.eq_ignore_ascii_case("Dockerfile"))
         .expect("the composed host must exist")
 }
+
+/// A composed host lives in `manifest.regions` and never in `manifest.files`,
+/// so "no file entry" is not the same as "anvil has never seen this path". It
+/// is also every composed file that has lost its regions to a merge, a revert
+/// or an edit -- and the lock still records them. Reporting that as a
+/// never-owned file tells the reader to delete a file anvil rendered, throwing
+/// away the gap content the refusal exists to protect, when the cheap recovery
+/// is restoring the file.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn a_composed_host_that_lost_its_regions_is_told_to_restore_it() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let dockerfile = root.join(".anvil/container/Dockerfile");
+
+    // The lock is left exactly as generated: it still records every region.
+    let recorded = Manifest::load(root).unwrap();
+    assert!(
+        recorded.regions.keys().any(|key| key.host == ".anvil/container/Dockerfile"),
+        "precondition: the lock records the composed host's regions"
+    );
+    assert!(
+        !recorded.files.contains_key(".anvil/container/Dockerfile"),
+        "precondition: a composed host is never tracked as an owned file"
+    );
+    write(&dockerfile, "# my own content\nFROM mine:1\n");
+
+    let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    let refusals: Vec<&String> = outcome
+        .plan
+        .refusals()
+        .iter()
+        .filter(|r| r.contains(".anvil/container/Dockerfile"))
+        .collect();
+    assert_eq!(refusals.len(), 1, "one diagnostic per host: {refusals:?}");
+    assert!(
+        !refusals[0].contains("anvil has never owned it"),
+        "the lock records the regions, so this is not a never-owned file: {}",
+        refusals[0]
+    );
+    assert!(
+        refusals[0].contains("Restore the file"),
+        "the recovery must be restoring the file, not deleting it: {}",
+        refusals[0]
+    );
+}
+
+/// The removal pass compares the lock's casing against the casing every plan
+/// item resolved from disk. Without resolving first, a case-only rename makes
+/// anvil's own artifact look retired -- and on a case-insensitive filesystem
+/// the removal opens the very file the pass just wrote and deletes it.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn a_case_only_rename_of_an_owned_file_is_not_deleted() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let canonical = root.join("justfiles/anvil/tools.just");
+    let renamed = root.join("justfiles/anvil/Tools.just");
+    assert!(canonical.is_file(), "precondition: the owned recipe exists as generated");
+
+    let body = std::fs::read_to_string(&canonical).unwrap();
+    std::fs::remove_file(&canonical).unwrap();
+    write(&renamed, &body);
+    // The lock still carries the original casing, which is the whole point.
+    assert_eq!(
+        Manifest::load(root).unwrap().file_checksum("justfiles/anvil/tools.just"),
+        Some(checksum_str(&body).as_str()),
+        "precondition: the lock records the pre-rename casing"
+    );
+
+    let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    let removed: Vec<String> = outcome
+        .plan
+        .items()
+        .iter()
+        .filter(|i| i.decision == Decision::Remove)
+        .filter_map(|i| match &i.target {
+            Target::File { path } => Some(path.clone()),
+            Target::Region { .. } => None,
+        })
+        .collect();
+    assert!(
+        !removed.iter().any(|p| p.eq_ignore_ascii_case("justfiles/anvil/tools.just")),
+        "anvil must not retire the artifact it just wrote: {removed:?}"
+    );
+    assert!(
+        renamed.is_file() || canonical.is_file(),
+        "the generated recipe must still be on disk after the run"
+    );
+    assert!(
+        !root.join("justfiles/anvil/Tools.just.anvil-proposed").exists()
+            && !root.join("justfiles/anvil/tools.just.anvil-proposed").exists(),
+        "a file anvil still owns must not be proposed against as though it were repository-authored"
+    );
+}

@@ -575,12 +575,27 @@ fn composed_host_state(order: &[&str], host_relpath: &str, text: &str, manifest:
         // that edit silently destroyed on upgrade. Appending the regions
         // instead is not a kinder answer, because everything already in the
         // file would then sit above `FROM`.
-        return match manifest.files.get(host_relpath) {
-            Some(recorded) if *recorded == checksum_str(text) => ComposedHostState::SeedFromScaffold,
+        return match manifest.file_checksum(host_relpath) {
+            Some(recorded) if recorded == checksum_str(text) => ComposedHostState::SeedFromScaffold,
             Some(_) => ComposedHostState::Unsafe(
                 "it was edited after anvil last wrote it, and this release composes the file from \
                  managed regions instead of owning it whole. Move the edits you want to keep into \
                  the gaps of a freshly generated file, or delete it and re-run to have one written"
+                    .to_owned(),
+            ),
+            // A composed host is recorded in `regions` and never in `files`, so
+            // "no file entry" is not the same as "anvil has never seen this".
+            // It is also every composed file that has lost its regions -- a
+            // merge resolved the other way, a revert, a checkout of an older
+            // commit -- and for those the lock still holds the provenance. The
+            // two cases have opposite recoveries, and telling someone to delete
+            // a file anvil rendered would throw away the gap content the
+            // message elsewhere tells them to preserve.
+            None if manifest.has_region_host(host_relpath) => ComposedHostState::Unsafe(
+                "anvil composes it from managed regions and the lock still records them, but none \
+                 of them is in the file: they were dropped by a merge, a revert or an edit. \
+                 Restore the file from version control to recover the regions and your own content \
+                 around them together"
                     .to_owned(),
             ),
             None => ComposedHostState::Unsafe(
@@ -685,7 +700,13 @@ fn plan_removals(
     let live_region_hosts: BTreeSet<String> = live_regions.iter().map(|(host, _)| host.clone()).collect();
 
     for (path, last) in &previous.files {
-        if live_files.contains(path) {
+        // The lock carries the casing the path had when the entry was written,
+        // while every live plan item carries the casing resolved from disk, so
+        // the two are compared through the same resolution. Without it a
+        // case-only rename makes anvil's own file look retired and the removal
+        // below deletes the artifact this very pass just wrote.
+        let resolved = resolve_existing_case_insensitive(repo_root, path);
+        if live_files.contains(&resolved) {
             continue;
         }
         // A path that is no longer an owned file but *is* the host of a live
@@ -702,11 +723,6 @@ fn plan_removals(
         // destroy the clean recovery -- reverting the edit -- that the refusal
         // message tells the reader to use. "Nothing was written to it" has to
         // be true of the lock as well as the file.
-        //
-        // The lock carries the casing the path had when the entry was written,
-        // while a live host carries the casing the write path resolved from
-        // disk, so the two are compared through the same resolution.
-        let resolved = resolve_existing_case_insensitive(repo_root, path);
         if live_region_hosts.contains(&resolved) {
             if !matches!(composed.states.get(&resolved), Some(ComposedHostState::Unsafe(_))) {
                 plan.push(PlanItem::orphaned_kept(Target::File { path: path.clone() }));

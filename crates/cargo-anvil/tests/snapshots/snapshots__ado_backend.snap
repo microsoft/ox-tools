@@ -177,6 +177,7 @@ CMD ["bash"]
 !justfiles
 justfiles/*
 !justfiles/anvil
+justfiles/anvil/**/*.anvil-proposed
 !.anvil
 .anvil/*
 !.anvil/container
@@ -3754,9 +3755,14 @@ anvil-container-tag:
     # -Force because Get-ChildItem omits hidden entries otherwise: a
     # dot-prefixed file is copied like any other, and skipping it would let its
     # edits ride under an unchanged tag -- and make Windows and Unix disagree.
+    #
+    # `.anvil-proposed` siblings are excluded here for the same reason as under
+    # `.anvil/container/`: this driver is itself an owned artifact, so a
+    # repository that customizes it gets the proposal written right here.
     $recipeRoot = Join-Path $repoRoot 'justfiles/anvil'
     if (Test-Path -LiteralPath $recipeRoot) {
-        foreach ($file in Get-ChildItem -LiteralPath $recipeRoot -Recurse -File -Force) {
+        foreach ($file in Get-ChildItem -LiteralPath $recipeRoot -Recurse -File -Force |
+            Where-Object { -not $_.Name.EndsWith('.anvil-proposed') }) {
             $inputs += [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName) -replace '\\', '/'
         }
     }
