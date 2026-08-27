@@ -12,13 +12,17 @@
 # format_code_in_doc_comments). Floating nightly would mean
 # format-drift breaking cloud workflows on rustup updates — the same trap we
 # explicitly avoid for udeps/miri/careful/external-types.
+#
+# Iterate workspace members rather than every local path dependency that
+# `cargo fmt --all` discovers. `--keep-going` reports formatting failures from
+# every member while retaining a bounded rustfmt command line per invocation.
 
 # Check Rust source formatting.
 [script("pwsh", "-NoProfile")]
 anvil-fmt: anvil-fmt-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
-    cargo each --workspace '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' --check
+    cargo each --workspace --keep-going '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' --check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Per-check setup + validate-prereqs

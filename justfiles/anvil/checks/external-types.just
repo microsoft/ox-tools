@@ -29,8 +29,9 @@ anvil-external-types: anvil-external-types-validate-prereqs
         exit 0
     }
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
-    # Build pkg-name -> manifest-path map, restricted to publishable library crates.
+    # Build pkg-name -> manifest-path maps for publishable and private libraries.
     $libPkgs = @{}
+    $privateLibPkgs = @{}
     $metadataJson = & cargo metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil-external-types: cargo metadata failed'
@@ -43,15 +44,20 @@ anvil-external-types: anvil-external-types-validate-prereqs
         exit 1
     }
     foreach ($p in $meta.packages) {
-        if (($p.targets | Where-Object { $_.kind -contains 'lib' }) -and
-            -not ($p.publish -is [array] -and $p.publish.Count -eq 0)) {
-            $libPkgs[$p.name] = $p.manifest_path
+        if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
+            if ($p.publish -is [array] -and $p.publish.Count -eq 0) {
+                $privateLibPkgs[$p.name] = $p.manifest_path
+            } else {
+                $libPkgs[$p.name] = $p.manifest_path
+            }
         }
     }
     # Decide which packages to check.
     $packages = @()
+    $privatePackages = @()
     if ($pkg -contains '--workspace') {
         $packages = $libPkgs.Keys
+        $privatePackages = $privateLibPkgs.Keys
     } else {
         for ($i = 0; $i -lt $pkg.Count; $i++) {
             if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
@@ -60,13 +66,21 @@ anvil-external-types: anvil-external-types-validate-prereqs
                 # this manifest-path map keys on.
                 $name = ($pkg[$i + 1] -split '@', 2)[0]
                 if ($libPkgs.ContainsKey($name)) { $packages += $name }
+                if ($privateLibPkgs.ContainsKey($name)) { $privatePackages += $name }
                 $i++
             }
         }
     }
     if ($packages.Count -eq 0) {
-        Write-Host 'anvil-external-types: no affected library crates; skipping'
+        if ($privatePackages.Count -gt 0) {
+            Write-Host "anvil-external-types: no affected publishable library crates; skipping ($($privatePackages.Count) non-publishable library crate(s) excluded)"
+        } else {
+            Write-Host 'anvil-external-types: no affected library crates; skipping'
+        }
         exit 0
+    }
+    if ($privatePackages.Count -gt 0) {
+        Write-Host "anvil-external-types: excluding $($privatePackages.Count) non-publishable library crate(s)"
     }
     Write-Host "anvil-external-types: catalog tool minimum cargo-check-external-types {{ cargo_check_external_types_version }}; rustdoc toolchain {{ rust_nightly_external_types }}"
     $failed = $false

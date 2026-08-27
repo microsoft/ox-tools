@@ -12,10 +12,10 @@
 # in cloud workflows:
 #
 #   - "modified": only run when at least one package's source files
-#     changed in the diff. The check's underlying tool is workspace-wide
-#     or directory-scoped (cargo fmt --all, cargo heather, cargo
-#     spellcheck), so it doesn't take --package; we short-circuit on
-#     the ANVIL_INCLUDE_MODIFIED == "--skip" sentinel.
+#     changed in the diff. The tier is only a skip gate: once admitted,
+#     the check runs its complete selected scope rather than splicing
+#     package arguments. That scope may be workspace members (cargo each),
+#     the workspace (cargo heather), or a directory (cargo spellcheck).
 #
 #   - "affected": run on the affected set (modified ∪ reverse-deps
 #     within the workspace). The check's underlying tool takes
@@ -37,7 +37,7 @@
 # Local invocation (no impact wiring): all three env vars are unset or
 # empty (recipes fall back to "--workspace" via the truthiness check
 # below); modified-tier recipes simply skip the splice and run their
-# workspace-wide tool; affected/required-tier recipes splat
+# complete selected scope; affected/required-tier recipes splat
 # "--workspace" when the env var is empty or unset.
 #
 # Preparation contract: when a recipe reaches the cargo call, the
@@ -64,8 +64,8 @@
 # and reduces the per-recipe boilerplate to a single one-line skip
 # guard plus the cargo invocation.
 #
-# Modified-tier recipes never splice the env var into cargo (their
-# tools are workspace-wide); they only check the skip sentinel.
+# Modified-tier recipes never splice the env var into their command;
+# they only check the skip sentinel.
 #
 # Every recipe whose body uses multi-line conditionals or env-var
 # splicing is annotated with [script("pwsh", "-NoProfile")]. pwsh is preinstalled on

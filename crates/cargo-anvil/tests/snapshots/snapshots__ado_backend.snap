@@ -3033,8 +3033,9 @@ anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
 
 # Modified tier.
 #
-# `--check-format` makes formatting differences fail instead of producing
-# warnings, keeping dependency ordering and Cargo manifest style deterministic.
+# cargo-sort 2.1.2 and newer report formatting-only differences as warnings
+# unless `--check-format` is set. Keep it enabled so dependency ordering and
+# Cargo manifest style are both enforced.
 #
 # `--grouped` keeps the blank lines between groups of key/value pairs
 # (e.g. blank-line-separated dependency blocks) intact.
@@ -3297,8 +3298,9 @@ anvil-external-types: anvil-external-types-validate-prereqs
         exit 0
     }
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
-    # Build pkg-name -> manifest-path map, restricted to publishable library crates.
+    # Build pkg-name -> manifest-path maps for publishable and private libraries.
     $libPkgs = @{}
+    $privateLibPkgs = @{}
     $metadataJson = & cargo metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil-external-types: cargo metadata failed'
@@ -3311,15 +3313,20 @@ anvil-external-types: anvil-external-types-validate-prereqs
         exit 1
     }
     foreach ($p in $meta.packages) {
-        if (($p.targets | Where-Object { $_.kind -contains 'lib' }) -and
-            -not ($p.publish -is [array] -and $p.publish.Count -eq 0)) {
-            $libPkgs[$p.name] = $p.manifest_path
+        if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
+            if ($p.publish -is [array] -and $p.publish.Count -eq 0) {
+                $privateLibPkgs[$p.name] = $p.manifest_path
+            } else {
+                $libPkgs[$p.name] = $p.manifest_path
+            }
         }
     }
     # Decide which packages to check.
     $packages = @()
+    $privatePackages = @()
     if ($pkg -contains '--workspace') {
         $packages = $libPkgs.Keys
+        $privatePackages = $privateLibPkgs.Keys
     } else {
         for ($i = 0; $i -lt $pkg.Count; $i++) {
             if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
@@ -3328,13 +3335,21 @@ anvil-external-types: anvil-external-types-validate-prereqs
                 # this manifest-path map keys on.
                 $name = ($pkg[$i + 1] -split '@', 2)[0]
                 if ($libPkgs.ContainsKey($name)) { $packages += $name }
+                if ($privateLibPkgs.ContainsKey($name)) { $privatePackages += $name }
                 $i++
             }
         }
     }
     if ($packages.Count -eq 0) {
-        Write-Host 'anvil-external-types: no affected library crates; skipping'
+        if ($privatePackages.Count -gt 0) {
+            Write-Host "anvil-external-types: no affected publishable library crates; skipping ($($privatePackages.Count) non-publishable library crate(s) excluded)"
+        } else {
+            Write-Host 'anvil-external-types: no affected library crates; skipping'
+        }
         exit 0
+    }
+    if ($privatePackages.Count -gt 0) {
+        Write-Host "anvil-external-types: excluding $($privatePackages.Count) non-publishable library crate(s)"
     }
     Write-Host "anvil-external-types: catalog tool minimum cargo-check-external-types {{ cargo_check_external_types_version }}; rustdoc toolchain {{ rust_nightly_external_types }}"
     $failed = $false
@@ -3378,13 +3393,17 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 # format_code_in_doc_comments). Floating nightly would mean
 # format-drift breaking cloud workflows on rustup updates — the same trap we
 # explicitly avoid for udeps/miri/careful/external-types.
+#
+# Iterate workspace members rather than every local path dependency that
+# `cargo fmt --all` discovers. `--keep-going` reports formatting failures from
+# every member while retaining a bounded rustfmt command line per invocation.
 
 # Check Rust source formatting.
 [script("pwsh", "-NoProfile")]
 anvil-fmt: anvil-fmt-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
-    cargo each --workspace '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' --check
+    cargo each --workspace --keep-going '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' --check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Per-check setup + validate-prereqs
@@ -4275,14 +4294,14 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
         exit 0
     }
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
-    # Build the candidate package list. Keep each package's metadata so
+    # Build the publishable candidate package list. Keep each package's metadata so
     # its manifest path can also be checked in the baseline. Always
     # iterate per-package over library crates only -- cargo-semver-checks
     # --workspace would fail on workspaces that contain bin-only crates
     # (reported as a missing lib target), and we want the same tolerance for
     # new / renamed / bin->lib-transition crates regardless of whether
     # we got here via impact-scoping (cloud workflows) or full-workspace
-    # fallback (local).
+    # fallback (local). Private crates have no registry consumer contract.
     $libPkgs = @{}
     $metadataJson = & cargo metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
@@ -4296,7 +4315,8 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
         exit 1
     }
     foreach ($p in $meta.packages) {
-        if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
+        if (($p.targets | Where-Object { $_.kind -contains 'lib' }) -and
+            -not ($p.publish -is [array] -and $p.publish.Count -eq 0)) {
             $libPkgs[$p.name] = $p
         }
     }
@@ -4315,7 +4335,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
         }
     }
     if ($packages.Count -eq 0) {
-        Write-Host 'anvil-semver-check: no affected library crates; skipping'
+        Write-Host 'anvil-semver-check: no affected publishable library crates; skipping'
         Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
         exit 0
     }
@@ -4944,10 +4964,10 @@ anvil-scheduled-test-validate-prereqs: \
 # in cloud workflows:
 #
 #   - "modified": only run when at least one package's source files
-#     changed in the diff. The check's underlying tool is workspace-wide
-#     or directory-scoped (cargo fmt --all, cargo heather, cargo
-#     spellcheck), so it doesn't take --package; we short-circuit on
-#     the ANVIL_INCLUDE_MODIFIED == "--skip" sentinel.
+#     changed in the diff. The tier is only a skip gate: once admitted,
+#     the check runs its complete selected scope rather than splicing
+#     package arguments. That scope may be workspace members (cargo each),
+#     the workspace (cargo heather), or a directory (cargo spellcheck).
 #
 #   - "affected": run on the affected set (modified ∪ reverse-deps
 #     within the workspace). The check's underlying tool takes
@@ -4969,7 +4989,7 @@ anvil-scheduled-test-validate-prereqs: \
 # Local invocation (no impact wiring): all three env vars are unset or
 # empty (recipes fall back to "--workspace" via the truthiness check
 # below); modified-tier recipes simply skip the splice and run their
-# workspace-wide tool; affected/required-tier recipes splat
+# complete selected scope; affected/required-tier recipes splat
 # "--workspace" when the env var is empty or unset.
 #
 # Preparation contract: when a recipe reaches the cargo call, the
@@ -4996,8 +5016,8 @@ anvil-scheduled-test-validate-prereqs: \
 # and reduces the per-recipe boilerplate to a single one-line skip
 # guard plus the cargo invocation.
 #
-# Modified-tier recipes never splice the env var into cargo (their
-# tools are workspace-wide); they only check the skip sentinel.
+# Modified-tier recipes never splice the env var into their command;
+# they only check the skip sentinel.
 #
 # Every recipe whose body uses multi-line conditionals or env-var
 # splicing is annotated with [script("pwsh", "-NoProfile")]. pwsh is preinstalled on

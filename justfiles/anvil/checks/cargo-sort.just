@@ -8,8 +8,9 @@
 
 # Modified tier.
 #
-# `--check-format` makes formatting differences fail instead of producing
-# warnings, keeping dependency ordering and Cargo manifest style deterministic.
+# cargo-sort 2.1.2 and newer report formatting-only differences as warnings
+# unless `--check-format` is set. Keep it enabled so dependency ordering and
+# Cargo manifest style are both enforced.
 #
 # `--grouped` keeps the blank lines between groups of key/value pairs
 # (e.g. blank-line-separated dependency blocks) intact.

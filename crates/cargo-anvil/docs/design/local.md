@@ -436,7 +436,7 @@ such env vars, one per cargo-delta tier:
 
 | Env var                      | Bucket    | What recipes do with it                                                                       |
 |------------------------------|-----------|------------------------------------------------------------------------------------------------|
-| `ANVIL_INCLUDE_MODIFIED`  | modified  | `--skip` → recipe exits 0. Otherwise: run unconditionally (modified-tier tools are workspace-wide). |
+| `ANVIL_INCLUDE_MODIFIED`  | modified  | `--skip` → recipe exits 0. Otherwise: run the check's complete selected scope without splicing package arguments. |
 | `ANVIL_INCLUDE_AFFECTED`  | affected  | `--skip` → recipe exits 0. Otherwise: splice the value into the cargo invocation, defaulting to `--workspace` when unset. |
 | `ANVIL_INCLUDE_REQUIRED`  | required  | Same semantics as `ANVIL_INCLUDE_AFFECTED`, but consumed by recipes that need transitive dep graph in scope (doc-build, cargo-hack, udeps). |
 
@@ -456,15 +456,16 @@ anvil-clippy:
     cargo clippy ${ANVIL_INCLUDE_AFFECTED:---workspace} --all-targets --all-features --locked -- -D warnings
 ```
 
-A typical modified-tier recipe checks the whole workspace while keeping each
-rustfmt child command bounded:
+A typical modified-tier recipe checks every workspace member while keeping each
+rustfmt child command bounded. Unlike `cargo fmt --all`, this intentionally does
+not discover non-member local path dependencies:
 
 ```just
 anvil-fmt:
     @if [ "$ANVIL_INCLUDE_MODIFIED" = "--skip" ]; then \
         echo "anvil-fmt: no modified packages; skipping"; exit 0; \
     fi; \
-    cargo each --workspace -- \
+    cargo each --workspace --keep-going -- \
         cargo fmt --manifest-path '{manifest}' --check
 ```
 

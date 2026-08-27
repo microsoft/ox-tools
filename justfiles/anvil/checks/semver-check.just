@@ -55,14 +55,14 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
         exit 0
     }
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
-    # Build the candidate package list. Keep each package's metadata so
+    # Build the publishable candidate package list. Keep each package's metadata so
     # its manifest path can also be checked in the baseline. Always
     # iterate per-package over library crates only -- cargo-semver-checks
     # --workspace would fail on workspaces that contain bin-only crates
     # (reported as a missing lib target), and we want the same tolerance for
     # new / renamed / bin->lib-transition crates regardless of whether
     # we got here via impact-scoping (cloud workflows) or full-workspace
-    # fallback (local).
+    # fallback (local). Private crates have no registry consumer contract.
     $libPkgs = @{}
     $metadataJson = & cargo metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
@@ -76,7 +76,8 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
         exit 1
     }
     foreach ($p in $meta.packages) {
-        if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
+        if (($p.targets | Where-Object { $_.kind -contains 'lib' }) -and
+            -not ($p.publish -is [array] -and $p.publish.Count -eq 0)) {
             $libPkgs[$p.name] = $p
         }
     }
@@ -95,7 +96,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
         }
     }
     if ($packages.Count -eq 0) {
-        Write-Host 'anvil-semver-check: no affected library crates; skipping'
+        Write-Host 'anvil-semver-check: no affected publishable library crates; skipping'
         Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
         exit 0
     }

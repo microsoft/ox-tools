@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.5.0"
-catalog_checksum = "sha256:d8b29120429d9e60e7fdcd2a0833ce3acc4217d81805b9545014f4dad4102ae7"
+catalog_checksum = "sha256:97099270927c3a7f1aa8e7362a116a1fb19e3992d3a3160e70482e0c947206d6"
 
 [[file]]
 path = ".anvil/container/Containerfile"
@@ -97,7 +97,7 @@ checksum = "sha256:3e0f0ab3826c4d259fc0bee8465cff17ab390796b584a3b6500f2ef606cfe
 
 [[file]]
 path = "justfiles/anvil/checks/cargo-sort.just"
-checksum = "sha256:bb80567fbe3c9c082b73992971931a0316154aafce703252f2eb0cfb5a19ec27"
+checksum = "sha256:0ecfb1cfb5109495fbceb36b47845113f7530dc12db422ddf2972698cef409b9"
 
 [[file]]
 path = "justfiles/anvil/checks/clippy.just"
@@ -129,11 +129,11 @@ checksum = "sha256:fd34ede436d8f990f16ef3f5c42e99324e62b39412c199c01501c868a1523
 
 [[file]]
 path = "justfiles/anvil/checks/external-types.just"
-checksum = "sha256:8b906cc383b812ac1a3a14a2450854d8c9b44860a8ab9b6e712c41c644aad794"
+checksum = "sha256:40bd7af54f9e828cfd7846568439d6157cd50d588b7172398e854de198300330"
 
 [[file]]
 path = "justfiles/anvil/checks/fmt.just"
-checksum = "sha256:735a444aa74023f2c02fdc9abca09d35e1c35b3b9309bf9f3ddbc20303aa99b0"
+checksum = "sha256:f46d8205e9747e283040aa85a56fce6bf71d2270c83a3c6c40a20f59af470191"
 
 [[file]]
 path = "justfiles/anvil/checks/license-headers.just"
@@ -181,7 +181,7 @@ checksum = "sha256:fb395f5413de48848f10ab3e4069599c0093a790cb31224776ba41f90c8d5
 
 [[file]]
 path = "justfiles/anvil/checks/semver-check.just"
-checksum = "sha256:b4376371bcf2bbb0563a74fb38adebd108c6c7ae9247ae3b9f5877ff1becd8f8"
+checksum = "sha256:22f72ad1180f46aca346ecc349b57ca46c1337cacb05463e29b0c78a96892137"
 
 [[file]]
 path = "justfiles/anvil/checks/spellcheck.just"
@@ -233,7 +233,7 @@ checksum = "sha256:f77629bbc1c73a849d9e2dada2eb5d01a8d3dcade51035c76c1061f513cf5
 
 [[file]]
 path = "justfiles/anvil/helpers.just"
-checksum = "sha256:cf6b30b8f4fd10eeb5bb5660c8e60512434fd94405a4fd8ea7399ababa089d3f"
+checksum = "sha256:ce8ca656cc35c6b78e676971d874e267ada82311acfcfa0f8df302e535a8ff62"
 
 [[file]]
 path = "justfiles/anvil/mod.just"

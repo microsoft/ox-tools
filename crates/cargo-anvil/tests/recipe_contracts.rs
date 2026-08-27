@@ -8,6 +8,7 @@
     reason = "panic-on-failure idioms are appropriate in tests"
 )]
 
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::path::Path;
@@ -79,16 +80,25 @@ if ($args -contains 'metadata') {
             metadata = [pscustomobject]@{}
         }
     }
+    if ($env:FAKE_THIRD_PACKAGE_NAME) {
+        $packages += [pscustomobject]@{
+            name = $env:FAKE_THIRD_PACKAGE_NAME
+            version = '0.1.0'
+            id = "$($env:FAKE_THIRD_PACKAGE_NAME) 0.1.0"
+            manifest_path = [System.IO.Path]::Combine(
+                $root,
+                'nested',
+                $env:FAKE_THIRD_PACKAGE_NAME,
+                'Cargo.toml'
+            )
+            targets = @([pscustomobject]@{ name = $env:FAKE_THIRD_PACKAGE_NAME; kind = @('lib') })
+            publish = @('private-registry')
+            metadata = [pscustomobject]@{}
+        }
+    }
     $metadata = [pscustomobject]@{
         workspace_root = $root
-        workspace_members = @(
-            $packages |
-                Where-Object {
-                    -not ($env:FAKE_SECOND_PACKAGE_NON_MEMBER -and
-                        $_.name -eq $env:FAKE_SECOND_PACKAGE_NAME)
-                } |
-                ForEach-Object { $_.id }
-        )
+        workspace_members = @($packages | ForEach-Object { $_.id })
         packages = $packages
     }
     $metadata | ConvertTo-Json -Depth 8 -Compress
@@ -649,7 +659,7 @@ fn fmt_delegates_workspace_iteration_to_cargo_each() {
     );
     let commands = std::fs::read_to_string(&log).unwrap();
     assert!(
-        commands.contains("each --workspace -- cargo +nightly-test fmt --manifest-path {manifest} --check"),
+        commands.contains("each --workspace --keep-going -- cargo +nightly-test fmt --manifest-path {manifest} --check"),
         "unexpected cargo invocation: {commands}"
     );
     assert!(!commands.contains("fmt --all"));
@@ -674,7 +684,7 @@ fn fmt_propagates_cargo_each_failure() {
 }
 
 #[test]
-fn external_types_skips_non_publishable_libraries() {
+fn external_types_checks_every_publishable_library_and_reports_private_ones() {
     if !tools_available() {
         return;
     }
@@ -692,9 +702,12 @@ fn external_types_skips_non_publishable_libraries() {
         tmp.path(),
         &["anvil-external-types"],
         &[
-            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
+            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--workspace")),
             ("FAKE_CARGO_LOG", log.as_os_str()),
             ("FAKE_PUBLISH_FALSE", OsStr::new("1")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("public-default")),
+            ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("public-default")),
+            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("public-registry")),
         ],
     );
     assert!(
@@ -705,7 +718,61 @@ fn external_types_skips_non_publishable_libraries() {
     );
     let commands = std::fs::read_to_string(log).unwrap();
     assert!(commands.contains("metadata --no-deps --format-version 1"));
-    assert!(!commands.contains("check-external-types --manifest-path"));
+    let expected_manifests = [
+        tmp.path()
+            .join("nested")
+            .join("public-default")
+            .join("Cargo.toml")
+            .to_string_lossy()
+            .into_owned(),
+        tmp.path()
+            .join("nested")
+            .join("public-registry")
+            .join("Cargo.toml")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    assert_eq!(
+        commands
+            .lines()
+            .filter_map(|command| { command.strip_prefix("+nightly-test check-external-types --manifest-path ") })
+            .map(str::to_owned)
+            .collect::<HashSet<_>>(),
+        expected_manifests.into_iter().collect()
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("excluding 1 non-publishable library crate"));
+}
+
+#[test]
+fn semver_skips_non_publishable_libraries() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("helpers.just", HELPERS), ("semver.just", SEMVER)],
+        &[
+            "anvil-tool-cargo-semver-checks-validate-prereqs",
+            "anvil-tool-cargo-semver-checks-install installer",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-semver-check"],
+        &[
+            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_PUBLISH_FALSE", OsStr::new("1")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "private semver filtering failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!std::fs::read_to_string(log).unwrap().contains("semver-checks"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("no affected publishable library crates"));
 }
 
 #[test]
