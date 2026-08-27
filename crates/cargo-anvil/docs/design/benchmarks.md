@@ -99,6 +99,16 @@ restore/save building blocks live in [github.md](./github.md) and
 [ado.md](./ado.md). cbh's own durable backends (for example Azure Blob) are
 outside anvil's scope: the artifact rolling window is the supported store.
 
+The window's *depth* is not symmetric between backends, and cannot be made so
+from here. GitHub's save sets an explicit retention, so the horizon is a
+property of the emitted workflow. ADO publishes through the job wrapper's
+artifact contract, which exposes no retention control, so the horizon there is
+whatever the project or organization build-retention policy grants — commonly
+shorter. An ADO chain can therefore lapse sooner than a GitHub one for the same
+schedule. This is a visible cold start rather than a silent wrong answer, so it
+is documented as a caveat rather than worked around: an adopter who needs a
+guaranteed horizon on ADO raises the project's build retention.
+
 ## 5. Surfacing: failing the scheduled build
 
 An active regression fails the scheduled build; the findings — each benchmark,
