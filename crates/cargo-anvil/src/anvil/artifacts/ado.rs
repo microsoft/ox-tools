@@ -320,9 +320,9 @@ mod tests {
         // Downstream stages consume the per-OS job outputs from the one stage.
         assert!(PR_STAGES.contains("stageDependencies.impact.compute_linux.outputs"));
         assert!(PR_STAGES.contains("stageDependencies.impact.compute_windows.outputs"));
-        assert!(PR_STAGES.contains("compute.msrv_compatibility_required"));
-        assert!(PR_STAGES.contains("eq(variables['msrv_compatibility_required'], 'true')"));
-        assert!(IMPACT_STEP.contains("-MsrvCompatibilityToolchain"));
+        assert!(PR_STAGES.contains("compute.msrv_test_required"));
+        assert!(PR_STAGES.contains("eq(variables['msrv_test_required'], 'true')"));
+        assert!(IMPACT_STEP.contains("-MsrvToolchain"));
         assert!(PR_STAGES.contains("- template: steps/job.yml"));
         assert!(
             !PR_STAGES.contains("\n      - job: "),

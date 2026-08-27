@@ -168,12 +168,13 @@ stages:
                 failIfCoverageEmpty: false
 
   - stage: pr_msrv
-    displayName: anvil pr-msrv (MSRV compatibility)
+    displayName: anvil pr-msrv (MSRV tests)
     dependsOn: [impact]
-    condition: and(succeeded(), eq(variables['msrv_compatibility_required'], 'true'))
+    condition: and(succeeded(), eq(variables['msrv_test_required'], 'true'))
     variables:
       include_affected_linux: $[ stageDependencies.impact.compute_linux.outputs['compute.include_affected'] ]
-      msrv_compatibility_required: $[ stageDependencies.impact.compute_linux.outputs['compute.msrv_compatibility_required'] ]
+      include_affected_windows: $[ stageDependencies.impact.compute_windows.outputs['compute.include_affected'] ]
+      msrv_test_required: $[ stageDependencies.impact.compute_linux.outputs['compute.msrv_test_required'] ]
     jobs:
       - template: steps/job.yml
         parameters:
@@ -183,6 +184,14 @@ stages:
             - template: steps/pr-msrv.yml
               parameters:
                 include_affected: $(include_affected_linux)
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/pr-msrv.yml
+              parameters:
+                include_affected: $(include_affected_windows)
 
   - stage: pr_runtime_analysis
     displayName: anvil pr-runtime-analysis (miri + careful)

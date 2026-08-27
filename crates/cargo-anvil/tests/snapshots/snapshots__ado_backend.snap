@@ -1205,8 +1205,8 @@ param(
     [switch] $ValidateWorkspaceMsrv,
     [switch] $InstallIfMissing,
     [switch] $ForEnvironment,
-    [switch] $MsrvCompatibilityToolchain,
-    [switch] $InstallMsrvCompatibilityIfNeeded
+    [switch] $MsrvToolchain,
+    [switch] $InstallMsrvIfNeeded
 )
 
 $ErrorActionPreference = 'Stop'
@@ -1317,22 +1317,10 @@ function Assert-UniformWorkspaceMsrv {
     }
 }
 
-function Get-MsrvCompatibilitySelection {
-    if ($null -eq $fileSelection) {
-        return $null
-    }
-
+function Get-MsrvSelection {
     $msrv = Get-RootMsrv -AllowMissing
     if ([string]::IsNullOrWhiteSpace($msrv)) {
         return $null
-    }
-    $selectedMatch = [regex]::Match($fileSelection.Value, '^(\d+)\.(\d+)(?:\.\d+)?(?:-.+)?$')
-    $msrvMatch = [regex]::Match($msrv, '^(\d+)\.(\d+)(?:\.\d+)?(?:-.+)?$')
-    if ($fileSelection.Selector -eq 'channel' -and $selectedMatch.Success -and $msrvMatch.Success) {
-        if ($selectedMatch.Groups[1].Value -eq $msrvMatch.Groups[1].Value -and
-            $selectedMatch.Groups[2].Value -eq $msrvMatch.Groups[2].Value) {
-            return $null
-        }
     }
 
     if (-not [string]::IsNullOrWhiteSpace($env:ANVIL_MSRV_TOOLCHAIN)) {
@@ -1374,22 +1362,22 @@ if ($ValidateWorkspaceMsrv) {
     exit 0
 }
 
-if ($MsrvCompatibilityToolchain -or $InstallMsrvCompatibilityIfNeeded) {
-    $compatibilitySelection = Get-MsrvCompatibilitySelection
-    if ($null -eq $compatibilitySelection) {
+if ($MsrvToolchain -or $InstallMsrvIfNeeded) {
+    $msrvSelection = Get-MsrvSelection
+    if ($null -eq $msrvSelection) {
         exit 0
     }
-    if ($InstallMsrvCompatibilityIfNeeded) {
-        if ($compatibilitySelection.Mapped) {
-            & cargo "+$($compatibilitySelection.Value)" --version *> $null
+    if ($InstallMsrvIfNeeded) {
+        if ($msrvSelection.Mapped) {
+            & cargo "+$($msrvSelection.Value)" --version *> $null
             if ($LASTEXITCODE -ne 0) {
-                throw "anvil: mapped MSRV toolchain '$($compatibilitySelection.Value)' is unavailable; provision ANVIL_MSRV_TOOLCHAIN or unset it to let Anvil install the declared public MSRV"
+                throw "anvil: mapped MSRV toolchain '$($msrvSelection.Value)' is unavailable; provision ANVIL_MSRV_TOOLCHAIN or unset it to let Anvil install the declared public MSRV"
             }
         } else {
-            Install-Toolchain $compatibilitySelection 'MSRV compatibility'
+            Install-Toolchain $msrvSelection 'MSRV'
         }
     } else {
-        $compatibilitySelection.Value
+        $msrvSelection.Value
     }
     exit 0
 }
@@ -1702,12 +1690,13 @@ stages:
                 failIfCoverageEmpty: false
 
   - stage: pr_msrv
-    displayName: anvil pr-msrv (MSRV compatibility)
+    displayName: anvil pr-msrv (MSRV tests)
     dependsOn: [impact]
-    condition: and(succeeded(), eq(variables['msrv_compatibility_required'], 'true'))
+    condition: and(succeeded(), eq(variables['msrv_test_required'], 'true'))
     variables:
       include_affected_linux: $[ stageDependencies.impact.compute_linux.outputs['compute.include_affected'] ]
-      msrv_compatibility_required: $[ stageDependencies.impact.compute_linux.outputs['compute.msrv_compatibility_required'] ]
+      include_affected_windows: $[ stageDependencies.impact.compute_windows.outputs['compute.include_affected'] ]
+      msrv_test_required: $[ stageDependencies.impact.compute_linux.outputs['compute.msrv_test_required'] ]
     jobs:
       - template: steps/job.yml
         parameters:
@@ -1717,6 +1706,14 @@ stages:
             - template: steps/pr-msrv.yml
               parameters:
                 include_affected: $(include_affected_linux)
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          steps:
+            - template: steps/pr-msrv.yml
+              parameters:
+                include_affected: $(include_affected_windows)
 
   - stage: pr_runtime_analysis
     displayName: anvil pr-runtime-analysis (miri + careful)
@@ -2010,8 +2007,7 @@ steps:
 #   include_affected - same shape, for the affected set (modified ∪ rev-deps).
 #   include_required - same shape, for the required set
 #                      (affected ∪ workspace-internal transitive deps).
-#   msrv_compatibility_required - "true" when a selecting toolchain file
-#                                 differs from the root MSRV.
+#   msrv_test_required - "true" when the root manifest declares an MSRV.
 #
 # Unscoped recipes (deny, audit, aprz, pr-title) ignore all three.
 steps:
@@ -2043,11 +2039,11 @@ steps:
       # worktree's rust-toolchain.toml. Capture it here, in the PR checkout,
       # where the active toolchain is resolved and installed.
       active_toolchain="$(rustup show active-toolchain | head -n1 | cut -d' ' -f1)"
-      compatibility_toolchain="$(pwsh -NoProfile -File .anvil/resolve-stable-toolchain.ps1 -MsrvCompatibilityToolchain)"
-      if [ -n "$compatibility_toolchain" ]; then
-          echo "##vso[task.setvariable variable=msrv_compatibility_required;isOutput=true]true"
+      msrv_toolchain="$(pwsh -NoProfile -File .anvil/resolve-stable-toolchain.ps1 -MsrvToolchain)"
+      if [ -n "$msrv_toolchain" ]; then
+          echo "##vso[task.setvariable variable=msrv_test_required;isOutput=true]true"
       else
-          echo "##vso[task.setvariable variable=msrv_compatibility_required;isOutput=true]false"
+          echo "##vso[task.setvariable variable=msrv_test_required;isOutput=true]false"
       fi
       # Two snapshots + impact compare (cargo-delta has no --base
       # shortcut). The baseline runs in a worktree at the merge target
@@ -4242,15 +4238,14 @@ anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Run affected-package tests under the declared MSRV when a selecting root
-# toolchain file chooses a different compiler.
+# Run affected-package tests under the declared MSRV.
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test: anvil-msrv-test-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' -MsrvCompatibilityToolchain | Out-String).Trim()
+    $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' -MsrvToolchain | Out-String).Trim()
     if ([string]::IsNullOrWhiteSpace($toolchain)) {
-        Write-Host 'anvil-msrv-test: selected toolchain matches the MSRV; skipping'
+        Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'
         exit 0
     }
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
@@ -4259,18 +4254,18 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs
     & cargo "+$toolchain" test @pkg --all-targets --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# Install the MSRV compatibility toolchain only when this check is required.
+# Install the declared MSRV toolchain only when this check is required.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test-setup installer="install":
-    & '.anvil/resolve-stable-toolchain.ps1' -InstallMsrvCompatibilityIfNeeded
+    & '.anvil/resolve-stable-toolchain.ps1' -InstallMsrvIfNeeded
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# Validate the conditional MSRV compatibility prerequisite.
+# Validate the MSRV prerequisite.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test-validate-prereqs:
-    $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' -MsrvCompatibilityToolchain | Out-String).Trim()
+    $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' -MsrvToolchain | Out-String).Trim()
     if ([string]::IsNullOrWhiteSpace($toolchain)) { exit 0 }
     & cargo "+$toolchain" --version
     if ($LASTEXITCODE -ne 0) {
@@ -4279,7 +4274,7 @@ anvil-msrv-test-validate-prereqs:
         } else {
             'run: just anvil-msrv-test-setup'
         }
-        Write-Error "anvil: MSRV compatibility toolchain '$toolchain' is unavailable; $hint"
+        Write-Error "anvil: MSRV toolchain '$toolchain' is unavailable; $hint"
         exit $LASTEXITCODE
     }
 

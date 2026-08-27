@@ -393,12 +393,11 @@ When selection falls back to the root MSRV, prerequisite validation reads
 single catalog toolchain explicitly with a selecting toolchain file. Anvil does not
 build a per-package toolchain matrix for this uncommon case.
 
-When a selecting root toolchain file uses a different compiler from the root MSRV,
-`anvil-msrv-test` runs affected-package tests under the MSRV with all features and
-with default features. Numeric channels are compared by major/minor version, so
-`1.95` and `1.95.0` match; non-numeric channels and path toolchains conservatively
-trigger the compatibility run. `ANVIL_MSRV_TOOLCHAIN` optionally maps the declared
-MSRV to a provisioned internal toolchain without changing when the check is required.
+When the root manifest declares an MSRV, `anvil-msrv-test` runs affected-package
+unit and integration tests under that compiler with all features and with default
+features. A selecting toolchain file does not suppress this minimum-version run.
+`ANVIL_MSRV_TOOLCHAIN` optionally maps the declared MSRV to a provisioned internal
+toolchain. Without a root MSRV the recipe is a no-op.
 
 `anvil-tool-rustc-validate-prereqs` verifies the selected compiler and the uniform
 MSRV rule. Per-check toolchain requirements (for example, miri, careful, and udeps

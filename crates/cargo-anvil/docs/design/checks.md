@@ -118,7 +118,7 @@ order, and `just anvil` is an alias for `just anvil-pr`.)
 |--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `semver-check`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
 | `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `llvm-cov` (instrumented `nextest`), `doc-test`, `examples`. Coverage is uploaded once from the canonical x86_64 Linux leg. |
-| `pr-msrv`         | Linux x86_64 only                     | Compatibility tests under the declared MSRV when a selecting root toolchain file uses a different compiler. The job is a cheap no-op when no compatibility run is needed. |
+| `pr-msrv`         | Same default as `pr-test`             | Affected-package unit and integration tests under the declared MSRV, with all features and default features. The group is skipped before setup when no root MSRV is declared. |
 | `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped via `ANVIL_INCLUDE_AFFECTED` so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
 | `pr-mutants`         | Linux x86_64 + Windows x86_64 + Linux aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | Diff-scoped mutation testing (`mutants --in-diff`). The recipe self-skips on `aarch64-pc-windows-msvc` (cargo-mutants doesn't build there), so the GH windows-arm leg is a no-op rather than a job failure. |
 
@@ -202,18 +202,20 @@ matrix overhead.
 
 This is the same set of checks that used to live in the standalone `pr-test` group; merging into `pr-test` removes one cloud-workflow job from the matrix without changing what runs.
 
-#### `pr-msrv` (minimum-version compatibility)
+#### `pr-msrv` (minimum-version tests)
 
-When a root `rust-toolchain` or `rust-toolchain.toml` selects a compiler whose
-numeric major/minor version differs from the root MSRV, Anvil runs affected-package
-tests under the MSRV with both all features and default features. Non-numeric
-channels such as `stable` and path toolchains conservatively count as different.
-A components-only toolchain file does not select a compiler and therefore does not
-trigger this check.
+When the root manifest declares an MSRV, Anvil runs affected-package unit and
+integration tests under that compiler with both all features and default features.
+This is the ordinary test-suite execution at the minimum supported compiler;
+`pr-test` runs the same affected suite through coverage instrumentation on the
+catalog nightly. A selecting toolchain file does not suppress the MSRV run, even
+when it selects the same compiler, because the MSRV group is the authoritative
+minimum-version test result.
 
-The compatibility run uses a dedicated Linux x86_64 job/stage in parallel with the
-other PR groups. Impact preparation publishes whether the run is required, allowing
-the cloud workflow to skip the job/stage before setup when it is not.
+The group uses the same OS/architecture matrix and per-OS impact sets as `pr-test`
+so cfg-gated targets and dependencies are exercised under the MSRV. It runs in
+parallel with the other PR groups. Impact preparation publishes whether a root MSRV
+exists, allowing the cloud workflow to skip the group before setup when it does not.
 `ANVIL_MSRV_TOOLCHAIN` may map the public MSRV to an already-provisioned internal
 toolchain; when it is unset, setup installs the declared MSRV through rustup.
 

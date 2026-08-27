@@ -6,15 +6,14 @@
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# Run affected-package tests under the declared MSRV when a selecting root
-# toolchain file chooses a different compiler.
+# Run affected-package tests under the declared MSRV.
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test: anvil-msrv-test-validate-prereqs
     $ErrorActionPreference = 'Stop'
     if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' -MsrvCompatibilityToolchain | Out-String).Trim()
+    $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' -MsrvToolchain | Out-String).Trim()
     if ([string]::IsNullOrWhiteSpace($toolchain)) {
-        Write-Host 'anvil-msrv-test: selected toolchain matches the MSRV; skipping'
+        Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'
         exit 0
     }
     $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
@@ -23,18 +22,18 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs
     & cargo "+$toolchain" test @pkg --all-targets --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# Install the MSRV compatibility toolchain only when this check is required.
+# Install the declared MSRV toolchain only when this check is required.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test-setup installer="install":
-    & '.anvil/resolve-stable-toolchain.ps1' -InstallMsrvCompatibilityIfNeeded
+    & '.anvil/resolve-stable-toolchain.ps1' -InstallMsrvIfNeeded
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-# Validate the conditional MSRV compatibility prerequisite.
+# Validate the MSRV prerequisite.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test-validate-prereqs:
-    $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' -MsrvCompatibilityToolchain | Out-String).Trim()
+    $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' -MsrvToolchain | Out-String).Trim()
     if ([string]::IsNullOrWhiteSpace($toolchain)) { exit 0 }
     & cargo "+$toolchain" --version
     if ($LASTEXITCODE -ne 0) {
@@ -43,6 +42,6 @@ anvil-msrv-test-validate-prereqs:
         } else {
             'run: just anvil-msrv-test-setup'
         }
-        Write-Error "anvil: MSRV compatibility toolchain '$toolchain' is unavailable; $hint"
+        Write-Error "anvil: MSRV toolchain '$toolchain' is unavailable; $hint"
         exit $LASTEXITCODE
     }

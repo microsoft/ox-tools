@@ -19,8 +19,7 @@ description: |
                        (modified ∪ rev-deps).
     include_required - same shape, for crates in the required set
                        (affected ∪ workspace-internal transitive deps).
-    msrv_compatibility_required - "true" when a selecting toolchain file
-                                  differs from the root MSRV.
+    msrv_test_required - "true" when the root manifest declares an MSRV.
 
   Recipes in justfiles/anvil/checks/ interpret each variable per their tier:
   modified-tier recipes (fmt, license-headers, spellcheck, ...) short-
@@ -41,9 +40,9 @@ outputs:
   include_required:
     description: Pre-formatted --package args for the required tier.
     value: ${{ steps.compute.outputs.include_required }}
-  msrv_compatibility_required:
-    description: Whether a selecting toolchain file differs from the root MSRV.
-    value: ${{ steps.msrv_compatibility.outputs.required }}
+  msrv_test_required:
+    description: Whether the root manifest declares an MSRV.
+    value: ${{ steps.msrv_test.outputs.required }}
 runs:
   using: composite
   steps:
@@ -58,11 +57,11 @@ runs:
     - name: Install cargo-delta
       shell: bash
       run: just anvil-tool-cargo-delta-install binstall
-    - id: msrv_compatibility
-      name: Detect MSRV compatibility run
+    - id: msrv_test
+      name: Detect MSRV test run
       shell: pwsh -NoProfile -Command ". '{0}'"
       run: |
-        $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' -MsrvCompatibilityToolchain | Out-String).Trim()
+        $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' -MsrvToolchain | Out-String).Trim()
         $required = -not [string]::IsNullOrWhiteSpace($toolchain)
         "required=$($required.ToString().ToLowerInvariant())" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
     - id: compute

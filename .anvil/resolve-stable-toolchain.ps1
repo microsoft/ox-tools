@@ -6,8 +6,8 @@ param(
     [switch] $ValidateWorkspaceMsrv,
     [switch] $InstallIfMissing,
     [switch] $ForEnvironment,
-    [switch] $MsrvCompatibilityToolchain,
-    [switch] $InstallMsrvCompatibilityIfNeeded
+    [switch] $MsrvToolchain,
+    [switch] $InstallMsrvIfNeeded
 )
 
 $ErrorActionPreference = 'Stop'
@@ -118,22 +118,10 @@ function Assert-UniformWorkspaceMsrv {
     }
 }
 
-function Get-MsrvCompatibilitySelection {
-    if ($null -eq $fileSelection) {
-        return $null
-    }
-
+function Get-MsrvSelection {
     $msrv = Get-RootMsrv -AllowMissing
     if ([string]::IsNullOrWhiteSpace($msrv)) {
         return $null
-    }
-    $selectedMatch = [regex]::Match($fileSelection.Value, '^(\d+)\.(\d+)(?:\.\d+)?(?:-.+)?$')
-    $msrvMatch = [regex]::Match($msrv, '^(\d+)\.(\d+)(?:\.\d+)?(?:-.+)?$')
-    if ($fileSelection.Selector -eq 'channel' -and $selectedMatch.Success -and $msrvMatch.Success) {
-        if ($selectedMatch.Groups[1].Value -eq $msrvMatch.Groups[1].Value -and
-            $selectedMatch.Groups[2].Value -eq $msrvMatch.Groups[2].Value) {
-            return $null
-        }
     }
 
     if (-not [string]::IsNullOrWhiteSpace($env:ANVIL_MSRV_TOOLCHAIN)) {
@@ -175,22 +163,22 @@ if ($ValidateWorkspaceMsrv) {
     exit 0
 }
 
-if ($MsrvCompatibilityToolchain -or $InstallMsrvCompatibilityIfNeeded) {
-    $compatibilitySelection = Get-MsrvCompatibilitySelection
-    if ($null -eq $compatibilitySelection) {
+if ($MsrvToolchain -or $InstallMsrvIfNeeded) {
+    $msrvSelection = Get-MsrvSelection
+    if ($null -eq $msrvSelection) {
         exit 0
     }
-    if ($InstallMsrvCompatibilityIfNeeded) {
-        if ($compatibilitySelection.Mapped) {
-            & cargo "+$($compatibilitySelection.Value)" --version *> $null
+    if ($InstallMsrvIfNeeded) {
+        if ($msrvSelection.Mapped) {
+            & cargo "+$($msrvSelection.Value)" --version *> $null
             if ($LASTEXITCODE -ne 0) {
-                throw "anvil: mapped MSRV toolchain '$($compatibilitySelection.Value)' is unavailable; provision ANVIL_MSRV_TOOLCHAIN or unset it to let Anvil install the declared public MSRV"
+                throw "anvil: mapped MSRV toolchain '$($msrvSelection.Value)' is unavailable; provision ANVIL_MSRV_TOOLCHAIN or unset it to let Anvil install the declared public MSRV"
             }
         } else {
-            Install-Toolchain $compatibilitySelection 'MSRV compatibility'
+            Install-Toolchain $msrvSelection 'MSRV'
         }
     } else {
-        $compatibilitySelection.Value
+        $msrvSelection.Value
     }
     exit 0
 }

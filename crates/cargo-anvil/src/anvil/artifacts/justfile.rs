@@ -480,8 +480,8 @@ mod tests {
         assert!(STABLE_TOOLCHAIN_RESOLVER.contains("rust-version"));
         assert!(STABLE_TOOLCHAIN_RESOLVER.contains("ValidateWorkspaceMsrv"));
         assert!(STABLE_TOOLCHAIN_RESOLVER.contains("InstallIfMissing"));
-        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("MsrvCompatibilityToolchain"));
-        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("InstallMsrvCompatibilityIfNeeded"));
+        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("MsrvToolchain"));
+        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("InstallMsrvIfNeeded"));
     }
 
     mod stable_toolchain_resolver_tests {
@@ -601,14 +601,14 @@ mod tests {
         }
 
         #[test]
-        fn requests_compatibility_only_for_a_different_selecting_toolchain() {
+        fn resolves_msrv_whenever_the_root_declares_one() {
             let no_msrv = fixture("[workspace]\nresolver = \"2\"\n");
             fs::write(no_msrv.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n")
                 .expect("toolchain fixture must be writable");
-            let output = run(no_msrv.path(), &["-MsrvCompatibilityToolchain"], None);
+            let output = run(no_msrv.path(), &["-MsrvToolchain"], None);
             assert!(
                 output.status.success(),
-                "a repository without a declared MSRV must skip compatibility"
+                "a repository without a declared MSRV must skip the MSRV test"
             );
             assert!(
                 String::from_utf8(output.stdout)
@@ -619,11 +619,11 @@ mod tests {
 
             let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
             let root = temp.path();
-            let compatibility = |root: &Path| {
-                let output = run(root, &["-MsrvCompatibilityToolchain"], None);
+            let resolve_msrv = |root: &Path| {
+                let output = run(root, &["-MsrvToolchain"], None);
                 assert!(
                     output.status.success(),
-                    "compatibility resolution failed: {}",
+                    "MSRV resolution failed: {}",
                     String::from_utf8_lossy(&output.stderr)
                 );
                 String::from_utf8(output.stdout)
@@ -632,23 +632,18 @@ mod tests {
                     .to_owned()
             };
 
-            assert!(compatibility(root).is_empty());
+            assert_eq!(resolve_msrv(root), "1.93");
             fs::write(root.join("rust-toolchain.toml"), "[toolchain]\ncomponents = [\"clippy\"]\n")
                 .expect("toolchain fixture must be writable");
-            assert!(compatibility(root).is_empty());
+            assert_eq!(resolve_msrv(root), "1.93");
 
             fs::write(root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.93.0\"\n").expect("toolchain fixture must be writable");
-            assert!(compatibility(root).is_empty());
+            assert_eq!(resolve_msrv(root), "1.93");
 
             fs::write(root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n").expect("toolchain fixture must be writable");
-            assert_eq!(compatibility(root), "1.93");
+            assert_eq!(resolve_msrv(root), "1.93");
             let output = Command::new("pwsh")
-                .args([
-                    "-NoProfile",
-                    "-File",
-                    ".anvil/resolve-stable-toolchain.ps1",
-                    "-MsrvCompatibilityToolchain",
-                ])
+                .args(["-NoProfile", "-File", ".anvil/resolve-stable-toolchain.ps1", "-MsrvToolchain"])
                 .current_dir(root)
                 .env_remove("RUSTUP_TOOLCHAIN")
                 .env("ANVIL_MSRV_TOOLCHAIN", "ms-prod-1.93")
@@ -662,7 +657,7 @@ mod tests {
 
             fs::write(root.join("rust-toolchain.toml"), "[toolchain]\npath = \"toolchains/custom\"\n")
                 .expect("toolchain fixture must be writable");
-            assert_eq!(compatibility(root), "1.93");
+            assert_eq!(resolve_msrv(root), "1.93");
         }
     }
 
