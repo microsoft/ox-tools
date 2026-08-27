@@ -479,6 +479,13 @@ fn a_newly_added_region_is_inserted_in_order_not_appended() {
     // And the repository's own lines are still there.
     assert!(composed.contains("# MINE-BEFORE"), "gap content before the region must survive");
     assert!(composed.contains("# MINE-AFTER"), "gap content after the region must survive");
+    // `# MINE-AFTER` sits in the gap that follows the restored region's
+    // predecessor. The region has to land above it: inserting one line lower
+    // would split the repository's gap content around anvil's sentinels.
+    assert!(
+        at("# >>> anvil-managed: anvil-container-base\n") < at("# MINE-AFTER"),
+        "the restored region must land above the gap content, not inside it:\n{composed}"
+    );
 }
 
 /// The Dockerfile is the first managed-region host whose region *order* is

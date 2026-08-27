@@ -218,10 +218,20 @@ pub fn upsert_region_with_placement(
 
     if let RegionPlacement::At(offset) = placement {
         let offset = offset.min(text.len());
-        // Land on a line boundary. An offset in the middle of a line would
-        // split it around the sentinels, which for a Dockerfile is the
-        // difference between a valid instruction and two invalid halves.
-        let offset = text[offset..].find('\n').map_or(text.len(), |index| offset + index + 1);
+        // Snap to a line boundary only when the offset is not already on one.
+        // Callers point at the start of the line the region should displace
+        // (typically a preceding region's `end_line.end`); advancing
+        // unconditionally would skip that line, landing the region after the
+        // first line of the repository's gap content and splitting it. An
+        // offset that does fall mid-line is rounded forward, because splitting
+        // a line around the sentinels turns one valid instruction into two
+        // invalid halves.
+        let on_line_boundary = offset == 0 || text[..offset].ends_with('\n');
+        let offset = if on_line_boundary {
+            offset
+        } else {
+            text[offset..].find('\n').map_or(text.len(), |index| offset + index + 1)
+        };
         let (before, after) = text.split_at(offset);
         let mut out = String::with_capacity(text.len() + rendered.len() + 2);
         out.push_str(before);
@@ -481,6 +491,21 @@ mod tests {
     /// The offset the caller computes points at the end of the preceding
     /// region's sentinel, so the split must fall on the following line boundary.
     #[test]
+    fn at_placement_on_a_line_boundary_does_not_skip_the_following_line() {
+        // The offset callers actually pass is a line start -- a preceding
+        // region's `end_line.end`. Advancing past the next newline would put
+        // the region after the first line of the gap and split it in two.
+        let host = "# >>> anvil-managed: a\nbody\n# <<< anvil-managed: a\n# my gap line\nRUN later\n";
+        let offset = host.find("# my gap line").unwrap();
+        let new = upsert_region_with_placement(host, "x", "body\n", SYN, RegionPlacement::At(offset)).unwrap();
+        assert_eq!(
+            new,
+            "# >>> anvil-managed: a\nbody\n# <<< anvil-managed: a\n\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n\n# my gap line\nRUN later\n",
+            "the region belongs above the gap content, not inside it"
+        );
+    }
+
+    #[test]
     fn at_placement_inserts_after_the_line_containing_the_offset() {
         let host = "# syntax=docker/dockerfile:1\nFROM base\n";
         // Offset lands mid-way through line 1; the region must go *after* that
@@ -517,7 +542,7 @@ mod tests {
         let new = upsert_region_with_placement(host, "x", "body\n", SYN, RegionPlacement::At(0)).unwrap();
         assert_eq!(
             new,
-            "FROM base\n\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n\nRUN later\n"
+            "# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n\nFROM base\nRUN later\n"
         );
     }
 
