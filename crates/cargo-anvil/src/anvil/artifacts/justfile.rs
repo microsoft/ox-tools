@@ -534,12 +534,15 @@ mod tests {
                 .to_owned()
         }
 
-        fn diagnostic(output: &Output) -> String {
+        fn normalized_diagnostic(output: &Output) -> String {
             format!(
                 "{}{}",
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             )
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
         }
 
         #[test]
@@ -583,10 +586,10 @@ mod tests {
             let missing = fixture("[workspace]\nresolver = \"2\"\n");
             let output = run(missing.path(), &[], None);
             assert!(!output.status.success());
+            let diagnostic = normalized_diagnostic(&output);
             assert!(
-                diagnostic(&output).contains("no root [workspace.package]"),
-                "unexpected resolver diagnostic: {}",
-                diagnostic(&output)
+                diagnostic.contains("no root [workspace.package]"),
+                "unexpected resolver diagnostic: {diagnostic}"
             );
 
             let heterogeneous =
@@ -606,10 +609,10 @@ mod tests {
 
             let output = run(heterogeneous.path(), &["-ValidateWorkspaceMsrv"], None);
             assert!(!output.status.success());
+            let diagnostic = normalized_diagnostic(&output);
             assert!(
-                diagnostic(&output).contains("must resolve to the root MSRV"),
-                "unexpected resolver diagnostic: {}",
-                diagnostic(&output)
+                diagnostic.contains("must resolve to the root MSRV"),
+                "unexpected resolver diagnostic: {diagnostic}"
             );
 
             let output = run(heterogeneous.path(), &["-ValidateWorkspaceMsrv"], Some("explicit-toolchain"));
