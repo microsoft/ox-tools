@@ -629,3 +629,111 @@ fn a_malformed_sentinel_is_named_in_the_refusal() {
         refusals[0]
     );
 }
+
+/// The guard that refuses a repository-authored Dockerfile is reached through
+/// a host name resolved from disk, so it must not be keyed off the canonical
+/// spelling. A repository that wrote a lower-cased `dockerfile` -- the commoner
+/// spelling in the wild, and indistinguishable from the canonical one on
+/// Windows and macOS -- would otherwise miss the composed-host lookup entirely,
+/// get no refusal, and have anvil's six regions appended below its own `FROM`.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn a_case_variant_repository_dockerfile_is_refused_too() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let canonical = root.join(".anvil/container/Dockerfile");
+    let lowercased = root.join(".anvil/container/dockerfile");
+
+    std::fs::remove_file(&canonical).unwrap();
+    let hand_written = "# hand written by the repository\nFROM mine:1\nRUN echo mine\n";
+    write(&lowercased, hand_written);
+    let mut manifest = Manifest::load(root).unwrap();
+    manifest.files.remove(".anvil/container/Dockerfile");
+    manifest.regions.retain(|key, _| key.host != ".anvil/container/Dockerfile");
+    manifest.save(root).unwrap();
+
+    // Without this the test passes vacuously on a case-insensitive filesystem
+    // that kept the old directory entry.
+    assert_eq!(
+        on_disk_dockerfile_name(root),
+        "dockerfile",
+        "precondition: the host is lower-cased on disk"
+    );
+
+    let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&lowercased).unwrap(),
+        hand_written,
+        "content anvil never owned must be left exactly as found"
+    );
+    let refusals: Vec<&String> = outcome
+        .plan
+        .refusals()
+        .iter()
+        .filter(|r| r.to_lowercase().contains(".anvil/container/dockerfile"))
+        .collect();
+    assert_eq!(refusals.len(), 1, "one diagnostic per host: {refusals:?}");
+    assert!(
+        refusals[0].contains("anvil has never owned it"),
+        "the diagnostic must explain why it cannot be composed: {}",
+        refusals[0]
+    );
+}
+
+/// A case-only rename of an already composed host leaves the lock keyed by the
+/// old spelling and the pass keyed by the new one. Nothing is missing -- every
+/// region is still in the file, rewritten this pass -- so the stale entries
+/// must transfer ownership rather than be treated as orphans: removing them
+/// would strip the pass's own writes and leave a Dockerfile with no `FROM`.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn a_case_only_rename_of_a_composed_host_keeps_its_regions() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let canonical = root.join(".anvil/container/Dockerfile");
+    let lowercased = root.join(".anvil/container/dockerfile");
+
+    let composed = std::fs::read_to_string(&canonical).unwrap();
+    let regions_before = composed.matches("# >>> anvil-managed:").count();
+    assert!(regions_before >= 2, "precondition: the host is composed from several regions");
+    std::fs::remove_file(&canonical).unwrap();
+    write(&lowercased, &composed);
+    assert_eq!(
+        on_disk_dockerfile_name(root),
+        "dockerfile",
+        "precondition: the host is lower-cased on disk"
+    );
+
+    let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    let after = std::fs::read_to_string(&lowercased).unwrap();
+    assert_eq!(
+        after.matches("# >>> anvil-managed:").count(),
+        regions_before,
+        "a case-only rename must not cost the host any of its regions:\n{after}"
+    );
+    assert!(
+        after.contains("\nFROM "),
+        "the composed file must still declare a base image:\n{after}"
+    );
+    let removed: Vec<&Target> = outcome
+        .plan
+        .items()
+        .iter()
+        .filter(|i| i.decision == Decision::Remove)
+        .map(|i| &i.target)
+        .collect();
+    assert!(removed.is_empty(), "nothing may be removed for a case-only rename: {removed:?}");
+}
+
+/// The real on-disk spelling of the composed host, so the case tests cannot
+/// pass without the rename they claim to make having taken effect.
+fn on_disk_dockerfile_name(root: &Path) -> String {
+    std::fs::read_dir(root.join(".anvil/container"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|n| n.eq_ignore_ascii_case("Dockerfile"))
+        .expect("the composed host must exist")
+}

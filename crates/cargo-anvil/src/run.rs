@@ -499,8 +499,16 @@ fn region_placement(region_id: &str) -> RegionPlacement {
 ///
 /// The **order** is load-bearing: `FROM` must precede every instruction that
 /// depends on it, and the toolchain must exist before `anvil-setup` runs.
+///
+/// The comparison ignores case because the caller has already replaced the
+/// canonical path with the host's real on-disk name. A repository that spelled
+/// the file `dockerfile` would otherwise miss this lookup entirely, and with it
+/// every guard below: the regions would be appended at end-of-file, under the
+/// repository's own `FROM`.
 fn composed_host_spec(host_relpath: &str) -> Option<(&'static str, &'static [&'static str])> {
-    (host_relpath == container::DOCKERFILE_PATH).then_some((container::DOCKERFILE_HEADER, container::DOCKERFILE_REGION_ORDER))
+    host_relpath
+        .eq_ignore_ascii_case(container::DOCKERFILE_PATH)
+        .then_some((container::DOCKERFILE_HEADER, container::DOCKERFILE_REGION_ORDER))
 }
 
 /// What a composed host's current content allows anvil to do with it.
@@ -694,8 +702,13 @@ fn plan_removals(
         // destroy the clean recovery -- reverting the edit -- that the refusal
         // message tells the reader to use. "Nothing was written to it" has to
         // be true of the lock as well as the file.
-        if live_region_hosts.contains(path) {
-            if !matches!(composed.states.get(path), Some(ComposedHostState::Unsafe(_))) {
+        //
+        // The lock carries the casing the path had when the entry was written,
+        // while a live host carries the casing the write path resolved from
+        // disk, so the two are compared through the same resolution.
+        let resolved = resolve_existing_case_insensitive(repo_root, path);
+        if live_region_hosts.contains(&resolved) {
+            if !matches!(composed.states.get(&resolved), Some(ComposedHostState::Unsafe(_))) {
                 plan.push(PlanItem::orphaned_kept(Target::File { path: path.clone() }));
             }
             continue;
@@ -720,6 +733,23 @@ fn plan_removals(
 
     for (key, last) in &previous.regions {
         if live_regions.contains(&(key.host.clone(), key.id.clone())) {
+            continue;
+        }
+        // A lock key records the casing its host had when the entry was
+        // written; a live key records the casing the write path resolved from
+        // disk this pass. A case-only rename of the host therefore makes every
+        // one of its regions look orphaned at the very moment the pass has
+        // rewritten all of them under the new name -- and for a composed host
+        // that is the whole file, so removing them would strip this pass's own
+        // writes and leave a Dockerfile with no `FROM`. The regions are still
+        // there under a key the manifest already carries, so the honest answer
+        // is to transfer ownership to the new key and touch nothing on disk.
+        let resolved_host = resolve_existing_case_insensitive(repo_root, &key.host);
+        if resolved_host != key.host && live_regions.contains(&(resolved_host, key.id.clone())) {
+            plan.push(PlanItem::orphaned_kept(Target::Region {
+                host: key.host.clone(),
+                id: key.id.clone(),
+            }));
             continue;
         }
         let Some(host_text) = hosts.get_or_read(repo_root, &key.host)? else {

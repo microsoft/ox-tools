@@ -249,9 +249,15 @@ newline framing would let a file whose body happened to contain `file`, a path a
 two files splitting at that point, so two different input sets could name one image. The lengths are byte counts of
 the same UTF-8 encoding the stream is hashed in, so an independent re-implementation arrives at the same bytes.
 Tagging entries this way
-prevents a rearrangement of names and contents from colliding. Line endings are normalized to LF, so CRLF and LF
-checkouts agree on the tag. The sort is ordinal because a case-insensitive one would drop one of two inputs differing
+prevents a rearrangement of names and contents from colliding. Line endings are normalized to LF for `.just` recipes
+and the declared text inputs, so those agree across a CRLF and an LF checkout; every other file the walk admits is
+hashed as the bytes the build context copies, because bytes are what `COPY` puts in the layer. The sort is ordinal
+because a case-insensitive one would drop one of two inputs differing
 only in case on the case-sensitive filesystem where the image is built.
+
+Anvil's own `.anvil-proposed` review siblings are excluded from both the digest and the build context. They are
+written beside a host when a template moves under a customized region, and they cannot reach the image, so digesting
+one would rename it for as long as the proposal went undismissed.
 
 The tag is the first eight bytes of the digest, hex-encoded: 64 bits, far beyond practical collision risk for a local
 image set, and short enough to keep `docker images` readable.

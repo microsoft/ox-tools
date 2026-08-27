@@ -151,9 +151,17 @@ anvil-container-tag:
     #
     # The hook is picked up by the same walk. Its *output* is deliberately
     # never hashed: a credential must not influence a tag.
+    #
+    # `.anvil-proposed` siblings are excluded. A region proposal is anvil's own
+    # review artifact, written beside its host when a template moves under a
+    # customized region; the build cannot see it and it cannot change what the
+    # image contains. Digesting it would rename the image for as long as a
+    # proposal sat undismissed, so two checkouts of one commit would disagree
+    # on the tag and a published image would stop resolving.
     $containerRoot = Join-Path $repoRoot '.anvil/container'
     if (Test-Path -LiteralPath $containerRoot) {
-        foreach ($file in Get-ChildItem -LiteralPath $containerRoot -Recurse -File -Force) {
+        foreach ($file in Get-ChildItem -LiteralPath $containerRoot -Recurse -File -Force |
+            Where-Object { -not $_.Name.EndsWith('.anvil-proposed') }) {
             $inputs += [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName) -replace '\\', '/'
         }
     }

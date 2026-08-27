@@ -171,7 +171,8 @@ CMD ["bash"]
 # download -- needs the file to be in the context. Denying it would leave the
 # gap documented but unusable for anything but `RUN`. It is also the directory
 # the image tag digests, so what the context admits and what the tag covers stay
-# the same set.
+# the same set -- including the `.anvil-proposed` siblings both exclude, which
+# are anvil's review artifacts rather than build inputs.
 *
 !justfiles
 justfiles/*
@@ -179,6 +180,7 @@ justfiles/*
 !.anvil
 .anvil/*
 !.anvil/container
+.anvil/container/**/*.anvil-proposed
 !rust-toolchain.toml
 
 === .delta.toml ===
@@ -3707,9 +3709,17 @@ anvil-container-tag:
     #
     # The hook is picked up by the same walk. Its *output* is deliberately
     # never hashed: a credential must not influence a tag.
+    #
+    # `.anvil-proposed` siblings are excluded. A region proposal is anvil's own
+    # review artifact, written beside its host when a template moves under a
+    # customized region; the build cannot see it and it cannot change what the
+    # image contains. Digesting it would rename the image for as long as a
+    # proposal sat undismissed, so two checkouts of one commit would disagree
+    # on the tag and a published image would stop resolving.
     $containerRoot = Join-Path $repoRoot '.anvil/container'
     if (Test-Path -LiteralPath $containerRoot) {
-        foreach ($file in Get-ChildItem -LiteralPath $containerRoot -Recurse -File -Force) {
+        foreach ($file in Get-ChildItem -LiteralPath $containerRoot -Recurse -File -Force |
+            Where-Object { -not $_.Name.EndsWith('.anvil-proposed') }) {
             $inputs += [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName) -replace '\\', '/'
         }
     }
