@@ -173,18 +173,34 @@ against the bytes that were parsed: `cargo metadata` runs in between as a subpro
 which is a wide enough window for an editor to save into, and an edit that lands there
 aborts the fix rather than being overwritten.
 
+Replacing a file by rename brings the temporary file's identity with it, so two
+properties an in-place write would have kept are restored deliberately. The manifest's
+permissions are read first and applied to the replacement, because a temporary file is
+created owner-only and a rename carries its mode rather than inheriting the target's —
+otherwise a world-readable manifest silently comes back owner-only, which git does not
+track. A symlinked manifest is resolved first, so the rename lands on the file the link
+points at instead of replacing the link with a regular file.
+
 #### Carried comments can be misattributed
 
 A group header and a note about one specific dependency are the same thing to the
-parser — comment lines in an entry's decor. When the noted entry is the one removed,
-its note lands on the next surviving entry and reads as if it were written about that
-one, which is worse than dropping it: a dropped comment shows up in the `--fix` diff,
-a wrong attribution outlives it.
+parser — comment lines in an entry's decor, whether that decor sits on the key or, for
+a `[workspace.dependencies.name]` entry, on the table. When the noted entry is the one
+removed, its note lands on the next surviving entry and reads as if it were written
+about that one, which is worse than dropping it: a dropped comment shows up in the
+`--fix` diff, a wrong attribution outlives it.
 
 The carry-forward still earns its keep for headers, so it stays, and the relocation is
 made visible instead: every move is reported on stderr, naming the entries the
 comments came from and the entry they landed on, so whoever reviews the diff knows
 which lines to check.
+
+Comments cannot always be placed. Only a plain value has a suffix to append to, so when
+the removed entries are last in the table and the final survivor is a dotted key or a
+sub-table — and when every entry is removed and nothing survives — the comments go with
+the group they introduced, reported as a drop. The report describes what happened
+rather than what was attempted: claiming a move that did not happen would send the
+reviewer hunting for text that is not in the diff.
 
 ## 6. Relationship to the other dependency checks
 

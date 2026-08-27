@@ -57,14 +57,18 @@
 //! # Fixing
 //!
 //! `--fix` replaces the manifest atomically -- a temporary file in the same
-//! directory, renamed over the original -- and refuses to write at all if the
-//! file changed after it was read, so a concurrent edit is never clobbered.
+//! directory, renamed over the original, carrying the permissions of the
+//! manifest it replaces and following a symlinked manifest to its target -- and
+//! refuses to write at all if the file changed after it was read, so a
+//! concurrent edit is never clobbered.
 //!
 //! Comments on a removed entry are carried to the next surviving entry, which
 //! keeps a group header attached to the group it introduces. A note about one
 //! specific dependency is indistinguishable from such a header, so every move
 //! is reported on stderr: check that carried text still describes the entry it
-//! landed on.
+//! landed on. Comments that cannot be placed -- nothing survives, or the last
+//! survivor is a dotted key or sub-table with no value to append to -- are
+//! reported as dropped.
 //!
 //! # Installation
 //!
@@ -233,28 +237,50 @@ fn check(manifest_path: &Path, fix: bool, require_workspace: bool) -> Result<Exi
 /// original, which is atomic on one filesystem. `cargo metadata` runs between
 /// the read and the write, and it is a child process, so that window is wide
 /// enough for an editor to save into it -- hence the unchanged-input guard.
+///
+/// Replacing a file by rename brings the temporary file's identity with it, so
+/// two properties an in-place write would have kept are restored deliberately:
+///
+/// - **Permissions.** A temporary file is created owner-only, and a rename
+///   carries its mode rather than inheriting the target's, so the manifest's
+///   own permissions are read first and applied to the replacement. Without
+///   that, a world-readable manifest silently comes back owner-only, which git
+///   does not track and the next differently-owned reader discovers the hard
+///   way.
+/// - **Symlinks.** A symlinked manifest is resolved first, so the rename lands
+///   on the file the link points at and the indirection survives. Replacing the
+///   link itself would quietly turn it into a regular file.
 fn write_back(manifest_path: &Path, original: &str, contents: &str) -> Result<()> {
     // Eagerly formatted rather than built in `with_context` closures: those
     // closures only run on failures no test can force portably.
+    let resolve_failure = format!("failed to resolve {}", manifest_path.display());
     let read_failure = format!("failed to re-read {} before writing it", manifest_path.display());
+    let metadata_failure = format!("failed to read the permissions of {}", manifest_path.display());
     let write_failure = format!("failed to write {}", manifest_path.display());
+    let permissions_failure = format!("failed to apply the permissions of {} to its replacement", manifest_path.display());
     let persist_failure = format!("failed to replace {}", manifest_path.display());
 
-    let current = std::fs::read_to_string(manifest_path).context(read_failure)?;
+    // Follow a symlinked manifest through to its target, the way an in-place
+    // write would have.
+    let target = std::fs::canonicalize(manifest_path).context(resolve_failure)?;
+
+    let current = std::fs::read_to_string(&target).context(read_failure)?;
     ensure!(
         current == original,
         "{} changed on disk while the check was running; not writing",
         manifest_path.display()
     );
 
-    let directory = manifest_path
+    let permissions = std::fs::metadata(&target).context(metadata_failure)?.permissions();
+    let directory = target
         .parent()
-        .expect("the manifest path always names a file, so it always has a parent directory");
+        .expect("a canonicalized file path always names a file, so it always has a parent directory");
 
     // Same directory as the manifest, so the rename stays on one filesystem.
     let mut staged = NamedTempFile::new_in(directory).context(write_failure.clone())?;
     staged.write_all(contents.as_bytes()).context(write_failure)?;
-    staged.persist(manifest_path).context(persist_failure)?;
+    staged.as_file().set_permissions(permissions).context(permissions_failure)?;
+    staged.persist(&target).context(persist_failure)?;
 
     Ok(())
 }
@@ -301,7 +327,7 @@ fn report_carries(carries: &[Carry]) {
                 lines(carry.lines)
             ),
             None => eprintln!(
-                "⚠️ Dropped {} comment {} from '{sources}': every entry in the table was removed.",
+                "⚠️ Dropped {} comment {} from '{sources}': no surviving entry could carry them.",
                 carry.lines,
                 lines(carry.lines)
             ),

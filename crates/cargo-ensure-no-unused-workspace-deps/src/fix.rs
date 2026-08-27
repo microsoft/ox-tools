@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use toml_edit::{DocumentMut, Item};
+use toml_edit::{DocumentMut, Item, TableLike};
 
 /// What a `--fix` did.
 pub struct Outcome {
@@ -59,12 +59,7 @@ pub fn remove(manifest: &mut DocumentMut, names: &[String]) -> Outcome {
     let mut sources: Vec<String> = Vec::new();
 
     for name in &order {
-        let prefix = table
-            .key(name)
-            .and_then(|key| key.leaf_decor().prefix())
-            .and_then(toml_edit::RawString::as_str)
-            .unwrap_or_default()
-            .to_owned();
+        let prefix = decor_prefix(table, name);
 
         if doomed.contains(name.as_str()) {
             let comments = comments_of(&prefix);
@@ -75,12 +70,18 @@ pub fn remove(manifest: &mut DocumentMut, names: &[String]) -> Outcome {
             table.remove(name);
             outcome.removed += 1;
         } else if !carried.is_empty() {
-            if let Some(mut key) = table.key_mut(name) {
+            // `onto` reports where the comments actually landed. Claiming a
+            // move that did not happen sends the reviewer of the `--fix` diff
+            // hunting for text that is not there, which is the failure this
+            // reporting exists to prevent.
+            let onto = table.key_mut(name).map(|mut key| {
                 key.leaf_decor_mut().set_prefix(format!("{carried}{prefix}"));
-            }
+                name.clone()
+            });
+
             outcome.carries.push(Carry {
                 from: std::mem::take(&mut sources),
-                onto: Some(name.clone()),
+                onto,
                 lines: comment_lines(&carried),
             });
             carried.clear();
@@ -93,29 +94,55 @@ pub fn remove(manifest: &mut DocumentMut, names: &[String]) -> Outcome {
         // surviving entry's *value* instead: attaching them to that entry's key
         // prefix would hoist them above it and relabel a surviving dependency.
         //
-        // When every entry was removed there is no surviving entry at all, and
-        // the comments go with the group they introduced.
+        // Only a plain value has a suffix to append to. When the last survivor
+        // is a dotted key or a sub-table, and when every entry was removed and
+        // there is no survivor at all, the comments go with the group they
+        // introduced -- reported as a drop, because that is what happened.
         let last = table.iter().last().map(|(key, _)| key.to_owned());
-        if let Some(last) = last.clone()
-            && let Some(value) = table.get_mut(&last).and_then(Item::as_value_mut)
-        {
-            let suffix = value
-                .decor()
-                .suffix()
-                .and_then(toml_edit::RawString::as_str)
-                .unwrap_or_default()
-                .to_owned();
-            value.decor_mut().set_suffix(format!("{suffix}{carried}"));
-        }
+        let onto = last.and_then(|last| {
+            let appended = table.get_mut(&last).and_then(Item::as_value_mut).map(|value| {
+                let suffix = value
+                    .decor()
+                    .suffix()
+                    .and_then(toml_edit::RawString::as_str)
+                    .unwrap_or_default()
+                    .to_owned();
+                value.decor_mut().set_suffix(format!("{suffix}{carried}"));
+            });
+
+            appended.map(|()| last)
+        });
 
         outcome.carries.push(Carry {
             from: std::mem::take(&mut sources),
-            onto: last,
+            onto,
             lines: comment_lines(&carried),
         });
     }
 
     outcome
+}
+
+/// The decor preceding one entry, from wherever `toml_edit` keeps it.
+///
+/// A plain entry carries its comments on the key. A sub-table entry --
+/// `[workspace.dependencies.name]` -- carries them on the table instead, and
+/// reading only the key would let those comments disappear unremarked.
+fn decor_prefix(table: &dyn TableLike, name: &str) -> String {
+    let on_table = table
+        .get(name)
+        .and_then(Item::as_table)
+        .and_then(|nested| nested.decor().prefix())
+        .and_then(toml_edit::RawString::as_str)
+        .unwrap_or_default();
+
+    let on_key = table
+        .key(name)
+        .and_then(|key| key.leaf_decor().prefix())
+        .and_then(toml_edit::RawString::as_str)
+        .unwrap_or_default();
+
+    format!("{on_table}{on_key}")
 }
 
 /// The comment-bearing part of a removed entry's decor.

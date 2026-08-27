@@ -302,6 +302,13 @@ fn fix_keeps_a_trailing_header_behind_the_last_survivor() {
         survivor < header,
         "the trailing header must not be hoisted above the survivor: {fixed}"
     );
+
+    // The trailing branch reports too: this is the path that used to claim a
+    // carry whether or not the append had actually happened.
+    assert!(
+        stderr.contains("Carried 1 comment line from 'once_cell' onto 'serde'"),
+        "the trailing carry must be reported: {stderr}"
+    );
 }
 
 #[test]
@@ -445,8 +452,62 @@ fn fix_reports_comments_dropped_with_an_emptied_table() {
 
     assert!(success, "--fix should succeed: {stderr}");
     assert!(
-        stderr.contains("Dropped 1 comment line from 'once_cell'"),
+        stderr.contains("Dropped 1 comment line from 'once_cell': no surviving entry could carry them."),
         "the drop must be reported: {stderr}"
+    );
+}
+
+#[test]
+fn fix_reports_a_drop_when_the_last_survivor_cannot_carry_comments() {
+    // Only a plain value has a suffix to append to. A dotted survivor is an
+    // `Item::Table`, so the comment cannot be attached and is dropped -- and
+    // the report has to say so rather than claim a move that did not happen.
+    let root = concat!(
+        "[workspace]\nmembers = [\"member\"]\n\n",
+        "[workspace.dependencies]\n",
+        "serde.version = \"1\"\n",
+        "# pinned to 1.2 until upstream #42 is fixed\n",
+        "once_cell = \"1\"\n",
+    );
+    let dir = workspace(root, &[("member", "[dependencies]\nserde = { workspace = true }\n")]);
+    let manifest = dir.path().join("Cargo.toml");
+
+    let (success, _, stderr) = outcome(&run(&manifest, &["--fix"]));
+
+    assert!(success, "--fix should succeed: {stderr}");
+
+    let fixed = fs::read_to_string(&manifest).expect("failed to read the fixed manifest");
+    assert!(!fixed.contains("pinned to 1.2"), "the comment really is gone: {fixed}");
+    assert!(
+        stderr.contains("Dropped 1 comment line from 'once_cell'"),
+        "a comment that was dropped must not be reported as carried: {stderr}"
+    );
+    assert!(!stderr.contains("Carried"), "nothing was carried here: {stderr}");
+}
+
+#[test]
+fn fix_carries_a_comment_from_a_removed_sub_table_entry() {
+    // A `[workspace.dependencies.name]` entry keeps its comments on the table,
+    // not on the key, so reading only the key decor would drop them unremarked.
+    let root = concat!(
+        "[workspace]\nmembers = [\"member\"]\n\n",
+        "[workspace.dependencies]\nserde = \"1\"\n\n",
+        "# pinned to 1.2 until upstream #42 is fixed\n",
+        "[workspace.dependencies.once_cell]\nversion = \"1\"\n",
+    );
+    let dir = workspace(root, &[("member", "[dependencies]\nserde = { workspace = true }\n")]);
+    let manifest = dir.path().join("Cargo.toml");
+
+    let (success, _, stderr) = outcome(&run(&manifest, &["--fix"]));
+
+    assert!(success, "--fix should succeed: {stderr}");
+
+    let fixed = fs::read_to_string(&manifest).expect("failed to read the fixed manifest");
+    assert!(!fixed.contains("once_cell"), "the unused entry should be gone: {fixed}");
+    assert!(fixed.contains("pinned to 1.2"), "the sub-table's comment must survive: {fixed}");
+    assert!(
+        stderr.contains("Carried 1 comment line from 'once_cell' onto 'serde'"),
+        "the move must be reported: {stderr}"
     );
 }
 
