@@ -765,6 +765,17 @@ fn plan_removals(
         // already established that the recorded key is not live, so when the
         // resolution changes nothing this lookup repeats it and fails.
         let resolved_host = resolve_existing_case_insensitive(repo_root, &key.host);
+        // A refused host was not opened, and "nothing was written to it" has to
+        // be true of the lock as well as the file -- the same invariant the
+        // owned-file loop above keeps. Without this, a lock entry naming a
+        // region the catalog no longer declares still reaches `remove_region`
+        // below, so the run splices a block out of the very file whose refusal
+        // says it was left alone, and purges the provenance the next run
+        // reclassifies from. Latent while every declared id is live, reachable
+        // at the first region rename or retirement.
+        if matches!(composed.states.get(&resolved_host), Some(ComposedHostState::Unsafe(_))) {
+            continue;
+        }
         if live_regions.contains(&(resolved_host, key.id.clone())) {
             plan.push(PlanItem::orphaned_kept(Target::Region {
                 host: key.host.clone(),

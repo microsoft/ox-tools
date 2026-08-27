@@ -834,3 +834,63 @@ fn a_case_only_rename_of_an_owned_file_is_not_deleted() {
         "a file anvil still owns must not be proposed against as though it were repository-authored"
     );
 }
+
+/// The refusal must be atomic across *both* removal loops. The owned-file loop
+/// consults `composed.states`; the region loop did not, so a lock entry naming
+/// a region the catalog no longer declares still reached `remove_region` --
+/// splicing a block out of the very file whose refusal says it was untouched,
+/// and purging the provenance the next run reclassifies from.
+///
+/// Reaching it needs a retired region id, which today's catalog has none of, so
+/// the stale key is planted here. That is the same upgrade shape the ordered
+/// insertion work exists for, so it is one rename away from being live.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn refusing_a_composed_host_spares_a_retired_region_entry_too() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let dockerfile = root.join(".anvil/container/Dockerfile");
+
+    // A region the catalog no longer declares, present in the file and tracked
+    // in the lock -- the state left by a rename or a retirement.
+    let legacy_id = "anvil-container-legacy";
+    let legacy_body = "RUN echo legacy\n";
+    let text = std::fs::read_to_string(&dockerfile).unwrap();
+    let with_legacy = format!("{text}\n# >>> anvil-managed: {legacy_id}\n{legacy_body}# <<< anvil-managed: {legacy_id}\n");
+    // Duplicate an opening sentinel so the host classifies `Unsafe` and the run
+    // refuses it. The legacy region itself stays well formed, so the removal
+    // path can still reach it.
+    let opener = "# >>> anvil-managed: anvil-container-base\n";
+    let broken = with_legacy.replacen(opener, &format!("{opener}{opener}"), 1);
+    write(&dockerfile, &broken);
+
+    let mut manifest = Manifest::load(root).unwrap();
+    manifest.set_region(".anvil/container/Dockerfile", legacy_id, checksum_str(legacy_body));
+    manifest.save(root).unwrap();
+    let lock_before = std::fs::read_to_string(root.join(".anvil.lock")).unwrap();
+
+    let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(&dockerfile).unwrap(),
+        broken,
+        "a refused host must not have a block spliced out of it"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(".anvil.lock")).unwrap(),
+        lock_before,
+        "\"nothing was written to it\" has to be true of the lock as well as the file"
+    );
+    let key = RegionKey {
+        host: ".anvil/container/Dockerfile".to_owned(),
+        id: legacy_id.to_owned(),
+    };
+    assert!(
+        Manifest::load(root).unwrap().regions.contains_key(&key),
+        "the retired region's provenance must survive a refusal"
+    );
+    assert!(
+        outcome.plan.refusals().iter().any(|r| r.contains(".anvil/container/Dockerfile")),
+        "precondition: the host must actually have been refused"
+    );
+}
