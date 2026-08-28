@@ -15,7 +15,7 @@
 //! exist today).
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use ohno::{AppError, IntoAppError as _, app_err, bail};
 use toml_edit::{ArrayOfTables, DocumentMut, Item, Table, value};
@@ -59,6 +59,29 @@ pub struct RegionKey {
     pub host: String,
     /// The region's stable `id` from the sentinel comments.
     pub id: String,
+}
+
+/// Reject a manifest path that would resolve outside the repository root.
+///
+/// Every path in the manifest is joined to the repository root and then read,
+/// written or deleted. `Path::join` replaces the base entirely when given an
+/// absolute path or a drive-qualified one, and `..` climbs out of it, so a
+/// manifest that has been corrupted or hand-edited could direct those
+/// operations at arbitrary locations. Paths are always stored `/`-separated
+/// and repository-relative, so anything else is malformed.
+///
+/// # Errors
+///
+/// Returns an error naming `context` and the offending path when it is
+/// absolute, carries a drive or UNC prefix, or contains a `..` component.
+fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
+    let malformed = Path::new(path)
+        .components()
+        .any(|component| matches!(component, Component::RootDir | Component::Prefix(_) | Component::ParentDir));
+    if malformed {
+        bail!("{context} '{path}' must be a relative path inside the repository");
+    }
+    Ok(())
 }
 
 impl Manifest {
@@ -129,6 +152,7 @@ impl Manifest {
                 if files.insert(path.clone(), checksum).is_some() {
                     bail!("duplicate [[file]] entry for '{path}'");
                 }
+                ensure_contained(&path, "[[file]] entry")?;
             }
         }
 
@@ -154,6 +178,7 @@ impl Manifest {
                 if regions.insert(key.clone(), checksum).is_some() {
                     bail!("duplicate [[region]] entry for host '{}' id '{}'", key.host, key.id);
                 }
+                ensure_contained(&key.host, "[[region]] host")?;
             }
         }
 
@@ -504,5 +529,29 @@ mod tests {
         assert!(manifest.has_region_host(".anvil/container/dockerfile"));
         assert!(!manifest.has_region_host(".anvil/container/Other"));
         assert!(!Manifest::default().has_region_host(".anvil/container/Dockerfile"));
+    }
+    #[test]
+    fn rejects_a_file_path_that_escapes_the_repository() {
+        for escape in ["../outside.txt", "/etc/passwd", "a/../../b.txt"] {
+            let toml = format!("version = 1\ntool = \"anvil\"\n\n[[file]]\npath = \"{escape}\"\nchecksum = \"sha256:x\"\n");
+            let err = Manifest::parse(&toml).unwrap_err();
+            assert!(
+                format!("{err}").contains("must be a relative path inside the repository"),
+                "unexpected error for '{escape}': {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_region_host_that_escapes_the_repository() {
+        let toml = "version = 1\ntool = \"anvil\"\n\n[[region]]\nhost = \"../Justfile\"\nid = \"anvil-imports\"\nchecksum = \"sha256:x\"\n";
+        let err = Manifest::parse(toml).unwrap_err();
+        assert!(format!("{err}").contains("must be a relative path inside the repository"), "{err}");
+    }
+
+    #[test]
+    fn accepts_an_ordinary_nested_path() {
+        let toml = "version = 1\ntool = \"anvil\"\n\n[[file]]\npath = \"justfiles/anvil/tools.just\"\nchecksum = \"sha256:x\"\n";
+        Manifest::parse(toml).expect("an ordinary nested path must be accepted");
     }
 }
