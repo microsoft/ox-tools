@@ -241,8 +241,8 @@ fn stable_toolchain_helper_preserves_invocation_directory_and_arguments() {
     );
     assert_eq!(fs::read_to_string(args_log).unwrap().trim(), "doc2readme --check");
     assert_eq!(
-        Path::new(fs::read_to_string(cwd_log).unwrap().trim()),
-        crate_dir,
+        fs::canonicalize(fs::read_to_string(cwd_log).unwrap().trim()).unwrap(),
+        fs::canonicalize(crate_dir).unwrap(),
         "scoped command must run from the nested Just invocation directory"
     );
 }
