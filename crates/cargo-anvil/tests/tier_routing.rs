@@ -31,12 +31,31 @@ runner := env_var_or_default("ANVIL_RUNNER", "native")
 
 default: (_anvil-run "pr" runner)
 failure: (_anvil-run "fail" runner)
+offtier: (_anvil-run "offtier" runner "off")
 
 [private]
 _anvil-pr: first second
 
 [private]
 _anvil-fail: first failing
+
+[private]
+_anvil-offtier: require-impact-off second
+
+# require-impact-off exits 9 when ANVIL_IMPACT is not "off". 9 is an arbitrary
+# nonzero sentinel chosen to be distinct from the generic failure status 7 used
+# by _anvil-fail's `failing`, so a routed-off assertion that trips this is
+# unambiguously the impact-precondition, not some other recipe failure. The
+# Windows, Unix, and the Rust assertion below must stay tied to this value.
+[windows]
+[script("pwsh", "-NoProfile")]
+require-impact-off:
+    if ($env:ANVIL_IMPACT -ne 'off') { Write-Output "impact=$($env:ANVIL_IMPACT)"; exit 9 }
+    Write-Output 'impact-off'
+
+[unix]
+require-impact-off:
+    @if [ "${ANVIL_IMPACT:-}" = off ]; then printf 'impact-off\n'; else printf 'impact=%s\n' "${ANVIL_IMPACT:-}"; exit 9; fi
 
 [windows]
 [script("pwsh", "-NoProfile")]
@@ -176,7 +195,10 @@ fn run(root: &Path, recipes: &[&str], environment: &[(&str, &str)]) -> Output {
     let mut command = Command::new("just");
     command.args(["--justfile", root.join(JUSTFILE).to_str().unwrap()]);
     command.args(recipes).current_dir(root);
-    command.env_remove("ANVIL_RUNNER").env_remove("ANVIL_IN_CONTAINER");
+    command
+        .env_remove("ANVIL_RUNNER")
+        .env_remove("ANVIL_IN_CONTAINER")
+        .env_remove("ANVIL_IMPACT");
     command.env("PATH", path_with_profile_wrapper(root));
     command.envs(environment.iter().copied());
     command.output().expect("just is required to verify generated tier routing")
@@ -268,6 +290,44 @@ fn invalid_runner_value_fails_instead_of_falling_back_to_native() {
         String::from_utf8_lossy(&output.stderr).contains("expected 'native' or 'container'"),
         "invalid runner error must be actionable: {}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn off_impact_argument_exports_anvil_impact_before_dependencies_run() {
+    if !just_available() {
+        return;
+    }
+    let tmp = fixture();
+    // Routed through `_anvil-run` with impact "off": the router must export
+    // ANVIL_IMPACT=off in the shell *before* re-invoking the private tier, so
+    // that tier's own dependency (`require-impact-off`, which runs before any
+    // recipe body) observes it. This is the scheduled/full full-workspace
+    // backstop -- the guarantee that impact scoping is off for those tiers.
+    let routed = run(tmp.path(), &["offtier"], &[]);
+    assert!(
+        routed.status.success(),
+        "off-routed tier failed: stdout={}; stderr={}",
+        String::from_utf8_lossy(&routed.stdout),
+        String::from_utf8_lossy(&routed.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&routed.stdout).lines().eq(["impact-off", "second"]),
+        "the off-mode dependency must observe ANVIL_IMPACT=off and run before the rest of the tier; stdout={}",
+        String::from_utf8_lossy(&routed.stdout)
+    );
+
+    // Sanity: invoking the private tier directly (no `_anvil-run`) does NOT set
+    // the mode, so the same dependency fails with its sentinel exit code --
+    // proving the router's shell export is what makes the routed run pass, not
+    // some ambient default.
+    let direct = run(tmp.path(), &["_anvil-offtier"], &[]);
+    assert_eq!(
+        direct.status.code(),
+        Some(9),
+        "direct tier must fail without ANVIL_IMPACT=off: stdout={}; stderr={}",
+        String::from_utf8_lossy(&direct.stdout),
+        String::from_utf8_lossy(&direct.stderr)
     );
 }
 
