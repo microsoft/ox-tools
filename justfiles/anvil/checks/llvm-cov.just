@@ -16,13 +16,14 @@
 
 # Measure test coverage and enforce the coverage gate.
 [script("pwsh", "-NoProfile")]
-anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
+anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($include -eq '--skip') {
         Write-Host 'anvil-llvm-cov: no affected packages; skipping'
         exit 0
     }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $pkg = @(if ($include) { -split $include } else { '--workspace' })
     $allTestPkg = $pkg
     # Separate coverage-opted-out packages from the measured set. A crate that
     # is entirely `#![cfg_attr(coverage_nightly, coverage(off))]` (e.g. a
@@ -147,7 +148,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs
     # threshold, so coverage regressions fail the PR locally and in cloud
     # workflows -- the Codecov upload stays purely for display, not the gate.
     #
-    # Scope the gate to the SAME package set we measured. When impact
+    # Scope the gate to the same package set we measured. When impact
     # scoping is active, $pkg holds `--package X@ver ...` (already opt-out
     # filtered above); pass those through so the gate only gates packages
     # that were actually instrumented -- otherwise unmeasured members would

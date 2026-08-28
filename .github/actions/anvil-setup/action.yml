@@ -16,7 +16,8 @@ inputs:
         - "none": skip tool installation entirely; just bootstrap the
           rust toolchain + just + binstall + cache. Used by
           anvil-impact, which installs only cargo-delta afterwards.
-        - anything else: install only that group's prerequisites via
+        - a name containing only lowercase letters, digits, and hyphens:
+          install only that group's prerequisites via
           `just anvil-<group>-setup`.
     default: ""
     required: false
@@ -30,6 +31,13 @@ inputs:
 runs:
   using: composite
   steps:
+    # Just reports the exact failing dependency recipe on stderr. GitHub
+    # otherwise reduces that to "Process completed with exit code 1", so
+    # promote Just's diagnostic to a workflow annotation.
+    - name: Register Just problem matcher
+      shell: bash
+      run: echo "::add-matcher::$GITHUB_ACTION_PATH/just-problem-matcher.json"
+
     # Standard GitHub-hosted runners guarantee only 14 GB of SSD space. Heavy
     # build and test jobs can exceed that with target artifacts alone, so this
     # opt-in cleanup removes toolchains unused by anvil's Rust checks.
@@ -81,7 +89,7 @@ runs:
         # tool-versions update all invalidate the cache cleanly.
         # runner.arch resolves to X64 / ARM64 / X86, which keeps the
         # x86_64 and aarch64 legs of the same OS from colliding on
-        # arch-incompatible target/ contents.
+        # arch-incompatible cached binaries in ~/.cargo/bin.
         #
         # ${{ github.job }} discriminates by workflow-job-id (`pr-fast`,
         # `pr-test`, `pr-slow`, etc.) so concurrent matrix legs that
@@ -104,13 +112,19 @@ runs:
         # see the cached binaries — every run then tries to reinstall
         # on top of them and fails with "binary X already exists in
         # destination".
+        #
+        # target/ (the compilation output dir) is deliberately NOT cached here:
+        # per the GitHub backend design's caching policy, multi-GB per-job
+        # target/ trees dwarf the high-value tool cache under the repo cache
+        # quota, give only modest recompile savings once tools are cached, and
+        # could overwrite the downloaded target/anvil/impact/ cache. Only the
+        # ~/.cargo tool + registry state below is cached.
         path: |
           ~/.cargo/registry/cache/
           ~/.cargo/registry/index/
           ~/.cargo/bin/
           ~/.cargo/.crates.toml
           ~/.cargo/.crates2.json
-          target/
 
     # rustup auto-installs the toolchain from rust-toolchain.toml on
     # first cargo invocation, but it doesn't pull profile/component
@@ -138,7 +152,7 @@ runs:
     # downloads the release binary from cargo-bins/cargo-binstall, so
     # the bootstrap branch in `tools.just` becomes a no-op on GH.
     - name: Install cargo-binstall
-      uses: cargo-bins/cargo-binstall@ead08b90bd7b2e6d81963fb9cf0b7239f66d5db4 # v1.21.0
+      uses: cargo-bins/cargo-binstall@v1.21.0 # immutable release, the tag cannot be moved
 
     - name: Install just
       shell: bash
@@ -149,6 +163,11 @@ runs:
 
     - name: Install anvil toolchains + tools
       shell: bash
+      # Carry action data through the environment instead of interpolating it
+      # into shell source. Validation below occurs before path or recipe-name
+      # composition.
+      env:
+        ANVIL_GROUP: ${{ inputs.group }}
       # When `group` is empty (the default), installs the full catalog
       # via `just anvil-setup binstall`. When `group` is "none",
       # skips tool installation entirely (used by anvil-impact, which
@@ -162,10 +181,16 @@ runs:
       # for ADO pipelines, so the ADO backend uses the default `install`
       # path; GH uses `binstall`.
       run: |
-        case "${{ inputs.group }}" in
+        if [[ -n "$ANVIL_GROUP" && "$ANVIL_GROUP" != "none" && ! "$ANVIL_GROUP" =~ ^[a-z0-9-]+$ ]]; then
+          echo "::error::Invalid Anvil group; expected lowercase letters, digits, and hyphens."
+          # Distinguish invalid action input from a setup-recipe failure.
+          exit 2
+        fi
+
+        case "$ANVIL_GROUP" in
           none) echo "anvil-setup: group=none, skipping tool install" ;;
           "")   just anvil-setup binstall ;;
-          *)    just "anvil-${{ inputs.group }}-setup" binstall ;;
+          *)    just "anvil-$ANVIL_GROUP-setup" binstall ;;
         esac
 
     # Save the cache as the LAST step of setup, regardless of whether
@@ -188,10 +213,11 @@ runs:
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
         key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+        # target/ deliberately excluded from the save path too -- see the
+        # restore step above for why (cache-quota / impact-cache-clobber).
         path: |
           ~/.cargo/registry/cache/
           ~/.cargo/registry/index/
           ~/.cargo/bin/
           ~/.cargo/.crates.toml
           ~/.cargo/.crates2.json
-          target/

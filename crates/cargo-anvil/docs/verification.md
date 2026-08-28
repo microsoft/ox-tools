@@ -138,7 +138,7 @@ ox-tools's `.github/workflows/anvil-pr.yml` (post-migration) wraps the regenerat
 `anvil-pr-impl.yml` with a small self-validation gate. Sketch:
 
 ```yaml
-name: anvil-pr
+name: Anvil
 on:
   pull_request: {}
   merge_group: {}

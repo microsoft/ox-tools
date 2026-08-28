@@ -90,10 +90,11 @@ $ just anvil-full     # both, sequentially
 
 cloud workflows invoke the same recipes, so a check behaves identically
 locally and in cloud workflows — they share one implementation in the
-imported `.just` files. The one difference is scope: cloud-workflow PR
-runs perform impact analysis (via [`cargo-delta`][__link0])
-and run each check only over the affected packages, whereas a local
-`just anvil-pr` runs every check over the whole workspace.
+imported `.just` files, including impact scoping: a local `just anvil-pr`
+runs `anvil-impact` (via [`cargo-delta`][__link0])
+and scopes each check to the affected packages, exactly as a cloud-workflow
+PR run does. The scheduled and full tiers deliberately opt out
+(`ANVIL_IMPACT=off`) and run every check over the whole workspace.
 
 The generated GitHub scheduled workflow publishes failures as GitHub
 issues. On failure, it best-effort reuses an open marker-owned issue and
@@ -227,8 +228,8 @@ The catalog and per-check rationale live in `docs/design/checks.md`;
 the tables below map each check to the group that runs it, link each
 check to its tool’s documentation, and note anything anvil-specific.
 
-**PR tier** (`anvil-pr`) — runs on every pull request, impact-scoped in
-cloud workflows. Two jobs: `pr-fast`, and `pr-slow` (whose three
+**PR tier** (`anvil-pr`) — runs on every pull request, impact-scoped
+both locally and in cloud workflows. Two jobs: `pr-fast`, and `pr-slow` (whose three
 sub-groups run sequentially within the one job per OS leg):
 
 <table>
@@ -444,14 +445,14 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbjXc_4J4IhEMbUEGBObScOREbL4ona_NAG7cbuZfYsFwUELhhZIGDa2NhcmdvLWFudmlsZTAuNC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQblcBzF-_WZVYbCN9Rt1pYQLsblkUTM0oENsMbNe4wSAldeq9hZIGDa2NhcmdvLWFudmlsZTAuNS4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://crates.io/crates/cargo-spellcheck
  [__link2]: https://crates.io/crates/cargo-coverage-gate
- [__link3]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=Catalog
- [__link4]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=Catalog::anvil
- [__link5]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CliMeta
- [__link6]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CatalogBuilder::with_artifact
- [__link7]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
- [__link8]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=CatalogBuilder::without_artifact
- [__link9]: https://docs.rs/cargo-anvil/0.4.0/cargo_anvil/?search=artifacts
+ [__link3]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=Catalog
+ [__link4]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=Catalog::anvil
+ [__link5]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CliMeta
+ [__link6]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CatalogBuilder::with_artifact
+ [__link7]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CatalogBuilder::replace_artifact
+ [__link8]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=CatalogBuilder::without_artifact
+ [__link9]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=artifacts
