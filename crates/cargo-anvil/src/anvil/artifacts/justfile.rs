@@ -766,6 +766,7 @@ mod tests {
         assert!(STABLE_TOOLCHAIN_RESOLVER.contains("rustup target add --toolchain"));
     }
 
+    #[cfg(not(miri))]
     mod stable_toolchain_resolver_tests {
         use std::path::Path;
         use std::process::{Command, Output};
@@ -913,7 +914,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg_attr(miri, ignore = "uses filesystem and subprocesses; miri isolation forbids them")]
         fn applies_toolchain_file_options_to_an_msrv_fallback() {
             let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
             fs::write(
