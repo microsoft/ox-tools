@@ -1,0 +1,41 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-ensure-no-unused-workspace-deps"
+description = "A cargo subcommand that ensures every [workspace.dependencies] entry is inherited by a workspace member"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["oxidizer", "cargo", "subcommand", "dependencies", "ci"]
+categories = ["command-line-utilities", "development-tools::cargo-plugins"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-ensure-no-unused-workspace-deps"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.cargo_check_external_types]
+# `anyhow::Error` leaks through the `run` entry point that `main` calls. Mirrors the
+# allowlist entry in `cargo-ensure-no-default-features`, which has the same shape.
+allowed_external_types = ["anyhow::Result"]
+
+[[bin]]
+name = "cargo-ensure-no-unused-workspace-deps"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true, features = ["std"] }
+cargo_metadata = { workspace = true }
+clap = { workspace = true, features = ["std", "derive", "color", "help", "error-context", "usage"] }
+tempfile = { workspace = true }
+toml_edit = { workspace = true }
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints

@@ -521,3 +521,6 @@ deprecations
 parallelization
 remediate
 recency
+symlink
+symlinked
+symlinks
