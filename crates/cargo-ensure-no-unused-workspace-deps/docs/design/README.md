@@ -134,9 +134,11 @@ the file. The success line goes to stdout.
 | 0    | No unused entries — or, under `--fix`, all unused entries were removed and the manifest written. |
 | 1    | Unused entries found without `--fix`, or a manifest could not be read, parsed, or enumerated.     |
 
-A `[workspace]` table with no `dependencies` catalog is a clean pass — there is
-nothing to be stale. A manifest with no `[workspace]` table at all is a pass with a
-note on stderr, or an error under `--require-workspace`.
+A `[workspace]` table with no `dependencies` catalog is a pass: no entry can be
+uninherited when none is declared. It is not silent, though — that is the boundary
+where *every* configured `allowed` name suppresses nothing, so each one is reported
+as stale on stderr before the run succeeds. A manifest with no `[workspace]` table at
+all is a pass with a note on stderr, or an error under `--require-workspace`.
 
 The exit code is returned from `run` as an `ExitCode` rather than raised with
 `std::process::exit`, so `main` unwinds normally. That matters under coverage
