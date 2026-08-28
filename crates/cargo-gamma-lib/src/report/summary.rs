@@ -572,6 +572,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "renders a 10,000-mutant plan to reach an inexact rounding boundary; the population size is the point and Miri pays for every mutant"
+    )]
     fn inexact_boundary_scores_do_not_render_as_exact_boundaries() {
         let mut plan = plan();
 

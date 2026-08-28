@@ -1167,6 +1167,10 @@ mod tests {
     /// version. Nothing failed, which is why it survived: clap only rejects a collision when the
     /// flag it collides with exists on that subcommand, and `version` was not propagated then.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rebuilds the whole clap command tree once per rejected flag; clap construction is safe code and dominates this test under Miri"
+    )]
     fn short_v_is_version_on_a_subcommand_and_never_a_reporting_flag() {
         use clap::CommandFactory as _;
 
@@ -1204,6 +1208,10 @@ mod tests {
 
     /// Artifact routing is directory-wide; individual report path flags are not accepted.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "rebuilds the whole clap command tree once per removed report flag; clap construction is safe code and dominates this test under Miri"
+    )]
     fn artifact_dir_replaces_individual_report_paths() {
         let cli = Cli::try_parse_from(["cargo gamma", "run", "--artifact-dir", "out"]).expect("the directory parses");
 

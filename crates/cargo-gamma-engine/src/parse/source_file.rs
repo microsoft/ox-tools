@@ -205,6 +205,10 @@ mod tests {
     /// the parse-and-collect path on the smallest stack a discovery worker runs on, so the file
     /// has to be turned away before `syn` ever sees it.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "builds a 4096-deep file to prove the depth guard fires before `syn` recurses; the depth is the point and Miri only re-times it"
+    )]
     fn a_file_nested_deeper_than_the_limit_is_refused_rather_than_overflowing_the_stack() {
         let depth = 4_096;
         let text = format!("fn f() -> i32 {{ {}1{} }}\n", "(".repeat(depth), ")".repeat(depth));
@@ -215,6 +219,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "builds two 4096-link postfix chains to prove the guard fires; the length is the point and Miri only re-times it"
+    )]
     fn a_file_with_a_deep_postfix_chain_is_refused_before_parsing() {
         let chains = [format!("call{}", "()".repeat(4_096)), format!("value{}", "[0]".repeat(4_096))];
 

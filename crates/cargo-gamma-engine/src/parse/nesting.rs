@@ -359,6 +359,10 @@ mod tests {
     /// ordinary and must not be refused: the depth that matters is the one the tree has, and
     /// neither of those reaches the tree at all.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "scans four 500-bracket runs of comment and literal text; the run length is the point and Miri only re-times it"
+    )]
     fn brackets_inside_comments_and_literals_are_not_nesting() {
         let commented = format!("// {}\nfn f() {{}}\n", "(".repeat(500));
         let documented = format!("/* {} */\nfn f() {{}}\n", "[".repeat(500));
@@ -372,6 +376,10 @@ mod tests {
 
     /// Nesting is depth, not count: a file of a thousand sibling constructs nests one level.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "scans a thousand sibling items to show siblings do not accumulate depth; the count is the point and Miri only re-times it"
+    )]
     fn siblings_do_not_accumulate_depth() {
         let text = "fn f() {}\n".repeat(1_000);
 
@@ -499,6 +507,10 @@ mod tests {
 
     /// Operators inside comments and strings are text here exactly as brackets are.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "scans two 500-operator runs of comment and literal text; the run length is the point and Miri only re-times it"
+    )]
     fn operators_inside_comments_and_literals_are_not_nesting() {
         let commented = format!("// {}\nfn f() {{}}\n", "-".repeat(500));
         let quoted = format!("fn f() -> &'static str {{ \"{}\" }}\n", "|".repeat(500));

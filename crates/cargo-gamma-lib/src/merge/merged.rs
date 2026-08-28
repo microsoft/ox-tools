@@ -188,6 +188,10 @@ mod tests {
     /// property: at `u32::MAX` the unbounded version allocates sixteen gigabytes, and a test that
     /// only checked the length would have to survive the allocation first.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "enumerates missing shards up to MAX_SHARDS; the bound is the point and Miri pays for every entry"
+    )]
     fn an_unchecked_shard_count_is_reported_up_to_the_bound_and_no_further() {
         let merged = Merged {
             shard_count: Some(u32::MAX),
@@ -208,6 +212,10 @@ mod tests {
     /// The bound is not a limit on how anyone shards: every index of the largest supported rotation
     /// is still enumerated.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "enumerates missing shards up to MAX_SHARDS; the bound is the point and Miri pays for every entry"
+    )]
     fn a_rotation_at_the_bound_still_reports_every_missing_shard() {
         let merged = Merged {
             shard_count: Some(MAX_SHARDS),

@@ -470,6 +470,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "reads the host clock; Miri isolation forbids GetSystemTimePreciseAsFileTime/clock_gettime")]
     fn today_is_a_plausible_date() {
         let date = today();
 

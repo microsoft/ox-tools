@@ -5,6 +5,10 @@ use cargo_gamma_lib::internals::commands::Cli;
 use clap::Parser as _;
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "builds the whole clap command tree once per documented invocation; clap construction is safe code and the slowest single test in the workspace under Miri"
+)]
 fn every_manual_command_parses() {
     let mut checked = 0;
     let mut lines = include_str!("../src/main.rs").lines();

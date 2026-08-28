@@ -643,6 +643,10 @@ mod tests {
     /// parentheses they wrote. The depth here is far past what a recursive walk survives, and the
     /// argument is well-formed, so the only thing being asked is whether the walk completes.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "walks a 50,000-deep token nest to prove the walk is iterative; the depth is the point and this is the slowest test in the crate under Miri"
+    )]
     fn nesting_deeper_than_the_stack_is_still_walked_to_the_end() {
         let depth = 50_000;
         let source = format!("{}arith{}", "(".repeat(depth), ")".repeat(depth));
@@ -1131,6 +1135,10 @@ mod tests {
     /// Deeply nested expressions or items are rejected before syn's recursive descent parser can
     /// overflow the compiler's stack.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "builds deep nests to prove the guard fires before `syn` recurses; the depth is the point and Miri only re-times it"
+    )]
     fn deeply_nested_tokens_are_rejected_safely() {
         let depth = 100;
         let deep_expr = format!("{}1{}", "(".repeat(depth), ")".repeat(depth));
@@ -1143,6 +1151,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "builds long postfix chains to prove the guard fires; the length is the point and Miri only re-times it"
+    )]
     fn deeply_chained_postfix_expressions_are_rejected_safely() {
         let chains = [
             format!("call{}", "()".repeat(NESTING_LIMIT * CHAIN_FACTOR + 1)),
@@ -1158,6 +1170,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "builds a long cast chain to prove the guard fires; the length is the point and Miri only re-times it"
+    )]
     fn deeply_chained_cast_expressions_are_rejected_safely() {
         let expression = format!("1{}", " as u64".repeat(NESTING_LIMIT * CHAIN_FACTOR + 1));
         let err = validate_value(stream(&expression), &stream("fn f() -> u32 { 1 }")).expect_err("cast chain rejected");
@@ -1166,6 +1182,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "builds a long unary chain to reach the guard diagnostic; the length is the point and Miri only re-times it"
+    )]
     fn a_long_unary_chain_expands_to_a_guard_diagnostic() {
         let expression = format!("{}1", "-".repeat(NESTING_LIMIT * CHAIN_FACTOR + 1));
         let output = value(stream(&expression), stream("fn f() -> i32 { 1 }")).to_string();
@@ -1175,6 +1195,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "builds a long binary chain to reach the guard; the length is the point and Miri only re-times it"
+    )]
     fn a_long_binary_chain_is_rejected_by_the_guard() {
         let expression = format!("true{}", " || true".repeat(NESTING_LIMIT * CHAIN_FACTOR + 1));
         let error = validate_value(stream(&expression), &stream("fn f() -> bool { true }")).expect_err("binary chain must be rejected");

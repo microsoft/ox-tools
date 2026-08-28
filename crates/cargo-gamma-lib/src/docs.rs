@@ -340,6 +340,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "renders the whole mutator table and sweeps the registry against it; a table sweep over safe code tells Miri nothing"
+    )]
     fn every_registered_mutator_appears_in_the_mutator_table() {
         // The table is the tool's published vocabulary. A name missing from it is a feature the
         // user cannot discover, and a name in it that the registry does not have is worse: it

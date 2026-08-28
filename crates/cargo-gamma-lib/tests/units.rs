@@ -530,6 +530,10 @@ mod glob {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "matches a 64-wildcard pattern against a 1024-character path to bound backtracking; the size is the point and Miri only re-times it"
+    )]
     fn repeated_double_stars_have_bounded_work() {
         let pattern = format!("{}b.rs", "**a".repeat(64));
         let path = format!("{}.rs", "a".repeat(1_024));

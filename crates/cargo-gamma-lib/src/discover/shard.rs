@@ -65,6 +65,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "hashes 8,000 ids across every shard count; the volume is the point and Miri only re-times the hash"
+    )]
     fn shards_are_always_in_range() {
         for count in 1_u32..=16 {
             for index in 0..500_u32 {
@@ -95,6 +99,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "hashes 2,000 ids to measure shard balance; the volume is the point and Miri only re-times the hash"
+    )]
     fn shards_are_reasonably_balanced() {
         let ids: Vec<String> = (0..2000).map(|index| format!("mutant{index:05}")).collect();
         let count = 8_u32;

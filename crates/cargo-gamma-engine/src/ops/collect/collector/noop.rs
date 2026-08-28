@@ -349,6 +349,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "repeats the no-op check 10,000 times to watch the proc-macro source map; the repetition is the test, and under Miri it runs for an hour"
+    )]
     fn repeated_noop_checks_do_not_advance_the_proc_macro_source_map() {
         let marker = || {
             "source_map_marker"

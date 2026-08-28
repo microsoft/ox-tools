@@ -397,6 +397,10 @@ fn a_parenthesized_let_condition_still_binds_a_pattern() {
 /// about a test gap that does not exist. Each case therefore pins the exact replacement text,
 /// which is the standard the `fn_value` family already meets.
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "sweeps the whole method-rename table; a table sweep over safe code costs Miri minutes and tells it nothing"
+)]
 fn every_method_rename_replaces_the_call_its_name_promises() {
     // The table pairs methods that agree on receiver, arity and result type. Each pair is
     // listed here so that dropping an entry is a failure rather than a silent loss of reach.
@@ -492,6 +496,10 @@ fn values_for_return(ty: &str) -> Vec<String> {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "sweeps every return-type row the resolver can name; a table sweep over safe code costs Miri minutes and tells it nothing"
+)]
 fn every_return_type_is_served_the_values_that_belong_to_it() {
     // One row per kind the resolver can name. Both halves matter: the mutator says what
     // question is being asked, and the replacement says whether the type was understood --

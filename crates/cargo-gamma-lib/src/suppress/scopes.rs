@@ -533,6 +533,10 @@ impl S {
     /// widest span at the earliest start at or after each offset — this guards the complexity
     /// change against a selection regression at scale.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "builds a thousand span groups to exercise the binary search at scale; the scale is the point and Miri only re-times the search"
+    )]
     fn many_spans_resolve_the_widest_at_the_earliest_start_at_every_offset() {
         let mut spans = Vec::new();
 

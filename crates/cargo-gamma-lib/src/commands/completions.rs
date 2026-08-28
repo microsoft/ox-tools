@@ -31,6 +31,10 @@ mod tests {
     use crate::testing::Sink;
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "generates a completion script for all five shells; clap_complete generation is safe code and among the slowest tests under Miri"
+    )]
     fn every_supported_shell_produces_a_script() {
         for shell in [Shell::Bash, Shell::Zsh, Shell::Fish, Shell::PowerShell, Shell::Elvish] {
             let mut host = Sink::default();
@@ -42,6 +46,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "generates a full bash completion script; clap_complete generation is safe code and among the slowest tests under Miri"
+    )]
     fn the_script_names_the_subcommands() {
         let mut host = Sink::default();
         let _code = completions(&mut host, &CompletionsArgs { shell: Shell::Bash });

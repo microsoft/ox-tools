@@ -328,6 +328,10 @@ const OPERATOR_ORACLE: &[OperatorCase] = &[
 /// two entries onto the same token, silently turning two mutants into one duplicate. The oracle is
 /// therefore the exact `(mutator, replacement)` set, asserted for every entry in the table.
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "sweeps the whole operator oracle table; a table sweep over safe code costs Miri minutes and tells it nothing"
+)]
 fn every_binary_and_compound_assignment_operator_emits_the_replacement_its_name_promises() {
     for (source, ops, expected) in OPERATOR_ORACLE {
         let mut found: Vec<(&str, String)> = candidates(source, ops)
@@ -3187,6 +3191,10 @@ fn assign_value_op(mut n: u32) {
 /// the failure message names the entry, its family and its description so a maintainer can tell
 /// the two apart at a glance rather than being told only that "some entry" is broken.
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "runs every registry entry against the composite fixture; a whole-registry sweep over safe code costs Miri the better part of an hour"
+)]
 fn every_registry_entry_produces_at_least_one_candidate_against_the_composite_fixture() {
     let file = SourceFile::parse("fixture.rs", EVERY_FAMILY_FIXTURE.to_owned()).unwrap();
 
@@ -3240,6 +3248,10 @@ fn candidate_key(candidate: &Candidate) -> (Range<usize>, &'static str, CompactS
 /// rule, so the two lists line up position for position without this test inventing an ordering of
 /// its own.
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "collects the whole registry over the composite fixture twice to compare the passes; safe code, and Miri pays for both passes"
+)]
 fn the_fused_pass_produces_the_same_candidates_as_check_stated_then_collect_with() {
     let file = SourceFile::parse("fixture.rs", EVERY_FAMILY_FIXTURE.to_owned()).unwrap();
     let selection = {

@@ -674,6 +674,10 @@ mod tests {
     /// same nesting guard the source parser uses, before `syn` ever sees it — for both the
     /// boolean-collapsing and three-valued entry points.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "builds a 4096-deep predicate to prove the depth guard fires; the guard is safe code and the depth is the whole point, so Miri pays minutes to re-check arithmetic"
+    )]
     fn a_predicate_nested_deeper_than_the_limit_is_refused_rather_than_parsed() {
         let depth = 4_096;
         let predicate = format!("{}unix{}", "not(".repeat(depth), ")".repeat(depth));
@@ -905,6 +909,10 @@ mod tests {
     /// under negation would satisfy this law on the four answerable leaves and break it here, and
     /// breaking it means code that might be in the build being deleted from the population.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "algebraic law swept over the whole generated tree corpus; every case is a `syn` parse of safe code, so Miri only multiplies the cost"
+    )]
     fn double_negation_is_the_identity_on_all_three_answers() {
         let set = set();
 
@@ -919,6 +927,10 @@ mod tests {
 
     /// Negating something unanswerable leaves it unanswerable.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "algebraic law swept over the whole generated tree corpus; every case is a `syn` parse of safe code, so Miri only multiplies the cost"
+    )]
     fn negation_never_turns_an_unknown_into_an_answer() {
         let set = set();
 
@@ -935,6 +947,10 @@ mod tests {
 
     /// `all` and `any` do not care what order their operands are written in.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "algebraic law swept over every ordered leaf pair; every case is a `syn` parse of safe code, so Miri only multiplies the cost"
+    )]
     fn the_combinators_are_commutative() {
         let set = set();
 
@@ -953,6 +969,10 @@ mod tests {
 
     /// Nor how they are bracketed.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "algebraic law swept over every leaf triple; every case is a `syn` parse of safe code, so Miri only multiplies the cost"
+    )]
     fn the_combinators_are_associative() {
         let set = set();
 
@@ -976,6 +996,10 @@ mod tests {
     /// Without this, an arm added later could make `any` short-circuit on an unknown while `all`
     /// did not, and each combinator's own tests would still pass.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "algebraic law swept over the whole generated tree corpus; every case is a `syn` parse of safe code, so Miri only multiplies the cost"
+    )]
     fn de_morgan_holds_including_where_the_answer_is_unknown() {
         let set = set();
 
@@ -1002,6 +1026,10 @@ mod tests {
     /// `all` however unanswerable the rest of it is, and refusing to settle there would leave
     /// dead code in the population instead of taking it out.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "algebraic law swept over the whole generated tree corpus; every case is a `syn` parse of safe code, so Miri only multiplies the cost"
+    )]
     fn the_identities_and_annihilators_of_the_combinators_hold() {
         let set = set();
 

@@ -272,6 +272,10 @@ mod tests {
     /// constant nor the `take` that enforces it was ever asked to drop a result. Exceeding
     /// GitHub's cap fails the upload whole, losing every finding rather than the excess.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "builds one finding per SARIF slot to reach the cap; the cap is the point and Miri pays for every finding"
+    )]
     fn one_finding_past_the_cap_is_dropped_and_reported() {
         let mutants: Vec<Mutant> = (0..=SARIF_LIMIT)
             .map(|line| mutant("/w/src/a.rs", line, "relational.gt_to_ge", Outcome::Survived))
