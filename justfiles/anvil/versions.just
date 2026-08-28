@@ -36,10 +36,12 @@
 # exported here; a toolchain-file selection stays empty so rustup honors the
 # file's complete targets/components/profile configuration.
 rust_stable_override := env_var_or_default('RUSTUP_TOOLCHAIN', '')
+# The resolver command ends in a comment so PowerShell's commonly configured
+# -Command shell ignores Just's argv[0] copy instead of joining it back in.
 rust_stable := if rust_stable_override != '' {
     rust_stable_override
 } else {
-    shell('pwsh -NoProfile -File .anvil/resolve-stable-toolchain.ps1 -ForEnvironment')
+    shell('pwsh -NoProfile -File .anvil/resolve-stable-toolchain.ps1 -ForEnvironment #')
 }
 export RUSTUP_TOOLCHAIN := rust_stable
 export ANVIL_STABLE_TOOLCHAIN_SOURCE := env_var_or_default(

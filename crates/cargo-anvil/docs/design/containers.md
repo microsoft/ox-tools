@@ -63,8 +63,10 @@ With no recipe, the command opens an interactive shell:
 just anvil-container
 ```
 
-Native tier execution remains the default. The three public tiers can instead
-route through the container:
+Native tier execution remains the default. The three public tiers — and, because
+they route through the same `_anvil-run` seam, the four scheduled *group* recipes
+(`anvil-scheduled-test`, `-advisories`, `-runtime-analysis`, `-exhaustive`) — can
+instead route through the container:
 
 - for one invocation: `just anvil_runner=container anvil-pr`;
 - for the current shell: set `ANVIL_RUNNER=container`;
@@ -74,7 +76,15 @@ route through the container:
 `ANVIL_RUNNER=native` overrides a repository container default for the current
 shell.
 
-The tier recipes delegate to a tool-owned `_anvil-run` seam. Inside the image,
+This makes group-level container routing asymmetric: the scheduled groups go
+through `_anvil-run` (to force the full-workspace backstop), so
+`just anvil_runner=container anvil-scheduled-test` containerizes, whereas the PR
+group recipes (`anvil-pr-fast`, …) run natively even under `anvil_runner=container`
+because the PR tier invokes them directly rather than through the seam. Run a PR
+group in a container via the whole tier (`anvil_runner=container anvil-pr`) or with
+`anvil-container` directly.
+
+The tier recipes and the four scheduled group recipes delegate to a tool-owned `_anvil-run` seam. Inside the image,
 `ANVIL_IN_CONTAINER=1` forces that seam to select native execution, so the
 existing private tier runs without recursively launching another container.
 Ad-hoc checks remain explicit through `anvil-container`.

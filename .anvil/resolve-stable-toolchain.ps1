@@ -7,7 +7,9 @@ param(
     [switch] $InstallIfMissing,
     [switch] $ForEnvironment,
     [switch] $MsrvToolchain,
-    [switch] $InstallMsrvIfNeeded
+    [switch] $InstallMsrvIfNeeded,
+    [switch] $EmitToolchainFileOptions,
+    [switch] $ApplyToolchainFileOptions
 )
 
 $ErrorActionPreference = 'Stop'
@@ -15,51 +17,101 @@ Set-StrictMode -Version 3
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
 
-function Get-SelectingToolchainFile {
+function Get-RootToolchainFilePath {
     foreach ($name in @('rust-toolchain', 'rust-toolchain.toml')) {
         $path = Join-Path $repoRoot $name
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        if (Test-Path -LiteralPath $path -PathType Leaf) {
+            return $path
+        }
+    }
+    return $null
+}
+
+function Get-SelectingToolchainFile {
+    $path = Get-RootToolchainFilePath
+    if ($null -eq $path) {
+        return $null
+    }
+
+    $content = Get-Content -LiteralPath $path -Raw
+    if ((Split-Path -Leaf $path) -eq 'rust-toolchain' -and $content.TrimStart() -notmatch '^\[') {
+        return [pscustomobject]@{
+            Path = $path
+            Value = $content.Trim()
+            Selector = 'channel'
+            Source = 'file'
+            Installable = $false
+        }
+    }
+
+    $inToolchain = $false
+    foreach ($line in $content -split '\r?\n') {
+        if ($line -match '^\s*\[\s*toolchain\s*\]\s*(?:#.*)?$') {
+            $inToolchain = $true
             continue
         }
-
-        $content = Get-Content -LiteralPath $path -Raw
-        if ($name -eq 'rust-toolchain' -and $content.TrimStart() -notmatch '^\[') {
+        if ($line -match '^\s*\[') {
+            $inToolchain = $false
+            continue
+        }
+        if ($inToolchain -and $line -match '^\s*["'']?(channel|path)["'']?\s*=\s*(["''])([^"'']+)\2\s*(?:#.*)?$') {
+            $value = $Matches[3]
+            if ($Matches[1] -eq 'path' -and -not [IO.Path]::IsPathRooted($value)) {
+                $value = [IO.Path]::GetFullPath((Join-Path $repoRoot $value))
+            }
             return [pscustomobject]@{
                 Path = $path
-                Value = $content.Trim()
-                Selector = 'channel'
+                Value = $value
+                Selector = $Matches[1]
                 Source = 'file'
                 Installable = $false
             }
         }
+    }
+    return $null
+}
 
-        $inToolchain = $false
-        foreach ($line in $content -split '\r?\n') {
-            if ($line -match '^\s*\[\s*toolchain\s*\]\s*(?:#.*)?$') {
-                $inToolchain = $true
-                continue
-            }
-            if ($line -match '^\s*\[') {
-                $inToolchain = $false
-                continue
-            }
-            if ($inToolchain -and $line -match '^\s*["'']?(channel|path)["'']?\s*=\s*(["''])([^"'']+)\2\s*(?:#.*)?$') {
-                $value = $Matches[3]
-                if ($Matches[1] -eq 'path' -and -not [IO.Path]::IsPathRooted($value)) {
-                    $value = [IO.Path]::GetFullPath((Join-Path $repoRoot $value))
-                }
-                return [pscustomobject]@{
-                    Path = $path
-                    Value = $value
-                    Selector = $Matches[1]
-                    Source = 'file'
-                    Installable = $false
-                }
-            }
-        }
+function Get-ToolchainFileOptions {
+    $path = Get-RootToolchainFilePath
+    if ($null -eq $path) {
+        return $null
     }
 
-    return $null
+    $content = Get-Content -LiteralPath $path -Raw
+    $section = [regex]::Match(
+        $content,
+        '(?ms)^\s*\[\s*toolchain\s*\]\s*(?:#.*)?$(.*?)(?=^\s*\[|\z)'
+    )
+    if (-not $section.Success) {
+        return $null
+    }
+
+    $body = $section.Groups[1].Value
+    $profileMatch = [regex]::Match(
+        $body,
+        '(?m)^\s*["'']?profile["'']?\s*=\s*(["''])([^"'']+)\1\s*(?:#.*)?$'
+    )
+    $readArray = {
+        param([string] $name)
+        $arrayMatch = [regex]::Match(
+            $body,
+            "(?ms)^\s*[`"']?$name[`"']?\s*=\s*\[(.*?)\]"
+        )
+        if (-not $arrayMatch.Success) {
+            return @()
+        }
+        return @(
+            [regex]::Matches($arrayMatch.Groups[1].Value, '(["''])([^"'']+)\1') |
+                ForEach-Object { $_.Groups[2].Value }
+        )
+    }
+
+    return [pscustomobject]@{
+        Path = $path
+        Profile = if ($profileMatch.Success) { $profileMatch.Groups[2].Value } else { $null }
+        Components = @(& $readArray 'components')
+        Targets = @(& $readArray 'targets')
+    }
 }
 
 function Get-RootMsrv([switch] $AllowMissing) {
@@ -125,32 +177,64 @@ function Get-MsrvSelection {
     }
 
     if (-not [string]::IsNullOrWhiteSpace($env:ANVIL_MSRV_TOOLCHAIN)) {
-        return [pscustomobject]@{ Value = $env:ANVIL_MSRV_TOOLCHAIN; Installable = $false; Mapped = $true }
+        return [pscustomobject]@{
+            Value = $env:ANVIL_MSRV_TOOLCHAIN
+            Source = 'mapped-msrv'
+            Installable = $false
+            Mapped = $true
+        }
     }
-    return [pscustomobject]@{ Value = $msrv; Installable = $true; Mapped = $false }
+    return [pscustomobject]@{ Value = $msrv; Source = 'msrv'; Installable = $true; Mapped = $false }
+}
+
+function Apply-ToolchainFileOptions([object] $toolchain) {
+    if ($toolchain.Source -eq 'file' -or $null -eq $toolchainFileOptions) {
+        return
+    }
+    foreach ($component in $toolchainFileOptions.Components) {
+        rustup component add --toolchain $toolchain.Value $component
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "anvil: toolchain-file component '$component' is unavailable for '$($toolchain.Value)'; rustup would skip an unavailable file component"
+        }
+    }
+    foreach ($target in $toolchainFileOptions.Targets) {
+        rustup target add --toolchain $toolchain.Value $target
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "anvil: toolchain-file target '$target' is unavailable for '$($toolchain.Value)'; rustup would skip an unavailable file target"
+        }
+    }
 }
 
 function Install-Toolchain([object] $toolchain, [string] $label) {
-    if (-not $toolchain.Installable) {
-        return
+    if ($toolchain.Installable) {
+        $installed = rustup toolchain list
+        if ($LASTEXITCODE -ne 0) {
+            throw 'anvil: rustup toolchain list failed'
+        }
+        if ($installed -notmatch "(?m)^$([regex]::Escape($toolchain.Value))(?:-|$)") {
+            $profile = if ($null -ne $toolchainFileOptions -and $toolchainFileOptions.Profile) {
+                $toolchainFileOptions.Profile
+            } else {
+                'minimal'
+            }
+            Write-Host "anvil: installing $label toolchain '$($toolchain.Value)'"
+            rustup toolchain install $toolchain.Value --profile $profile
+            if ($LASTEXITCODE -ne 0) {
+                throw "anvil: failed to install $label toolchain '$($toolchain.Value)'"
+            }
+        }
     }
-
-    $installed = rustup toolchain list
-    if ($LASTEXITCODE -ne 0) {
-        throw 'anvil: rustup toolchain list failed'
-    }
-    if ($installed -match "(?m)^$([regex]::Escape($toolchain.Value))(?:-|$)") {
-        return
-    }
-
-    Write-Host "anvil: installing $label toolchain '$($toolchain.Value)'"
-    rustup toolchain install $toolchain.Value --profile minimal
-    if ($LASTEXITCODE -ne 0) {
-        throw "anvil: failed to install $label toolchain '$($toolchain.Value)'"
-    }
+    Apply-ToolchainFileOptions $toolchain
 }
 
 $fileSelection = Get-SelectingToolchainFile
+$toolchainFileOptions = Get-ToolchainFileOptions
+if ($EmitToolchainFileOptions) {
+    if ($null -ne $toolchainFileOptions) {
+        $toolchainFileOptions | ConvertTo-Json -Compress
+    }
+    exit 0
+}
 if ($ValidateWorkspaceMsrv) {
     $skipWorkspaceMsrvValidation = if ([string]::IsNullOrWhiteSpace($env:ANVIL_STABLE_TOOLCHAIN_SOURCE)) {
         -not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)
@@ -174,9 +258,8 @@ if ($MsrvToolchain -or $InstallMsrvIfNeeded) {
             if ($LASTEXITCODE -ne 0) {
                 throw "anvil: mapped MSRV toolchain '$($msrvSelection.Value)' is unavailable; provision ANVIL_MSRV_TOOLCHAIN or unset it to let Anvil install the declared public MSRV"
             }
-        } else {
-            Install-Toolchain $msrvSelection 'MSRV'
         }
+        Install-Toolchain $msrvSelection 'MSRV'
     } else {
         $msrvSelection.Value
     }
@@ -189,6 +272,11 @@ $selection = if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
     $fileSelection
 } else {
     [pscustomobject]@{ Value = Get-RootMsrv; Source = 'msrv'; Installable = $true }
+}
+
+if ($ApplyToolchainFileOptions) {
+    Apply-ToolchainFileOptions $selection
+    exit 0
 }
 
 if ($InstallIfMissing) {

@@ -19,6 +19,10 @@ parameters:
     default: ''
 steps:
   - pwsh: |
+      & '.anvil/resolve-stable-toolchain.ps1' -ApplyToolchainFileOptions
+      if ($LASTEXITCODE -ne 0) {
+        throw "anvil: stable toolchain option setup failed with exit code $LASTEXITCODE"
+      }
       $source = if ([string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) { 'resolved' } else { 'environment' }
       $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' | Out-String).Trim()
       if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($toolchain)) {
@@ -49,8 +53,7 @@ steps:
         $(HOME)/.cargo/bin/
         $(HOME)/.cargo/.crates.toml
         $(HOME)/.cargo/.crates2.json
-        target/
-    displayName: anvil setup (cache cargo home and target)
+    displayName: anvil setup (cache cargo home)
 
   - bash: |
       if ! command -v just >/dev/null 2>&1 ; then

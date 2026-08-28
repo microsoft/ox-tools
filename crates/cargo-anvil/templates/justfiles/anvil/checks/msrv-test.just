@@ -8,15 +8,16 @@
 
 # Run affected-package tests under the declared MSRV.
 [script("pwsh", "-NoProfile")]
-anvil-msrv-test: anvil-msrv-test-validate-prereqs
+anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($include -eq '--skip') { Write-Host 'anvil-msrv-test: no affected packages; skipping'; exit 0 }
     $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' -MsrvToolchain | Out-String).Trim()
     if ([string]::IsNullOrWhiteSpace($toolchain)) {
         Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'
         exit 0
     }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $pkg = @(if ($include) { -split $include } else { '--workspace' })
     & cargo "+$toolchain" test @pkg --all-targets --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & cargo "+$toolchain" test @pkg --all-targets --locked
