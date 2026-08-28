@@ -36,8 +36,7 @@ steps:
         $(HOME)/.cargo/bin/
         $(HOME)/.cargo/.crates.toml
         $(HOME)/.cargo/.crates2.json
-        target/
-    displayName: anvil setup (cache cargo home and target)
+    displayName: anvil setup (cache cargo home)
 
   - bash: |
       if ! command -v just >/dev/null 2>&1 ; then

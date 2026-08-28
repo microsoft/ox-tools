@@ -20,20 +20,38 @@ anvil-pr: anvil-pr-validate-prereqs \
 # without a commit (advisories, flakes) + the truly expensive
 # exhaustive checks that don't fit in a PR budget. Runs on a schedule
 # against `main`, not on PRs.
+#
+# The scheduled tier is deliberately NOT impact-scoped: it is the catch-all
+# that backstops PR-tier scoping. Every impact-scoped check depends on
+# `anvil-impact` and populates its own scope from the cache, so the tier runs
+# with ANVIL_IMPACT=off, which makes `_anvil-impact-include` return each
+# category's full-workspace default and the `anvil-impact` dependency no-op.
+# A dependency-only recipe cannot set an environment variable for its own
+# dependencies, so the public tier wraps the private one through
+# `_anvil-unscoped`.
 
 # Run all scheduled checks.
 [group("anvil")]
-anvil-scheduled: anvil-scheduled-validate-prereqs \
+anvil-scheduled: (_anvil-unscoped "scheduled")
+
+[private]
+_anvil-scheduled: anvil-scheduled-validate-prereqs \
     anvil-scheduled-test \
     anvil-scheduled-advisories \
     anvil-scheduled-runtime-analysis \
     anvil-scheduled-exhaustive
 
 # Full tier: PR + scheduled, end-to-end. Useful before tagging a release.
+# Full-workspace for the same reason as the scheduled tier.
+
+# Full tier: PR + scheduled, end-to-end. Useful before tagging a release.
 [group("anvil")]
-anvil-full: anvil-full-validate-prereqs \
+anvil-full: (_anvil-unscoped "full")
+
+[private]
+_anvil-full: anvil-full-validate-prereqs \
     anvil-pr \
-    anvil-scheduled
+    _anvil-scheduled
 
 # Tier-level + global setup + validate-prereqs
 # ===========================================================================

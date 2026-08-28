@@ -194,6 +194,8 @@ pub mod artifacts {
         pub fn versions() -> Artifact;  // justfiles/anvil/versions.just
         pub fn tools() -> Artifact;     // justfiles/anvil/tools.just
         pub fn helpers() -> Artifact;   // justfiles/anvil/helpers.just (shared helper recipes)
+        pub fn impact() -> Artifact;    // justfiles/anvil/impact.just (the anvil-impact recipe + tier formatter)
+        pub fn runner() -> Artifact;    // justfiles/anvil/runner.just (native/container tier router)
         pub fn check_files() -> Vec<Artifact>; // justfiles/anvil/checks/<check>.just (one per check)
         pub fn group_files() -> Vec<Artifact>; // justfiles/anvil/groups/<group>.just (one per group)
         pub fn tiers() -> Artifact;     // justfiles/anvil/tiers.just

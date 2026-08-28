@@ -191,9 +191,38 @@ mod tests {
         assert!(RUN_GROUP_ACTION.contains("status=${PIPESTATUS[0]}"));
         assert!(RUN_GROUP_ACTION.contains("Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"));
         assert!(RUN_GROUP_ACTION.contains("uses: ./.github/actions/anvil-report-status"));
-        assert!(RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_MODIFIED"));
-        assert!(RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_AFFECTED"));
-        assert!(RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_REQUIRED"));
+        // Impact reaches scoped checks through the downloaded impact cache
+        // (read via `_anvil-impact-include`), not threaded --package env vars;
+        // the executor only fixes the mode.
+        assert!(RUN_GROUP_ACTION.contains("impact_mode:"));
+        assert!(RUN_GROUP_ACTION.contains("ANVIL_IMPACT: ${{ inputs.impact_mode }}"));
+        assert!(
+            !RUN_GROUP_ACTION.contains("ANVIL_INCLUDE_"),
+            "the shared executor must not thread ANVIL_INCLUDE_* env vars"
+        );
+    }
+
+    #[test]
+    fn pr_groups_consume_downloaded_impact_while_scheduled_defaults_off() {
+        // PR group jobs download the per-OS impact artifact and run in
+        // `consume` mode; scoped checks read that downloaded cache.
+        assert!(PR_IMPL_WORKFLOW.contains("uses: actions/download-artifact"));
+        assert!(PR_IMPL_WORKFLOW.contains("name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}"));
+        assert!(PR_IMPL_WORKFLOW.contains("impact_mode: consume"));
+        assert!(
+            !PR_IMPL_WORKFLOW.contains("include_modified:"),
+            "PR groups consume the downloaded cache, not threaded --package inputs"
+        );
+        // The scheduled workflow passes no impact_mode, so the executor's
+        // default keeps every scheduled tier full-workspace (never scoped).
+        assert!(
+            !SCHEDULED_IMPL_WORKFLOW.contains("impact_mode:"),
+            "scheduled groups rely on the executor's default-off, never consume"
+        );
+        assert!(
+            RUN_GROUP_ACTION.contains("default: \"off\""),
+            "the executor must default impact_mode to off so an un-wired caller never scopes checks out"
+        );
     }
 
     fn run_group_step(fake_output: &str, fake_status: i32) -> (ExitStatus, String) {
@@ -304,18 +333,18 @@ export -f just
     }
 
     #[test]
-    fn impact_action_uses_group_none_and_installs_only_cargo_delta() {
+    fn impact_action_uses_group_none_and_runs_the_shared_recipe() {
+        // The impact action reuses anvil-setup (group=none) + the cargo-delta
+        // install, then runs the same `just anvil-impact` recipe adopters run
+        // locally and uploads the whole cache as a per-OS artifact. The include
+        // lists reach group jobs through that downloaded cache, never job
+        // outputs, so CI and local execution stay identical by construction.
         assert!(IMPACT_ACTION.contains("group: none"));
-        assert!(IMPACT_ACTION.contains("anvil-tool-cargo-delta-install"));
-        assert!(IMPACT_ACTION.contains("delta_config=\"$(pwd)/.delta.toml\""));
-        assert!(!IMPACT_ACTION.contains("remote_branch ="));
-        assert_eq!(
-            IMPACT_ACTION.matches("--config \"$delta_config\"").count(),
-            3,
-            "current snapshot, baseline snapshot, and impact must share the repository config"
-        );
-        assert!(IMPACT_ACTION.contains("cargo delta --config \"$delta_config\" snapshot"));
-        assert!(IMPACT_ACTION.contains("cargo delta --config \"$delta_config\" impact"));
+        assert!(IMPACT_ACTION.contains("just anvil-tool-cargo-delta-install binstall"));
+        assert!(IMPACT_ACTION.contains("run: just anvil-impact"));
+        assert!(IMPACT_ACTION.contains("uses: actions/upload-artifact"));
+        assert!(IMPACT_ACTION.contains("name: anvil-impact-${{ runner.os }}"));
+        assert!(IMPACT_ACTION.contains("path: target/anvil/impact"));
     }
 
     #[test]

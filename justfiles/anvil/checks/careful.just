@@ -8,10 +8,11 @@
 
 # Run tests with cargo-careful for affected workspace packages.
 [script("pwsh", "-NoProfile")]
-anvil-careful: anvil-careful-validate-prereqs
+anvil-careful: anvil-careful-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') { exit 0 }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    if ($include -eq '--skip') { Write-Host 'anvil-careful: no affected packages; skipping'; exit 0 }
+    $pkg = @(if ($include) { -split $include } else { '--workspace' })
     # Guard against cargo-careful's stale-sysroot hazard. cargo-careful
     # builds a custom std ("careful sysroot": debug-assertions + extra UB
     # checks) into a STABLE cache path -- ProjectDirs(de.ralfj.cargo-careful),

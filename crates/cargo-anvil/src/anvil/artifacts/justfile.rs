@@ -43,6 +43,20 @@ const HELPERS_JUST: &str = include_str!("../../../templates/justfiles/anvil/help
 /// Repo-root-relative path of the shared-helpers recipe file.
 const HELPERS_JUST_PATH: &str = "justfiles/anvil/helpers.just";
 
+/// Contents of `justfiles/anvil/impact.just` baked into the binary.
+///
+/// The single `anvil-impact` recipe: it snapshots the base ref and the
+/// working tree (two independent cache keys), computes the cargo-delta
+/// impact set, and writes the `target/anvil/impact/` artifacts that the
+/// scoped checks consume via `_anvil-impact-include`. Also owns the tier
+/// projection helper `_anvil-impact-format` (which lives here next to its
+/// sole caller). The same recipe runs locally and in cloud workflows (which
+/// just share the artifacts).
+const IMPACT_JUST: &str = include_str!("../../../templates/justfiles/anvil/impact.just");
+
+/// Repo-root-relative path of the impact recipe file.
+const IMPACT_JUST_PATH: &str = "justfiles/anvil/impact.just";
+
 /// Emits `(path, include_str!)` pairs for a set of split recipe files that
 /// live under a subdirectory of `justfiles/anvil/`. Each file is one owned
 /// artifact, so the recipe tree is one file per check / per group rather
@@ -169,6 +183,12 @@ pub fn tools() -> Artifact {
 #[must_use]
 pub fn helpers() -> Artifact {
     Artifact::owned_file(HELPERS_JUST_PATH, HELPERS_JUST)
+}
+
+/// `justfiles/anvil/impact.just` — the shared `anvil-impact` recipe.
+#[must_use]
+pub fn impact() -> Artifact {
+    Artifact::owned_file(IMPACT_JUST_PATH, IMPACT_JUST)
 }
 
 /// The `justfiles/anvil/checks/<check>.just` files — one owned artifact
