@@ -97,7 +97,7 @@ want to reproduce the gate locally.
 
 ```text
 cargo coverage-gate  [--lcov <path>]... [-p <spec>]... [--package <spec>]...
-                     [--target <triple>] [--print-test-only-packages]
+                     [--target <triple>]
                      [--summary-file <path>] [--quiet]
 ```
 
@@ -130,10 +130,6 @@ Flags:
 - `--target <triple>` — evaluate target-specific package policies for the
   supplied Rust target. Defaults to the active rustc host target when target
   policies exist; workspaces without target policies do not invoke rustc.
-- `--print-test-only-packages` — print packages whose effective policy has
-  `min-lines-percent = 0`, one bare package name per line without `@version`,
-  then exit `0` without reading lcov. Coverage automation uses this output to
-  choose packages for a non-instrumented test path.
 - `--summary-file <path>` — write a Markdown verdict table to this file.
   When unset, the tool honors the environment variables
   `GITHUB_STEP_SUMMARY` (GitHub Actions) and
@@ -254,12 +250,11 @@ expression (`cfg(windows)`, `cfg(target_os = "linux")`,
 language.
 
 `min-lines-percent = 0` disables gating for that package on the matching
-target. It does not itself disable tests or coverage instrumentation:
-orchestrators can use `--print-test-only-packages` to route the package through
-a non-instrumented test path. This is distinct from
-`expect-no-coverable-lines = true`, which keeps a target-independent facade or
-re-export package in the instrumented test set so its tests can contribute
-coverage to other packages.
+target. It does not disable tests or coverage instrumentation. Test binaries
+from zero-threshold packages remain part of the instrumented run because they
+may contribute coverage to other workspace packages. This is distinct from
+`expect-no-coverable-lines = true`, which asserts that the selected package
+itself owns no coverable lines.
 
 Target tables replace the base policy with either `min-lines-percent` or
 `expect-no-coverable-lines = true`. The two are mutually exclusive. An exact
@@ -276,11 +271,7 @@ Resolution follows Cargo's precedence:
    policy applies.
 
 The CLI accepts `--target <triple>`. When omitted, it obtains the host triple
-from `rustc -vV`. A dedicated `--print-test-only-packages` mode loads metadata
-and prints packages whose effective policy is `min-lines-percent = 0`, one bare
-package name per line without `@version`, then exits `0` without reading lcov.
-Coverage orchestrators can use this output before selecting packages for
-instrumentation. Target discovery is lazy: if no package declares target
+from `rustc -vV`. Target discovery is lazy: if no package declares target
 policies, evaluation does not invoke rustc and preserves the pre-target-policy
 runtime and error surface.
 
@@ -440,9 +431,17 @@ configuration error. Conversely, if such a package *does* have attributed
 coverable lines, it fails the gate (exit `1`) rather than passing.
 
 A package whose effective target policy sets `min-lines-percent = 0` passes,
-including when it has no attributed data. Coverage orchestrators use
-`--print-test-only-packages` to remove it from instrumentation while still
-running its tests through a plain test runner.
+including when it has no attributed data. Its tests remain instrumented so
+they can contribute coverage to other packages.
+
+An empty lcov tracefile is valid input. Each in-scope package is classified
+from its effective policy: zero-threshold and `expect-no-coverable-lines`
+packages pass, while a package with a positive threshold reports `NO DATA`
+and makes the result a configuration error. This lets an orchestrator recover
+from cargo-llvm-cov's "no coverage data found" export outcome by supplying an
+empty tracefile to the gate. It must not remove test binaries from
+instrumentation preemptively; if those tests produce coverage for another
+package, the normal export succeeds and that coverage remains visible.
 
 ### 6.4 Cross-package test attribution
 
@@ -671,9 +670,9 @@ file) and `DA:` (line count) records; everything else is ignored, so
 new record types added by future cargo-llvm-cov releases will not
 break parsing.
 
-If a tracefile contains no `SF:` sections — empty file, or a corrupted
-upload — the tool exits with a configuration error (no files attributed
-to any package). Structural parse errors (e.g., malformed `DA:`
+If a tracefile contains no `SF:` sections, every in-scope package is evaluated
+as having no attributed data. The effective package policies determine the
+result as described in §6.3. Structural parse errors (e.g., malformed `DA:`
 records) are hard errors with exit code 2.
 
 #### Tooling requirements

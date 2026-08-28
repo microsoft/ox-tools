@@ -202,17 +202,10 @@ fn gated_crate_with_no_data_exits_2() {
 /// `[package.metadata.coverage-gate]` body. Each entry is
 /// `(name, gate_body)`; an empty `gate_body` omits the block entirely.
 fn make_workspace_with_gate(dir: &Path, members: &[(&str, &str)]) {
-    make_workspace_with_gate_and_default(dir, members, None);
-}
-
-fn make_workspace_with_gate_and_default(dir: &Path, members: &[(&str, &str)], workspace_min_lines_percent: Option<&str>) {
     let members_list = members.iter().map(|(n, _)| format!("\"{n}\"")).collect::<Vec<_>>().join(", ");
-    let workspace_meta = workspace_min_lines_percent
-        .map(|m| format!("\n[workspace.metadata.coverage-gate]\nmin-lines-percent = {m}\n"))
-        .unwrap_or_default();
     fs::write(
         dir.join("Cargo.toml"),
-        format!("[workspace]\nresolver = \"2\"\nmembers = [{members_list}]\n{workspace_meta}"),
+        format!("[workspace]\nresolver = \"2\"\nmembers = [{members_list}]\n"),
     )
     .expect("write workspace root Cargo.toml");
 
@@ -321,7 +314,7 @@ fn target_zero_threshold_opts_package_out_of_gate() {
 
 #[test]
 #[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
-fn print_test_only_packages_does_not_read_lcov() {
+fn empty_lcov_passes_when_all_effective_policies_allow_no_data() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace_with_gate(
         tmp.path(),
@@ -333,49 +326,17 @@ fn print_test_only_packages_does_not_read_lcov() {
                 min-lines-percent = 0",
             ),
             ("beta", "expect-no-coverable-lines = true"),
-            ("gamma", "min-lines-percent = 0"),
-            (
-                "delta",
-                "min-lines-percent = 100\n\n\
-                 [package.metadata.coverage-gate.target.'cfg(unix)']\n\
-                 min-lines-percent = 0",
-            ),
         ],
     );
+    let empty_lcov = write_lcov(tmp.path(), &[]);
 
     coverage_gate(tmp.path())
-        .args([
-            "--target",
-            "x86_64-unknown-linux-gnu",
-            "--print-test-only-packages",
-            "--lcov",
-            "does-not-exist.info",
-        ])
+        .args(["--target", "x86_64-unknown-linux-gnu", "--lcov", &empty_lcov])
         .assert()
         .success()
-        .stdout("alpha\ndelta\ngamma\n");
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
-fn print_test_only_packages_includes_workspace_zero_threshold() {
-    let tmp = TempDir::new().expect("tempdir");
-    make_workspace_with_gate_and_default(
-        tmp.path(),
-        &[
-            ("alpha", ""),
-            ("beta", "expect-no-coverable-lines = true"),
-            ("gamma", "min-lines-percent = 80"),
-        ],
-        Some("0"),
-    );
-
-    coverage_gate(tmp.path())
-        .args(["--print-test-only-packages", "--lcov", "does-not-exist.info"])
-        .env("RUSTC", tmp.path().join("missing-rustc"))
-        .assert()
-        .success()
-        .stdout("alpha\n");
+        .stdout(predicate::str::contains("alpha"))
+        .stdout(predicate::str::contains("beta"))
+        .stdout(predicate::str::contains("all packages meet their threshold"));
 }
 
 #[test]

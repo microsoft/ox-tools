@@ -51,14 +51,6 @@ pub(crate) struct CoverageGateArgs {
     #[arg(long, value_name = "TRIPLE")]
     pub(crate) target: Option<String>,
 
-    /// Print packages that should run tests without coverage and exit.
-    ///
-    /// Includes packages whose effective policy has
-    /// `min-lines-percent = 0`. Prints one bare package name per line,
-    /// without `@version`, and exits successfully without reading lcov.
-    #[arg(long)]
-    pub(crate) print_test_only_packages: bool,
-
     /// Write the Markdown verdict table to this file.
     ///
     /// When unset, the tool falls back to `$GITHUB_STEP_SUMMARY` and then

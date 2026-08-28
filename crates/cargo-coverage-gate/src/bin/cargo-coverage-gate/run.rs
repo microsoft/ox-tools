@@ -15,15 +15,6 @@ use ohno::{AppError, IntoAppError};
 use crate::cli::CoverageGateArgs;
 
 pub(crate) fn run(args: &CoverageGateArgs) -> Result<ExitCode, AppError> {
-    if args.print_test_only_packages {
-        let packages = cargo_coverage_gate::test_only_packages(None, &args.packages, args.target.as_deref())
-            .into_app_err("failed to resolve test-only packages")?;
-        for package in packages {
-            println!("{package}");
-        }
-        return Ok(ExitCode::SUCCESS);
-    }
-
     let lcov_paths: Vec<PathBuf> = if args.lcov.is_empty() {
         vec![PathBuf::from("target/coverage/lcov.info")]
     } else {

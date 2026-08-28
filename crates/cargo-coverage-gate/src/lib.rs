@@ -90,12 +90,12 @@
 //! configuration error rather than depending on declaration order.
 //!
 //! A zero target-specific threshold disables gating on the matching target,
-//! but does not itself control test execution or instrumentation. Coverage
-//! automation can call `cargo coverage-gate
-//! --print-test-only-packages --target <triple>` or [`test_only_packages`] to
-//! identify packages that should run through a non-instrumented test path.
-//! The command prints one bare package name per line (without `@version`) and
-//! exits successfully without reading lcov.
+//! but does not disable test execution or instrumentation. Those test binaries
+//! remain instrumented because they may contribute coverage to other packages.
+//! If cargo-llvm-cov reports that an instrumented run produced no coverage
+//! data, automation can supply an empty lcov tracefile: zero-threshold and
+//! `expect-no-coverable-lines` packages pass, while positively gated packages
+//! report `NO DATA`.
 //!
 //! ## Why lcov, not the JSON?
 //!
@@ -116,7 +116,6 @@
 //! ```text
 //! cargo coverage-gate  [--lcov <path>]... [-p|--package <spec>]...
 //!                      [--target <triple>]
-//!                      [--print-test-only-packages]
 //!                      [--summary-file <path>] [--quiet]
 //! ```
 //!
@@ -152,9 +151,8 @@
 //!
 //! [`evaluate`] gates one lcov tracefile for the host target, while
 //! [`evaluate_many`] merges multiple tracefiles at line level.
-//! [`evaluate_many_for_target`] evaluates an explicit target triple, and
-//! [`test_only_packages`] performs the metadata-only package query described
-//! above. Evaluation returns an [`EvaluatedReport`], which renders as plain
+//! [`evaluate_many_for_target`] evaluates an explicit target triple.
+//! Evaluation returns an [`EvaluatedReport`], which renders as plain
 //! text via [`EvaluatedReport::render_text`] or GitHub-flavored Markdown via
 //! [`EvaluatedReport::render_markdown`] and reduces to a [`Verdict`] via
 //! [`EvaluatedReport::verdict`]. The accompanying binary loads tracefiles from
@@ -283,11 +281,11 @@ pub fn evaluate(lcov_text: &str, manifest_path: Option<&Path>, gated_packages: &
 /// counts summed, line sets combined), so passing the `--all-features` and
 /// `--no-default-features` exports yields the same per-package line
 /// coverage as a single merged report — without a platform-specific lcov
-/// merger. An empty slice is treated as an empty report (every gated
-/// package then reports NO DATA). NO DATA is not a passing outcome:
-/// each such package classifies as `NoData`, which rolls the overall
-/// result up to [`Verdict::ConfigError`] (process exit code 2), so an
-/// empty slice never yields a successful verdict.
+/// merger. An empty slice is treated as an empty report. Packages with
+/// positive thresholds then report NO DATA, which rolls the overall result
+/// up to [`Verdict::ConfigError`] (process exit code 2). Packages with zero
+/// thresholds pass, while `expect-no-coverable-lines` packages report EMPTY
+/// and pass.
 ///
 /// `gated_packages` restricts the operation to a named subset; when
 /// empty, every workspace member is in scope.
@@ -327,31 +325,6 @@ pub fn evaluate_many_for_target(
     let ws = workspace::Workspace::load(manifest_path, target)?;
     let inner = verdict::evaluate(&report, &ws, gated_packages)?;
     Ok(EvaluatedReport { inner })
-}
-
-/// Return packages that should run tests without coverage for `target`.
-///
-/// This metadata-only query is intended for coverage automation that
-/// must remove packages with an effective `min-lines-percent = 0` from
-/// instrumentation while still running their tests through a plain test
-/// runner.
-///
-/// # Errors
-///
-/// Returns a [`CoverageGateError`] when workspace metadata, target
-/// discovery, target policy, or a package selector is invalid.
-pub fn test_only_packages(
-    manifest_path: Option<&Path>,
-    packages: &[String],
-    target: Option<&str>,
-) -> Result<Vec<String>, CoverageGateError> {
-    let ws = workspace::Workspace::load(manifest_path, target)?;
-    let selected = verdict::resolve_gated(&ws, packages)?;
-    Ok(selected
-        .into_iter()
-        .filter(|member| !member.expect_no_coverable_lines && threshold::Threshold::resolve(member, &ws).min_lines_percent == 0.0)
-        .map(|member| member.name.clone())
-        .collect())
 }
 
 #[cfg(test)]

@@ -99,11 +99,12 @@ matching `cfg(...)` expressions. Multiple matching cfg policies are a
 configuration error rather than depending on declaration order.
 
 A zero target-specific threshold disables gating on the matching target,
-but does not itself control test execution or instrumentation. Coverage
-automation can call `cargo coverage-gate --print-test-only-packages --target <triple>` or [`test_only_packages`][__link1] to
-identify packages that should run through a non-instrumented test path.
-The command prints one bare package name per line (without `@version`) and
-exits successfully without reading lcov.
+but does not disable test execution or instrumentation. Those test binaries
+remain instrumented because they may contribute coverage to other packages.
+If cargo-llvm-cov reports that an instrumented run produced no coverage
+data, automation can supply an empty lcov tracefile: zero-threshold and
+`expect-no-coverable-lines` packages pass, while positively gated packages
+report `NO DATA`.
 
 ### Why lcov, not the JSON?
 
@@ -124,7 +125,6 @@ Codecov / ADO numbers confusing.
 ```text
 cargo coverage-gate  [--lcov <path>]... [-p|--package <spec>]...
                      [--target <triple>]
-                     [--print-test-only-packages]
                      [--summary-file <path>] [--quiet]
 ```
 
@@ -156,14 +156,13 @@ let code = report.verdict().as_exit_code();
 
 ### Public API
 
-[`evaluate`][__link2] gates one lcov tracefile for the host target, while
-[`evaluate_many`][__link3] merges multiple tracefiles at line level.
-[`evaluate_many_for_target`][__link4] evaluates an explicit target triple, and
-[`test_only_packages`][__link5] performs the metadata-only package query described
-above. Evaluation returns an [`EvaluatedReport`][__link6], which renders as plain
-text via [`EvaluatedReport::render_text`][__link7] or GitHub-flavored Markdown via
-[`EvaluatedReport::render_markdown`][__link8] and reduces to a [`Verdict`][__link9] via
-[`EvaluatedReport::verdict`][__link10]. The accompanying binary loads tracefiles from
+[`evaluate`][__link1] gates one lcov tracefile for the host target, while
+[`evaluate_many`][__link2] merges multiple tracefiles at line level.
+[`evaluate_many_for_target`][__link3] evaluates an explicit target triple.
+Evaluation returns an [`EvaluatedReport`][__link4], which renders as plain
+text via [`EvaluatedReport::render_text`][__link5] or GitHub-flavored Markdown via
+[`EvaluatedReport::render_markdown`][__link6] and reduces to a [`Verdict`][__link7] via
+[`EvaluatedReport::verdict`][__link8]. The accompanying binary loads tracefiles from
 disk and orchestrates rendering plus the appropriate exit code.
 
 
@@ -172,15 +171,13 @@ disk and orchestrates rendering plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbdKLP7PcbAPsbeHSPlXhUImobKq_kwe1zsH4bcq-jhiXZ7SNhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbcvaYALYk9GcbLDI6G2DLxr0bYVksFz6RuJcbUYA_Oup1xJdhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
- [__link1]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.test_only_packages.html
- [__link10]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
- [__link2]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate.html
- [__link3]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate_many.html
- [__link4]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate_many_for_target.html
- [__link5]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.test_only_packages.html
- [__link6]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/struct.EvaluatedReport.html
- [__link7]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
- [__link8]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
- [__link9]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/enum.Verdict.html
+ [__link1]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate.html
+ [__link2]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate_many.html
+ [__link3]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate_many_for_target.html
+ [__link4]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/struct.EvaluatedReport.html
+ [__link5]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::render_text
+ [__link6]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::render_markdown
+ [__link7]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/enum.Verdict.html
+ [__link8]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/?search=EvaluatedReport::verdict
