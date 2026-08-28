@@ -14,7 +14,7 @@ anvil-bench: anvil-bench-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     if ($include -eq '--skip') { Write-Host 'anvil-bench: no affected packages; skipping'; exit 0 }
-    & "{{ just_executable() }}" _anvil-with-stable cargo bench @(if ($include) { -split $include } else { '--workspace' }) --all-features --no-run
+    & cargo {{_anvil_stable_toolchain_args}} bench @(if ($include) { -split $include } else { '--workspace' }) --all-features --no-run
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # bench uses the cargo built-in in compile-only mode; no extra tool install

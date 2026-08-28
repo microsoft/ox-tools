@@ -177,37 +177,318 @@ anvil-tool-pwsh-validate-prereqs:
 [script("pwsh", "-NoProfile")]
 _anvil-resolve-stable action="resolve":
     $ErrorActionPreference = 'Stop'
-    $resolverArgs = @(switch ('{{action}}') {
-        'resolve' { @() }
-        'for-environment' { @('-ForEnvironment') }
-        'install' { @('-InstallIfMissing') }
-        'apply-file-options' { @('-ApplyToolchainFileOptions') }
-        'validate-workspace-msrv' { @('-ValidateWorkspaceMsrv') }
-        'msrv' { @('-MsrvToolchain') }
-        'install-msrv' { @('-InstallMsrvIfNeeded') }
-        default {
-            Write-Error "_anvil-resolve-stable: unknown action '{{action}}'"
-            exit 2
-        }
-    })
-    & pwsh -NoProfile -File '.anvil/resolve-stable-toolchain.ps1' @resolverArgs
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    Set-StrictMode -Version 3
 
-# Run one command under the selected stable compiler. A repository toolchain
-# file yields no override so rustup processes its complete configuration.
-[script("pwsh", "-NoProfile")]
-_anvil-with-stable command *args:
-    $ErrorActionPreference = 'Stop'
-    $toolchain = (& "{{ just_executable() }}" _anvil-resolve-stable for-environment | Out-String).Trim()
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    if ([string]::IsNullOrWhiteSpace($toolchain)) {
-        Remove-Item Env:\RUSTUP_TOOLCHAIN -ErrorAction SilentlyContinue
-    } else {
-        $env:RUSTUP_TOOLCHAIN = $toolchain
+    $action = '{{action}}'
+    $validActions = @(
+        'resolve',
+        'for-environment',
+        'install',
+        'apply-file-options',
+        'validate-workspace-msrv',
+        'msrv',
+        'install-msrv',
+        'emit-file-options'
+    )
+    if ($action -notin $validActions) {
+        Write-Error "_anvil-resolve-stable: unknown action '$action'"
+        exit 2
     }
-    Set-Location '{{invocation_directory_native()}}'
-    & '{{command}}' {{args}}
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+    $repoRoot = '{{justfile_directory()}}'
+
+    function Get-RootToolchainFilePath {
+        foreach ($name in @('rust-toolchain', 'rust-toolchain.toml')) {
+            $path = Join-Path $repoRoot $name
+            if (Test-Path -LiteralPath $path -PathType Leaf) {
+                return $path
+            }
+        }
+        return $null
+    }
+
+    function Read-RootToolchainFile([string] $path) {
+        $content = Get-Content -LiteralPath $path -Raw
+        if ([string]::IsNullOrWhiteSpace($content)) {
+            throw "anvil: root toolchain file '$path' is empty; remove it or declare a toolchain configuration"
+        }
+        return $content
+    }
+
+    function Get-SelectingToolchainFile {
+        $path = Get-RootToolchainFilePath
+        if ($null -eq $path) {
+            return $null
+        }
+
+        $content = Read-RootToolchainFile $path
+        if ((Split-Path -Leaf $path) -eq 'rust-toolchain' -and $content.TrimStart() -notmatch '^\[') {
+            return [pscustomobject]@{
+                Path = $path
+                Value = $content.Trim()
+                Selector = 'channel'
+                Source = 'file'
+                Installable = $false
+            }
+        }
+
+        $inToolchain = $false
+        foreach ($line in $content -split '\r?\n') {
+            if ($line -match '^\s*\[\s*toolchain\s*\]\s*(?:#.*)?$') {
+                $inToolchain = $true
+                continue
+            }
+            if ($line -match '^\s*\[') {
+                $inToolchain = $false
+                continue
+            }
+            if ($inToolchain -and $line -match '^\s*["'']?(channel|path)["'']?\s*=\s*(["''])([^"'']+)\2\s*(?:#.*)?$') {
+                $value = $Matches[3]
+                if ($Matches[1] -eq 'path' -and -not [IO.Path]::IsPathRooted($value)) {
+                    $value = [IO.Path]::GetFullPath((Join-Path $repoRoot $value))
+                }
+                return [pscustomobject]@{
+                    Path = $path
+                    Value = $value
+                    Selector = $Matches[1]
+                    Source = 'file'
+                    Installable = $false
+                }
+            }
+        }
+        return $null
+    }
+
+    function Get-ToolchainFileOptions {
+        $path = Get-RootToolchainFilePath
+        if ($null -eq $path) {
+            return $null
+        }
+
+        $content = Read-RootToolchainFile $path
+        $section = [regex]::Match(
+            $content,
+            '(?ms)^\s*\[\s*toolchain\s*\]\s*(?:#.*)?$(.*?)(?=^\s*\[|\z)'
+        )
+        if (-not $section.Success) {
+            return $null
+        }
+
+        $body = $section.Groups[1].Value
+        $profileMatch = [regex]::Match(
+            $body,
+            '(?m)^\s*["'']?profile["'']?\s*=\s*(["''])([^"'']+)\1\s*(?:#.*)?$'
+        )
+        $readArray = {
+            param([string] $name)
+            $arrayMatch = [regex]::Match(
+                $body,
+                "(?ms)^\s*[`"']?$name[`"']?\s*=\s*\[(.*?)\]"
+            )
+            if (-not $arrayMatch.Success) {
+                return @()
+            }
+            return @(
+                [regex]::Matches($arrayMatch.Groups[1].Value, '(["''])([^"'']+)\1') |
+                    ForEach-Object { $_.Groups[2].Value }
+            )
+        }
+
+        return [pscustomobject]@{
+            Path = $path
+            Profile = if ($profileMatch.Success) { $profileMatch.Groups[2].Value } else { $null }
+            Components = @(& $readArray 'components')
+            Targets = @(& $readArray 'targets')
+        }
+    }
+
+    function Get-RootMsrv([switch] $AllowMissing) {
+        $manifestPath = Join-Path $repoRoot 'Cargo.toml'
+        if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+            throw "anvil: Cargo.toml not found at repository root '$repoRoot'"
+        }
+
+        $values = @{}
+        $section = ''
+        foreach ($line in (Get-Content -LiteralPath $manifestPath)) {
+            if ($line -match '^\s*\[\s*([^\]]+)\s*\]\s*(?:#.*)?$') {
+                $section = $Matches[1].Trim()
+                continue
+            }
+            if ($section -in @('workspace.package', 'package') -and
+                $line -match '^\s*["'']?rust-version["'']?\s*=\s*(["''])([^"'']+)\1\s*(?:#.*)?$') {
+                $values[$section] = $Matches[2]
+            }
+        }
+
+        if ($values.ContainsKey('workspace.package')) {
+            return $values['workspace.package']
+        }
+        if ($values.ContainsKey('package')) {
+            return $values['package']
+        }
+
+        if ($AllowMissing) {
+            return $null
+        }
+        throw 'anvil: no selecting rust-toolchain(.toml) and no root [workspace.package] or [package] rust-version; declare an MSRV or select a toolchain explicitly'
+    }
+
+    function Assert-WorkspaceMsrvCompatibility {
+        $manifestPath = Join-Path $repoRoot 'Cargo.toml'
+        $metadataText = (& cargo metadata --manifest-path $manifestPath --format-version 1 --no-deps 2>&1 | Out-String)
+        if ($LASTEXITCODE -ne 0) {
+            throw "anvil: cargo metadata failed while validating workspace MSRVs:`n$metadataText"
+        }
+        $metadata = $metadataText | ConvertFrom-Json
+        $memberIds = [Collections.Generic.HashSet[string]]::new(
+            [string[]] $metadata.workspace_members,
+            [StringComparer]::Ordinal
+        )
+        $members = @($metadata.packages | Where-Object { $memberIds.Contains([string] $_.id) })
+        $missing = @($members | Where-Object { [string]::IsNullOrWhiteSpace([string] $_.rust_version) } | ForEach-Object name)
+        if ($missing.Count -gt 0) {
+            throw "anvil: workspace packages without a resolved rust-version: $($missing -join ', '); declare one or select a toolchain explicitly"
+        }
+
+        $rootMsrv = Get-RootMsrv
+        $newer = @(
+            $members |
+                Where-Object { [version] ([string] $_.rust_version) -gt [version] $rootMsrv } |
+                ForEach-Object { "$($_.name) ($($_.rust_version))" }
+        )
+        if ($newer.Count -gt 0) {
+            throw "anvil: workspace packages require a compiler newer than the root MSRV $rootMsrv`: $($newer -join ', '); raise the root MSRV or select one catalog toolchain explicitly with rust-toolchain.toml"
+        }
+    }
+
+    function Assert-CompleteInternalToolchainConfiguration {
+        if (-not [string]::IsNullOrWhiteSpace($env:ANVIL_MSRV_TOOLCHAIN) -and
+            [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN) -and
+            $null -eq $fileSelection) {
+            throw 'anvil: ANVIL_MSRV_TOOLCHAIN is set without RUSTUP_TOOLCHAIN and no repository toolchain file selects stable checks; set RUSTUP_TOOLCHAIN to the provisioned stable toolchain or unset ANVIL_MSRV_TOOLCHAIN'
+        }
+    }
+
+    function Get-MsrvSelection {
+        $msrv = Get-RootMsrv -AllowMissing
+        if ([string]::IsNullOrWhiteSpace($msrv)) {
+            return $null
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($env:ANVIL_MSRV_TOOLCHAIN)) {
+            return [pscustomobject]@{
+                Value = $env:ANVIL_MSRV_TOOLCHAIN
+                Source = 'mapped-msrv'
+                Installable = $false
+                Mapped = $true
+            }
+        }
+        return [pscustomobject]@{ Value = $msrv; Source = 'msrv'; Installable = $true; Mapped = $false }
+    }
+
+    function Apply-ToolchainFileOptions([object] $toolchain) {
+        if ($toolchain.Source -eq 'file' -or $null -eq $toolchainFileOptions) {
+            return
+        }
+        foreach ($component in $toolchainFileOptions.Components) {
+            rustup component add --toolchain $toolchain.Value $component
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "anvil: toolchain-file component '$component' is unavailable for '$($toolchain.Value)'; rustup would skip an unavailable file component"
+            }
+        }
+        foreach ($target in $toolchainFileOptions.Targets) {
+            rustup target add --toolchain $toolchain.Value $target
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "anvil: toolchain-file target '$target' is unavailable for '$($toolchain.Value)'; rustup would skip an unavailable file target"
+            }
+        }
+    }
+
+    function Install-Toolchain([object] $toolchain, [string] $label) {
+        if ($toolchain.Installable) {
+            $installed = rustup toolchain list
+            if ($LASTEXITCODE -ne 0) {
+                throw 'anvil: rustup toolchain list failed'
+            }
+            if ($installed -notmatch "(?m)^$([regex]::Escape($toolchain.Value))(?:-|$)") {
+                $profile = if ($null -ne $toolchainFileOptions -and $toolchainFileOptions.Profile) {
+                    $toolchainFileOptions.Profile
+                } else {
+                    'minimal'
+                }
+                Write-Host "anvil: installing $label toolchain '$($toolchain.Value)'"
+                rustup toolchain install $toolchain.Value --profile $profile
+                if ($LASTEXITCODE -ne 0) {
+                    throw "anvil: failed to install $label toolchain '$($toolchain.Value)'"
+                }
+            }
+        }
+        Apply-ToolchainFileOptions $toolchain
+    }
+
+    $fileSelection = Get-SelectingToolchainFile
+    $toolchainFileOptions = Get-ToolchainFileOptions
+
+    if ($action -eq 'emit-file-options') {
+        if ($null -ne $toolchainFileOptions) {
+            $toolchainFileOptions | ConvertTo-Json -Compress
+        }
+        exit 0
+    }
+
+    if ($action -eq 'validate-workspace-msrv') {
+        Assert-CompleteInternalToolchainConfiguration
+        $skipWorkspaceMsrvValidation = -not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)
+        if (-not $skipWorkspaceMsrvValidation -and $null -eq $fileSelection) {
+            Assert-WorkspaceMsrvCompatibility
+        }
+        exit 0
+    }
+
+    if ($action -in @('msrv', 'install-msrv')) {
+        $msrvSelection = Get-MsrvSelection
+        if ($null -eq $msrvSelection) {
+            exit 0
+        }
+        if ($action -eq 'install-msrv') {
+            if ($msrvSelection.Mapped) {
+                & cargo "+$($msrvSelection.Value)" --version *> $null
+                if ($LASTEXITCODE -ne 0) {
+                    throw "anvil: mapped MSRV toolchain '$($msrvSelection.Value)' is unavailable; provision ANVIL_MSRV_TOOLCHAIN or unset it to let Anvil install the declared public MSRV"
+                }
+            }
+            Install-Toolchain $msrvSelection 'MSRV'
+        } else {
+            $msrvSelection.Value
+        }
+        exit 0
+    }
+
+    Assert-CompleteInternalToolchainConfiguration
+    $selection = if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
+        [pscustomobject]@{ Value = $env:RUSTUP_TOOLCHAIN; Source = 'environment'; Installable = $false }
+    } elseif ($null -ne $fileSelection) {
+        $fileSelection
+    } else {
+        [pscustomobject]@{ Value = Get-RootMsrv; Source = 'msrv'; Installable = $true }
+    }
+
+    if ($action -eq 'apply-file-options') {
+        Apply-ToolchainFileOptions $selection
+        exit 0
+    }
+
+    if ($action -eq 'install') {
+        Install-Toolchain $selection 'stable'
+        exit 0
+    }
+
+    if ($action -eq 'for-environment' -and $selection.Source -eq 'file') {
+        ''
+    } else {
+        $selection.Value
+    }
 
 # _install-tool: install a cargo subcommand at the catalog version,
 # or no-op if it is already installed at or above that version. The
@@ -239,7 +520,7 @@ _install-tool name version installer source_prereq="":
     # cached binaries and fail with "binary already exists in destination".
     $installed = $null
     $pattern = '^' + [regex]::Escape($name) + ' v(\S+):'
-    foreach ($line in (& "{{ just_executable() }}" _anvil-with-stable cargo install --list 2>$null)) {
+    foreach ($line in (& cargo {{_anvil_stable_toolchain_args}} install --list 2>$null)) {
         if ($line -match $pattern) { $installed = $Matches[1]; break }
     }
     if ($installed) {
@@ -257,7 +538,7 @@ _install-tool name version installer source_prereq="":
     if ($installer -eq 'binstall') {
         if (-not (Get-Command cargo-binstall -ErrorAction SilentlyContinue)) {
             Write-Host '  Bootstrapping cargo-binstall'
-            & "{{ just_executable() }}" _anvil-with-stable cargo install --locked cargo-binstall
+            & cargo {{_anvil_stable_toolchain_args}} install --locked cargo-binstall
             if ($LASTEXITCODE -ne 0) {
                 Write-Error 'cargo-binstall bootstrap failed'
                 exit $LASTEXITCODE
@@ -271,7 +552,7 @@ _install-tool name version installer source_prereq="":
             $binstallArgs += @('--disable-strategies', 'compile')
         }
         $binstallArgs += @($name, '--version', "=$version")
-        & "{{ just_executable() }}" _anvil-with-stable cargo @binstallArgs
+        & cargo {{_anvil_stable_toolchain_args}} @binstallArgs
         if ($LASTEXITCODE -eq 0) { exit 0 }
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
     }
@@ -279,7 +560,7 @@ _install-tool name version installer source_prereq="":
         & "{{just_executable()}}" $sourcePrereq
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
-    & "{{ just_executable() }}" _anvil-with-stable cargo install --locked $name --version "=$version"
+    & cargo {{_anvil_stable_toolchain_args}} install --locked $name --version "=$version"
     if ($LASTEXITCODE -ne 0) {
         Write-Error "$name install FAILED"
         exit $LASTEXITCODE
@@ -295,7 +576,7 @@ _check-tool name version:
 
     $installed = $null
     $pattern = '^' + [regex]::Escape($name) + ' v(\S+):'
-    foreach ($line in (& "{{ just_executable() }}" _anvil-with-stable cargo install --list 2>$null)) {
+    foreach ($line in (& cargo {{_anvil_stable_toolchain_args}} install --list 2>$null)) {
         if ($line -match $pattern) { $installed = $Matches[1]; break }
     }
     if (-not $installed) {
@@ -376,14 +657,14 @@ _install-component toolchain component:
     }
     if ($null -ne $subcommand) {
         if ($toolchain -eq 'default') {
-            & "{{ just_executable() }}" _anvil-with-stable cargo $subcommand --version *> $null
+            & cargo {{_anvil_stable_toolchain_args}} $subcommand --version *> $null
         } else {
             & cargo "+$toolchain" $subcommand --version *> $null
         }
         $present = ($LASTEXITCODE -eq 0)
     } else {
         $sysroot = if ($toolchain -eq 'default') {
-            & "{{ just_executable() }}" _anvil-with-stable rustc --print sysroot 2>$null
+            & rustc {{_anvil_stable_toolchain_args}} --print sysroot 2>$null
         } else {
             & rustc "+$toolchain" --print sysroot 2>$null
         }
@@ -444,14 +725,14 @@ _check-component toolchain component:
     }
     if ($null -ne $subcommand) {
         if ($toolchain -eq 'default') {
-            & "{{ just_executable() }}" _anvil-with-stable cargo $subcommand --version *> $null
+            & cargo {{_anvil_stable_toolchain_args}} $subcommand --version *> $null
         } else {
             & cargo "+$toolchain" $subcommand --version *> $null
         }
         $present = ($LASTEXITCODE -eq 0)
     } else {
         $sysroot = if ($toolchain -eq 'default') {
-            & "{{ just_executable() }}" _anvil-with-stable rustc --print sysroot 2>$null
+            & rustc {{_anvil_stable_toolchain_args}} --print sysroot 2>$null
         } else {
             & rustc "+$toolchain" --print sysroot 2>$null
         }

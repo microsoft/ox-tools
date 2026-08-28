@@ -42,9 +42,9 @@ anvil-spellcheck: anvil-spellcheck-validate-prereqs
     # ignores user-curated dictionaries (`extra_dictionaries`, custom
     # hunspell langs, etc.).
     if (Test-Path 'spellcheck.toml') {
-        & "{{ just_executable() }}" _anvil-with-stable cargo spellcheck --cfg spellcheck.toml check --code 1
+        & cargo {{_anvil_stable_toolchain_args}} spellcheck --cfg spellcheck.toml check --code 1
     } else {
-        & "{{ just_executable() }}" _anvil-with-stable cargo spellcheck check --code 1
+        & cargo {{_anvil_stable_toolchain_args}} spellcheck check --code 1
     }
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

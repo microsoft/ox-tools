@@ -163,6 +163,12 @@ recipes locally.
 The cell format is `cargo invocation (short rationale)`. "Source" cites the surveyed repo
 that provided the strongest version of the check.
 
+Invocations shown without a pinned nightly or MSRV use the selected stable
+compiler. Their generated PowerShell recipes invoke Cargo directly with the
+lazy optional stable argument: an explicit `+toolchain` for a caller override
+or root MSRV, and no argument when a repository toolchain file selects the
+compiler. They do not route the main command through a nested Just recipe.
+
 ### `pr-fast`
 
 | Check                          | Invocation                                                | Source |

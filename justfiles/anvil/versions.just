@@ -5,6 +5,8 @@
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 #
 # Pinned versions used by the anvil check tree.
+
+set lazy
 #
 # Everything anvil installs (cargo subcommands + rustup toolchains)
 # is pinned here. The pinning policy:
@@ -30,9 +32,102 @@
 # Rustup toolchains
 # ============================================================================
 
-# Stable checks select their compiler through `_anvil-with-stable` at the
-# individual command site. `RUSTUP_TOOLCHAIN` is an input override only; Anvil
-# never exports a resolved value globally into unrelated recipes or helpers.
+# Stable commands interpolate this lazy PowerShell argument-array expression
+# directly at each command site. `RUSTUP_TOOLCHAIN` is an input override only;
+# Anvil never exports a resolved value globally into unrelated recipes or
+# helpers.
+[private]
+_anvil_stable_toolchain_selection_script := '''
+param([string] $RepoRoot)
+
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version 3
+
+function Write-ExplicitToolchainArgs([string] $Toolchain) {
+    Write-Output ("@('+" + $Toolchain.Replace("'", "''") + "')")
+}
+
+if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
+    Write-ExplicitToolchainArgs $env:RUSTUP_TOOLCHAIN
+    exit 0
+}
+
+$toolchainFile = $null
+foreach ($name in @('rust-toolchain', 'rust-toolchain.toml')) {
+    $candidate = Join-Path $RepoRoot $name
+    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        $toolchainFile = $candidate
+        break
+    }
+}
+
+$selectingFile = $false
+if ($null -ne $toolchainFile) {
+    $content = Get-Content -LiteralPath $toolchainFile -Raw
+    if ([string]::IsNullOrWhiteSpace($content)) {
+        throw "anvil: root toolchain file '$toolchainFile' is empty; remove it or declare a toolchain configuration"
+    }
+    if ((Split-Path -Leaf $toolchainFile) -eq 'rust-toolchain' -and $content.TrimStart() -notmatch '^\[') {
+        $selectingFile = $true
+    } else {
+        $inToolchain = $false
+        foreach ($line in $content -split '\r?\n') {
+            if ($line -match '^\s*\[\s*toolchain\s*\]\s*(?:#.*)?$') {
+                $inToolchain = $true
+                continue
+            }
+            if ($line -match '^\s*\[') {
+                $inToolchain = $false
+                continue
+            }
+            if ($inToolchain -and $line -match '^\s*["'']?(channel|path)["'']?\s*=\s*(["''])([^"'']+)\2\s*(?:#.*)?$') {
+                $selectingFile = $true
+                break
+            }
+        }
+    }
+}
+
+if ($selectingFile) {
+    Write-Output '@()'
+    exit 0
+}
+
+if (-not [string]::IsNullOrWhiteSpace($env:ANVIL_MSRV_TOOLCHAIN)) {
+    throw 'anvil: ANVIL_MSRV_TOOLCHAIN is set without RUSTUP_TOOLCHAIN and no repository toolchain file selects stable checks; set RUSTUP_TOOLCHAIN to the provisioned stable toolchain or unset ANVIL_MSRV_TOOLCHAIN'
+}
+
+$manifestPath = Join-Path $RepoRoot 'Cargo.toml'
+if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw "anvil: Cargo.toml not found at repository root '$RepoRoot'"
+}
+
+$values = @{}
+$section = ''
+foreach ($line in (Get-Content -LiteralPath $manifestPath)) {
+    if ($line -match '^\s*\[\s*([^\]]+)\s*\]\s*(?:#.*)?$') {
+        $section = $Matches[1].Trim()
+        continue
+    }
+    if ($section -in @('workspace.package', 'package') -and
+        $line -match '^\s*["'']?rust-version["'']?\s*=\s*(["''])([^"'']+)\1\s*(?:#.*)?$') {
+        $values[$section] = $Matches[2]
+    }
+}
+
+$msrv = if ($values.ContainsKey('workspace.package')) {
+    $values['workspace.package']
+} elseif ($values.ContainsKey('package')) {
+    $values['package']
+} else {
+    throw 'anvil: no selecting rust-toolchain(.toml) and no root [workspace.package] or [package] rust-version; declare an MSRV or select a toolchain explicitly'
+}
+Write-ExplicitToolchainArgs $msrv
+exit 0
+'''
+
+[private]
+_anvil_stable_toolchain_args := if os_family() == "windows" { shell("& ([scriptblock]::Create('" + replace(_anvil_stable_toolchain_selection_script, "'", "''") + "')) '" + replace(justfile_directory(), "'", "''") + "';") } else { shell("pwsh -NoProfile -Command '& ([scriptblock]::Create($args[0])) $args[1]' " + quote(_anvil_stable_toolchain_selection_script) + " " + quote(justfile_directory())) }
 
 # General nightly used by udeps, miri, careful, and any future
 # nightly-dependent check. Bumped on a regular cadence (monthly is a

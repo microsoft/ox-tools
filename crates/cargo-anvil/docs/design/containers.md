@@ -150,7 +150,6 @@ The local image tag is a SHA-256 hash of build-relevant repository content:
 
 - root `Cargo.toml`;
 - an optional `rust-toolchain` or `rust-toolchain.toml`;
-- the generated stable-toolchain resolver;
 - generated `justfiles/anvil/**/*.just` recipes;
 - the `Containerfile`, `Containerfile.dockerignore`, entrypoint, and other
   static image inputs.
@@ -174,9 +173,10 @@ available. Runtime execution uses `--pull=never` and never substitutes
 Container execution uses the same deterministic stable-toolchain selection as
 native execution: an existing `RUSTUP_TOOLCHAIN`, a selecting repository
 toolchain file, or the root manifest's MSRV. It fails rather than choosing a
-runner or image default when none is available. Image setup and checks invoke
-the standard resolver and selected-stable execution recipes; the resolved value
-is not exported across unrelated recipe processes.
+runner or image default when none is available. Image setup uses the ordinary
+toolchain setup recipe. Checks then evaluate the lazy optional `+toolchain`
+argument and invoke Cargo or Rust directly in their current recipe process; no
+resolved value is exported across unrelated recipe processes.
 
 The restricted image-construction context does not contain workspace member
 manifests, so per-package MSRV compatibility validation runs in native and

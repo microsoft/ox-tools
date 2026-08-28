@@ -22,7 +22,6 @@
 !justfiles/anvil/*.just
 !justfiles/anvil/checks/*.just
 !justfiles/anvil/groups/*.just
-!.anvil/resolve-stable-toolchain.ps1
 !.anvil/container/*
 .anvil/container/*/*
 .anvil/container/customize.sh

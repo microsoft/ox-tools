@@ -17,7 +17,7 @@ anvil-doc-build: anvil-doc-build-validate-prereqs anvil-impact
     $include = (& "{{ just_executable() }}" _anvil-impact-include required)
     if ($include -eq '--skip') { Write-Host 'anvil-doc-build: no affected packages; skipping'; exit 0 }
     $env:RUSTDOCFLAGS = '-D warnings'
-    & "{{ just_executable() }}" _anvil-with-stable cargo doc @(if ($include) { -split $include } else { '--workspace' }) --all-features --no-deps
+    & cargo {{_anvil_stable_toolchain_args}} doc @(if ($include) { -split $include } else { '--workspace' }) --all-features --no-deps
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # doc-build, examples and doc-test are pure cargo built-ins; the rust

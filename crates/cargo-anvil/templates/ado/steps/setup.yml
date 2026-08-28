@@ -30,7 +30,12 @@ steps:
       Write-Host "anvil: selected stable toolchain '$toolchain'"
     displayName: anvil setup (resolve stable toolchain)
   - pwsh: |
-      $version = (& just _anvil-with-stable rustc --version | Select-Object -Last 1).Split()[1]
+      $toolchain = (& just _anvil-resolve-stable for-environment | Out-String).Trim()
+      if ($LASTEXITCODE -ne 0) {
+        throw 'anvil: failed to select stable toolchain arguments'
+      }
+      $toolchainArgs = if ([string]::IsNullOrWhiteSpace($toolchain)) { @() } else { @("+$toolchain") }
+      $version = (& rustc @toolchainArgs --version | Select-Object -Last 1).Split()[1]
       Write-Host "##vso[task.setvariable variable=anvil_rustc_version]$version"
     displayName: anvil setup (capture rustc version)
   - task: Cache@2

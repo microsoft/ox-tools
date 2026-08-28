@@ -14,7 +14,7 @@ anvil-examples: anvil-examples-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     if ($include -eq '--skip') { Write-Host 'anvil-examples: no affected packages; skipping'; exit 0 }
-    & "{{ just_executable() }}" _anvil-with-stable cargo build @(if ($include) { -split $include } else { '--workspace' }) --examples --all-features --locked
+    & cargo {{_anvil_stable_toolchain_args}} build @(if ($include) { -split $include } else { '--workspace' }) --examples --all-features --locked
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-examples` recipe.

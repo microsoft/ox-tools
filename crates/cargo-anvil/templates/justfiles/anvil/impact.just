@@ -241,9 +241,13 @@ _anvil-impact-snapshot:
         # selections are already valid rustup overrides. For a selecting
         # toolchain file, ask rustup for the concrete active identifier so
         # `path` selections are not mistaken for named toolchains.
-        $baselineToolchain = (& "{{ just_executable() }}" _anvil-resolve-stable for-environment | Out-String).Trim()
-        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        if ([string]::IsNullOrWhiteSpace($baselineToolchain)) {
+        $stableArgs = {{_anvil_stable_toolchain_args}}
+        $baselineToolchain = if ($stableArgs.Count -eq 1) {
+            $stableArgs[0].Substring(1)
+        } else {
+            $null
+        }
+        if ($null -eq $baselineToolchain) {
             if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
                 Write-Error 'anvil-impact: rustup is required to resolve the active repository toolchain for the baseline snapshot'
                 exit 1
@@ -318,7 +322,7 @@ _anvil-impact-snapshot:
         Write-Host 'anvil-impact: current snapshot up to date'
     } else {
         Write-Host 'anvil-impact: snapshotting working tree'
-        $curSnap = & "{{ just_executable() }}" _anvil-with-stable cargo delta @deltaArgs snapshot
+        $curSnap = & cargo {{_anvil_stable_toolchain_args}} delta @deltaArgs snapshot
         if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-impact: cargo delta snapshot (current) failed'; exit 1 }
         Set-Content -LiteralPath $currentJson -Value $curSnap -Encoding UTF8
         Set-Content -LiteralPath $currentKeyFile -Value $currentState -Encoding UTF8 -NoNewline
@@ -436,7 +440,7 @@ anvil-impact: _anvil-impact-snapshot
     # early), so default to an empty object so impact.json always exists --
     # the freshness check above keys on its presence, and a missing file
     # would force a recompute on every invocation.
-    $impactOut = (& "{{ just_executable() }}" _anvil-with-stable cargo delta @deltaArgs impact --baseline $baselineJson --current $currentJson --format json | Out-String)
+    $impactOut = (& cargo {{_anvil_stable_toolchain_args}} delta @deltaArgs impact --baseline $baselineJson --current $currentJson --format json | Out-String)
     if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-impact: cargo delta impact failed'; exit 1 }
     if ([string]::IsNullOrWhiteSpace($impactOut)) { $impactOut = '{}' }
     Set-Content -LiteralPath $impactJson -Value $impactOut.Trim() -Encoding UTF8
@@ -513,7 +517,7 @@ _anvil-impact-format tier impactJson:
     # nested workspaces cargo-delta can instead emit a manifest directory
     # leaf; accept any reported identifier only when every matching namespace
     # resolves to the *same* workspace package.
-    $metadataJson = & "{{ just_executable() }}" _anvil-with-stable cargo metadata --no-deps --format-version 1
+    $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil-impact: cargo metadata failed'
         exit $LASTEXITCODE

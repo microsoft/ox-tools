@@ -51,28 +51,25 @@ repo/
 │   ├── tools.just          tool/component/toolchain install + validate-prereqs recipes,
 │   │                       plus the cargo-spellcheck source-deps check and
 │   │                       anvil-validate-prereqs.
-│   └── versions.just       catalog nightly toolchains and cargo-subcommand minimum versions
-│                           as plain just variables (rust_nightly, cargo_nextest_version, …).
-│                           Read by recipes via `{{ var }}` interpolation. See §3.
+│   └── versions.just       catalog nightly toolchains and cargo-subcommand minimum versions,
+│                           plus the lazy stable-toolchain argument selector, as
+│                           non-exported just variables. See §3.
 │
-└── .anvil/
-    ├── resolve-stable-toolchain.ps1               unconditional toolchain bootstrap
-    └── container/                                 optional non-recipe container assets
-        ├── Containerfile
-        ├── Containerfile.dockerignore
-        ├── README.md
-        ├── entrypoint.sh
-        ├── image-id.ps1
-        ├── image-id.sh
-        ├── run-in-container.ps1
-        └── run-in-container.sh
+└── .anvil/container/                              optional non-recipe container assets
+    ├── Containerfile
+    ├── Containerfile.dockerignore
+    ├── README.md
+    ├── entrypoint.sh
+    ├── image-id.ps1
+    ├── image-id.sh
+    ├── run-in-container.ps1
+    └── run-in-container.sh
 ```
 
 The Justfile region is the only file anvil adds to that the user co-owns, and it's
-a single `import` line. Generated recipes live inside `justfiles/anvil/`; the
-unconditional stable-toolchain bootstrap lives at
-`.anvil/resolve-stable-toolchain.ps1`; optional non-recipe container assets live
-inside `.anvil/container/`. Generated files in these directories are tool-owned
+a single `import` line. Generated recipes live inside `justfiles/anvil/`;
+optional non-recipe container assets live inside `.anvil/container/`.
+Generated files in these directories are tool-owned
 (tracked by full-file checksum in the sidecar manifest). If the user wants to add
 project-specific recipes, they add them to the top-level `Justfile` outside the
 managed region, or to their own additional imported `.just` files. The alias
@@ -404,17 +401,23 @@ without that stable override (and without a selecting repository toolchain
 file) is rejected as incomplete internal configuration. An empty root
 toolchain file is invalid and produces an actionable error.
 
-The generated `.anvil/resolve-stable-toolchain.ps1` implements the parsing and
-installation logic behind the private `_anvil-resolve-stable` recipe.
+`versions.just` holds a shared multiline PowerShell selection script and the
+lazy, non-exported `_anvil_stable_toolchain_args` value that evaluates it.
 `RUSTUP_TOOLCHAIN` is an input to selection, never a globally exported output.
-Each stable check invokes its Cargo or Rust command through
-`_anvil-with-stable`, which applies an environment/MSRV selection only to that
-child process. For a selecting toolchain file the helper removes the override
-for that child so rustup processes the complete file, including its components,
-targets, and profile. Nightly and MSRV checks continue to pass explicit
-`+toolchain` arguments. The compiler intent is therefore visible at each command
-site, nested Just invocations cannot recursively demand a global exported value,
-and unrelated recipes and raw commands retain the caller's normal environment.
+The value is a PowerShell argument-array expression: `@()` for a selecting
+repository toolchain file, or `@('+toolchain')` for a caller override or MSRV
+fallback. Apostrophes in explicit toolchain names are escaped before the
+expression is interpolated.
+
+Each stable recipe executes Cargo or Rust directly in its current PowerShell
+recipe process, for example
+`& cargo {{_anvil_stable_toolchain_args}} clippy ...`. A selecting toolchain
+file therefore reaches native rustup unoverridden, including its components,
+targets, profile, and path semantics. Explicit caller/MSRV selections are
+visible as Cargo's `+toolchain` argument. Nightly and MSRV-specific checks keep
+their own explicit `+toolchain` arguments. No nested Just wrapper sits on the
+main Cargo/Rust command path, and unrelated recipes and raw commands retain the
+caller's normal environment.
 
 An environment override or MSRV fallback normally causes rustup to ignore the
 repository toolchain file. Anvil therefore reads `profile`, `components`, and
@@ -425,12 +428,12 @@ Explicit components and targets are added at setup time. If an option is unavail
 for the selected compiler, Anvil warns and skips it, matching rustup's handling of
 unavailable options read directly from a toolchain file.
 
-The resolver script is a generated implementation artifact, but all supported
-entry points call it through `_anvil-resolve-stable`. Because selection is no
-longer a globally exported Just variable, that standard recipe can be invoked
-from setup, checks, or nested Just helpers without a parse-time evaluation cycle.
-The single script implementation keeps PowerShell parsing and installation
-behavior identical across those recipe callers.
+The private `_anvil-resolve-stable` recipe contains the setup implementation
+for installing public selections, replaying toolchain-file options, validating
+workspace MSRVs, and mapping the MSRV in internal environments. Setup workflows
+and container construction may invoke this ordinary recipe. It does not wrap
+the Cargo/Rust command that performs a check and does not delegate to a
+standalone script.
 
 When selection falls back to the root MSRV, prerequisite validation reads
 `cargo metadata` and requires every workspace package to resolve a

@@ -65,7 +65,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     # we got here via impact-scoping (cloud workflows) or full-workspace
     # fallback (local).
     $libPkgs = @{}
-    $metadataJson = & "{{ just_executable() }}" _anvil-with-stable cargo metadata --no-deps --format-version 1
+    $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil-semver-check: cargo metadata failed'
         exit $LASTEXITCODE
@@ -142,7 +142,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         }
 
         Write-Host "anvil-semver-check: $p (baseline $base)"
-        $outputLines = @(& "{{ just_executable() }}" _anvil-with-stable cargo semver-checks --package $p --baseline-rev $base 2>&1)
+        $outputLines = @(& cargo {{_anvil_stable_toolchain_args}} semver-checks --package $p --baseline-rev $base 2>&1)
         $semverExit = $LASTEXITCODE
         $output = ($outputLines | Out-String)
         if ($semverExit -eq 100) {

@@ -47,7 +47,7 @@ anvil-readme-check: anvil-readme-check-validate-prereqs
     # Unscoped: a change to the workspace-level README template is a repo-level
     # input cargo-delta cannot map to a package, so this check always runs the
     # full library set rather than an impact subset.
-    $metadataJson = & "{{ just_executable() }}" _anvil-with-stable cargo metadata --no-deps --format-version 1
+    $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil-readme-check: cargo metadata failed'
         exit $LASTEXITCODE
@@ -89,7 +89,7 @@ anvil-readme-check: anvil-readme-check-validate-prereqs
             }
             $args = @('doc2readme', '--check')
             if ($relTemplate) { $args += @('--template', $relTemplate) }
-            & "{{ just_executable() }}" _anvil-with-stable cargo @args
+            & cargo {{_anvil_stable_toolchain_args}} @args
             if ($LASTEXITCODE -ne 0) { $hadFailure = $true }
         } finally {
             Pop-Location

@@ -44,7 +44,7 @@ anvil-aprz: anvil-aprz-validate-prereqs
             Write-Warning 'To fix: run `gh auth login` (recommended), or set $env:GITHUB_TOKEN to a GitHub token, then re-run.'
         }
     }
-    & "{{ just_executable() }}" _anvil-with-stable cargo aprz deps --error-if-high-risk --console appraisal
+    & cargo {{_anvil_stable_toolchain_args}} aprz deps --error-if-high-risk --console appraisal
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-aprz` recipe.

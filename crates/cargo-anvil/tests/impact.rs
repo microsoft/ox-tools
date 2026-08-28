@@ -840,7 +840,11 @@ fn impact_falls_back_to_full_workspace_when_base_has_no_workspace() {
     // The introducing commit: add the cargo workspace + emit the anvil tree.
     write(
         &root.join("Cargo.toml"),
-        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n\n[workspace.package]\nrust-version = \"1.97\"\n",
+    );
+    write(
+        &root.join("Justfile"),
+        "set unstable\nset windows-shell := [\"pwsh\", \"-NoProfile\", \"-Command\"]\n",
     );
     write(
         &root.join("crates/alpha/Cargo.toml"),
@@ -883,10 +887,19 @@ fn fake_cargo(dir: &Path, log: &Path) {
     fs::create_dir_all(dir).unwrap();
     #[cfg(windows)]
     {
-        // `.cmd` so pwsh's `& cargo` resolves it via PATHEXT before any real
-        // `cargo.exe` on a later PATH entry.
-        let script = format!("@echo off\r\n>>\"{}\" echo %*\r\nexit /b 0\r\n", log.display());
-        fs::write(dir.join("cargo.cmd"), script).unwrap();
+        // Script shims receive the inline argument-array expression as one
+        // nested array, whereas native Cargo flattens it. Normalize the shim
+        // input before recording the native-process argv contract.
+        let script = format!(
+            "$effectiveArgs = @()\n\
+             foreach ($argument in $args) {{\n\
+             \x20   if ($argument -is [Array]) {{ $effectiveArgs += @($argument) }} else {{ $effectiveArgs += $argument }}\n\
+             }}\n\
+             Add-Content -LiteralPath '{}' -Value ($effectiveArgs -join ' ')\n\
+             exit 0\n",
+            log.display()
+        );
+        fs::write(dir.join("cargo.ps1"), script).unwrap();
     }
     #[cfg(unix)]
     {
@@ -1046,11 +1059,17 @@ fn fake_cargo_with_metadata(dir: &Path, log: &Path, metadata_json: &Path) {
     #[cfg(windows)]
     {
         let script = format!(
-            "@echo off\r\nif \"%1\"==\"metadata\" (\r\n  type \"{meta}\"\r\n  exit /b 0\r\n)\r\n>>\"{log}\" echo %*\r\nexit /b 0\r\n",
+            "$effectiveArgs = @()\n\
+             foreach ($argument in $args) {{\n\
+             \x20   if ($argument -is [Array]) {{ $effectiveArgs += @($argument) }} else {{ $effectiveArgs += $argument }}\n\
+             }}\n\
+             if ($effectiveArgs -contains 'metadata') {{ Get-Content -Raw -LiteralPath '{meta}'; exit 0 }}\n\
+             Add-Content -LiteralPath '{log}' -Value ($effectiveArgs -join ' ')\n\
+             exit 0\n",
             meta = metadata_json.display(),
             log = log.display()
         );
-        fs::write(dir.join("cargo.cmd"), script).unwrap();
+        fs::write(dir.join("cargo.ps1"), script).unwrap();
     }
     #[cfg(unix)]
     {
@@ -1353,7 +1372,11 @@ fn impact_format_maps_proc_macro_target_name_to_its_package() {
     let root = tmp.path();
     write(
         &root.join("Cargo.toml"),
-        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n",
+        "[workspace]\nresolver = \"2\"\nmembers = [\"crates/*\"]\n\n[workspace.package]\nrust-version = \"1.97\"\n",
+    );
+    write(
+        &root.join("Justfile"),
+        "set unstable\nset windows-shell := [\"pwsh\", \"-NoProfile\", \"-Command\"]\n",
     );
     write(
         &root.join("crates/my-macro/Cargo.toml"),
@@ -1391,14 +1414,16 @@ fn snapshot_toolchain_probe(caller_toolchain: Option<&str>, toolchain_file: bool
         git(root, &["add", "rust-toolchain.toml"]);
         git(root, &["commit", "-q", "-m", "select local toolchain"]);
     }
-    // cargo shim: log the active RUSTUP_TOOLCHAIN on each `delta snapshot`
-    // (emitting `{}` as the snapshot), satisfy the cargo-delta prereq probe
-    // (`cargo install --list`), and no-op everything else.
+    // cargo shim: log the effective explicit argument or RUSTUP_TOOLCHAIN on
+    // each `delta snapshot` (emitting `{}` as the snapshot), satisfy the
+    // cargo-delta prereq probe (`cargo install --list`), and no-op everything
+    // else.
     let shim = ShimBin::new(&[
         (
             "cargo.ps1",
             "if (($args -contains 'delta') -and ($args -contains 'snapshot')) {\n\
-            \x20   $tc = if (Test-Path Env:\\RUSTUP_TOOLCHAIN) { $env:RUSTUP_TOOLCHAIN } else { '<unset>' }\n\
+            \x20   $explicit = @($args | Where-Object { $_ -like '+*' } | Select-Object -First 1)\n\
+            \x20   $tc = if ($explicit.Count -eq 1) { $explicit[0].Substring(1) } elseif (Test-Path Env:\\RUSTUP_TOOLCHAIN) { $env:RUSTUP_TOOLCHAIN } else { '<unset>' }\n\
             \x20   Add-Content -LiteralPath $env:ANVIL_TEST_LOG -Value $tc\n\
             \x20   Write-Output '{}'\n\
             \x20   exit 0\n\

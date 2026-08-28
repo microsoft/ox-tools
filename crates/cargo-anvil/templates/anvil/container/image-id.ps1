@@ -13,10 +13,7 @@ if ($LASTEXITCODE -ne 0 -or -not $repoRoot) {
     throw 'anvil-container must run from a Git repository.'
 }
 
-$inputs = @(
-    'Cargo.toml',
-    '.anvil/resolve-stable-toolchain.ps1'
-)
+$inputs = @('Cargo.toml')
 foreach ($toolchainFile in @('rust-toolchain', 'rust-toolchain.toml')) {
     if (Test-Path -LiteralPath (Join-Path $repoRoot $toolchainFile) -PathType Leaf) {
         $inputs += $toolchainFile

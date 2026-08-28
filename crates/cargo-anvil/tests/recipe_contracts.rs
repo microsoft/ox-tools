@@ -25,8 +25,16 @@ const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-ch
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
 const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
-const STABLE_TOOLCHAIN_RESOLVER: &str = include_str!("../templates/anvil/resolve-stable-toolchain.ps1");
 const FAKE_CARGO_PS1: &str = r#"
+$effectiveArgs = @()
+foreach ($argument in $args) {
+    if ($argument -is [Array]) {
+        $effectiveArgs += @($argument)
+    } else {
+        $effectiveArgs += $argument
+    }
+}
+$args = $effectiveArgs
 $joined = $args -join ' '
 if ($env:FAKE_CARGO_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value $joined
@@ -141,23 +149,16 @@ fn tools_available() -> bool {
 
 fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
     let tmp = TempDir::new().unwrap();
-    let mut justfile = String::from("set unstable\nset allow-duplicate-recipes\n\n");
+    let mut justfile =
+        String::from("set unstable\nset allow-duplicate-recipes\nset windows-shell := [\"pwsh\", \"-NoProfile\", \"-Command\"]\n\n");
     // Focused fixtures need this shared variable, but the real version catalog
     // already defines it and Just rejects duplicate definitions.
     if !imports.iter().any(|(name, _)| *name == "versions.just") {
-        justfile.push_str("rust_nightly := \"nightly-test\"\n\n");
+        justfile.push_str("rust_nightly := \"nightly-test\"\n_anvil_stable_toolchain_args := \"@()\"\n\n");
     }
     for (name, contents) in imports {
         write(&tmp.path().join(name), contents);
         writeln!(justfile, "import '{name}'").unwrap();
-    }
-    if !imports.iter().any(|(name, _)| *name == "tools.just") {
-        justfile.push_str(
-            "\n[script(\"pwsh\", \"-NoProfile\")]\n\
-             _anvil-with-stable command *args:\n\
-             \x20   & '{{command}}' {{args}}\n\
-             \x20   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
-        );
     }
     justfile.push('\n');
     for recipe in dependency_recipes {
@@ -169,7 +170,6 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
         &tmp.path().join("Cargo.toml"),
         "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nrust-version = \"1.97\"\n",
     );
-    write(&tmp.path().join(".anvil/resolve-stable-toolchain.ps1"), STABLE_TOOLCHAIN_RESOLVER);
 
     let bin = tmp.path().join("fake-bin");
     fs::create_dir_all(&bin).unwrap();
@@ -213,37 +213,44 @@ fn assert_failed(output: &Output, context: &str) {
 }
 
 #[test]
-fn stable_toolchain_helper_preserves_invocation_directory_and_arguments() {
+fn stable_command_runs_directly_with_explicit_toolchain_arguments() {
     if !tools_available() {
         return;
     }
     let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
-    let crate_dir = tmp.path().join("crates/fixture");
-    fs::create_dir_all(&crate_dir).unwrap();
+    let justfile_path = tmp.path().join("Justfile");
+    let mut justfile = fs::read_to_string(&justfile_path).unwrap();
+    justfile.push_str(
+        "\n[script(\"pwsh\", \"-NoProfile\")]\n\
+         _anvil-test-stable-command:\n\
+         \x20   & cargo {{_anvil_stable_toolchain_args}} doc2readme --check\n\
+         \x20   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
+    );
+    write(&justfile_path, &justfile);
     let args_log = tmp.path().join("cargo-args.log");
     let cwd_log = tmp.path().join("cargo-cwd.log");
 
-    let output = run_just_from(
+    let output = run_just(
         tmp.path(),
-        &crate_dir,
-        &["_anvil-with-stable", "cargo", "doc2readme", "--check"],
+        &["_anvil-test-stable-command"],
         &[
             ("FAKE_CARGO_LOG", args_log.as_os_str()),
             ("FAKE_CARGO_CWD_LOG", cwd_log.as_os_str()),
+            ("RUSTUP_TOOLCHAIN", OsStr::new("test-stable")),
         ],
     );
 
     assert!(
         output.status.success(),
-        "stable helper should preserve command context:\nstdout:\n{}\nstderr:\n{}",
+        "direct stable command should preserve arguments:\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(fs::read_to_string(args_log).unwrap().trim(), "doc2readme --check");
+    assert_eq!(fs::read_to_string(args_log).unwrap().trim(), "+test-stable doc2readme --check");
     assert_eq!(
         fs::canonicalize(fs::read_to_string(cwd_log).unwrap().trim()).unwrap(),
-        fs::canonicalize(crate_dir).unwrap(),
-        "scoped command must run from the nested Just invocation directory"
+        fs::canonicalize(tmp.path()).unwrap(),
+        "the command must run directly in its recipe process"
     );
 }
 

@@ -27,12 +27,6 @@ const VERSIONS_JUST: &str = include_str!("../../../templates/justfiles/anvil/ver
 /// Repo-root-relative path of the pinned-versions recipe file.
 const VERSIONS_JUST_PATH: &str = "justfiles/anvil/versions.just";
 
-/// Stable-toolchain resolver shared by local recipes and cloud setup.
-const STABLE_TOOLCHAIN_RESOLVER: &str = include_str!("../../../templates/anvil/resolve-stable-toolchain.ps1");
-
-/// Repo-root-relative path of the stable-toolchain resolver.
-const STABLE_TOOLCHAIN_RESOLVER_PATH: &str = ".anvil/resolve-stable-toolchain.ps1";
-
 /// Contents of `justfiles/anvil/tools.just` baked into the binary.
 const TOOLS_JUST: &str = include_str!("../../../templates/justfiles/anvil/tools.just");
 
@@ -208,12 +202,6 @@ pub fn entry() -> Artifact {
 #[must_use]
 pub fn versions() -> Artifact {
     Artifact::owned_file(VERSIONS_JUST_PATH, VERSIONS_JUST)
-}
-
-/// `.anvil/resolve-stable-toolchain.ps1` — deterministic stable selection.
-#[must_use]
-pub fn stable_toolchain_resolver() -> Artifact {
-    Artifact::owned_file(STABLE_TOOLCHAIN_RESOLVER_PATH, STABLE_TOOLCHAIN_RESOLVER)
 }
 
 /// `justfiles/anvil/tools.just` — tool install / prereq recipes.
@@ -566,7 +554,7 @@ mod tests {
             "_anvil-base-ref",
             "git rev-parse --verify \"$base^{commit}\"",
             "git cat-file -e $baselineManifest",
-            "cargo semver-checks --package $p --baseline-rev $base",
+            "cargo {{_anvil_stable_toolchain_args}} semver-checks --package $p --baseline-rev $base",
         ] {
             assert!(body.contains(needle), "semver check template missing '{needle}'");
         }
@@ -750,21 +738,20 @@ mod tests {
     }
 
     #[test]
-    fn stable_toolchain_resolution_is_scoped_to_each_command() {
+    fn stable_toolchain_selection_is_lazy_and_scoped_to_each_command() {
         assert!(!VERSIONS_JUST.contains("export RUSTUP_TOOLCHAIN"));
+        assert!(VERSIONS_JUST.contains("_anvil_stable_toolchain_selection_script := '''"));
+        assert!(VERSIONS_JUST.contains("set lazy"));
+        assert!(VERSIONS_JUST.contains("_anvil_stable_toolchain_args :="));
+        assert!(VERSIONS_JUST.contains("shell(\"& ([scriptblock]::Create('\""));
+        assert!(VERSIONS_JUST.contains("quote(_anvil_stable_toolchain_selection_script)"));
+        assert!(VERSIONS_JUST.contains("Write-Output '@()'"));
+        assert!(VERSIONS_JUST.contains("\"@('+\""));
         assert!(TOOLS_JUST.contains("_anvil-resolve-stable action=\"resolve\":"));
-        assert!(TOOLS_JUST.contains("_anvil-with-stable command *args:"));
-        assert!(TOOLS_JUST.contains("Remove-Item Env:\\RUSTUP_TOOLCHAIN"));
-        assert!(TOOLS_JUST.contains("$env:RUSTUP_TOOLCHAIN = $toolchain"));
-        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("RUSTUP_TOOLCHAIN"));
-        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("rust-version"));
-        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("ValidateWorkspaceMsrv"));
-        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("InstallIfMissing"));
-        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("MsrvToolchain"));
-        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("InstallMsrvIfNeeded"));
-        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("EmitToolchainFileOptions"));
-        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("rustup component add --toolchain"));
-        assert!(STABLE_TOOLCHAIN_RESOLVER.contains("rustup target add --toolchain"));
+        assert!(!TOOLS_JUST.contains("_anvil-with-stable"));
+        assert!(TOOLS_JUST.contains("& cargo {{_anvil_stable_toolchain_args}}"));
+        assert!(TOOLS_JUST.contains("rustup component add --toolchain"));
+        assert!(TOOLS_JUST.contains("rustup target add --toolchain"));
     }
 
     #[test]
@@ -782,8 +769,10 @@ mod tests {
                         .map(|(_, arguments)| arguments.trim_start())
                         .expect("invokes_cargo patterns always include 'cargo '");
                     assert!(
-                        toolchain.starts_with("'+") || toolchain.starts_with("\"+"),
-                        "{path} invokes Cargo without an explicit toolchain or _anvil-with-stable: {line}"
+                        toolchain.starts_with("'+")
+                            || toolchain.starts_with("\"+")
+                            || toolchain.starts_with("{{_anvil_stable_toolchain_args}}"),
+                        "{path} invokes Cargo without an explicit toolchain selection: {line}"
                     );
                 }
             }
@@ -798,24 +787,69 @@ mod tests {
 
         use tempfile::TempDir;
 
-        use super::STABLE_TOOLCHAIN_RESOLVER;
+        use super::{TOOLS_JUST, VERSIONS_JUST};
 
         fn fixture(cargo_toml: &str) -> TempDir {
             let temp = TempDir::new().expect("temporary repository must be creatable");
-            fs::create_dir(temp.path().join(".anvil")).expect("resolver directory must be creatable");
-            fs::write(temp.path().join(".anvil/resolve-stable-toolchain.ps1"), STABLE_TOOLCHAIN_RESOLVER)
-                .expect("resolver fixture must be writable");
             fs::write(temp.path().join("Cargo.toml"), cargo_toml).expect("manifest fixture must be writable");
+            fs::write(temp.path().join("versions.just"), VERSIONS_JUST).expect("versions fixture must be writable");
+            fs::write(temp.path().join("tools.just"), TOOLS_JUST).expect("tools fixture must be writable");
+            fs::write(
+                temp.path().join("Justfile"),
+                concat!(
+                    "set unstable\n",
+                    "set windows-shell := [\"pwsh\", \"-NoProfile\", \"-Command\"]\n",
+                    "import 'versions.just'\n",
+                    "import 'tools.just'\n\n",
+                    "[script(\"pwsh\", \"-NoProfile\")]\n",
+                    "_anvil-test-stable-args:\n",
+                    "    Write-Output \"{{_anvil_stable_toolchain_args}}\"\n",
+                ),
+            )
+            .expect("Justfile fixture must be writable");
             temp
         }
 
-        fn run(root: &Path, args: &[&str], rustup_toolchain: Option<&str>) -> Output {
-            let mut command = Command::new("pwsh");
+        fn command(root: &Path) -> Command {
+            let mut command = Command::new("just");
             command
-                .args(["-NoProfile", "-File", ".anvil/resolve-stable-toolchain.ps1"])
-                .args(args)
+                .args(["--justfile"])
+                .arg(root.join("Justfile"))
                 .current_dir(root)
-                .env_remove("ANVIL_MSRV_TOOLCHAIN");
+                .env_remove("ANVIL_MSRV_TOOLCHAIN")
+                .env_remove("RUSTUP_TOOLCHAIN");
+            command
+        }
+
+        fn run(root: &Path, args: &[&str], rustup_toolchain: Option<&str>) -> Output {
+            let mut command = command(root);
+            match args {
+                [] => {
+                    command.arg("_anvil-test-stable-args");
+                }
+                ["-ForEnvironment"] => {
+                    command.args(["_anvil-resolve-stable", "for-environment"]);
+                }
+                ["-InstallIfMissing"] => {
+                    command.args(["_anvil-resolve-stable", "install"]);
+                }
+                ["-ApplyToolchainFileOptions"] => {
+                    command.args(["_anvil-resolve-stable", "apply-file-options"]);
+                }
+                ["-ValidateWorkspaceMsrv"] => {
+                    command.args(["_anvil-resolve-stable", "validate-workspace-msrv"]);
+                }
+                ["-MsrvToolchain"] => {
+                    command.args(["_anvil-resolve-stable", "msrv"]);
+                }
+                ["-InstallMsrvIfNeeded"] => {
+                    command.args(["_anvil-resolve-stable", "install-msrv"]);
+                }
+                ["-EmitToolchainFileOptions"] => {
+                    command.args(["_anvil-resolve-stable", "emit-file-options"]);
+                }
+                other => panic!("unsupported resolver arguments in test: {other:?}"),
+            }
             match rustup_toolchain {
                 Some(value) => {
                     command.env("RUSTUP_TOOLCHAIN", value);
@@ -824,7 +858,9 @@ mod tests {
                     command.env_remove("RUSTUP_TOOLCHAIN");
                 }
             }
-            command.output().expect("pwsh must be available to test the generated resolver")
+            command
+                .output()
+                .expect("just must be available to test generated toolchain selection")
         }
 
         fn resolved(root: &Path, rustup_toolchain: Option<&str>) -> String {
@@ -855,36 +891,19 @@ mod tests {
         fn honors_environment_files_and_msrv_in_precedence_order() {
             let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
             let root = temp.path();
-            assert_eq!(resolved(root, None), "1.93");
-            assert_eq!(
-                String::from_utf8(run(root, &["-ForEnvironment"], None).stdout)
-                    .expect("resolver output must be UTF-8")
-                    .trim(),
-                "1.93"
-            );
+            assert_eq!(resolved(root, None), "@('+1.93')");
 
             fs::write(root.join("rust-toolchain.toml"), "[toolchain]\ncomponents = [\"clippy\"]\n")
                 .expect("toolchain fixture must be writable");
-            assert_eq!(resolved(root, None), "1.93");
+            assert_eq!(resolved(root, None), "@('+1.93')");
 
             fs::write(root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n").expect("toolchain fixture must be writable");
-            assert_eq!(resolved(root, None), "1.94");
-            assert!(
-                String::from_utf8(run(root, &["-ForEnvironment"], None).stdout)
-                    .expect("resolver output must be UTF-8")
-                    .trim()
-                    .is_empty()
-            );
+            assert_eq!(resolved(root, None), "@()");
 
             fs::write(root.join("rust-toolchain"), "1.92\n").expect("legacy toolchain fixture must be writable");
-            assert_eq!(resolved(root, None), "1.92");
-            assert_eq!(resolved(root, Some("custom-toolchain")), "custom-toolchain");
-            assert_eq!(
-                String::from_utf8(run(root, &["-ForEnvironment"], Some("custom-toolchain")).stdout)
-                    .expect("resolver output must be UTF-8")
-                    .trim(),
-                "custom-toolchain"
-            );
+            assert_eq!(resolved(root, None), "@()");
+            assert_eq!(resolved(root, Some("custom-toolchain")), "@('+custom-toolchain')");
+            assert_eq!(resolved(root, Some("team's-toolchain")), "@('+team''s-toolchain')");
         }
 
         #[test]
@@ -966,14 +985,12 @@ mod tests {
             let mut paths = vec![shim.path().to_path_buf()];
             paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
 
-            let output = Command::new("pwsh")
-                .args(["-NoProfile", "-File", ".anvil/resolve-stable-toolchain.ps1", "-InstallIfMissing"])
-                .current_dir(temp.path())
-                .env_remove("RUSTUP_TOOLCHAIN")
+            let output = command(temp.path())
+                .args(["_anvil-resolve-stable", "install"])
                 .env("ANVIL_TEST_LOG", &log)
                 .env("PATH", env::join_paths(paths).expect("shim PATH must be valid"))
                 .output()
-                .expect("pwsh must be available to test the generated resolver");
+                .expect("just must be available to test the generated resolver recipe");
             assert!(
                 output.status.success(),
                 "toolchain option application failed: {}",
@@ -1044,13 +1061,11 @@ mod tests {
         fn rejects_an_unpaired_internal_msrv_mapping_for_stable_selection() {
             let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
             let run_with_mapping = |root: &Path| {
-                Command::new("pwsh")
-                    .args(["-NoProfile", "-File", ".anvil/resolve-stable-toolchain.ps1"])
-                    .current_dir(root)
-                    .env_remove("RUSTUP_TOOLCHAIN")
+                command(root)
+                    .arg("_anvil-test-stable-args")
                     .env("ANVIL_MSRV_TOOLCHAIN", "ms-prod-1.93")
                     .output()
-                    .expect("pwsh must be available to test the generated resolver")
+                    .expect("just must be available to test the generated toolchain selection")
             };
 
             let output = run_with_mapping(temp.path());
@@ -1098,12 +1113,9 @@ mod tests {
                 .expect("cargo shim must be writable");
                 let mut paths = vec![shim.path().to_path_buf()];
                 paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
-                let mut command = Command::new("pwsh");
+                let mut command = command(root);
                 command
-                    .args(["-NoProfile", "-File", ".anvil/resolve-stable-toolchain.ps1", "-InstallMsrvIfNeeded"])
-                    .current_dir(root)
-                    .env_remove("RUSTUP_TOOLCHAIN")
-                    .env_remove("ANVIL_MSRV_TOOLCHAIN")
+                    .args(["_anvil-resolve-stable", "install-msrv"])
                     .env("ANVIL_RUSTUP_LOG", &rustup_log)
                     .env("ANVIL_CARGO_LOG", &cargo_log)
                     .env("PATH", env::join_paths(paths).expect("shim PATH must be valid"));
@@ -1205,13 +1217,11 @@ mod tests {
 
             fs::write(root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n").expect("toolchain fixture must be writable");
             assert_eq!(resolve_msrv(root), "1.93");
-            let output = Command::new("pwsh")
-                .args(["-NoProfile", "-File", ".anvil/resolve-stable-toolchain.ps1", "-MsrvToolchain"])
-                .current_dir(root)
-                .env_remove("RUSTUP_TOOLCHAIN")
+            let output = command(root)
+                .args(["_anvil-resolve-stable", "msrv"])
                 .env("ANVIL_MSRV_TOOLCHAIN", "ms-prod-1.93")
                 .output()
-                .expect("pwsh must be available to test the generated resolver");
+                .expect("just must be available to test the generated resolver recipe");
             assert!(output.status.success());
             assert_eq!(
                 String::from_utf8(output.stdout).expect("resolver output must be UTF-8").trim(),

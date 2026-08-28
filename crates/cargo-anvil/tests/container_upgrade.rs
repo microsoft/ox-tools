@@ -13,12 +13,13 @@
     reason = "integration tests panic on unmet preconditions for readable failure output"
 )]
 
-//! Consumer-upgrade coverage for the container asset relocation.
+//! Consumer-upgrade coverage for generated artifact retirement and relocation.
 //!
 //! The snapshot tests describe a fresh tree. This exercises the path an
 //! existing adopter actually takes: a repository generated before the move,
 //! with its `.anvil.lock` and its assets under `justfiles/anvil/container/`,
-//! updated by a binary that emits `.anvil/container/`.
+//! updated by a binary that emits `.anvil/container/` and no longer emits the
+//! standalone stable-toolchain resolver.
 
 use std::path::Path;
 
@@ -29,6 +30,7 @@ use tempfile::TempDir;
 /// A hand-authored customization file: never catalog-tracked, so `cargo anvil`
 /// can neither move it nor report it. The drivers warn about one left here.
 const LEGACY_CUSTOMIZE: &str = "justfiles/anvil/container/customize.sh";
+const LEGACY_RESOLVER: &str = ".anvil/resolve-stable-toolchain.ps1";
 
 /// Where a generated container asset lived before the move. Every asset,
 /// including the entry recipe, sat directly under `justfiles/anvil/container/`.
@@ -94,18 +96,16 @@ fn rewind_to_pre_move_layout(root: &Path) {
             .unwrap_or_else(|| panic!("{current} must be tracked by the fresh lock"));
         manifest.files.insert(previous, checksum);
     }
-    let resolver = ".anvil/resolve-stable-toolchain.ps1";
-    std::fs::remove_file(root.join(resolver)).unwrap();
-    manifest
-        .files
-        .remove(resolver)
-        .unwrap_or_else(|| panic!("{resolver} must be tracked by the fresh lock"));
+    write(&root.join(LEGACY_RESOLVER), "");
+    manifest.files.insert(
+        LEGACY_RESOLVER.to_owned(),
+        "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_owned(),
+    );
     // Provenance of the older build. It is recorded, never a gate.
     manifest.catalog_checksum = Some("sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned());
     manifest.tool_version = Some("0.2.0".to_owned());
     manifest.save(root).unwrap();
     std::fs::remove_dir(root.join(".anvil/container")).unwrap();
-    std::fs::remove_dir(root.join(".anvil")).unwrap();
 }
 
 fn decision_for(outcome: &RunOutcome, path: &str) -> Decision {
@@ -142,6 +142,19 @@ fn upgrading_from_the_pre_move_layout_relocates_generated_container_assets() {
     assert!(outcome.applied);
 
     let manifest = Manifest::load(root).unwrap();
+    assert!(
+        !root.join(LEGACY_RESOLVER).exists(),
+        "the untouched previously-owned resolver must be removed"
+    );
+    assert!(
+        !manifest.files.contains_key(LEGACY_RESOLVER),
+        "the retired resolver must be dropped from the lock"
+    );
+    assert_eq!(
+        decision_for(&outcome, LEGACY_RESOLVER),
+        Decision::Remove,
+        "an untouched retired resolver must be removed during upgrade"
+    );
     for (current, previous) in &assets {
         // Every asset is re-emitted at its new location and tracked there.
         assert!(root.join(current).is_file(), "{current} must be written at the new location");

@@ -19,7 +19,7 @@ if [[ ! "$base_image" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
     echo 'anvil-container: ANVIL_CONTAINER_BASE_IMAGE must be pinned by sha256 digest (image@sha256:<64 hex characters>).' >&2
     exit 1
 fi
-inputs=(Cargo.toml .anvil/resolve-stable-toolchain.ps1)
+inputs=(Cargo.toml)
 for toolchain_file in rust-toolchain rust-toolchain.toml; do
     if [[ -f "$repo_root/$toolchain_file" ]]; then
         inputs+=("$toolchain_file")
