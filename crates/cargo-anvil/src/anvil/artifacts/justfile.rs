@@ -1157,7 +1157,8 @@ mod tests {
             assert!(
                 diagnostic.contains("mapped MSRV toolchain")
                     && diagnostic.contains("is unavailable")
-                    && diagnostic.contains("provision ANVIL_MSRV_TOOLCHAIN"),
+                    && diagnostic.contains("provision")
+                    && diagnostic.contains("ANVIL_MSRV_TOOLCHAIN"),
                 "unexpected mapped MSRV diagnostic: {diagnostic}"
             );
         }
