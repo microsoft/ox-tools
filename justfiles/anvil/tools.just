@@ -205,6 +205,7 @@ _anvil-with-stable command *args:
     } else {
         $env:RUSTUP_TOOLCHAIN = $toolchain
     }
+    Set-Location '{{invocation_directory()}}'
     & '{{command}}' {{args}}
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

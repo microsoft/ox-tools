@@ -31,6 +31,9 @@ $joined = $args -join ' '
 if ($env:FAKE_CARGO_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value $joined
 }
+if ($env:FAKE_CARGO_CWD_LOG) {
+    Add-Content -LiteralPath $env:FAKE_CARGO_CWD_LOG -Value (Get-Location).Path
+}
 if ($args -contains 'metadata') {
     if ($env:FAKE_METADATA_EXIT) { exit [int]$env:FAKE_METADATA_EXIT }
     if ($env:FAKE_METADATA_INVALID) {
@@ -182,8 +185,16 @@ fn path_with_fake_bin(root: &Path) -> OsString {
 }
 
 fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> Output {
+    run_just_from(root, root, arguments, environment)
+}
+
+fn run_just_from(root: &Path, current_dir: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> Output {
     let mut command = Command::new("just");
-    command.args(["--justfile", "Justfile"]).args(arguments).current_dir(root);
+    command
+        .arg("--justfile")
+        .arg(root.join("Justfile"))
+        .args(arguments)
+        .current_dir(current_dir);
     command.env("PATH", path_with_fake_bin(root));
     command.env("FAKE_WORKSPACE_ROOT", root);
     for &(key, value) in environment {
@@ -198,6 +209,41 @@ fn assert_failed(output: &Output, context: &str) {
         "{context} unexpectedly succeeded\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn stable_toolchain_helper_preserves_invocation_directory_and_arguments() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
+    let crate_dir = tmp.path().join("crates/fixture");
+    fs::create_dir_all(&crate_dir).unwrap();
+    let args_log = tmp.path().join("cargo-args.log");
+    let cwd_log = tmp.path().join("cargo-cwd.log");
+
+    let output = run_just_from(
+        tmp.path(),
+        &crate_dir,
+        &["_anvil-with-stable", "cargo", "doc2readme", "--check"],
+        &[
+            ("FAKE_CARGO_LOG", args_log.as_os_str()),
+            ("FAKE_CARGO_CWD_LOG", cwd_log.as_os_str()),
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "stable helper should preserve command context:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(args_log).unwrap().trim(), "doc2readme --check");
+    assert_eq!(
+        Path::new(fs::read_to_string(cwd_log).unwrap().trim()),
+        crate_dir,
+        "scoped command must run from the nested Just invocation directory"
     );
 }
 
