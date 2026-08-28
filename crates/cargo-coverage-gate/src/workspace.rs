@@ -819,7 +819,13 @@ min-lines-percent = 0
 
     #[test]
     fn rejects_build_context_target_selectors() {
-        for selector in ["cfg(feature = \"simd\")", "cfg(test)", "cfg(debug_assertions)", "cfg(proc_macro)"] {
+        for selector in [
+            "cfg(feature = \"simd\")",
+            "cfg(test)",
+            "cfg(debug_assertions)",
+            "cfg(proc_macro)",
+            "cfg(all(unix, any(target_os = \"linux\", feature = \"simd\")))",
+        ] {
             let gate = serde_json::json!({
                 "target": {
                     (selector): { "min-lines-percent": 0 }
