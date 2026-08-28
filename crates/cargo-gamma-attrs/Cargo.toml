@@ -1,0 +1,38 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-gamma-attrs"
+description = "Inert attribute macros for suppressing cargo-gamma mutations"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["cargo", "mutation-testing", "testing"]
+categories = ["development-tools::testing"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-attrs"
+
+[package.metadata.docs.rs]
+all-features = true
+
+# This crate only re-exports inert proc macros and has no attributable runtime lines.
+[package.metadata.coverage-gate]
+min-lines-percent = 0.0
+
+# Users write `#[gamma::skip]`, which is an attribute *path*, not a package name, so the
+# lib name is deliberately short: it appears in every instrumented crate.
+[lib]
+name = "gamma"
+proc-macro = true
+
+[dependencies]
+cargo-gamma-attrs-impl = { workspace = true }
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints
