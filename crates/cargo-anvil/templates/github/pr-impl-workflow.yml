@@ -214,7 +214,7 @@ jobs:
         # empty the recipe no-ops and there is no file to upload, so we gate
         # on the files existing (impact scoping lives in the downloaded cache
         # now, not a job output). Codecov coalesces the two per-config files.
-        if: matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info', 'target/coverage/lcov-no-default.info') != ''
+        if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info', 'target/coverage/lcov-no-default.info') != ''
         uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
         with:
           files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info

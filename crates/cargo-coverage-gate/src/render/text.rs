@@ -5,7 +5,10 @@
 
 use std::io;
 
-use crate::render::{files, format_delta, format_lines, format_source, format_status_text, format_threshold, result_summary};
+use crate::render::{
+    MAX_DIAGNOSTIC_LINES, diagnostic_line_count, failure_detail, files, format_delta, format_line_ranges, format_lines, format_source,
+    format_status_text, format_threshold, result_summary,
+};
 use crate::verdict::Report;
 
 const HEADERS: [&str; 6] = ["Package", "Lines", "Threshold", "Δ vs threshold", "Status", "Source"];
@@ -48,12 +51,49 @@ pub(crate) fn render(out: &mut dyn io::Write, report: &Report) -> io::Result<()>
     write_separator(out, &widths)?;
 
     writeln!(out, "Result: {}", result_summary(&report.outcomes))?;
+    write_failure_details(out, report)?;
     if report.unattributed > 0 {
         writeln!(
             out,
             "Note: {} had paths outside any workspace member and were not attributed.",
             files(report.unattributed),
         )?;
+    }
+    Ok(())
+}
+
+fn write_failure_details(out: &mut dyn io::Write, report: &Report) -> io::Result<()> {
+    let failures: Vec<_> = report
+        .outcomes
+        .iter()
+        .filter_map(|outcome| failure_detail(outcome).map(|detail| (outcome, detail)))
+        .collect();
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    writeln!(out)?;
+    writeln!(out, "Failure details:")?;
+    for (outcome, detail) in failures {
+        writeln!(out, "  {}: {}", outcome.name, detail)?;
+        let mut remaining = MAX_DIAGNOSTIC_LINES;
+        for diagnostic in &outcome.diagnostics {
+            if remaining == 0 {
+                break;
+            }
+            let displayed = diagnostic.lines.len().min(remaining);
+            writeln!(
+                out,
+                "    {}: {}",
+                diagnostic.path.display(),
+                format_line_ranges(&diagnostic.lines[..displayed])
+            )?;
+            remaining -= displayed;
+        }
+        let omitted = diagnostic_line_count(outcome).saturating_sub(MAX_DIAGNOSTIC_LINES);
+        if omitted > 0 {
+            writeln!(out, "    ... {omitted} more line locations omitted")?;
+        }
     }
     Ok(())
 }
@@ -92,7 +132,7 @@ mod tests {
     use super::*;
     use crate::aggregate::LineTotals;
     use crate::threshold::{Threshold, ThresholdSource};
-    use crate::verdict::{PackageOutcome, Status};
+    use crate::verdict::{LineDiagnostic, PackageOutcome, Status};
 
     fn outcome(name: &str, count: u32, covered: u32, threshold: f64, source: ThresholdSource, status: Status) -> PackageOutcome {
         PackageOutcome {
@@ -103,6 +143,7 @@ mod tests {
             },
             totals: LineTotals { count, covered },
             status,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -144,11 +185,13 @@ mod tests {
 
     #[test]
     fn renders_fail_with_negative_delta() {
+        let mut beta = outcome("beta", 100, 60, 80.0, ThresholdSource::Workspace, Status::Fail);
+        beta.diagnostics.push(LineDiagnostic {
+            path: "src/lib.rs".into(),
+            lines: (61..=100).collect(),
+        });
         let report = Report {
-            outcomes: vec![
-                outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok),
-                outcome("beta", 100, 60, 80.0, ThresholdSource::Workspace, Status::Fail),
-            ],
+            outcomes: vec![outcome("alpha", 100, 95, 80.0, ThresholdSource::Package, Status::Ok), beta],
             unattributed: 0,
         };
         let s = render_to_string(&report);
@@ -157,6 +200,25 @@ mod tests {
         assert!(s.contains("FAIL"));
         assert!(s.contains("workspace"));
         assert!(s.contains("1 package below threshold"));
+        assert!(s.contains("beta: 60/100 lines covered; 40 uncovered."));
+        assert!(s.contains("src/lib.rs: 61-100"));
+    }
+
+    #[test]
+    fn failure_details_are_bounded() {
+        let mut failed = outcome("alpha", 200, 0, 80.0, ThresholdSource::Package, Status::Fail);
+        failed.diagnostics.push(LineDiagnostic {
+            path: "src/lib.rs".into(),
+            lines: (1..=200).collect(),
+        });
+        let report = Report {
+            outcomes: vec![failed],
+            unattributed: 0,
+        };
+        let s = render_to_string(&report);
+        assert!(s.contains("src/lib.rs: 1-100"), "got:\n{s}");
+        assert!(s.contains("100 more line locations omitted"), "got:\n{s}");
+        assert!(!s.contains("1-200"), "got:\n{s}");
     }
 
     #[test]
@@ -171,6 +233,7 @@ mod tests {
         assert!(s.contains("default"));
         assert!(s.contains("—"));
         assert!(s.contains("no attributed coverage data"));
+        assert!(s.contains("gamma: no coverage records were attributed to this package."));
     }
 
     #[test]
@@ -202,21 +265,21 @@ mod tests {
 
     #[test]
     fn renders_unexpected_coverable_lines_row_and_summary() {
+        let mut alpha = outcome("alpha", 7, 0, 0.0, ThresholdSource::Package, Status::UnexpectedCoverableLines);
+        alpha.diagnostics.push(LineDiagnostic {
+            path: "src/lib.rs".into(),
+            lines: vec![2, 3, 9],
+        });
         let report = Report {
-            outcomes: vec![outcome(
-                "alpha",
-                7,
-                0,
-                0.0,
-                ThresholdSource::Package,
-                Status::UnexpectedCoverableLines,
-            )],
+            outcomes: vec![alpha],
             unattributed: 0,
         };
         let s = render_to_string(&report);
         assert!(s.contains("NOT EMPTY"));
         assert!(s.contains("7 lines"));
         assert!(s.contains("1 package with unexpected coverable lines"));
+        assert!(s.contains("alpha: expected no coverable lines; found 7 lines."));
+        assert!(s.contains("src/lib.rs: 2-3, 9"));
     }
 
     #[test]

@@ -11,7 +11,10 @@
 //! `Cargo.toml`. The accompanying `cargo-coverage-gate` binary reads the
 //! coverage lcov tracefile, resolves each package's threshold from a small
 //! three-layer lookup, and emits a verdict table to stdout (and,
-//! optionally, to a Markdown summary file for CI step summaries).
+//! optionally, to a Markdown summary file for CI step summaries). A failing
+//! verdict includes exact covered/coverable counts and the uncovered source
+//! line ranges, so the output identifies what must be covered without relying
+//! on a later coverage-service upload.
 //!
 //! ## Threshold resolution
 //!

@@ -14,6 +14,7 @@
 //! [`threshold`]: crate::threshold
 
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use crate::Verdict;
 use crate::aggregate::{LineTotals, aggregate};
@@ -55,6 +56,18 @@ pub(crate) struct PackageOutcome {
     pub(crate) totals: LineTotals,
     /// Outcome of the comparison.
     pub(crate) status: Status,
+    /// Source locations relevant to a failing outcome.
+    pub(crate) diagnostics: Vec<LineDiagnostic>,
+}
+
+/// Relevant source lines from one file in a failing package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LineDiagnostic {
+    /// Path relative to the package manifest directory when possible.
+    pub(crate) path: PathBuf,
+    /// Uncovered lines for a numeric failure, or all coverable lines for
+    /// an `expect-no-coverable-lines` failure.
+    pub(crate) lines: Vec<u32>,
 }
 
 impl PackageOutcome {
@@ -129,11 +142,13 @@ pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_pac
                 let status = classify(totals, threshold);
                 (threshold, status)
             };
+            let diagnostics = diagnostics(attrib, m, status);
             PackageOutcome {
                 name: m.name.clone(),
                 threshold,
                 totals,
                 status,
+                diagnostics,
             }
         })
         .collect();
@@ -143,6 +158,32 @@ pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_pac
         outcomes,
         unattributed: unattributed.len(),
     })
+}
+
+fn diagnostics(files: &[&crate::lcov_cov::FileReport], member: &Member, status: Status) -> Vec<LineDiagnostic> {
+    let mut diagnostics: Vec<LineDiagnostic> = files
+        .iter()
+        .filter_map(|file| {
+            let lines = match status {
+                Status::Fail => &file.uncovered_lines,
+                Status::UnexpectedCoverableLines => &file.coverable_lines,
+                Status::Ok | Status::NoData | Status::NoCoverableLines => return None,
+            };
+            if lines.is_empty() {
+                return None;
+            }
+            Some(LineDiagnostic {
+                path: file
+                    .filename
+                    .strip_prefix(&member.manifest_dir)
+                    .unwrap_or(&file.filename)
+                    .to_path_buf(),
+                lines: lines.clone(),
+            })
+        })
+        .collect();
+    diagnostics.sort_by(|a, b| a.path.cmp(&b.path));
+    diagnostics
 }
 
 /// Resolve `packages` (each a cargo-style selector) against the
@@ -278,8 +319,6 @@ fn classify_no_coverable_lines(totals: LineTotals) -> Status {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use std::path::PathBuf;
-
     use super::*;
     use crate::lcov_cov::FileReport;
 
@@ -288,6 +327,8 @@ mod tests {
             filename: PathBuf::from(path),
             lines_total: count,
             lines_covered: covered,
+            coverable_lines: (1..=count).collect(),
+            uncovered_lines: ((covered + 1)..=count).collect(),
         }
     }
 
@@ -356,6 +397,19 @@ mod tests {
         let beta = r.outcomes.iter().find(|o| o.name == "beta").unwrap();
         assert_eq!(beta.status, Status::Fail);
         assert!((beta.percent().unwrap() - 60.0).abs() < f64::EPSILON);
+        assert_eq!(beta.diagnostics[0].path, PathBuf::from("src/lib.rs"));
+        assert_eq!(beta.diagnostics[0].lines, (61..=100).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn unexpected_coverable_lines_report_every_instrumented_location() {
+        let report = make_report(vec![make_file("/repo/crates/alpha/src/lib.rs", 4, 2)]);
+        let ws = make_workspace(vec![make_member_expect_empty("alpha", "/repo/crates/alpha")], None);
+        let evaluated = evaluate(&report, &ws, &[]).expect("evaluate");
+        let alpha = &evaluated.outcomes[0];
+        assert_eq!(alpha.status, Status::UnexpectedCoverableLines);
+        assert_eq!(alpha.diagnostics[0].path, PathBuf::from("src/lib.rs"));
+        assert_eq!(alpha.diagnostics[0].lines, vec![1, 2, 3, 4]);
     }
 
     #[test]

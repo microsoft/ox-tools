@@ -20,6 +20,8 @@ pub(crate) mod text;
 use crate::threshold::ThresholdSource;
 use crate::verdict::{PackageOutcome, Status};
 
+pub(crate) const MAX_DIAGNOSTIC_LINES: usize = 100;
+
 /// Human-readable text for the `Lines` column.
 fn format_lines(outcome: &PackageOutcome) -> String {
     match outcome.status {
@@ -155,6 +157,54 @@ fn files(n: usize) -> String {
     plural(n, "file", "files")
 }
 
+fn failure_detail(outcome: &PackageOutcome) -> Option<String> {
+    match outcome.status {
+        Status::Fail => {
+            let uncovered = outcome.totals.count.saturating_sub(outcome.totals.covered);
+            Some(format!(
+                "{}/{} lines covered; {} uncovered.",
+                outcome.totals.covered, outcome.totals.count, uncovered
+            ))
+        }
+        Status::NoData => Some("no coverage records were attributed to this package.".to_owned()),
+        Status::UnexpectedCoverableLines => Some(format!(
+            "expected no coverable lines; found {}.",
+            plural(outcome.totals.count as usize, "line", "lines")
+        )),
+        Status::Ok | Status::NoCoverableLines => None,
+    }
+}
+
+fn diagnostic_line_count(outcome: &PackageOutcome) -> usize {
+    outcome.diagnostics.iter().map(|diagnostic| diagnostic.lines.len()).sum()
+}
+
+fn format_line_ranges(lines: &[u32]) -> String {
+    let mut ranges = Vec::new();
+    let Some((&first, rest)) = lines.split_first() else {
+        return String::new();
+    };
+    let mut start = first;
+    let mut end = first;
+    for &line in rest {
+        if line != end.saturating_add(1) {
+            push_line_range(&mut ranges, start, end);
+            start = line;
+        }
+        end = line;
+    }
+    push_line_range(&mut ranges, start, end);
+    ranges.join(", ")
+}
+
+fn push_line_range(ranges: &mut Vec<String>, start: u32, end: u32) {
+    if start == end {
+        ranges.push(start.to_string());
+    } else {
+        ranges.push(format!("{start}-{end}"));
+    }
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
@@ -171,6 +221,7 @@ mod tests {
             },
             totals: LineTotals { count, covered },
             status: Status::Ok,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -183,6 +234,7 @@ mod tests {
             },
             totals: LineTotals { count, covered },
             status,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -230,6 +282,13 @@ mod tests {
     fn format_delta_returns_dash_for_no_data() {
         let o = outcome(0, 0, 80.0);
         assert_eq!(format_delta(&o), "—");
+    }
+
+    #[test]
+    fn line_ranges_compress_only_adjacent_lines() {
+        assert_eq!(format_line_ranges(&[]), "");
+        assert_eq!(format_line_ranges(&[7]), "7");
+        assert_eq!(format_line_ranges(&[1, 2, 3, 5, 7, 8]), "1-3, 5, 7-8");
     }
 
     #[test]

@@ -20,7 +20,10 @@ by [`cargo-llvm-cov`][__link0] against per-package thresholds carried in
 `Cargo.toml`. The accompanying `cargo-coverage-gate` binary reads the
 coverage lcov tracefile, resolves each package’s threshold from a small
 three-layer lookup, and emits a verdict table to stdout (and,
-optionally, to a Markdown summary file for CI step summaries).
+optionally, to a Markdown summary file for CI step summaries). A failing
+verdict includes exact covered/coverable counts and the uncovered source
+line ranges, so the output identifies what must be covered without relying
+on a later coverage-service upload.
 
 ### Threshold resolution
 
@@ -105,7 +108,7 @@ plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbDzRwf0qddWQbQiTzhu0-bE0bX-rutkvfDuYbITgXvtMXiRVhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4zLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbUyBJhTlThKMb2KAsMNOODUYbjhYEhuJ2xScbr_AgFmRNpuZhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC4zLjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://docs.rs/cargo-coverage-gate/0.3.0/cargo_coverage_gate/fn.evaluate.html
  [__link2]: https://docs.rs/cargo-coverage-gate/0.3.0/cargo_coverage_gate/struct.EvaluatedReport.html

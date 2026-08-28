@@ -69,7 +69,7 @@ jobs:
         # Multi-flag tag combines the OS with a "scheduled" marker so
         # the Codecov UI can distinguish PR-tier uploads from scheduled
         # uploads while still tracking each platform separately.
-        if: matrix.os != 'windows-arm'
+        if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info', 'target/coverage/lcov-no-default.info') != ''
         uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
         with:
           files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info

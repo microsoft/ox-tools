@@ -1508,6 +1508,7 @@ runs:
         failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed\( on line [0-9][0-9]*\)\{0,1\} with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
         echo "failed_recipe=${failed_recipe:-anvil-$ANVIL_GROUP}" >> "$GITHUB_OUTPUT"
         echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+        exit "$status"
 
     # Reporting is supplemental: run after success or failure, but never let
     # an API outage determine the authoritative workflow-job result.
@@ -1520,11 +1521,6 @@ runs:
         setup_outcome: ${{ steps.setup.outcome }}
         exit_code: ${{ steps.run.outputs.exit_code }}
         failed_recipe: ${{ steps.run.outputs.failed_recipe }}
-
-    - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
-      if: always() && steps.run.outputs.exit_code != '' && steps.run.outputs.exit_code != '0'
-      shell: bash
-      run: exit 1
 
 === .github/actions/anvil-setup/action.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -1985,7 +1981,7 @@ jobs:
         # empty the recipe no-ops and there is no file to upload, so we gate
         # on the files existing (impact scoping lives in the downloaded cache
         # now, not a job output). Codecov coalesces the two per-config files.
-        if: matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info', 'target/coverage/lcov-no-default.info') != ''
+        if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info', 'target/coverage/lcov-no-default.info') != ''
         uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
         with:
           files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
@@ -2188,7 +2184,7 @@ jobs:
         # Multi-flag tag combines the OS with a "scheduled" marker so
         # the Codecov UI can distinguish PR-tier uploads from scheduled
         # uploads while still tracking each platform separately.
-        if: matrix.os != 'windows-arm'
+        if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info', 'target/coverage/lcov-no-default.info') != ''
         uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
         with:
           files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info

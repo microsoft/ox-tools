@@ -593,9 +593,10 @@ the following mechanisms, all driven by Just's existing terminal diagnostic:
 1. The problem matcher registered by `anvil-setup` promotes
    ``error: recipe `anvil-license-headers` failed with exit code 1`` to a
    GitHub annotation.
-2. The group composite ends with a failing step named
-   `Failed Just recipe: anvil-license-headers`, putting the recipe name in the
-   job's step list.
+2. The `Run Anvil group` step itself returns Just's exit status after recording
+   the recipe name and exit code for supplemental reporting. The failed step is
+   therefore the step containing the complete, live recipe output; no
+   synthetic failure step can displace or truncate the underlying diagnostic.
 3. On eligible pull requests, `anvil-report-status` publishes a commit status
    whose reserved context namespace names the failed recipe and runner:
 
@@ -604,10 +605,12 @@ the following mechanisms, all driven by Just's existing terminal diagnostic:
    ```
 
 The group action streams normal Just output, captures the terminal failed
-recipe, reports supplemental presentation on a best-effort basis, and then
-propagates Just's result to the authoritative workflow job. The reporter
-neither invokes checks nor contains group membership. Internal capture,
-parsing, status reconciliation, and test-harness details are documented in the
+recipe, writes its outputs, and returns Just's status from that same step.
+Subsequent reporting uses `always()` and is supplemental and best-effort, so it
+still runs after a recipe failure without replacing the authoritative failed
+step. The reporter neither invokes checks nor contains group membership.
+Internal capture, parsing, status reconciliation, and test-harness details are
+documented in the
 [implementation guide](../implementation.md#github-group-execution-and-status-reporting).
 
 When `publish_commit_statuses` is enabled, the shared reporter manages statuses
@@ -904,8 +907,11 @@ Recommended root workflow shape:
 ## 10. Coverage upload
 
 After `pr-test` (and `scheduled-test`) runs the `anvil-llvm-cov` recipe, the reusable
-workflow uploads the resulting `target/coverage/lcov.info` to Codecov from every leg of
-the matrix except `windows-11-arm`. The windows-arm leg is excluded because its
+workflow uploads the resulting coverage files to Codecov from every leg of the matrix
+except `windows-11-arm`. The upload condition uses `always()` plus a file-existence
+guard: completed coverage reports are retained even when the coverage gate or a later
+group recipe fails, while failures before report generation do not trigger an empty
+upload. The windows-arm leg is excluded because its
 LLVM-coverage instrumentation produces `malformed instrumentation profile data: symbol
 name is empty` errors that make the profile unusable. Coverage from every other leg is
 necessary because OS/arch-gated code (`cfg(target_os = ...)`, `cfg(target_arch = ...)`)
@@ -918,10 +924,10 @@ The upload step:
 
 ```yaml
 - name: Upload coverage to Codecov
-  if: matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info', 'target/coverage/lcov-no-default.info') != ''
+  if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info', 'target/coverage/lcov-no-default.info') != ''
   uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
   with:
-    files: target/coverage/lcov.info
+    files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
     flags: ${{ matrix.os }}
     token: ${{ secrets.CODECOV_TOKEN }}
     fail_ci_if_error: false
@@ -934,9 +940,10 @@ all; private repos set `CODECOV_TOKEN` at the repo level. `fail_ci_if_error: fal
 keeps the build green when Codecov is unreachable (typical for internal repos that
 can't reach `codecov.io`).
 
-On the scheduled upload the step additionally combines the OS flag with a `scheduled`
-marker (`flags: scheduled,${{ matrix.os }}`) so PR vs scheduled streams stay
-distinguishable in the Codecov UI while still being queryable per-OS.
+The scheduled upload has the same `always()` and file-existence semantics. It
+additionally combines the OS flag with a `scheduled` marker
+(`flags: scheduled,${{ matrix.os }}`) so PR vs scheduled streams stay distinguishable
+in the Codecov UI while still being queryable per-OS.
 
 anvil does not gate the PR on coverage. The lcov upload is informational; Codecov's
 own status check is the gating layer when the adopter wants one (configured in Codecov,

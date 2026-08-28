@@ -120,14 +120,22 @@ tests in `tests/impact.rs` exercise the real recipe rather than a CI-only path.
 
 ## GitHub group execution and status reporting
 
-The generated `anvil-run-group` composite action owns the capture-before-failure
-protocol. Its inline Bash step invokes Just through `tee`, temporarily disables
-immediate exit, and reads `PIPESTATUS[0]` so the saved result belongs to Just
-rather than `tee`. It selects the final standard Just failed-recipe diagnostic,
-including the optional line-number form, and falls back to the group recipe
-when a tool exits without that diagnostic. The step writes the recipe and exit
-code as outputs without failing so the reporter can consume them. After
-best-effort reporting, a final guarded step propagates the captured failure.
+The generated `anvil-run-group` composite action owns the
+capture-before-propagation protocol. Its inline Bash step invokes Just through
+`tee`, temporarily disables immediate exit, and reads `PIPESTATUS[0]` so the
+saved result belongs to Just rather than `tee`. It selects the final standard
+Just failed-recipe diagnostic, including the optional line-number form, and
+falls back to the group recipe when a tool exits without that diagnostic. The
+step writes the recipe and exit code as outputs, then returns the captured
+status itself. This is a correctness constraint for diagnostics: the GitHub
+step marked failed must be the step containing the complete recipe output.
+Moving propagation to a later synthetic step would make GitHub focus that
+empty step and hide the useful output behind a successful predecessor.
+
+The reporter uses `always()`, so GitHub runs it after the group step fails and
+the outputs written before propagation remain available to it. Its
+`continue-on-error` remains necessary because supplemental API reporting must
+not replace or obscure the authoritative recipe result.
 
 The status reporter is an inline `actions/github-script` body. It validates the
 pull-request head SHA, reads same-commit status history newest-first, and keeps
