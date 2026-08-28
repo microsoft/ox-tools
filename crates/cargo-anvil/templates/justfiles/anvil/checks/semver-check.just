@@ -11,13 +11,14 @@
 #
 # Several real-world conditions aren't actually SemVer violations:
 #   - bin-only crates have no API to compare (reported as a missing lib target).
+#   - `publish = false` crates have no registry consumer contract.
 #   - crates newly added since the PR base have no manifest at their
 #     current workspace-relative path in that baseline.
 #   - crates renamed since the PR base have no matching package in that
 #     baseline ("package `<name>` not found in ...").
 #   - crates where the branch baseline lacks a lib target the
 #     current source has (bin -> bin+lib transition).
-# We pre-filter to library-bearing crates from cargo metadata, skip
+# We pre-filter to publishable library-bearing crates from cargo metadata, skip
 # packages whose current manifest path is absent from the baseline,
 # then run cargo-semver-checks per-package and tolerate the remaining
 # "no-comparable-baseline" failure modes.
@@ -37,8 +38,8 @@
 #
 # TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
 # skip/splat preamble, this recipe stays multi-step: cargo-metadata
-# filter to library crates (cargo-semver-checks --workspace fails on
-# bin-only workspaces), intersect ANVIL_INCLUDE_AFFECTED with that
+# filter to publishable library crates (cargo-semver-checks --workspace
+# fails on bin-only workspaces), intersect ANVIL_INCLUDE_AFFECTED with that
 # set, verify the PR branch baseline is present, skip newly-added
 # manifest paths, then invoke per-crate against that baseline with
 # special handling for renamed crates ("package `<name>` not found in
