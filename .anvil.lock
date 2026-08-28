@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.5.0"
-catalog_checksum = "sha256:074664f94a7fc0b87f7d29966452b7c9d957ca65771bf3e65724e3b8814da86a"
+catalog_checksum = "sha256:2717eebd54ddfc2e1d1f8454dd0f901d7e634032a642334484b159f8b7e88274"
 
 [[file]]
 path = ".anvil/container/Containerfile"
@@ -181,7 +181,7 @@ checksum = "sha256:d346399f288570066e53fd123baf05f7d4a57f17da8ee687a6d881204c5ba
 
 [[file]]
 path = "justfiles/anvil/checks/semver-check.just"
-checksum = "sha256:0e2aaef4acd81363f2e0ce2c6b6c22bd5adc164e7dc597006d78006c6d42422e"
+checksum = "sha256:13fcb4569e132b8922dc1c111a58ca081121125f29b0c855207bc818684ef2b5"
 
 [[file]]
 path = "justfiles/anvil/checks/spellcheck.just"

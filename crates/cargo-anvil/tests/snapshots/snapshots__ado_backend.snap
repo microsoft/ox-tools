@@ -4271,7 +4271,7 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 # TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
 # skip/splat preamble, this recipe stays multi-step: cargo-metadata
 # filter to publishable library crates (cargo-semver-checks --workspace
-# bin-only workspaces), intersect the affected set ($include) with that
+# fails on bin-only workspaces), intersect the affected set ($include) with that
 # set, verify the PR branch baseline is present, skip newly-added
 # manifest paths, then invoke per-crate against that baseline with
 # special handling for renamed crates ("package `<name>` not found in
