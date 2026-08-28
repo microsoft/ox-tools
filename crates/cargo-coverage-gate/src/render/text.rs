@@ -232,6 +232,10 @@ mod tests {
             path: "src/second.rs".into(),
             lines: (101..=160).collect(),
         });
+        failed.diagnostics.push(LineDiagnostic {
+            path: "src/third.rs".into(),
+            lines: vec![200],
+        });
         let report = Report {
             outcomes: vec![failed],
             unattributed: 0,
@@ -240,7 +244,8 @@ mod tests {
         assert!(s.contains("src/first.rs: 1-60"), "got:\n{s}");
         assert!(s.contains("src/second.rs: 101-140"), "got:\n{s}");
         assert!(!s.contains("src/second.rs: 101-160"), "got:\n{s}");
-        assert!(s.contains("20 more line locations omitted"), "got:\n{s}");
+        assert!(!s.contains("src/third.rs"), "got:\n{s}");
+        assert!(s.contains("21 more line locations omitted"), "got:\n{s}");
     }
 
     #[test]
@@ -383,6 +388,23 @@ mod tests {
             unattributed: 2,
         };
         let mut w = FailOnNeedle { needle: b"had paths" };
+        assert!(render(&mut w, &report).is_err());
+    }
+
+    #[test]
+    fn propagates_error_from_failure_diagnostic_write() {
+        let mut failed = outcome("alpha", 1, 0, 80.0, ThresholdSource::Package, Status::Fail);
+        failed.diagnostics.push(LineDiagnostic {
+            path: "src/DIAGNOSTIC_WRITE_FAIL.rs".into(),
+            lines: vec![1],
+        });
+        let report = Report {
+            outcomes: vec![failed],
+            unattributed: 0,
+        };
+        let mut w = FailOnNeedle {
+            needle: b"DIAGNOSTIC_WRITE_FAIL",
+        };
         assert!(render(&mut w, &report).is_err());
     }
 }
