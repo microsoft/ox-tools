@@ -741,16 +741,21 @@ mod tests {
     #[test]
     fn stable_toolchain_selection_is_scoped_to_each_command() {
         assert!(!VERSIONS_JUST.contains("export RUSTUP_TOOLCHAIN"));
-        assert!(VERSIONS_JUST.contains("_anvil_stable_toolchain_args := trim('''\n@(& {"));
-        assert!(VERSIONS_JUST.contains("Write-Output ('+' + $Toolchain)"));
+        assert!(
+            VERSIONS_JUST
+                .contains("_anvil_stable_toolchain_args := trim(\"@(& {\\n$RepoRoot = '\" + replace(justfile_directory(), \"'\", \"''\")")
+        );
+        assert!(VERSIONS_JUST.contains("Write-Output ('+' + $env:RUSTUP_TOOLCHAIN)"));
+        assert!(!VERSIONS_JUST.contains("(Get-Location).Path"));
         assert!(!VERSIONS_JUST.contains("os_family()"));
         assert!(!VERSIONS_JUST.contains("shell("));
         assert!(!VERSIONS_JUST.contains("[scriptblock]::Create"));
         assert!(TOOLS_JUST.contains("_anvil-resolve-stable action=\"resolve\":"));
         assert!(!TOOLS_JUST.contains("_anvil-with-stable"));
         assert!(TOOLS_JUST.contains("& cargo {{_anvil_stable_toolchain_args}}"));
+        assert!(VERSIONS_JUST.contains("rustup show active-toolchain"));
         assert!(TOOLS_JUST.contains("rustup component add --toolchain"));
-        assert!(TOOLS_JUST.contains("rustup target add --toolchain"));
+        assert!(!TOOLS_JUST.contains("rustup target add --toolchain"));
     }
 
     #[test]
@@ -870,10 +875,18 @@ mod tests {
                     "[script(\"pwsh\", \"-NoProfile\")]\n",
                     "_anvil-test-stable-command:\n",
                     "    & cargo {{_anvil_stable_toolchain_args}} --version\n",
+                    "\n[script(\"pwsh\", \"-NoProfile\")]\n",
+                    "_anvil-test-stable-command-after-chdir:\n",
+                    "    Set-Location 'nested'\n",
+                    "    & cargo {{_anvil_stable_toolchain_args}} --version\n",
                 ),
             )
             .expect("Justfile fixture must be writable");
             temp
+        }
+
+        fn tools_available() -> bool {
+            Command::new("just").arg("--version").output().is_ok() && Command::new("pwsh").arg("--version").output().is_ok()
         }
 
         fn command(root: &Path) -> Command {
@@ -899,9 +912,6 @@ mod tests {
                 ["-InstallIfMissing"] => {
                     command.arg("anvil-toolchain-stable-install");
                 }
-                ["-ApplyToolchainFileOptions"] => {
-                    command.args(["_anvil-resolve-stable", "apply-file-options"]);
-                }
                 ["-ValidateWorkspaceMsrv"] => {
                     command.args(["_anvil-resolve-stable", "validate-workspace-msrv"]);
                 }
@@ -910,9 +920,6 @@ mod tests {
                 }
                 ["-InstallMsrvIfNeeded"] => {
                     command.args(["_anvil-resolve-stable", "install-msrv"]);
-                }
-                ["-EmitToolchainFileOptions"] => {
-                    command.args(["_anvil-resolve-stable", "emit-file-options"]);
                 }
                 other => panic!("unsupported resolver arguments in test: {other:?}"),
             }
@@ -955,29 +962,33 @@ mod tests {
 
         #[test]
         fn honors_environment_files_and_msrv_in_precedence_order() {
+            if !tools_available() {
+                return;
+            }
             let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
             let root = temp.path();
             assert_eq!(resolved(root, None), "@('+1.93')");
 
-            fs::write(root.join("rust-toolchain.toml"), "[toolchain]\ncomponents = [\"clippy\"]\n")
-                .expect("toolchain fixture must be writable");
-            assert_eq!(resolved(root, None), "@('+1.93')");
-
-            fs::write(root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n").expect("toolchain fixture must be writable");
-            assert_eq!(resolved(root, None), "@()");
-
-            fs::write(root.join("rust-toolchain"), "1.92\n").expect("legacy toolchain fixture must be writable");
-            assert_eq!(resolved(root, None), "@()");
             assert_eq!(resolved(root, Some("custom-toolchain")), "@('+custom-toolchain')");
             assert_eq!(resolved(root, Some("team's-toolchain")), "@('+team''s-toolchain')");
         }
 
         #[test]
         fn passes_selected_arguments_directly_to_cargo() {
+            if !tools_available() {
+                return;
+            }
             let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
             let shim = TempDir::new().expect("cargo shim directory must be creatable");
             #[cfg(windows)]
-            fs::write(shim.path().join("cargo.cmd"), "@echo off\r\necho %*\r\nexit /b 0\r\n").expect("Cargo shim must be writable");
+            {
+                fs::write(shim.path().join("cargo.cmd"), "@echo off\r\necho %*\r\nexit /b 0\r\n").expect("Cargo shim must be writable");
+                fs::write(
+                    shim.path().join("rustup.cmd"),
+                    "@echo off\r\nif \"%1 %2\"==\"show active-toolchain\" echo C:\\toolchains\\test toolchain (overridden by fixture)\r\nexit /b 0\r\n",
+                )
+                .expect("rustup shim must be writable");
+            }
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -985,6 +996,13 @@ mod tests {
                 let cargo = shim.path().join("cargo");
                 fs::write(&cargo, "#!/bin/sh\nprintf '%s\\n' \"$*\"\nexit 0\n").expect("Cargo shim must be writable");
                 fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).expect("Cargo shim must be executable");
+                let rustup = shim.path().join("rustup");
+                fs::write(
+                    &rustup,
+                    "#!/bin/sh\nif [ \"$*\" = 'show active-toolchain' ]; then echo '/toolchains/test toolchain (overridden by fixture)'; fi\nexit 0\n",
+                )
+                .expect("rustup shim must be writable");
+                fs::set_permissions(&rustup, fs::Permissions::from_mode(0o755)).expect("rustup shim must be executable");
             }
             let mut paths = vec![shim.path().to_path_buf()];
             paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
@@ -1006,11 +1024,11 @@ mod tests {
                 "+team's-toolchain --version"
             );
 
-            fs::write(temp.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n")
+            fs::write(temp.path().join("rust-toolchain.toml"), "[toolchain]\ncomponents = [\"clippy\"]\n")
                 .expect("toolchain fixture must be writable");
             let output = command(temp.path())
                 .arg("_anvil-test-stable-command")
-                .env("PATH", path)
+                .env("PATH", &path)
                 .output()
                 .expect("repository-selected Cargo command must run");
             assert!(
@@ -1018,14 +1036,58 @@ mod tests {
                 "repository-selected Cargo command failed: {}",
                 normalized_diagnostic(&output)
             );
+            let expected_file_toolchain = if cfg!(windows) {
+                "\"+C:\\toolchains\\test toolchain\" --version"
+            } else {
+                "+/toolchains/test toolchain --version"
+            };
             assert_eq!(
                 String::from_utf8(output.stdout).expect("Cargo shim output must be UTF-8").trim(),
-                "--version"
+                expected_file_toolchain
+            );
+
+            fs::remove_file(temp.path().join("rust-toolchain.toml")).expect("toolchain fixture must be removable");
+            let nested = temp.path().join("nested");
+            fs::create_dir(&nested).expect("nested working directory must be creatable");
+
+            let output = command(temp.path())
+                .args(["--working-directory"])
+                .arg(&nested)
+                .arg("_anvil-test-stable-command")
+                .env("PATH", &path)
+                .output()
+                .expect("stable Cargo command with an explicit working directory must run");
+            assert!(
+                output.status.success(),
+                "working-directory stable Cargo command failed: {}",
+                normalized_diagnostic(&output)
+            );
+            assert_eq!(
+                String::from_utf8(output.stdout).expect("Cargo shim output must be UTF-8").trim(),
+                "+1.93 --version"
+            );
+
+            let output = command(temp.path())
+                .arg("_anvil-test-stable-command-after-chdir")
+                .env("PATH", path)
+                .output()
+                .expect("stable Cargo command after Set-Location must run");
+            assert!(
+                output.status.success(),
+                "Set-Location stable Cargo command failed: {}",
+                normalized_diagnostic(&output)
+            );
+            assert_eq!(
+                String::from_utf8(output.stdout).expect("Cargo shim output must be UTF-8").trim(),
+                "+1.93 --version"
             );
         }
 
         #[test]
         fn rejects_empty_legacy_toolchain_files_with_an_actionable_error() {
+            if !tools_available() {
+                return;
+            }
             for contents in ["", "  \r\n\t"] {
                 let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
                 fs::write(temp.path().join("rust-toolchain"), contents).expect("toolchain fixture must be writable");
@@ -1034,99 +1096,116 @@ mod tests {
                 assert!(!output.status.success(), "empty toolchain file must fail resolution");
                 let diagnostic = normalized_diagnostic(&output);
                 assert!(
-                    diagnostic.contains("root toolchain file")
-                        && diagnostic.contains("is empty")
-                        && diagnostic.contains("remove it")
-                        && diagnostic.contains("declare a toolchain configuration"),
+                    diagnostic.contains("rustup could not resolve")
+                        && (diagnostic.contains("empty toolchain override") || diagnostic.contains("error parsing override file")),
                     "unexpected resolver diagnostic: {diagnostic}"
                 );
             }
         }
 
         #[test]
-        fn reads_multiline_toolchain_file_install_options() {
-            let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
-            fs::write(
-                temp.path().join("rust-toolchain.toml"),
-                concat!(
-                    "[toolchain]\n",
-                    "profile = \"minimal\"\n",
-                    "components = [\n  \"clippy\",\n  \"rustfmt\",\n]\n",
-                    "targets = [\n  \"wasm32-unknown-unknown\",\n]\n",
-                ),
-            )
-            .expect("toolchain fixture must be writable");
-
-            let output = run(temp.path(), &["-EmitToolchainFileOptions"], None);
-            assert!(
-                output.status.success(),
-                "toolchain option resolution failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            let options = String::from_utf8(output.stdout).expect("resolver output must be UTF-8");
-            for expected in [
-                r#""Profile":"minimal""#,
-                r#""Components":["clippy","rustfmt"]"#,
-                r#""Targets":["wasm32-unknown-unknown"]"#,
-            ] {
-                assert!(options.contains(expected), "missing {expected} in {options}");
+        fn installs_default_components_on_the_selected_stable_toolchain() {
+            if !tools_available() {
+                return;
             }
-        }
-
-        #[test]
-        fn applies_toolchain_file_options_to_an_msrv_fallback() {
             let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
-            fs::write(
-                temp.path().join("rust-toolchain.toml"),
-                concat!(
-                    "[toolchain]\n",
-                    "profile = \"complete\"\n",
-                    "components = [\"clippy\"]\n",
-                    "targets = [\"wasm32-unknown-unknown\"]\n",
-                ),
-            )
-            .expect("toolchain fixture must be writable");
+            let shim = TempDir::new().expect("component shim directory must be creatable");
+            let cargo_log = shim.path().join("cargo.log");
+            let rustup_log = shim.path().join("rustup.log");
+            #[cfg(windows)]
+            {
+                fs::write(
+                    shim.path().join("cargo.cmd"),
+                    "@echo off\r\n>>\"%ANVIL_CARGO_LOG%\" echo %*\r\nexit /b 1\r\n",
+                )
+                .expect("Cargo shim must be writable");
+                fs::write(
+                    shim.path().join("rustup.cmd"),
+                    "@echo off\r\n>>\"%ANVIL_RUSTUP_LOG%\" echo %*\r\nif \"%1 %2\"==\"show active-toolchain\" echo 1.94-test-host (overridden by fixture)\r\nexit /b 0\r\n",
+                )
+                .expect("rustup shim must be writable");
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
 
-            let shim = TempDir::new().expect("rustup shim directory must be creatable");
-            let log = shim.path().join("rustup.log");
-            fs::write(
-                shim.path().join("rustup.ps1"),
-                concat!(
-                    "Add-Content -LiteralPath $env:ANVIL_TEST_LOG -Value ($args -join ' ')\n",
-                    "if (($args -contains 'toolchain') -and ($args -contains 'list')) {\n",
-                    "    Write-Output 'stable-x86_64-pc-windows-msvc (default)'\n",
-                    "}\n",
-                    "exit 0\n",
-                ),
-            )
-            .expect("rustup shim must be writable");
+                for (name, log_variable, status) in [("cargo", "ANVIL_CARGO_LOG", 1), ("rustup", "ANVIL_RUSTUP_LOG", 0)] {
+                    let executable = shim.path().join(name);
+                    let extra = if name == "rustup" {
+                        "if [ \"$*\" = 'show active-toolchain' ]; then echo '1.94-test-host (overridden by fixture)'; fi\n"
+                    } else {
+                        ""
+                    };
+                    fs::write(
+                        &executable,
+                        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${log_variable}\"\n{extra}exit {status}\n"),
+                    )
+                    .expect("component shim must be writable");
+                    fs::set_permissions(&executable, fs::Permissions::from_mode(0o755)).expect("component shim must be executable");
+                }
+            }
             let mut paths = vec![shim.path().to_path_buf()];
             paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+            let path = env::join_paths(paths).expect("shim PATH must be valid");
+            let run_install = |rustup_toolchain: Option<&str>| {
+                let mut command = command(temp.path());
+                command
+                    .args(["_install-component", "default", "clippy"])
+                    .env("ANVIL_CARGO_LOG", &cargo_log)
+                    .env("ANVIL_RUSTUP_LOG", &rustup_log)
+                    .env("PATH", &path);
+                if let Some(value) = rustup_toolchain {
+                    command.env("RUSTUP_TOOLCHAIN", value);
+                }
+                command.output().expect("default component installation must run")
+            };
 
-            let output = command(temp.path())
-                .args(["_anvil-resolve-stable", "install"])
-                .env("ANVIL_TEST_LOG", &log)
-                .env("PATH", env::join_paths(paths).expect("shim PATH must be valid"))
-                .output()
-                .expect("just must be available to test the generated resolver recipe");
+            let output = run_install(Some("custom-toolchain"));
             assert!(
                 output.status.success(),
-                "toolchain option application failed: {}",
+                "override-selected component installation failed: {}",
                 normalized_diagnostic(&output)
             );
-            let calls = fs::read_to_string(log).expect("rustup shim log must be readable");
-            for expected in [
-                "toolchain list",
-                "toolchain install 1.93 --profile complete",
-                "component add --toolchain 1.93 clippy",
-                "target add --toolchain 1.93 wasm32-unknown-unknown",
-            ] {
-                assert!(calls.contains(expected), "missing {expected} in rustup calls:\n{calls}");
-            }
+            assert_eq!(
+                fs::read_to_string(&cargo_log).expect("Cargo shim log must be readable").trim(),
+                "+custom-toolchain clippy --version"
+            );
+            assert_eq!(
+                fs::read_to_string(&rustup_log).expect("rustup shim log must be readable").trim(),
+                "component add --toolchain custom-toolchain clippy"
+            );
+
+            fs::write(temp.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n")
+                .expect("toolchain fixture must be writable");
+            fs::write(&cargo_log, "").expect("Cargo shim log must be resettable");
+            fs::write(&rustup_log, "").expect("rustup shim log must be resettable");
+            let output = run_install(None);
+            assert!(
+                output.status.success(),
+                "repository-selected component installation failed: {}",
+                normalized_diagnostic(&output)
+            );
+            assert_eq!(
+                fs::read_to_string(&cargo_log).expect("Cargo shim log must be readable").trim(),
+                "+1.94-test-host clippy --version"
+            );
+            let rustup_call = fs::read_to_string(&rustup_log).expect("rustup shim log must be readable");
+            assert!(
+                rustup_call
+                    .lines()
+                    .any(|line| line == "component add --toolchain 1.94-test-host clippy")
+            );
+            assert!(
+                rustup_call.lines().any(|line| line == "show active-toolchain"),
+                "repository-selected component installation must ask rustup for the active toolchain"
+            );
         }
 
         #[test]
         fn rejects_missing_or_too_new_workspace_msrvs() {
+            if !tools_available() {
+                return;
+            }
             let missing = fixture("[workspace]\nresolver = \"2\"\n");
             let output = run(missing.path(), &[], None);
             assert!(!output.status.success());
@@ -1151,7 +1230,41 @@ mod tests {
                 fs::write(member.join("lib.rs"), "").expect("member source must be writable");
             }
 
-            let output = run(workspace.path(), &["-ValidateWorkspaceMsrv"], None);
+            let shim = TempDir::new().expect("Cargo shim directory must be creatable");
+            let log = shim.path().join("cargo.log");
+            fs::write(
+                shim.path().join("cargo.ps1"),
+                concat!(
+                    "Add-Content -LiteralPath $env:ANVIL_TEST_LOG -Value ($args -join ' ')\n",
+                    "$metadata = @{\n",
+                    "    workspace_members = @('a-id', 'b-id')\n",
+                    "    packages = @(\n",
+                    "        @{ id = 'a-id'; name = 'a'; rust_version = '1.91' }\n",
+                    "        @{ id = 'b-id'; name = 'b'; rust_version = $env:ANVIL_TEST_B_MSRV }\n",
+                    "    )\n",
+                    "}\n",
+                    "$metadata | ConvertTo-Json -Depth 4 -Compress\n",
+                    "exit 0\n",
+                ),
+            )
+            .expect("Cargo shim must be writable");
+            let mut paths = vec![shim.path().to_path_buf()];
+            paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+            let path = env::join_paths(paths).expect("shim PATH must be valid");
+            let run_validation = |b_msrv: &str, rustup_toolchain: Option<&str>| {
+                let mut command = command(workspace.path());
+                command
+                    .args(["_anvil-resolve-stable", "validate-workspace-msrv"])
+                    .env("ANVIL_TEST_B_MSRV", b_msrv)
+                    .env("ANVIL_TEST_LOG", &log)
+                    .env("PATH", &path);
+                if let Some(value) = rustup_toolchain {
+                    command.env("RUSTUP_TOOLCHAIN", value);
+                }
+                command.output().expect("workspace MSRV validation must run")
+            };
+
+            let output = run_validation("1.93", None);
             assert!(!output.status.success());
             let diagnostic = normalized_diagnostic(&output);
             assert!(
@@ -1159,24 +1272,27 @@ mod tests {
                 "unexpected resolver diagnostic: {diagnostic}"
             );
 
-            fs::write(
-                workspace.path().join("b/Cargo.toml"),
-                "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\nrust-version = \"1.92\"\n[lib]\npath = \"lib.rs\"\n",
-            )
-            .expect("member manifest must be writable");
-            let output = run(workspace.path(), &["-ValidateWorkspaceMsrv"], None);
+            let output = run_validation("1.92", None);
             assert!(
                 output.status.success(),
                 "member MSRVs at or below the root must be compatible: {}",
                 normalized_diagnostic(&output)
             );
+            let calls = fs::read_to_string(&log).expect("Cargo shim log must be readable");
+            assert!(
+                calls.lines().all(|line| line.starts_with("+1.92 metadata ")),
+                "workspace compatibility metadata must use the root MSRV toolchain:\n{calls}"
+            );
 
-            let output = run(workspace.path(), &["-ValidateWorkspaceMsrv"], Some("explicit-toolchain"));
+            let output = run_validation("1.93", Some("explicit-toolchain"));
             assert!(output.status.success(), "explicit override must permit differing MSRVs");
         }
 
         #[test]
         fn rejects_an_unpaired_internal_msrv_mapping_for_stable_selection() {
+            if !tools_available() {
+                return;
+            }
             let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
             let run_with_mapping = |root: &Path| {
                 command(root)
@@ -1195,19 +1311,13 @@ mod tests {
                     && diagnostic.contains("unset ANVIL_MSRV_TOOLCHAIN"),
                 "unexpected resolver diagnostic: {diagnostic}"
             );
-
-            fs::write(temp.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n")
-                .expect("toolchain fixture must be writable");
-            let output = run_with_mapping(temp.path());
-            assert!(
-                output.status.success(),
-                "a repository-selected stable toolchain completes the configuration: {}",
-                normalized_diagnostic(&output)
-            );
         }
 
         #[test]
         fn provisions_public_and_mapped_msrv_toolchains() {
+            if !tools_available() {
+                return;
+            }
             let run_install = |root: &Path, mapped: Option<&str>, installed: &str, cargo_exit: i32| {
                 let shim = TempDir::new().expect("toolchain shim directory must be creatable");
                 let rustup_log = shim.path().join("rustup.log");
@@ -1247,11 +1357,6 @@ mod tests {
             };
 
             let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
-            fs::write(
-                temp.path().join("rust-toolchain.toml"),
-                "[toolchain]\ncomponents = [\"clippy\"]\ntargets = [\"wasm32-unknown-unknown\"]\n",
-            )
-            .expect("toolchain fixture must be writable");
 
             let (output, rustup_calls, cargo_calls) = run_install(temp.path(), None, "1.93-x86_64-pc-windows-msvc", 0);
             assert!(
@@ -1264,8 +1369,6 @@ mod tests {
                 !rustup_calls.contains("toolchain install"),
                 "installed MSRV must not be reinstalled"
             );
-            assert!(rustup_calls.contains("component add --toolchain 1.93 clippy"));
-            assert!(rustup_calls.contains("target add --toolchain 1.93 wasm32-unknown-unknown"));
             assert!(cargo_calls.is_empty(), "public MSRV availability is checked through rustup");
 
             let (output, rustup_calls, cargo_calls) = run_install(temp.path(), Some("ms-prod-1.93"), "", 0);
@@ -1277,8 +1380,6 @@ mod tests {
             assert!(cargo_calls.contains("+ms-prod-1.93 --version"));
             assert!(!rustup_calls.contains("toolchain list"));
             assert!(!rustup_calls.contains("toolchain install"));
-            assert!(rustup_calls.contains("component add --toolchain ms-prod-1.93 clippy"));
-            assert!(rustup_calls.contains("target add --toolchain ms-prod-1.93 wasm32-unknown-unknown"));
 
             let (output, _, cargo_calls) = run_install(temp.path(), Some("ms-prod-1.93"), "", 9);
             assert!(!output.status.success(), "an unavailable mapped MSRV must fail");
@@ -1295,6 +1396,9 @@ mod tests {
 
         #[test]
         fn resolves_msrv_whenever_the_root_declares_one() {
+            if !tools_available() {
+                return;
+            }
             let no_msrv = fixture("[workspace]\nresolver = \"2\"\n");
             fs::write(no_msrv.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n")
                 .expect("toolchain fixture must be writable");

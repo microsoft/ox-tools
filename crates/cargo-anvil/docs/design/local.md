@@ -261,7 +261,9 @@ install recipe (one per atomic resource); composition layers chain those.
 - `anvil-toolchain-<symbolic>-install` — `rustup toolchain install` for a pinned
   nightly (e.g. `nightly-2026-02-10`).
 - `anvil-component-<toolchain>-<component>-install` — `rustup component add`
-  on a specific toolchain. Depends on the matching toolchain-install recipe.
+  on a specific toolchain. Stable components explicitly target the toolchain
+  selected by an override, repository toolchain file, or MSRV fallback. Depends
+  on the matching toolchain-install recipe.
 
 Each has a matching `*-validate-prereqs` recipe that exits 0 when the resource is
 already present at or above its pin and fails with a one-line install hint otherwise.
@@ -389,8 +391,8 @@ ambient stable toolchain. The selection order is:
 
 1. `RUSTUP_TOOLCHAIN`, when the caller already set it. This is the standard rustup
    override and lets internal pipelines select an installed `ms-prod-*` toolchain.
-2. The `channel` or `path` selected by a root `rust-toolchain` or
-   `rust-toolchain.toml`. The legacy file name wins when both exist, matching rustup.
+2. A root `rust-toolchain` or `rust-toolchain.toml`, delegated to rustup without
+   Anvil parsing or modifying the file.
 3. The root package or `[workspace.package]` `rust-version`, treated as the
    repository MSRV.
 
@@ -404,8 +406,8 @@ floor should declare root `[workspace.package].rust-version` (or package
 `rust-version`) and have every workspace member inherit it or declare an equal
 or lower minimum. A repository with missing package MSRVs, or a member minimum
 newer than the root, must instead correct the root floor or add a root toolchain
-file with `channel` or `path` to select the single compiler used by catalog
-checks. Internal builds may set `RUSTUP_TOOLCHAIN` to a provisioned toolchain
+file to select the single compiler used by catalog checks. Internal builds may
+set `RUSTUP_TOOLCHAIN` to a provisioned toolchain
 rather than adding a public compiler pin. Setting `ANVIL_MSRV_TOOLCHAIN`
 without that stable override (and without a selecting repository toolchain
 file) is rejected as incomplete internal configuration. An empty root
@@ -415,38 +417,35 @@ toolchain file is invalid and produces an actionable error.
 `_anvil_stable_toolchain_args` value. Its value is a multiline PowerShell array
 expression, not a command for Just's expression-time `shell()` function. Just
 interpolates the expression into an existing PowerShell recipe, where it
-evaluates to no elements for a selecting repository toolchain file or one
-`+toolchain` string for a caller override or MSRV fallback. Toolchain names,
-including apostrophes, therefore remain runtime string data rather than source
-text that needs escaping or reparsing. `RUSTUP_TOOLCHAIN` is an input to
-selection, never a globally exported output.
+evaluates to one `+toolchain` string. For a repository toolchain file, it asks
+`rustup show active-toolchain` from the repository root and uses rustup's
+resolved concrete toolchain. For an override or MSRV fallback, it uses that
+value directly. Toolchain names, including apostrophes, therefore remain
+runtime string data rather than source text that needs escaping or reparsing.
+`RUSTUP_TOOLCHAIN` is an input to selection, never a globally exported output.
+The expression embeds an escaped PowerShell literal produced from
+`justfile_directory()`, matching the setup resolver's repository root.
+Recipe-local `Set-Location` calls and Just's `--working-directory` option
+therefore cannot redirect selection to a nested manifest.
 
 Each stable recipe executes Cargo or Rust directly in its current PowerShell
 recipe process, for example
-`& cargo {{_anvil_stable_toolchain_args}} clippy ...`. A selecting toolchain
-file therefore reaches native rustup unoverridden, including its components,
-targets, profile, and path semantics. Explicit caller/MSRV selections are
-visible as Cargo's `+toolchain` argument. Nightly and MSRV-specific checks keep
-their own explicit `+toolchain` arguments. No nested Just wrapper sits on the
-main Cargo/Rust command path. Selection starts no subprocess, has no
-OS-specific branch or host-shell quoting, and does not change the adopter's
+`& cargo {{_anvil_stable_toolchain_args}} clippy ...`. Repository toolchain-file
+provisioning runs `rustc` from the repository root, so rustup natively owns the
+file's channel, path, profile, components, and targets. Default Clippy and
+rustfmt setup then passes `--toolchain` for the resolved concrete toolchain, so
+the component is installed on the compiler their checks probe. Nightly and
+MSRV-specific checks keep their own explicit `+toolchain` arguments. No nested
+Just wrapper sits on the main Cargo/Rust command path. Selection has no
+OS-specific branch or host-shell quoting and does not change the adopter's
 configured shell. Unrelated recipes and raw commands retain the caller's normal
 environment.
 
-An environment override or MSRV fallback normally causes rustup to ignore the
-repository toolchain file. Anvil therefore reads `profile`, `components`, and
-`targets` from a root `[toolchain]` table and applies those options to the concrete
-selected toolchain. A profile controls a public toolchain installation performed
-by Anvil; externally provisioned toolchains retain their provisioner's profile.
-Explicit components and targets are added at setup time. If an option is unavailable
-for the selected compiler, Anvil warns and skips it, matching rustup's handling of
-unavailable options read directly from a toolchain file.
-
 The public setup primitive `anvil-toolchain-stable-install` owns stable
-provisioning. It delegates parsing, public installation, toolchain-file option
-replay, and internal mapping to the private `_anvil-resolve-stable`
-implementation. Leaf setup recipes reach the primitive directly or through the
-shared Cargo-tool/default-component installers; group, tier, and
+provisioning. Rustup processes repository toolchain files directly; the private
+`_anvil-resolve-stable` implementation handles public MSRV installation and
+internal mapping. Leaf setup recipes reach the primitive directly or through
+the shared Cargo-tool/default-component installers; group, tier, and
 `anvil-setup` recipes inherit and deduplicate that dependency. Cloud version
 capture uses the private `_anvil-stable-rustc-version` recipe, whose dependency
 provisions stable before it invokes `rustc` directly with the lazy argument.
@@ -454,13 +453,17 @@ Workflows and container construction therefore invoke setup operations rather
 than orchestrating `_anvil-resolve-stable` actions. Neither helper wraps a
 Cargo/Rust command that performs a check, and no standalone script is involved.
 
-When selection falls back to the root MSRV, prerequisite validation reads
-`cargo metadata` and requires every workspace package to resolve a
-`rust_version` no newer than the root floor. Lower member minima are valid
-because the root compiler satisfies them. Workspaces with missing package
-MSRVs or member minima above the root must correct the declarations or choose a
-single catalog toolchain explicitly with a selecting toolchain file. Anvil does
-not build a per-package toolchain matrix for this uncommon case.
+When selection falls back to the root MSRV, Anvil reads the root manifest just
+far enough to bootstrap that compiler, then prerequisite validation reads
+`cargo +<root-msrv> metadata`. Cargo performs the authoritative workspace
+resolution; Anvil requires every workspace package to expose a `rust_version`
+no newer than the root floor. Running metadata under that compiler avoids
+depending on an ambient default during the fallback itself.
+Lower member minima are valid because the root compiler satisfies them.
+Workspaces with missing package MSRVs or member minima above the root must
+correct the declarations or choose a single catalog toolchain explicitly with
+a selecting toolchain file. Anvil does not build a per-package toolchain matrix
+for this uncommon case.
 
 When the root manifest declares an MSRV, `anvil-msrv-test` runs affected-package
 unit and integration tests under that compiler with all features and with default

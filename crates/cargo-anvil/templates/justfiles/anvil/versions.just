@@ -31,65 +31,42 @@
 # Rustup toolchains
 # ============================================================================
 
-# Stable commands interpolate this PowerShell array expression directly
-# at each command site. Selection runs inside the existing PowerShell recipe
-# process, so it needs no host-shell quoting or selector subprocess.
+# Stable commands interpolate this PowerShell array expression directly at each
+# command site. Rustup resolves repository toolchain files from the repository
+# root; Anvil only reads Cargo.toml when it needs the root MSRV fallback.
 # `RUSTUP_TOOLCHAIN` is an input override only; Anvil never exports a resolved
 # value globally into unrelated recipes or helpers.
 [private]
-_anvil_stable_toolchain_args := trim('''
-@(& {
-$RepoRoot = (Get-Location).Path
-
+_anvil_stable_toolchain_args := trim("@(& {\n$RepoRoot = '" + replace(justfile_directory(), "'", "''") + "'\n\n" + '''
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3
 
-function Write-ExplicitToolchainArg([string] $Toolchain) {
-    Write-Output ('+' + $Toolchain)
-}
-
 if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
-    Write-ExplicitToolchainArg $env:RUSTUP_TOOLCHAIN
+    Write-Output ('+' + $env:RUSTUP_TOOLCHAIN)
     return
 }
 
-$toolchainFile = $null
-foreach ($name in @('rust-toolchain', 'rust-toolchain.toml')) {
-    $candidate = Join-Path $RepoRoot $name
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-        $toolchainFile = $candidate
-        break
-    }
-}
-
-$selectingFile = $false
-if ($null -ne $toolchainFile) {
-    $content = Get-Content -LiteralPath $toolchainFile -Raw
-    if ([string]::IsNullOrWhiteSpace($content)) {
-        throw "anvil: root toolchain file '$toolchainFile' is empty; remove it or declare a toolchain configuration"
-    }
-    if ((Split-Path -Leaf $toolchainFile) -eq 'rust-toolchain' -and $content.TrimStart() -notmatch '^\[') {
-        $selectingFile = $true
-    } else {
-        $inToolchain = $false
-        foreach ($line in $content -split '\r?\n') {
-            if ($line -match '^\s*\[\s*toolchain\s*\]\s*(?:#.*)?$') {
-                $inToolchain = $true
-                continue
-            }
-            if ($line -match '^\s*\[') {
-                $inToolchain = $false
-                continue
-            }
-            if ($inToolchain -and $line -match '^\s*["'']?(channel|path)["'']?\s*=\s*(["''])([^"'']+)\2\s*(?:#.*)?$') {
-                $selectingFile = $true
-                break
-            }
+if ((Test-Path -LiteralPath (Join-Path $RepoRoot 'rust-toolchain') -PathType Leaf) -or
+    (Test-Path -LiteralPath (Join-Path $RepoRoot 'rust-toolchain.toml') -PathType Leaf)) {
+    Push-Location $RepoRoot
+    try {
+        $rustupOutput = @(& rustup show active-toolchain 2>&1)
+        if ($LASTEXITCODE -ne 0) {
+            throw "anvil: rustup could not resolve the repository toolchain file:`n$($rustupOutput -join "`n")"
         }
+        $active = $rustupOutput | Select-Object -Last 1
+        if ([string]::IsNullOrWhiteSpace([string] $active)) {
+            throw 'anvil: rustup returned no active repository toolchain'
+        }
+    } finally {
+        Pop-Location
     }
-}
-
-if ($selectingFile) {
+    $resolved = [string] $active
+    $sourceMarker = $resolved.LastIndexOf(' (')
+    if ($sourceMarker -ge 0) {
+        $resolved = $resolved.Substring(0, $sourceMarker)
+    }
+    Write-Output ('+' + $resolved)
     return
 }
 
@@ -122,7 +99,7 @@ $msrv = if ($values.ContainsKey('workspace.package')) {
 } else {
     throw 'anvil: no selecting rust-toolchain(.toml) and no root [workspace.package] or [package] rust-version; declare an MSRV or select a toolchain explicitly'
 }
-Write-ExplicitToolchainArg $msrv
+Write-Output ('+' + $msrv)
 })
 ''')
 

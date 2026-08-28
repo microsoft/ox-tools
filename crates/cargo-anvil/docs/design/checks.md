@@ -166,10 +166,12 @@ that provided the strongest version of the check.
 Invocations shown without a pinned nightly or MSRV use the selected stable
 compiler. Their generated PowerShell recipes invoke Cargo directly with the
 lazy optional stable argument: an explicit `+toolchain` for a caller override
-or root MSRV, and no argument when a repository toolchain file selects the
-compiler. The shared inline PowerShell array expression evaluates in that same
-recipe process without a host-OS branch or selector subprocess. They do not
-route the main command through a nested Just recipe.
+or root MSRV, or the concrete toolchain that rustup resolves from a repository
+toolchain file. The shared inline PowerShell array expression evaluates in that
+same recipe process without a host-OS branch. Its repository root is fixed by
+`justfile_directory()`, so checks that enter crate directories retain the same
+selection as setup. They do not route the main command through a nested Just
+recipe.
 Their paired setup recipes reach `anvil-toolchain-stable-install` directly or
 through the shared Cargo-tool/default-component installer before any stable
 command runs. Paired `*-validate-prereqs` recipes remain read-only and never

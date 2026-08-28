@@ -1074,7 +1074,7 @@ fn fake_cargo_with_metadata(dir: &Path, log: &Path, metadata_json: &Path) {
     #[cfg(unix)]
     {
         let script = format!(
-            "#!/bin/sh\nif [ \"$1\" = metadata ]; then cat '{meta}'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{log}'\nexit 0\n",
+            "#!/bin/sh\ncase \"$1\" in +*) shift ;; esac\nif [ \"$1\" = metadata ]; then cat '{meta}'; exit 0; fi\nprintf '%s\\n' \"$*\" >> '{log}'\nexit 0\n",
             meta = metadata_json.display(),
             log = log.display()
         );
@@ -1487,13 +1487,12 @@ fn impact_snapshot_uses_current_checkout_toolchain_for_both_trees() {
         "baseline and current snapshots must both use Anvil's selected MSRV"
     );
 
-    // Case C: a toolchain file is selected natively in the current checkout.
-    // The baseline needs rustup's concrete active identifier because the file
-    // may contain a path that cannot be assigned directly to RUSTUP_TOOLCHAIN.
+    // Case C: rustup resolves the current checkout's toolchain file once and
+    // the concrete identifier selects both snapshots.
     let with_file = snapshot_toolchain_probe(None, true);
     assert_eq!(
         with_file,
-        vec!["file-active-toolchain".to_owned(), "<unset>".to_owned()],
-        "baseline must use the current file's concrete active toolchain while the current snapshot lets rustup process that file natively"
+        vec!["file-active-toolchain".to_owned(), "file-active-toolchain".to_owned()],
+        "baseline and current snapshots must both use the current file's concrete active toolchain"
     );
 }
