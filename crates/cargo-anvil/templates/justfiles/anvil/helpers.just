@@ -133,5 +133,5 @@ _anvil-base-ref:
 _anvil-unscoped name:
     $ErrorActionPreference = 'Stop'
     $env:ANVIL_IMPACT = 'off'
-    & '{{ replace(just_executable(), "'", "''") }}' '_anvil-{{ name }}'
+    & '{{ replace(just_executable(), "'", "''") }}' '_anvil-{{ replace(name, "'", "''") }}'
     exit $LASTEXITCODE

@@ -81,9 +81,11 @@ files) are annotated with `[group("anvil-setup")]`. `just --groups` therefore sh
 two clean clusters: one for "run checks", one for "install prereqs".
 
 > **Containerized execution.** `justfiles/anvil/container.just` adds the
-> `anvil-container <recipe>` command, which runs any recipe below inside a pinned
+> `anvil-container <command…>` recipe, which runs the given argv inside a pinned
 > Linux image instead of against the host toolchain (Linux-on-Windows parity,
-> toolchain pinning). It is explicit: the tiers themselves always run natively.
+> toolchain pinning). Anvil recipes are reached by naming `just`
+> (`just anvil-container just anvil-pr`); with no argument it opens a shell. It
+> is explicit: the tiers themselves always run natively.
 > The recipe bodies are unchanged; see [containers.md](./containers.md).
 
 ## 2. Recipe layers

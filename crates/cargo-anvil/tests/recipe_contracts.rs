@@ -178,6 +178,20 @@ fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> 
     command.args(["--justfile", "Justfile"]).args(arguments).current_dir(root);
     command.env("PATH", path_with_fake_bin(root));
     command.env("FAKE_WORKSPACE_ROOT", root);
+    // A fixture is a scratch workspace, so it must not inherit the impact
+    // scoping of whatever invoked the test suite. A CI group job exports
+    // `ANVIL_IMPACT=consume` and downloads a cache into the real repository;
+    // inherited into a temp directory that has no cache, `anvil-impact` fails
+    // hard and takes the recipe under test with it. `ANVIL_INCLUDE_*` is the
+    // same hazard one level down: a leg whose scope resolved to `--skip` would
+    // silently short-circuit the recipe before it did anything. A test that
+    // cares about either value passes it explicitly below.
+    command.env_remove("ANVIL_IMPACT");
+    for key in std::env::vars_os().map(|(key, _)| key) {
+        if key.to_string_lossy().starts_with("ANVIL_INCLUDE_") {
+            command.env_remove(key);
+        }
+    }
     for &(key, value) in environment {
         command.env(key, value);
     }
@@ -1037,6 +1051,10 @@ fn mutants_diff_skips_on_arm64_windows() {
             // is the *other* early exit, pinned so a skipped impact scope
             // cannot be mistaken for the architecture bail-out.
             ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
+            // Same reason as the sibling contract: `anvil-mutants-diff` depends
+            // on `anvil-impact`, and this test is about the architecture
+            // bail-out, not about computing an impact set.
+            ("ANVIL_IMPACT", OsStr::new("off")),
         ],
     );
 
