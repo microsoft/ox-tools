@@ -742,10 +742,11 @@ mechanics are in [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact
 ## 6. Rust toolchain
 
 The user's root pipeline or compliance template installs Rust before the Anvil stages
-run. The generated setup step then resolves the catalog toolchain and publishes
-environment/MSRV selections as `RUSTUP_TOOLCHAIN` for subsequent steps before it
-captures `rustc --version` and restores the cache. A selecting toolchain file remains
-unset in the environment so rustup processes the complete file.
+run. The generated setup step resolves the catalog toolchain and captures its
+`rustc --version` through `_anvil-with-stable` before restoring the cache. It does
+not publish a resolved `RUSTUP_TOOLCHAIN` to subsequent steps. Each stable recipe
+applies the selection only to its own Cargo or Rust child process, while a selecting
+toolchain file remains unoverridden so rustup processes the complete file.
 
 Selection follows the shared local contract: an existing `RUSTUP_TOOLCHAIN`, then a
 root toolchain file with `channel` or `path`, then the root MSRV. Internal pipelines

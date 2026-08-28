@@ -401,13 +401,17 @@ checks. Internal builds may set `RUSTUP_TOOLCHAIN` to a provisioned toolchain ra
 than adding a public compiler pin. An empty root toolchain file is invalid and produces
 an actionable error.
 
-The generated `.anvil/resolve-stable-toolchain.ps1` implements this contract. For
-an existing environment override or MSRV fallback, the recipe tree exports the
-result as `RUSTUP_TOOLCHAIN`. For a selecting toolchain file it leaves that
-variable empty so rustup processes the complete file, including its components,
-targets, and profile. `just anvil-*` therefore behaves the same locally and in
-cloud workflows without changing the user's global rustup default. Raw `cargo`
-commands outside Anvil retain normal rustup behavior.
+The generated `.anvil/resolve-stable-toolchain.ps1` implements the parsing and
+installation logic behind the private `_anvil-resolve-stable` recipe.
+`RUSTUP_TOOLCHAIN` is an input to selection, never a globally exported output.
+Each stable check invokes its Cargo or Rust command through
+`_anvil-with-stable`, which applies an environment/MSRV selection only to that
+child process. For a selecting toolchain file the helper removes the override
+for that child so rustup processes the complete file, including its components,
+targets, and profile. Nightly and MSRV checks continue to pass explicit
+`+toolchain` arguments. The compiler intent is therefore visible at each command
+site, nested Just invocations cannot recursively demand a global exported value,
+and unrelated recipes and raw commands retain the caller's normal environment.
 
 An environment override or MSRV fallback normally causes rustup to ignore the
 repository toolchain file. Anvil therefore reads `profile`, `components`, and
@@ -418,11 +422,12 @@ Explicit components and targets are added at setup time. If an option is unavail
 for the selected compiler, Anvil warns and skips it, matching rustup's handling of
 unavailable options read directly from a toolchain file.
 
-The resolver is a generated bootstrap artifact rather than a regular Just recipe.
-`versions.just` needs the resolved value while Just is parsing imports, and cloud
-and container setup need it before the generated recipe catalog can run. Keeping
-the parser and installation behavior in one script avoids separate implementations
-at those pre-recipe call sites; ordinary validation and checks remain Just recipes.
+The resolver script is a generated implementation artifact, but all supported
+entry points call it through `_anvil-resolve-stable`. Because selection is no
+longer a globally exported Just variable, that standard recipe can be invoked
+from setup, checks, or nested Just helpers without a parse-time evaluation cycle.
+The single script implementation keeps PowerShell parsing and installation
+behavior identical across those recipe callers.
 
 When selection falls back to the root MSRV, prerequisite validation reads
 `cargo metadata` and requires every workspace package to resolve to that same

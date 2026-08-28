@@ -54,7 +54,7 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
             $packageNames.Add(($pkgArgs[++$i] -split '@', 2)[0])
         }
     } else {
-        $metadataJson = & cargo metadata --no-deps --format-version 1
+        $metadataJson = & "{{ just_executable() }}" _anvil-with-stable cargo metadata --no-deps --format-version 1
         if ($LASTEXITCODE -ne 0) {
             Write-Error 'anvil-bolero: cargo metadata failed'
             exit $LASTEXITCODE

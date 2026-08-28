@@ -19,23 +19,19 @@ parameters:
     default: ''
 steps:
   - pwsh: |
-      & '.anvil/resolve-stable-toolchain.ps1' -ApplyToolchainFileOptions
+      & just _anvil-resolve-stable apply-file-options
       if ($LASTEXITCODE -ne 0) {
         throw "anvil: stable toolchain option setup failed with exit code $LASTEXITCODE"
       }
-      $source = if ([string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) { 'resolved' } else { 'environment' }
-      $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' | Out-String).Trim()
+      $toolchain = (& just _anvil-resolve-stable | Out-String).Trim()
       if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($toolchain)) {
         throw 'anvil: failed to resolve stable toolchain'
       }
-      $environmentValue = (& '.anvil/resolve-stable-toolchain.ps1' -ForEnvironment | Out-String).Trim()
-      if (-not [string]::IsNullOrWhiteSpace($environmentValue)) {
-        Write-Host "##vso[task.setvariable variable=RUSTUP_TOOLCHAIN]$environmentValue"
-      }
-      Write-Host "##vso[task.setvariable variable=ANVIL_STABLE_TOOLCHAIN_SOURCE]$source"
       Write-Host "anvil: selected stable toolchain '$toolchain'"
     displayName: anvil setup (resolve stable toolchain)
-  - bash: echo "##vso[task.setvariable variable=anvil_rustc_version]$(rustc --version | awk '{print $2}')"
+  - pwsh: |
+      $version = (& just _anvil-with-stable rustc --version | Select-Object -Last 1).Split()[1]
+      Write-Host "##vso[task.setvariable variable=anvil_rustc_version]$version"
     displayName: anvil setup (capture rustc version)
   - task: Cache@2
     inputs:

@@ -270,7 +270,8 @@ Detail on each host:
 
 - **`Justfile` and `justfiles/anvil/*.just`** — see [local.md](./local.md).
 - **`.anvil/resolve-stable-toolchain.ps1`** — the unconditional generated
-  bootstrap shared by parse-time recipe variables and cloud/container setup.
+  implementation behind the private stable-toolchain recipes used by local,
+  cloud, and container setup.
 - **`.anvil/container/`** — the non-recipe container assets (Containerfile,
   drivers, image-ID helpers, README) emitted only when the catalog includes the
   optional container backend. `justfiles/` holds `.just` recipes and nothing
@@ -313,7 +314,9 @@ Detail on each host:
   When neither selects a toolchain, Anvil selects the root manifest's
   `[workspace.package].rust-version` or `[package].rust-version`. GitHub setup installs a
   missing public selection through rustup. ADO pipelines provision their selected internal
-  toolchain before Anvil runs.
+  toolchain before Anvil runs. The caller's `RUSTUP_TOOLCHAIN` is an input override only;
+  generated recipes apply resolved selection per stable command rather than exporting it
+  globally.
 
 The tool's persistent state lives in `.anvil.lock` at the repo root — the sidecar
 manifest tracking last-rendered checksums per owned file and per managed region. See

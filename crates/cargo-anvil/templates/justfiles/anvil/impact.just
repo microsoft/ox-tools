@@ -235,19 +235,25 @@ _anvil-impact-snapshot:
         # The baseline worktree is checked out at the merge target, whose
         # rust-toolchain.toml may pin a toolchain that is NOT installed on this
         # machine (any PR that bumps rust-toolchain.toml hits this). The
-        # snapshot is metadata-only (file presence + content hashes), so run it
-        # under the *active* toolchain via RUSTUP_TOOLCHAIN -- resolved here, in
-        # the current checkout, where it is installed -- which overrides the
-        # worktree's rust-toolchain.toml. Best-effort: skip if rustup is absent.
-        $activeToolchain = $null
-        # `rustup` may be absent (e.g. ADO msrustup provides `cargo` directly
-        # without a `rustup` command). Under `$ErrorActionPreference = 'Stop'`
-        # a bare `rustup` call would raise a terminating command-not-found
-        # error before the `$LASTEXITCODE` guard runs, so probe for the command
-        # first and leave `$activeToolchain` null when it is unavailable.
-        if (Get-Command rustup -ErrorAction SilentlyContinue) {
-            $rt = (rustup show active-toolchain 2>$null)
-            if (($LASTEXITCODE -eq 0) -and $rt) { $activeToolchain = (($rt | Select-Object -First 1) -split '\s+')[0] }
+        # snapshot is metadata-only (file presence + content hashes), so use
+        # the selected compiler from the current checkout to override any
+        # different toolchain file in the baseline worktree. Environment/MSRV
+        # selections are already valid rustup overrides. For a selecting
+        # toolchain file, ask rustup for the concrete active identifier so
+        # `path` selections are not mistaken for named toolchains.
+        $baselineToolchain = (& "{{ just_executable() }}" _anvil-resolve-stable for-environment | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        if ([string]::IsNullOrWhiteSpace($baselineToolchain)) {
+            if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+                Write-Error 'anvil-impact: rustup is required to resolve the active repository toolchain for the baseline snapshot'
+                exit 1
+            }
+            $active = (rustup show active-toolchain 2>$null)
+            if (($LASTEXITCODE -ne 0) -or -not $active) {
+                Write-Error 'anvil-impact: failed to resolve the active repository toolchain for the baseline snapshot'
+                exit 1
+            }
+            $baselineToolchain = (($active | Select-Object -First 1) -split '\s+')[0]
         }
 
         # Temp-root precedence follows the runner-managed scratch dir on each
@@ -280,14 +286,12 @@ _anvil-impact-snapshot:
                 Set-Content -LiteralPath $baselineKeyFile -Value $baselineKey -Encoding UTF8 -NoNewline
             } else {
                 Push-Location $wt
-                # Preserve any caller-provided RUSTUP_TOOLCHAIN: we override it
-                # only for this baseline snapshot, then restore the caller's
-                # value (or remove it if we introduced it) so the current
-                # snapshot below runs under the same toolchain the caller chose.
+                # Override only this baseline subprocess scope, then restore the
+                # caller's input override before returning to the current tree.
                 $hadToolchain = Test-Path Env:\RUSTUP_TOOLCHAIN
                 $priorToolchain = if ($hadToolchain) { $env:RUSTUP_TOOLCHAIN } else { $null }
                 try {
-                    if ($activeToolchain) { $env:RUSTUP_TOOLCHAIN = $activeToolchain }
+                    $env:RUSTUP_TOOLCHAIN = $baselineToolchain
                     $baseSnap = cargo delta @deltaArgs snapshot
                     if ($LASTEXITCODE -ne 0) { throw 'cargo delta snapshot (baseline) failed' }
                 } finally {
@@ -314,7 +318,7 @@ _anvil-impact-snapshot:
         Write-Host 'anvil-impact: current snapshot up to date'
     } else {
         Write-Host 'anvil-impact: snapshotting working tree'
-        $curSnap = cargo delta @deltaArgs snapshot
+        $curSnap = & "{{ just_executable() }}" _anvil-with-stable cargo delta @deltaArgs snapshot
         if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-impact: cargo delta snapshot (current) failed'; exit 1 }
         Set-Content -LiteralPath $currentJson -Value $curSnap -Encoding UTF8
         Set-Content -LiteralPath $currentKeyFile -Value $currentState -Encoding UTF8 -NoNewline
@@ -432,7 +436,7 @@ anvil-impact: _anvil-impact-snapshot
     # early), so default to an empty object so impact.json always exists --
     # the freshness check above keys on its presence, and a missing file
     # would force a recompute on every invocation.
-    $impactOut = (cargo delta @deltaArgs impact --baseline $baselineJson --current $currentJson --format json | Out-String)
+    $impactOut = (& "{{ just_executable() }}" _anvil-with-stable cargo delta @deltaArgs impact --baseline $baselineJson --current $currentJson --format json | Out-String)
     if ($LASTEXITCODE -ne 0) { Write-Error 'anvil-impact: cargo delta impact failed'; exit 1 }
     if ([string]::IsNullOrWhiteSpace($impactOut)) { $impactOut = '{}' }
     Set-Content -LiteralPath $impactJson -Value $impactOut.Trim() -Encoding UTF8
@@ -509,7 +513,7 @@ _anvil-impact-format tier impactJson:
     # nested workspaces cargo-delta can instead emit a manifest directory
     # leaf; accept any reported identifier only when every matching namespace
     # resolves to the *same* workspace package.
-    $metadataJson = & cargo metadata --no-deps --format-version 1
+    $metadataJson = & "{{ just_executable() }}" _anvil-with-stable cargo metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil-impact: cargo metadata failed'
         exit $LASTEXITCODE

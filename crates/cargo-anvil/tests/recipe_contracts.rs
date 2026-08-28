@@ -25,6 +25,7 @@ const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-ch
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
 const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
+const STABLE_TOOLCHAIN_RESOLVER: &str = include_str!("../templates/anvil/resolve-stable-toolchain.ps1");
 const FAKE_CARGO_PS1: &str = r#"
 $joined = $args -join ' '
 if ($env:FAKE_CARGO_LOG) {
@@ -147,6 +148,14 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
         write(&tmp.path().join(name), contents);
         writeln!(justfile, "import '{name}'").unwrap();
     }
+    if !imports.iter().any(|(name, _)| *name == "tools.just") {
+        justfile.push_str(
+            "\n[script(\"pwsh\", \"-NoProfile\")]\n\
+             _anvil-with-stable command *args:\n\
+             \x20   & '{{command}}' {{args}}\n\
+             \x20   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }\n",
+        );
+    }
     justfile.push('\n');
     for recipe in dependency_recipes {
         justfile.push_str(recipe);
@@ -155,8 +164,9 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
     write(&tmp.path().join("Justfile"), &justfile);
     write(
         &tmp.path().join("Cargo.toml"),
-        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\n",
+        "[package]\nname = \"fixture\"\nversion = \"0.1.0\"\nrust-version = \"1.97\"\n",
     );
+    write(&tmp.path().join(".anvil/resolve-stable-toolchain.ps1"), STABLE_TOOLCHAIN_RESOLVER);
 
     let bin = tmp.path().join("fake-bin");
     fs::create_dir_all(&bin).unwrap();

@@ -750,11 +750,12 @@ mod tests {
     }
 
     #[test]
-    fn stable_toolchain_resolution_is_exported() {
-        assert!(VERSIONS_JUST.contains("rust_stable_override := env_var_or_default("));
-        assert!(VERSIONS_JUST.contains("shell('pwsh -NoProfile -File .anvil/resolve-stable-toolchain.ps1 -ForEnvironment #')"));
-        assert!(VERSIONS_JUST.contains("export RUSTUP_TOOLCHAIN := rust_stable"));
-        assert!(VERSIONS_JUST.contains("export ANVIL_STABLE_TOOLCHAIN_SOURCE :="));
+    fn stable_toolchain_resolution_is_scoped_to_each_command() {
+        assert!(!VERSIONS_JUST.contains("export RUSTUP_TOOLCHAIN"));
+        assert!(TOOLS_JUST.contains("_anvil-resolve-stable action=\"resolve\":"));
+        assert!(TOOLS_JUST.contains("_anvil-with-stable command *args:"));
+        assert!(TOOLS_JUST.contains("Remove-Item Env:\\RUSTUP_TOOLCHAIN"));
+        assert!(TOOLS_JUST.contains("$env:RUSTUP_TOOLCHAIN = $toolchain"));
         assert!(STABLE_TOOLCHAIN_RESOLVER.contains("RUSTUP_TOOLCHAIN"));
         assert!(STABLE_TOOLCHAIN_RESOLVER.contains("rust-version"));
         assert!(STABLE_TOOLCHAIN_RESOLVER.contains("ValidateWorkspaceMsrv"));
@@ -764,6 +765,29 @@ mod tests {
         assert!(STABLE_TOOLCHAIN_RESOLVER.contains("EmitToolchainFileOptions"));
         assert!(STABLE_TOOLCHAIN_RESOLVER.contains("rustup component add --toolchain"));
         assert!(STABLE_TOOLCHAIN_RESOLVER.contains("rustup target add --toolchain"));
+    }
+
+    #[test]
+    fn checks_do_not_invoke_an_implicit_default_cargo() {
+        for (path, body) in CHECK_FILES {
+            for line in body.lines().map(str::trim) {
+                let invokes_cargo = line.starts_with("cargo ")
+                    || line.starts_with("& cargo ")
+                    || line.contains("= cargo ")
+                    || line.contains("= & cargo ")
+                    || line.contains("(& cargo ");
+                if invokes_cargo {
+                    let toolchain = line
+                        .split_once("cargo ")
+                        .map(|(_, arguments)| arguments.trim_start())
+                        .expect("invokes_cargo patterns always include 'cargo '");
+                    assert!(
+                        toolchain.starts_with("'+") || toolchain.starts_with("\"+"),
+                        "{path} invokes Cargo without an explicit toolchain or _anvil-with-stable: {line}"
+                    );
+                }
+            }
+        }
     }
 
     #[cfg(not(miri))]
@@ -791,7 +815,6 @@ mod tests {
                 .args(["-NoProfile", "-File", ".anvil/resolve-stable-toolchain.ps1"])
                 .args(args)
                 .current_dir(root)
-                .env_remove("ANVIL_STABLE_TOOLCHAIN_SOURCE")
                 .env_remove("ANVIL_MSRV_TOOLCHAIN");
             match rustup_toolchain {
                 Some(value) => {

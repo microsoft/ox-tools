@@ -52,11 +52,9 @@ COPY . .
 RUN --mount=type=cache,id=anvil-cargo-registry,target=/usr/local/cargo/registry \
     --mount=type=cache,id=anvil-cargo-git,target=/usr/local/cargo/git \
     --mount=type=cache,id=anvil-cargo-target,target=/tmp/anvil-target \
-    pwsh -NoProfile -File .anvil/resolve-stable-toolchain.ps1 -InstallIfMissing \
-    && toolchain="$(pwsh -NoProfile -File .anvil/resolve-stable-toolchain.ps1 -ForEnvironment)" \
-    && printf "anvil_runner := \"native\"\nimport 'justfiles/anvil/mod.just'\n" > Justfile \
-    && RUSTUP_TOOLCHAIN="$toolchain" ANVIL_STABLE_TOOLCHAIN_SOURCE=container \
-        CARGO_TARGET_DIR=/tmp/anvil-target just anvil-setup
+    printf "anvil_runner := \"native\"\nimport 'justfiles/anvil/mod.just'\n" > Justfile \
+    && just _anvil-resolve-stable install \
+    && CARGO_TARGET_DIR=/tmp/anvil-target just anvil-setup
 
 COPY .anvil/container/entrypoint.sh /usr/local/bin/anvil-container-entrypoint
 RUN chmod 755 /usr/local/bin/anvil-container-entrypoint

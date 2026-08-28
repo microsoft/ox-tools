@@ -174,7 +174,9 @@ available. Runtime execution uses `--pull=never` and never substitutes
 Container execution uses the same deterministic stable-toolchain selection as
 native execution: an existing `RUSTUP_TOOLCHAIN`, a selecting repository
 toolchain file, or the root manifest's MSRV. It fails rather than choosing a
-runner or image default when none is available.
+runner or image default when none is available. Image setup and checks invoke
+the standard resolver and selected-stable execution recipes; the resolved value
+is not exported across unrelated recipe processes.
 
 The restricted image-construction context does not contain workspace member
 manifests, so uniform per-package MSRV validation runs in native and cloud setup

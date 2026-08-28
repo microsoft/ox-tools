@@ -12,7 +12,7 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     if ($include -eq '--skip') { Write-Host 'anvil-msrv-test: no affected packages; skipping'; exit 0 }
-    $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' -MsrvToolchain | Out-String).Trim()
+    $toolchain = (& "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String).Trim()
     if ([string]::IsNullOrWhiteSpace($toolchain)) {
         Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'
         exit 0
@@ -27,14 +27,14 @@ anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test-setup installer="install":
-    & '.anvil/resolve-stable-toolchain.ps1' -InstallMsrvIfNeeded
+    & "{{ just_executable() }}" _anvil-resolve-stable install-msrv
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Validate the MSRV prerequisite.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test-validate-prereqs:
-    $toolchain = (& '.anvil/resolve-stable-toolchain.ps1' -MsrvToolchain | Out-String).Trim()
+    $toolchain = (& "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String).Trim()
     if ([string]::IsNullOrWhiteSpace($toolchain)) { exit 0 }
     & cargo "+$toolchain" --version
     if ($LASTEXITCODE -ne 0) {

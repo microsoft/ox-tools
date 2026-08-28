@@ -144,7 +144,7 @@ anvil-tool-rustc-validate-prereqs:
         Write-Error 'anvil: rustc not found. Install via rustup: https://rustup.rs'
         exit 1
     }
-    & pwsh -NoProfile -File '.anvil/resolve-stable-toolchain.ps1' -ValidateWorkspaceMsrv
+    & "{{ just_executable() }}" _anvil-resolve-stable validate-workspace-msrv
     if ($LASTEXITCODE -ne 0) {
         exit $LASTEXITCODE
     }
@@ -172,6 +172,41 @@ anvil-tool-pwsh-validate-prereqs:
 # ============================================================================
 # Private helpers (install/check primitives)
 # ============================================================================
+
+# Resolve or prepare the selected stable compiler without globally exporting it.
+[script("pwsh", "-NoProfile")]
+_anvil-resolve-stable action="resolve":
+    $ErrorActionPreference = 'Stop'
+    $resolverArgs = @(switch ('{{action}}') {
+        'resolve' { @() }
+        'for-environment' { @('-ForEnvironment') }
+        'install' { @('-InstallIfMissing') }
+        'apply-file-options' { @('-ApplyToolchainFileOptions') }
+        'validate-workspace-msrv' { @('-ValidateWorkspaceMsrv') }
+        'msrv' { @('-MsrvToolchain') }
+        'install-msrv' { @('-InstallMsrvIfNeeded') }
+        default {
+            Write-Error "_anvil-resolve-stable: unknown action '{{action}}'"
+            exit 2
+        }
+    })
+    & pwsh -NoProfile -File '.anvil/resolve-stable-toolchain.ps1' @resolverArgs
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+# Run one command under the selected stable compiler. A repository toolchain
+# file yields no override so rustup processes its complete configuration.
+[script("pwsh", "-NoProfile")]
+_anvil-with-stable command *args:
+    $ErrorActionPreference = 'Stop'
+    $toolchain = (& "{{ just_executable() }}" _anvil-resolve-stable for-environment | Out-String).Trim()
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    if ([string]::IsNullOrWhiteSpace($toolchain)) {
+        Remove-Item Env:\RUSTUP_TOOLCHAIN -ErrorAction SilentlyContinue
+    } else {
+        $env:RUSTUP_TOOLCHAIN = $toolchain
+    }
+    & '{{command}}' {{args}}
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # _install-tool: install a cargo subcommand at the catalog version,
 # or no-op if it is already installed at or above that version. The
@@ -203,7 +238,7 @@ _install-tool name version installer source_prereq="":
     # cached binaries and fail with "binary already exists in destination".
     $installed = $null
     $pattern = '^' + [regex]::Escape($name) + ' v(\S+):'
-    foreach ($line in (cargo install --list 2>$null)) {
+    foreach ($line in (& "{{ just_executable() }}" _anvil-with-stable cargo install --list 2>$null)) {
         if ($line -match $pattern) { $installed = $Matches[1]; break }
     }
     if ($installed) {
@@ -221,7 +256,7 @@ _install-tool name version installer source_prereq="":
     if ($installer -eq 'binstall') {
         if (-not (Get-Command cargo-binstall -ErrorAction SilentlyContinue)) {
             Write-Host '  Bootstrapping cargo-binstall'
-            cargo install --locked cargo-binstall
+            & "{{ just_executable() }}" _anvil-with-stable cargo install --locked cargo-binstall
             if ($LASTEXITCODE -ne 0) {
                 Write-Error 'cargo-binstall bootstrap failed'
                 exit $LASTEXITCODE
@@ -235,7 +270,7 @@ _install-tool name version installer source_prereq="":
             $binstallArgs += @('--disable-strategies', 'compile')
         }
         $binstallArgs += @($name, '--version', "=$version")
-        cargo @binstallArgs
+        & "{{ just_executable() }}" _anvil-with-stable cargo @binstallArgs
         if ($LASTEXITCODE -eq 0) { exit 0 }
         Write-Host '  binstall failed; falling back to cargo install' -ForegroundColor Yellow
     }
@@ -243,7 +278,7 @@ _install-tool name version installer source_prereq="":
         & "{{just_executable()}}" $sourcePrereq
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
-    cargo install --locked $name --version "=$version"
+    & "{{ just_executable() }}" _anvil-with-stable cargo install --locked $name --version "=$version"
     if ($LASTEXITCODE -ne 0) {
         Write-Error "$name install FAILED"
         exit $LASTEXITCODE
@@ -259,7 +294,7 @@ _check-tool name version:
 
     $installed = $null
     $pattern = '^' + [regex]::Escape($name) + ' v(\S+):'
-    foreach ($line in (cargo install --list 2>$null)) {
+    foreach ($line in (& "{{ just_executable() }}" _anvil-with-stable cargo install --list 2>$null)) {
         if ($line -match $pattern) { $installed = $Matches[1]; break }
     }
     if (-not $installed) {
@@ -340,14 +375,14 @@ _install-component toolchain component:
     }
     if ($null -ne $subcommand) {
         if ($toolchain -eq 'default') {
-            & cargo $subcommand --version *> $null
+            & "{{ just_executable() }}" _anvil-with-stable cargo $subcommand --version *> $null
         } else {
             & cargo "+$toolchain" $subcommand --version *> $null
         }
         $present = ($LASTEXITCODE -eq 0)
     } else {
         $sysroot = if ($toolchain -eq 'default') {
-            & rustc --print sysroot 2>$null
+            & "{{ just_executable() }}" _anvil-with-stable rustc --print sysroot 2>$null
         } else {
             & rustc "+$toolchain" --print sysroot 2>$null
         }
@@ -408,14 +443,14 @@ _check-component toolchain component:
     }
     if ($null -ne $subcommand) {
         if ($toolchain -eq 'default') {
-            & cargo $subcommand --version *> $null
+            & "{{ just_executable() }}" _anvil-with-stable cargo $subcommand --version *> $null
         } else {
             & cargo "+$toolchain" $subcommand --version *> $null
         }
         $present = ($LASTEXITCODE -eq 0)
     } else {
         $sysroot = if ($toolchain -eq 'default') {
-            & rustc --print sysroot 2>$null
+            & "{{ just_executable() }}" _anvil-with-stable rustc --print sysroot 2>$null
         } else {
             & rustc "+$toolchain" --print sysroot 2>$null
         }

@@ -37,7 +37,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
     # never opts a changed package out of tests.
     $testOnlyPkg = [System.Collections.Generic.List[string]]::new()
     if ($pkg -contains '--package') {
-        $metadataJson = & cargo metadata --no-deps --format-version 1
+        $metadataJson = & "{{ just_executable() }}" _anvil-with-stable cargo metadata --no-deps --format-version 1
         if ($LASTEXITCODE -ne 0) {
             Write-Error 'anvil-llvm-cov: cargo metadata failed'
             exit $LASTEXITCODE
@@ -168,7 +168,7 @@ anvil-llvm-cov: anvil-llvm-cov-validate-prereqs anvil-impact
         }
         $gateArgs.Add($pkg[$i])
     }
-    cargo coverage-gate @gateArgs --lcov target/coverage/lcov-all-features.info --lcov target/coverage/lcov-no-default.info
+    & "{{ just_executable() }}" _anvil-with-stable cargo coverage-gate @gateArgs --lcov target/coverage/lcov-all-features.info --lcov target/coverage/lcov-no-default.info
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # --- pr-test members (shared with scheduled-test) ---

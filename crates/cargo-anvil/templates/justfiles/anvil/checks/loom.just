@@ -55,7 +55,7 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
         Write-Host 'anvil-loom: no affected packages; skipping'
         exit 0
     }
-    $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+    $meta = & "{{ just_executable() }}" _anvil-with-stable cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     # Optional impact-scoping: recover bare package names from the
@@ -108,7 +108,7 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
     $env:RUSTFLAGS = "--cfg loom $($env:RUSTFLAGS)".Trim()
     foreach ($lt in $loomTargets) {
         Write-Host "anvil-loom: $($lt.pkg) :: $($lt.target)"
-        & cargo test -p $lt.pkg --release --all-features --locked --test $lt.target -- --test-threads=1
+        & "{{ just_executable() }}" _anvil-with-stable cargo test -p $lt.pkg --release --all-features --locked --test $lt.target -- --test-threads=1
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     }
 

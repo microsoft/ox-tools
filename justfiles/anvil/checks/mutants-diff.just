@@ -43,7 +43,7 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     $diff_path = Join-Path $tmp_dir 'anvil-mutants-diff.diff'
     git diff "$base..HEAD" --output=$diff_path
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    cargo mutants --in-diff $diff_path --no-shuffle --jobs 0
+    & "{{ just_executable() }}" _anvil-with-stable cargo mutants --in-diff $diff_path --no-shuffle --jobs 0
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # --- pr-mutants members ---

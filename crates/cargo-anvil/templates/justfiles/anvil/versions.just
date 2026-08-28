@@ -30,24 +30,9 @@
 # Rustup toolchains
 # ============================================================================
 
-# Stable toolchain used by every check without an explicit +toolchain argument.
-# The resolver honors RUSTUP_TOOLCHAIN, then a selecting root toolchain file,
-# then the root package/workspace MSRV. Environment and MSRV selections are
-# exported here; a toolchain-file selection stays empty so rustup honors the
-# file's complete targets/components/profile configuration.
-rust_stable_override := env_var_or_default('RUSTUP_TOOLCHAIN', '')
-# The resolver command ends in a comment so PowerShell's commonly configured
-# -Command shell ignores Just's argv[0] copy instead of joining it back in.
-rust_stable := if rust_stable_override != '' {
-    rust_stable_override
-} else {
-    shell('pwsh -NoProfile -File .anvil/resolve-stable-toolchain.ps1 -ForEnvironment #')
-}
-export RUSTUP_TOOLCHAIN := rust_stable
-export ANVIL_STABLE_TOOLCHAIN_SOURCE := env_var_or_default(
-    'ANVIL_STABLE_TOOLCHAIN_SOURCE',
-    if rust_stable_override == '' { 'resolved' } else { 'environment' },
-)
+# Stable checks select their compiler through `_anvil-with-stable` at the
+# individual command site. `RUSTUP_TOOLCHAIN` is an input override only; Anvil
+# never exports a resolved value globally into unrelated recipes or helpers.
 
 # General nightly used by udeps, miri, careful, and any future
 # nightly-dependent check. Bumped on a regular cadence (monthly is a

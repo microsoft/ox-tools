@@ -245,10 +245,6 @@ fn workspace() -> TempDir {
 ///   `GITHUB_BASE_REF=main`); inherited, `_anvil-base-ref` would resolve
 ///   `origin/main`, which does not exist in the temp repo (whose base is
 ///   `origin/master`), and the snapshot would fail base-ref resolution.
-/// - `ANVIL_STABLE_TOOLCHAIN_SOURCE`: cloud setup sets this for the outer
-///   repository; inherited, resolver validation would treat the fixture's
-///   toolchain as its own resolved selection and invoke intentionally fake
-///   `cargo metadata` shims used by impact tests.
 ///
 /// Tests that need a specific mode or base set the var back on the returned
 /// Command.
@@ -260,7 +256,6 @@ fn just_cmd(root: &Path, args: &[&str]) -> Command {
         .env_remove("BASE_REF")
         .env_remove("GITHUB_BASE_REF")
         .env_remove("SYSTEM_PULLREQUEST_TARGETBRANCH")
-        .env_remove("ANVIL_STABLE_TOOLCHAIN_SOURCE")
         .current_dir(root);
     cmd
 }
@@ -1000,7 +995,6 @@ fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msr
     let run_msrv = || {
         just_cmd(root, &["anvil-msrv-test"])
             .env("ANVIL_IMPACT", "consume")
-            .env("ANVIL_STABLE_TOOLCHAIN_SOURCE", "environment")
             .env("RUSTUP_TOOLCHAIN", "test-stable")
             .env("PATH", &path)
             .output()
@@ -1386,18 +1380,20 @@ fn impact_format_maps_proc_macro_target_name_to_its_package() {
 }
 
 /// Drive `just _anvil-impact-snapshot` under a `cargo` shim that records the
-/// `RUSTUP_TOOLCHAIN` in effect at each `cargo delta snapshot` and a `rustup`
-/// shim that reports a fixed active toolchain, returning the two logged values
-/// in order: `[baseline, current]`. `caller_toolchain` is the value the caller
-/// exports (or `None` to leave it unset).
-fn snapshot_toolchain_probe(caller_toolchain: Option<&str>) -> Vec<String> {
+/// `RUSTUP_TOOLCHAIN` in effect at each `cargo delta snapshot`, returning the
+/// two logged values in order: `[baseline, current]`. `caller_toolchain` is the
+/// input override the caller exports (or `None` to use repository selection).
+fn snapshot_toolchain_probe(caller_toolchain: Option<&str>, toolchain_file: bool) -> Vec<String> {
     let tmp = workspace();
     let root = tmp.path();
+    if toolchain_file {
+        write(&root.join("rust-toolchain.toml"), "[toolchain]\npath = \"toolchains/local\"\n");
+        git(root, &["add", "rust-toolchain.toml"]);
+        git(root, &["commit", "-q", "-m", "select local toolchain"]);
+    }
     // cargo shim: log the active RUSTUP_TOOLCHAIN on each `delta snapshot`
     // (emitting `{}` as the snapshot), satisfy the cargo-delta prereq probe
-    // (`cargo install --list`), and no-op everything else. rustup shim: report
-    // a fixed active toolchain, distinct from any caller value, so the baseline
-    // override is unambiguous.
+    // (`cargo install --list`), and no-op everything else.
     let shim = ShimBin::new(&[
         (
             "cargo.ps1",
@@ -1416,7 +1412,7 @@ fn snapshot_toolchain_probe(caller_toolchain: Option<&str>) -> Vec<String> {
         (
             "rustup.ps1",
             "if (($args -contains 'show') -and ($args -contains 'active-toolchain')) {\n\
-            \x20   Write-Output 'anvil-active-toolchain'\n\
+            \x20   Write-Output 'file-active-toolchain (overridden by rust-toolchain.toml)'\n\
             \x20   exit 0\n\
             }\n\
             exit 0\n",
@@ -1440,34 +1436,39 @@ fn snapshot_toolchain_probe(caller_toolchain: Option<&str>) -> Vec<String> {
 }
 
 #[test]
-fn impact_snapshot_runs_baseline_under_active_toolchain_then_restores_caller_value() {
+fn impact_snapshot_uses_current_checkout_toolchain_for_both_trees() {
     if !core_tools_available() {
         return;
     }
     // The baseline snapshot is taken inside a worktree checked out at the merge
     // target, whose rust-toolchain.toml may pin a toolchain that is NOT
-    // installed here (any PR that bumps rust-toolchain.toml). The recipe runs
-    // that snapshot under the *active* toolchain via RUSTUP_TOOLCHAIN, then must
-    // put the caller's value back so the *current* snapshot runs under the
-    // toolchain Anvil selected -- restoring either the caller override or the
-    // deterministic MSRV fallback. A regression that forgets to restore would
-    // leak the baseline override into the current snapshot.
+    // installed here (any PR that bumps rust-toolchain.toml). Both snapshots
+    // must therefore use the compiler selected from the current checkout so
+    // cargo-delta compares metadata produced under one compiler policy.
 
-    // Case A: the caller pins RUSTUP_TOOLCHAIN. Baseline runs under the active
-    // toolchain; the current snapshot must see the caller's pin restored.
-    let with_caller = snapshot_toolchain_probe(Some("caller-pin-toolchain"));
+    // Case A: the caller override is the selected compiler for both trees.
+    let with_caller = snapshot_toolchain_probe(Some("caller-pin-toolchain"), false);
     assert_eq!(
         with_caller,
-        vec!["anvil-active-toolchain".to_owned(), "caller-pin-toolchain".to_owned()],
-        "baseline must snapshot under the active toolchain, then the caller's RUSTUP_TOOLCHAIN must be restored for the current snapshot"
+        vec!["caller-pin-toolchain".to_owned(), "caller-pin-toolchain".to_owned()],
+        "baseline and current snapshots must both use the caller's selected compiler"
     );
 
-    // Case B: the caller sets nothing. Anvil selects the workspace MSRV, and
-    // the recipe must restore that value after the temporary baseline override.
-    let without_caller = snapshot_toolchain_probe(None);
+    // Case B: without an override, the workspace MSRV selects both snapshots.
+    let without_caller = snapshot_toolchain_probe(None, false);
     assert_eq!(
         without_caller,
-        vec!["anvil-active-toolchain".to_owned(), "1.97".to_owned()],
-        "with no caller RUSTUP_TOOLCHAIN, the recipe must restore Anvil's selected MSRV after the baseline override"
+        vec!["1.97".to_owned(), "1.97".to_owned()],
+        "baseline and current snapshots must both use Anvil's selected MSRV"
+    );
+
+    // Case C: a toolchain file is selected natively in the current checkout.
+    // The baseline needs rustup's concrete active identifier because the file
+    // may contain a path that cannot be assigned directly to RUSTUP_TOOLCHAIN.
+    let with_file = snapshot_toolchain_probe(None, true);
+    assert_eq!(
+        with_file,
+        vec!["file-active-toolchain".to_owned(), "<unset>".to_owned()],
+        "baseline must use the current file's concrete active toolchain while the current snapshot lets rustup process that file natively"
     );
 }

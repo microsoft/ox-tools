@@ -244,11 +244,7 @@ if ($EmitToolchainFileOptions) {
     exit 0
 }
 if ($ValidateWorkspaceMsrv) {
-    $skipWorkspaceMsrvValidation = if ([string]::IsNullOrWhiteSpace($env:ANVIL_STABLE_TOOLCHAIN_SOURCE)) {
-        -not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)
-    } else {
-        $env:ANVIL_STABLE_TOOLCHAIN_SOURCE -in @('environment', 'container')
-    }
+    $skipWorkspaceMsrvValidation = -not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)
     if (-not $skipWorkspaceMsrvValidation -and $null -eq $fileSelection) {
         Assert-UniformWorkspaceMsrv
     }
