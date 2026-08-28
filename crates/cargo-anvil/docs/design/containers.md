@@ -1,12 +1,12 @@
 # Containerized execution
 
-Any generated recipe can be executed inside a Linux image built from the toolchain and tool versions the repository
+Any command can be executed inside a Linux image built from the toolchain and tool versions the repository
 pins:
 
 ```bash
-just anvil-container anvil-clippy   # one check
-just anvil-container anvil-pr       # the whole PR tier
-just anvil-container                # interactive shell
+just anvil-container just anvil-pr    # a tier
+just anvil-container cargo build      # any other command
+just anvil-container                  # interactive shell
 ```
 
 Execution is opt-in per invocation: recipes run natively unless a container is requested by name. The feature is three
@@ -56,38 +56,21 @@ own agents. The image is pinned to resemble that environment, not to reproduce i
 
 ## 2. Command surface
 
-`anvil-container` accepts a recipe name and its arguments; every other recipe continues to execute natively.
+`anvil-container` takes the argv to run inside the image; every recipe continues to execute natively unless a
+container is requested by name. Anvil recipes are reached by naming `just`, like any other command:
 
 ```bash
-just anvil-container anvil-setup binstall
+just anvil-container just anvil-setup binstall
+just anvil-container cargo build
 ```
 
-**Upgrading from 0.4.0.** The routing seam is gone, and its removal is silent for the repositories most likely to
-care. 0.4.0 let a repository opt into containers by exporting `ANVIL_RUNNER=container`, which routed a tier through
-`_anvil-run`; anyone who did that left the generated `anvil-runner` region byte-identical, so regeneration classifies
-it `Remove` and deletes it without comment. From the next `just anvil-pr` the tier runs natively on the host
-toolchain, with no diagnostic and no behaviour anvil can detect. What was removed:
-
-| Removed in this release | Replacement |
-| --- | --- |
-| `ANVIL_RUNNER` environment variable | none — name the container explicitly with `just anvil-container <recipe>` |
-| the `anvil-runner` managed region in the root `Justfile` | none |
-| `justfiles/anvil/runner.just` | `justfiles/anvil/container.just` |
-| the `_anvil-pr`, `_anvil-scheduled` and `_anvil-full` shadow recipes | the tiers themselves, which now only run natively |
-| `.anvil/container/run-in-container.{sh,ps1}`, `entrypoint.sh`, `image-id.{sh,ps1}`, `Containerfile*` | `.anvil/container/Dockerfile` and its ignore file |
-
-A 0.4.0 installation also holds cache volumes named `anvil-cargo-registry-<repo-id>`, `anvil-cargo-git-<repo-id>` and
-`anvil-target-<repo-id>-<image-id>`. This release keys volume names on the repository *directory name* instead, so
-none of those are reused and `anvil-container-down` does not remove them; `anvil-target-*` in particular holds a full
-workspace `target/`. Remove them once with the engine directly.
-
-Arguments are whitespace-delimited tokens. `just` joins a variadic `*target` with spaces before the recipe body sees
-it, so the original argv is unrecoverable and an argument containing a space does not round-trip. No catalog recipe
-takes one; a fork whose recipes do should pass them through the environment instead.
+Arguments are whitespace-delimited tokens. `just` joins a variadic `*command` with spaces before the recipe body sees
+it, so the original argv is unrecoverable and an argument containing a space does not round-trip. Pass such a value
+through the environment instead.
 
 | Recipe | Behaviour |
 | --- | --- |
-| `just anvil-container <recipe> [args…]` | Execute a recipe in the image. With no argument, opens an interactive shell. |
+| `just anvil-container <command…>` | Execute a command in the image. With no argument, opens an interactive shell. |
 | `just anvil-container-tag` | Print the image reference for the current inputs. Builds nothing. |
 | `just anvil-container-status` | Print the engine, working directory, image reference, and whether it is present. Never builds or pulls. |
 | `just anvil-container-down` | Remove this repository's cache volumes. The image is retained. |
@@ -100,14 +83,14 @@ There is deliberately no `anvil-container-rebuild`. Its whole body would be `ANV
 the ordinary resolve, and that variable is already public below — where it also composes with `NO_REBUILD` and
 `NO_RESOLVE`, which a recipe form does not.
 
-What the recipe did supply was **scope**: it set the variable in its own process and exited, so exactly one build
-ignored the cache. An exported variable is sticky, and every container command reads it, so a forgotten
+What a recipe form would supply is **scope**: it sets the variable in its own process and exits, so exactly one build
+ignores the cache. An exported variable is sticky, and every container command reads it, so a forgotten
 `ANVIL_CONTAINER_NO_CACHE` rebuilds from scratch on each later invocation with nothing to indicate why. Scope it to
 the one run:
 
 ```powershell
 $env:ANVIL_CONTAINER_NO_CACHE = '1'
-try { just anvil-container anvil-fmt } finally { Remove-Item Env:ANVIL_CONTAINER_NO_CACHE }
+try { just anvil-container just anvil-fmt } finally { Remove-Item Env:ANVIL_CONTAINER_NO_CACHE }
 ```
 
 | Variable | Effect |
@@ -158,10 +141,10 @@ silent in a way that matters: the file carries the base digest and four tool pin
 keeps building on the base and versions frozen at that moment, while `anvil-container-tag` resolves happily *because
 the tag hashes their file*. The identity scheme works perfectly and still names a stale image.
 
-**What regions actually change.** They do not make anvil's content unwritable: §2's ownership rules apply to a region
+**What regions buy.** They do not make anvil's content unwritable: §2's ownership rules apply to a region
 body exactly as they do to a file, so an edit *inside* a region is still preserved and still produces a proposal rather
 than being overwritten. Anvil never destroys repository content, and a special case here would be the one place it did.
-What changes is that there is no longer a reason to edit: every legitimate addition — another base image, a root CA, a
+What they remove is the reason to edit: every legitimate addition — another base image, a root CA, a
 build dependency, a run-time tool — has a gap that is the *correct* place for it, chosen by what must already be true
 at that point in the build.
 

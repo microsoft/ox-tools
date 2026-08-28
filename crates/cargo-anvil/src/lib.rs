@@ -113,16 +113,17 @@
 //!
 //! Execution is opt-in per invocation: `just anvil-pr` and every other recipe
 //! continue to run natively, and a container is entered only through
-//! `anvil-container`, which takes any recipe name and its arguments. Those
-//! arguments are whitespace-delimited tokens: `just` joins a variadic
+//! `anvil-container`, whose arguments are the argv executed inside the image.
+//! Those arguments are whitespace-delimited tokens: `just` joins a variadic
 //! parameter with spaces before the recipe sees it, so an argument that itself
 //! contains a space cannot be recovered and does not survive the round trip.
 //!
 //! ```text
-//! just anvil-container anvil-clippy         # one check
-//! just anvil-container anvil-pr             # the whole PR tier
-//! just anvil-container anvil-setup binstall # a recipe with an argument
-//! just anvil-container                      # interactive shell
+//! just anvil-container just anvil-clippy         # one check
+//! just anvil-container just anvil-pr             # the whole PR tier
+//! just anvil-container just anvil-setup binstall # a recipe with an argument
+//! just anvil-container cargo build               # any other command
+//! just anvil-container                           # interactive shell
 //! ```
 //!
 //! The feature is three generated artifacts and one optional hook script, with
@@ -198,7 +199,7 @@
 //!
 //! ```text
 //! $env:ANVIL_CONTAINER_NO_CACHE = '1'
-//! try { just anvil-container anvil-fmt } finally { Remove-Item Env:ANVIL_CONTAINER_NO_CACHE }
+//! try { just anvil-container just anvil-fmt } finally { Remove-Item Env:ANVIL_CONTAINER_NO_CACHE }
 //! ```
 //!
 //! ### The hook

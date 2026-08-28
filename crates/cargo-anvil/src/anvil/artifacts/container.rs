@@ -424,7 +424,7 @@ mod tests {
     fn recipe_has_no_generation_time_placeholders() {
         // Every value is a literal or resolved at run time; nothing is
         // substituted at emit time, so the recipe cannot drift from a
-        // configuration file that no longer exists.
+        // configuration file.
         assert!(!RECIPE.contains("__"), "the recipe must not carry rendering placeholders");
         assert!(!RECIPE.contains("anvil.toml"));
     }
@@ -432,7 +432,7 @@ mod tests {
     #[test]
     fn recipe_exposes_the_documented_surface() {
         for expected in [
-            "anvil-container *target:",
+            "anvil-container *command:",
             "anvil-container-tag:",
             "anvil-container-status:",
             "anvil-container-down:",
@@ -454,7 +454,7 @@ mod tests {
         // so each public recipe repeats a one-line summary immediately above
         // its attributes.
         for recipe in [
-            "anvil-container *target:",
+            "anvil-container *command:",
             "anvil-container-tag:",
             "anvil-container-status:",
             "anvil-container-down:",
@@ -599,7 +599,7 @@ mod tests {
         // And the escaping that is present uses just's own doubling form.
         assert!(RECIPE.contains(r#"replace(justfile_directory(), "'", "''")"#));
         assert!(RECIPE.contains(r#"replace(invocation_directory_native(), "'", "''")"#));
-        assert!(RECIPE.contains(r#"replace(target, "'", "''")"#));
+        assert!(RECIPE.contains(r#"replace(command, "'", "''")"#));
     }
 
     #[test]
@@ -610,18 +610,22 @@ mod tests {
     }
 
     #[test]
-    fn a_recipe_argument_survives_as_its_own_word() {
-        // `*target` joins with spaces, so passing it through as one string
-        // would break `anvil-container anvil-setup binstall` -- and around
-        // fifty generated recipes take a parameter.
+    fn an_argument_survives_as_its_own_word() {
+        // `*command` joins with spaces, so passing it through as one string
+        // would run a single argument containing them all.
         assert!(RECIPE.contains(r"-split '\s+'"));
-        assert!(RECIPE.contains("}}' @targetParts"));
-        assert!(RECIPE.contains("@('just') + $targetParts"));
-        // Every nested call goes through the launching binary, including the
-        // in-container passthrough: ANVIL_IN_CONTAINER is a documented control
-        // a developer can set on a host, where a bare name resolves against
-        // PATH rather than the `just` that is running.
-        assert!(!RECIPE.contains("\n        just @targetParts"));
+        // The argv is the command. Prefixing it would confine the recipe to
+        // `just` and make every other program unreachable.
+        assert!(RECIPE.contains("$runArgs += $argv"));
+        assert!(!RECIPE.contains("@('just') + $argv"));
+    }
+
+    #[test]
+    fn a_nested_just_resolves_to_the_launching_binary() {
+        // ANVIL_IN_CONTAINER is a documented control a developer can set on a
+        // host, where a bare name resolves against PATH rather than the `just`
+        // that is running.
+        assert!(RECIPE.contains(r#"if ($argv[0] -eq 'just') { '{{ replace(just_executable(), "'", "''") }}' } else { $argv[0] }"#));
     }
 
     #[test]
@@ -655,10 +659,10 @@ mod tests {
 
     #[test]
     fn hook_file_is_an_image_input_but_hook_output_is_not() {
-        // A changed hook must rename the tag; a minted credential must not.
-        // The hook is no longer named individually -- it is picked up by the
-        // walk of `.anvil/container/`, which is what also catches a file a
-        // repository `COPY`s from one of the Dockerfile's user gaps.
+        // A changed hook must rename the tag; a minted credential must not. The
+        // hook is picked up by the walk of `.anvil/container/`, which is what
+        // also catches a file a repository `COPY`s from one of the Dockerfile's
+        // user gaps.
         assert!(RECIPE.contains("$containerRoot = Join-Path $repoRoot '.anvil/container'"));
         assert!(RECIPE.contains("id=$id,env=$name"));
     }
@@ -810,31 +814,33 @@ mod tests {
     }
 
     #[test]
-    fn a_derived_token_is_scoped_to_a_target_that_reads_it() {
+    fn a_derived_token_is_scoped_to_a_command_that_reads_it() {
         // Forwarding an exported GITHUB_TOKEN is exact parity: natively it is
         // visible to every process the shell spawns too. Minting one from `gh`
         // is not -- PID 1's environment reaches every build script and proc
         // macro, where natively the recipe mints it in its own process -- so it
-        // happens only for a target whose plan reads the variable.
+        // happens only for a command whose plan reads the variable.
         let derive = RECIPE.find("gh auth token --hostname").expect("the gh fallback must exist");
         let guard = RECIPE[..derive].rfind("if ($needsToken)").expect("the derive must be guarded");
         let plan = RECIPE[..guard]
             .rfind("$plan -match 'GITHUB_TOKEN'")
             .expect("the plan must decide whether a token is needed");
         let dry_run = RECIPE[..plan]
-            .rfind("--dry-run @targetParts")
+            .rfind("--dry-run @($argv | Select-Object -Skip 1)")
             .expect("the plan must come from just");
         assert!(dry_run < plan && plan < guard, "compute the plan, match it, then derive");
         // Through the launching binary, like every other nested call: a bare
         // `just` here fails silently when the caller invoked it by absolute
         // path, and an empty plan reads as "no token needed".
         assert!(!RECIPE.contains("(just --dry-run"));
-        assert!(RECIPE.contains("}}' --dry-run @targetParts"));
+        assert!(RECIPE.contains(r"}}' --dry-run @($argv | Select-Object -Skip 1)"));
         // The predicate is the variable, not the name of a check, so a catalog
         // that adds another GitHub-authenticated check is covered for free.
         assert!(!RECIPE.contains("$plan -match 'aprz'"));
-        // An interactive session has no target to plan, and can run anything.
-        assert!(RECIPE.contains("$needsToken = $targetParts.Count -eq 0"));
+        // An interactive session has no command to plan, and can run anything.
+        assert!(RECIPE.contains("$needsToken = $argv.Count -eq 0"));
+        // Only `just` can be planned, so nothing else earns a minted credential.
+        assert!(RECIPE.contains("if (-not $needsToken -and $argv[0] -eq 'just')"));
     }
 
     #[test]

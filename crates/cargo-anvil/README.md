@@ -112,16 +112,17 @@ the toolset by construction, with no second tool list to keep in step.
 
 Execution is opt-in per invocation: `just anvil-pr` and every other recipe
 continue to run natively, and a container is entered only through
-`anvil-container`, which takes any recipe name and its arguments. Those
-arguments are whitespace-delimited tokens: `just` joins a variadic
+`anvil-container`, whose arguments are the argv executed inside the image.
+Those arguments are whitespace-delimited tokens: `just` joins a variadic
 parameter with spaces before the recipe sees it, so an argument that itself
 contains a space cannot be recovered and does not survive the round trip.
 
 ```text
-just anvil-container anvil-clippy         # one check
-just anvil-container anvil-pr             # the whole PR tier
-just anvil-container anvil-setup binstall # a recipe with an argument
-just anvil-container                      # interactive shell
+just anvil-container just anvil-clippy         # one check
+just anvil-container just anvil-pr             # the whole PR tier
+just anvil-container just anvil-setup binstall # a recipe with an argument
+just anvil-container cargo build               # any other command
+just anvil-container                           # interactive shell
 ```
 
 The feature is three generated artifacts and one optional hook script, with
@@ -197,7 +198,7 @@ so a forgotten one rebuilds from scratch each time:
 
 ```text
 $env:ANVIL_CONTAINER_NO_CACHE = '1'
-try { just anvil-container anvil-fmt } finally { Remove-Item Env:ANVIL_CONTAINER_NO_CACHE }
+try { just anvil-container just anvil-fmt } finally { Remove-Item Env:ANVIL_CONTAINER_NO_CACHE }
 ```
 
 #### The hook
@@ -480,7 +481,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbcyN35C50s70b7icANpGEc88bQlr3I2a8WwobrcveTzoRNR9hZIGDa2NhcmdvLWFudmlsZTAuNS4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQb5Q3GF-6G62YbV-q0mTL9mIYbh7z-5PL8118b-8n3fLqY9pRhZIGDa2NhcmdvLWFudmlsZTAuNS4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=artifacts

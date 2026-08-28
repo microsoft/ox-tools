@@ -515,8 +515,8 @@ fn composed_host_spec(host_relpath: &str) -> Option<(&'static str, &'static [&'s
 enum ComposedHostState {
     /// Carries every region anvil owns, in the declared order. Update in place.
     Composable,
-    /// Either absent, or a byte-identical render from the release that owned
-    /// this path outright. Every byte of it is anvil's, so the scaffold
+    /// Either absent, or a byte-identical render of a version that owned this
+    /// path as a whole file. Every byte of it is anvil's, so the scaffold
     /// replaces it and the regions rebuild the file.
     SeedFromScaffold,
     /// Anvil cannot reach a valid file from here without either destroying
@@ -566,21 +566,20 @@ fn composed_host_state(order: &[&str], host_relpath: &str, text: &str, manifest:
     }
 
     if present.is_empty() {
-        // Nothing of anvil's is in the file. Either it is the previous
-        // release's whole-file render -- safe to replace, because every byte of
-        // it came from anvil -- or it is content anvil has never owned.
+        // Nothing of anvil's is in the file. Either it is a whole-file render
+        // anvil produced -- safe to replace, because every byte of it came from
+        // anvil -- or it is content anvil has never owned.
         //
         // The checksum comparison is the whole safety property: without it, a
-        // repository that edited the previously-owned Dockerfile would have
-        // that edit silently destroyed on upgrade. Appending the regions
-        // instead is not a kinder answer, because everything already in the
-        // file would then sit above `FROM`.
+        // repository that edited such a file would have that edit silently
+        // destroyed. Appending the regions instead is not a kinder answer,
+        // because everything already in the file would then sit above `FROM`.
         return match manifest.file_checksum(host_relpath) {
             Some(recorded) if recorded == checksum_str(text) => ComposedHostState::SeedFromScaffold,
             Some(_) => ComposedHostState::Unsafe(
-                "it was edited after anvil last wrote it, and this release composes the file from \
-                 managed regions instead of owning it whole. Move the edits you want to keep into \
-                 the gaps of a freshly generated file, or delete it and re-run to have one written"
+                "it was edited after anvil last wrote it, and anvil composes the file from managed \
+                 regions rather than owning it whole. Move the edits you want to keep into the \
+                 gaps of a freshly generated file, or delete it and re-run to have one written"
                     .to_owned(),
             ),
             // A composed host is recorded in `regions` and never in `files`, so
@@ -767,12 +766,12 @@ fn plan_removals(
         let resolved_host = resolve_existing_case_insensitive(repo_root, &key.host);
         // A refused host was not opened, and "nothing was written to it" has to
         // be true of the lock as well as the file -- the same invariant the
-        // owned-file loop above keeps. Without this, a lock entry naming a
-        // region the catalog no longer declares still reaches `remove_region`
-        // below, so the run splices a block out of the very file whose refusal
-        // says it was left alone, and purges the provenance the next run
-        // reclassifies from. Latent while every declared id is live, reachable
-        // at the first region rename or retirement.
+        // owned-file loop above keeps. A lock entry naming a region the catalog
+        // does not declare would otherwise reach `remove_region` below, so the
+        // run would splice a block out of the very file whose refusal says it
+        // was left alone, and purge the provenance the next run reclassifies
+        // from. Unreachable while every declared id is live; a region rename or
+        // retirement is what exposes it.
         if matches!(composed.states.get(&resolved_host), Some(ComposedHostState::Unsafe(_))) {
             continue;
         }
