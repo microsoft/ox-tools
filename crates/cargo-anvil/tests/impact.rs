@@ -245,6 +245,10 @@ fn workspace() -> TempDir {
 ///   `GITHUB_BASE_REF=main`); inherited, `_anvil-base-ref` would resolve
 ///   `origin/main`, which does not exist in the temp repo (whose base is
 ///   `origin/master`), and the snapshot would fail base-ref resolution.
+/// - `ANVIL_STABLE_TOOLCHAIN_SOURCE`: cloud setup sets this for the outer
+///   repository; inherited, resolver validation would treat the fixture's
+///   toolchain as its own resolved selection and invoke intentionally fake
+///   `cargo metadata` shims used by impact tests.
 ///
 /// Tests that need a specific mode or base set the var back on the returned
 /// Command.
@@ -256,6 +260,7 @@ fn just_cmd(root: &Path, args: &[&str]) -> Command {
         .env_remove("BASE_REF")
         .env_remove("GITHUB_BASE_REF")
         .env_remove("SYSTEM_PULLREQUEST_TARGETBRANCH")
+        .env_remove("ANVIL_STABLE_TOOLCHAIN_SOURCE")
         .current_dir(root);
     cmd
 }
