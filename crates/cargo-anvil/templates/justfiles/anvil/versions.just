@@ -6,7 +6,6 @@
 #
 # Pinned versions used by the anvil check tree.
 
-set lazy
 #
 # Everything anvil installs (cargo subcommands + rustup toolchains)
 # is pinned here. The pinning policy:
@@ -38,7 +37,7 @@ set lazy
 # helpers.
 [private]
 _anvil_stable_toolchain_selection_script := '''
-param([string] $RepoRoot)
+$RepoRoot = (Get-Location).Path
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3
@@ -127,7 +126,7 @@ exit 0
 '''
 
 [private]
-_anvil_stable_toolchain_args := if os_family() == "windows" { shell("& ([scriptblock]::Create('" + replace(_anvil_stable_toolchain_selection_script, "'", "''") + "')) '" + replace(justfile_directory(), "'", "''") + "';") } else { shell("pwsh -NoProfile -Command '& ([scriptblock]::Create($args[0])) $args[1]' " + quote(_anvil_stable_toolchain_selection_script) + " " + quote(justfile_directory())) }
+_anvil_stable_toolchain_args := if os_family() == "windows" { shell("& ([scriptblock]::Create('" + replace(_anvil_stable_toolchain_selection_script, "'", "''") + "'));") } else { shell("pwsh -NoProfile -Command '& ([scriptblock]::Create($args[0]))' " + quote(_anvil_stable_toolchain_selection_script)) }
 
 # General nightly used by udeps, miri, careful, and any future
 # nightly-dependent check. Bumped on a regular cadence (monthly is a
