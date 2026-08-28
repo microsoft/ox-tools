@@ -9,10 +9,9 @@
 # Affected tier (lints public API of changed crates and reverse dependencies).
 #
 # cargo-check-external-types is per-manifest: no --package/--workspace,
-# only --manifest-path. Iterate the affected publishable library crates and run
-# the tool once each, pointing at the crate's Cargo.toml. Bin-only crates have
-# no public API surface, while `publish = false` crates have no registry
-# consumer contract; both are skipped.
+# only --manifest-path. Iterate the affected library crates and run
+# the tool once each, pointing at the crate's Cargo.toml. Bin-only
+# crates have no public API surface and are skipped.
 # TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
 # skip/splat preamble, this recipe stays multi-step: cargo-check-
 # external-types is per-manifest (no --package/--workspace), so we
@@ -30,9 +29,8 @@ anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
         exit 0
     }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
-    # Build pkg-name -> manifest-path maps for publishable and non-publishable libraries.
+    # Build pkg-name -> manifest-path map, restricted to library crates.
     $libPkgs = @{}
-    $nonPublishableLibPkgs = @{}
     $metadataJson = & cargo metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil-external-types: cargo metadata failed'
@@ -46,19 +44,13 @@ anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
     }
     foreach ($p in $meta.packages) {
         if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
-            if ($p.publish -is [array] -and $p.publish.Count -eq 0) {
-                $nonPublishableLibPkgs[$p.name] = $p.manifest_path
-            } else {
-                $libPkgs[$p.name] = $p.manifest_path
-            }
+            $libPkgs[$p.name] = $p.manifest_path
         }
     }
     # Decide which packages to check.
     $packages = @()
-    $nonPublishablePackages = @()
     if ($pkg -contains '--workspace') {
         $packages = $libPkgs.Keys
-        $nonPublishablePackages = $nonPublishableLibPkgs.Keys
     } else {
         for ($i = 0; $i -lt $pkg.Count; $i++) {
             if ($pkg[$i] -eq '--package' -and ($i + 1) -lt $pkg.Count) {
@@ -67,21 +59,13 @@ anvil-external-types: anvil-external-types-validate-prereqs anvil-impact
                 # this manifest-path map keys on.
                 $name = ($pkg[$i + 1] -split '@', 2)[0]
                 if ($libPkgs.ContainsKey($name)) { $packages += $name }
-                if ($nonPublishableLibPkgs.ContainsKey($name)) { $nonPublishablePackages += $name }
                 $i++
             }
         }
     }
     if ($packages.Count -eq 0) {
-        if ($nonPublishablePackages.Count -gt 0) {
-            Write-Host "anvil-external-types: no affected publishable library crates; skipping ($($nonPublishablePackages.Count) non-publishable library crate(s) excluded)"
-        } else {
-            Write-Host 'anvil-external-types: no affected library crates; skipping'
-        }
+        Write-Host 'anvil-external-types: no affected library crates; skipping'
         exit 0
-    }
-    if ($nonPublishablePackages.Count -gt 0) {
-        Write-Host "anvil-external-types: excluding $($nonPublishablePackages.Count) non-publishable library crate(s)"
     }
     Write-Host "anvil-external-types: catalog tool minimum cargo-check-external-types {{ cargo_check_external_types_version }}; rustdoc toolchain {{ rust_nightly_external_types }}"
     $failed = $false

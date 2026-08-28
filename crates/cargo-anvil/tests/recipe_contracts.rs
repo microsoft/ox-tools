@@ -769,7 +769,7 @@ fn fmt_propagates_cargo_each_failure() {
 }
 
 #[test]
-fn external_types_checks_every_publishable_library_and_reports_non_publishable_ones() {
+fn external_types_checks_every_library_including_non_publishable_ones() {
     if !tools_available() {
         return;
     }
@@ -798,13 +798,14 @@ fn external_types_checks_every_publishable_library_and_reports_non_publishable_o
     );
     assert!(
         output.status.success(),
-        "non-publishable library filtering failed\nstdout:\n{}\nstderr:\n{}",
+        "library selection failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let commands = std::fs::read_to_string(log).unwrap();
     assert!(commands.contains("metadata --no-deps --format-version 1"));
     let expected_manifests = [
+        tmp.path().join("Cargo.toml").to_string_lossy().into_owned(),
         tmp.path()
             .join("nested")
             .join("public-default")
@@ -826,7 +827,6 @@ fn external_types_checks_every_publishable_library_and_reports_non_publishable_o
             .collect::<HashSet<_>>(),
         expected_manifests.into_iter().collect()
     );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("excluding 1 non-publishable library crate"));
 }
 
 #[test]

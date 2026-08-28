@@ -13,8 +13,8 @@
 #   - "modified": only run when at least one package's source files
 #     changed in the diff. The tier is only a skip gate: once admitted,
 #     the check runs its complete selected scope rather than splicing
-#     package arguments. That scope may be workspace members (cargo each),
-#     the workspace (cargo heather), or a directory (cargo spellcheck).
+#     package arguments. That scope may be workspace members (cargo each)
+#     or the whole workspace (cargo heather, cargo sort).
 #
 #   - "affected": run on the affected set (modified ∪ reverse-deps within the
 #     workspace). The tool takes --package; the recipe splices the resolved

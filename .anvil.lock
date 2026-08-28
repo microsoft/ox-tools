@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.5.0"
-catalog_checksum = "sha256:2717eebd54ddfc2e1d1f8454dd0f901d7e634032a642334484b159f8b7e88274"
+catalog_checksum = "sha256:dd1853eac724c9550e1eb62b5e67c3b816e15a3be8017652239da5d71813d3ad"
 
 [[file]]
 path = ".anvil/container/Containerfile"
@@ -129,7 +129,7 @@ checksum = "sha256:0e84a7b43ff07608c624ece03d46ddd58c629ebd5f6a5684f3b43b7190026
 
 [[file]]
 path = "justfiles/anvil/checks/external-types.just"
-checksum = "sha256:46411f5c538c2544889054bb69d9ca78b04db59a82d61d39a1a8dca9ebec6839"
+checksum = "sha256:d003f1d82898706c136f42c3156d5ecc8f288c18f125c964b9dca1d24fa93d67"
 
 [[file]]
 path = "justfiles/anvil/checks/fmt.just"
@@ -233,7 +233,7 @@ checksum = "sha256:a00153eda6b55d4db33e8019fa74f4a905f9c80b10b0db10955179c0af3e9
 
 [[file]]
 path = "justfiles/anvil/helpers.just"
-checksum = "sha256:57462cd3805fb5d2892d206ee8ccb704b6ded8b2953ff240264d18d4467dc7a5"
+checksum = "sha256:72a7b89f85b5bdc55f8c8c4699b78e877a6c78d0bb39e57b57518f5e289858fa"
 
 [[file]]
 path = "justfiles/anvil/impact.just"
