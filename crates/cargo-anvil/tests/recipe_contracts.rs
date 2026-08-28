@@ -11,12 +11,14 @@
 use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
+use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 
 use tempfile::TempDir;
 
 const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
+const IMPACT: &str = include_str!("../templates/justfiles/anvil/impact.just");
 #[cfg(target_os = "linux")]
 const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.just");
 const FMT: &str = include_str!("../templates/justfiles/anvil/checks/fmt.just");
@@ -101,6 +103,20 @@ if ($args -contains 'metadata') {
         workspace_members = @($packages | ForEach-Object { $_.id })
         packages = $packages
     }
+    if ($env:FAKE_NON_MEMBER_PACKAGE_NAME) {
+        # A package present in `packages` but absent from `workspace_members`
+        # (a path/registry dependency). Recipes that enumerate the workspace
+        # must filter these out; the object is added AFTER workspace_members is
+        # computed so it is never listed as a member.
+        $metadata.packages += [pscustomobject]@{
+            name = $env:FAKE_NON_MEMBER_PACKAGE_NAME
+            version = '0.1.0'
+            id = "$($env:FAKE_NON_MEMBER_PACKAGE_NAME) 0.1.0"
+            manifest_path = [System.IO.Path]::Combine($root, 'external', 'Cargo.toml')
+            targets = @([pscustomobject]@{ name = $env:FAKE_NON_MEMBER_PACKAGE_NAME; kind = @('lib') })
+            metadata = [pscustomobject]@{}
+        }
+    }
     $metadata | ConvertTo-Json -Depth 8 -Compress
     exit 0
 }
@@ -128,9 +144,18 @@ exit 0
 
 fn write(path: &Path, contents: &str) {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).unwrap();
+        fs::create_dir_all(parent).unwrap();
     }
-    std::fs::write(path, contents).unwrap();
+    fs::write(path, contents).unwrap();
+}
+
+/// Seed the impact cache that scoped check recipes read via
+/// `_anvil-impact-include`, standing in for a completed `anvil-impact` run.
+/// Without a cache file the recipes fall back to their tier default
+/// (`--workspace` for the affected tier), so tests that exercise a scoped run
+/// must plant the include file the recipe consumes.
+fn seed_include(root: &Path, tier: &str, spec: &str) {
+    write(&root.join(format!("target/anvil/impact/include_{tier}.txt")), spec);
 }
 
 fn tools_available() -> bool {
@@ -139,7 +164,7 @@ fn tools_available() -> bool {
 
 fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
     let tmp = TempDir::new().unwrap();
-    let mut justfile = String::from("set unstable\n\n");
+    let mut justfile = String::from("set unstable\nset allow-duplicate-recipes\n\n");
     // Focused fixtures need this shared variable, but the real version catalog
     // already defines it and Just rejects duplicate definitions.
     if !imports.iter().any(|(name, _)| *name == "versions.just") {
@@ -163,7 +188,7 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
     );
 
     let bin = tmp.path().join("fake-bin");
-    std::fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&bin).unwrap();
     write(&bin.join("cargo.ps1"), FAKE_CARGO_PS1);
     write(&bin.join("git.ps1"), "exit 0\n");
     tmp
@@ -196,11 +221,11 @@ fn assert_failed(output: &Output, context: &str) {
 }
 
 #[test]
-fn impact_format_resolves_directory_aliases_and_fails_closed() {
+fn impact_format_resolves_directory_aliases_and_fails_hard() {
     if !tools_available() {
         return;
     }
-    let tmp = fixture(&[("helpers.just", HELPERS)], &[]);
+    let tmp = fixture(&[("impact.just", IMPACT)], &[]);
     write(
         &tmp.path().join("impact.json"),
         r#"{"Modified":[],"Affected":["unknown-package"],"Required":[]}"#,
@@ -213,6 +238,11 @@ fn impact_format_resolves_directory_aliases_and_fails_closed() {
         &[("FAKE_METADATA_EXIT", OsStr::new("0")), ("FAKE_CARGO_LOG", log.as_os_str())],
     );
     assert_failed(&unknown, "unknown cargo-delta package");
+    assert!(
+        String::from_utf8_lossy(&unknown.stderr).contains("unknown package"),
+        "unknown package should be diagnosed directly:\n{}",
+        String::from_utf8_lossy(&unknown.stderr)
+    );
 
     write(
         &tmp.path().join("impact.json"),
@@ -248,6 +278,11 @@ fn impact_format_resolves_directory_aliases_and_fails_closed() {
         ],
     );
     assert_failed(&ambiguous_alias, "ambiguous cargo-delta directory alias");
+    assert!(
+        String::from_utf8_lossy(&ambiguous_alias.stderr).contains("ambiguous package identifier"),
+        "ambiguous alias should be diagnosed directly:\n{}",
+        String::from_utf8_lossy(&ambiguous_alias.stderr)
+    );
 
     write(
         &tmp.path().join("impact.json"),
@@ -296,26 +331,91 @@ fn bolero_discovery_failure_propagates() {
         return;
     }
     let tmp = fixture(
-        &[("bolero.just", BOLERO)],
+        &[("bolero.just", BOLERO), ("impact.just", IMPACT)],
         &[
             "anvil-toolchain-nightly-validate-prereqs",
             "anvil-tool-cargo-bolero-validate-prereqs",
             "anvil-toolchain-nightly-install",
             "anvil-tool-cargo-bolero-install installer",
+            "anvil-impact",
         ],
     );
     let log = tmp.path().join("cargo.log");
+    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-bolero"],
+        &[("FAKE_BOLERO_LIST_EXIT", OsStr::new("9")), ("FAKE_CARGO_LOG", log.as_os_str())],
+    );
+
+    assert_failed(&output, "cargo bolero target discovery failure");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn bolero_full_workspace_discovery_enumerates_every_member() {
+    if !tools_available() {
+        return;
+    }
+    // When the affected tier is the whole workspace (`--workspace`, or an
+    // adopter running `anvil-bolero` directly with no impact cache), the recipe
+    // cannot read package specs from the include string -- it must enumerate
+    // the workspace via `cargo metadata` and run target discovery for EVERY
+    // member. A regression that only handled the scoped `--package` form, or
+    // that dropped members, would silently fuzz nothing. Drive the metadata
+    // shim so the workspace has two members and assert both are discovered.
+    let tmp = fixture(
+        &[("bolero.just", BOLERO), ("impact.just", IMPACT)],
+        &[
+            "anvil-toolchain-nightly-validate-prereqs",
+            "anvil-tool-cargo-bolero-validate-prereqs",
+            "anvil-toolchain-nightly-install",
+            "anvil-tool-cargo-bolero-install installer",
+            "anvil-impact",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    // A whole-workspace affected tier forces the metadata-enumeration branch
+    // (the scoped `--package` branch never calls `cargo metadata`).
+    seed_include(tmp.path(), "affected", "--workspace");
     let output = run_just(
         tmp.path(),
         &["anvil-bolero"],
         &[
-            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
-            ("FAKE_BOLERO_LIST_EXIT", OsStr::new("9")),
+            // `bolero list` succeeds but reports no targets, so the recipe
+            // no-ops after discovery -- exactly the path we want to observe.
+            ("FAKE_BOLERO_LIST_EXIT", OsStr::new("0")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other-package")),
+            // A package present in metadata but NOT a workspace member must be
+            // skipped -- discovery is over members, not every known package.
+            ("FAKE_NON_MEMBER_PACKAGE_NAME", OsStr::new("external-dep")),
             ("FAKE_CARGO_LOG", log.as_os_str()),
         ],
     );
 
-    assert_failed(&output, "cargo bolero target discovery failure");
+    assert!(
+        output.status.success(),
+        "full-workspace bolero discovery must succeed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let calls = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        calls.contains("metadata"),
+        "full-workspace discovery must enumerate members via `cargo metadata`, got:\n{calls}"
+    );
+    assert!(
+        calls.contains("bolero list --profile release --package fixture"),
+        "the first workspace member must be discovered, got:\n{calls}"
+    );
+    assert!(
+        calls.contains("bolero list --profile release --package other-package"),
+        "every workspace member must be discovered, not just the first, got:\n{calls}"
+    );
+    assert!(
+        !calls.contains("external-dep"),
+        "a non-workspace-member package must NOT be discovered, got:\n{calls}"
+    );
 }
 
 #[test]
@@ -324,18 +424,16 @@ fn semver_exit_code_contract_is_executed() {
         return;
     }
     let tmp = fixture(
-        &[("helpers.just", HELPERS), ("semver.just", SEMVER)],
+        &[("helpers.just", HELPERS), ("semver.just", SEMVER), ("impact.just", IMPACT)],
         &[
             "anvil-tool-cargo-semver-checks-validate-prereqs",
             "anvil-tool-cargo-semver-checks-install installer",
+            "anvil-impact",
         ],
     );
     let log = tmp.path().join("cargo.log");
-    let common = [
-        ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
-        ("BASE_REF", OsStr::new("base")),
-        ("FAKE_CARGO_LOG", log.as_os_str()),
-    ];
+    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+    let common = [("BASE_REF", OsStr::new("base")), ("FAKE_CARGO_LOG", log.as_os_str())];
 
     let findings = run_just(
         tmp.path(),
@@ -343,7 +441,6 @@ fn semver_exit_code_contract_is_executed() {
         &[
             common[0],
             common[1],
-            common[2],
             ("FAKE_SEMVER_EXIT", OsStr::new("100")),
             ("FAKE_SEMVER_OUTPUT", OsStr::new("breaking change")),
         ],
@@ -354,7 +451,7 @@ fn semver_exit_code_contract_is_executed() {
         String::from_utf8_lossy(&findings.stderr)
     );
     assert!(tmp.path().join("target/anvil/comments/semver.md").is_file());
-    let findings_comment = std::fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
+    let findings_comment = fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
     assert!(findings_comment.contains("Potential breaking changes"));
     assert!(findings_comment.contains("breaking change"));
 
@@ -364,7 +461,6 @@ fn semver_exit_code_contract_is_executed() {
         &[
             common[0],
             common[1],
-            common[2],
             ("FAKE_SEMVER_EXIT", OsStr::new("101")),
             ("FAKE_SEMVER_OUTPUT", OsStr::new("package `fixture` not found in the baseline")),
         ],
@@ -383,7 +479,6 @@ fn semver_exit_code_contract_is_executed() {
             &[
                 common[0],
                 common[1],
-                common[2],
                 ("FAKE_SEMVER_EXIT", OsStr::new("101")),
                 ("FAKE_SEMVER_OUTPUT", OsStr::new(output)),
             ],
@@ -402,7 +497,6 @@ fn semver_exit_code_contract_is_executed() {
             &[
                 common[0],
                 common[1],
-                common[2],
                 ("FAKE_SEMVER_EXIT", OsStr::new(exit)),
                 ("FAKE_SEMVER_OUTPUT", OsStr::new(output)),
             ],
@@ -412,7 +506,7 @@ fn semver_exit_code_contract_is_executed() {
             "cargo-semver-checks exit {exit} should be advisory:\n{}",
             String::from_utf8_lossy(&inconclusive.stderr)
         );
-        let comment = std::fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
+        let comment = fs::read_to_string(tmp.path().join("target/anvil/comments/semver.md")).unwrap();
         assert!(comment.contains("Inconclusive comparisons"));
         assert!(comment.contains(&format!("exit {exit}")));
         assert!(comment.contains(output));
@@ -426,7 +520,7 @@ fn install_tool_controls_source_fallback_and_prerequisite_ordering() {
     }
     let tmp = fixture(&[("versions.just", VERSIONS), ("tools.just", TOOLS)], &[]);
     let justfile_path = tmp.path().join("Justfile");
-    let mut justfile = std::fs::read_to_string(&justfile_path).unwrap();
+    let mut justfile = fs::read_to_string(&justfile_path).unwrap();
     justfile.push_str(
         r#"
 [script("pwsh", "-NoProfile")]
@@ -453,7 +547,7 @@ source-prereq:
         "controlled source fallback should succeed:\n{}",
         String::from_utf8_lossy(&fallback.stderr)
     );
-    let log_contents = std::fs::read_to_string(&log).unwrap();
+    let log_contents = fs::read_to_string(&log).unwrap();
     let lines = log_contents.lines().collect::<Vec<_>>();
     let binstall = lines
         .iter()
@@ -469,7 +563,7 @@ source-prereq:
         .expect("Anvil must perform the controlled source install at the exact pin");
     assert!(binstall < prerequisite && prerequisite < source_install);
 
-    std::fs::remove_file(&log).unwrap();
+    fs::remove_file(&log).unwrap();
     let prerequisite_failure = run_just(
         tmp.path(),
         &["_install-tool", "cargo-spellcheck", "0.15.7", "binstall", "source-prereq"],
@@ -480,14 +574,14 @@ source-prereq:
         ],
     );
     assert_failed(&prerequisite_failure, "source prerequisite failure");
-    let failed_log = std::fs::read_to_string(&log).unwrap();
+    let failed_log = fs::read_to_string(&log).unwrap();
     assert!(failed_log.contains("source-prereq"));
     assert!(
         !failed_log.contains("install --locked cargo-spellcheck --version =0.15.7"),
         "source installation must not run after prerequisite failure"
     );
 
-    std::fs::remove_file(&log).unwrap();
+    fs::remove_file(&log).unwrap();
     let ordinary_tool = run_just(
         tmp.path(),
         &["_install-tool", "cargo-other", "1.2.3", "binstall", ""],
@@ -498,7 +592,7 @@ source-prereq:
         ],
     );
     assert!(ordinary_tool.status.success());
-    let ordinary_log = std::fs::read_to_string(&log).unwrap();
+    let ordinary_log = fs::read_to_string(&log).unwrap();
     let ordinary_binstall = ordinary_log
         .lines()
         .find(|line| line.contains("binstall --no-confirm --locked"))
@@ -516,7 +610,7 @@ fn repository_constants_match_shared_anvil_versions() {
         return;
     }
 
-    let repository_constants = std::fs::read_to_string(constants_path).unwrap();
+    let repository_constants = fs::read_to_string(constants_path).unwrap();
     let constants = repository_constants.lines().filter_map(|line| {
         let (name, value) = line.split_once('=')?;
         Some((name.to_ascii_lowercase(), value.trim().to_owned()))
@@ -598,6 +692,7 @@ fn public_api_checks_fail_when_metadata_discovery_fails() {
             &[
                 "anvil-tool-cargo-semver-checks-validate-prereqs",
                 "anvil-tool-cargo-semver-checks-install installer",
+                "anvil-impact",
             ][..],
         ),
         (
@@ -609,28 +704,16 @@ fn public_api_checks_fail_when_metadata_discovery_fails() {
                 "anvil-toolchain-nightly-external-types-validate-prereqs",
                 "anvil-tool-cargo-check-external-types-install installer",
                 "anvil-toolchain-nightly-external-types-install",
+                "anvil-impact",
             ][..],
         ),
     ] {
-        let tmp = fixture(&[(recipe_file, contents)], dependencies);
-        let output = run_just(
-            tmp.path(),
-            &[recipe],
-            &[
-                ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
-                ("FAKE_METADATA_EXIT", OsStr::new("23")),
-            ],
-        );
+        let tmp = fixture(&[(recipe_file, contents), ("impact.just", IMPACT)], dependencies);
+        seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+        let output = run_just(tmp.path(), &[recipe], &[("FAKE_METADATA_EXIT", OsStr::new("23"))]);
         assert_failed(&output, &format!("{recipe} cargo metadata failure"));
 
-        let malformed = run_just(
-            tmp.path(),
-            &[recipe],
-            &[
-                ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
-                ("FAKE_METADATA_INVALID", OsStr::new("1")),
-            ],
-        );
+        let malformed = run_just(tmp.path(), &[recipe], &[("FAKE_METADATA_INVALID", OsStr::new("1"))]);
         assert_failed(&malformed, &format!("{recipe} malformed cargo metadata"));
     }
 }
@@ -641,12 +724,13 @@ fn fmt_delegates_workspace_iteration_to_cargo_each() {
         return;
     }
     let tmp = fixture(
-        &[("fmt.just", FMT)],
+        &[("fmt.just", FMT), ("impact.just", IMPACT)],
         &[
             "anvil-component-nightly-rustfmt-validate-prereqs",
             "anvil-component-nightly-rustfmt-install",
             "anvil-tool-cargo-each-validate-prereqs",
             "anvil-tool-cargo-each-install installer",
+            "anvil-impact",
         ],
     );
     let log = tmp.path().join("cargo.log");
@@ -671,12 +755,13 @@ fn fmt_propagates_cargo_each_failure() {
         return;
     }
     let tmp = fixture(
-        &[("fmt.just", FMT)],
+        &[("fmt.just", FMT), ("impact.just", IMPACT)],
         &[
             "anvil-component-nightly-rustfmt-validate-prereqs",
             "anvil-component-nightly-rustfmt-install",
             "anvil-tool-cargo-each-validate-prereqs",
             "anvil-tool-cargo-each-install installer",
+            "anvil-impact",
         ],
     );
     let output = run_just(tmp.path(), &["anvil-fmt"], &[("FAKE_EACH_EXIT", OsStr::new("23"))]);
@@ -689,20 +774,21 @@ fn external_types_checks_every_publishable_library_and_reports_private_ones() {
         return;
     }
     let tmp = fixture(
-        &[("external-types.just", EXTERNAL_TYPES)],
+        &[("external-types.just", EXTERNAL_TYPES), ("impact.just", IMPACT)],
         &[
             "anvil-tool-cargo-check-external-types-validate-prereqs",
             "anvil-toolchain-nightly-external-types-validate-prereqs",
             "anvil-tool-cargo-check-external-types-install installer",
             "anvil-toolchain-nightly-external-types-install",
+            "anvil-impact",
         ],
     );
+    seed_include(tmp.path(), "affected", "--workspace");
     let log = tmp.path().join("cargo.log");
     let output = run_just(
         tmp.path(),
         &["anvil-external-types"],
         &[
-            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--workspace")),
             ("FAKE_CARGO_LOG", log.as_os_str()),
             ("FAKE_PUBLISH_FALSE", OsStr::new("1")),
             ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("public-default")),
@@ -749,21 +835,19 @@ fn semver_skips_non_publishable_libraries() {
         return;
     }
     let tmp = fixture(
-        &[("helpers.just", HELPERS), ("semver.just", SEMVER)],
+        &[("helpers.just", HELPERS), ("semver.just", SEMVER), ("impact.just", IMPACT)],
         &[
             "anvil-tool-cargo-semver-checks-validate-prereqs",
             "anvil-tool-cargo-semver-checks-install installer",
+            "anvil-impact",
         ],
     );
+    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
     let log = tmp.path().join("cargo.log");
     let output = run_just(
         tmp.path(),
         &["anvil-semver-check"],
-        &[
-            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
-            ("FAKE_CARGO_LOG", log.as_os_str()),
-            ("FAKE_PUBLISH_FALSE", OsStr::new("1")),
-        ],
+        &[("FAKE_CARGO_LOG", log.as_os_str()), ("FAKE_PUBLISH_FALSE", OsStr::new("1"))],
     );
     assert!(
         output.status.success(),
@@ -781,7 +865,7 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
         return;
     }
     let tmp = fixture(
-        &[("llvm-cov.just", LLVM_COV)],
+        &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
         &[
             "anvil-component-nightly-llvm-tools-validate-prereqs",
             "anvil-tool-cargo-llvm-cov-validate-prereqs",
@@ -791,24 +875,22 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
             "anvil-tool-cargo-llvm-cov-install installer",
             "anvil-tool-cargo-nextest-install installer",
             "anvil-tool-cargo-coverage-gate-install installer",
+            "anvil-impact",
         ],
     );
     let log = tmp.path().join("cargo.log");
+    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
     let output = run_just(
         tmp.path(),
         &["anvil-llvm-cov"],
-        &[
-            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
-            ("FAKE_NEXTEST_EXIT", OsStr::new("0")),
-            ("FAKE_CARGO_LOG", log.as_os_str()),
-        ],
+        &[("FAKE_NEXTEST_EXIT", OsStr::new("0")), ("FAKE_CARGO_LOG", log.as_os_str())],
     );
     assert!(
         output.status.success(),
         "all-opted-out coverage path should succeed:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let calls = std::fs::read_to_string(&log).unwrap();
+    let calls = fs::read_to_string(&log).unwrap();
     assert_eq!(calls.matches("nextest run").count(), 2, "calls:\n{calls}");
     assert!(calls.contains("--all-features"), "calls:\n{calls}");
     assert!(calls.contains("--no-default-features"), "calls:\n{calls}");
@@ -816,14 +898,7 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
     assert!(!calls.contains("llvm-cov"), "coverage commands must not run:\n{calls}");
     assert!(!calls.contains("coverage-gate"), "the coverage gate must not run:\n{calls}");
 
-    let no_tests = run_just(
-        tmp.path(),
-        &["anvil-llvm-cov"],
-        &[
-            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
-            ("FAKE_NEXTEST_EXIT", OsStr::new("4")),
-        ],
-    );
+    let no_tests = run_just(tmp.path(), &["anvil-llvm-cov"], &[("FAKE_NEXTEST_EXIT", OsStr::new("4"))]);
     assert!(
         no_tests.status.success(),
         "opted-out packages with no runnable tests should succeed:\n{}",
@@ -833,11 +908,7 @@ fn all_coverage_opted_out_packages_run_both_test_configurations() {
     let failed = run_just(
         tmp.path(),
         &["anvil-llvm-cov"],
-        &[
-            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
-            ("FAKE_NEXTEST_EXIT", OsStr::new("7")),
-            ("FAKE_CARGO_LOG", log.as_os_str()),
-        ],
+        &[("FAKE_NEXTEST_EXIT", OsStr::new("7")), ("FAKE_CARGO_LOG", log.as_os_str())],
     );
     assert_failed(&failed, "plain nextest failure for an opted-out package");
 }
@@ -849,7 +920,7 @@ fn windows_arm64_fallback_accepts_empty_nextest_sets_in_both_configurations() {
         return;
     }
     let tmp = fixture(
-        &[("llvm-cov.just", LLVM_COV)],
+        &[("llvm-cov.just", LLVM_COV), ("impact.just", IMPACT)],
         &[
             "anvil-component-nightly-llvm-tools-validate-prereqs",
             "anvil-tool-cargo-llvm-cov-validate-prereqs",
@@ -859,14 +930,15 @@ fn windows_arm64_fallback_accepts_empty_nextest_sets_in_both_configurations() {
             "anvil-tool-cargo-llvm-cov-install installer",
             "anvil-tool-cargo-nextest-install installer",
             "anvil-tool-cargo-coverage-gate-install installer",
+            "anvil-impact",
         ],
     );
     let log = tmp.path().join("cargo.log");
+    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
     let output = run_just(
         tmp.path(),
         &["anvil-llvm-cov"],
         &[
-            ("ANVIL_INCLUDE_AFFECTED", OsStr::new("--package fixture@0.1.0")),
             ("PROCESSOR_ARCHITECTURE", OsStr::new("ARM64")),
             ("FAKE_NEXTEST_EXIT", OsStr::new("4")),
             ("FAKE_CARGO_LOG", log.as_os_str()),
@@ -877,7 +949,7 @@ fn windows_arm64_fallback_accepts_empty_nextest_sets_in_both_configurations() {
         "Windows ARM64 fallback should accept empty nextest sets:\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let calls = std::fs::read_to_string(&log).unwrap();
+    let calls = fs::read_to_string(&log).unwrap();
     assert_eq!(calls.matches("nextest run").count(), 2, "calls:\n{calls}");
     assert!(calls.contains("--all-features"), "calls:\n{calls}");
     assert!(calls.contains("--no-default-features"), "calls:\n{calls}");

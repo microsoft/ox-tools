@@ -19,9 +19,10 @@
 
 # Check Rust source formatting.
 [script("pwsh", "-NoProfile")]
-anvil-fmt: anvil-fmt-validate-prereqs
+anvil-fmt: anvil-fmt-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
-    if ($env:ANVIL_INCLUDE_MODIFIED -eq '--skip') { exit 0 }
+    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
+    if ($include -eq '--skip') { Write-Host 'anvil-fmt: no modified packages; skipping'; exit 0 }
     cargo each --workspace --keep-going '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' --check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

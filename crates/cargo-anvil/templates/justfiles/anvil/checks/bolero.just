@@ -30,22 +30,23 @@
 
 # Run Bolero tests for affected workspace packages.
 [script("pwsh", "-NoProfile")]
-anvil-bolero: anvil-bolero-validate-prereqs
+anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     if (-not $IsLinux) {
         Write-Host 'anvil-bolero: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only; harnesses still run under anvil-llvm-cov)'
         exit 0
     }
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+    if ($include -eq '--skip') {
         Write-Host 'anvil-bolero: no affected packages; skipping'
         exit 0
     }
     $packageNames = [System.Collections.Generic.List[string]]::new()
-    if ($env:ANVIL_INCLUDE_AFFECTED) {
-        $pkgArgs = @(-split $env:ANVIL_INCLUDE_AFFECTED)
+    if ($include -and $include -ne '--workspace') {
+        $pkgArgs = @(-split $include)
         for ($i = 0; $i -lt $pkgArgs.Count; $i++) {
             if ($pkgArgs[$i] -ne '--package' -or ($i + 1) -ge $pkgArgs.Count) {
-                Write-Error "anvil-bolero: unsupported affected-package arguments: $env:ANVIL_INCLUDE_AFFECTED"
+                Write-Error "anvil-bolero: unsupported affected-package arguments: $include"
                 exit 1
             }
             # Impact emits version-qualified specs (name@version); cargo-bolero
