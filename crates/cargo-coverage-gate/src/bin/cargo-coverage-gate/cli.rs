@@ -47,7 +47,7 @@ pub(crate) struct CoverageGateArgs {
 
     /// Rust target triple whose coverage policy should be evaluated.
     ///
-    /// Defaults to the active rustc host target.
+    /// Defaults to the rustc host target.
     #[arg(long, value_name = "TRIPLE")]
     pub(crate) target: Option<String>,
 

@@ -285,7 +285,6 @@ fn conflicting_coverage_metadata_exits_2() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn target_zero_threshold_opts_package_out_of_gate() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace_with_gate(
@@ -313,7 +312,6 @@ fn target_zero_threshold_opts_package_out_of_gate() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
 fn empty_lcov_passes_when_all_effective_policies_allow_no_data() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace_with_gate(
@@ -340,8 +338,7 @@ fn empty_lcov_passes_when_all_effective_policies_allow_no_data() {
 }
 
 #[test]
-#[cfg_attr(miri, ignore = "spawns the binary as a subprocess")]
-fn target_zero_threshold_package_remains_gated_on_supported_target() {
+fn target_zero_threshold_package_remains_gated_when_override_does_not_match() {
     let tmp = TempDir::new().expect("tempdir");
     make_workspace_with_gate(
         tmp.path(),

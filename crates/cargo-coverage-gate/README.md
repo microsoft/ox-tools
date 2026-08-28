@@ -29,6 +29,7 @@ optionally, to a Markdown summary file for CI step summaries).
 A workspace can define the default line-coverage threshold:
 
 ```toml
+# Illustrative workspace policy.
 [workspace.metadata.coverage-gate]
 min-lines-percent = 80
 ```
@@ -36,6 +37,7 @@ min-lines-percent = 80
 Individual packages can override it:
 
 ```toml
+# Illustrative package policy, intentionally stricter than the workspace.
 [package.metadata.coverage-gate]
 min-lines-percent = 95
 ```
@@ -80,7 +82,7 @@ min-lines-percent = 100
 [package.metadata.coverage-gate.target.'cfg(not(windows))']
 min-lines-percent = 0
 
-[package.metadata.coverage-gate.target.x86_64-pc-windows-msvc]
+[package.metadata.coverage-gate.target.x86_64-unknown-linux-gnu]
 min-lines-percent = 100
 ```
 
@@ -156,9 +158,9 @@ let code = report.verdict().as_exit_code();
 
 ### Public API
 
-[`evaluate`][__link1] gates one lcov tracefile for the host target, while
+[`evaluate`][__link1] gates one lcov tracefile for the rustc host target, while
 [`evaluate_many`][__link2] merges multiple tracefiles at line level.
-[`evaluate_many_for_target`][__link3] evaluates an explicit target triple.
+[`evaluate_many_for_target`][__link3] evaluates an explicit Rust target triple.
 Evaluation returns an [`EvaluatedReport`][__link4], which renders as plain
 text via [`EvaluatedReport::render_text`][__link5] or GitHub-flavored Markdown via
 [`EvaluatedReport::render_markdown`][__link6] and reduces to a [`Verdict`][__link7] via
@@ -171,7 +173,7 @@ disk and orchestrates rendering plus the appropriate exit code.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-coverage-gate">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbcvaYALYk9GcbLDI6G2DLxr0bYVksFz6RuJcbUYA_Oup1xJdhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbF3P3j2nLNgEbcLNXR38OFU8bmdHWagvGfrMbqUEVVagSr0lhZIGDc2NhcmdvLWNvdmVyYWdlLWdhdGVlMC40LjBzY2FyZ29fY292ZXJhZ2VfZ2F0ZQ
  [__link0]: https://github.com/taiki-e/cargo-llvm-cov
  [__link1]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate.html
  [__link2]: https://docs.rs/cargo-coverage-gate/0.4.0/cargo_coverage_gate/fn.evaluate_many.html

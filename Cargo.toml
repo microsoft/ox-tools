@@ -27,8 +27,6 @@ anyhow = { version = "1.0.100", default-features = false }
 assert_cmd = { version = "2.2.0", default-features = false }
 bytes = { version = "1.11.1", default-features = false }
 camino = { version = "1.2.5", default-features = false }
-# local dependencies
-cargo-aprz-lib = { path = "crates/cargo-aprz-lib", default-features = false, version = "1.1.0" }
 cargo-platform = { version = "0.3.3", default-features = false }
 cargo_metadata = { version = "0.23.1", default-features = false }
 cel-interpreter = { version = "0.10.0", default-features = false }
@@ -95,6 +93,9 @@ walkdir = { version = "2.5.0", default-features = false }
 windows = { version = "0.62.2", default-features = false }
 wiremock = { version = "0.6.5", default-features = false }
 zstd = { version = "0.13.3", default-features = false }
+
+# local dependencies
+cargo-aprz-lib = { path = "crates/cargo-aprz-lib", default-features = false, version = "1.1.0" }
 
 # >>> anvil-managed: anvil-workspace-lints
 [workspace.lints]

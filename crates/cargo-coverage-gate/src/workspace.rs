@@ -14,13 +14,14 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use cargo_metadata::MetadataCommand;
-use cargo_platform::Platform;
+use cargo_platform::{Cfg, CfgExpr, Platform};
 use serde_json::Value;
 
+use crate::CoverageGateError;
 use crate::error::{
-    AmbiguousTargetPolicyError, ConflictingCoverageMetadataError, CoverageGateError, InvalidNoCoverableLinesValueError,
-    InvalidTargetPolicyError, InvalidTargetSelectorError, InvalidThresholdValueError, LoadMetadataError, ThresholdOutOfRangeError,
-    WorkspaceScopedNoCoverableLinesError,
+    AmbiguousTargetPolicyError, ConflictingCoverageMetadataError, InvalidNoCoverableLinesValueError, InvalidTargetPolicyShapeError,
+    InvalidTargetSelectorError, InvalidTargetTableError, InvalidThresholdValueError, LoadMetadataError, MissingTargetPolicyBehaviorError,
+    ThresholdOutOfRangeError, UnsupportedTargetSelectorError, WorkspaceScopedNoCoverableLinesError, WorkspaceTargetPolicyError,
 };
 use crate::target::TargetContext;
 
@@ -198,28 +199,30 @@ fn extract_target_policies(gate: &Value, source: &str, scope: Scope) -> Result<V
         return Ok(Vec::new());
     };
     if scope == Scope::Workspace {
-        return Err(InvalidTargetPolicyError::new(
-            source.to_owned(),
-            "target policies are package-scoped and cannot be set in workspace metadata".to_owned(),
-        )
-        .into());
+        return Err(WorkspaceTargetPolicyError::new().into());
     }
-    let table = raw_target.as_object().ok_or_else(|| {
-        InvalidTargetPolicyError::new(
-            source.to_owned(),
-            "`target` must be a table keyed by target triple or cfg expression".to_owned(),
-        )
-    })?;
+    let table = raw_target
+        .as_object()
+        .ok_or_else(|| InvalidTargetTableError::new(source.to_owned()))?;
 
     table
         .iter()
         .map(|(selector_text, raw_policy)| {
             let policy_source = format!("{source} target `{selector_text}`");
             let selector = Platform::from_str(selector_text)
-                .map_err(|error| InvalidTargetSelectorError::new(source.to_owned(), selector_text.clone(), error.to_string()))?;
+                .map_err(|error| InvalidTargetSelectorError::caused_by(source.to_owned(), selector_text.clone(), error))?;
+            let unsupported_attributes = unsupported_cfg_attributes(&selector);
+            if !unsupported_attributes.is_empty() {
+                return Err(UnsupportedTargetSelectorError::new(
+                    source.to_owned(),
+                    selector_text.clone(),
+                    unsupported_attributes.join(", "),
+                )
+                .into());
+            }
             raw_policy
                 .as_object()
-                .ok_or_else(|| InvalidTargetPolicyError::new(policy_source.clone(), "policy must be a table".to_owned()))?;
+                .ok_or_else(|| InvalidTargetPolicyShapeError::new(policy_source.clone()))?;
 
             let min_lines_percent = extract_min_lines_percent(raw_policy, &policy_source)?;
             let expect_no_coverable_lines = extract_expect_no_coverable_lines(raw_policy, &policy_source, Scope::Package)?;
@@ -232,11 +235,7 @@ fn extract_target_policies(gate: &Value, source: &str, scope: Scope) -> Result<V
             } else if let Some(value) = min_lines_percent {
                 PolicyOverride::Threshold(value)
             } else {
-                return Err(InvalidTargetPolicyError::new(
-                    policy_source,
-                    "policy must set `min-lines-percent` or `expect-no-coverable-lines = true`".to_owned(),
-                )
-                .into());
+                return Err(MissingTargetPolicyBehaviorError::new(policy_source).into());
             };
             Ok(TargetPolicy {
                 selector_text: selector_text.clone(),
@@ -245,6 +244,34 @@ fn extract_target_policies(gate: &Value, source: &str, scope: Scope) -> Result<V
             })
         })
         .collect()
+}
+
+fn unsupported_cfg_attributes(platform: &Platform) -> Vec<String> {
+    fn visit(expression: &CfgExpr, attributes: &mut Vec<String>) {
+        match expression {
+            CfgExpr::Not(expression) => visit(expression, attributes),
+            CfgExpr::All(expressions) | CfgExpr::Any(expressions) => {
+                for expression in expressions {
+                    visit(expression, attributes);
+                }
+            }
+            CfgExpr::Value(Cfg::Name(name)) if matches!(name.as_str(), "test" | "debug_assertions" | "proc_macro") => {
+                attributes.push(name.as_str().to_owned());
+            }
+            CfgExpr::Value(Cfg::KeyPair(name, _)) if name.as_str() == "feature" => {
+                attributes.push(name.as_str().to_owned());
+            }
+            CfgExpr::Value(_) | CfgExpr::True | CfgExpr::False => {}
+        }
+    }
+
+    let mut attributes = Vec::new();
+    if let Platform::Cfg(expression) = platform {
+        visit(expression, &mut attributes);
+    }
+    attributes.sort();
+    attributes.dedup();
+    attributes
 }
 
 fn apply_target_policy(metadata: &mut CoverageGateMetadata, target: &TargetContext, source: &str) -> Result<(), CoverageGateError> {
@@ -787,6 +814,36 @@ min-lines-percent = 0
 
             let error = load(&tmp.path().join("Cargo.toml")).expect_err("malformed target policy must fail");
             assert!(error.to_string().contains(expected), "case {index}: {error}");
+        }
+    }
+
+    #[test]
+    fn rejects_build_context_target_selectors() {
+        for selector in ["cfg(feature = \"simd\")", "cfg(test)", "cfg(debug_assertions)", "cfg(proc_macro)"] {
+            let gate = serde_json::json!({
+                "target": {
+                    (selector): { "min-lines-percent": 0 }
+                }
+            });
+            let error = extract_target_policies(&gate, "alpha", Scope::Package).expect_err("build-context selector must be rejected");
+            let rendered = error.to_string();
+            assert!(
+                rendered.contains("unsupported build-context cfg attributes"),
+                "{selector}: {rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_target_derived_cfg_selectors() {
+        for selector in ["cfg(target_os = \"linux\")", "cfg(target_arch = \"x86_64\")"] {
+            let gate = serde_json::json!({
+                "target": {
+                    (selector): { "min-lines-percent": 0 }
+                }
+            });
+            let policies = extract_target_policies(&gate, "alpha", Scope::Package).expect("target-derived selector must be accepted");
+            assert_eq!(policies.len(), 1);
         }
     }
 }

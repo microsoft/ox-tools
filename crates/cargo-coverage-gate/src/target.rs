@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Active compilation-target discovery and Cargo-style selector matching.
+//! Rust target discovery and Cargo-style selector matching.
 
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -10,9 +10,10 @@ use std::str::FromStr;
 
 use cargo_platform::{Cfg, Platform};
 
-use crate::error::{CoverageGateError, ResolveTargetError};
+use crate::CoverageGateError;
+use crate::error::{ExecuteRustcError, InvalidRustcCfgError, MissingRustcHostTargetError, ResolveTargetError, RustcCommandFailedError};
 
-/// The target triple and cfg values used to resolve target policy.
+/// The Rust target triple and cfg values used to resolve target policy.
 #[derive(Debug, Clone)]
 pub(crate) struct TargetContext {
     pub(crate) triple: String,
@@ -20,27 +21,28 @@ pub(crate) struct TargetContext {
 }
 
 impl TargetContext {
-    /// Resolve an explicit target, or the active rustc host when omitted.
+    /// Resolve an explicit Rust target, or the rustc host target when omitted.
     pub(crate) fn resolve(target: Option<&str>) -> Result<Self, CoverageGateError> {
         let rustc = env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
-        Self::resolve_with_rustc(target, &rustc)
+        Self::resolve_with_rustc(target, &rustc).map_err(Into::into)
     }
 
-    fn resolve_with_rustc(target: Option<&str>, rustc: &OsStr) -> Result<Self, CoverageGateError> {
+    fn resolve_with_rustc(target: Option<&str>, rustc: &OsStr) -> Result<Self, ResolveTargetError> {
+        let rustc_display = rustc.to_string_lossy();
         let triple = if let Some(target) = target {
             target.to_owned()
         } else {
+            let command = format!("{rustc_display} -vV");
             let output = Command::new(rustc)
                 .arg("-vV")
                 .output()
-                .map_err(|error| ResolveTargetError::new(format!("could not execute `{}`: {error}", rustc.to_string_lossy())))?;
+                .map_err(|error| ExecuteRustcError::caused_by(command.clone(), error))?;
             if !output.status.success() {
-                return Err(ResolveTargetError::new(format!(
-                    "`{} -vV` exited with {}: {}",
-                    rustc.to_string_lossy(),
-                    output.status,
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ))
+                return Err(RustcCommandFailedError::new(
+                    command,
+                    output.status.to_string(),
+                    String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+                )
                 .into());
             }
             let stdout = String::from_utf8_lossy(&output.stdout);
@@ -48,20 +50,20 @@ impl TargetContext {
                 .lines()
                 .find_map(|line| line.strip_prefix("host: "))
                 .map(str::to_owned)
-                .ok_or_else(|| ResolveTargetError::new(format!("`{} -vV` did not report a host triple", rustc.to_string_lossy())))?
+                .ok_or_else(|| MissingRustcHostTargetError::new(command))?
         };
 
+        let command = format!("{rustc_display} --print cfg --target {triple}");
         let output = Command::new(rustc)
             .args(["--print", "cfg", "--target", &triple])
             .output()
-            .map_err(|error| ResolveTargetError::new(format!("could not execute `{}`: {error}", rustc.to_string_lossy())))?;
+            .map_err(|error| ExecuteRustcError::caused_by(command.clone(), error))?;
         if !output.status.success() {
-            return Err(ResolveTargetError::new(format!(
-                "`{} --print cfg --target {triple}` exited with {}: {}",
-                rustc.to_string_lossy(),
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            ))
+            return Err(RustcCommandFailedError::new(
+                command,
+                output.status.to_string(),
+                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            )
             .into());
         }
 
@@ -69,11 +71,8 @@ impl TargetContext {
         let cfg = stdout
             .lines()
             .filter(|line| !line.is_empty())
-            .map(|line| {
-                Cfg::from_str(line)
-                    .map_err(|error| ResolveTargetError::new(format!("rustc reported invalid cfg `{line}` for `{triple}`: {error}")).into())
-            })
-            .collect::<Result<Vec<_>, CoverageGateError>>()?;
+            .map(|line| Cfg::from_str(line).map_err(|error| InvalidRustcCfgError::caused_by(line.to_owned(), triple.clone(), error).into()))
+            .collect::<Result<Vec<_>, ResolveTargetError>>()?;
 
         Ok(Self { triple, cfg })
     }
@@ -97,12 +96,20 @@ impl TargetContext {
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
+    use std::error::Error as _;
+    use std::fs::write;
+    #[cfg(unix)]
+    use std::fs::{metadata, set_permissions};
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+
+    use tempfile::{TempDir, tempdir};
 
     use super::*;
 
-    fn fake_rustc(vv_stdout: &str, vv_exit: i32, cfg_stdout: &str, cfg_exit: i32) -> tempfile::TempDir {
-        let temp = tempfile::tempdir().expect("tempdir");
+    fn fake_rustc(vv_stdout: &str, vv_exit: i32, cfg_stdout: &str, cfg_exit: i32) -> TempDir {
+        let temp = tempdir().expect("tempdir");
         let path = fake_rustc_path(&temp);
         let vv_output = vv_stdout.lines().map(echo_line).collect::<Vec<_>>().join("\n");
         let cfg_output = cfg_stdout.lines().map(echo_line).collect::<Vec<_>>().join("\n");
@@ -111,14 +118,13 @@ mod tests {
         let script = format!("@echo off\nif \"%1\"==\"-vV\" (\n{vv_output}\nexit /b {vv_exit}\n)\n{cfg_output}\nexit /b {cfg_exit}\n");
         #[cfg(not(windows))]
         let script = format!("#!/bin/sh\nif [ \"$1\" = \"-vV\" ]; then\n{vv_output}\nexit {vv_exit}\nfi\n{cfg_output}\nexit {cfg_exit}\n");
-        std::fs::write(&path, script).expect("write fake rustc");
+        write(&path, script).expect("write fake rustc");
 
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let mut permissions = std::fs::metadata(&path).expect("fake rustc metadata").permissions();
+            let mut permissions = metadata(&path).expect("fake rustc metadata").permissions();
             permissions.set_mode(0o755);
-            std::fs::set_permissions(&path, permissions).expect("make fake rustc executable");
+            set_permissions(&path, permissions).expect("make fake rustc executable");
         }
 
         temp
@@ -134,7 +140,7 @@ mod tests {
         format!("printf '%s\\n' '{line}'")
     }
 
-    fn fake_rustc_path(temp: &tempfile::TempDir) -> PathBuf {
+    fn fake_rustc_path(temp: &TempDir) -> PathBuf {
         #[cfg(windows)]
         {
             temp.path().join("rustc.cmd")
@@ -175,9 +181,11 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "uses filesystem and spawns fake rustc processes; miri isolation forbids both")]
     fn rejects_failed_or_malformed_rustc_output() {
-        let missing = fake_rustc_path(&tempfile::tempdir().expect("tempdir"));
+        let missing = fake_rustc_path(&tempdir().expect("tempdir"));
         let error = TargetContext::resolve_with_rustc(None, missing.as_os_str()).expect_err("missing rustc must fail");
-        assert!(error.to_string().contains("failed to resolve"));
+        let rendered = error.to_string();
+        assert!(rendered.contains("failed to resolve"));
+        assert!(error.source().is_some(), "resolve error must preserve its typed cause");
 
         let failed_host = fake_rustc("", 7, "", 0);
         let error =

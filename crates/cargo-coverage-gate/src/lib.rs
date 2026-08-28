@@ -20,6 +20,7 @@
 //! A workspace can define the default line-coverage threshold:
 //!
 //! ```toml
+//! # Illustrative workspace policy.
 //! [workspace.metadata.coverage-gate]
 //! min-lines-percent = 80
 //! ```
@@ -27,6 +28,7 @@
 //! Individual packages can override it:
 //!
 //! ```toml
+//! # Illustrative package policy, intentionally stricter than the workspace.
 //! [package.metadata.coverage-gate]
 //! min-lines-percent = 95
 //! ```
@@ -71,7 +73,7 @@
 //! [package.metadata.coverage-gate.target.'cfg(not(windows))']
 //! min-lines-percent = 0
 //!
-//! [package.metadata.coverage-gate.target.x86_64-pc-windows-msvc]
+//! [package.metadata.coverage-gate.target.x86_64-unknown-linux-gnu]
 //! min-lines-percent = 100
 //! ```
 //!
@@ -149,9 +151,9 @@
 //!
 //! ## Public API
 //!
-//! [`evaluate`] gates one lcov tracefile for the host target, while
+//! [`evaluate`] gates one lcov tracefile for the rustc host target, while
 //! [`evaluate_many`] merges multiple tracefiles at line level.
-//! [`evaluate_many_for_target`] evaluates an explicit target triple.
+//! [`evaluate_many_for_target`] evaluates an explicit Rust target triple.
 //! Evaluation returns an [`EvaluatedReport`], which renders as plain
 //! text via [`EvaluatedReport::render_text`] or GitHub-flavored Markdown via
 //! [`EvaluatedReport::render_markdown`] and reduces to a [`Verdict`] via
@@ -263,10 +265,11 @@ impl EvaluatedReport {
 /// # Errors
 ///
 /// Returns a [`CoverageGateError`] when the tracefile does not parse,
-/// workspace discovery fails, an unknown package appears in
-/// `gated_packages`, or a configured `min-lines-percent` value is outside
-/// `[0.0, 100.0]`. The error message identifies which case occurred;
-/// callers usually just propagate it.
+/// workspace discovery fails, a package selector is unknown, coverage
+/// metadata or target policy is invalid or ambiguous, a configured threshold
+/// is out of range, or required Rust target discovery or cfg queries fail.
+/// The error message identifies which case occurred; callers usually just
+/// propagate it.
 ///
 /// [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
 pub fn evaluate(lcov_text: &str, manifest_path: Option<&Path>, gated_packages: &[String]) -> Result<EvaluatedReport, CoverageGateError> {
@@ -297,6 +300,7 @@ pub fn evaluate(lcov_text: &str, manifest_path: Option<&Path>, gated_packages: &
 /// the merge.
 ///
 /// [`cargo-llvm-cov`]: https://github.com/taiki-e/cargo-llvm-cov
+#[inline]
 pub fn evaluate_many(
     lcov_texts: &[&str],
     manifest_path: Option<&Path>,
@@ -305,16 +309,18 @@ pub fn evaluate_many(
     evaluate_many_for_target(lcov_texts, manifest_path, gated_packages, None)
 }
 
-/// Evaluate one or more lcov tracefiles for an explicit compilation target.
+/// Evaluate one or more lcov tracefiles for an explicit Rust target.
 ///
 /// `target` is a Rust target triple such as `x86_64-pc-windows-msvc`.
-/// When omitted, the active `rustc` host target is used. Target-specific
+/// When omitted, the rustc host target is used. Target-specific
 /// package policy is resolved before the gated package set is evaluated.
 ///
 /// # Errors
 ///
 /// Returns a [`CoverageGateError`] under the same conditions as
-/// [`evaluate_many`], or when the target/cfg query fails.
+/// [`evaluate_many`]. When target policy requires Rust target resolution,
+/// rustc launch, exit-status, host-output, and cfg-output failures are also
+/// reported.
 pub fn evaluate_many_for_target(
     lcov_texts: &[&str],
     manifest_path: Option<&Path>,

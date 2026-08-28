@@ -128,7 +128,7 @@ Flags:
   whose tests actually ran. A selector that matches no member is a
   configuration error (exit 2).
 - `--target <triple>` — evaluate target-specific package policies for the
-  supplied Rust target. Defaults to the active rustc host target when target
+  supplied Rust target. Defaults to the rustc host target when target
   policies exist; workspaces without target policies do not invoke rustc.
 - `--summary-file <path>` — write a Markdown verdict table to this file.
   When unset, the tool honors the environment variables
@@ -247,7 +247,10 @@ expression (`cfg(windows)`, `cfg(target_os = "linux")`,
 `cfg(all(unix, target_arch = "x86_64"))`). Coverage-gate uses the
 `cargo-platform` parser and matches `cfg(...)` expressions against
 `rustc --print cfg --target <triple>`, so it does not maintain a second target
-language.
+language. As in Cargo target-specific dependency selection, selectors must
+describe target properties. Build-context predicates such as `cfg(feature =
+"...")`, `cfg(test)`, `cfg(debug_assertions)`, and `cfg(proc_macro)` are
+configuration errors because a standalone target query cannot evaluate them.
 
 `min-lines-percent = 0` disables gating for that package on the matching
 target. It does not disable tests or coverage instrumentation. Test binaries
@@ -270,10 +273,9 @@ Resolution follows Cargo's precedence:
 4. With no matching target table, the ordinary package → workspace → built-in
    policy applies.
 
-The CLI accepts `--target <triple>`. When omitted, it obtains the host triple
-from `rustc -vV`. Target discovery is lazy: if no package declares target
-policies, evaluation does not invoke rustc and preserves the pre-target-policy
-runtime and error surface.
+The CLI accepts `--target <triple>`. When omitted, it obtains the rustc host
+target from `rustc -vV`. Rust target discovery is lazy: if no package declares
+target policies, evaluation does not invoke rustc.
 
 ### 5.4 The verdict table
 
@@ -647,12 +649,17 @@ comparison rounds to the same precision before comparing — see
 
 ### 10.2 Security
 
-The tool reads `Cargo.toml` files and a coverage lcov tracefile. It never
-writes; the only output channels are stdout and the optional summary
-file. No network access, no privileged operations. The only subprocess
-invocation is the read-only `cargo metadata` call performed by
-`cargo_metadata::MetadataCommand::exec()` during workspace discovery
-(used to enumerate workspace members and resolve the workspace root).
+The tool reads `Cargo.toml` files and coverage lcov tracefiles. It never writes;
+the only output channels are stdout and the optional summary file. It performs
+no network access or privileged operations.
+
+Workspace discovery invokes the read-only `cargo metadata` command through
+`cargo_metadata::MetadataCommand::exec()` to enumerate workspace members and
+resolve the workspace root. When any package declares target-specific policy,
+the tool also invokes the executable selected by `RUSTC` (or `rustc` when
+unset). It runs `rustc -vV` only when it must discover the host target, then
+runs `rustc --print cfg --target <triple>` for both explicit and discovered
+targets. Workspaces without target-specific policy do not invoke rustc.
 
 ### 10.3 Monorepo / multi-workspace
 
