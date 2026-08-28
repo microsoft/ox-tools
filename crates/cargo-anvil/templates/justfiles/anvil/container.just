@@ -4,8 +4,9 @@
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 #
-# Containerized execution. `just anvil-container <recipe>` runs any anvil
-# recipe inside a pinned Linux image; everything else keeps running natively.
+# Containerized execution. `just anvil-container <command…>` runs the given
+# argv inside a pinned Linux image; everything else keeps running natively.
+# Anvil recipes are reached by naming `just`, like any other command.
 # There is no configuration file and no transparent routing: the container is
 # reached through this recipe or not at all.
 #

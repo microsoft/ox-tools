@@ -128,10 +128,14 @@ _anvil-base-ref:
 # recipe's body executes after its dependencies, so exporting from there is
 # too late. Invoking `_anvil-<name>` as a child process makes every check
 # below it inherit the setting.
+#
+# The justfile is named explicitly so the child resolves the same file the
+# wrapper was defined in, rather than whatever an upward search from the
+# working directory happens to find.
 [private]
 [script("pwsh", "-NoProfile")]
 _anvil-unscoped name:
     $ErrorActionPreference = 'Stop'
     $env:ANVIL_IMPACT = 'off'
-    & '{{ replace(just_executable(), "'", "''") }}' '_anvil-{{ replace(name, "'", "''") }}'
+    & '{{ replace(just_executable(), "'", "''") }}' --justfile '{{ replace(justfile(), "'", "''") }}' '_anvil-{{ replace(name, "'", "''") }}'
     exit $LASTEXITCODE

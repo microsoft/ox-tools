@@ -109,14 +109,15 @@ anvil-full-validate-prereqs: \
 # catalog knows about; `anvil-validate-prereqs` verifies every tool
 # and component is present at or above its pinned version.
 #
-# These also install / verify cargo-delta, the impact-analysis tool.
-# cargo-delta is only invoked by the cloud-workflow impact step (not by
-# any check), so it is deliberately NOT part of the per-group / per-tier
-# setup recipes -- a CI group job installs only what its checks need, and
-# the impact step installs cargo-delta itself. But the catch-all
-# `anvil-setup` is "install everything the catalog knows about", so it
-# includes cargo-delta too (a local `just anvil-setup` then provisions a
-# complete environment, impact tool included).
+# cargo-delta (the impact-analysis tool) is a prerequisite of every group
+# whose checks are impact-scoped: those checks depend on `anvil-impact`,
+# which invokes cargo-delta when it has to (re)compute the impact set, so
+# each such group's `-setup` / `-validate-prereqs` installs / verifies it
+# (fail-fast, rather than discovering it missing mid-run). In a cloud
+# workflow a group job normally consumes the downloaded impact artifact and
+# never actually runs cargo-delta, but the tool is guaranteed present.
+# `anvil-setup` also lists it explicitly as the catch-all (harmless -- just
+# dedups the fan-out).
 
 # Install every tool and component in the anvil catalog.
 [group("anvil-setup")]

@@ -8,7 +8,7 @@
 .DESCRIPTION
     Creates a throwaway repository in a temp directory, generates the anvil tree
     into it with the locally-built cargo-anvil, and then does only what a
-    developer would do: run `just anvil-container <recipe>` and observe what
+    developer would do: run `just anvil-container <command…>` and observe what
     happens.
 
     The setup phase is held to that standard deliberately. If this script has to
@@ -387,7 +387,7 @@ Assert-That 'status reports an image reference' ($reference -like "$imagePrefix*
 Assert-That 'image is absent before the first run' (-not (Test-ImagePresent $reference))
 
 Write-Step "building and running (this takes several minutes on a cold cache)"
-$firstRun = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'anvil-fmt')
+$firstRun = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'just', 'anvil-fmt')
 Write-Detail (($firstRun.StdErr -split "`r?`n" | Select-Object -Last 4) -join "`n")
 
 Assert-Equal 'anvil-fmt succeeds inside the container' 0 $firstRun.ExitCode
@@ -398,10 +398,16 @@ Assert-That 'image is present afterwards' (Test-ImagePresent $reference)
 
 Write-Section '3. Second run reuses the image'
 
-$secondRun = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'anvil-fmt')
+$secondRun = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'just', 'anvil-fmt')
 Assert-Equal 'anvil-fmt succeeds again' 0 $secondRun.ExitCode
 Assert-That 'nothing was rebuilt' (-not ($secondRun.StdErr -match 'building ')) $secondRun.StdErr
 Assert-Equal 'the reference is unchanged' $reference (Get-ImageReference -Repo $repo)
+
+# The argv is executed verbatim, so a program that is not `just` is reachable
+# too. This is the branch a recipe name would never exercise.
+$bareCommand = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'cargo', '--version') -AllowFailure
+Assert-Equal 'a non-just command runs in the image' 0 $bareCommand.ExitCode
+Assert-That 'the bare command produced its own output' ($bareCommand.StdOut -match 'cargo\s+\d') $bareCommand.StdOut
 
 $status = Invoke-Just -Repo $repo -Arguments @('anvil-container-status')
 Assert-That 'status reports present and current' ($status.StdOut -match 'present and current') $status.StdOut
@@ -441,7 +447,7 @@ Assert-That 'the tool resolves inside the image, not a volume' `
 # credential, and a test that prints it to the terminal on failure is a leak.
 function Hide-Token([string]$Text) { $Text -replace 'E2E-TOKEN:\[[^\]]+\]', 'E2E-TOKEN:[<redacted>]' }
 
-$withToken = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'e2e-show-token') `
+$withToken = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'just', 'e2e-show-token') `
     -Environment @{ GITHUB_TOKEN = 'e2e-forwarded-token' }
 Assert-That 'a host GITHUB_TOKEN reaches a recipe in the container' `
     ($withToken.StdOut -match 'E2E-TOKEN:\[e2e-forwarded-token\]') (Hide-Token "$($withToken.StdOut)$($withToken.StdErr)")
@@ -458,7 +464,7 @@ if ($ghCommand) {
     $pathWithoutGh = (($env:PATH -split $separator) |
         Where-Object { $_ -and $_.TrimEnd('\', '/') -ne $ghDir }) -join $separator
 }
-$withoutToken = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'e2e-show-token') `
+$withoutToken = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'just', 'e2e-show-token') `
     -Environment @{ GITHUB_TOKEN = ''; GH_TOKEN = ''; PATH = $pathWithoutGh }
 Assert-That 'no token is invented when the host has none' `
     ($withoutToken.StdOut -match 'E2E-TOKEN:\[\]') (Hide-Token "$($withoutToken.StdOut)$($withoutToken.StdErr)")
@@ -472,7 +478,7 @@ if (Get-Command gh -ErrorAction SilentlyContinue) {
     try { $hostGhToken = (gh auth token --hostname github.com 2>$null) } catch { $hostGhToken = $null }
 }
 if ($hostGhToken -and $hostGhToken.Trim()) {
-    $viaGh = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'e2e-show-token') `
+    $viaGh = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'just', 'e2e-show-token') `
         -Environment @{ GITHUB_TOKEN = '' }
     Assert-That 'the gh CLI token is used when the environment has none' `
         ($viaGh.StdOut -match ('E2E-TOKEN:\[' + [regex]::Escape($hostGhToken.Trim()) + '\]')) `
@@ -482,7 +488,7 @@ if ($hostGhToken -and $hostGhToken.Trim()) {
     # in this environment hands it to every build script and proc macro in the
     # container, where natively the recipe would mint it in its own process --
     # so a target that never reads the variable must not receive it.
-    $noNeed = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'e2e-dump-env') `
+    $noNeed = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'just', 'e2e-dump-env') `
         -Environment @{ GITHUB_TOKEN = '' }
     Assert-That 'no token is derived for a target that does not read it' `
         ($noNeed.StdOut -notmatch 'GITHUB_TOKEN') `
@@ -519,7 +525,7 @@ Assert-That 'its .git is a file, not a directory' `
 $wtReference = Get-ImageReference -Repo $worktree
 Assert-Equal 'the worktree selects the same image, so nothing rebuilds' $reference $wtReference
 
-$wtGit = Invoke-Just -Repo $worktree -Arguments @('anvil-container', 'e2e-show-git') -AllowFailure
+$wtGit = Invoke-Just -Repo $worktree -Arguments @('anvil-container', 'just', 'e2e-show-git') -AllowFailure
 Assert-Equal 'a recipe run from a worktree succeeds' 0 $wtGit.ExitCode
 Assert-That 'git resolves the branch inside the container' `
     ($wtGit.StdOut -match 'E2E-GIT:\[e2e-worktree\]') "$($wtGit.StdOut)$($wtGit.StdErr)"
@@ -647,7 +653,7 @@ RUN --mount=type=secret,id=e2e_token,required=true \
 $leakControlStanza = $secretStanza -replace '(?m)\s*&& rm -f /usr/local/cargo/credentials\.toml$', ''
 Write-Fixture $dockerfile ($dockerfileBody + $leakControlStanza)
 Write-Step 'building a deliberately leaking image to prove the probe works'
-$controlRun = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'anvil-fmt') -AllowFailure
+$controlRun = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'just', 'anvil-fmt') -AllowFailure
 Assert-Equal 'the control image builds' 0 $controlRun.ExitCode
 $controlLeak = Invoke-Engine -Arguments @(
     'run', '--rm', '--pull=never', (Get-ImageReference -Repo $repo),
@@ -658,7 +664,7 @@ Assert-Equal 'the probe detects a secret left in the filesystem' 0 $controlLeak.
 Write-Fixture $dockerfile ($dockerfileBody + $secretStanza)
 
 Write-Step 'rebuilding with the hook active'
-$hookRun = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'anvil-fmt') -AllowFailure
+$hookRun = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'just', 'anvil-fmt') -AllowFailure
 Assert-Equal 'the run with a hook succeeds' 0 $hookRun.ExitCode
 Assert-That 'the hook announced itself at build time' ($hookRun.StdErr -match 'Anvil-BuildSecrets')
 Assert-That 'the build secret was declared' ($hookRun.StdErr -match 'build secrets: e2e_token')
@@ -684,7 +690,7 @@ $leak = Invoke-Engine -Arguments @(
 Assert-Equal 'the secret is absent from the image filesystem' 1 $leak.ExitCode
 
 Write-Step 'checking that the forwarded value arrives inside the container'
-$showEnv = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'e2e-show-env') -AllowFailure
+$showEnv = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'just', 'e2e-show-env') -AllowFailure
 Assert-That 'the run-time value reaches a recipe in the container' `
     ($showEnv.StdOut -match 'E2E:run-value') "stdout: $($showEnv.StdOut)`nstderr: $($showEnv.StdErr)"
 
@@ -698,7 +704,7 @@ function Anvil-BuildSecrets {
 }
 '@
 
-$emptyHook = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'anvil-fmt') -AllowFailure
+$emptyHook = Invoke-Just -Repo $repo -Arguments @('anvil-container', 'just', 'anvil-fmt') -AllowFailure
 Assert-That 'an empty secret aborts the run' ($emptyHook.ExitCode -ne 0) `
     'BuildKit would mount an empty secret and exit 0, tagging a degraded image with a valid hash'
 Assert-That 'the failure names the offending secret' ($emptyHook.StdErr -match "empty value for secret 'e2e_token'") `
@@ -757,7 +763,7 @@ Write-Section '10. Recipes run natively inside the image'
 $nestedReference = if ($buildSecretsSupported) { $secretReference } else { Get-ImageReference -Repo $repo }
 $nested = Invoke-Engine -Arguments @(
     'run', '--rm', '-e', 'ANVIL_IN_CONTAINER=1', '-v', "$(ConvertTo-EnginePath $repo):/workspace", '-w', '/workspace',
-    $nestedReference, 'just', 'anvil-container', 'anvil-fmt'
+    $nestedReference, 'just', 'anvil-container', 'just', 'anvil-fmt'
 ) -AllowFailure
 Assert-Equal 'anvil-container passes through inside the image' 0 $nested.ExitCode
 Assert-That 'no engine was invoked from inside the container' `

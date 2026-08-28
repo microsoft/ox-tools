@@ -2311,8 +2311,9 @@ anvil-udeps-validate-prereqs: anvil-toolchain-nightly-validate-prereqs anvil-too
 # Update cargo-anvil and regenerate; repository-specific edits stop automatic updates.
 # Update behaviour: https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/updates.md
 #
-# Containerized execution. `just anvil-container <recipe>` runs any anvil
-# recipe inside a pinned Linux image; everything else keeps running natively.
+# Containerized execution. `just anvil-container <command…>` runs the given
+# argv inside a pinned Linux image; everything else keeps running natively.
+# Anvil recipes are reached by naming `just`, like any other command.
 # There is no configuration file and no transparent routing: the container is
 # reached through this recipe or not at all.
 #
@@ -3709,12 +3710,16 @@ _anvil-base-ref:
 # recipe's body executes after its dependencies, so exporting from there is
 # too late. Invoking `_anvil-<name>` as a child process makes every check
 # below it inherit the setting.
+#
+# The justfile is named explicitly so the child resolves the same file the
+# wrapper was defined in, rather than whatever an upward search from the
+# working directory happens to find.
 [private]
 [script("pwsh", "-NoProfile")]
 _anvil-unscoped name:
     $ErrorActionPreference = 'Stop'
     $env:ANVIL_IMPACT = 'off'
-    & '{{ replace(just_executable(), "'", "''") }}' '_anvil-{{ replace(name, "'", "''") }}'
+    & '{{ replace(just_executable(), "'", "''") }}' --justfile '{{ replace(justfile(), "'", "''") }}' '_anvil-{{ replace(name, "'", "''") }}'
     exit $LASTEXITCODE
 
 === justfiles/anvil/impact.just ===
@@ -4548,14 +4553,15 @@ anvil-full-validate-prereqs: \
 # catalog knows about; `anvil-validate-prereqs` verifies every tool
 # and component is present at or above its pinned version.
 #
-# These also install / verify cargo-delta, the impact-analysis tool.
-# cargo-delta is only invoked by the cloud-workflow impact step (not by
-# any check), so it is deliberately NOT part of the per-group / per-tier
-# setup recipes -- a CI group job installs only what its checks need, and
-# the impact step installs cargo-delta itself. But the catch-all
-# `anvil-setup` is "install everything the catalog knows about", so it
-# includes cargo-delta too (a local `just anvil-setup` then provisions a
-# complete environment, impact tool included).
+# cargo-delta (the impact-analysis tool) is a prerequisite of every group
+# whose checks are impact-scoped: those checks depend on `anvil-impact`,
+# which invokes cargo-delta when it has to (re)compute the impact set, so
+# each such group's `-setup` / `-validate-prereqs` installs / verifies it
+# (fail-fast, rather than discovering it missing mid-run). In a cloud
+# workflow a group job normally consumes the downloaded impact artifact and
+# never actually runs cargo-delta, but the tool is guaranteed present.
+# `anvil-setup` also lists it explicitly as the catch-all (harmless -- just
+# dedups the fan-out).
 
 # Install every tool and component in the anvil catalog.
 [group("anvil-setup")]
