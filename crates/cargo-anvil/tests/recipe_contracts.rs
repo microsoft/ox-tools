@@ -23,10 +23,24 @@ const IMPACT: &str = include_str!("../templates/justfiles/anvil/impact.just");
 const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.just");
 const FMT: &str = include_str!("../templates/justfiles/anvil/checks/fmt.just");
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
+const LOOM: &str = include_str!("../templates/justfiles/anvil/checks/loom.just");
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
 const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
+
+#[test]
+fn loom_has_an_overridable_ci_preemption_bound() {
+    assert!(
+        LOOM.contains("IsNullOrWhiteSpace($env:LOOM_MAX_PREEMPTIONS)"),
+        "loom must preserve an adopter-provided exploration bound"
+    );
+    assert!(
+        LOOM.contains("$env:LOOM_MAX_PREEMPTIONS = '2'"),
+        "loom must default CI to its documented two-preemption bound"
+    );
+}
+
 const FAKE_CARGO_PS1: &str = r#"
 $joined = $args -join ' '
 if ($env:FAKE_CARGO_LOG) {

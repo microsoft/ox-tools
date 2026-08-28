@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.5.0"
-catalog_checksum = "sha256:dd1853eac724c9550e1eb62b5e67c3b816e15a3be8017652239da5d71813d3ad"
+catalog_checksum = "sha256:00ad3a3081a344bf215dfc3a94a4d7216b4784dbc002887585294d46327405f4"
 
 [[file]]
 path = ".anvil/container/Containerfile"
@@ -145,7 +145,7 @@ checksum = "sha256:689f7d5b1eaea32672f8d0b9fff0994cc03bc56fb8ef282a4286f930fc503
 
 [[file]]
 path = "justfiles/anvil/checks/loom.just"
-checksum = "sha256:4bf509bcca3507aafd9848ce19ea3691ab2cd77de05b344e042f3ba2c300e35b"
+checksum = "sha256:8feb9bcb11c314f4c7825854cc7dd10b184d91ad520dd736addd098d3c7bb1bf"
 
 [[file]]
 path = "justfiles/anvil/checks/miri-race-coverage.just"
@@ -181,7 +181,7 @@ checksum = "sha256:d346399f288570066e53fd123baf05f7d4a57f17da8ee687a6d881204c5ba
 
 [[file]]
 path = "justfiles/anvil/checks/semver-check.just"
-checksum = "sha256:13fcb4569e132b8922dc1c111a58ca081121125f29b0c855207bc818684ef2b5"
+checksum = "sha256:52b31bec3c5d271b25f46d9b1dd6aca4b84e394fd8cf46bfa5386a3df7ed3999"
 
 [[file]]
 path = "justfiles/anvil/checks/spellcheck.just"
@@ -321,6 +321,46 @@ checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103a
 
 [[region]]
 host = "crates/cargo-ensure-no-default-features/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo-gamma-attrs-impl/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo-gamma-attrs/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo-gamma-engine/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo-gamma-lib/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo-gamma-process/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo-gamma-rt/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo-gamma-unsafe/Cargo.toml"
+id = "anvil-lints"
+checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
+
+[[region]]
+host = "crates/cargo-gamma/Cargo.toml"
 id = "anvil-lints"
 checksum = "sha256:2dd7c0f21339fd17092b8dedfe924aa86732c3520baab84f914c2d8f4103ac40"
 
