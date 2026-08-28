@@ -118,7 +118,7 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]
-anvil-loom-setup installer="install": anvil-tool-rustc-validate-prereqs
+anvil-loom-setup installer="install": anvil-toolchain-stable-install
 
 # Validate prerequisites for the `anvil-loom` recipe.
 [group("anvil-setup")]

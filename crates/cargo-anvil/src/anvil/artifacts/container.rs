@@ -226,6 +226,8 @@ mod tests {
     #[test]
     fn containerfile_installs_the_generated_toolset() {
         assert!(CONTAINERFILE.contains("just anvil-setup"));
+        assert!(!CONTAINERFILE.contains("_anvil-resolve-stable"));
+        assert!(!CONTAINERFILE.contains("just anvil-toolchain-stable-install"));
         assert!(CONTAINERFILE.contains("COPY . ."));
         assert!(IGNORE.contains("!.anvil/container/*"));
         assert!(!IGNORE.contains("resolve-stable-toolchain"));

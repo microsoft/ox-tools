@@ -18,26 +18,20 @@ parameters:
     type: string
     default: ''
 steps:
+  - bash: |
+      if ! command -v just >/dev/null 2>&1 ; then
+        cargo install --locked just
+      fi
+    displayName: anvil setup (install just)
+
   - pwsh: |
-      & just _anvil-resolve-stable apply-file-options
-      if ($LASTEXITCODE -ne 0) {
-        throw "anvil: stable toolchain option setup failed with exit code $LASTEXITCODE"
+      $version = (& just _anvil-stable-rustc-version | Select-Object -Last 1)
+      if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($version)) {
+        throw 'anvil: failed to provision the selected stable toolchain'
       }
-      $toolchain = (& just _anvil-resolve-stable | Out-String).Trim()
-      if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($toolchain)) {
-        throw 'anvil: failed to resolve stable toolchain'
-      }
-      Write-Host "anvil: selected stable toolchain '$toolchain'"
-    displayName: anvil setup (resolve stable toolchain)
-  - pwsh: |
-      $toolchain = (& just _anvil-resolve-stable for-environment | Out-String).Trim()
-      if ($LASTEXITCODE -ne 0) {
-        throw 'anvil: failed to select stable toolchain arguments'
-      }
-      $toolchainArgs = if ([string]::IsNullOrWhiteSpace($toolchain)) { @() } else { @("+$toolchain") }
-      $version = (& rustc @toolchainArgs --version | Select-Object -Last 1).Split()[1]
+      $version = $version.Trim()
       Write-Host "##vso[task.setvariable variable=anvil_rustc_version]$version"
-    displayName: anvil setup (capture rustc version)
+    displayName: anvil setup (provision stable toolchain and capture version)
   - task: Cache@2
     inputs:
       # Same key shape as the GitHub side: OS + arch + rustc version +
@@ -55,12 +49,6 @@ steps:
         $(HOME)/.cargo/.crates.toml
         $(HOME)/.cargo/.crates2.json
     displayName: anvil setup (cache cargo home)
-
-  - bash: |
-      if ! command -v just >/dev/null 2>&1 ; then
-        cargo install --locked just
-      fi
-    displayName: anvil setup (install just)
 
   # Hand everything else off to the catalog recipe. Idempotent. ADO
   # uses the default `install` backend (source builds) because

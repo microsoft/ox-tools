@@ -27,7 +27,7 @@ anvil-doc-test: anvil-doc-test-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]
-anvil-doc-test-setup installer="install": anvil-tool-rustc-validate-prereqs
+anvil-doc-test-setup installer="install": anvil-toolchain-stable-install
 
 # Validate prerequisites for the `anvil-doc-test` recipe.
 [group("anvil-setup")]

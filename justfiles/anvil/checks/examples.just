@@ -19,7 +19,7 @@ anvil-examples: anvil-examples-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-examples` recipe.
 [group("anvil-setup")]
-anvil-examples-setup installer="install": anvil-tool-rustc-validate-prereqs
+anvil-examples-setup installer="install": anvil-toolchain-stable-install
 
 # Validate prerequisites for the `anvil-examples` recipe.
 [group("anvil-setup")]

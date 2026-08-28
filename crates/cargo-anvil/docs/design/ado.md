@@ -703,13 +703,16 @@ download to get scoping.
 ### `setup.yml` and `impact.yml`
 
 `setup.yml` is a step template that installs `just`
-(`cargo install just --locked`) and then invokes the catalog setup recipes. It
+(`cargo install just --locked`), provisions or prepares the selected stable
+compiler through the setup dependency graph while capturing its cache-key
+version, and then invokes the requested catalog setup recipe. It
 takes a single `group` parameter that controls which recipes run:
 
 - empty (default): runs `just anvil-setup` -- the full catalog. Use for "give
   me everything" flows.
-- `none`: skips the catalog setup entirely. Used by `impact.yml`, which only
-  needs `cargo-delta` and installs it itself afterwards.
+- `none`: skips the group/full tool fan-out after stable provisioning. Used by
+  `impact.yml`, which only needs `cargo-delta` and installs it itself
+  afterwards.
 - any other value (e.g. `pr-fast`, `scheduled-advisories`): runs
   `just anvil-<group>-setup` -- only the tools, components, and toolchains
   that group actually needs. Every per-group step template
@@ -743,14 +746,19 @@ mechanics are in [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact
 
 ## 6. Rust toolchain
 
-The user's root pipeline or compliance template installs Rust before the Anvil
-stages run. The generated setup step prepares the catalog toolchain and invokes
-`rustc --version` directly with either the selected `+toolchain` argument or no
-override for a selecting repository file before restoring the cache. It does
-not publish a resolved `RUSTUP_TOOLCHAIN` to subsequent steps. Each stable
-recipe lazily selects the same optional argument and invokes Cargo or Rust
-directly in its current process, while a selecting toolchain file remains
-unoverridden so rustup processes the complete file.
+The user's root pipeline or compliance template installs the Rust/rustup
+bootstrap before the Anvil stages run. After bootstrapping Just, the generated
+setup step calls `_anvil-stable-rustc-version`. Its
+`anvil-toolchain-stable-install` dependency provisions a public selection or
+prepares an externally provisioned internal selection before invoking `rustc`
+directly with the lazy optional `+toolchain` argument. The resulting version
+keys the cache. The template never invokes `_anvil-resolve-stable` itself and
+does not publish a resolved `RUSTUP_TOOLCHAIN` to subsequent steps. Each stable
+recipe evaluates the inline PowerShell array expression and invokes Cargo or
+Rust directly in its current PowerShell process. Selection has no
+expression-time subprocess, host-OS branch, or change to the adopter's
+configured shell. A selecting toolchain file remains unoverridden so rustup
+processes the complete file.
 
 Selection follows the shared local contract: an existing `RUSTUP_TOOLCHAIN`, then a
 root toolchain file with `channel` or `path`, then the root MSRV. Internal pipelines
@@ -761,21 +769,21 @@ Setup reapplies explicit components and targets from a suppressed root toolchain
 file to the provisioned compiler. Unavailable options warn and are skipped, matching
 rustup's native toolchain-file behavior.
 
-Anvil does not install stable Rust on ADO:
+In 1ESPT compliance pipelines, msrustup still provisions the selected
+`RUSTUP_TOOLCHAIN`; the Anvil setup primitive treats that caller override as
+external and only reapplies applicable repository file options. Mapping a
+public MSRV to an internal `ms-prod-*` channel remains a root-pipeline policy.
+In OSS/non-1ESPT pipelines, the user provides rustup (for example with
+`RustInstaller@1`) and Anvil installs a missing public MSRV selection through
+the same setup primitive.
 
-- **1ESPT compliance.** Compliance pipelines provision Rust through msrustup.
-- **Backend mapping is a repository decision.** Mapping a public MSRV to an internal
-  `ms-prod-*` channel belongs in the root pipeline, not the catalog.
-
-In the OSS / non-1ESPT case, the user adds a `RustInstaller@1` task (or a rustup
-shell script) to their root pipeline before the anvil stages template runs. A typical
-placement: a setup stage that `dependsOn`s nothing and runs first, followed by the anvil
-stages.
-
-`anvil-tool-rustc-validate-prereqs` validates the selected compiler and the
-workspace MSRV compatibility rule. For nightly-requiring checks, the matching
-toolchain-validate-prereqs recipe fails with a suggestion to ask the team's pipeline
-owner to add that dated nightly to msrustup.
+Shared Cargo-tool/default-component setup and stable-only leaf setup all depend
+on `anvil-toolchain-stable-install`; Just deduplicates it for group/full
+fan-out. `anvil-tool-rustc-validate-prereqs` remains read-only and validates
+the selected compiler and workspace MSRV compatibility rule. For
+nightly-requiring checks, the matching toolchain-validate-prereqs recipe fails
+with a suggestion to ask the team's pipeline owner to add that dated nightly
+to msrustup.
 
 ## 7. Caching
 

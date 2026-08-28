@@ -165,6 +165,9 @@ mod tests {
     fn setup_action_takes_group_input_and_dispatches() {
         assert!(SETUP_ACTION.contains("group:"));
         assert!(SETUP_ACTION.contains("just anvil-setup binstall"));
+        assert!(SETUP_ACTION.contains("just _anvil-stable-rustc-version"));
+        assert!(!SETUP_ACTION.contains("_anvil-resolve-stable"));
+        assert!(!SETUP_ACTION.contains("just anvil-toolchain-stable-install"));
         assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
         assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" binstall"));
         assert!(SETUP_ACTION.contains(r"^[a-z0-9-]+$"));

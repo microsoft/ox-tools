@@ -31,24 +31,26 @@
 # Rustup toolchains
 # ============================================================================
 
-# Stable commands interpolate this lazy PowerShell argument-array expression
-# directly at each command site. `RUSTUP_TOOLCHAIN` is an input override only;
-# Anvil never exports a resolved value globally into unrelated recipes or
-# helpers.
+# Stable commands interpolate this PowerShell array expression directly
+# at each command site. Selection runs inside the existing PowerShell recipe
+# process, so it needs no host-shell quoting or selector subprocess.
+# `RUSTUP_TOOLCHAIN` is an input override only; Anvil never exports a resolved
+# value globally into unrelated recipes or helpers.
 [private]
-_anvil_stable_toolchain_selection_script := '''
+_anvil_stable_toolchain_args := trim('''
+@(& {
 $RepoRoot = (Get-Location).Path
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3
 
-function Write-ExplicitToolchainArgs([string] $Toolchain) {
-    Write-Output ("@('+" + $Toolchain.Replace("'", "''") + "')")
+function Write-ExplicitToolchainArg([string] $Toolchain) {
+    Write-Output ('+' + $Toolchain)
 }
 
 if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
-    Write-ExplicitToolchainArgs $env:RUSTUP_TOOLCHAIN
-    exit 0
+    Write-ExplicitToolchainArg $env:RUSTUP_TOOLCHAIN
+    return
 }
 
 $toolchainFile = $null
@@ -88,8 +90,7 @@ if ($null -ne $toolchainFile) {
 }
 
 if ($selectingFile) {
-    Write-Output '@()'
-    exit 0
+    return
 }
 
 if (-not [string]::IsNullOrWhiteSpace($env:ANVIL_MSRV_TOOLCHAIN)) {
@@ -121,12 +122,9 @@ $msrv = if ($values.ContainsKey('workspace.package')) {
 } else {
     throw 'anvil: no selecting rust-toolchain(.toml) and no root [workspace.package] or [package] rust-version; declare an MSRV or select a toolchain explicitly'
 }
-Write-ExplicitToolchainArgs $msrv
-exit 0
-'''
-
-[private]
-_anvil_stable_toolchain_args := if os_family() == "windows" { shell("& ([scriptblock]::Create('" + replace(_anvil_stable_toolchain_selection_script, "'", "''") + "'));") } else { shell("pwsh -NoProfile -Command '& ([scriptblock]::Create($args[0]))' " + quote(_anvil_stable_toolchain_selection_script)) }
+Write-ExplicitToolchainArg $msrv
+})
+''')
 
 # General nightly used by udeps, miri, careful, and any future
 # nightly-dependent check. Bumped on a regular cadence (monthly is a

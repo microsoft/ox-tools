@@ -735,13 +735,16 @@ result, and log link without check-suite attribution.
 ### `anvil-setup`
 
 `anvil-setup` is a composite action that installs `just`
-(`cargo install just --locked`) and then invokes the catalog setup recipes. Its
+(`cargo install just --locked`), provisions the selected stable compiler
+through the setup dependency graph while capturing its cache-key version, and
+then invokes the requested catalog setup recipe. Its
 `group` input controls which recipes run:
 
 - empty (default): runs `just anvil-setup binstall` -- the full catalog. Use
   for local "give me everything" flows.
-- `none`: skips the catalog setup entirely. Used by `anvil-impact`, which only
-  needs `cargo-delta` and installs it itself afterwards.
+- `none`: skips the group/full tool fan-out after stable provisioning. Used by
+  `anvil-impact`, which only needs `cargo-delta` and installs it itself
+  afterwards.
 - any other value (e.g. `pr-fast`, `scheduled-advisories`): runs
   `just anvil-<group>-setup binstall` -- only the tools, components, and
   toolchains that group actually needs. Ordinary group names contain only
@@ -840,17 +843,21 @@ The check → bucket mapping is in
 
 ## 7. Rust toolchain
 
-The setup action bootstraps cargo-binstall and Just using the runner environment,
-then prepares the catalog's stable toolchain through the standard private Just
-recipe before reading `rustc` or restoring build artifacts. It installs a
-missing public channel through rustup and invokes `rustc` directly with either
-the selected `+toolchain` argument or no override for a selecting repository
-file. It does not publish a resolved `RUSTUP_TOOLCHAIN` through `GITHUB_ENV`.
+The setup action bootstraps cargo-binstall and Just using the runner
+environment, then calls `_anvil-stable-rustc-version`. That helper depends on
+`anvil-toolchain-stable-install`, so the setup graph provisions a missing
+public selection and replays applicable file options before invoking `rustc`
+directly with the lazy optional `+toolchain` argument. The resulting version
+keys the cache; the workflow never invokes `_anvil-resolve-stable` itself and
+does not publish a resolved `RUSTUP_TOOLCHAIN` through `GITHUB_ENV`.
 Each stable recipe lazily selects the same optional argument and invokes Cargo
-or Rust directly in its current process; selecting toolchain files remain
-unoverridden so rustup processes them natively. All matrix legs therefore use
-the same repository selection instead of the different stable versions that
-runner images may carry, without changing unrelated recipe environments.
+or Rust directly in its current PowerShell process. The selector is an inline
+PowerShell array expression rather than an expression-time shell subprocess, so
+it has no host-OS branch and does not alter the adopter's configured shell.
+Selecting toolchain files remain unoverridden so rustup processes them natively.
+All matrix legs therefore use the same repository selection instead of the
+different stable versions that runner images may carry, without changing
+unrelated recipe environments.
 
 Selection follows the shared local contract: an existing `RUSTUP_TOOLCHAIN`, then a
 root toolchain file with `channel` or `path`, then the root MSRV. There is no
@@ -877,9 +884,12 @@ users that need additional preparation take ownership of the generated reusable
 implementation workflow and add the preparation there. The generated composite
 actions remain implementation details rather than a separately supported API.
 
-`anvil-tool-rustc-validate-prereqs` (depended on by every check that needs rustc)
-validates the installed `rustc` against the catalog minimum at recipe time; a
-below-minimum `rustc` produces a clean failure message.
+Setup recipes that need stable Rust depend on
+`anvil-toolchain-stable-install`; shared Cargo-tool installation and
+default-component installation carry the same prerequisite. Just deduplicates
+it across each group/full setup invocation.
+`anvil-tool-rustc-validate-prereqs` remains read-only and validates the
+installed `rustc` and workspace MSRV contract at check time.
 
 ## 8. Caching
 

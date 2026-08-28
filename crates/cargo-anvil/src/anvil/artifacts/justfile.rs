@@ -330,6 +330,7 @@ mod tests {
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-deny-install"));
         assert!(TOOLS_JUST.contains("anvil-tool-cargo-deny-validate-prereqs"));
         assert!(TOOLS_JUST.contains("anvil-component-default-clippy-install"));
+        assert!(TOOLS_JUST.contains("anvil-toolchain-stable-install"));
         assert!(TOOLS_JUST.contains("anvil-toolchain-nightly-install"));
     }
 
@@ -738,20 +739,76 @@ mod tests {
     }
 
     #[test]
-    fn stable_toolchain_selection_is_lazy_and_scoped_to_each_command() {
+    fn stable_toolchain_selection_is_scoped_to_each_command() {
         assert!(!VERSIONS_JUST.contains("export RUSTUP_TOOLCHAIN"));
-        assert!(VERSIONS_JUST.contains("_anvil_stable_toolchain_selection_script := '''"));
-        assert!(VERSIONS_JUST.contains("set lazy"));
-        assert!(VERSIONS_JUST.contains("_anvil_stable_toolchain_args :="));
-        assert!(VERSIONS_JUST.contains("shell(\"& ([scriptblock]::Create('\""));
-        assert!(VERSIONS_JUST.contains("quote(_anvil_stable_toolchain_selection_script)"));
-        assert!(VERSIONS_JUST.contains("Write-Output '@()'"));
-        assert!(VERSIONS_JUST.contains("\"@('+\""));
+        assert!(VERSIONS_JUST.contains("_anvil_stable_toolchain_args := trim('''\n@(& {"));
+        assert!(VERSIONS_JUST.contains("Write-Output ('+' + $Toolchain)"));
+        assert!(!VERSIONS_JUST.contains("os_family()"));
+        assert!(!VERSIONS_JUST.contains("shell("));
+        assert!(!VERSIONS_JUST.contains("[scriptblock]::Create"));
         assert!(TOOLS_JUST.contains("_anvil-resolve-stable action=\"resolve\":"));
         assert!(!TOOLS_JUST.contains("_anvil-with-stable"));
         assert!(TOOLS_JUST.contains("& cargo {{_anvil_stable_toolchain_args}}"));
         assert!(TOOLS_JUST.contains("rustup component add --toolchain"));
         assert!(TOOLS_JUST.contains("rustup target add --toolchain"));
+    }
+
+    #[test]
+    fn setup_graph_owns_stable_toolchain_provisioning() {
+        assert!(
+            TOOLS_JUST.contains("anvil-toolchain-stable-install: (_anvil-resolve-stable \"install\")"),
+            "stable provisioning must have a setup-specific recipe"
+        );
+        assert!(
+            TOOLS_JUST.contains("_install-tool name version installer source_prereq=\"\": anvil-toolchain-stable-install (_install-tool-core name version installer source_prereq)"),
+            "every shared Cargo-tool installation must provision stable first"
+        );
+        assert!(
+            TOOLS_JUST.contains("& just _install-tool-core cargo-bolero"),
+            "platform-gated installers must use the already-provisioned core helper"
+        );
+        assert!(
+            TOOLS_JUST.contains("& just _install-tool-core cargo-mutants"),
+            "platform-gated installers must use the already-provisioned core helper"
+        );
+        for component in ["clippy", "rustfmt"] {
+            let expected = format!("anvil-component-default-{component}-install: anvil-toolchain-stable-install");
+            assert!(
+                TOOLS_JUST.contains(&expected),
+                "default component '{component}' must provision stable first"
+            );
+        }
+        assert!(
+            TOOLS_JUST.contains("_anvil-stable-rustc-version: anvil-toolchain-stable-install"),
+            "cloud version capture must use the setup dependency graph"
+        );
+
+        let checks = all_check_bodies();
+        for check in ["bench", "doc-build", "doc-test", "examples", "loom"] {
+            let setup = format!("anvil-{check}-setup installer=\"install\": anvil-toolchain-stable-install");
+            let validation = format!("anvil-{check}-validate-prereqs: anvil-tool-rustc-validate-prereqs");
+            assert!(checks.contains(&setup), "{check} setup must provision stable");
+            assert!(
+                checks.contains(&validation),
+                "{check} validation must remain read-only prerequisite validation"
+            );
+        }
+        assert!(
+            !checks.contains("validate-prereqs: anvil-toolchain-stable-install"),
+            "validate-prereqs recipes must never install stable"
+        );
+
+        let groups = all_group_bodies();
+        assert!(
+            groups.contains("(anvil-tool-cargo-delta-install installer)") && groups.contains("(anvil-bench-setup installer)"),
+            "representative group setup paths must reach stable provisioning through Cargo-tool or stable-only leaf setup"
+        );
+        assert!(
+            TIERS_JUST.contains("anvil-full-setup installer=\"install\":")
+                && TIERS_JUST.contains("(anvil-pr-setup installer)")
+                && TIERS_JUST.contains("anvil-setup installer=\"install\": (anvil-full-setup installer)"),
+            "full and global setup must retain their transitive path to stable provisioning"
+        );
     }
 
     #[test]
@@ -803,7 +860,16 @@ mod tests {
                     "import 'tools.just'\n\n",
                     "[script(\"pwsh\", \"-NoProfile\")]\n",
                     "_anvil-test-stable-args:\n",
-                    "    Write-Output \"{{_anvil_stable_toolchain_args}}\"\n",
+                    "    $stableArgs = {{_anvil_stable_toolchain_args}}\n",
+                    "    if ($stableArgs.Count -eq 0) {\n",
+                    "        Write-Output '@()'\n",
+                    "        exit 0\n",
+                    "    }\n",
+                    "    $escaped = ([string] $stableArgs[0]).Replace(\"'\", \"''\")\n",
+                    "    Write-Output (\"@('\" + $escaped + \"')\")\n\n",
+                    "[script(\"pwsh\", \"-NoProfile\")]\n",
+                    "_anvil-test-stable-command:\n",
+                    "    & cargo {{_anvil_stable_toolchain_args}} --version\n",
                 ),
             )
             .expect("Justfile fixture must be writable");
@@ -831,7 +897,7 @@ mod tests {
                     command.args(["_anvil-resolve-stable", "for-environment"]);
                 }
                 ["-InstallIfMissing"] => {
-                    command.args(["_anvil-resolve-stable", "install"]);
+                    command.arg("anvil-toolchain-stable-install");
                 }
                 ["-ApplyToolchainFileOptions"] => {
                     command.args(["_anvil-resolve-stable", "apply-file-options"]);
@@ -904,6 +970,58 @@ mod tests {
             assert_eq!(resolved(root, None), "@()");
             assert_eq!(resolved(root, Some("custom-toolchain")), "@('+custom-toolchain')");
             assert_eq!(resolved(root, Some("team's-toolchain")), "@('+team''s-toolchain')");
+        }
+
+        #[test]
+        fn passes_selected_arguments_directly_to_cargo() {
+            let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
+            let shim = TempDir::new().expect("cargo shim directory must be creatable");
+            #[cfg(windows)]
+            fs::write(shim.path().join("cargo.cmd"), "@echo off\r\necho %*\r\nexit /b 0\r\n").expect("Cargo shim must be writable");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+
+                let cargo = shim.path().join("cargo");
+                fs::write(&cargo, "#!/bin/sh\nprintf '%s\\n' \"$*\"\nexit 0\n").expect("Cargo shim must be writable");
+                fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).expect("Cargo shim must be executable");
+            }
+            let mut paths = vec![shim.path().to_path_buf()];
+            paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+            let path = env::join_paths(paths).expect("shim PATH must be valid");
+
+            let output = command(temp.path())
+                .arg("_anvil-test-stable-command")
+                .env("RUSTUP_TOOLCHAIN", "team's-toolchain")
+                .env("PATH", &path)
+                .output()
+                .expect("direct stable Cargo command must run");
+            assert!(
+                output.status.success(),
+                "direct stable Cargo command failed: {}",
+                normalized_diagnostic(&output)
+            );
+            assert_eq!(
+                String::from_utf8(output.stdout).expect("Cargo shim output must be UTF-8").trim(),
+                "+team's-toolchain --version"
+            );
+
+            fs::write(temp.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n")
+                .expect("toolchain fixture must be writable");
+            let output = command(temp.path())
+                .arg("_anvil-test-stable-command")
+                .env("PATH", path)
+                .output()
+                .expect("repository-selected Cargo command must run");
+            assert!(
+                output.status.success(),
+                "repository-selected Cargo command failed: {}",
+                normalized_diagnostic(&output)
+            );
+            assert_eq!(
+                String::from_utf8(output.stdout).expect("Cargo shim output must be UTF-8").trim(),
+                "--version"
+            );
         }
 
         #[test]

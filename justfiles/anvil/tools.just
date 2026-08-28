@@ -128,13 +128,12 @@ anvil-tool-cargo-spellcheck-source-deps-check:
     }
 
 # ============================================================================
-# rustc + pwsh validate-prereqs (no install -- system prereqs)
+# rustc + pwsh validate-prereqs
 # ============================================================================
 #
-# rustc is installed via rustup (https://rustup.rs); pwsh is installed
-# via the platform's package manager. Both are presumed present on any
-# machine running anvil; the validate recipes just surface a friendly
-# error if not.
+# Stable rustc is provisioned by `anvil-toolchain-stable-install` below.
+# pwsh is installed via the platform's package manager. The validate recipes
+# are read-only and only surface a friendly error if a prerequisite is absent.
 
 # Validate that rustc is available.
 [group("anvil-setup")]
@@ -490,7 +489,32 @@ _anvil-resolve-stable action="resolve":
         $selection.Value
     }
 
-# _install-tool: install a cargo subcommand at the catalog version,
+# Provision the selected stable toolchain and replay any applicable
+# toolchain-file options. This is the shared prerequisite for setup paths that
+# execute stable Cargo/Rust or install Cargo tools; Just deduplicates it within
+# each setup invocation.
+[group("anvil-setup")]
+anvil-toolchain-stable-install: (_anvil-resolve-stable "install")
+
+# Report the selected stable rustc version for cloud cache keys. Provisioning
+# is a dependency so workflow surfaces invoke one setup-aware operation rather
+# than orchestrating the resolver directly.
+[private]
+[script("pwsh", "-NoProfile")]
+_anvil-stable-rustc-version: anvil-toolchain-stable-install
+    $versionLine = (& rustc {{_anvil_stable_toolchain_args}} --version | Select-Object -Last 1)
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($versionLine)) {
+        Write-Error 'anvil: failed to read the selected stable rustc version'
+        exit 1
+    }
+    $parts = ([string] $versionLine).Split()
+    if ($parts.Count -lt 2) {
+        Write-Error "anvil: unexpected rustc version output: $versionLine"
+        exit 1
+    }
+    Write-Output $parts[1]
+
+# _install-tool-core: install a cargo subcommand at the catalog version,
 # or no-op if it is already installed at or above that version. The
 # `installer` parameter selects between:
 #   - "install"  (cargo install --locked, pure-source). Default.
@@ -500,7 +524,7 @@ _anvil-resolve-stable action="resolve":
 # `source_prereq`, when set, runs immediately before a source installation,
 # including a binstall fallback.
 [script("pwsh", "-NoProfile")]
-_install-tool name version installer source_prereq="":
+_install-tool-core name version installer source_prereq="":
     $ErrorActionPreference = 'Stop'
     $name = '{{name}}'
     $version = '{{version}}'
@@ -565,6 +589,9 @@ _install-tool name version installer source_prereq="":
         Write-Error "$name install FAILED"
         exit $LASTEXITCODE
     }
+
+# Provision stable before entering the Cargo tool installer.
+_install-tool name version installer source_prereq="": anvil-toolchain-stable-install (_install-tool-core name version installer source_prereq)
 
 # _check-tool: verify a cargo subcommand is installed at or above the
 # pinned version. Errors with an install hint on missing or too-old.
@@ -790,7 +817,7 @@ anvil-toolchain-nightly-external-types-validate-prereqs: (_check-toolchain rust_
 
 # Install the pinned `clippy` component for the default toolchain.
 [group("anvil-setup")]
-anvil-component-default-clippy-install: (_install-component "default" "clippy")
+anvil-component-default-clippy-install: anvil-toolchain-stable-install (_install-component "default" "clippy")
 
 # Validate that the pinned `clippy` component is available for the default toolchain.
 [group("anvil-setup")]
@@ -798,7 +825,7 @@ anvil-component-default-clippy-validate-prereqs: (_check-component "default" "cl
 
 # Install the pinned `rustfmt` component for the default toolchain.
 [group("anvil-setup")]
-anvil-component-default-rustfmt-install: (_install-component "default" "rustfmt")
+anvil-component-default-rustfmt-install: anvil-toolchain-stable-install (_install-component "default" "rustfmt")
 
 # Validate that the pinned `rustfmt` component is available for the default toolchain.
 [group("anvil-setup")]
@@ -885,12 +912,12 @@ anvil-tool-cargo-audit-validate-prereqs: (_check-tool "cargo-audit" cargo_audit_
 # Install the pinned `cargo-bolero` tool.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
-anvil-tool-cargo-bolero-install installer="install":
+anvil-tool-cargo-bolero-install installer="install": anvil-toolchain-stable-install
     if (-not $IsLinux) {
         Write-Host 'anvil-tool-cargo-bolero-install: non-Linux host -- skipping (cargo-bolero/libfuzzer is Linux-only)'
         exit 0
     }
-    & just _install-tool cargo-bolero {{cargo_bolero_version}} {{installer}}
+    & just _install-tool-core cargo-bolero {{cargo_bolero_version}} {{installer}}
     exit $LASTEXITCODE
 
 # Validate that the pinned `cargo-bolero` tool is available.
@@ -1002,12 +1029,12 @@ anvil-tool-cargo-llvm-cov-validate-prereqs: (_check-tool "cargo-llvm-cov" cargo_
 # Install the pinned `cargo-mutants` tool.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
-anvil-tool-cargo-mutants-install installer="install":
+anvil-tool-cargo-mutants-install installer="install": anvil-toolchain-stable-install
     if ($IsWindows -and ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')) {
         Write-Host 'anvil-tool-cargo-mutants-install: aarch64-pc-windows-msvc -- skipping (winapi build incompat)'
         exit 0
     }
-    & just _install-tool cargo-mutants {{cargo_mutants_version}} {{installer}}
+    & just _install-tool-core cargo-mutants {{cargo_mutants_version}} {{installer}}
     exit $LASTEXITCODE
 
 # Validate that the pinned `cargo-mutants` tool is available.

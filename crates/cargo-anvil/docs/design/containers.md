@@ -173,10 +173,13 @@ available. Runtime execution uses `--pull=never` and never substitutes
 Container execution uses the same deterministic stable-toolchain selection as
 native execution: an existing `RUSTUP_TOOLCHAIN`, a selecting repository
 toolchain file, or the root manifest's MSRV. It fails rather than choosing a
-runner or image default when none is available. Image setup uses the ordinary
-toolchain setup recipe. Checks then evaluate the lazy optional `+toolchain`
-argument and invoke Cargo or Rust directly in their current recipe process; no
-resolved value is exported across unrelated recipe processes.
+runner or image default when none is available. The Containerfile invokes only
+`anvil-setup`; its transitive `anvil-toolchain-stable-install` prerequisite
+provisions stable once before any stable Cargo tool installation. Checks then
+evaluate the lazy inline PowerShell array expression and invoke Cargo or Rust
+directly in their current recipe process. Selection uses no expression-time
+subprocess or host-OS branch, and no resolved value is exported across unrelated
+recipe processes.
 
 The restricted image-construction context does not contain workspace member
 manifests, so per-package MSRV compatibility validation runs in native and

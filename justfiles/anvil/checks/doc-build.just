@@ -26,7 +26,7 @@ anvil-doc-build: anvil-doc-build-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-doc-build` recipe.
 [group("anvil-setup")]
-anvil-doc-build-setup installer="install": anvil-tool-rustc-validate-prereqs
+anvil-doc-build-setup installer="install": anvil-toolchain-stable-install
 
 # Validate prerequisites for the `anvil-doc-build` recipe.
 [group("anvil-setup")]

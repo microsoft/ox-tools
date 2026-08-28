@@ -214,8 +214,19 @@ mod tests {
     fn setup_step_takes_group_parameter_and_dispatches() {
         assert!(SETUP_STEP.contains("name: group"));
         assert!(SETUP_STEP.contains("just anvil-setup"));
+        assert!(SETUP_STEP.contains("just _anvil-stable-rustc-version"));
+        assert!(!SETUP_STEP.contains("_anvil-resolve-stable"));
+        assert!(!SETUP_STEP.contains("just anvil-toolchain-stable-install"));
         assert!(SETUP_STEP.contains("just anvil-${{ parameters.group }}-setup"));
         assert!(SETUP_STEP.contains("eq(parameters.group, 'none')"));
+        let just_bootstrap = SETUP_STEP.find("anvil setup (install just)").expect("setup must bootstrap Just");
+        let version_capture = SETUP_STEP
+            .find("just _anvil-stable-rustc-version")
+            .expect("setup must capture the provisioned stable compiler version");
+        assert!(
+            just_bootstrap < version_capture,
+            "Just must be bootstrapped before setup-driven stable version capture"
+        );
     }
 
     #[test]
