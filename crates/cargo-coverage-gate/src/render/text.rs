@@ -222,6 +222,44 @@ mod tests {
     }
 
     #[test]
+    fn failure_detail_limit_spans_diagnostic_files() {
+        let mut failed = outcome("alpha", 120, 0, 80.0, ThresholdSource::Package, Status::Fail);
+        failed.diagnostics.push(LineDiagnostic {
+            path: "src/first.rs".into(),
+            lines: (1..=60).collect(),
+        });
+        failed.diagnostics.push(LineDiagnostic {
+            path: "src/second.rs".into(),
+            lines: (101..=160).collect(),
+        });
+        let report = Report {
+            outcomes: vec![failed],
+            unattributed: 0,
+        };
+        let s = render_to_string(&report);
+        assert!(s.contains("src/first.rs: 1-60"), "got:\n{s}");
+        assert!(s.contains("src/second.rs: 101-140"), "got:\n{s}");
+        assert!(!s.contains("src/second.rs: 101-160"), "got:\n{s}");
+        assert!(s.contains("20 more line locations omitted"), "got:\n{s}");
+    }
+
+    #[test]
+    fn exact_failure_detail_limit_has_no_omission_notice() {
+        let mut failed = outcome("alpha", 100, 0, 80.0, ThresholdSource::Package, Status::Fail);
+        failed.diagnostics.push(LineDiagnostic {
+            path: "src/lib.rs".into(),
+            lines: (1..=100).collect(),
+        });
+        let report = Report {
+            outcomes: vec![failed],
+            unattributed: 0,
+        };
+        let s = render_to_string(&report);
+        assert!(s.contains("src/lib.rs: 1-100"), "got:\n{s}");
+        assert!(!s.contains("more line locations omitted"), "got:\n{s}");
+    }
+
+    #[test]
     fn renders_no_data_row_and_summary() {
         let report = Report {
             outcomes: vec![outcome("gamma", 0, 0, 100.0, ThresholdSource::Default, Status::NoData)],
