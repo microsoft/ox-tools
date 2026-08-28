@@ -1055,3 +1055,40 @@ fn mutants_diff_skips_on_arm64_windows() {
         "cargo must not be invoked at all on the skipped leg"
     );
 }
+
+/// The wrapper that disables impact scoping for the full-workspace tiers is
+/// only correct if the export happens *before* the wrapped recipe's
+/// dependencies run: `just` evaluates dependencies in their own processes, and
+/// every impact-scoped check reads `ANVIL_IMPACT` as a dependency of the tier,
+/// not in the tier's own body. A fixture dependency that fails unless the
+/// variable is already set pins that ordering; invoking the wrapped recipe
+/// directly is the negative control that proves the fixture can fail.
+#[test]
+fn unscoped_wrapper_exports_impact_off_before_dependencies_run() {
+    const PROBE: &str = "[private]\n_anvil-probe: probe-dep\n\n\
+        [private]\n[script(\"pwsh\", \"-NoProfile\")]\nprobe-dep:\n    \
+        if ($env:ANVIL_IMPACT -ne 'off') { exit 9 }\n    exit 0\n";
+
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("helpers.just", HELPERS), ("probe.just", PROBE)], &[]);
+    let root = tmp.path();
+
+    let wrapped = run_just(root, &["_anvil-unscoped", "probe"], &[]);
+    assert!(
+        wrapped.status.success(),
+        "the dependency must observe ANVIL_IMPACT=off\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&wrapped.stdout),
+        String::from_utf8_lossy(&wrapped.stderr)
+    );
+
+    let direct = run_just(root, &["_anvil-probe"], &[]);
+    assert_eq!(
+        direct.status.code(),
+        Some(9),
+        "without the wrapper the dependency must see no setting, or this test proves nothing\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&direct.stdout),
+        String::from_utf8_lossy(&direct.stderr)
+    );
+}
