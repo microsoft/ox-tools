@@ -77,6 +77,18 @@ runs:
         }
         "Free after cleanup (GiB): $(Get-FreeDiskGiB)"
 
+    # The resolver is a standard Just recipe, so bootstrap Just before any
+    # selected-toolchain setup. cargo-binstall keeps this cold path fast.
+    - name: Install cargo-binstall
+      uses: cargo-bins/cargo-binstall@v1.21.0 # immutable release, the tag cannot be moved
+
+    - name: Install just
+      shell: bash
+      run: |
+        if ! command -v just >/dev/null 2>&1 ; then
+          cargo binstall --no-confirm --locked just || cargo install --locked just
+        fi
+
     - name: Resolve stable toolchain
       shell: pwsh -NoProfile -Command ". '{0}'"
       run: |
@@ -141,27 +153,10 @@ runs:
           ~/.cargo/.crates2.json
 
     # The catalog recipe `anvil-setup` (or `anvil-<group>-setup`
-    # when a group is specified via the `group` input) needs `just` to
-    # run. We bootstrap just here (chicken-and-egg), then hand off
-    # everything else to it. The setup recipes are idempotent and
+    # when a group is specified via the `group` input) uses the Just
+    # bootstrapped above, then handles everything else. The setup recipes are idempotent and
     # short-circuit on tools already installed at or above the pinned
     # version, so re-running on cache-hit runs is cheap.
-    # Install a prebuilt cargo-binstall binary in seconds. Without this,
-    # the first `_install-tool` recipe that needs binstall bootstraps it
-    # via `cargo install --locked cargo-binstall`, which takes ~4 min of
-    # source compilation on every cold-cache job. The official action
-    # downloads the release binary from cargo-bins/cargo-binstall, so
-    # the bootstrap branch in `tools.just` becomes a no-op on GH.
-    - name: Install cargo-binstall
-      uses: cargo-bins/cargo-binstall@v1.21.0 # immutable release, the tag cannot be moved
-
-    - name: Install just
-      shell: bash
-      run: |
-        if ! command -v just >/dev/null 2>&1 ; then
-          cargo binstall --no-confirm --locked just || cargo install --locked just
-        fi
-
     - name: Install anvil toolchains + tools
       shell: bash
       # Carry action data through the environment instead of interpolating it

@@ -840,11 +840,13 @@ The check → bucket mapping is in
 
 ## 7. Rust toolchain
 
-The setup action resolves the catalog's stable toolchain before reading `rustc` or
-restoring build artifacts. It installs a missing public channel through rustup and
-captures the selected compiler version through `_anvil-with-stable`, but does not
-publish a resolved `RUSTUP_TOOLCHAIN` through `GITHUB_ENV`. Each stable recipe applies
-the selection only to its own Cargo or Rust child process; selecting toolchain files
+The setup action bootstraps cargo-binstall and Just using the runner environment,
+then resolves the catalog's stable toolchain through the standard private Just
+recipe before reading `rustc` or restoring build artifacts. It installs a missing
+public channel through rustup and captures the selected compiler version through
+`_anvil-with-stable`, but does not publish a resolved `RUSTUP_TOOLCHAIN` through
+`GITHUB_ENV`. Each stable recipe applies the selection only to its own Cargo or
+Rust child process; selecting toolchain files
 remain unoverridden so rustup processes them natively. All matrix legs therefore use
 the same repository selection instead of the different stable versions that runner
 images may carry, without changing unrelated recipe environments.
