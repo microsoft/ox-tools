@@ -38,7 +38,6 @@ wraps, and [extensibility.md](./extensibility.md) for the catalog seam a downstr
   - [7.4 Trust boundary](#74-trust-boundary)
 - [8. Customization](#8-customization)
 - [9. Limitations](#9-limitations)
-- [10. Verification](#10-verification)
 
 ## 1. Purpose
 
@@ -60,7 +59,7 @@ own agents. The image is pinned to resemble that environment, not to reproduce i
 container is requested by name. Anvil recipes are reached by naming `just`, like any other command:
 
 ```bash
-just anvil-container just anvil-setup binstall
+just anvil-container just anvil-pr
 just anvil-container cargo build
 ```
 
@@ -622,27 +621,5 @@ guard. A different base OS with a different toolchain source is two region repla
   itself, or accept that edits to it require `ANVIL_CONTAINER_NO_CACHE=1`.
 - anvil never pushes or promotes an image. It builds one, and will use one a hook fetched (§7.3); publishing belongs
   to whoever owns the registry.
-
-## 10. Verification
-
-`scripts/test-anvil-container.ps1` exercises the behaviour above end to end against a real engine, driving only the
-public surface. It needs a live daemon, so it cannot join `anvil-pr`; the unit tests in `artifacts::container` and
-the emitted-tree snapshots are what run unattended.
-
-```powershell
-./scripts/test-anvil-container.ps1                  # docker
-./scripts/test-anvil-container.ps1 -Engine podman   # podman
-```
-
-`scripts/test-anvil-dogfood.ps1` is the complement: rather than a synthetic fixture it runs this repository's own
-generated tree in its own image, which is what catches the defects a fixture is too small to have — a check whose tool
-is missing, a mount whose permissions are wrong, a variable that does not cross the boundary. It mutates the working
-tree while asserting which edits rename the image, and restores each file from a byte copy; if it is interrupted
-mid-run, `cargo run -p cargo-anvil -- anvil` returns the generated tree to a known state.
-
-```powershell
-./scripts/test-anvil-dogfood.ps1                            # docker, full tier
-./scripts/test-anvil-dogfood.ps1 -Engine podman -SkipTier   # podman, mechanism only
-```
 
 [design]: ./README.md
