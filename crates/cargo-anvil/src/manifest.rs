@@ -61,25 +61,36 @@ pub struct RegionKey {
     pub id: String,
 }
 
-/// Reject a manifest path that would resolve outside the repository root.
+/// Reject a manifest path that would resolve outside the repository root, or
+/// to the root itself.
 ///
 /// Every path in the manifest is joined to the repository root and then read,
 /// written or deleted. `Path::join` replaces the base entirely when given an
 /// absolute path or a drive-qualified one, and `..` climbs out of it, so a
 /// manifest that has been corrupted or hand-edited could direct those
-/// operations at arbitrary locations. Paths are always stored `/`-separated
-/// and repository-relative, so anything else is malformed.
+/// operations at arbitrary locations. An empty or purely relative path
+/// (`""`, `"."`) resolves to the repository root, so the same operations would
+/// target a directory. Paths are always stored `/`-separated and
+/// repository-relative, so anything else is malformed.
 ///
 /// # Errors
 ///
 /// Returns an error naming `context` and the offending path when it is
-/// absolute, carries a drive or UNC prefix, or contains a `..` component.
+/// absolute, carries a drive or network-share prefix, contains a `..`
+/// component, or names no file at all.
 fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
-    let malformed = Path::new(path)
-        .components()
-        .any(|component| matches!(component, Component::RootDir | Component::Prefix(_) | Component::ParentDir));
-    if malformed {
-        bail!("{context} '{path}' must be a relative path inside the repository");
+    let mut names = 0_usize;
+    for component in Path::new(path).components() {
+        match component {
+            Component::Normal(_) => names += 1,
+            Component::CurDir => {}
+            Component::RootDir | Component::Prefix(_) | Component::ParentDir => {
+                bail!("{context} '{path}' must be a relative path inside the repository");
+            }
+        }
+    }
+    if names == 0 {
+        bail!("{context} '{path}' must name a file inside the repository");
     }
     Ok(())
 }
@@ -547,6 +558,18 @@ mod tests {
         let toml = "version = 1\ntool = \"anvil\"\n\n[[region]]\nhost = \"../Justfile\"\nid = \"anvil-imports\"\nchecksum = \"sha256:x\"\n";
         let err = Manifest::parse(toml).unwrap_err();
         assert!(format!("{err}").contains("must be a relative path inside the repository"), "{err}");
+    }
+
+    #[test]
+    fn rejects_a_path_that_names_no_file() {
+        for empty in ["", ".", "./"] {
+            let toml = format!("version = 1\ntool = \"anvil\"\n\n[[file]]\npath = \"{empty}\"\nchecksum = \"sha256:x\"\n");
+            let err = Manifest::parse(&toml).unwrap_err();
+            assert!(
+                format!("{err}").contains("must name a file inside the repository"),
+                "unexpected error for '{empty}': {err}"
+            );
+        }
     }
 
     #[test]

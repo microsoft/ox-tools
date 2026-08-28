@@ -2113,16 +2113,19 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
             $findings.Add('```') | Out-Null
             $findings.Add('') | Out-Null
         } elseif ($semverExit -eq 101) {
-            # Exit 101 means the check could not complete. Two transitions
-            # intentionally have no comparable branch baseline: a package
-            # renamed in place and a baseline bin becoming a library.
+            # Exit 101 means the check could not complete. Some conditions
+            # intentionally have no usable branch baseline: a package renamed
+            # in place, a baseline bin becoming a library, or a dependency
+            # version in the baseline becoming yanked after that commit landed.
             $packageMissing = $output.Contains(('package `{0}` not found in' -f $p))
             $manifestParseFailed = $output.Contains('possibly due to errors:')
             $renamedPackage = $packageMissing -and -not $manifestParseFailed
             $baselineLibraryMissing = $output.Contains('has no lib target') -or
                                       $output.Contains('no library targets found')
-            if ($renamedPackage -or $baselineLibraryMissing) {
-                Write-Host "  $p has no comparable branch baseline; skipping (likely renamed or bin->lib transition)" -ForegroundColor Yellow
+            $baselineDependencyYanked = $output.Contains('is yanked') -and
+                                        ($output -match 'target[\\/]+semver-checks[\\/]+git-')
+            if ($renamedPackage -or $baselineLibraryMissing -or $baselineDependencyYanked) {
+                Write-Host "  $p has no usable branch baseline; skipping (renamed, bin->lib, or yanked baseline dependency)" -ForegroundColor Yellow
             } else {
                 Write-Warning "anvil-semver-check: $p could not be checked (cargo-semver-checks exit 101):`n$output"
                 $inconclusive.Add('#### `' + $p + '` (exit 101)') | Out-Null
