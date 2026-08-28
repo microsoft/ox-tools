@@ -64,7 +64,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     # (reported as a missing lib target), and we want the same tolerance for
     # new / renamed / bin->lib-transition crates regardless of whether
     # we got here via impact-scoping (cloud workflows) or full-workspace
-    # fallback (local). Private crates have no registry consumer contract.
+    # fallback (local). Crates with `publish = false` have no registry consumer contract.
     $libPkgs = @{}
     $metadataJson = & cargo metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {

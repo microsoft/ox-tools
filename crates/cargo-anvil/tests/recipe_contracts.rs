@@ -769,7 +769,7 @@ fn fmt_propagates_cargo_each_failure() {
 }
 
 #[test]
-fn external_types_checks_every_publishable_library_and_reports_private_ones() {
+fn external_types_checks_every_publishable_library_and_reports_non_publishable_ones() {
     if !tools_available() {
         return;
     }
@@ -798,7 +798,7 @@ fn external_types_checks_every_publishable_library_and_reports_private_ones() {
     );
     assert!(
         output.status.success(),
-        "private library filtering failed\nstdout:\n{}\nstderr:\n{}",
+        "non-publishable library filtering failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -851,7 +851,7 @@ fn semver_skips_non_publishable_libraries() {
     );
     assert!(
         output.status.success(),
-        "private semver filtering failed\nstdout:\n{}\nstderr:\n{}",
+        "non-publishable semver filtering failed\nstdout:\n{}\nstderr:\n{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );

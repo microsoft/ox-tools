@@ -523,7 +523,7 @@ anvil-fmt:
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
     if ($include -eq '--skip') { exit 0 }
     cargo each --workspace --keep-going '--' \
-        cargo fmt --manifest-path '{manifest}' --check
+        cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' --check
 ```
 
 The mapping from check to bucket is fixed in the catalog (see
