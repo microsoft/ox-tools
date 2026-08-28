@@ -9,13 +9,7 @@ yanked = "deny"
 unmaintained = "all"
 # Advisories we have consciously accepted. Each entry needs a reason and,
 # where the fix is out of our hands, the upstream we are waiting on.
-ignore = [
-    # `paste` is unmaintained but has no safe upgrade. It reaches us only
-    # transitively through `cel-interpreter`, which `cargo-aprz` uses to
-    # evaluate appraisal expressions. Revisit when cel-interpreter moves to
-    # `pastey` (which this workspace already depends on directly).
-    "RUSTSEC-2024-0436",
-]
+ignore = []
 # <<< anvil-managed: anvil-deny-advisories
 
 # >>> anvil-managed: anvil-deny-bans

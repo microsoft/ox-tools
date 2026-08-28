@@ -53,6 +53,7 @@ pub use events::Events;
 pub use incremental_mode::IncrementalMode;
 pub use loader::UNDER_GAMMA_VAR;
 pub(crate) use manifest::RUNTIME_CRATE;
+pub(crate) use measure::run_with_locks;
 pub use measure::{Built, Measured, Oracle, measure, run};
 pub use memory::{DEFAULT_HEADROOM, DEFAULT_MULTIPLIER, Demand, MemoryControl, MemoryPolicy};
 // Named for its subject at this level, where `support` alone would say nothing about what is

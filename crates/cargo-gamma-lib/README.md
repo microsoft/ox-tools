@@ -13,15 +13,11 @@
 
 </div>
 
-Internal implementation library for [`cargo-gamma`][__link0].
-
-This crate is an implementation detail. Do not depend on it: it may change in incompatible
-ways without warning, and it carries no semver commitment to anything it exposes.
+This is an implementation detail of the cargo-gamma tool. Do not take a dependency on this crate
+as it may change in incompatible ways without warning.
 
 
 <hr/>
 <sub>
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-lib">source code</a>.
 </sub>
-
- [__link0]: https://crates.io/crates/cargo-gamma
