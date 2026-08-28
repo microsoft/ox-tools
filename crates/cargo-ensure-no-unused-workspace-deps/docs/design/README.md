@@ -202,11 +202,12 @@ which lines to check.
 
 Comments cannot always be placed. When the removed entries are last in the table the
 carried text has to go *after* the final survivor rather than ahead of it, and only a
-plain value has a suffix to append to — so a sub-table survivor there, and an emptied
-table with no survivor at all, lose the comments with the group they introduced. That
-is reported as a drop. The report describes what happened rather than what was
-attempted: claiming a move that did not happen would send the reviewer hunting for
-text that is not in the diff.
+plain value has a suffix to append to — so a dotted key or a sub-table survivor there,
+and an emptied table with no survivor at all, lose the comments with the group they
+introduced. That is reported as a drop. (A dotted survivor elsewhere in the table is
+carried onto normally; it is only appending *after* one that has nowhere to go.) The
+report describes what happened rather than what was attempted: claiming a move that
+did not happen would send the reviewer hunting for text that is not in the diff.
 
 ## 6. Relationship to the other dependency checks
 

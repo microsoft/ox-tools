@@ -91,9 +91,12 @@ pub fn remove(manifest: &mut DocumentMut, names: &[String]) -> Outcome {
         // would hoist them above it and relabel a surviving dependency.
         //
         // Only a plain value has a suffix to append to. When the last survivor
-        // is a sub-table, and when every entry was removed and nothing survives
-        // at all, the comments go with the group they introduced -- reported as
-        // a drop, because that is what happened.
+        // is a dotted key or a sub-table, and when every entry was removed and
+        // nothing survives at all, the comments go with the group they
+        // introduced -- reported as a drop, because that is what happened.
+        //
+        // A dotted survivor can be carried *onto* earlier in the loop, where
+        // the comments go ahead of it; only appending after it is impossible.
         let last = table.iter().last().map(|(key, _)| key.to_owned());
         let onto = last.and_then(|last| {
             let appended = table.get_mut(&last).and_then(Item::as_value_mut).map(|value| {
