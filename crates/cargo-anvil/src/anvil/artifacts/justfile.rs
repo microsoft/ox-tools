@@ -636,12 +636,13 @@ mod tests {
         // when it (re)computes the impact set. The group's setup +
         // validate-prereqs must therefore install / verify cargo-delta, so a
         // missing tool fails fast at setup rather than mid-run. (pr-slow is an
-        // umbrella and inherits this via pr-test / pr-runtime-analysis /
-        // pr-mutants.) Scheduled groups force ANVIL_IMPACT=off and never
+        // umbrella and inherits this via pr-test / pr-msrv /
+        // pr-runtime-analysis / pr-mutants.) Scheduled groups force
+        // ANVIL_IMPACT=off and never
         // recompute the impact set, so they deliberately do NOT depend on
         // cargo-delta.
         let groups = all_group_bodies();
-        for g in ["pr-fast", "pr-test", "pr-runtime-analysis", "pr-mutants"] {
+        for g in ["pr-fast", "pr-test", "pr-msrv", "pr-runtime-analysis", "pr-mutants"] {
             assert!(
                 groups.contains(&format!(
                     "anvil-{g}-setup installer=\"install\": \\\n    (anvil-tool-cargo-delta-install installer)"
@@ -860,6 +861,25 @@ mod tests {
                     .trim(),
                 "custom-toolchain"
             );
+        }
+
+        #[test]
+        fn rejects_empty_legacy_toolchain_files_with_an_actionable_error() {
+            for contents in ["", "  \r\n\t"] {
+                let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
+                fs::write(temp.path().join("rust-toolchain"), contents).expect("toolchain fixture must be writable");
+
+                let output = run(temp.path(), &[], None);
+                assert!(!output.status.success(), "empty toolchain file must fail resolution");
+                let diagnostic = normalized_diagnostic(&output);
+                assert!(
+                    diagnostic.contains("root toolchain file")
+                        && diagnostic.contains("is empty")
+                        && diagnostic.contains("remove it")
+                        && diagnostic.contains("declare a toolchain configuration"),
+                    "unexpected resolver diagnostic: {diagnostic}"
+                );
+            }
         }
 
         #[test]

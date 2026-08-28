@@ -980,6 +980,69 @@ fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
     );
 }
 
+#[test]
+fn msrv_test_uses_affected_packages_for_both_feature_modes_and_skips_without_msrv() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = workspace();
+    let root = tmp.path();
+    run_impact(root);
+    let affected = fs::read_to_string(root.join("target/anvil/impact/include_affected.txt"))
+        .unwrap()
+        .trim()
+        .to_owned();
+
+    let bin = root.join(".fakebin");
+    let log = root.join("cargo-argv.log");
+    fake_cargo(&bin, &log);
+    let path = path_with_prefix(&bin);
+    let run_msrv = || {
+        just_cmd(root, &["anvil-msrv-test"])
+            .env("ANVIL_IMPACT", "consume")
+            .env("ANVIL_STABLE_TOOLCHAIN_SOURCE", "environment")
+            .env("RUSTUP_TOOLCHAIN", "test-stable")
+            .env("PATH", &path)
+            .output()
+            .unwrap()
+    };
+
+    let output = run_msrv();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "anvil-msrv-test failed:\n{combined}");
+    let argv = fs::read_to_string(&log).unwrap();
+    for expected in [
+        format!("+1.97 test {affected} --all-targets --all-features --locked"),
+        format!("+1.97 test {affected} --all-targets --locked"),
+    ] {
+        assert!(argv.contains(&expected), "missing MSRV invocation '{expected}' in:\n{argv}");
+    }
+
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    fs::write(
+        root.join("Cargo.toml"),
+        manifest.replace("\n[workspace.package]\nrust-version = \"1.97\"\n", "\n"),
+    )
+    .unwrap();
+    fs::write(&log, "").unwrap();
+
+    let skipped = run_msrv();
+    let skip_combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&skipped.stdout),
+        String::from_utf8_lossy(&skipped.stderr)
+    );
+    assert!(skipped.status.success(), "no-MSRV invocation failed:\n{skip_combined}");
+    assert!(
+        fs::read_to_string(&log).unwrap().is_empty(),
+        "no-MSRV invocation must skip before calling cargo"
+    );
+}
+
 /// Write a fake `cargo` into `dir` that answers `cargo metadata …` by printing
 /// the contents of `metadata_json` and captures every other invocation's argv
 /// (one per line) to `log`, exiting 0. Lets `anvil-loom` be driven with a

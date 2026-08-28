@@ -6,21 +6,21 @@
 
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
-# pr-slow is the single PR-tier group for everything that takes more
-# than ~30s per crate (tests, stricter runtimes, mutation testing).
-# It's internally split into four sub-recipes so individual concerns
-# can be invoked locally without dragging the others along:
+# pr-slow is the local umbrella for everything that takes more than ~30s
+# per crate (tests, MSRV tests, stricter runtimes, mutation testing). It's
+# split into four sub-recipes so individual concerns can be invoked locally
+# without dragging the others along:
 #
-#   slow1: tests + coverage (replaces the former pr-test group)
-#   slow2: stricter-runtime correctness (miri, careful)
-#   slow3: mutation testing
+#   pr-test: tests + coverage
+#   pr-msrv: unit and integration tests under the declared MSRV
+#   pr-runtime-analysis: stricter-runtime correctness (miri, careful)
+#   pr-mutants: mutation testing
 #
-# Cloud workflows run pr-slow as ONE job per OS leg -- the sub-recipes run
-# sequentially within. This trades per-leg wall-clock for fewer
-# orchestration jobs and a flatter PR check graph. Individual sub-
-# recipes are runnable on their own locally:
+# Cloud workflows run the four sub-groups as independent parallel jobs.
+# The umbrella runs them sequentially only when invoked locally:
 #
 #   $ just anvil-pr-test   # tests + coverage only
+#   $ just anvil-pr-msrv   # MSRV unit and integration tests only
 #   $ just anvil-pr-runtime-analysis   # miri + careful only
 #   $ just anvil-pr-mutants   # mutants only
 

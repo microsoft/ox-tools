@@ -102,6 +102,7 @@ mod tests {
     #[test]
     fn impact_mode_classifies_pr_and_scheduled_groups() {
         assert_eq!(impact_mode("pr-fast"), "consume");
+        assert_eq!(impact_mode("pr-msrv"), "consume");
         assert_eq!(impact_mode("pr-mutants"), "consume");
         assert_eq!(impact_mode("scheduled-test"), "off");
         assert_eq!(impact_mode("scheduled-exhaustive"), "off");

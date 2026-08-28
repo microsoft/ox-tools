@@ -43,9 +43,9 @@ repo/
 │   ├── groups/             one file per group: groups/<group>.just holds the
 │   │                       `anvil-<group>` recipe plus its `*-setup` /
 │   │                       `*-validate-prereqs` (anvil-pr-fast, anvil-pr-test,
-│   │                       anvil-pr-runtime-analysis, anvil-pr-mutants,
+│   │                       anvil-pr-msrv, anvil-pr-runtime-analysis, anvil-pr-mutants,
 │   │                       anvil-scheduled-test, …). `anvil-pr-slow` is a
-│   │                       convenience umbrella over the three pr-slow sub-groups.
+│   │                       convenience umbrella over the four pr-slow sub-groups.
 │   ├── container.just      optional container entry recipe (`anvil-container`).
 │   ├── tiers.just          tier aggregators (anvil-pr, anvil-scheduled, anvil-full).
 │   ├── tools.just          tool/component/toolchain install + validate-prereqs recipes,
@@ -55,24 +55,28 @@ repo/
 │                           as plain just variables (rust_nightly, cargo_nextest_version, …).
 │                           Read by recipes via `{{ var }}` interpolation. See §3.
 │
-└── .anvil/container/                              optional non-recipe container assets
-    ├── Containerfile
-    ├── Containerfile.dockerignore
-    ├── README.md
-    ├── entrypoint.sh
-    ├── image-id.ps1
-    ├── image-id.sh
-    ├── run-in-container.ps1
-    └── run-in-container.sh
+└── .anvil/
+    ├── resolve-stable-toolchain.ps1               unconditional toolchain bootstrap
+    └── container/                                 optional non-recipe container assets
+        ├── Containerfile
+        ├── Containerfile.dockerignore
+        ├── README.md
+        ├── entrypoint.sh
+        ├── image-id.ps1
+        ├── image-id.sh
+        ├── run-in-container.ps1
+        └── run-in-container.sh
 ```
 
 The Justfile region is the only file anvil adds to that the user co-owns, and it's
-a single `import` line. Generated recipes live inside `justfiles/anvil/`; optional
-non-recipe container assets live inside `.anvil/container/`. Generated files in
-both directories are tool-owned (tracked by full-file checksum in the sidecar
-manifest). If the user wants to add project-specific recipes, they add them to
-the top-level `Justfile` outside the managed region, or to their own additional
-imported `.just` files. The alias `anvil := anvil-pr` lives in `mod.just`, not in
+a single `import` line. Generated recipes live inside `justfiles/anvil/`; the
+unconditional stable-toolchain bootstrap lives at
+`.anvil/resolve-stable-toolchain.ps1`; optional non-recipe container assets live
+inside `.anvil/container/`. Generated files in these directories are tool-owned
+(tracked by full-file checksum in the sidecar manifest). If the user wants to add
+project-specific recipes, they add them to the top-level `Justfile` outside the
+managed region, or to their own additional imported `.just` files. The alias
+`anvil := anvil-pr` lives in `mod.just`, not in
 the user's `Justfile`, so renaming or retargeting the alias is a template update
 with no managed-region churn.
 
@@ -386,6 +390,16 @@ ambient stable toolchain. The selection order is:
 There is no runner-default fallback. A repository with neither a selecting toolchain
 file nor a root MSRV fails with an actionable setup error rather than inheriting a
 compiler that can change with the machine image.
+
+This is a breaking migration for adopters that previously relied on the runner's
+ambient stable compiler. Before regenerating, a repository with one compatibility
+floor should declare root `[workspace.package].rust-version` (or package
+`rust-version`) and have every workspace member inherit or declare that same value.
+A repository with missing or heterogeneous package MSRVs must instead add a root
+toolchain file with `channel` or `path` to select the single compiler used by catalog
+checks. Internal builds may set `RUSTUP_TOOLCHAIN` to a provisioned toolchain rather
+than adding a public compiler pin. An empty root toolchain file is invalid and produces
+an actionable error.
 
 The generated `.anvil/resolve-stable-toolchain.ps1` implements this contract. For
 an existing environment override or MSRV fallback, the recipe tree exports the

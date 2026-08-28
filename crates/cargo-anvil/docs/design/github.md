@@ -59,6 +59,7 @@ flowchart LR
     impact["impact-linux + impact-windows<br/>(2 jobs;<br/>outputs consumed by every group below)"]:::job
     pr_fast_job["pr-fast<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_test_job["pr-test<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
+    pr_msrv_job["pr-msrv<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_runtime_analysis_job["pr-runtime-analysis<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     pr_mutants_job["pr-mutants<br/>matrix: linux, windows,<br/>linux-arm, windows-arm"]:::job
     impact_act[".github/actions/<br/>anvil-impact"]:::action
@@ -68,6 +69,7 @@ flowchart LR
     impact_just["just anvil-impact"]:::recipe
     fast_just["just anvil-pr-fast"]:::recipe
     test_just["just anvil-pr-test"]:::recipe
+    msrv_just["just anvil-pr-msrv"]:::recipe
     runtime_just["just anvil-pr-runtime-analysis"]:::recipe
     mutants_just["just anvil-pr-mutants"]:::recipe
     setup_just["just anvil-&lt;group&gt;-setup"]:::recipe
@@ -77,12 +79,14 @@ flowchart LR
     pr_impl --> impact
     pr_impl --> pr_fast_job
     pr_impl --> pr_test_job
+    pr_impl --> pr_msrv_job
     pr_impl --> pr_runtime_analysis_job
     pr_impl --> pr_mutants_job
 
     impact ==> impact_act
     pr_fast_job ==> run_group_act
     pr_test_job ==> run_group_act
+    pr_msrv_job ==> run_group_act
     pr_test_job ==> codecov_act
     pr_runtime_analysis_job ==> run_group_act
     pr_mutants_job ==> run_group_act
@@ -92,6 +96,7 @@ flowchart LR
     run_group_act ==> setup_act
     run_group_act ==> fast_just
     run_group_act ==> test_just
+    run_group_act ==> msrv_just
     run_group_act ==> runtime_just
     run_group_act ==> mutants_just
     setup_act ==> setup_just

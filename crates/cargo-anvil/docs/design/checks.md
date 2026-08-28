@@ -208,14 +208,16 @@ When the root manifest declares an MSRV, Anvil runs affected-package unit and
 integration tests under that compiler with both all features and default features.
 This is the ordinary test-suite execution at the minimum supported compiler;
 `pr-test` runs the same affected suite through coverage instrumentation on the
-catalog nightly. A selecting toolchain file does not suppress the MSRV run, even
-when it selects the same compiler, because the MSRV group is the authoritative
-minimum-version test result.
+catalog nightly. Other checks that use the selected stable compiler do not execute
+this unit/integration suite, so an MSRV fallback does not make `pr-msrv` a duplicate.
+A selecting toolchain file does not suppress the MSRV run, even when it selects the
+same compiler, because the MSRV group is the authoritative minimum-version test
+result.
 
 The group uses the same OS/architecture matrix and per-OS impact sets as `pr-test`
 so cfg-gated targets and dependencies are exercised under the MSRV. It runs in
-parallel with the other PR groups. Impact preparation publishes whether a root MSRV
-exists, allowing the cloud workflow to skip the group before setup when it does not.
+parallel with the other PR groups. When no root MSRV exists, the recipe exits
+successfully without running tests.
 `ANVIL_MSRV_TOOLCHAIN` may map the public MSRV to an already-provisioned internal
 toolchain; when it is unset, setup installs the declared MSRV through rustup.
 

@@ -27,13 +27,21 @@ function Get-RootToolchainFilePath {
     return $null
 }
 
+function Read-RootToolchainFile([string] $path) {
+    $content = Get-Content -LiteralPath $path -Raw
+    if ([string]::IsNullOrWhiteSpace($content)) {
+        throw "anvil: root toolchain file '$path' is empty; remove it or declare a toolchain configuration"
+    }
+    return $content
+}
+
 function Get-SelectingToolchainFile {
     $path = Get-RootToolchainFilePath
     if ($null -eq $path) {
         return $null
     }
 
-    $content = Get-Content -LiteralPath $path -Raw
+    $content = Read-RootToolchainFile $path
     if ((Split-Path -Leaf $path) -eq 'rust-toolchain' -and $content.TrimStart() -notmatch '^\[') {
         return [pscustomobject]@{
             Path = $path
@@ -77,7 +85,7 @@ function Get-ToolchainFileOptions {
         return $null
     }
 
-    $content = Get-Content -LiteralPath $path -Raw
+    $content = Read-RootToolchainFile $path
     $section = [regex]::Match(
         $content,
         '(?ms)^\s*\[\s*toolchain\s*\]\s*(?:#.*)?$(.*?)(?=^\s*\[|\z)'

@@ -237,7 +237,8 @@ repo/
 ├── .anvil.lock                                    sidecar manifest tracking last-rendered checksums (see updates.md)
 ├── Justfile                                       managed-region: anvil-imports
 ├── justfiles/anvil/                               owned (see local.md)
-├── .anvil/container/                              owned, only with the container backend (see local.md, containers.md)
+├── .anvil/resolve-stable-toolchain.ps1            owned, unconditional bootstrap (see local.md)
+├── .anvil/container/                              owned, optional container assets (see containers.md)
 ├── Cargo.toml                                     managed-region: anvil-workspace-lints (or anvil-lints in single-crate)
 ├── crates/<member>/Cargo.toml                     managed-region: anvil-lints (one per workspace member)
 ├── deny.toml                                      managed-regions: anvil-deny-{advisories,licenses,bans,sources}
@@ -268,6 +269,8 @@ repo/
 Detail on each host:
 
 - **`Justfile` and `justfiles/anvil/*.just`** — see [local.md](./local.md).
+- **`.anvil/resolve-stable-toolchain.ps1`** — the unconditional generated
+  bootstrap shared by parse-time recipe variables and cloud/container setup.
 - **`.anvil/container/`** — the non-recipe container assets (Containerfile,
   drivers, image-ID helpers, README) emitted only when the catalog includes the
   optional container backend. `justfiles/` holds `.just` recipes and nothing

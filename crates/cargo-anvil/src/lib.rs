@@ -231,8 +231,8 @@
 //! check to its tool's documentation, and note anything anvil-specific.
 //!
 //! **PR tier** (`anvil-pr`) — runs on every pull request, impact-scoped
-//! both locally and in cloud workflows. Two jobs: `pr-fast`, and `pr-slow` (whose three
-//! sub-groups run sequentially within the one job per OS leg):
+//! both locally and in cloud workflows. `pr-fast` is one job, while the four
+//! `pr-slow` sub-groups run as independent parallel jobs per OS leg:
 //!
 //! <table>
 //!   <thead><tr><th>Job</th><th>Sub-group</th><th>Check</th><th>Notes</th></tr></thead>
