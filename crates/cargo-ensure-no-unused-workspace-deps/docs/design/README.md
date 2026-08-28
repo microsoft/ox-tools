@@ -184,23 +184,29 @@ points at instead of replacing the link with a regular file.
 #### Carried comments can be misattributed
 
 A group header and a note about one specific dependency are the same thing to the
-parser — comment lines in an entry's decor, whether that decor sits on the key or, for
-a `[workspace.dependencies.name]` entry, on the table. When the noted entry is the one
-removed, its note lands on the next surviving entry and reads as if it were written
-about that one, which is worse than dropping it: a dropped comment shows up in the
-`--fix` diff, a wrong attribution outlives it.
+parser — comment lines in an entry's decor. Where that decor lives depends on how the
+entry is written: on the key for a plain value, on the table for a
+`[workspace.dependencies.name]` sub-table, and on the first inner key for a dotted
+`name.version = "1"`. Comments are read from, and written to, the same slot; reading
+one slot and writing another would render both and put text in the manifest that
+nobody wrote.
+
+When the noted entry is the one removed, its note lands on the next surviving entry
+and reads as if it were written about that one, which is worse than dropping it: a
+dropped comment shows up in the `--fix` diff, a wrong attribution outlives it.
 
 The carry-forward still earns its keep for headers, so it stays, and the relocation is
 made visible instead: every move is reported on stderr, naming the entries the
 comments came from and the entry they landed on, so whoever reviews the diff knows
 which lines to check.
 
-Comments cannot always be placed. Only a plain value has a suffix to append to, so when
-the removed entries are last in the table and the final survivor is a dotted key or a
-sub-table — and when every entry is removed and nothing survives — the comments go with
-the group they introduced, reported as a drop. The report describes what happened
-rather than what was attempted: claiming a move that did not happen would send the
-reviewer hunting for text that is not in the diff.
+Comments cannot always be placed. When the removed entries are last in the table the
+carried text has to go *after* the final survivor rather than ahead of it, and only a
+plain value has a suffix to append to — so a sub-table survivor there, and an emptied
+table with no survivor at all, lose the comments with the group they introduced. That
+is reported as a drop. The report describes what happened rather than what was
+attempted: claiming a move that did not happen would send the reviewer hunting for
+text that is not in the diff.
 
 ## 6. Relationship to the other dependency checks
 

@@ -66,9 +66,9 @@
 //! keeps a group header attached to the group it introduces. A note about one
 //! specific dependency is indistinguishable from such a header, so every move
 //! is reported on stderr: check that carried text still describes the entry it
-//! landed on. Comments that cannot be placed -- nothing survives, or the last
-//! survivor is a dotted key or sub-table with no value to append to -- are
-//! reported as dropped.
+//! landed on. Comments that cannot be placed -- the removal emptied the table,
+//! or left a trailing survivor with nothing to append to -- are reported as
+//! dropped.
 //!
 //! # Installation
 //!

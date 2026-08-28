@@ -28,8 +28,9 @@ pub struct Carry {
     /// Entries whose comments were carried, in manifest order.
     pub from: Vec<String>,
 
-    /// The entry the comments landed on, or `None` when the table was emptied
-    /// and they were dropped.
+    /// The entry the comments landed on, or `None` when they could not be
+    /// placed and were dropped: nothing survived the removal, or the only
+    /// surviving anchor was a value the comments cannot attach to.
     pub onto: Option<String>,
 
     /// How many comment lines moved.
@@ -59,10 +60,8 @@ pub fn remove(manifest: &mut DocumentMut, names: &[String]) -> Outcome {
     let mut sources: Vec<String> = Vec::new();
 
     for name in &order {
-        let prefix = decor_prefix(table, name);
-
         if doomed.contains(name.as_str()) {
-            let comments = comments_of(&prefix);
+            let comments = comments_of(&leading_comments(table, name));
             if !comments.is_empty() {
                 sources.push(name.clone());
             }
@@ -74,10 +73,7 @@ pub fn remove(manifest: &mut DocumentMut, names: &[String]) -> Outcome {
             // move that did not happen sends the reviewer of the `--fix` diff
             // hunting for text that is not there, which is the failure this
             // reporting exists to prevent.
-            let onto = table.key_mut(name).map(|mut key| {
-                key.leaf_decor_mut().set_prefix(format!("{carried}{prefix}"));
-                name.clone()
-            });
+            let onto = prepend_comments(table, name, &carried);
 
             outcome.carries.push(Carry {
                 from: std::mem::take(&mut sources),
@@ -90,14 +86,14 @@ pub fn remove(manifest: &mut DocumentMut, names: &[String]) -> Outcome {
 
     if !carried.is_empty() {
         // The removed entries were the last in the table, so there is no
-        // following key to carry the comments to. Append them after the final
-        // surviving entry's *value* instead: attaching them to that entry's key
-        // prefix would hoist them above it and relabel a surviving dependency.
+        // following entry to carry the comments to. Append them after the final
+        // surviving entry's *value* instead: attaching them ahead of that entry
+        // would hoist them above it and relabel a surviving dependency.
         //
         // Only a plain value has a suffix to append to. When the last survivor
-        // is a dotted key or a sub-table, and when every entry was removed and
-        // there is no survivor at all, the comments go with the group they
-        // introduced -- reported as a drop, because that is what happened.
+        // is a sub-table, and when every entry was removed and nothing survives
+        // at all, the comments go with the group they introduced -- reported as
+        // a drop, because that is what happened.
         let last = table.iter().last().map(|(key, _)| key.to_owned());
         let onto = last.and_then(|last| {
             let appended = table.get_mut(&last).and_then(Item::as_value_mut).map(|value| {
@@ -123,26 +119,82 @@ pub fn remove(manifest: &mut DocumentMut, names: &[String]) -> Outcome {
     outcome
 }
 
-/// The decor preceding one entry, from wherever `toml_edit` keeps it.
+/// The name of the inner key that renders first inside a dotted entry.
 ///
-/// A plain entry carries its comments on the key. A sub-table entry --
-/// `[workspace.dependencies.name]` -- carries them on the table instead, and
-/// reading only the key would let those comments disappear unremarked.
-fn decor_prefix(table: &dyn TableLike, name: &str) -> String {
-    let on_table = table
-        .get(name)
-        .and_then(Item::as_table)
-        .and_then(|nested| nested.decor().prefix())
-        .and_then(toml_edit::RawString::as_str)
-        .unwrap_or_default();
+/// `dep.version = "1"` is a dotted table whose leading comments hang off the
+/// inner `version` key, not off `dep`.
+fn dotted_leaf(table: &dyn TableLike, name: &str) -> Option<String> {
+    let nested = table.get(name).and_then(Item::as_table).filter(|nested| nested.is_dotted())?;
 
-    let on_key = table
+    nested.iter().next().map(|(inner, _)| inner.to_owned())
+}
+
+/// The decor preceding one entry, read from whichever slot renders it.
+///
+/// `toml_edit` keeps an entry's leading comments in one of three places: on the
+/// key for a plain value, on the table for a `[workspace.dependencies.name]`
+/// sub-table, and on the first inner key for a dotted `name.version = "1"`.
+/// Reading only the key lets the other two disappear unremarked.
+fn leading_comments(table: &dyn TableLike, name: &str) -> String {
+    if let Some(leaf) = dotted_leaf(table, name) {
+        return table
+            .get(name)
+            .and_then(Item::as_table_like)
+            .and_then(|nested| nested.key(&leaf))
+            .and_then(|key| key.leaf_decor().prefix())
+            .and_then(toml_edit::RawString::as_str)
+            .unwrap_or_default()
+            .to_owned();
+    }
+
+    if let Some(nested) = table.get(name).and_then(Item::as_table) {
+        return nested
+            .decor()
+            .prefix()
+            .and_then(toml_edit::RawString::as_str)
+            .unwrap_or_default()
+            .to_owned();
+    }
+
+    table
         .key(name)
         .and_then(|key| key.leaf_decor().prefix())
         .and_then(toml_edit::RawString::as_str)
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .to_owned()
+}
 
-    format!("{on_table}{on_key}")
+/// Prepend `carried` to an entry's leading comments, in the same slot
+/// [`leading_comments`] reads from.
+///
+/// Writing to a different slot than the one that holds the entry's own decor
+/// would render both, duplicating text the user never wrote. Returns the entry
+/// name when the comments were placed, and `None` when the entry offers no such
+/// slot, so the caller can report a drop instead of an imagined move.
+fn prepend_comments(table: &mut dyn TableLike, name: &str, carried: &str) -> Option<String> {
+    let existing = leading_comments(table, name);
+    let combined = format!("{carried}{existing}");
+
+    if let Some(leaf) = dotted_leaf(table, name) {
+        return table
+            .get_mut(name)
+            .and_then(Item::as_table_like_mut)
+            .and_then(|nested| nested.key_mut(&leaf))
+            .map(|mut key| {
+                key.leaf_decor_mut().set_prefix(combined);
+                name.to_owned()
+            });
+    }
+
+    if let Some(nested) = table.get_mut(name).and_then(Item::as_table_mut) {
+        nested.decor_mut().set_prefix(combined);
+        return Some(name.to_owned());
+    }
+
+    table.key_mut(name).map(|mut key| {
+        key.leaf_decor_mut().set_prefix(combined);
+        name.to_owned()
+    })
 }
 
 /// The comment-bearing part of a removed entry's decor.

@@ -486,6 +486,102 @@ fn fix_reports_a_drop_when_the_last_survivor_cannot_carry_comments() {
 }
 
 #[test]
+fn fix_does_not_duplicate_a_sub_table_survivors_own_comment() {
+    // The survivor's own comment lives on its table decor. Reading it there and
+    // writing it back onto the key would leave both in the document, so `--fix`
+    // would emit a line the user never wrote.
+    let root = concat!(
+        "[workspace]\nmembers = [\"member\"]\n\n",
+        "[workspace.dependencies]\n",
+        "# --- group header ---\n",
+        "once_cell = \"1\"\n\n",
+        "# note about serde\n",
+        "[workspace.dependencies.serde]\nversion = \"1\"\n",
+    );
+    let dir = workspace(root, &[("member", "[dependencies]\nserde = { workspace = true }\n")]);
+    let manifest = dir.path().join("Cargo.toml");
+
+    let (success, _, stderr) = outcome(&run(&manifest, &["--fix"]));
+
+    assert!(success, "--fix should succeed: {stderr}");
+
+    let fixed = fs::read_to_string(&manifest).expect("failed to read the fixed manifest");
+    assert_eq!(
+        fixed.matches("# note about serde").count(),
+        1,
+        "the survivor's own comment must appear exactly once: {fixed}"
+    );
+    assert!(fixed.contains("# --- group header ---"), "the carried header survives: {fixed}");
+    assert!(
+        stderr.contains("Carried 1 comment line from 'once_cell' onto 'serde'"),
+        "the move must be reported: {stderr}"
+    );
+}
+
+#[test]
+fn fix_carries_onto_a_dotted_survivor() {
+    // A dotted entry keeps its leading comments on its first inner key, so that
+    // is where a carry has to land. Writing to the outer key renders nothing
+    // and would lose the text while still reporting a move.
+    let root = concat!(
+        "[workspace]\nmembers = [\"member\"]\n\n",
+        "[workspace.dependencies]\n",
+        "# pinned to 1.2 until upstream #42 is fixed\n",
+        "old = \"1\"\n",
+        "serde.version = \"1\"\n",
+        "zzz = \"1\"\n",
+    );
+    let dir = workspace(
+        root,
+        &[(
+            "member",
+            "[dependencies]\nserde = { workspace = true }\nzzz = { workspace = true }\n",
+        )],
+    );
+    let manifest = dir.path().join("Cargo.toml");
+
+    let (success, _, stderr) = outcome(&run(&manifest, &["--fix"]));
+
+    assert!(success, "--fix should succeed: {stderr}");
+
+    let fixed = fs::read_to_string(&manifest).expect("failed to read the fixed manifest");
+    let comment = fixed.find("# pinned to 1.2").expect("the carried comment survives");
+    let survivor = fixed.find("serde.version").expect("the dotted survivor is kept");
+    assert!(comment < survivor, "the comment introduces the entry it landed on: {fixed}");
+    assert!(
+        stderr.contains("Carried 1 comment line from 'old' onto 'serde'"),
+        "the move must be reported: {stderr}"
+    );
+}
+
+#[test]
+fn fix_carries_a_comment_from_a_removed_dotted_entry() {
+    // The removed entry is dotted, so its comment hangs off the inner key.
+    // Reading only the outer key or the table decor would drop it unreported.
+    let root = concat!(
+        "[workspace]\nmembers = [\"member\"]\n\n",
+        "[workspace.dependencies]\n",
+        "# note about old\n",
+        "old.version = \"1\"\n",
+        "serde = \"1\"\n",
+    );
+    let dir = workspace(root, &[("member", "[dependencies]\nserde = { workspace = true }\n")]);
+    let manifest = dir.path().join("Cargo.toml");
+
+    let (success, _, stderr) = outcome(&run(&manifest, &["--fix"]));
+
+    assert!(success, "--fix should succeed: {stderr}");
+
+    let fixed = fs::read_to_string(&manifest).expect("failed to read the fixed manifest");
+    assert!(!fixed.contains("old.version"), "the unused entry should be gone: {fixed}");
+    assert!(fixed.contains("# note about old"), "its comment must not vanish: {fixed}");
+    assert!(
+        stderr.contains("Carried 1 comment line from 'old' onto 'serde'"),
+        "the move must be reported: {stderr}"
+    );
+}
+
+#[test]
 fn fix_carries_a_comment_from_a_removed_sub_table_entry() {
     // A `[workspace.dependencies.name]` entry keeps its comments on the table,
     // not on the key, so reading only the key decor would drop them unremarked.
