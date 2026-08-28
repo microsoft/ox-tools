@@ -947,3 +947,60 @@ fn filesystem_is_case_sensitive(root: &Path) -> bool {
     std::fs::remove_file(&probe).unwrap();
     sensitive
 }
+
+/// A region removal must splice into the text this pass wrote, not the text
+/// that was on disk before it. The host text cache is keyed by the spelling
+/// the writes used, so a removal reading under the lock's spelling misses the
+/// cache, re-reads the pre-pass file, and writes that back over the regions
+/// the same run produced. Removals apply after writes, so the stale text wins.
+///
+/// The two spellings diverge after a case-only rename of the host, which is
+/// what this sets up: the lock keeps `Justfile`, the file on disk is
+/// `justfile`, and both a write and a removal target it in one pass.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn a_region_removal_composes_with_the_writes_of_the_same_pass() {
+    const IMPORTS_REGION_ID: &str = "anvil-imports";
+
+    let tmp = generated_tree();
+    let root = tmp.path();
+    let recorded = root.join("Justfile");
+    let renamed = root.join("justfile");
+
+    // Drop the region anvil maintains so this pass has to write it back, and
+    // plant a retired one so the removal path runs against the same host.
+    let text = std::fs::read_to_string(&recorded).unwrap();
+    let with_retired =
+        format!("{text}\n# >>> anvil-managed: {RETIRED_REGION_ID}\n{RETIRED_REGION_BODY}# <<< anvil-managed: {RETIRED_REGION_ID}\n");
+    let staged = remove_region_block(&with_retired, IMPORTS_REGION_ID);
+    std::fs::remove_file(&recorded).unwrap();
+    write(&renamed, &staged);
+
+    let mut manifest = Manifest::load(root).unwrap();
+    manifest.set_region("Justfile", RETIRED_REGION_ID, checksum_str(RETIRED_REGION_BODY));
+    manifest.save(root).unwrap();
+
+    run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    let after = std::fs::read_to_string(&renamed).unwrap();
+    assert!(
+        after.contains(&format!("# >>> anvil-managed: {IMPORTS_REGION_ID}")),
+        "the region written this pass must survive the removal of another region in the same host:\n{after}"
+    );
+    assert!(
+        !after.contains(RETIRED_REGION_ID),
+        "the retired region must still be removed:\n{after}"
+    );
+}
+
+/// Strip a whole managed region, sentinels included, from `text`.
+fn remove_region_block(text: &str, id: &str) -> String {
+    let open = format!("# >>> anvil-managed: {id}");
+    let close = format!("# <<< anvil-managed: {id}");
+    let start = text.find(&open).expect("region must be present to remove");
+    let end = text[start..].find(&close).expect("region must be closed") + start + close.len();
+    let mut out = String::with_capacity(text.len());
+    out.push_str(&text[..start]);
+    out.push_str(text[end..].trim_start_matches('\n'));
+    out
+}

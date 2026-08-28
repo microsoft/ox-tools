@@ -778,14 +778,14 @@ fn plan_removals(
         if matches!(composed.states.get(&resolved_host), Some(ComposedHostState::Unsafe(_))) {
             continue;
         }
-        if live_regions.contains(&(resolved_host, key.id.clone())) {
+        if live_regions.contains(&(resolved_host.clone(), key.id.clone())) {
             plan.push(PlanItem::orphaned_kept(Target::Region {
                 host: key.host.clone(),
                 id: key.id.clone(),
             }));
             continue;
         }
-        let Some(host_text) = hosts.get_or_read(repo_root, &key.host)? else {
+        let Some(host_text) = hosts.get_or_read(repo_root, &resolved_host)? else {
             // Host file is gone entirely; just drop the manifest
             // entry. Emit OrphanedKept (no-op apply) so the plan
             // can record the transfer of ownership consistently.
@@ -807,9 +807,12 @@ fn plan_removals(
                 // Splice against — and update — the accumulated host text
                 // so a removal composes with the writes already planned
                 // for this host this pass instead of clobbering them
-                // (their item is applied earlier; this one, later).
+                // (their item is applied earlier; this one, later). The
+                // cache is keyed by the resolved spelling, which is what
+                // the writes used; reading under the recorded spelling
+                // would miss it and splice into the pre-pass text.
                 let spliced = remove_region(&host_text, &key.id, syntax)?;
-                hosts.set(&key.host, spliced.clone());
+                hosts.set(&resolved_host, spliced.clone());
                 plan.push(PlanItem::remove_region(key.host.clone(), key.id.clone(), spliced));
             }
             RemovalDecision::OrphanedKept | RemovalDecision::AlreadyGone => {

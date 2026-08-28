@@ -485,8 +485,11 @@ impl Plan {
                 (Target::Region { host, id }, Decision::Remove) => {
                     // Untouched orphan region: splice the markers + body
                     // out of the host file and drop the manifest entry.
+                    // The host is resolved to its on-disk casing for the
+                    // write, for the reason the File arm above gives; the
+                    // manifest key stays as recorded so the entry is purged.
                     let spliced = item.spliced_host.as_ref().expect("region Remove must carry spliced host");
-                    let abs = repo_root.join(host);
+                    let abs = repo_root.join(resolve_existing_case_insensitive(repo_root, host));
                     write_file(&abs, spliced)?;
                     next.regions.remove(&RegionKey {
                         host: host.clone(),
