@@ -991,7 +991,7 @@ mod tests {
         }
 
         #[test]
-        fn rejects_missing_and_heterogeneous_workspace_msrvs() {
+        fn rejects_missing_or_too_new_workspace_msrvs() {
             let missing = fixture("[workspace]\nresolver = \"2\"\n");
             let output = run(missing.path(), &[], None);
             assert!(!output.status.success());
@@ -1001,10 +1001,10 @@ mod tests {
                 "unexpected resolver diagnostic: {diagnostic}"
             );
 
-            let heterogeneous =
+            let workspace =
                 fixture("[workspace]\nresolver = \"2\"\nmembers = [\"a\", \"b\"]\n[workspace.package]\nrust-version = \"1.92\"\n");
-            for (name, version) in [("a", "1.92"), ("b", "1.93")] {
-                let member = heterogeneous.path().join(name);
+            for (name, version) in [("a", "1.91"), ("b", "1.93")] {
+                let member = workspace.path().join(name);
                 fs::create_dir(&member).expect("member directory must be creatable");
                 fs::write(
                     member.join("Cargo.toml"),
@@ -1016,16 +1016,150 @@ mod tests {
                 fs::write(member.join("lib.rs"), "").expect("member source must be writable");
             }
 
-            let output = run(heterogeneous.path(), &["-ValidateWorkspaceMsrv"], None);
+            let output = run(workspace.path(), &["-ValidateWorkspaceMsrv"], None);
             assert!(!output.status.success());
             let diagnostic = normalized_diagnostic(&output);
             assert!(
-                diagnostic.contains("must resolve to the root") && diagnostic.contains("MSRV"),
+                diagnostic.contains("newer than the root MSRV") && diagnostic.contains("b (1.93)") && !diagnostic.contains("a (1.91)"),
                 "unexpected resolver diagnostic: {diagnostic}"
             );
 
-            let output = run(heterogeneous.path(), &["-ValidateWorkspaceMsrv"], Some("explicit-toolchain"));
-            assert!(output.status.success(), "explicit override must permit heterogeneous MSRVs");
+            fs::write(
+                workspace.path().join("b/Cargo.toml"),
+                "[package]\nname = \"b\"\nversion = \"0.1.0\"\nedition = \"2021\"\nrust-version = \"1.92\"\n[lib]\npath = \"lib.rs\"\n",
+            )
+            .expect("member manifest must be writable");
+            let output = run(workspace.path(), &["-ValidateWorkspaceMsrv"], None);
+            assert!(
+                output.status.success(),
+                "member MSRVs at or below the root must be compatible: {}",
+                normalized_diagnostic(&output)
+            );
+
+            let output = run(workspace.path(), &["-ValidateWorkspaceMsrv"], Some("explicit-toolchain"));
+            assert!(output.status.success(), "explicit override must permit differing MSRVs");
+        }
+
+        #[test]
+        fn rejects_an_unpaired_internal_msrv_mapping_for_stable_selection() {
+            let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
+            let run_with_mapping = |root: &Path| {
+                Command::new("pwsh")
+                    .args(["-NoProfile", "-File", ".anvil/resolve-stable-toolchain.ps1"])
+                    .current_dir(root)
+                    .env_remove("RUSTUP_TOOLCHAIN")
+                    .env("ANVIL_MSRV_TOOLCHAIN", "ms-prod-1.93")
+                    .output()
+                    .expect("pwsh must be available to test the generated resolver")
+            };
+
+            let output = run_with_mapping(temp.path());
+            assert!(!output.status.success(), "an unpaired internal MSRV mapping must fail");
+            let diagnostic = normalized_diagnostic(&output);
+            assert!(
+                diagnostic.contains("ANVIL_MSRV_TOOLCHAIN")
+                    && diagnostic.contains("without RUSTUP_TOOLCHAIN")
+                    && diagnostic.contains("unset ANVIL_MSRV_TOOLCHAIN"),
+                "unexpected resolver diagnostic: {diagnostic}"
+            );
+
+            fs::write(temp.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.94\"\n")
+                .expect("toolchain fixture must be writable");
+            let output = run_with_mapping(temp.path());
+            assert!(
+                output.status.success(),
+                "a repository-selected stable toolchain completes the configuration: {}",
+                normalized_diagnostic(&output)
+            );
+        }
+
+        #[test]
+        fn provisions_public_and_mapped_msrv_toolchains() {
+            let run_install = |root: &Path, mapped: Option<&str>, installed: &str, cargo_exit: i32| {
+                let shim = TempDir::new().expect("toolchain shim directory must be creatable");
+                let rustup_log = shim.path().join("rustup.log");
+                let cargo_log = shim.path().join("cargo.log");
+                fs::write(
+                    shim.path().join("rustup.ps1"),
+                    format!(
+                        "Add-Content -LiteralPath $env:ANVIL_RUSTUP_LOG -Value ($args -join ' ')\n\
+                         if (($args -contains 'toolchain') -and ($args -contains 'list')) {{ Write-Output '{installed}' }}\n\
+                         exit 0\n"
+                    ),
+                )
+                .expect("rustup shim must be writable");
+                fs::write(
+                    shim.path().join("cargo.ps1"),
+                    format!(
+                        "Add-Content -LiteralPath $env:ANVIL_CARGO_LOG -Value ($args -join ' ')\n\
+                         exit {cargo_exit}\n"
+                    ),
+                )
+                .expect("cargo shim must be writable");
+                let mut paths = vec![shim.path().to_path_buf()];
+                paths.extend(env::split_paths(&env::var_os("PATH").unwrap_or_default()));
+                let mut command = Command::new("pwsh");
+                command
+                    .args(["-NoProfile", "-File", ".anvil/resolve-stable-toolchain.ps1", "-InstallMsrvIfNeeded"])
+                    .current_dir(root)
+                    .env_remove("RUSTUP_TOOLCHAIN")
+                    .env_remove("ANVIL_MSRV_TOOLCHAIN")
+                    .env("ANVIL_RUSTUP_LOG", &rustup_log)
+                    .env("ANVIL_CARGO_LOG", &cargo_log)
+                    .env("PATH", env::join_paths(paths).expect("shim PATH must be valid"));
+                if let Some(value) = mapped {
+                    command.env("ANVIL_MSRV_TOOLCHAIN", value);
+                }
+                let output = command.output().expect("pwsh must be available to test MSRV provisioning");
+                let rustup_calls = fs::read_to_string(rustup_log).unwrap_or_default();
+                let cargo_calls = fs::read_to_string(cargo_log).unwrap_or_default();
+                (output, rustup_calls, cargo_calls)
+            };
+
+            let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
+            fs::write(
+                temp.path().join("rust-toolchain.toml"),
+                "[toolchain]\ncomponents = [\"clippy\"]\ntargets = [\"wasm32-unknown-unknown\"]\n",
+            )
+            .expect("toolchain fixture must be writable");
+
+            let (output, rustup_calls, cargo_calls) = run_install(temp.path(), None, "1.93-x86_64-pc-windows-msvc", 0);
+            assert!(
+                output.status.success(),
+                "installed public MSRV provisioning failed: {}",
+                normalized_diagnostic(&output)
+            );
+            assert!(rustup_calls.contains("toolchain list"));
+            assert!(
+                !rustup_calls.contains("toolchain install"),
+                "installed MSRV must not be reinstalled"
+            );
+            assert!(rustup_calls.contains("component add --toolchain 1.93 clippy"));
+            assert!(rustup_calls.contains("target add --toolchain 1.93 wasm32-unknown-unknown"));
+            assert!(cargo_calls.is_empty(), "public MSRV availability is checked through rustup");
+
+            let (output, rustup_calls, cargo_calls) = run_install(temp.path(), Some("ms-prod-1.93"), "", 0);
+            assert!(
+                output.status.success(),
+                "mapped MSRV provisioning failed: {}",
+                normalized_diagnostic(&output)
+            );
+            assert!(cargo_calls.contains("+ms-prod-1.93 --version"));
+            assert!(!rustup_calls.contains("toolchain list"));
+            assert!(!rustup_calls.contains("toolchain install"));
+            assert!(rustup_calls.contains("component add --toolchain ms-prod-1.93 clippy"));
+            assert!(rustup_calls.contains("target add --toolchain ms-prod-1.93 wasm32-unknown-unknown"));
+
+            let (output, _, cargo_calls) = run_install(temp.path(), Some("ms-prod-1.93"), "", 9);
+            assert!(!output.status.success(), "an unavailable mapped MSRV must fail");
+            assert!(cargo_calls.contains("+ms-prod-1.93 --version"));
+            let diagnostic = normalized_diagnostic(&output);
+            assert!(
+                diagnostic.contains("mapped MSRV toolchain")
+                    && diagnostic.contains("is unavailable")
+                    && diagnostic.contains("provision ANVIL_MSRV_TOOLCHAIN"),
+                "unexpected mapped MSRV diagnostic: {diagnostic}"
+            );
         }
 
         #[test]

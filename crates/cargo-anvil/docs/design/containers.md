@@ -179,9 +179,9 @@ the standard resolver and selected-stable execution recipes; the resolved value
 is not exported across unrelated recipe processes.
 
 The restricted image-construction context does not contain workspace member
-manifests, so uniform per-package MSRV validation runs in native and cloud setup
-rather than during image construction. Container checks still use the selected
-root MSRV; a package that requires a newer compiler fails normally.
+manifests, so per-package MSRV compatibility validation runs in native and
+cloud setup rather than during image construction. Container checks still use
+the selected root MSRV; a package that requires a newer compiler fails normally.
 
 The public default is digest-pinned Debian Bookworm. A user or automation can
 select another image compatible with the generated Debian-based

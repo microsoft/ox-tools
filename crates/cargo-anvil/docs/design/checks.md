@@ -218,8 +218,12 @@ The group uses the same OS/architecture matrix and per-OS impact sets as `pr-tes
 so cfg-gated targets and dependencies are exercised under the MSRV. It runs in
 parallel with the other PR groups. When no root MSRV exists, the recipe exits
 successfully without running tests.
-`ANVIL_MSRV_TOOLCHAIN` may map the public MSRV to an already-provisioned internal
-toolchain; when it is unset, setup installs the declared MSRV through rustup.
+`ANVIL_MSRV_TOOLCHAIN` may map the public MSRV to an already-provisioned
+internal toolchain. Internal environments pair it with `RUSTUP_TOOLCHAIN` (or a
+selecting repository toolchain file) for stable checks; a mapping by itself is
+rejected rather than allowing stable checks to fall through to a public
+channel. When the mapping is unset, setup installs the declared MSRV through
+rustup.
 
 #### `pr-runtime-analysis` (stricter-runtime correctness)
 

@@ -394,12 +394,15 @@ compiler that can change with the machine image.
 This is a breaking migration for adopters that previously relied on the runner's
 ambient stable compiler. Before regenerating, a repository with one compatibility
 floor should declare root `[workspace.package].rust-version` (or package
-`rust-version`) and have every workspace member inherit or declare that same value.
-A repository with missing or heterogeneous package MSRVs must instead add a root
-toolchain file with `channel` or `path` to select the single compiler used by catalog
-checks. Internal builds may set `RUSTUP_TOOLCHAIN` to a provisioned toolchain rather
-than adding a public compiler pin. An empty root toolchain file is invalid and produces
-an actionable error.
+`rust-version`) and have every workspace member inherit it or declare an equal
+or lower minimum. A repository with missing package MSRVs, or a member minimum
+newer than the root, must instead correct the root floor or add a root toolchain
+file with `channel` or `path` to select the single compiler used by catalog
+checks. Internal builds may set `RUSTUP_TOOLCHAIN` to a provisioned toolchain
+rather than adding a public compiler pin. Setting `ANVIL_MSRV_TOOLCHAIN`
+without that stable override (and without a selecting repository toolchain
+file) is rejected as incomplete internal configuration. An empty root
+toolchain file is invalid and produces an actionable error.
 
 The generated `.anvil/resolve-stable-toolchain.ps1` implements the parsing and
 installation logic behind the private `_anvil-resolve-stable` recipe.
@@ -430,10 +433,12 @@ The single script implementation keeps PowerShell parsing and installation
 behavior identical across those recipe callers.
 
 When selection falls back to the root MSRV, prerequisite validation reads
-`cargo metadata` and requires every workspace package to resolve to that same
-`rust_version`. Workspaces with missing or heterogeneous package MSRVs must choose a
-single catalog toolchain explicitly with a selecting toolchain file. Anvil does not
-build a per-package toolchain matrix for this uncommon case.
+`cargo metadata` and requires every workspace package to resolve a
+`rust_version` no newer than the root floor. Lower member minima are valid
+because the root compiler satisfies them. Workspaces with missing package
+MSRVs or member minima above the root must correct the declarations or choose a
+single catalog toolchain explicitly with a selecting toolchain file. Anvil does
+not build a per-package toolchain matrix for this uncommon case.
 
 When the root manifest declares an MSRV, `anvil-msrv-test` runs affected-package
 unit and integration tests under that compiler with all features and with default
@@ -441,8 +446,9 @@ features. A selecting toolchain file does not suppress this minimum-version run.
 `ANVIL_MSRV_TOOLCHAIN` optionally maps the declared MSRV to a provisioned internal
 toolchain. Without a root MSRV the recipe is a no-op.
 
-`anvil-tool-rustc-validate-prereqs` verifies the selected compiler and the uniform
-MSRV rule. Per-check toolchain requirements (for example, miri, careful, and udeps
+`anvil-tool-rustc-validate-prereqs` verifies the selected compiler and the
+workspace MSRV compatibility rule. Per-check toolchain requirements (for
+example, miri, careful, and udeps
 need nightly) remain enforced by the matching
 `anvil-toolchain-<name>-validate-prereqs` recipe. Explicit `cargo +toolchain`
 arguments retain rustup's higher precedence, so these checks continue to use the

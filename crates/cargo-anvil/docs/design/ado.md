@@ -373,9 +373,11 @@ x86_64 jobs and per-OS affected-package impact sets as `pr_test`, and invokes
 `anvil-pr-msrv`. The stage consumes the per-OS impact artifact like the other PR
 groups; when the root manifest declares no MSRV, the recipe exits successfully
 without running tests.
-Internal pipelines set `ANVIL_MSRV_TOOLCHAIN` to the provisioned `ms-prod-*`
-equivalent of that MSRV; public pipelines let Anvil install the declared MSRV
-through rustup.
+Internal pipelines set `RUSTUP_TOOLCHAIN` to their provisioned stable compiler
+and `ANVIL_MSRV_TOOLCHAIN` to the provisioned `ms-prod-*` equivalent of the
+declared MSRV. Supplying only the MSRV mapping is rejected because stable checks
+would otherwise fall through to a public channel. Public pipelines leave both
+unset and let Anvil install the declared MSRV through rustup.
 
 ### 4.1 Per-job wrapper (`steps/job.yml`) — the 1ESPT extensibility point
 
@@ -769,7 +771,7 @@ placement: a setup stage that `dependsOn`s nothing and runs first, followed by t
 stages.
 
 `anvil-tool-rustc-validate-prereqs` validates the selected compiler and the
-uniform-MSRV fallback rule. For nightly-requiring checks, the matching
+workspace MSRV compatibility rule. For nightly-requiring checks, the matching
 toolchain-validate-prereqs recipe fails with a suggestion to ask the team's pipeline
 owner to add that dated nightly to msrustup.
 

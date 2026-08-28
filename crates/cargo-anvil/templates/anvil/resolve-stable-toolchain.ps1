@@ -154,7 +154,7 @@ function Get-RootMsrv([switch] $AllowMissing) {
     throw 'anvil: no selecting rust-toolchain(.toml) and no root [workspace.package] or [package] rust-version; declare an MSRV or select a toolchain explicitly'
 }
 
-function Assert-UniformWorkspaceMsrv {
+function Assert-WorkspaceMsrvCompatibility {
     $manifestPath = Join-Path $repoRoot 'Cargo.toml'
     $metadataText = (& cargo metadata --manifest-path $manifestPath --format-version 1 --no-deps 2>&1 | Out-String)
     if ($LASTEXITCODE -ne 0) {
@@ -171,10 +171,22 @@ function Assert-UniformWorkspaceMsrv {
         throw "anvil: workspace packages without a resolved rust-version: $($missing -join ', '); declare one or select a toolchain explicitly"
     }
 
-    $versions = @($members | ForEach-Object { [string] $_.rust_version } | Sort-Object -Unique)
     $rootMsrv = Get-RootMsrv
-    if ($versions.Count -ne 1 -or $versions[0] -ne $rootMsrv) {
-        throw "anvil: workspace packages must resolve to the root MSRV $rootMsrv; found $($versions -join ', '); select one catalog toolchain explicitly with rust-toolchain.toml"
+    $newer = @(
+        $members |
+            Where-Object { [version] ([string] $_.rust_version) -gt [version] $rootMsrv } |
+            ForEach-Object { "$($_.name) ($($_.rust_version))" }
+    )
+    if ($newer.Count -gt 0) {
+        throw "anvil: workspace packages require a compiler newer than the root MSRV $rootMsrv`: $($newer -join ', '); raise the root MSRV or select one catalog toolchain explicitly with rust-toolchain.toml"
+    }
+}
+
+function Assert-CompleteInternalToolchainConfiguration {
+    if (-not [string]::IsNullOrWhiteSpace($env:ANVIL_MSRV_TOOLCHAIN) -and
+        [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN) -and
+        $null -eq $fileSelection) {
+        throw 'anvil: ANVIL_MSRV_TOOLCHAIN is set without RUSTUP_TOOLCHAIN and no repository toolchain file selects stable checks; set RUSTUP_TOOLCHAIN to the provisioned stable toolchain or unset ANVIL_MSRV_TOOLCHAIN'
     }
 }
 
@@ -244,9 +256,10 @@ if ($EmitToolchainFileOptions) {
     exit 0
 }
 if ($ValidateWorkspaceMsrv) {
+    Assert-CompleteInternalToolchainConfiguration
     $skipWorkspaceMsrvValidation = -not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)
     if (-not $skipWorkspaceMsrvValidation -and $null -eq $fileSelection) {
-        Assert-UniformWorkspaceMsrv
+        Assert-WorkspaceMsrvCompatibility
     }
     exit 0
 }
@@ -270,6 +283,7 @@ if ($MsrvToolchain -or $InstallMsrvIfNeeded) {
     exit 0
 }
 
+Assert-CompleteInternalToolchainConfiguration
 $selection = if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
     [pscustomobject]@{ Value = $env:RUSTUP_TOOLCHAIN; Source = 'environment'; Installable = $false }
 } elseif ($null -ne $fileSelection) {
