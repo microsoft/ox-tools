@@ -4,6 +4,8 @@
 examine_globs = ["crates/**"]
 exclude_globs = [
     "crates/cargo-aprz-lib/**",
+    # Remove when cargo-gamma runs on itself; until then neither mutation engine covers these crates.
+    "crates/cargo-gamma*/**",
     "crates/testing_aids/**",
 ]
 all_features = true
