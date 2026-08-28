@@ -893,3 +893,57 @@ fn refusing_a_composed_host_spares_a_retired_region_entry_too() {
         "precondition: the host must actually have been refused"
     );
 }
+
+/// A retired owned file is deleted under its real on-disk name. The lock
+/// records whatever casing was written; on a case-sensitive filesystem a
+/// case-only rename makes the recorded path absent, which reads as
+/// `AlreadyGone` and would delete nothing while the lock entry is purged --
+/// leaving the file on disk owned by no one.
+#[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+#[test]
+fn a_retired_owned_file_is_removed_under_its_on_disk_casing() {
+    let tmp = generated_tree();
+    let root = tmp.path();
+    if !filesystem_is_case_sensitive(root) {
+        // The two spellings name one file here, so nothing distinguishes the
+        // fix from the defect. The property only exists where they differ.
+        return;
+    }
+
+    // A file anvil no longer declares, tracked in the lock under one casing
+    // and present on disk under another.
+    let recorded = "justfiles/anvil/Retired.just";
+    let on_disk = root.join("justfiles/anvil/retired.just");
+    let body = "# retired\n";
+    write(&on_disk, body);
+    let mut manifest = Manifest::load(root).unwrap();
+    manifest.set_file(recorded, checksum_str(body));
+    manifest.save(root).unwrap();
+
+    let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
+
+    assert!(
+        outcome
+            .plan
+            .items()
+            .iter()
+            .any(|i| i.decision == Decision::Remove && matches!(&i.target, Target::File { path } if path == recorded)),
+        "the retired file must be planned for removal"
+    );
+    assert!(!on_disk.exists(), "the file must be gone from disk, not merely untracked");
+    assert!(
+        !Manifest::load(root).unwrap().files.contains_key(recorded),
+        "the lock entry must be purged"
+    );
+}
+
+/// Whether two spellings of one name are distinct paths on the filesystem
+/// backing `root`. The casing behaviour under test is only observable when
+/// they are.
+fn filesystem_is_case_sensitive(root: &Path) -> bool {
+    let probe = root.join("anvil-case-probe");
+    std::fs::write(&probe, b"").unwrap();
+    let sensitive = !root.join("ANVIL-CASE-PROBE").exists();
+    std::fs::remove_file(&probe).unwrap();
+    sensitive
+}

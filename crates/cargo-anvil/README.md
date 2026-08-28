@@ -251,9 +251,9 @@ A downstream catalog that needs a different base OS for every repository it
 manages replaces the base and tool regions instead, inheriting the catalog
 install and the entry contract. A replacement that copies more of the tree
 must replace the ignore file with it, since the build context admits only
-`justfiles/anvil/` and `rust-toolchain.toml`. See [`artifacts::container`][__link1]
-and the design document for the full contract, the host setup for each
-engine, and the known limitations.
+`justfiles/anvil/`, `.anvil/container/` and `rust-toolchain.toml`. See
+[`artifacts::container`][__link1] and the design document for the full contract, the
+host setup for each engine, and the known limitations.
 
 ### Checks and tiers
 
@@ -482,7 +482,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbmII2hgTks2UbJ479ivzen1IbFHImKDbbn5obcqda0xJCu1FhZIGDa2NhcmdvLWFudmlsZTAuNS4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbgKHiUZXoKcwbNzADe3lPpOAbmHjFvxOs3xUb5ecQdSnq-vdhZIGDa2NhcmdvLWFudmlsZTAuNS4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.5.0/cargo_anvil/?search=artifacts

@@ -252,9 +252,9 @@
 //! manages replaces the base and tool regions instead, inheriting the catalog
 //! install and the entry contract. A replacement that copies more of the tree
 //! must replace the ignore file with it, since the build context admits only
-//! `justfiles/anvil/` and `rust-toolchain.toml`. See [`artifacts::container`]
-//! and the design document for the full contract, the host setup for each
-//! engine, and the known limitations.
+//! `justfiles/anvil/`, `.anvil/container/` and `rust-toolchain.toml`. See
+//! [`artifacts::container`] and the design document for the full contract, the
+//! host setup for each engine, and the known limitations.
 //!
 //! ## Checks and tiers
 //!

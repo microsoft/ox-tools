@@ -23,6 +23,7 @@ use std::path::{Path, PathBuf};
 use ohno::{AppError, IntoAppError as _};
 
 use crate::decision::Decision;
+use crate::io::resolve_existing_case_insensitive;
 use crate::manifest::{Manifest, RegionKey};
 
 /// What is being changed by a single plan item.
@@ -466,10 +467,14 @@ impl Plan {
                 }
                 (Target::File { path }, Decision::Remove) => {
                     // Untouched orphan file: delete and drop the
-                    // manifest entry. If the file is already missing
-                    // (race / external delete), absorb the error so
-                    // the result is idempotent.
-                    let abs = repo_root.join(path);
+                    // manifest entry. The path is resolved to its on-disk
+                    // casing first, because the manifest key is whatever
+                    // casing was recorded and the file may since have been
+                    // renamed in case only; deleting the unresolved path
+                    // would leave the file behind with no lock entry.
+                    // If the file is already missing (race / external
+                    // delete), absorb the error so the result is idempotent.
+                    let abs = repo_root.join(resolve_existing_case_insensitive(repo_root, path));
                     if let Err(e) = std::fs::remove_file(&abs)
                         && e.kind() != std::io::ErrorKind::NotFound
                     {

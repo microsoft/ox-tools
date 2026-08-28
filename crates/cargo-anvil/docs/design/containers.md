@@ -179,10 +179,12 @@ The image installs its tools by running `just anvil-setup`, the same recipe the 
 generated pins. There is no second tool list to keep synchronized, and consequently a tool-pin change renames the
 image (§4.1).
 
-`Dockerfile.dockerignore` scopes the build context to `justfiles/anvil/` and `rust-toolchain.toml`, denying everything
-else. The whole recipe tree is copied because `just` has to parse it to run `anvil-setup`, and the whole tree is
-hashed (§4). BuildKit reads `<dockerfile>.dockerignore` in preference to a root `.dockerignore`, so the
-repository neither needs to own a root ignore file nor can have one silently override this.
+`Dockerfile.dockerignore` scopes the build context to `justfiles/anvil/`, `.anvil/container/` and
+`rust-toolchain.toml`, denying everything else. The recipe tree is copied whole because `just` has to parse it to run
+`anvil-setup`, and it is hashed whole (§4). `.anvil/container/` is admitted so a gap can `COPY` a file placed beside
+the Dockerfile; anvil's own `.anvil-proposed` review artifacts are excluded from both the context and the digest.
+BuildKit reads `<dockerfile>.dockerignore` in preference to a root `.dockerignore`, so the repository neither needs to
+own a root ignore file nor can have one silently override this.
 
 ## 4. Image identity
 
@@ -583,9 +585,9 @@ Replacing a *region* rather than the whole file is what makes a downstream catal
 msrustup catalog rewrites the base and tool layers and nothing else. Replacing `dockerfile_setup()` reintroduces the
 second tool list the design exists to avoid, and is almost never right.
 
-**A replacement must keep the ignore file in step.** A region that `COPY`s anything beyond `justfiles/anvil/` and
-`rust-toolchain.toml` must also replace `artifacts::container::dockerignore()` (§3), or the added paths never reach the
-build context and the build fails on a missing file.
+**A replacement must keep the ignore file in step.** A region that `COPY`s anything outside `justfiles/anvil/`,
+`.anvil/container/` and `rust-toolchain.toml` must also replace `artifacts::container::dockerignore()` (§3), or the
+added paths never reach the build context and the build fails on a missing file.
 
 **Anything extra it copies is digested, provided it lives under `.anvil/container/`.** The hashed set is that whole
 directory (§4.1), so an installer script, a config file or a certificate placed beside the Dockerfile is an input:

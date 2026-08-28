@@ -331,6 +331,10 @@ function Invoke-Suite([string]$EngineName) {
     Write-Step "$($tools.Count) pinned tools"
     $broken = @()
     $missing = @()
+    $unexplained = @()
+    # Tools with no `--version` that exits 0. Empty: every pinned tool is a
+    # cargo subcommand or a standalone binary that reports its version.
+    $noVersionFlag = @()
     foreach ($tool in $tools.Keys) {
         $run = Invoke-Engine -Arguments @('run', '--rm', $reference, $tool, '--version') -AllowFailure
         $combined = "$($run.StdOut)`n$($run.StdErr)"
@@ -341,10 +345,18 @@ function Invoke-Suite([string]$EngineName) {
             $broken += "$tool -> $line"
         } elseif ($combined -match 'executable file .*not found|no such file or directory') {
             $missing += $tool
+        } elseif ($run.ExitCode -ne 0 -and $tool -notin $noVersionFlag) {
+            # The exit code is the only signal that covers every remaining
+            # failure shape: a crash, an illegal instruction, a permission
+            # error, or a loader diagnostic neither pattern above recognises.
+            # Without this the assertions below pass on all of them.
+            $first = (($combined -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -First 1)
+            $unexplained += "$tool -> exit $($run.ExitCode): $($first)".Trim()
         }
     }
     Assert-That 'every pinned tool executes inside the image' ($broken.Count -eq 0) ($broken -join "`n")
     Assert-That 'every pinned tool is present in the image' ($missing.Count -eq 0) ($missing -join ', ')
+    Assert-That 'every pinned tool reports its version successfully' ($unexplained.Count -eq 0) ($unexplained -join "`n")
 
     Write-Section "$EngineName : checks"
 

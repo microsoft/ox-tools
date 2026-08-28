@@ -728,7 +728,10 @@ fn plan_removals(
             }
             continue;
         }
-        let disk = read_file_if_present(&repo_root.join(path))?;
+        // Read under the resolved casing: a lock entry recorded before a
+        // case-only rename would otherwise find nothing on disk, classify a
+        // file that is still present as `AlreadyGone`, and delete it.
+        let disk = read_file_if_present(&repo_root.join(&resolved))?;
         let disk_checksum = disk.as_deref().map(checksum_str);
         match decide_removal(last, disk_checksum.as_deref()) {
             // A file still matching its last render is safe to delete; an
