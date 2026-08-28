@@ -28,7 +28,7 @@ path = "justfiles/anvil/checks/fmt.just"
 checksum = "sha256:8f3a…"
 
 [[file]]
-path = ".github/actions/anvil-pr-fast/action.yml"
+path = ".github/actions/anvil-run-group/action.yml"
 checksum = "sha256:b91c…"
 
 [[file]]
@@ -156,7 +156,7 @@ refuse on a `catalog_checksum` mismatch the way it does for `tool`.
 
 Identified by **path**. The catalog (compiled into the binary) specifies the full set of
 paths the tool owns. Examples: `justfiles/anvil/checks/fmt.just`,
-`.github/actions/anvil-pr-fast/action.yml`, `.pipelines/anvil/pr.yml`.
+`.github/actions/anvil-run-group/action.yml`, `.pipelines/anvil/pr.yml`.
 
 There is no in-file checksum line. Owned files carry an explicit generated-content
 warning near the beginning (where the file's syntax allows), naming cargo-anvil as

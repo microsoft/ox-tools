@@ -1,0 +1,39 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-gamma-process"
+description = "Internal bounded process-tree lifecycle for cargo-gamma"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["cargo", "mutation-testing", "testing"]
+categories = ["development-tools::testing"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-process"
+
+[package.metadata.docs.rs]
+all-features = true
+
+# Establish the cross-platform CI baseline for this new crate. Raise it as coverage improves.
+[package.metadata.coverage-gate]
+min-lines-percent = 91.6
+
+[features]
+fault-injection = []
+
+[dependencies]
+cargo-gamma-unsafe = { workspace = true }
+
+[dev-dependencies]
+camino = { workspace = true }
+tempfile = { workspace = true }
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints
