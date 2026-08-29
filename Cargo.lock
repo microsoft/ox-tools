@@ -310,7 +310,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "98a5782f2650f80d533f58ec339c6dce4cc5428f9c2755894f98156f52af81f2"
 dependencies = [
  "bolero-generator-derive",
+ "either",
+ "getrandom 0.3.4",
  "rand_core 0.9.5",
+ "rand_xoshiro",
 ]
 
 [[package]]
