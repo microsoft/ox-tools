@@ -19,7 +19,6 @@ use tempfile::TempDir;
 
 const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
 const IMPACT: &str = include_str!("../templates/justfiles/anvil/impact.just");
-#[cfg(target_os = "linux")]
 const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.just");
 const FMT: &str = include_str!("../templates/justfiles/anvil/checks/fmt.just");
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
@@ -38,6 +37,18 @@ fn loom_has_an_overridable_ci_preemption_bound() {
     assert!(
         LOOM.contains("$env:LOOM_MAX_PREEMPTIONS = '2'"),
         "loom must default CI to its documented two-preemption bound"
+    );
+}
+
+#[test]
+fn bolero_uses_its_supported_release_profile_option() {
+    assert!(
+        BOLERO.contains("bolero test --profile release"),
+        "bolero execution must select the release profile with cargo-bolero's supported option"
+    );
+    assert!(
+        !BOLERO.contains("bolero test --release"),
+        "cargo-bolero 0.13.4 does not accept Cargo's --release shorthand"
     );
 }
 

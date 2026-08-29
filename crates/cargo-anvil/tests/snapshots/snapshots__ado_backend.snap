@@ -2887,7 +2887,7 @@ anvil-bolero: anvil-bolero-validate-prereqs anvil-impact
             exit 1
         }
         Write-Host "anvil-bolero: ${packageName}::${testName}"
-        & cargo '+{{ rust_nightly }}' bolero test --release --engine libfuzzer -T 60s --package $packageName $testName
+        & cargo '+{{ rust_nightly }}' bolero test --profile release --engine libfuzzer -T 60s --package $packageName $testName
         if ($LASTEXITCODE -ne 0) { $failed = $true }
     }
     if ($failed) { exit 1 }
