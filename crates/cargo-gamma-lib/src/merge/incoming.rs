@@ -87,7 +87,7 @@ impl From<Incoming> for Report {
             thresholds: incoming.thresholds,
             project_root: incoming.project_root,
             framework,
-            files: incoming.files,
+            files: incoming.files.into_iter().collect(),
             config,
         }
     }

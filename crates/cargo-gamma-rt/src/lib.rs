@@ -3,6 +3,7 @@
 
 #![no_std]
 #![doc(hidden)]
+#![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 #![cfg_attr(
     all(any(unix, windows), miri),
     expect(
@@ -110,6 +111,31 @@
 //! acquire the startup environment is different: the runtime emits [`ENVIRONMENT_ERROR_MARKER`]
 //! and exits, so the parent cannot mistake a mutant that never activated for a survivor.
 //!
+//! That distinction covers [`CENSUS_VAR`] as well as [`ACTIVE_VAR`]. An unset census variable is an
+//! ordinary process, but a census variable this process could not *read* is a startup failure, not
+//! an absent one: treating it as absence would run the mutant named by [`ACTIVE_VAR`], produce no
+//! census file, and report a baseline failure the run would read as a verdict about that mutant. A
+//! read interrupted by a signal is retried rather than counted as a failure, since an interruption
+//! is not evidence of anything.
+//!
+//! Two further failure shapes exist because "captured, but wrong" is worse than either of the
+//! above:
+//!
+//! - If some other native constructor runs instrumented code before this crate's own constructor
+//!   installs the captured selection — on a hosted target outside a Miri execution, where that
+//!   installation is expected — a guard reached in that window panics rather than silently
+//!   reporting the baseline. `NONE` would otherwise be ambiguous between "genuinely unmutated" and
+//!   "asked too early to know", and only the first may ever be reported as a passing mutant.
+//! - On a Unix with no immutable startup environment image, [`ACTIVE_VAR`] is read through
+//!   `getenv` under the POSIX process-wide precondition that no native environment mutation runs
+//!   concurrently. This capture happens before Rust `main`, so safe Rust has not had an opportunity
+//!   to start a thread that violates the precondition; Rust environment mutation is unsafe for the
+//!   same reason. A foreign native constructor that starts concurrent `setenv`, `putenv`,
+//!   `unsetenv`, or equivalent mutation is outside this abstraction. The runtime still performs a
+//!   second independent read and rejects a disagreement through [`ENVIRONMENT_ERROR_MARKER`] and
+//!   immediate exit. That double-read is integrity detection for a visibly inconsistent result,
+//!   not a proof of memory safety or proof that forbidden foreign mutation did not occur.
+//!
 //! ```rust
 //! use gamma_rt::{ACTIVE_VAR, CENSUS_VAR, NONE, a, active, any};
 //!
@@ -190,8 +216,10 @@
 mod either;
 mod runtime;
 
+#[doc(inline)]
 pub use either::Either;
 #[cfg(all(loom, feature = "loom"))]
 #[doc(hidden)]
 pub use runtime::run_loom_models;
-pub use runtime::{ACTIVE_VAR, CENSUS_VAR, ENVIRONMENT_ERROR_MARKER, NONE, OVERFLOW, SEAL, a, active, any};
+#[doc(inline)]
+pub use runtime::{ACTIVE_VAR, CENSUS_VAR, ENVIRONMENT_ERROR_MARKER, MAX_CENSUS_SITES, NONE, OVERFLOW, SEAL, a, active, any};

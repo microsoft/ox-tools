@@ -3,6 +3,10 @@
 
 //! Whether this host can meter and bound a test subtree's memory.
 
+use crate::PlatformError;
+#[cfg(not(windows))]
+use crate::Situation;
+
 /// Reports whether this host can meter and bound a test subtree's memory, or why it cannot.
 ///
 /// The answer is worked out once and cached, because settling it can involve creating a cgroup and
@@ -11,7 +15,12 @@
 ///
 /// # Errors
 ///
-/// Returns the reason this host cannot account for a whole test subtree's memory.
+/// Returns a [`PlatformError`] whose [`situation`](PlatformError::situation) is
+/// [`Situation::Unsupported`](crate::Situation::Unsupported), carrying the reason this host cannot
+/// account for a whole test subtree's memory: no cgroup v2 unified hierarchy, no delegated cgroup,
+/// no memory controller to hand to children, a kernel missing the interface files a leaf needs, or
+/// a Unix that is not Linux. It is a standing fact about the machine rather than about one launch,
+/// so a caller degrades or refuses the whole run once rather than retrying.
 #[cfg_attr(
     windows,
     expect(
@@ -21,10 +30,12 @@
                   to go and look, and the signature is shared"
     )
 )]
-pub fn support() -> Result<(), String> {
+pub fn support() -> Result<(), PlatformError> {
     #[cfg(target_os = "linux")]
     {
-        crate::cgroup::root().map(|_root| ()).map_err(str::to_owned)
+        crate::cgroup::root()
+            .map(|_root| ())
+            .map_err(|reason| PlatformError::new(Situation::Unsupported, reason))
     }
 
     #[cfg(windows)]
@@ -38,13 +49,13 @@ pub fn support() -> Result<(), String> {
     #[cfg(not(any(target_os = "linux", windows)))]
     {
         // #[gamma::skip(result.err_to_ok, literal.str_to_empty, literal.str_to_xyzzy, reason = "this compile-time branch exists only on unsupported non-Linux, non-Windows targets and cannot be executed by the Linux mutation run")]
-        Err(
+        Err(PlatformError::new(
+            Situation::Unsupported,
             "bounding a test subtree's memory needs cgroup v2 on Linux or a job object on Windows, \
              and this platform offers no unprivileged equivalent that accounts for a whole process \
              tree. An inherited `RLIMIT_AS` is not one: it bounds each process separately, and \
              bounds reserved address space rather than resident memory, so scaling it from a \
-             measured peak would stop healthy tests while leaving the runaway case unbounded"
-                .to_owned(),
-        )
+             measured peak would stop healthy tests while leaving the runaway case unbounded",
+        ))
     }
 }

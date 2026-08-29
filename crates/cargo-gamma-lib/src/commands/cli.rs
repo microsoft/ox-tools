@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 use camino::Utf8PathBuf;
+use clap::builder::Styles;
+use clap::builder::styling::{AnsiColor, Effects};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 
@@ -9,6 +11,12 @@ use super::When;
 use crate::ci::{Annotations, Level};
 use crate::error::error;
 use crate::ops::registry::Selection;
+
+const CLAP_STYLES: Styles = Styles::styled()
+    .header(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .usage(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .literal(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
+    .placeholder(AnsiColor::Cyan.on_default());
 
 /// Adapts a [`crate::bounds`] check to clap's parser signature.
 macro_rules! bounded {
@@ -40,11 +48,13 @@ fn size(text: &str) -> Result<u64, String> {
     bin_name = "cargo gamma",
     version,
     propagate_version = true,
+    author,
     about = "Fast mutation testing for Rust.",
     long_about = "Fast mutation testing for Rust.\n\nEvery selected mutant is compiled into one \
                   set of test binaries and chosen at run time, so a whole workspace is mutated \
                   without rebuilding it once per mutant.\n\nWith no subcommand, `run` is implied.",
-    max_term_width = 100
+    max_term_width = 100,
+    styles = CLAP_STYLES
 )]
 pub struct Cli {
     /// The subcommand to run. Defaults to `run`.
@@ -236,6 +246,10 @@ pub struct SelectArgs {
     /// Skip files matching these glob patterns.
     #[arg(long = "exclude-file", value_name = "GLOB")]
     pub exclude_files: Vec<String>,
+
+    /// Lexical terminal trait names excluded through `gamma.toml`.
+    #[arg(skip)]
+    pub exclude_trait_impls: Vec<String>,
 
     /// Number of shards to divide the mutants into.
     #[arg(long, value_name = "COUNT")]
@@ -625,12 +639,6 @@ pub struct RunArgs {
     #[arg(long, help_heading = "Run control")]
     pub dry_run: bool,
 
-    /// Load the report viewer from a CDN instead of embedding it.
-    ///
-    /// Produces a much smaller file, at the cost of needing network access to read it.
-    #[arg(long, help_heading = "Reporting")]
-    pub html_external: bool,
-
     /// How loudly a survivor is reported to a SARIF consumer.
     ///
     /// A surviving mutant is an observation about the test suite rather than a defect in the code,
@@ -697,7 +705,6 @@ pub enum ListKind {
     Files,
 
     /// The named mutator presets.
-    #[value(alias = "profiles")]
     Presets,
 }
 
@@ -736,6 +743,7 @@ impl Default for SelectArgs {
             mutators: None,
             files: Vec::new(),
             exclude_files: Vec::new(),
+            exclude_trait_impls: Vec::new(),
             shard_count: None,
             shard_index: None,
             in_diff: None,
@@ -1026,15 +1034,13 @@ mod tests {
     }
 
     #[test]
-    fn mutator_presets_are_listed_by_the_new_name_and_the_old_name_remains_an_alias() {
-        for name in ["presets", "profiles"] {
-            let cli = Cli::try_parse_from(["cargo-gamma", "list", name]).expect("list kind parses");
-            let Command::List(args) = cli.command else {
-                panic!("expected list");
-            };
+    fn mutator_presets_are_listed_by_name() {
+        let cli = Cli::try_parse_from(["cargo-gamma", "list", "presets"]).expect("list kind parses");
+        let Command::List(args) = cli.command else {
+            panic!("expected list");
+        };
 
-            assert_eq!(args.what, ListKind::Presets);
-        }
+        assert_eq!(args.what, ListKind::Presets);
     }
 
     #[test]
@@ -1101,7 +1107,14 @@ mod tests {
     fn the_cli_definition_is_valid() {
         use clap::CommandFactory as _;
 
-        Cli::command().debug_assert();
+        let command = Cli::command();
+
+        assert_eq!(command.get_author(), Some(env!("CARGO_PKG_AUTHORS")));
+        assert_eq!(command.get_styles().get_header(), CLAP_STYLES.get_header());
+        assert_eq!(command.get_styles().get_usage(), CLAP_STYLES.get_usage());
+        assert_eq!(command.get_styles().get_literal(), CLAP_STYLES.get_literal());
+        assert_eq!(command.get_styles().get_placeholder(), CLAP_STYLES.get_placeholder());
+        command.debug_assert();
     }
 
     /// The default eligibility is both ceilings, and it is a real parse rather than a string check.
@@ -1202,18 +1215,14 @@ mod tests {
         }
     }
 
-    /// Artifact routing is directory-wide; individual report path flags are not accepted.
+    /// Artifact routing is directory-wide.
     #[test]
-    fn artifact_dir_replaces_individual_report_paths() {
+    fn artifact_and_cache_directories_parse() {
         let cli = Cli::try_parse_from(["cargo gamma", "run", "--artifact-dir", "out"]).expect("the directory parses");
 
         match cli.command {
             Command::Run(args) => assert_eq!(args.artifact_dir.unwrap(), "out"),
             _ => panic!("expected run"),
-        }
-
-        for removed in ["--html-report", "--json-report", "--sarif-report", "--advice", "--diag-bundle"] {
-            _ = Cli::try_parse_from(["cargo gamma", "run", removed, "out"]).expect_err("individual report paths are gone");
         }
 
         let cli = Cli::try_parse_from(["cargo gamma", "run", "--cache-dir", "cache"]).expect("cache directory parses");
@@ -1222,8 +1231,6 @@ mod tests {
             Command::Run(args) => assert_eq!(args.measure.cache_dir.unwrap(), "cache"),
             _ => panic!("expected run"),
         }
-
-        _ = Cli::try_parse_from(["cargo gamma", "run", "--scratch-dir", "cache"]).expect_err("the old cache option is gone");
     }
 
     /// Every flag taking a filesystem path presents the same `<PATH>` placeholder.

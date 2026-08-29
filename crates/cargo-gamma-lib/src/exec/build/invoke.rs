@@ -21,6 +21,7 @@ use super::messages::cargo_message;
 use crate::Result;
 use crate::discover::Plan;
 use crate::error::{Error, error};
+use crate::report::encode_controls;
 
 /// Explains a failed cargo spawn.
 ///
@@ -29,13 +30,15 @@ use crate::error::{Error, error};
 /// is not always `cargo` from `PATH`: an inherited `CARGO` wins, and a stale one left over from an
 /// earlier shell points at a binary that no longer exists.
 pub(super) fn spawn_failure(program: &str, work: &Workspace, cause: io::Error) -> Error {
+    let program = encode_controls(program);
+    let root = encode_controls(work.root.as_str());
+
     if !work.root.as_std_path().is_dir() {
-        return error!("the scratch tree at `{}` disappeared while it was being built", work.root).caused_by(cause);
+        return error!("the scratch tree at `{root}` disappeared while it was being built").caused_by(cause);
     }
 
     error!(
-        "could not run `{program}` in `{}`. Cargo is taken from the `CARGO` environment variable when it is set, and from `PATH` otherwise",
-        work.root
+        "could not run `{program}` in `{root}`. Cargo is taken from the `CARGO` environment variable when it is set, and from `PATH` otherwise"
     )
     .caused_by(cause)
 }
@@ -61,7 +64,7 @@ pub(super) fn compile(work: &Workspace, args: &[String], budget: Option<Duration
         .stderr(Stdio::piped())
         .stdout(Stdio::piped());
 
-    supervise(&mut command, work, budget, events)
+    supervise(command, work, budget, events)
 }
 
 /// Runs an already-configured cargo command under containment, and collects what it said.
@@ -82,36 +85,42 @@ pub(super) fn compile(work: &Workspace, args: &[String], budget: Option<Duration
 /// No accounting is asked for. This is the boundary that can be killed, and nothing here reads a
 /// peak: the memory a build uses is `rustc`'s business, and a ceiling on it would fail builds the
 /// user never asked to be bounded.
-pub(super) fn supervise(
-    command: &mut Command,
-    work: &Workspace,
-    budget: Option<Duration>,
-    events: &mut dyn Events,
-) -> Result<Option<Output>> {
+pub(super) fn supervise(command: Command, work: &Workspace, budget: Option<Duration>, events: &mut dyn Events) -> Result<Option<Output>> {
     supervise_with_limits(command, work, budget, events, OUTPUT_LIMITS)
 }
 
 /// Runs a build with explicit limits for retained and narrated output.
 pub(super) fn supervise_with_limits(
-    command: &mut Command,
+    command: Command,
     work: &Workspace,
     budget: Option<Duration>,
     events: &mut dyn Events,
     limits: OutputLimits,
 ) -> Result<Option<Output>> {
     let program = command.get_program().to_string_lossy().into_owned();
+    let root = encode_controls(work.root.as_str());
 
-    let guard = prepare(command, MemoryRequest::default())
-        .map_err(|reason| error!("the cargo build in `{}` could not be contained: {reason}", work.root))?;
+    let prepared = prepare(command, MemoryRequest::default()).map_err(|reason| {
+        let raw_reason = reason.to_string();
+        let reason = encode_controls(&raw_reason);
 
-    let child = command.spawn().map_err(|cause| spawn_failure(&program, work, cause))?;
+        error!("the cargo build in `{root}` could not be contained: {reason}")
+    })?;
 
-    let mut subtree = match ProcessTree::adopt(child, guard) {
+    let spawned = prepared.spawn().map_err(|failure| {
+        let (cause, _prepared) = failure.into_parts();
+
+        spawn_failure(&program, work, cause)
+    })?;
+
+    let mut subtree = match ProcessTree::adopt(spawned) {
         Ok(subtree) => subtree,
         Err(reason) => {
             events.build_finished();
+            let raw_reason = reason.to_string();
+            let reason = encode_controls(&raw_reason);
 
-            return Err(error!("the cargo build in `{}` could not be contained: {reason}", work.root));
+            return Err(error!("the cargo build in `{root}` could not be contained: {reason}"));
         }
     };
 
@@ -153,7 +162,7 @@ pub(super) fn supervise_with_limits(
                 // build tree running with no handle on it at all.
                 collect(&mut subtree);
 
-                break Err(error!("could not wait for cargo in `{}`", work.root).caused_by(cause));
+                break Err(error!("could not wait for cargo in `{root}`").caused_by(cause));
             }
         }
     };
@@ -183,22 +192,20 @@ pub(super) fn supervise_with_limits(
     // and one that stopped on a read that failed — because the difference is invisible in the bytes.
     let (Some(stdout), Some(stderr)) = (said, printed) else {
         return Err(error!(
-            "cargo in `{}` finished, but its output could not be read to the end, so what it built could not be read",
-            work.root
+            "cargo in `{root}` finished, but its output could not be read to the end, so what it built could not be read"
         ));
     };
 
     if !stdout.complete || !stderr.complete {
         return Err(error!(
-            "cargo in `{}` finished, but its output could not be read to the end, so what it built could not be read",
-            work.root
+            "cargo in `{root}` finished, but its output could not be read to the end, so what it built could not be read"
         ));
     }
 
     if !stdout.within_limits || !stderr.within_limits {
         return Err(error!(
-            "cargo in `{}` exceeded the configured {}-byte retained or {}-byte per-line build-output limit, so its truncated output could not be trusted",
-            work.root, limits.retained, limits.line
+            "cargo in `{root}` exceeded the configured {}-byte retained or {}-byte per-line build-output limit, so its truncated output could not be trusted",
+            limits.retained, limits.line
         ));
     }
 

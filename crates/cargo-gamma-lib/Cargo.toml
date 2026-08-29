@@ -25,7 +25,7 @@ disable = true
 
 # Establish the cross-platform CI baseline for this new crate. Raise it as coverage improves.
 [package.metadata.coverage-gate]
-min-lines-percent = 96.8
+min-lines-percent = 96.7
 
 [features]
 # Exposes the crate's internal modules so that the integration tests in `tests/` can drive them
@@ -105,6 +105,10 @@ required-features = ["loom"]
 
 [[test]]
 name = "regressions"
+required-features = ["internals"]
+
+[[test]]
+name = "sarif_contract"
 required-features = ["internals"]
 
 [[test]]

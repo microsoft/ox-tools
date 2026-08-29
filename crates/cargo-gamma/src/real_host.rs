@@ -39,7 +39,19 @@ impl Host for RealHost {
 
 #[cfg(test)]
 mod tests {
+    use std::env;
+    use std::process::Command;
+
     use super::*;
+
+    /// A variable the parent gives the child, whose exact value the adapter has to hand back.
+    const PRESENT_VAR: &str = "GAMMA_REAL_HOST_PRESENT";
+
+    /// What the parent sets it to, chosen so that no ambient environment could supply it.
+    const PRESENT_VALUE: &str = "a value only this test chose";
+
+    /// A variable the parent removes from the child, whatever the launching environment held.
+    const ABSENT_VAR: &str = "GAMMA_REAL_HOST_ABSENT";
 
     /// The real host is driven through the trait, because every other test in the workspace is not.
     ///
@@ -74,12 +86,46 @@ mod tests {
     }
 
     /// The real host reads the real environment rather than overriding `env`.
-
+    ///
+    /// Driven through a child process this test launches itself, because the two states the
+    /// adapter has to tell apart — set, and not set — are properties of a process environment, and
+    /// this process's own is whatever the developer or the CI runner happened to export. Asserting
+    /// against it reads correct code as broken in a sanitized environment, and reads broken code as
+    /// correct whenever the ambient process happens to agree. Writing this process's environment to
+    /// arrange the two states is not an option either: `setenv` races every other thread's read,
+    /// which is why nothing in this workspace does it.
+    ///
+    /// So the states are arranged on the child's `Command` — one variable given a value only this
+    /// test chose, one removed outright — and the child reports what the adapter returned for each.
     #[test]
     fn the_real_host_reads_the_process_environment() {
+        let executable = env::current_exe().expect("the test binary knows its own path");
+
+        let output = Command::new(&executable)
+            .args(["--exact", "real_host::tests::the_child_reports_what_the_host_read", "--nocapture"])
+            .env(PRESENT_VAR, PRESENT_VALUE)
+            .env_remove(ABSENT_VAR)
+            .output()
+            .expect("the child runs");
+
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+
+        let text = String::from_utf8_lossy(&output.stdout);
+
+        // The value is compared, not merely its presence: an adapter that answered `Some` with the
+        // name, the empty string, or another variable's value would satisfy a presence check.
+        assert!(text.contains(&format!("present={:?}", Some(PRESENT_VALUE))), "{text}");
+        assert!(text.contains("absent=None"), "{text}");
+    }
+
+    /// Reports what [`RealHost`] read for each variable the test above arranged.
+    ///
+    /// Only meaningful when launched by that test; harmless on its own, where it prints two
+    /// absences and asserts nothing.
+    #[test]
+    fn the_child_reports_what_the_host_read() {
         let host = RealHost;
 
-        assert!(host.env("PATH").is_some_and(|path| !path.is_empty()));
-        assert_eq!(host.env("GAMMA_DEFINITELY_NOT_SET_IN_THE_ENVIRONMENT"), None);
+        println!("present={:?} absent={:?}", host.env(PRESENT_VAR), host.env(ABSENT_VAR));
     }
 }

@@ -173,6 +173,33 @@ mod tests {
         assert!(!Outcome::Pending.is_valid());
     }
 
+    /// A run stopped by the clock or the memory ceiling scores against the suite, not for it.
+    ///
+    /// Both outcomes mean the same thing about the tests: the mutant changed how the code behaves
+    /// and no assertion said so. The suite noticed nothing — a budget did — so neither may be
+    /// credited as a detection. Pinned here because the reasoning is inverted easily and the
+    /// consequence is silent: reading a timeout as a kill turns a suite too slow for its own budget
+    /// into a near-perfect score made of mutants nothing ever exercised, and reading a memory limit
+    /// as a kill does the same for a mutant that merely allocated. Both remain in the denominator,
+    /// because the mutant did run and something about it was observed.
+    #[test]
+    fn a_timeout_and_a_memory_limit_score_as_undetected_mutants() {
+        assert_eq!(Outcome::Timeout.scoring(), Scoring::Undetected);
+        assert_eq!(Outcome::OutOfMemory.scoring(), Scoring::Undetected);
+
+        for outcome in [Outcome::Timeout, Outcome::OutOfMemory] {
+            assert!(!outcome.is_detected(), "{outcome} must not be credited as a detection");
+            assert!(outcome.is_valid(), "{outcome} must stay in the denominator");
+        }
+
+        // They are undetected in exactly the way a survivor is, and are not the excluded case that
+        // a flake or an unviable mutant takes.
+        assert_eq!(Outcome::Timeout.scoring(), Outcome::Survived.scoring());
+        assert_eq!(Outcome::OutOfMemory.scoring(), Outcome::Survived.scoring());
+        assert_ne!(Outcome::Timeout.scoring(), Outcome::Killed.scoring());
+        assert_ne!(Outcome::OutOfMemory.scoring(), Outcome::Flaky.scoring());
+    }
+
     /// A flake is neither a detection nor a gap in the tests, and scores as neither.
     ///
     /// Counting it as detected would let one unreliable test manufacture a kill against every

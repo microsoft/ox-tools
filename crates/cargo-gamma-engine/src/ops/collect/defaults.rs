@@ -26,7 +26,11 @@ pub(super) struct DefaultPaths {
 }
 
 impl DefaultPaths {
-    /// Collects standard-trait aliases and local shadows from a parsed file.
+    /// Collects standard-trait aliases and local shadows from a parsed file, ignoring `cfg`.
+    ///
+    /// Every production caller threads a real [`CfgSet`] through [`Self::of_in`]; this unconditional
+    /// form only remains to let tests build a `DefaultPaths` from bare source without a `CfgSet`.
+    #[cfg(test)]
     pub(super) fn of(file: &File) -> Self {
         Self::of_in(file, &CfgSet::unconditional())
     }
@@ -223,7 +227,12 @@ impl DefaultPaths {
 }
 
 /// Returns the outer attributes of an item.
-fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+///
+/// `pub(in crate::ops::collect)` so every discovery prepass — the stated-value audit, the
+/// type/import index, and the fused phase-one pass that drives both — can gate its own descent by
+/// the same predicate the collector itself reads before ever offering a mutant, rather than each
+/// prepass reaching its own conclusion about which items the selected build actually contains.
+pub(in crate::ops::collect) fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
     match item {
         syn::Item::Const(node) => &node.attrs,
         syn::Item::Enum(node) => &node.attrs,
@@ -240,6 +249,34 @@ fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
         syn::Item::Type(node) => &node.attrs,
         syn::Item::Union(node) => &node.attrs,
         syn::Item::Use(node) => &node.attrs,
+        _ => &[],
+    }
+}
+
+/// Returns the outer attributes of an associated item inside an `impl` block.
+///
+/// Shared with the same discovery prepasses [`item_attrs`] serves, so an inactive associated
+/// constant or method is excluded from the stated-value audit and the type/import index exactly as
+/// the collector already excludes it from candidate collection.
+pub(in crate::ops::collect) fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
+    match item {
+        syn::ImplItem::Const(node) => &node.attrs,
+        syn::ImplItem::Fn(node) => &node.attrs,
+        syn::ImplItem::Type(node) => &node.attrs,
+        syn::ImplItem::Macro(node) => &node.attrs,
+        _ => &[],
+    }
+}
+
+/// Returns the outer attributes of an associated item inside a `trait` block.
+///
+/// Shared with the same discovery prepasses [`item_attrs`] serves; see its documentation.
+pub(in crate::ops::collect) fn trait_item_attrs(item: &syn::TraitItem) -> &[syn::Attribute] {
+    match item {
+        syn::TraitItem::Const(node) => &node.attrs,
+        syn::TraitItem::Fn(node) => &node.attrs,
+        syn::TraitItem::Type(node) => &node.attrs,
+        syn::TraitItem::Macro(node) => &node.attrs,
         _ => &[],
     }
 }
@@ -924,6 +961,23 @@ mod tests {
             item_attrs(&verbatim).is_empty(),
             "an unrecognized item kind has no attributes to read"
         );
+    }
+
+    #[test]
+    fn associated_item_attrs_read_macros_and_fall_back_for_verbatim_tokens() {
+        let implementation: syn::ImplItem = parse_quote!(
+            #[allow(dead_code)]
+            m!();
+        );
+        let declaration: syn::TraitItem = parse_quote!(
+            #[allow(dead_code)]
+            m!();
+        );
+
+        assert_eq!(impl_item_attrs(&implementation).len(), 1);
+        assert_eq!(trait_item_attrs(&declaration).len(), 1);
+        assert!(impl_item_attrs(&syn::ImplItem::Verbatim(proc_macro2::TokenStream::new())).is_empty());
+        assert!(trait_item_attrs(&syn::TraitItem::Verbatim(proc_macro2::TokenStream::new())).is_empty());
     }
 
     /// A `where` clause is read the same way inline bounds are: a plain type bound reports its

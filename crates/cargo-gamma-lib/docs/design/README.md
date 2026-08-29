@@ -3,6 +3,8 @@
 > Status: **Implemented**.
 > Crate name: `cargo-gamma-lib`.
 
+This is the crate's top-level design document.
+
 ## Purpose
 
 This crate coordinates cargo-gamma campaigns: configuration, discovery,
@@ -14,6 +16,10 @@ verdicts, incremental reuse, reporting, and command dispatch.
 - Rust parsing and instrumentation are delegated to `cargo-gamma-engine`.
 - Process-tree mechanics are delegated to `cargo-gamma-process` and
   `cargo-gamma-unsafe`.
+- Cargo metadata and nextest inventory commands run through the same contained
+  process-output lifecycle as later builds and tests. Their stdout and stderr
+  are drained concurrently, and descendants are swept before inherited pipe
+  handles are allowed to keep capture open.
 - The injected guard protocol is provided by dependency-free
   `cargo-gamma-rt`.
 - The `internals` feature exists only for this crate's integration tests and

@@ -1,0 +1,114 @@
+{
+  "version": "2.1.0",
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "cargo-gamma",
+          "informationUri": "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma",
+          "version": "0.0.0-golden",
+          "rules": [
+            {
+              "id": "arith.add_to_sub",
+              "name": "arith.add_to_sub",
+              "shortDescription": {
+                "text": "Surviving mutant: arith.add_to_sub"
+              },
+              "fullDescription": {
+                "text": "The arith.add_to_sub mutation was applied and the test suite still passed, so nothing asserts on the behavior it changed."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              }
+            },
+            {
+              "id": "relational.gt_to_ge",
+              "name": "relational.gt_to_ge",
+              "shortDescription": {
+                "text": "Surviving mutant: relational.gt_to_ge"
+              },
+              "fullDescription": {
+                "text": "The relational.gt_to_ge mutation was applied and the test suite still passed, so nothing asserts on the behavior it changed."
+              },
+              "defaultConfiguration": {
+                "level": "warning"
+              }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "relational.gt_to_ge",
+          "level": "warning",
+          "message": {
+            "text": "replace a > b with a >= b and no test failed."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/a.rs"
+                },
+                "region": {
+                  "startLine": 7,
+                  "startColumn": 5
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "gammaMutantId/v5": "/w/src/a.rs:7:relational.gt_to_ge"
+          }
+        },
+        {
+          "ruleId": "arith.add_to_sub",
+          "level": "warning",
+          "message": {
+            "text": "No test reaches this code: replace a + b with a - b."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/b.rs"
+                },
+                "region": {
+                  "startLine": 12,
+                  "startColumn": 5
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "gammaMutantId/v5": "/w/src/b.rs:12:arith.add_to_sub"
+          }
+        },
+        {
+          "ruleId": "relational.gt_to_ge",
+          "level": "warning",
+          "message": {
+            "text": "replace a > b with a >= b and the test run timed out before an assertion rejected it."
+          },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "src/c.rs"
+                },
+                "region": {
+                  "startLine": 3,
+                  "startColumn": 5
+                }
+              }
+            }
+          ],
+          "partialFingerprints": {
+            "gammaMutantId/v5": "/w/src/c.rs:3:relational.gt_to_ge"
+          }
+        }
+      ]
+    }
+  ]
+}

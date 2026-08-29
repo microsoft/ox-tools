@@ -42,10 +42,15 @@ mod intent;
 mod scan;
 mod scopes;
 
+#[doc(inline)]
 pub use apply::suppress;
+#[doc(inline)]
 pub use directive::Directive;
+#[doc(inline)]
 pub use idle::{Idle, idle};
+#[doc(inline)]
 pub use intent::Intent;
+#[doc(inline)]
 pub use scan::directives;
 pub(crate) use scan::directives_for;
 

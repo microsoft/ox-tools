@@ -15,6 +15,9 @@ use crate::error::error;
 /// The dependency name the instrumented code refers to.
 pub(crate) const RUNTIME_CRATE: &str = "gamma_rt";
 
+/// The package that provides the guard runtime.
+pub(super) const RUNTIME_PACKAGE: &str = "cargo-gamma-rt";
+
 /// Dependency tables, all of which can carry a path.
 const DEPENDENCY_TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
 
@@ -131,11 +134,11 @@ impl Manifest {
         }
     }
 
-    /// Adds the guard runtime as a dependency, unless the package already has it.
+    /// Makes the package use the one guard runtime vendored for this run.
     ///
-    /// A package may already depend on the runtime — `cargo-gamma`'s own crates do. Two crates
-    /// with one library name makes every reference to it ambiguous, so the existing dependency is
-    /// left to do the job.
+    /// An existing dependency on the implementation crate is replaced rather than retained. Every
+    /// instrumented package must share one runtime instance: two package identities would carry
+    /// independent active-mutant and census state into the same test executable.
     ///
     /// The path written is absolute. Cargo resolves a dependency path against the manifest holding
     /// it, and this manifest is the copy rather than the original, so a relative path would be
@@ -145,51 +148,143 @@ impl Manifest {
     /// Adding a dependency means the lockfile in the copied tree has to be written, which is why a
     /// run cannot honour `--locked` or `--frozen` as written: those flags forbid exactly this edit.
     /// The build substitutes `--offline` for them and says so once.
-    pub(super) fn link_runtime(&mut self, runtime: &Utf8Path) {
-        if self.links_runtime() {
-            return;
+    pub(super) fn link_runtime(&mut self, runtime: &Utf8Path) -> Result<()> {
+        let runtime = absolute(runtime);
+
+        let conflicting_target = self
+            .document
+            .get("target")
+            .and_then(Item::as_table_like)
+            .into_iter()
+            .flat_map(toml_edit::TableLike::iter)
+            .filter_map(|(_platform, target)| target.as_table_like()?.get("dependencies")?.as_table_like())
+            .any(|dependencies| {
+                dependencies.contains_key(RUNTIME_CRATE) && !dependency_points_to(dependencies.get(RUNTIME_CRATE), &runtime)
+            });
+
+        if conflicting_target {
+            return Err(Self::runtime_name_reserved(&self.path));
         }
 
-        let runtime = absolute(runtime);
+        if let Some(targets) = self.document.get_mut("target").and_then(Item::as_table_like_mut) {
+            for (_platform, target) in targets.iter_mut() {
+                let Some(dependencies) = target
+                    .as_table_like_mut()
+                    .and_then(|table| table.get_mut("dependencies"))
+                    .and_then(Item::as_table_like_mut)
+                else {
+                    continue;
+                };
+
+                self.changed |= dependencies.remove(RUNTIME_CRATE).is_some();
+                self.changed |= dependencies.remove("cargo-gamma-rt").is_some();
+            }
+        }
 
         let dependencies = self.document.entry("dependencies").or_insert_with(|| Item::Table(Table::new()));
 
         let Some(table) = dependencies.as_table_like_mut() else {
-            return;
+            return Ok(());
         };
 
-        let mut entry = toml_edit::InlineTable::new();
-        let _replaced = entry.insert("path", Value::from(runtime.as_str()));
+        if table.contains_key(RUNTIME_CRATE) && !dependency_points_to(table.get(RUNTIME_CRATE), &runtime) {
+            return Err(Self::runtime_name_reserved(&self.path));
+        }
 
+        let _existing_runtime = table.remove("cargo-gamma-rt");
+        let mut entry = toml_edit::InlineTable::new();
+        let _package = entry.insert("package", Value::from(RUNTIME_PACKAGE));
+        let _replaced = entry.insert("path", Value::from(runtime.as_str()));
         let _added = table.insert(RUNTIME_CRATE, Item::Value(Value::InlineTable(entry)));
 
         self.changed = true;
+
+        Ok(())
     }
 
-    /// Returns whether the library target can already name the guard runtime.
-    ///
-    /// Only a normal dependency counts. A dev- or build-dependency is invisible to the lib target,
-    /// so treating one as sufficient would leave every guard in library code unable to name the
-    /// runtime and fail the build everywhere at once. Declaring the crate in both sections is
-    /// legal, so adding ours alongside an existing dev-dependency is safe.
-    fn links_runtime(&self) -> bool {
-        let named = |table: Option<&Item>| {
-            table
-                .and_then(Item::as_table_like)
-                .is_some_and(|table| table.contains_key(RUNTIME_CRATE) || table.contains_key("cargo-gamma-rt"))
-        };
+    /// Redirects a runtime dependency already present in this package to the campaign's copy.
+    pub(super) fn redirect_runtime(&mut self, runtime: &Utf8Path) -> Result<()> {
+        let runtime = absolute(runtime);
+        self.redirect_workspace_runtime(&runtime)?;
 
-        if named(self.document.get("dependencies")) {
-            return true;
+        let top_level = self
+            .document
+            .get("dependencies")
+            .and_then(Item::as_table_like)
+            .is_some_and(|dependencies| dependencies.contains_key(RUNTIME_CRATE) || dependencies.contains_key("cargo-gamma-rt"));
+        let targeted = self
+            .document
+            .get("target")
+            .and_then(Item::as_table_like)
+            .into_iter()
+            .flat_map(toml_edit::TableLike::iter)
+            .filter_map(|(_platform, target)| target.as_table_like()?.get("dependencies")?.as_table_like())
+            .any(|dependencies| dependencies.contains_key(RUNTIME_CRATE) || dependencies.contains_key("cargo-gamma-rt"));
+
+        if top_level || targeted {
+            self.link_runtime(&runtime)?;
         }
 
-        // `[target.'cfg(unix)'.dependencies]` is still a normal dependency table.
-        self.document.get("target").and_then(Item::as_table_like).is_some_and(|targets| {
-            targets
-                .iter()
-                .any(|(_platform, entry)| named(entry.as_table_like().and_then(|table| table.get("dependencies"))))
-        })
+        Ok(())
     }
+
+    /// Normalizes a workspace dependency before members inherit it by name.
+    fn redirect_workspace_runtime(&mut self, runtime: &Utf8Path) -> Result<()> {
+        let Some(dependencies) = self
+            .document
+            .get_mut("workspace")
+            .and_then(Item::as_table_like_mut)
+            .and_then(|workspace| workspace.get_mut("dependencies"))
+            .and_then(Item::as_table_like_mut)
+        else {
+            return Ok(());
+        };
+
+        let aliased = dependencies.get(RUNTIME_CRATE);
+        if aliased.is_some() && !dependency_points_to(aliased, runtime) {
+            return Err(Self::runtime_name_reserved(&self.path));
+        }
+
+        if aliased.is_some() || dependencies.contains_key(RUNTIME_PACKAGE) {
+            let _aliased = dependencies.remove(RUNTIME_CRATE);
+            let _canonical = dependencies.remove(RUNTIME_PACKAGE);
+            let mut aliased_entry = toml_edit::InlineTable::new();
+            let _package = aliased_entry.insert("package", Value::from(RUNTIME_PACKAGE));
+            let _path = aliased_entry.insert("path", Value::from(runtime.as_str()));
+            let _runtime = dependencies.insert(RUNTIME_CRATE, Item::Value(Value::InlineTable(aliased_entry)));
+
+            // Keep the canonical workspace key resolvable for dev- and build-dependencies, which
+            // are not rewritten to the guard's reserved crate name.
+            let mut canonical_entry = toml_edit::InlineTable::new();
+            let _path = canonical_entry.insert("path", Value::from(runtime.as_str()));
+            let _runtime = dependencies.insert(RUNTIME_PACKAGE, Item::Value(Value::InlineTable(canonical_entry)));
+            self.changed = true;
+        }
+
+        Ok(())
+    }
+
+    fn runtime_name_reserved(path: &Utf8Path) -> crate::error::Error {
+        error!(
+            "`gamma_rt` is already a dependency in `{path}` but cargo-gamma reserves that crate name for its guard runtime.\n\
+             Rename that dependency so cargo-gamma can instrument this package."
+        )
+        .usage()
+    }
+}
+
+/// Whether an existing dependency already names this run's vendored runtime.
+fn dependency_points_to(item: Option<&Item>, runtime: &Utf8Path) -> bool {
+    let Some(specification) = item.and_then(Item::as_table_like) else {
+        return false;
+    };
+
+    specification.get("workspace").and_then(Item::as_bool) == Some(true)
+        || specification.get("package").and_then(Item::as_str) == Some(RUNTIME_PACKAGE)
+        || specification
+            .get("path")
+            .and_then(Item::as_str)
+            .is_some_and(|path| absolute(Utf8Path::new(path)) == runtime)
 }
 
 /// Rewrites every escaping path in one dependency table.
@@ -576,7 +671,7 @@ mod tests {
 
         let mut manifest = Manifest::read(&path).unwrap();
 
-        manifest.link_runtime(Utf8Path::new("/scratch/rt"));
+        manifest.link_runtime(Utf8Path::new("/scratch/rt")).unwrap();
 
         manifest.document.to_string()
     }
@@ -602,7 +697,7 @@ mod tests {
 
         let mut manifest = Manifest::read(&path).unwrap();
 
-        manifest.link_runtime(Utf8Path::new("scratch/gamma/rt"));
+        manifest.link_runtime(Utf8Path::new("scratch/gamma/rt")).unwrap();
 
         let text = manifest.document.to_string();
         let expected = absolute(Utf8Path::new("scratch/gamma/rt"));
@@ -630,21 +725,132 @@ mod tests {
     }
 
     #[test]
-    fn an_existing_runtime_dependency_is_not_duplicated() {
-        // Two crates with one library name makes every guard call ambiguous.
+    fn an_existing_runtime_dependency_is_replaced_by_the_vendored_one() {
+        let runtime = absolute(Utf8Path::new("/scratch/rt"));
+
         for text in [
             "[dependencies]\ncargo-gamma-rt = { workspace = true }\n",
-            "[dependencies]\ngamma_rt = { path = \"../rt\" }\n",
-            "[dependencies.gamma_rt]\npath = \"../rt\"\n",
-            "[target.'cfg(unix)'.dependencies]\ngamma_rt = \"1\"\n",
+            "[dependencies]\ngamma_rt = { path = \"/scratch/rt\" }\n",
+            "[dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", version = \"0.1\" }\n",
+            "[dependencies]\ngamma_rt = { workspace = true }\n",
         ] {
             let linked = linked(text);
 
-            assert_eq!(
-                linked.matches("gamma_rt").count() + linked.matches("cargo-gamma-rt").count(),
-                1,
-                "{linked}"
-            );
+            assert_eq!(linked.matches("gamma_rt").count(), 1, "{linked}");
+            assert!(linked.contains("package = \"cargo-gamma-rt\""), "{linked}");
+            assert!(linked.contains(runtime.as_str()), "{linked}");
+        }
+    }
+
+    #[test]
+    fn an_existing_runtime_is_redirected_before_its_package_is_instrumented() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(temporary.path().join("Cargo.toml")).unwrap();
+        let runtime = absolute(Utf8Path::new("/scratch/rt"));
+
+        fs::write(
+            path.as_std_path(),
+            "[package]\nname = \"x\"\n\n[dependencies]\ncargo-gamma-rt = { workspace = true }\n",
+        )
+        .unwrap();
+
+        let mut manifest = Manifest::read(&path).unwrap();
+        manifest.redirect_runtime(&runtime).unwrap();
+        let text = manifest.document.to_string();
+
+        assert!(text.contains("package = \"cargo-gamma-rt\""), "{text}");
+        assert!(text.contains(runtime.as_str()), "{text}");
+    }
+
+    #[test]
+    fn a_workspace_runtime_alias_is_redirected_before_members_inherit_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(temporary.path().join("Cargo.toml")).unwrap();
+        let runtime = absolute(Utf8Path::new("/scratch/rt"));
+
+        fs::write(
+            path.as_std_path(),
+            "[workspace]\nmembers = []\n\n\
+             [workspace.dependencies]\ngamma_rt = { package = \"cargo-gamma-rt\", version = \"0.1\" }\n",
+        )
+        .unwrap();
+
+        let mut manifest = Manifest::read(&path).unwrap();
+        manifest.redirect_runtime(&runtime).unwrap();
+        let text = manifest.document.to_string();
+
+        assert_eq!(text.matches("\ngamma_rt =").count(), 1, "{text}");
+        assert!(text.contains("gamma_rt = { package = \"cargo-gamma-rt\""), "{text}");
+        assert!(text.contains("cargo-gamma-rt = { path"), "{text}");
+        assert!(text.contains(runtime.as_str()), "{text}");
+    }
+
+    #[test]
+    fn a_canonical_workspace_runtime_remains_available_to_inheriting_dependencies() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(temporary.path().join("Cargo.toml")).unwrap();
+        let runtime = absolute(Utf8Path::new("/scratch/rt"));
+
+        fs::write(
+            path.as_std_path(),
+            "[workspace]\nmembers = []\n\n\
+             [workspace.dependencies]\ncargo-gamma-rt = \"0.1\"\n",
+        )
+        .unwrap();
+
+        let mut manifest = Manifest::read(&path).unwrap();
+        manifest.redirect_runtime(&runtime).unwrap();
+        let text = manifest.document.to_string();
+
+        assert!(text.contains("gamma_rt = { package = \"cargo-gamma-rt\", path"), "{text}");
+        assert!(text.contains("cargo-gamma-rt = { path"), "{text}");
+        assert_eq!(text.matches(runtime.as_str()).count(), 2, "{text}");
+    }
+
+    #[test]
+    fn an_unrelated_workspace_dependency_cannot_occupy_the_runtime_name() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = Utf8PathBuf::from_path_buf(temporary.path().join("Cargo.toml")).unwrap();
+        let runtime = absolute(Utf8Path::new("/scratch/rt"));
+
+        fs::write(
+            path.as_std_path(),
+            "[workspace]\nmembers = []\n\n\
+             [workspace.dependencies]\ngamma_rt = { package = \"some-other-package\", version = \"1\" }\n",
+        )
+        .unwrap();
+
+        let mut manifest = Manifest::read(&path).unwrap();
+        let failure = manifest
+            .redirect_runtime(&runtime)
+            .expect_err("the generated guard's crate name must be reserved workspace-wide");
+
+        assert!(failure.is_usage(), "{failure}");
+        assert!(failure.to_string().contains("reserves that crate name"), "{failure}");
+    }
+
+    #[test]
+    fn an_unrelated_dependency_cannot_occupy_the_runtime_name() {
+        for dependency in [
+            "gamma_rt = \"1\"",
+            "gamma_rt = { package = \"some-other-package\", version = \"1\" }",
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            let path = Utf8PathBuf::from_path_buf(temporary.path().join("Cargo.toml")).unwrap();
+
+            fs::write(
+                path.as_std_path(),
+                format!("[package]\nname = \"x\"\n\n[dependencies]\n{dependency}\n"),
+            )
+            .unwrap();
+
+            let mut manifest = Manifest::read(&path).unwrap();
+            let failure = manifest
+                .link_runtime(Utf8Path::new("/scratch/rt"))
+                .expect_err("the generated guard's crate name must be reserved");
+
+            assert!(failure.is_usage(), "{failure}");
+            assert!(failure.to_string().contains("reserves that crate name"), "{failure}");
         }
     }
 

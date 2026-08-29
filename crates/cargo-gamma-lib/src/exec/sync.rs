@@ -9,7 +9,6 @@
 //! place with their original mtimes — preserving Cargo's fingerprint validity for inputs that did
 //! not change.
 
-use core::sync::atomic::Ordering;
 use std::collections::HashSet;
 use std::fs::{self, File, FileTimes};
 use std::io::{ErrorKind, Read};
@@ -20,7 +19,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use ignore::{WalkBuilder, WalkState};
 use walkdir::WalkDir;
 
-use super::copy::{CopyOptions, copy_tree_with, is_pruned, tracked_files};
+use super::copy::{CopyOptions, Reflinks, copy_tree_with, is_pruned, tracked_files};
 use crate::Result;
 use crate::error::{Error, error};
 
@@ -61,8 +60,13 @@ fn clear_sentinel(root: &Utf8Path) {
 ///
 /// Returns which path was taken so the caller can emit appropriate diagnostics.
 pub(super) fn sync_or_copy(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: CopyOptions) -> Result<SyncOutcome> {
+    // Taken once for the whole operation and shared by both the delta path and the fresh copy it
+    // may fall back to: they write to the same tree, so what one of them learns about cloning there
+    // is exactly what the other needs to know.
+    let reflinks = Reflinks::for_destination(root);
+
     if !root.as_std_path().is_dir() {
-        copy_tree_with(source, root, skip, options)?;
+        copy_tree_with(source, root, skip, options, &reflinks)?;
         mark_consistent(root);
         return Ok(SyncOutcome::FreshCopy);
     }
@@ -71,7 +75,7 @@ pub(super) fn sync_or_copy(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, 
         // Prior run was interrupted — cannot trust what is there. Remove and resync.
         fs::remove_dir_all(root.as_std_path())
             .map_err(|cause| error!("could not clear the inconsistent scratch tree at `{root}`").caused_by(cause))?;
-        copy_tree_with(source, root, skip, options)?;
+        copy_tree_with(source, root, skip, options, &reflinks)?;
         mark_consistent(root);
         return Ok(SyncOutcome::FreshCopy);
     }
@@ -79,7 +83,7 @@ pub(super) fn sync_or_copy(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, 
     // The tree looks consistent — attempt delta sync.
     clear_sentinel(root);
 
-    match delta_sync(source, root, skip, options) {
+    match delta_sync(source, root, skip, options, &reflinks) {
         Ok(()) => {
             mark_consistent(root);
             Ok(SyncOutcome::Synchronized)
@@ -87,7 +91,7 @@ pub(super) fn sync_or_copy(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, 
         Err(_cause) => {
             // Delta sync failed. Remove everything and do a clean sync to restore correctness.
             let _removed = fs::remove_dir_all(root.as_std_path());
-            copy_tree_with(source, root, skip, options)?;
+            copy_tree_with(source, root, skip, options, &reflinks)?;
             mark_consistent(root);
             Ok(SyncOutcome::FreshCopy)
         }
@@ -101,7 +105,7 @@ pub(super) fn sync_or_copy(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, 
 /// 1. Copies new entries and replaces changed entries.
 /// 2. Removes stale entries that no longer exist in the source.
 /// 3. Leaves unchanged entries untouched (preserving their mtimes for Cargo).
-fn delta_sync(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: CopyOptions) -> Result<()> {
+fn delta_sync(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: CopyOptions, reflinks: &Reflinks) -> Result<()> {
     // Collect the set of relative paths the source tree produces.
     let expected = collect_source_entries(source, skip, options)?;
 
@@ -109,7 +113,7 @@ fn delta_sync(source: &Utf8Path, root: &Utf8Path, skip: &Utf8Path, options: Copy
     for relative in &expected {
         let src = source.join(relative);
         let dst = root.join(relative);
-        sync_entry(&src, &dst)?;
+        sync_entry(&src, &dst, reflinks)?;
     }
 
     // Remove stale entries from the scratch tree.
@@ -214,10 +218,11 @@ fn is_pruned_anywhere(root: &Utf8Path, relative: &Utf8Path, excluded: &Utf8Path)
 
 /// Synchronizes one source entry to the scratch tree.
 ///
-/// For files: copies if new or changed (by len + mtime). Unchanged files are left in place.
+/// For files: copies if new or if length, permissions, or contents changed. Unchanged files are
+/// left in place so their modification times continue to preserve Cargo fingerprints.
 /// For directories: creates if missing.
 /// For symlinks: recreates if target differs.
-fn sync_entry(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
+fn sync_entry(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) -> Result<()> {
     let src_meta = fs::symlink_metadata(source.as_std_path()).map_err(|cause| error!("could not read `{source}`").caused_by(cause))?;
 
     if src_meta.is_dir() {
@@ -237,11 +242,11 @@ fn sync_entry(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
     }
 
     // Regular file.
-    sync_file(source, destination, &src_meta)
+    sync_file(source, destination, &src_meta, reflinks)
 }
 
 /// Synchronizes a regular file, preserving mtime for unchanged files.
-fn sync_file(source: &Utf8Path, destination: &Utf8Path, src_meta: &fs::Metadata) -> Result<()> {
+fn sync_file(source: &Utf8Path, destination: &Utf8Path, src_meta: &fs::Metadata, reflinks: &Reflinks) -> Result<()> {
     let needs_copy = match fs::symlink_metadata(destination.as_std_path()) {
         Err(_) => true, // Destination does not exist.
         Ok(dst_meta) => {
@@ -271,7 +276,7 @@ fn sync_file(source: &Utf8Path, destination: &Utf8Path, src_meta: &fs::Metadata)
 
         // Remove existing destination before copying (reflink requires no existing file).
         let _removed = fs::remove_file(destination.as_std_path());
-        copy_file_for_sync(source, destination)?;
+        copy_file_for_sync(source, destination, reflinks)?;
     }
     // Unchanged files are left in place — their mtime stays as it was, preserving Cargo
     // fingerprints.
@@ -380,10 +385,10 @@ fn sync_symlink(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_file_for_sync(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
+fn copy_file_for_sync(source: &Utf8Path, destination: &Utf8Path, reflinks: &Reflinks) -> Result<()> {
     let copied_at = SystemTime::now();
 
-    if reflink_supported() && super::copy::REFLINK_WORKS.load(Ordering::Relaxed) {
+    if reflinks.worth_trying() {
         match reflink_copy::reflink(source.as_std_path(), destination.as_std_path()) {
             Ok(()) => {
                 stamp_mtime(destination, copied_at)?;
@@ -393,7 +398,7 @@ fn copy_file_for_sync(source: &Utf8Path, destination: &Utf8Path) -> Result<()> {
                 return Err(error!("could not copy `{source}` to `{destination}`").caused_by(cause));
             }
             Err(_unsupported) => {
-                super::copy::REFLINK_WORKS.store(false, Ordering::Relaxed);
+                reflinks.unsupported();
                 let _removed = fs::remove_file(destination.as_std_path());
             }
         }
@@ -414,11 +419,6 @@ fn stamp_mtime(path: &Utf8Path, time: SystemTime) -> Result<()> {
         .map_err(|cause| error!("could not open copied file `{path}`").caused_by(cause))?;
     file.set_times(FileTimes::new().set_modified(time))
         .map_err(|cause| error!("could not freshen copied file `{path}`").caused_by(cause))
-}
-
-/// Whether cloning is worth trying on this platform at all.
-const fn reflink_supported() -> bool {
-    !cfg!(target_env = "musl")
 }
 
 /// Removes entries from the scratch tree that are not in the expected set.

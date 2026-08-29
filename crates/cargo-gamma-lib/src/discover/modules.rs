@@ -184,10 +184,13 @@ pub(super) fn excluded_files(roots: &[Utf8PathBuf], declared: &[(Utf8PathBuf, Ve
 #[cfg(not(miri))]
 mod tests {
     use super::*;
-    use crate::cfg::test_gated;
 
     fn parse(text: &str) -> syn::File {
         syn::parse_file(text).unwrap()
+    }
+
+    fn test_gated(attrs: &[Attribute]) -> bool {
+        test_gated_for(&CfgSet::default(), attrs)
     }
 
     #[test]

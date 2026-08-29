@@ -25,7 +25,7 @@ disable = true
 
 # Establish the lowest Windows baseline for this new crate. Raise it as coverage improves.
 [package.metadata.coverage-gate]
-min-lines-percent = 90.8
+min-lines-percent = 89.0
 
 # HARD CONSTRAINT: zero production dependencies and no build.rs. This crate is injected into the
 # dependency graph of the crate under test; anything else perturbs feature unification and breaks

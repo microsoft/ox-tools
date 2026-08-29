@@ -9,3 +9,6 @@ exclude-files = [
     # Process fault injection exists only to force test-only operating-system failure paths.
     "crates/cargo-gamma-process/src/faults.rs",
 ]
+
+# Human-readable debug and redacted output is diagnostic text, not a supported behavioral contract.
+exclude-trait-impls = ["Debug"]

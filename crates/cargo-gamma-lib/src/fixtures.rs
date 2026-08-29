@@ -17,7 +17,7 @@
 //! Gated on `cfg(test)` rather than living in [`crate::testing`]: that module is `pub`, so anything
 //! added to it joins the crate's API, and these are only ever wanted from a `mod tests` block.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use camino::Utf8PathBuf;
 
@@ -49,6 +49,7 @@ pub(crate) fn mutant() -> Mutant {
         column: 1,
         mutator: "relational.lt_to_le".to_owned().into(),
         item_path: "f".to_owned().into(),
+        trait_impl: None,
         occurrence: 0,
         replacement_index: 0,
         original: "a".to_owned().into(),
@@ -115,13 +116,13 @@ pub(crate) fn report() -> Report {
             name: "cargo-gamma".to_owned(),
             version: "0.1.0".to_owned(),
         },
-        files: HashMap::default(),
+        files: BTreeMap::new(),
         config: None,
     }
 }
 
 pub(crate) fn report_with(shard: Option<(u32, u32)>, started_at: u64, mutants: Vec<MutantResult>) -> Report {
-    let mut files = HashMap::default();
+    let mut files = BTreeMap::new();
 
     let _ = files.insert(
         "src/lib.rs".to_owned(),

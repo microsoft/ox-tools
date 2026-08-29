@@ -13,7 +13,7 @@ use super::host::Host;
 use crate::error::error;
 use crate::exec::CargoOptions;
 use crate::ops::registry;
-use crate::report::Styler;
+use crate::report::{Styler, encode_controls};
 
 /// Implements `list`.
 #[cfg(test)]
@@ -32,6 +32,22 @@ pub(super) fn list_with_cargo<H: Host>(host: &mut H, args: &ListArgs, styler: St
         ListKind::Mutants => list_mutants(host, args, styler, cargo),
         ListKind::Presets => list_presets(host, args),
     }
+}
+
+/// Writes a listing as pretty JSON, straight to the stream.
+///
+/// Serializing into a `String` first would hold a second copy of a listing that reaches tens of
+/// megabytes on a large workspace, for no benefit: the document is written out whole either way.
+///
+/// # Errors
+///
+/// Returns an error if `entries` cannot be serialized, or if the stream cannot be written to.
+fn write_json_lines<W: Write, T: serde::Serialize + ?Sized>(stream: &mut W, entries: &T, what: &str) -> crate::Result<()> {
+    serde_json::to_writer_pretty(&mut *stream, entries).map_err(|cause| error!("could not write {what} as JSON").caused_by(cause))?;
+
+    writeln!(stream).map_err(|cause| error!("could not write {what} as JSON").caused_by(cause))?;
+
+    Ok(())
 }
 
 /// Lists the named mutator presets.
@@ -56,11 +72,7 @@ fn list_presets<H: Host>(host: &mut H, args: &ListArgs) -> crate::Result<i32> {
             })
             .collect();
 
-        writeln!(
-            stream,
-            "{}",
-            serde_json::to_string_pretty(&entries).map_err(|cause| { error!("could not serialize the presets").caused_by(cause) })?
-        )?;
+        write_json_lines(&mut stream, &entries, "the presets")?;
 
         return Ok(EXIT_OK);
     }
@@ -100,12 +112,7 @@ fn list_mutators<H: Host>(host: &mut H, args: &ListArgs) -> crate::Result<i32> {
             })
             .collect();
 
-        writeln!(
-            stream,
-            "{}",
-            serde_json::to_string_pretty(&entries)
-                .map_err(|cause| { error!("could not serialize the mutator registry").caused_by(cause) })?
-        )?;
+        write_json_lines(&mut stream, &entries, "the mutator registry")?;
 
         return Ok(EXIT_OK);
     }
@@ -136,17 +143,13 @@ fn list_files<H: Host>(host: &mut H, args: &ListArgs, styler: Styler, cargo: &Ca
     if args.json {
         let paths: Vec<&Utf8PathBuf> = plan.files.iter().map(|file| &file.path).collect();
 
-        writeln!(
-            stream,
-            "{}",
-            serde_json::to_string_pretty(&paths).map_err(|cause| error!("could not serialize the file list").caused_by(cause))?
-        )?;
+        write_json_lines(&mut stream, &paths, "the file list")?;
 
         return Ok(EXIT_OK);
     }
 
     for file in &plan.files {
-        writeln!(stream, "{}", file.path)?;
+        writeln!(stream, "{}", encode_controls(file.path.as_str()))?;
     }
 
     Ok(EXIT_OK)
@@ -167,17 +170,13 @@ fn list_mutants<H: Host>(host: &mut H, args: &ListArgs, styler: Styler, cargo: &
     let mut stream = host.results();
 
     if args.json {
-        writeln!(
-            stream,
-            "{}",
-            serde_json::to_string_pretty(&plan.mutants).map_err(|cause| error!("could not serialize the mutant list").caused_by(cause))?
-        )?;
+        write_json_lines(&mut stream, &plan.mutants, "the mutant list")?;
 
         return Ok(EXIT_OK);
     }
 
     for mutant in &plan.mutants {
-        writeln!(stream, "{}", describe_for_listing(mutant))?;
+        writeln!(stream, "{}", encode_controls(&describe_for_listing(mutant)))?;
     }
 
     let suppressed = plan
@@ -237,7 +236,7 @@ fn write_population<H: Host>(
     let report = crate::elements::build(plan, crate::elements::Thresholds::default(), Some(info))?;
 
     crate::elements::write_json(&report, path)?;
-    writeln!(host.error(), "Wrote {path}")?;
+    writeln!(host.error(), "Wrote {}", encode_controls(path.as_str()))?;
 
     Ok(())
 }
@@ -248,7 +247,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::testing::{BrokenHost, Sink};
+    use crate::testing::{Broken, BrokenHost, Sink};
 
     fn crate_dir(name: &str) -> tempfile::TempDir {
         crate::fixtures::crate_dir(name, "pub fn less(a: i32, b: i32) -> bool { a < b }\n").0
@@ -264,6 +263,13 @@ mod tests {
             json,
             json_report: None,
         }
+    }
+
+    #[test]
+    fn a_stream_failure_is_reported_as_a_write_failure() {
+        let failure = write_json_lines(&mut Broken, &[1], "the fixture").expect_err("the closed stream must fail");
+
+        assert!(failure.to_string().contains("could not write the fixture as JSON"), "{failure}");
     }
 
     #[test]

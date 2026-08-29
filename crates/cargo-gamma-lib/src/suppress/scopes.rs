@@ -43,10 +43,10 @@ impl Scopes {
     pub(super) fn of(file: &SourceFile) -> Self {
         let mut collector = ScopeCollector {
             scopes: Self::default(),
-            text_len: file.text.len(),
+            text_len: file.text().len(),
         };
 
-        collector.visit_file(&file.ast);
+        collector.visit_file(file.ast());
 
         let mut scopes = collector.scopes;
 

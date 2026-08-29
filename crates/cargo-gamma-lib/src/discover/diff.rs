@@ -30,7 +30,7 @@ impl Diff {
     ///
     /// Returns an error if the diff cannot be read.
     pub fn read(path: &Utf8Path) -> Result<Self> {
-        Self::read_from(path, &mut stdin())
+        Self::read_from(path, stdin())
     }
 
     /// Reads a unified diff, taking `-` from `input` rather than from the real standard input.
@@ -41,8 +41,9 @@ impl Diff {
     ///
     /// # Errors
     ///
-    /// Returns an error if the diff cannot be read.
-    pub fn read_from(path: &Utf8Path, input: &mut impl Read) -> Result<Self> {
+    /// Returns an error if the diff cannot be read: `-` names a stream that fails part way
+    /// through or is not UTF-8, and any other path names a file that cannot be opened or read.
+    pub fn read_from(path: &Utf8Path, mut input: impl Read) -> Result<Self> {
         let text = if path == "-" {
             let mut buffer = String::new();
 
@@ -779,12 +780,25 @@ index 1234567..89abcde 100644
 
     // `--in-diff -` is the form `git diff | cargo gamma run --in-diff -` uses, and it has to read
     // the whole stream rather than the first line of it.
+    //
+    // The reader is passed by value here and by `&mut` in the test below, which is the whole point
+    // of the generic being taken by value: an owned reader needs no adapter, and a caller that
+    // still wants its reader back afterwards passes a mutable borrow of it.
     #[test]
     fn a_diff_is_read_from_standard_input() {
+        let diff = Diff::read_from(Utf8Path::new("-"), SAMPLE.as_bytes()).expect("could not read the diff");
+
+        assert!(diff.touches_file(Utf8Path::new("src/lib.rs")));
+    }
+
+    // A reader the caller still owns afterwards reaches the same parser through a mutable borrow.
+    #[test]
+    fn a_borrowed_reader_is_accepted_and_left_with_its_owner() {
         let mut input = SAMPLE.as_bytes();
         let diff = Diff::read_from(Utf8Path::new("-"), &mut input).expect("could not read the diff");
 
         assert!(diff.touches_file(Utf8Path::new("src/lib.rs")));
+        assert!(input.is_empty(), "the borrowed reader was consumed in place rather than copied");
     }
 
     // A stream that fails half way through must be reported rather than silently truncated into a

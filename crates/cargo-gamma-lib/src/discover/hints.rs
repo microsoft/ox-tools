@@ -213,7 +213,7 @@ impl Hints {
         // The one place the admission rule is applied, so that widening it means editing a function
         // whose name says what it decides.
         let unviable: HashSet<&str> = record
-            .entries()
+            .iter()
             .filter(|(_id, outcome)| tier_of(*outcome) == Some(Tier::Ordering))
             .map(|(id, _outcome)| id)
             .collect();

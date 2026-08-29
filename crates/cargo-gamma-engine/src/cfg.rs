@@ -148,16 +148,7 @@ impl CfgSet {
     /// might have appeared would be the same unsupported guess this module avoids elsewhere.
     #[must_use]
     pub fn holds_for(&self, attrs: &[Attribute]) -> bool {
-        // #[gamma::skip(cond.always_false, reason = "`decide` also returns `Unknown` whenever enforcement is off, so this is only an early return and removing it cannot change an answer")]
-        if !self.enforced {
-            return true;
-        }
-
-        self.effective(attrs).iter().all(|attribute| {
-            // An attribute this module cannot parse says nothing about whether the code is built,
-            // so the code stays mutable.
-            cfg_predicate(attribute).is_none_or(|predicate| !is_test_only(&predicate) && self.holds(&predicate))
-        })
+        self.holds_effective(&self.effective(attrs))
     }
 
     /// Returns whether effective attributes confine an item to test code.
@@ -167,7 +158,39 @@ impl CfgSet {
     /// treats as a test, while a false condition can hide ordinary production code on a guess.
     #[must_use]
     pub fn test_gated(&self, attrs: &[Attribute]) -> bool {
-        self.effective(attrs)
+        self.test_gated_effective(attrs, &self.effective(attrs))
+    }
+
+    /// Returns whether `attrs` take an item out of the population: it is gated to test code, or it
+    /// is behind a configuration predicate that does not hold for this build.
+    ///
+    /// Every call site that asks this asks both [`Self::test_gated`] and [`Self::holds_for`]
+    /// together, and each independently expands `cfg_attr` metadata — cloning every attribute and
+    /// shifting a vector — to answer its one question. This shares that expansion between both.
+    #[must_use]
+    pub fn skip_gate(&self, attrs: &[Attribute]) -> bool {
+        let effective = self.effective(attrs);
+
+        self.test_gated_effective(attrs, &effective) || !self.holds_effective(&effective)
+    }
+
+    /// The [`Self::holds_for`] answer, given an already-expanded attribute list.
+    fn holds_effective(&self, effective: &[Meta]) -> bool {
+        // #[gamma::skip(cond.always_false, reason = "`decide` also returns `Unknown` whenever enforcement is off, so this is only an early return and removing it cannot change an answer")]
+        if !self.enforced {
+            return true;
+        }
+
+        effective.iter().all(|attribute| {
+            // An attribute this module cannot parse says nothing about whether the code is built,
+            // so the code stays mutable.
+            cfg_predicate(attribute).is_none_or(|predicate| !is_test_only(&predicate) && self.holds(&predicate))
+        })
+    }
+
+    /// The [`Self::test_gated`] answer, given an already-expanded attribute list.
+    fn test_gated_effective(&self, attrs: &[Attribute], effective: &[Meta]) -> bool {
+        effective
             .iter()
             .any(|attribute| cfg_predicate(attribute).is_some_and(|predicate| is_test_only(&predicate)) || is_test_attribute(attribute))
             || attrs.iter().any(|attribute| {
@@ -412,18 +435,6 @@ fn is_test_attribute(attribute: &Meta) -> bool {
     attribute.path().segments.last().is_some_and(|segment| segment.ident == "test")
 }
 
-/// Returns whether direct configuration gates confine an item to a unit-test build.
-///
-/// This compatibility helper intentionally has no selected configuration, so it cannot apply
-/// `cfg_attr`. Discovery calls [`test_gated_for`] with its target-specific [`CfgSet`]; the
-/// collector calls [`CfgSet::test_gated`] for item attributes.
-#[must_use]
-pub fn test_gated(attrs: &[Attribute]) -> bool {
-    attrs
-        .iter()
-        .any(|attribute| cfg_predicate(&attribute.meta).is_some_and(|predicate| is_test_only(&predicate)))
-}
-
 /// Returns whether effective configuration gates confine an item to a unit-test build under `cfg`.
 ///
 /// Module discovery needs this narrower answer: `#[test]` belongs to a function, while only
@@ -520,6 +531,10 @@ mod tests {
         let item: syn::ItemFn = syn::parse_str(&format!("{text} fn f() {{}}")).expect("the fixture parses");
 
         item.attrs
+    }
+
+    fn test_gated(attrs: &[Attribute]) -> bool {
+        test_gated_for(&CfgSet::default(), attrs)
     }
 
     #[test]
@@ -805,6 +820,38 @@ mod tests {
         assert!(cfg.test_gated(&gated));
         assert!(cfg.test_gated(&test_attribute), "an effective #[test] is test code too");
         assert!(!cfg.test_gated(&inactive), "an inactive cfg_attr adds no test gate");
+    }
+
+    /// `skip_gate` shares one `cfg_attr` expansion between the two questions callers otherwise ask
+    /// separately, so it has to agree with them exactly, on every attribute shape that exercises
+    /// either question: an inactive predicate, an active `cfg(test)`, an active `cfg_attr` adding
+    /// `#[test]`, and a plain unconditional attribute list.
+    #[test]
+    fn skip_gate_agrees_with_test_gated_or_not_holds_for_on_every_shape() {
+        let unresolved = set();
+        let resolved = test_build();
+
+        let fixtures: &[&[Attribute]] = &[
+            &attribute("#[cfg(unix)]"),
+            &attribute("#[cfg(windows)]"),
+            &attribute("#[cfg(test)]"),
+            &attribute("#[cfg(all(test, unix))]"),
+            &attribute("#[cfg_attr(unix, cfg(test))]"),
+            &attribute("#[cfg_attr(unix, test)]"),
+            &attribute("#[cfg_attr(windows, cfg(test))]"),
+            &attribute("#[test]"),
+            &[],
+        ];
+
+        for cfg in [&unresolved, &resolved] {
+            for attrs in fixtures {
+                assert_eq!(
+                    cfg.skip_gate(attrs),
+                    cfg.test_gated(attrs) || !cfg.holds_for(attrs),
+                    "diverged on {attrs:?}"
+                );
+            }
+        }
     }
 
     /// Module discovery and item collection use the same recursive test-gate rule. Each once read
