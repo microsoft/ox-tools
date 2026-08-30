@@ -89,7 +89,12 @@ fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
             }
         }
     }
-    if names == 0 {
+    // `Path::components` folds a trailing `.` away, so `a/.` arrives as a lone
+    // `Normal("a")` and satisfies the count above while naming a directory.
+    // Paths are stored `/`-separated, so the raw final segment is what decides
+    // whether a file is named at all.
+    let last = path.rsplit('/').next().unwrap_or_default();
+    if names == 0 || last.is_empty() || last == "." {
         bail!("{context} '{path}' must name a file inside the repository");
     }
     Ok(())
@@ -562,7 +567,7 @@ mod tests {
 
     #[test]
     fn rejects_a_path_that_names_no_file() {
-        for empty in ["", ".", "./"] {
+        for empty in ["", ".", "./", "a/.", "a/"] {
             let toml = format!("version = 1\ntool = \"anvil\"\n\n[[file]]\npath = \"{empty}\"\nchecksum = \"sha256:x\"\n");
             let err = Manifest::parse(&toml).unwrap_err();
             assert!(
