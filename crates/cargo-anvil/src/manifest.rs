@@ -76,9 +76,19 @@ pub struct RegionKey {
 /// # Errors
 ///
 /// Returns an error naming `context` and the offending path when it is
-/// absolute, carries a drive or network-share prefix, contains a `..`
-/// component, or names no file at all.
+/// absolute, carries a drive or network-share prefix or a backslash, contains
+/// a `..` component, or names no file at all.
 fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
+    // The format is `/`-separated, and the platforms disagree about `\`:
+    // Windows treats it as a separator, Unix as an ordinary filename character.
+    // A path carrying one therefore denotes different things on different
+    // machines and slips past whichever check is written in terms of the other
+    // -- `a\` counts a component on Windows yet ends no `/` segment, and
+    // `..\x` climbs on Windows while reading as one filename on Unix. Rejected
+    // rather than interpreted.
+    if path.contains('\\') {
+        bail!("{context} '{path}' must be a relative path inside the repository");
+    }
     let mut names = 0_usize;
     for component in Path::new(path).components() {
         match component {
@@ -548,8 +558,19 @@ mod tests {
     }
     #[test]
     fn rejects_a_file_path_that_escapes_the_repository() {
-        for escape in ["../outside.txt", "/etc/passwd", "a/../../b.txt"] {
-            let toml = format!("version = 1\ntool = \"anvil\"\n\n[[file]]\npath = \"{escape}\"\nchecksum = \"sha256:x\"\n");
+        for escape in [
+            "../outside.txt",
+            "/etc/passwd",
+            "a/../../b.txt",
+            "a\\",
+            "..\\outside.txt",
+            "C:\\x.txt",
+        ] {
+            // A TOML basic string treats `\` as an escape, so a path carrying
+            // one has to arrive doubled or the document itself is malformed and
+            // the parse fails before the path is ever validated.
+            let literal = escape.replace('\\', "\\\\");
+            let toml = format!("version = 1\ntool = \"anvil\"\n\n[[file]]\npath = \"{literal}\"\nchecksum = \"sha256:x\"\n");
             let err = Manifest::parse(&toml).unwrap_err();
             assert!(
                 format!("{err}").contains("must be a relative path inside the repository"),
