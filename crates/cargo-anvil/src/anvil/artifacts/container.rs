@@ -60,17 +60,16 @@ const RECIPE: &str = include_str!("../../../templates/justfiles/anvil/container.
 const DOCKERIGNORE: &str = include_str!("../../../templates/anvil/container/Dockerfile.dockerignore");
 
 /// Seeded into the Dockerfile when the file does not exist, and never
-/// reconciled afterwards — it is the one line anvil cannot own.
+/// reconciled afterwards — it is the part of the file anvil cannot own.
 ///
 /// `# syntax=docker/dockerfile:1` pins the `BuildKit` frontend, and `BuildKit`
 /// honors the directive only as the very first line, before any comment. A
 /// region's opening sentinel *is* a comment, so the directive cannot live inside
 /// one without being silently demoted, dropping the build to the default
-/// frontend with nothing failing to say so. Everything else in the file is a
-/// region, so anvil can keep it current.
+/// frontend with nothing failing to say so. The copyright notice follows it as
+/// ordinary repository content, editable like anything else in a gap.
 pub(crate) const DOCKERFILE_HEADER: &str = include_str!("../../../templates/anvil/container/Dockerfile.header");
 
-const DOCKERFILE_HEADER_REGION: &str = include_str!("../../../templates/anvil/container/Dockerfile.header.region");
 const DOCKERFILE_BASE_IMAGE: &str = include_str!("../../../templates/anvil/container/Dockerfile.baseimage.region");
 const DOCKERFILE_BASE: &str = include_str!("../../../templates/anvil/container/Dockerfile.base.region");
 const DOCKERFILE_TOOLS: &str = include_str!("../../../templates/anvil/container/Dockerfile.tools.region");
@@ -94,7 +93,6 @@ const DOCKERIGNORE_PATH: &str = ".anvil/container/Dockerfile.dockerignore";
 /// against this list and refuses rather than emitting a Dockerfile that is
 /// silently wrong.
 pub(crate) const DOCKERFILE_REGION_ORDER: &[&str] = &[
-    "anvil-container-header",
     "anvil-container-base-image",
     "anvil-container-base",
     "anvil-container-tools",
@@ -111,7 +109,6 @@ pub fn all() -> Vec<Artifact> {
     vec![
         recipe(),
         dockerignore(),
-        dockerfile_header(),
         dockerfile_base_image(),
         dockerfile_base(),
         dockerfile_tools(),
@@ -133,17 +130,6 @@ fn dockerfile_region(id: &'static str, body: &'static str) -> Artifact {
         body: body.to_owned(),
         syntax: CommentSyntax::Hash,
     })
-}
-
-/// The file's explanatory header: what the regions are, which gap takes what,
-/// and why the parser directive sits outside them.
-///
-/// A region rather than part of the scaffold, so a correction to the guidance
-/// reaches repositories that already generated the file. Scaffold content is
-/// written once and never reconciled, which makes a mistake in it permanent.
-#[must_use]
-pub fn dockerfile_header() -> Artifact {
-    dockerfile_region("anvil-container-header", DOCKERFILE_HEADER_REGION)
 }
 
 /// The default base image, digest-pinned, alone in its own region.
@@ -274,8 +260,7 @@ mod tests {
     }
 
     /// Every region body, in the order the engine enforces.
-    const REGION_BODIES: [&str; 6] = [
-        DOCKERFILE_HEADER_REGION,
+    const REGION_BODIES: [&str; 5] = [
         DOCKERFILE_BASE_IMAGE,
         DOCKERFILE_BASE,
         DOCKERFILE_TOOLS,
@@ -294,7 +279,7 @@ mod tests {
     }
 
     #[test]
-    fn group_is_two_owned_files_and_six_dockerfile_regions() {
+    fn group_is_two_owned_files_and_five_dockerfile_regions() {
         let all = all();
         let owned: Vec<_> = all
             .iter()
@@ -402,15 +387,20 @@ mod tests {
     }
 
     #[test]
-    fn only_the_parser_directive_is_left_outside_the_regions() {
-        // Anything anvil owns that sits outside a region can never be corrected
-        // on a repository that has already generated the file, because the
-        // scaffold is written once and never reconciled. Exactly one line has
-        // to pay that price.
+    fn the_scaffold_carries_no_instruction_that_could_go_stale() {
+        // Anything anvil owns outside a region can never be corrected on a
+        // repository that has already generated the file, because the scaffold
+        // is written once and never reconciled. The parser directive has to pay
+        // that price; nothing that pins or installs anything may join it.
+        let mut lines = DOCKERFILE_HEADER.lines();
         assert_eq!(
-            DOCKERFILE_HEADER.lines().collect::<Vec<_>>(),
-            ["# syntax=docker/dockerfile:1"],
-            "the scaffold must carry the parser directive and nothing else"
+            lines.next(),
+            Some("# syntax=docker/dockerfile:1"),
+            "the parser directive must lead the scaffold"
+        );
+        assert!(
+            lines.all(|line| line.is_empty() || line.starts_with('#')),
+            "the scaffold must carry no build instruction: {DOCKERFILE_HEADER}"
         );
     }
 
@@ -676,13 +666,19 @@ mod tests {
         let walk = RECIPE
             .find("$containerRoot = Join-Path $repoRoot '.anvil/container'")
             .expect("the tag must walk the container directory");
-        let recurse = RECIPE[walk..]
-            .find("Get-ChildItem -LiteralPath $containerRoot -Recurse -File -Force")
-            .expect("the walk must be recursive and include hidden entries");
+        assert!(
+            RECIPE[walk..].contains("Get-ChildItem -LiteralPath $containerRoot -Recurse -File -Force"),
+            "the walk must be recursive and include hidden entries"
+        );
         // A missing Dockerfile must still be fatal: the walk alone would let
         // it contribute nothing and yield a confident tag for an unbuildable
-        // image.
-        assert!(RECIPE[walk + recurse..].contains("container image input is missing: $dockerfile"));
+        // image. The resolver asserts existence, and the tag resolves the path
+        // through it before walking.
+        let resolve = RECIPE[..walk]
+            .rfind("_anvil-container-dockerfile\n")
+            .expect("the tag must resolve the Dockerfile before hashing the directory");
+        assert!(resolve < walk);
+        assert!(RECIPE.contains("anvil: container image input is missing: .anvil/container/Dockerfile"));
     }
 
     #[test]
@@ -805,12 +801,29 @@ mod tests {
         // anvil-pr-title is the sharp case: with PR_TITLE unset it exits 0 with
         // a skip notice, so a title a native run rejects would pass in a
         // container and the tier would still report green.
-        for name in ["PR_TITLE", "BASE_REF", "GITHUB_BASE_REF", "SYSTEM_PULLREQUEST_TARGETBRANCH"] {
+        for name in [
+            "PR_TITLE",
+            "BASE_REF",
+            "GITHUB_BASE_REF",
+            "SYSTEM_PULLREQUEST_TARGETBRANCH",
+            "ANVIL_IMPACT",
+        ] {
             assert!(RECIPE.contains(name), "{name} must be forwarded");
         }
-        for name in ["ANVIL_INCLUDE_MODIFIED", "ANVIL_INCLUDE_AFFECTED", "ANVIL_INCLUDE_REQUIRED"] {
-            assert!(RECIPE.contains(name), "{name} must be forwarded");
-        }
+        // ANVIL_IMPACT decides whether scoping is computed, consumed from a
+        // downloaded cache, or skipped. A CI group job exports `consume`, and a
+        // container that did not inherit it would recompute from a diff instead
+        // of trusting the artifact the group downloaded.
+        assert!(
+            RECIPE.contains("'ANVIL_IMPACT')) {"),
+            "ANVIL_IMPACT must be in the forwarded set, not merely mentioned"
+        );
+        // Nothing reads these; forwarding them only implied a contract that
+        // does not exist. See justfile.rs, which asserts they stay removed.
+        assert!(
+            !RECIPE.contains("ANVIL_INCLUDE_"),
+            "the ANVIL_INCLUDE_* variables were removed and must not be forwarded"
+        );
     }
 
     #[test]
@@ -825,15 +838,13 @@ mod tests {
         let plan = RECIPE[..guard]
             .rfind("$plan -match 'GITHUB_TOKEN'")
             .expect("the plan must decide whether a token is needed");
-        let dry_run = RECIPE[..plan]
-            .rfind("--dry-run @($argv | Select-Object -Skip 1)")
-            .expect("the plan must come from just");
+        let dry_run = RECIPE[..plan].rfind("--dry-run @target").expect("the plan must come from just");
         assert!(dry_run < plan && plan < guard, "compute the plan, match it, then derive");
         // Through the launching binary, like every other nested call: a bare
         // `just` here fails silently when the caller invoked it by absolute
         // path, and an empty plan reads as "no token needed".
         assert!(!RECIPE.contains("(just --dry-run"));
-        assert!(RECIPE.contains(r"}}' --dry-run @($argv | Select-Object -Skip 1)"));
+        assert!(RECIPE.contains(r"}}' --dry-run @target"));
         // The predicate is the variable, not the name of a check, so a catalog
         // that adds another GitHub-authenticated check is covered for free.
         assert!(!RECIPE.contains("$plan -match 'aprz'"));
@@ -841,6 +852,24 @@ mod tests {
         assert!(RECIPE.contains("$needsToken = $argv.Count -eq 0"));
         // Only `just` can be planned, so nothing else earns a minted credential.
         assert!(RECIPE.contains("if (-not $needsToken -and $argv[0] -eq 'just')"));
+    }
+
+    #[test]
+    fn planning_follows_a_recipe_launched_as_a_child_process() {
+        // `just --dry-run` prints the bodies just runs itself. The unscoped tier
+        // wrapper runs its tier as a child process instead, so a plan of
+        // `anvil-scheduled` is the wrapper alone and reveals none of the checks
+        // under it -- including anvil-aprz, whose GITHUB_TOKEN is what stops it
+        // sleeping on the advisory API's unauthenticated rate limit.
+        assert!(
+            RECIPE.contains(r#"[regex]::Matches($step, "'(_anvil-[^'\s]+)'")"#),
+            "the plan must follow each nested target the wrapper names"
+        );
+        // Bounded: a recipe reachable twice is planned once, and a body naming
+        // itself terminates instead of looping.
+        assert!(RECIPE.contains("if (-not $planned.Add(($target -join ' '))) { continue }"));
+        // Every step contributes, so a match anywhere in the tree counts.
+        assert!(RECIPE.contains("$plan = \"$plan`n$step\""));
     }
 
     #[test]
@@ -894,9 +923,9 @@ mod tests {
     }
 
     #[test]
-    fn a_linked_worktree_can_reach_its_git_directory() {
-        // A worktree's .git is a file naming a host path outside the mount, so
-        // without this the container resolves no refs at all and every check
+    fn a_redirected_checkout_can_reach_its_git_directory() {
+        // A checkout whose .git is a file names a host path outside the mount,
+        // so without this the container resolves no refs at all and every check
         // that needs history fails.
         assert!(RECIPE.contains("git rev-parse --git-common-dir"));
         assert!(RECIPE.contains("${engineGitCommon}:/anvil/gitdir"));
@@ -905,16 +934,50 @@ mod tests {
         // container would inherit them and any git run outside the workspace
         // -- `git init` in a test's scratch directory, most of all -- would
         // operate on this repository instead of its own.
-        assert!(RECIPE.contains("gitdir: /anvil/gitdir/$rel"));
+        assert!(RECIPE.contains("gitdir: $containerGitDir"));
         assert!(RECIPE.contains("{{anvil_container_workdir}}/.git:ro"));
         assert!(!RECIPE.contains("GIT_DIR="));
         assert!(!RECIPE.contains("GIT_WORK_TREE="));
         // The generated file is temporary and must not outlive the run.
         assert!(RECIPE.contains("if ($gitFile) { Remove-Item -LiteralPath $gitFile"));
-        // An ordinary clone must not take the extra mount.
-        assert!(RECIPE.contains("if ($gitDirAbs -ne $gitCommonAbs) {"));
+        // An ordinary clone keeps its git directory inside the checkout, where
+        // the bind mount already carries it, and must not take the extra mount.
+        assert!(RECIPE.contains("(Test-Path -LiteralPath (Join-Path $repoRoot '.git') -PathType Leaf)"));
+        // The shape of .git, not whether the git directory differs from the
+        // common one: `--separate-git-dir` redirects without differing, so that
+        // predicate skipped it and left git pointed at a host path.
+        assert!(
+            !RECIPE.contains("if ($gitDirAbs -ne $gitCommonAbs) {"),
+            "a redirect without a separate worktree entry must still be mounted"
+        );
+        // One mount carries both directories, so the git directory has to sit
+        // under the common one. Emitting a path that climbs out of the mount
+        // would fail inside the container, where the cause is invisible.
+        assert!(RECIPE.contains("if ($rel -eq '.') {"));
+        assert!(RECIPE.contains("$rel.StartsWith('../') -or [System.IO.Path]::IsPathRooted($rel)"));
         // A host with a working engine but no git must not start failing here.
         assert!(RECIPE.contains("if (Get-Command git -ErrorAction SilentlyContinue) {"));
+    }
+
+    #[test]
+    fn the_dockerfile_is_found_under_the_casing_on_disk() {
+        // Anvil resolves every path it manages against what the repository
+        // already has, so a checkout carrying `dockerfile` keeps that name and
+        // the regions are maintained there. A recipe hard-coding the canonical
+        // literal then names nothing on a case-sensitive filesystem.
+        assert!(
+            !RECIPE.contains("$dockerfile = '.anvil/container/Dockerfile'"),
+            "the path must be resolved, not assumed"
+        );
+        assert!(RECIPE.contains("_anvil-container-dockerfile:"));
+        // -ceq, because PowerShell's -eq on strings is case-insensitive and
+        // would make the exact-match pass indistinguishable from the fallback.
+        assert!(RECIPE.contains("$_.Name -ceq 'Dockerfile'"));
+        assert!(RECIPE.contains("$_.Name -ieq 'Dockerfile'"));
+        // The one place that asserts the file exists: the tag's directory walk
+        // cannot, because a missing Dockerfile contributes nothing to the hash
+        // and yields a confident tag for an image that can never be built.
+        assert!(RECIPE.contains("anvil: container image input is missing: .anvil/container/Dockerfile"));
     }
 
     #[test]

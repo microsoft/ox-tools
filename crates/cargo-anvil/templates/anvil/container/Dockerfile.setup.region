@@ -1,20 +1,14 @@
-# Install the pinned toolchain and cargo subcommands from the generated catalog.
-# The whole recipe tree is copied because `just` has to parse it, and the whole
-# tree is hashed into the image tag: `anvil-setup` reaches the install recipes
-# through the tier, group and check recipes, so any of them can change what this
-# layer installs.
+# The whole recipe tree is copied because `just` parses it to reach the install
+# recipes.
 #
-# `binstall` matches what CI passes. Not only a speed-up: some catalog tools do
-# not compile from source on every pinned toolchain.
-#
-# The credential files are removed in the same layer as the install. A build
+# The credential files are removed in the same layer that used them: a build
 # secret never lands in a layer, but anything the install *writes* with it is
-# ordinary content, and the `chmod` below would publish it world-readable.
-# Deleting them in a later `RUN` would not help -- the earlier layer keeps them.
+# ordinary content, and the `chmod` below would publish it world-readable. A
+# later `RUN` cannot undo that, because the earlier layer keeps them.
 #
-# `registry` and `git` are created before the `chmod` because the run mounts a
-# named volume over each, and an engine seeds a new volume from the image path
-# it covers. A path that does not exist seeds as root-owned 0755, which the
+# `registry` and `git` must exist before the `chmod`. The run mounts a named
+# volume over each, and an engine seeds a new volume from the image path it
+# covers; a path that does not exist seeds as root-owned 0755, which the
 # `--user` mapping cannot write, so the first cargo fetch fails with EACCES.
 WORKDIR /opt/anvil
 COPY justfiles ./justfiles

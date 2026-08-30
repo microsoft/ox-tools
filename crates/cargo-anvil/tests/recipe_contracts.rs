@@ -27,6 +27,7 @@ const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
 const APRZ: &str = include_str!("../templates/justfiles/anvil/checks/aprz.just");
 const MUTANTS_DIFF: &str = include_str!("../templates/justfiles/anvil/checks/mutants-diff.just");
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
+const CONTAINER: &str = include_str!("../templates/justfiles/anvil/container.just");
 const FAKE_CARGO_PS1: &str = r#"
 $joined = $args -join ' '
 if ($env:FAKE_CARGO_LOG) {
@@ -1113,4 +1114,109 @@ fn unscoped_wrapper_exports_impact_off_before_dependencies_run() {
         String::from_utf8_lossy(&direct.stdout),
         String::from_utf8_lossy(&direct.stderr)
     );
+}
+
+/// `just --dry-run` reports the bodies just runs itself, not the body of a
+/// recipe that one of them launches as a child process. The unscoped wrapper
+/// launches its tier that way, so a plan of the public tier name reveals the
+/// wrapper alone.
+///
+/// The container driver decides whether to mint a GitHub token by matching the
+/// plan for `GITHUB_TOKEN`, so this is why it has to follow each nested target
+/// rather than reading one plan. If this test ever fails because a plan now
+/// reaches through the child process, that expansion can be deleted.
+#[test]
+fn a_wrapped_tier_hides_its_checks_from_a_plan() {
+    const PROBE: &str = "[private]\n[script(\"pwsh\", \"-NoProfile\")]\n_anvil-probe:\n    \
+        if (-not $env:GITHUB_TOKEN) { exit 1 }\n\n\
+        probe: (_anvil-unscoped \"probe\")\n";
+
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("helpers.just", HELPERS), ("probe.just", PROBE)], &[]);
+    let root = tmp.path();
+
+    let wrapped = run_just(root, &["--dry-run", "probe"], &[]);
+    let wrapped_plan = format!(
+        "{}{}",
+        String::from_utf8_lossy(&wrapped.stdout),
+        String::from_utf8_lossy(&wrapped.stderr)
+    );
+    assert!(
+        !wrapped_plan.contains("GITHUB_TOKEN"),
+        "a wrapped tier's plan must not reach the recipe it launches, or the driver's expansion is dead code\n{wrapped_plan}"
+    );
+    assert!(
+        wrapped_plan.contains("_anvil-probe"),
+        "the wrapper must still name the recipe it launches, which is what the driver follows\n{wrapped_plan}"
+    );
+
+    let direct = run_just(root, &["--dry-run", "_anvil-probe"], &[]);
+    let direct_plan = format!(
+        "{}{}",
+        String::from_utf8_lossy(&direct.stdout),
+        String::from_utf8_lossy(&direct.stderr)
+    );
+    assert!(
+        direct_plan.contains("GITHUB_TOKEN"),
+        "planning the launched recipe directly must reveal the variable, or this test proves nothing\n{direct_plan}"
+    );
+}
+
+/// Anvil resolves every path it manages against what the repository already
+/// carries, so a checkout holding `dockerfile` keeps that name and the regions
+/// are maintained inside it. The container recipes have to agree, or on a
+/// case-sensitive filesystem the build names a file that does not exist.
+#[test]
+fn the_container_dockerfile_resolves_to_its_on_disk_casing() {
+    if !tools_available() {
+        return;
+    }
+
+    for name in ["Dockerfile", "dockerfile", "DOCKERFILE"] {
+        let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+        let root = tmp.path();
+        write(&root.join(".anvil/container").join(name), "FROM scratch\n");
+
+        let output = run_just(root, &["_anvil-container-dockerfile"], &[]);
+        assert!(
+            output.status.success(),
+            "resolving {name} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            format!(".anvil/container/{name}"),
+            "the resolved path must carry the casing on disk"
+        );
+    }
+
+    // Absent, the tag would hash a directory that contributes nothing for it
+    // and hand back a confident reference to an image that cannot be built.
+    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+    let missing = run_just(tmp.path(), &["_anvil-container-dockerfile"], &[]);
+    assert_failed(&missing, "resolving an absent Dockerfile");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("container image input is missing"),
+        "the failure must name the missing input\nstderr:\n{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+
+    // Exact case wins over a fold. Only a case-sensitive filesystem can hold
+    // both spellings at once, so this is the one assertion that cannot run
+    // everywhere; on Windows the two names are the same file.
+    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+    let root = tmp.path();
+    write(&root.join(".anvil/container/dockerfile"), "FROM scratch\n");
+    write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
+    if fs::read_dir(root.join(".anvil/container")).unwrap().count() == 2 {
+        let output = run_just(root, &["_anvil-container-dockerfile"], &[]);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            ".anvil/container/Dockerfile",
+            "an exact-case match must win over a case-insensitive one"
+        );
+    }
 }

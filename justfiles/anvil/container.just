@@ -106,6 +106,33 @@ _anvil-container-path host_path:
     }
     Write-Output $translated.Trim()
 
+# Print the composed Dockerfile's repository-relative path in its on-disk casing.
+#
+# Anvil resolves every path it manages against what the repository already has,
+# so a checkout that carries `dockerfile` keeps that name and the regions are
+# maintained there. On a case-sensitive filesystem the canonical literal then
+# names nothing, and the build fails on a file the generator is maintaining.
+#
+# Also the one place that asserts the file exists: the tag's directory walk
+# cannot, because a missing Dockerfile simply contributes nothing to the hash
+# and yields a confident tag for an image that can never be built.
+[private]
+[script("pwsh", "-NoProfile")]
+_anvil-container-dockerfile:
+    $ErrorActionPreference = 'Stop'
+    $dir = Join-Path '{{ replace(justfile_directory(), "'", "''") }}' '.anvil/container'
+    $entries = @(Get-ChildItem -LiteralPath $dir -File -Force -ErrorAction SilentlyContinue)
+    # Exact case wins; -ceq because PowerShell's -eq is case-insensitive.
+    $match = @($entries | Where-Object { $_.Name -ceq 'Dockerfile' })[0]
+    if (-not $match) {
+        $match = @($entries | Where-Object { $_.Name -ieq 'Dockerfile' })[0]
+    }
+    if (-not $match) {
+        Write-Error 'anvil: container image input is missing: .anvil/container/Dockerfile'
+        exit 1
+    }
+    Write-Output ".anvil/container/$($match.Name)"
+
 # Print the exec image reference for the current inputs, without building it.
 #
 # The tag is a SHA-256 over the image's declared inputs: the Dockerfile and its
@@ -127,7 +154,9 @@ _anvil-container-path host_path:
 anvil-container-tag:
     $ErrorActionPreference = 'Stop'
     $repoRoot = '{{ replace(justfile_directory(), "'", "''") }}'
-    $dockerfile = '.anvil/container/Dockerfile'
+    $dockerfile = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-dockerfile
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $dockerfile = "$dockerfile".Trim()
     $hookRel = '.anvil/container/hooks.ps1'
 
     $inputs = @('rust-toolchain.toml')
@@ -165,14 +194,6 @@ anvil-container-tag:
             Where-Object { -not $_.Name.EndsWith('.anvil-proposed') }) {
             $inputs += [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName) -replace '\\', '/'
         }
-    }
-    # The walk cannot assert this on its own: a missing Dockerfile would simply
-    # contribute nothing and yield a confident tag for an image that can never
-    # be built. It is the one file under that directory that must exist, so it
-    # is checked by name.
-    if (-not (Test-Path -LiteralPath (Join-Path $repoRoot $dockerfile) -PathType Leaf)) {
-        Write-Error "anvil: container image input is missing: $dockerfile"
-        exit 1
     }
     # Every generated recipe file. The image installs its tools by running
     # `just anvil-setup`, and that dependency chain runs through the tier,
@@ -302,7 +323,9 @@ _anvil-container-image:
     $enginePrefix = @($engineCmd | Select-Object -Skip 1)
 
     $repoRoot = '{{ replace(justfile_directory(), "'", "''") }}'
-    $dockerfile = '.anvil/container/Dockerfile'
+    $dockerfile = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-dockerfile
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $dockerfile = "$dockerfile".Trim()
     $hookRel = '.anvil/container/hooks.ps1'
 
     $image = & '{{ replace(just_executable(), "'", "''") }}' anvil-container-tag
@@ -571,12 +594,18 @@ anvil-container *command:
     $runArgs += $interactive ? '-it' : '-i'
     $runArgs += @('-v', "${engineRoot}:{{anvil_container_workdir}}")
 
-    # A linked worktree keeps its real git directory outside the checkout: its
-    # `.git` is a file naming an absolute host path, which does not exist inside
-    # the container, so git resolves neither HEAD nor origin/main. Mount the
-    # common git directory and replace the checkout's `.git` file with one
-    # naming that mount; the `commondir` file in the worktree's entry is
-    # relative, so it resolves under it.
+    # A checkout whose `.git` is a file keeps its real git directory elsewhere:
+    # a linked worktree points into the main clone, `--separate-git-dir` and a
+    # submodule point somewhere else again. The path recorded there is a host
+    # path that does not exist inside the container, so git resolves neither
+    # HEAD nor origin/main. Mount the common git directory and replace the
+    # checkout's `.git` with one naming that mount; the `commondir` file in a
+    # worktree's entry is relative, so it resolves under it.
+    #
+    # The predicate is the shape of `.git`, not whether the git directory
+    # differs from the common one: `--separate-git-dir` redirects without
+    # differing, and testing for a difference skips it and leaves git pointed at
+    # a path the container cannot see.
     #
     # The redirection lives in the checkout rather than in GIT_DIR/GIT_WORK_TREE
     # so that it stays scoped to it. Those variables are ambient: every process
@@ -594,23 +623,35 @@ anvil-container *command:
     if (Get-Command git -ErrorAction SilentlyContinue) {
         $gitDir = & git rev-parse --git-dir 2>$null
         $gitCommon = & git rev-parse --git-common-dir 2>$null
-        if ($LASTEXITCODE -eq 0 -and $gitDir -and $gitCommon) {
+        if ($LASTEXITCODE -eq 0 -and $gitDir -and $gitCommon -and
+            (Test-Path -LiteralPath (Join-Path $repoRoot '.git') -PathType Leaf)) {
             $gitDirAbs = (Resolve-Path -LiteralPath $gitDir).Path
             $gitCommonAbs = (Resolve-Path -LiteralPath $gitCommon).Path
-            if ($gitDirAbs -ne $gitCommonAbs) {
-                $rel = [System.IO.Path]::GetRelativePath($gitCommonAbs, $gitDirAbs) -replace '\\', '/'
-                $engineGitCommon = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-path $gitCommonAbs
-                if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-                $engineGitCommon = "$engineGitCommon".Trim()
-                # LF and no trailing newline: git parses this file strictly.
-                $gitFile = Join-Path ([System.IO.Path]::GetTempPath()) "anvil-gitfile-$([System.Guid]::NewGuid().ToString('N'))"
-                [System.IO.File]::WriteAllText($gitFile, "gitdir: /anvil/gitdir/$rel`n")
-                $engineGitFile = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-path $gitFile
-                if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-                $engineGitFile = "$engineGitFile".Trim()
-                $runArgs += @('-v', "${engineGitCommon}:/anvil/gitdir")
-                $runArgs += @('-v', "${engineGitFile}:{{anvil_container_workdir}}/.git:ro")
+            $rel = [System.IO.Path]::GetRelativePath($gitCommonAbs, $gitDirAbs) -replace '\\', '/'
+            # One mount has to carry both directories, so the git directory must
+            # sit under the common one. `git worktree` always places it there and
+            # a redirect without a separate worktree entry makes the two equal;
+            # anything else cannot be expressed as a single mount, and emitting a
+            # path that climbs out of it would fail inside the container instead.
+            if ($rel -eq '.') {
+                $containerGitDir = '/anvil/gitdir'
+            } elseif ($rel.StartsWith('../') -or [System.IO.Path]::IsPathRooted($rel)) {
+                Write-Error "anvil: this checkout's git directory ($gitDirAbs) is not inside its common git directory ($gitCommonAbs), so the two cannot be mounted as one tree. Run the container from an ordinary clone or a git worktree checkout."
+                exit 1
+            } else {
+                $containerGitDir = "/anvil/gitdir/$rel"
             }
+            $engineGitCommon = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-path $gitCommonAbs
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $engineGitCommon = "$engineGitCommon".Trim()
+            # LF and no trailing newline: git parses this file strictly.
+            $gitFile = Join-Path ([System.IO.Path]::GetTempPath()) "anvil-gitfile-$([System.Guid]::NewGuid().ToString('N'))"
+            [System.IO.File]::WriteAllText($gitFile, "gitdir: $containerGitDir`n")
+            $engineGitFile = & '{{ replace(just_executable(), "'", "''") }}' _anvil-container-path $gitFile
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $engineGitFile = "$engineGitFile".Trim()
+            $runArgs += @('-v', "${engineGitCommon}:/anvil/gitdir")
+            $runArgs += @('-v', "${engineGitFile}:{{anvil_container_workdir}}/.git:ro")
         }
     }
 
@@ -688,18 +729,41 @@ anvil-container *command:
             # A dry run has no side effects, and a target that cannot be planned
             # (a typo, a recipe needing arguments) yields nothing, so the run
             # fails on its own terms rather than on a missing token.
+            #
+            # A plan covers the bodies just runs itself, not the body of a
+            # recipe that one of them launches as a child process. The unscoped
+            # tier wrapper launches its tier that way, so planning
+            # `anvil-scheduled` shows the wrapper and none of the checks
+            # underneath it. Follow each nested target a plan names, or a
+            # wrapped tier reads as needing nothing and runs unauthenticated.
             $plan = ''
-            # The same executable that launched this tree, for the reason every
-            # other nested call uses it: a caller invoking `just` by absolute
-            # path with its directory off PATH would otherwise fail here. That
-            # failure is silent, because an empty plan reads as "does not need a
-            # token" -- so anvil-aprz would run unauthenticated in an image with
-            # no gh of its own and block on the rate limit for up to an hour.
-            try {
-                $plan = (& '{{ replace(just_executable(), "'", "''") }}' --dry-run @($argv | Select-Object -Skip 1) 2>&1 |
-                    ForEach-Object { $_.ToString() }) -join "`n"
-            } catch {
-                $plan = ''
+            $targets = [System.Collections.Generic.List[object]]::new()
+            $targets.Add([string[]]@($argv | Select-Object -Skip 1))
+            $planned = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+            for ($i = 0; $i -lt $targets.Count; $i++) {
+                $target = [string[]]$targets[$i]
+                # A recipe reachable twice is planned once, and a body naming
+                # itself terminates.
+                if (-not $planned.Add(($target -join ' '))) { continue }
+                # The same executable that launched this tree, for the reason
+                # every other nested call uses it: a caller invoking `just` by
+                # absolute path with its directory off PATH would otherwise fail
+                # here. That failure is silent, because an empty plan reads as
+                # "does not need a token" -- so anvil-aprz would run
+                # unauthenticated in an image with no gh of its own and block on
+                # the rate limit for up to an hour.
+                $step = ''
+                try {
+                    $step = (& '{{ replace(just_executable(), "'", "''") }}' --dry-run @target 2>&1 |
+                        ForEach-Object { $_.ToString() }) -join "`n"
+                } catch {
+                    $step = ''
+                }
+                $plan = "$plan`n$step"
+                # A launched recipe appears as a quoted argument to `just`.
+                foreach ($nested in [regex]::Matches($step, "'(_anvil-[^'\s]+)'")) {
+                    $targets.Add([string[]]@($nested.Groups[1].Value))
+                }
             }
             $needsToken = $plan -match 'GITHUB_TOKEN'
         }
@@ -719,11 +783,14 @@ anvil-container *command:
 
     # The recipe contract's own inputs. These are read by generated checks --
     # `anvil-pr-title` reads PR_TITLE, `_anvil-base-ref` reads BASE_REF and its
-    # CI equivalents, and the impact filters read the ANVIL_INCLUDE_* set -- so
-    # dropping them at the boundary makes the same command mean different things
-    # inside and out. anvil-pr-title is the sharp case: with PR_TITLE unset it
-    # exits 0 with a skip notice, so a title a native run rejects passes in a
-    # container and the tier still reports green.
+    # CI equivalents, and `anvil-impact` reads ANVIL_IMPACT to decide whether to
+    # compute scoping, consume a downloaded cache, or skip -- so dropping them at
+    # the boundary makes the same command mean different things inside and out.
+    # anvil-pr-title is the sharp case: with PR_TITLE unset it exits 0 with a
+    # skip notice, so a title a native run rejects passes in a container and the
+    # tier still reports green. ANVIL_IMPACT is the other: a CI group job exports
+    # `consume`, and a container that did not inherit it would recompute scoping
+    # from a diff instead of trusting the artifact the group downloaded.
     #
     # Forwarded by name and only when set, so an unset variable stays unset
     # rather than arriving as an empty string, which several of these treat as
@@ -731,7 +798,7 @@ anvil-container *command:
     foreach ($name in @(
         'PR_TITLE',
         'BASE_REF', 'GITHUB_BASE_REF', 'SYSTEM_PULLREQUEST_TARGETBRANCH',
-        'ANVIL_INCLUDE_MODIFIED', 'ANVIL_INCLUDE_AFFECTED', 'ANVIL_INCLUDE_REQUIRED')) {
+        'ANVIL_IMPACT')) {
         if ((Test-Path -LiteralPath "Env:$name") -and -not [string]::IsNullOrEmpty((Get-Item -LiteralPath "Env:$name").Value)) {
             $forwardedEnv += $name
             $runArgs += @('-e', $name)

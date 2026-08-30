@@ -113,20 +113,19 @@ repo/
 │   ├── container.just                     the anvil-container recipes
 │   └── …                                  checks, groups, tiers, executed natively *inside* the image
 └── .anvil/container/
-    ├── Dockerfile                         composed: anvil's six regions, your content in the gaps
+    ├── Dockerfile                         composed: anvil's five regions, your content in the gaps
     ├── Dockerfile.dockerignore            what the build context admits
     └── hooks.ps1                          optional; not emitted by default (§7)
 ```
 
 `container.just` and `Dockerfile.dockerignore` are owned files carrying the usual `DO NOT EDIT DIRECTLY` marker.
 
-The Dockerfile is **composed**, not owned: anvil maintains six managed regions inside it, and the repository owns
+The Dockerfile is **composed**, not owned: anvil maintains five managed regions inside it, and the repository owns
 everything between them. Regions are updated in place on every run. Gap content is preserved byte-for-byte and is
 never read, rewritten or reordered.
 
 | Region | What anvil puts there | What belongs in the gap after it |
 | --- | --- | --- |
-| `anvil-container-header` | An orientation comment naming the regions and their gaps. | — |
 | `anvil-container-base-image` | `ARG BASE_IMAGE`, pinned to a digest. | A second `ARG BASE_IMAGE=…` to build on a different base. |
 | `anvil-container-base` | `FROM`, the version pins for `pwsh`, `just`, `rustup` and `cargo-binstall`, and the `ENV` block. | Anything the first network access needs: a root CA, `http_proxy`, an internal package mirror. |
 | `anvil-container-tools` | System packages and those four tools. | Libraries a catalog tool needs to compile, for tools `binstall` has no prebuilt binary for. |
@@ -138,8 +137,9 @@ first download, a run-time tool after the toolchain exists. That is what makes t
 the catalog — a repository adds to a gap and keeps receiving base-image and tool-pin updates, where a fork or an edit
 inside a region freezes them.
 
-Line 1 is `# syntax=docker/dockerfile:1` and belongs to no region. Anvil writes it when it creates the file and never
-touches it again; a repository that needs a different frontend edits that line and owns it from then on.
+Line 1 is `# syntax=docker/dockerfile:1` and belongs to no region, because BuildKit honors the directive only when
+nothing precedes it and a region sentinel is a comment. Anvil writes it, and the copyright notice under it, when it
+creates the file and never touches either again; both are the repository's from then on.
 
 **Why not an owned file.** An edited owned file is preserved and anvil's version is written to `.anvil-proposed`
 (`updates.md` §2). There is no three-way merge and no recorded common ancestor, so each upgrade leaves two files to
@@ -348,11 +348,18 @@ interactive session can run anything, and refusing there would reintroduce the s
 predicate is the variable rather than the name of a check, so a catalog that adds another GitHub-authenticated check is
 covered without touching the driver.
 
+A plan covers the bodies `just` runs itself, not the body of a recipe that one of them launches as a child process.
+The unscoped tier wrapper (§`helpers.just`) launches its tier that way, so planning `anvil-scheduled` shows the wrapper
+alone. The driver therefore follows each nested target a plan names, until nothing new appears; without that, a wrapped
+tier reads as needing nothing and `anvil-aprz` runs unauthenticated inside an image that has no `gh` of its own.
+
 It also forwards the recipe contract's own inputs when they are set — `PR_TITLE`, `BASE_REF`, `GITHUB_BASE_REF`,
-`SYSTEM_PULLREQUEST_TARGETBRANCH` and the `ANVIL_INCLUDE_*` filters — because a check that reads one natively must read
+`SYSTEM_PULLREQUEST_TARGETBRANCH` and `ANVIL_IMPACT` — because a check that reads one natively must read
 the same value in a container. `anvil-pr-title` is the sharp case: with `PR_TITLE` unset it exits 0 with a skip notice,
 so dropping it at the boundary would let a title a native run rejects pass in a container while the tier still reported
-green. They are forwarded by name and only when set, so an unset variable stays unset rather than arriving empty.
+green. `ANVIL_IMPACT` is the other: a CI group job exports `consume`, and a container that did not inherit it would
+recompute scoping from a diff instead of trusting the artifact the group downloaded. They are forwarded by name and
+only when set, so an unset variable stays unset rather than arriving empty.
 
 A resolved token is set on the driver process, passed by name, and unset after the run, so it never reaches a host
 command line. Inside the container it is readable by everything the run executes, including build scripts and proc

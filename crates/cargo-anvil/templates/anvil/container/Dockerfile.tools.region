@@ -32,10 +32,6 @@ RUN curl --proto '=https' --tlsv1.2 -fsSLo /tmp/rustup-init \
     && /tmp/rustup-init -y --profile minimal --default-toolchain none --no-modify-path \
     && rm /tmp/rustup-init
 
-# Without this, the first `_install-tool` that needs binstall bootstraps it by
-# compiling it from source, which costs minutes on every image build and is one
-# more source build a toolchain bump can break. CI installs the prebuilt binary
-# for the same reason.
 RUN curl -fsSLo /tmp/cargo-binstall.tgz \
         "https://github.com/cargo-bins/cargo-binstall/releases/download/v${CARGO_BINSTALL_VERSION}/cargo-binstall-x86_64-unknown-linux-musl.tgz" \
     && echo "${CARGO_BINSTALL_SHA256}  /tmp/cargo-binstall.tgz" | sha256sum -c - \

@@ -1,35 +1,16 @@
 # syntax=docker/dockerfile:1
 
-# >>> anvil-managed: anvil-container-header
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
-#
-# Anvil execution image.
-#
-# The `anvil-managed:` regions are cargo-anvil's and are kept current. The gaps
-# between them are yours and are preserved. Add to a gap, not inside a region:
-# anvil will not overwrite an edit inside one, so editing there silently freezes
-# the base digest and the tool pins at that moment.
-#
-# Which gap, since position decides whether a line works at all:
-#
-#   after base-image   re-declare ARG BASE_IMAGE to build on your own base
-#   after base         root CA, proxy, apt mirror -- anything the first download needs
-#   after tools        libraries a catalog tool needs to compile from source
-#   after setup        what your own checks need at run time
-#
-# `# syntax=` stays on line 1: BuildKit honors it only when nothing precedes it,
-# and a region sentinel is a comment.
-# <<< anvil-managed: anvil-container-header
 
 # >>> anvil-managed: anvil-container-base-image
-# Tracks the Linux runner the generated workflows use (`ubuntu-latest`).
-# `anvil-setup binstall` installs prebuilt binaries that need that runner's
-# glibc, so this moves when the runner does. Digest-pinned because a floating
-# tag can change under an image reference that claims to name fixed content.
+# Prebuilt binaries installed by `anvil-setup binstall` link against this
+# image's glibc, so it tracks the Linux runner the generated workflows use.
+# Digest-pinned: a floating tag moves content under a reference that claims to
+# name fixed content.
 #
-# To build on another base, re-declare this in the gap below rather than editing
-# here: a later ARG wins, and anvil keeps updating the pins you did not touch.
+# Re-declare BASE_IMAGE in the gap below to build on another base; a later ARG
+# wins, and the pins anvil maintains stay current.
 ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
 # <<< anvil-managed: anvil-container-base-image
 
@@ -87,10 +68,6 @@ RUN curl --proto '=https' --tlsv1.2 -fsSLo /tmp/rustup-init \
     && /tmp/rustup-init -y --profile minimal --default-toolchain none --no-modify-path \
     && rm /tmp/rustup-init
 
-# Without this, the first `_install-tool` that needs binstall bootstraps it by
-# compiling it from source, which costs minutes on every image build and is one
-# more source build a toolchain bump can break. CI installs the prebuilt binary
-# for the same reason.
 RUN curl -fsSLo /tmp/cargo-binstall.tgz \
         "https://github.com/cargo-bins/cargo-binstall/releases/download/v${CARGO_BINSTALL_VERSION}/cargo-binstall-x86_64-unknown-linux-musl.tgz" \
     && echo "${CARGO_BINSTALL_SHA256}  /tmp/cargo-binstall.tgz" | sha256sum -c - \
@@ -102,23 +79,17 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # <<< anvil-managed: anvil-container-tools
 
 # >>> anvil-managed: anvil-container-setup
-# Install the pinned toolchain and cargo subcommands from the generated catalog.
-# The whole recipe tree is copied because `just` has to parse it, and the whole
-# tree is hashed into the image tag: `anvil-setup` reaches the install recipes
-# through the tier, group and check recipes, so any of them can change what this
-# layer installs.
+# The whole recipe tree is copied because `just` parses it to reach the install
+# recipes.
 #
-# `binstall` matches what CI passes. Not only a speed-up: some catalog tools do
-# not compile from source on every pinned toolchain.
-#
-# The credential files are removed in the same layer as the install. A build
+# The credential files are removed in the same layer that used them: a build
 # secret never lands in a layer, but anything the install *writes* with it is
-# ordinary content, and the `chmod` below would publish it world-readable.
-# Deleting them in a later `RUN` would not help -- the earlier layer keeps them.
+# ordinary content, and the `chmod` below would publish it world-readable. A
+# later `RUN` cannot undo that, because the earlier layer keeps them.
 #
-# `registry` and `git` are created before the `chmod` because the run mounts a
-# named volume over each, and an engine seeds a new volume from the image path
-# it covers. A path that does not exist seeds as root-owned 0755, which the
+# `registry` and `git` must exist before the `chmod`. The run mounts a named
+# volume over each, and an engine seeds a new volume from the image path it
+# covers; a path that does not exist seeds as root-owned 0755, which the
 # `--user` mapping cannot write, so the first cargo fetch fails with EACCES.
 WORKDIR /opt/anvil
 COPY justfiles ./justfiles

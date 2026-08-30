@@ -20,7 +20,7 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use ohno::{AppError, IntoAppError as _};
+use ohno::{AppError, IntoAppError as _, bail};
 
 use crate::decision::Decision;
 use crate::io::resolve_existing_case_insensitive;
@@ -415,7 +415,7 @@ impl Plan {
             match (&item.target, item.decision) {
                 (Target::File { path }, Decision::Write) => {
                     let content = item.rendered.as_ref().expect("Write decision must carry rendered content");
-                    let abs = repo_root.join(path);
+                    let abs = contained_path(repo_root, path)?;
                     write_file(&abs, content)?;
                     if let Some(checksum) = &item.rendered_checksum {
                         next.files.insert(path.clone(), checksum.clone());
@@ -423,7 +423,7 @@ impl Plan {
                 }
                 (Target::File { path }, Decision::Propose) => {
                     let content = item.rendered.as_ref().expect("Propose decision must carry rendered content");
-                    let abs = repo_root.join(format!("{path}.anvil-proposed"));
+                    let abs = contained_path(repo_root, &format!("{path}.anvil-proposed"))?;
                     write_file(&abs, content)?;
                     if let Some(checksum) = &item.rendered_checksum {
                         // Bump L to the new T so subsequent runs see the
@@ -436,7 +436,7 @@ impl Plan {
                 }
                 (Target::Region { host, id }, Decision::Write) => {
                     let spliced = item.spliced_host.as_ref().expect("region Write must carry spliced host");
-                    let abs = repo_root.join(host);
+                    let abs = contained_path(repo_root, host)?;
                     write_file(&abs, spliced)?;
                     if let Some(checksum) = &item.rendered_checksum {
                         next.regions.insert(
@@ -450,7 +450,7 @@ impl Plan {
                 }
                 (Target::Region { host, id }, Decision::Propose) => {
                     let spliced = item.spliced_host.as_ref().expect("region Propose must carry spliced host");
-                    let abs = repo_root.join(format!("{host}.anvil-proposed"));
+                    let abs = contained_path(repo_root, &format!("{host}.anvil-proposed"))?;
                     write_file(&abs, spliced)?;
                     if let Some(checksum) = &item.rendered_checksum {
                         // Same rationale as the File/Propose branch: bump
@@ -474,7 +474,7 @@ impl Plan {
                     // would leave the file behind with no lock entry.
                     // If the file is already missing (race / external
                     // delete), absorb the error so the result is idempotent.
-                    let abs = repo_root.join(resolve_existing_case_insensitive(repo_root, path));
+                    let abs = contained_path(repo_root, &resolve_existing_case_insensitive(repo_root, path))?;
                     if let Err(e) = std::fs::remove_file(&abs)
                         && e.kind() != std::io::ErrorKind::NotFound
                     {
@@ -489,7 +489,7 @@ impl Plan {
                     // write, for the reason the File arm above gives; the
                     // manifest key stays as recorded so the entry is purged.
                     let spliced = item.spliced_host.as_ref().expect("region Remove must carry spliced host");
-                    let abs = repo_root.join(resolve_existing_case_insensitive(repo_root, host));
+                    let abs = contained_path(repo_root, &resolve_existing_case_insensitive(repo_root, host))?;
                     write_file(&abs, spliced)?;
                     next.regions.remove(&RegionKey {
                         host: host.clone(),
@@ -555,6 +555,49 @@ fn write_section(out: &mut String, header: &str, items: &[&PlanItem]) {
     }
 }
 
+/// Join a repository-relative path to `repo_root` and verify that it resolves
+/// inside it.
+///
+/// `Manifest::ensure_contained` rejects a path that escapes lexically, but a
+/// path built entirely from ordinary components still lands outside the
+/// repository when one of those components is a symlink pointing out of it.
+/// The manifest is committed content, so a checkout can carry both the link and
+/// the entry that names it, and the write, delete or proposal below would
+/// follow it.
+///
+/// Resolution stops at the deepest ancestor that exists, because the path
+/// itself frequently does not: a file anvil is about to create has nothing on
+/// disk to resolve. That is sufficient, since a symlink can only be a component
+/// that exists.
+///
+/// # Errors
+///
+/// Returns an error if the repository root cannot be resolved, or if the path
+/// resolves outside it.
+fn contained_path(repo_root: &Path, relpath: &str) -> Result<PathBuf, AppError> {
+    let abs = repo_root.join(relpath);
+    let root = repo_root
+        .canonicalize()
+        .into_app_err_with(|| format!("failed to resolve the repository root {}", repo_root.display()))?;
+
+    let mut probe = abs.as_path();
+    loop {
+        if let Ok(resolved) = probe.canonicalize() {
+            if !resolved.starts_with(&root) {
+                bail!(
+                    "manifest path '{relpath}' resolves to {}, outside the repository at {}",
+                    resolved.display(),
+                    root.display()
+                );
+            }
+            return Ok(abs);
+        }
+        probe = probe
+            .parent()
+            .expect("the walk reaches a filesystem root, which always resolves, before running out of components");
+    }
+}
+
 fn write_file(path: &Path, content: &str) -> Result<(), AppError> {
     let parent = path
         .parent()
@@ -578,6 +621,60 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_path_inside_the_repository_is_joined_as_given() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("a")).unwrap();
+        std::fs::write(tmp.path().join("a/b.txt"), "x").unwrap();
+
+        assert_eq!(contained_path(tmp.path(), "a/b.txt").unwrap(), tmp.path().join("a/b.txt"));
+        // A file anvil is about to create has nothing on disk to resolve, so
+        // the walk has to fall back to the deepest ancestor that does.
+        assert_eq!(
+            contained_path(tmp.path(), "a/new/deeper/c.txt").unwrap(),
+            tmp.path().join("a/new/deeper/c.txt")
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_path_that_resolves_outside_the_repository_is_refused() {
+        // The last line of defence, so it must hold on its own rather than
+        // assuming the manifest's lexical guard has already run.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(tmp.path().join("outside")).unwrap();
+
+        let err = contained_path(&root, "../outside").unwrap_err();
+        assert!(
+            format!("{err}").contains("outside the repository"),
+            "expected a containment error, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_symlinked_component_cannot_carry_a_write_out_of_the_repository() {
+        // The manifest is committed content, so one commit can add both a link
+        // that leaves the tree and an entry naming a path through it. Every
+        // component here is ordinary, so the lexical guard passes it.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+
+        let err = contained_path(&root, "escape/victim.txt").unwrap_err();
+        assert!(
+            format!("{err}").contains("outside the repository"),
+            "expected a containment error, got: {err}"
+        );
+    }
 
     #[test]
     fn empty_plan_is_in_sync() {
