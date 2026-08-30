@@ -3697,6 +3697,16 @@ anvil-container-tag:
 
     $inputs = @('rust-toolchain.toml')
     $links = @()
+    # The declared input and the two walk roots are checked here, because a walk
+    # only ever reports descendants: a link that *is* the root is traversed or
+    # read through and never appears in its own output. Same hazard as a link
+    # below them -- the engine copies the link while everything here follows it.
+    foreach ($declared in @('rust-toolchain.toml', '.anvil/container', 'justfiles/anvil')) {
+        $item = Get-Item -LiteralPath (Join-Path $repoRoot $declared) -Force -ErrorAction SilentlyContinue
+        if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
+            $links += $item.FullName
+        }
+    }
     # The declared inputs are text this tree owns, so their line endings are
     # normalized before hashing and a CRLF checkout agrees with an LF one.
     # Everything discovered by walking a directory is treated as text only when

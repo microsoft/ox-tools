@@ -1347,15 +1347,37 @@ fn a_link_among_the_image_inputs_is_refused() {
         return;
     }
 
-    for (kind, name, links_a_directory) in [("a file link", "linked.just", false), ("a directory link", "linked", true)] {
+    // A walk only ever reports descendants, so a link that *is* a declared
+    // input or a walk root is followed and never appears in its own output.
+    // Both positions are covered.
+    for (kind, name, links_a_directory) in [
+        ("a file link below a walk root", "justfiles/anvil/linked.just", false),
+        ("a directory link below a walk root", "justfiles/anvil/linked", true),
+        ("a linked declared input", "rust-toolchain.toml", false),
+        ("a linked recipe walk root", "justfiles/anvil", true),
+        ("a linked container walk root", ".anvil/container", true),
+    ] {
         let tmp = fixture(&[("container.just", CONTAINER)], &[]);
         let root = tmp.path();
-        write(&root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"stable\"\n");
-        write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
-        write(&root.join("justfiles/anvil/mod.just"), "# recipes\n");
         write(&root.join("elsewhere/target.just"), "# shared\n");
+        write(&root.join("elsewhere/Dockerfile"), "FROM scratch\n");
+        // Everything the tag needs, except whatever this case replaces with a
+        // link. The link stands in for it, so writing it first would defeat the
+        // case for a walk root and leave nothing to link at all.
+        for (path, body) in [
+            ("rust-toolchain.toml", "[toolchain]\nchannel = \"stable\"\n"),
+            (".anvil/container/Dockerfile", "FROM scratch\n"),
+            ("justfiles/anvil/mod.just", "# recipes\n"),
+        ] {
+            if !path.starts_with(name) {
+                write(&root.join(path), body);
+            }
+        }
 
-        let link = root.join("justfiles/anvil").join(name);
+        let link = root.join(name);
+        if let Some(parent) = link.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
         let created = if links_a_directory {
             symlink_dir(&root.join("elsewhere"), &link)
         } else {
@@ -1371,7 +1393,7 @@ fn a_link_among_the_image_inputs_is_refused() {
         assert_failed(&output, &format!("computing a tag with {kind} among the inputs"));
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
-            stderr.contains("regular") && stderr.contains(name),
+            stderr.contains("regular") && stderr.contains(name.rsplit('/').next().unwrap()),
             "{kind} must be named in the refusal\nstderr:\n{stderr}"
         );
     }
