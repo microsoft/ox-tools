@@ -297,24 +297,26 @@ anvil-container-tag:
                 }
             }
         }
-        # `--raw` reports the index mode and the working-tree mode as the first
-        # two fields, so a mode-only change is visible even though the content
-        # is identical. On Windows core.fileMode is normally false and git
-        # reports no drift, which is correct: the filesystem has no bit to
-        # disagree with.
+        # `--raw` reports the working-tree mode as its second field, so a
+        # mode-only change is visible even though the content is identical. On
+        # Windows core.fileMode is normally false and git reports no drift,
+        # which is correct: the filesystem has no bit to disagree with.
         #
-        # A zero mode means the path is absent on that side -- an unstaged
-        # deletion, or an intent-to-add entry. Neither can make the image
-        # disagree with its tag, because a path missing from the build context
-        # is missing from the digest too, so only a transition between two real
-        # modes is drift. A `chmod` is always one of those.
+        # A zero working-tree mode is a deletion: the path is in neither the
+        # build context nor the digest, so there is nothing to disagree about.
+        # Every other entry is present in the context and is compared against
+        # the bit the digest actually framed, which comes from `ls-files
+        # --stage` above. The raw index-side mode is not that bit -- an
+        # intent-to-add entry reports zero there while `ls-files` reports a real
+        # placeholder mode -- so comparing the two raw fields would both miss an
+        # executable `git add -N` file and reject an ordinary one.
         $drift = & git -c core.quotePath=false -C $repoRoot diff --no-ext-diff --raw -- @tracked 2>$null
         if ($LASTEXITCODE -eq 0) {
             foreach ($entry in $drift) {
-                if ($entry -match '^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ \S+\t(.+)$') {
-                    $indexMode, $worktreeMode, $driftPath = $Matches[1], $Matches[2], $Matches[3]
-                    if ($indexMode -ne '000000' -and $worktreeMode -ne '000000' -and $indexMode -ne $worktreeMode) {
-                        Write-Error "anvil: '$driftPath' has mode $worktreeMode in the working tree and $indexMode in the index. The build copies the working tree while the image tag is computed from the index, so the image would not match its own reference. Stage the mode change (git add) and re-run."
+                if ($entry -match '^:\d{6} (\d{6}) [0-9a-f]+ [0-9a-f]+ \S+\t(.+)$') {
+                    $worktreeMode, $driftPath = $Matches[1], $Matches[2]
+                    if ($worktreeMode -ne '000000' -and $executable.Contains($driftPath) -ne ($worktreeMode -eq '100755')) {
+                        Write-Error "anvil: '$driftPath' has mode $worktreeMode in the working tree, which is not the mode the image tag was computed from. The build copies the working tree, so the image would not match its own reference. Stage the mode change (git add) and re-run."
                         exit 1
                     }
                 }

@@ -1259,12 +1259,17 @@ fn the_image_tag_follows_the_executable_bit() {
     assert_eq!(plain, tag("0"), "the tag must depend on the inputs alone");
 }
 
-/// The index is authoritative for the tag only while the working tree agrees
-/// with it. A `chmod` that has not been staged is copied by the build and
-/// missed by the digest, so the reference would name an image the build does
-/// not produce; the run has to stop rather than absorb that.
+/// The tag is computed from the index while the build copies the working tree,
+/// so the two have to agree about the executable bit. Where they do not, the
+/// reference names an image the build does not produce, and the run stops
+/// rather than absorbing it.
+///
+/// `git diff --raw` has three shapes here and only one of them is drift, so
+/// each is pinned: an ordinary modification, a deletion (absent from both the
+/// context and the digest), and an intent-to-add entry, whose raw index mode is
+/// zero even though `ls-files --stage` reports a real placeholder mode.
 #[test]
-fn an_unstaged_mode_change_stops_the_run() {
+fn a_working_tree_mode_the_tag_did_not_frame_stops_the_run() {
     if !tools_available() {
         return;
     }
@@ -1273,55 +1278,51 @@ fn an_unstaged_mode_change_stops_the_run() {
     write(&root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"stable\"\n");
     write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
     write(&root.join("justfiles/anvil/setup.sh"), "echo hello\n");
+    // The digest frames this path from `ls-files --stage`, which reports
+    // 100644 in every case below -- including the intent-to-add ones, where
+    // the raw index mode is zero but the placeholder is a real mode.
     write(
         &root.join("fake-bin/git.ps1"),
         "if ($args -contains 'ls-files') {\n    \
          Write-Output \"100644 0000000000000000000000000000000000000000 0`tjustfiles/anvil/setup.sh\"\n}\n\
-         if ($args -contains 'diff' -and $env:FAKE_DRIFT -eq '1') {\n    \
-         Write-Output \":100644 100755 0000000 0000000 M`tjustfiles/anvil/setup.sh\"\n}\nexit 0\n",
+         if ($args -contains 'diff' -and $env:FAKE_RAW) {\n    Write-Output $env:FAKE_RAW\n}\nexit 0\n",
     );
 
-    let clean = run_just(root, &["anvil-container-tag"], &[("FAKE_DRIFT", OsStr::new("0"))]);
-    assert!(
-        clean.status.success(),
-        "an agreeing working tree must compute a tag\nstderr:\n{}",
-        String::from_utf8_lossy(&clean.stderr)
-    );
+    let tag = |raw: &str| run_just(root, &["anvil-container-tag"], &[("FAKE_RAW", OsStr::new(raw))]);
 
-    let drifted = run_just(root, &["anvil-container-tag"], &[("FAKE_DRIFT", OsStr::new("1"))]);
-    assert_failed(&drifted, "computing a tag against an unstaged mode change");
-    let stderr = String::from_utf8_lossy(&drifted.stderr);
-    assert!(
-        stderr.contains("working tree") && stderr.contains("git add"),
-        "the refusal must name the drift and the recovery\nstderr:\n{stderr}"
-    );
-
-    // A zero mode means the path is absent on that side. `git diff --raw`
-    // encodes an unstaged deletion as `:100644 000000 ... D` and an
-    // intent-to-add as `:000000 100644 ... A`, and both differ numerically
-    // without being drift -- a path missing from the build context is missing
-    // from the digest too. Retiring a managed file and not yet staging the
-    // deletion is the ordinary way to reach this.
     for (kind, raw) in [
-        ("an unstaged deletion", ":100644 000000 0000000 0000000 D`tjustfiles/anvil/setup.sh"),
+        ("no working-tree change at all", ""),
+        ("an unstaged deletion", ":100644 000000 0000000 0000000 D\tjustfiles/anvil/setup.sh"),
         (
-            "an intent-to-add entry",
-            ":000000 100644 0000000 0000000 A`tjustfiles/anvil/setup.sh",
+            "an intent-to-add entry that is not executable",
+            ":000000 100644 0000000 0000000 A\tjustfiles/anvil/setup.sh",
+        ),
+        (
+            "an edit that leaves the mode alone",
+            ":100644 100644 0000000 0000000 M\tjustfiles/anvil/setup.sh",
         ),
     ] {
-        write(
-            &root.join("fake-bin/git.ps1"),
-            &format!(
-                "if ($args -contains 'ls-files') {{\n    \
-                 Write-Output \"100644 0000000000000000000000000000000000000000 0`tjustfiles/anvil/setup.sh\"\n}}\n\
-                 if ($args -contains 'diff') {{\n    Write-Output \"{raw}\"\n}}\nexit 0\n"
-            ),
-        );
-        let absent = run_just(root, &["anvil-container-tag"], &[]);
+        let output = tag(raw);
         assert!(
-            absent.status.success(),
-            "{kind} must not be reported as mode drift\nstderr:\n{}",
-            String::from_utf8_lossy(&absent.stderr)
+            output.status.success(),
+            "{kind} must not be reported as drift\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    for (kind, raw) in [
+        ("an unstaged chmod +x", ":100644 100755 0000000 0000000 M\tjustfiles/anvil/setup.sh"),
+        (
+            "an intent-to-add entry that is executable",
+            ":000000 100755 0000000 0000000 A\tjustfiles/anvil/setup.sh",
+        ),
+    ] {
+        let output = tag(raw);
+        assert_failed(&output, kind);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("working tree") && stderr.contains("git add"),
+            "{kind} must name the drift and the recovery\nstderr:\n{stderr}"
         );
     }
 }
