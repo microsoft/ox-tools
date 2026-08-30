@@ -3710,12 +3710,21 @@ anvil-container-tag:
         # is identical. On Windows core.fileMode is normally false and git
         # reports no drift, which is correct: the filesystem has no bit to
         # disagree with.
+        #
+        # A zero mode means the path is absent on that side -- an unstaged
+        # deletion, or an intent-to-add entry. Neither can make the image
+        # disagree with its tag, because a path missing from the build context
+        # is missing from the digest too, so only a transition between two real
+        # modes is drift. A `chmod` is always one of those.
         $drift = & git -c core.quotePath=false -C $repoRoot diff --no-ext-diff --raw -- @tracked 2>$null
         if ($LASTEXITCODE -eq 0) {
             foreach ($entry in $drift) {
-                if ($entry -match '^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ \S+\t(.+)$' -and $Matches[1] -ne $Matches[2]) {
-                    Write-Error "anvil: '$($Matches[3])' has mode $($Matches[2]) in the working tree and $($Matches[1]) in the index. The build copies the working tree while the image tag is computed from the index, so the image would not match its own reference. Stage the mode change (git add) and re-run."
-                    exit 1
+                if ($entry -match '^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ \S+\t(.+)$') {
+                    $indexMode, $worktreeMode, $driftPath = $Matches[1], $Matches[2], $Matches[3]
+                    if ($indexMode -ne '000000' -and $worktreeMode -ne '000000' -and $indexMode -ne $worktreeMode) {
+                        Write-Error "anvil: '$driftPath' has mode $worktreeMode in the working tree and $indexMode in the index. The build copies the working tree while the image tag is computed from the index, so the image would not match its own reference. Stage the mode change (git add) and re-run."
+                        exit 1
+                    }
                 }
             }
         }

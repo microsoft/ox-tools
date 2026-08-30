@@ -1295,4 +1295,33 @@ fn an_unstaged_mode_change_stops_the_run() {
         stderr.contains("working tree") && stderr.contains("git add"),
         "the refusal must name the drift and the recovery\nstderr:\n{stderr}"
     );
+
+    // A zero mode means the path is absent on that side. `git diff --raw`
+    // encodes an unstaged deletion as `:100644 000000 ... D` and an
+    // intent-to-add as `:000000 100644 ... A`, and both differ numerically
+    // without being drift -- a path missing from the build context is missing
+    // from the digest too. Retiring a managed file and not yet staging the
+    // deletion is the ordinary way to reach this.
+    for (kind, raw) in [
+        ("an unstaged deletion", ":100644 000000 0000000 0000000 D`tjustfiles/anvil/setup.sh"),
+        (
+            "an intent-to-add entry",
+            ":000000 100644 0000000 0000000 A`tjustfiles/anvil/setup.sh",
+        ),
+    ] {
+        write(
+            &root.join("fake-bin/git.ps1"),
+            &format!(
+                "if ($args -contains 'ls-files') {{\n    \
+                 Write-Output \"100644 0000000000000000000000000000000000000000 0`tjustfiles/anvil/setup.sh\"\n}}\n\
+                 if ($args -contains 'diff') {{\n    Write-Output \"{raw}\"\n}}\nexit 0\n"
+            ),
+        );
+        let absent = run_just(root, &["anvil-container-tag"], &[]);
+        assert!(
+            absent.status.success(),
+            "{kind} must not be reported as mode drift\nstderr:\n{}",
+            String::from_utf8_lossy(&absent.stderr)
+        );
+    }
 }
