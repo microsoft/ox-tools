@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.5.0"
-catalog_checksum = "sha256:4ddb59624d988e688e62dffe8528e25615ece7a40dbb2299d1b2b4d247f436dc"
+catalog_checksum = "sha256:53bd8acbb5beed0120b532a7a0a071d449a8eb8b1018a69bf5b933567449e074"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -165,7 +165,7 @@ checksum = "sha256:6efd7378a2cd0f5d86519bd32fd86f2055a60191187dd77a8842b374b8eb7
 
 [[file]]
 path = "justfiles/anvil/container.just"
-checksum = "sha256:b8b8bf3c285f9426f73c077b8fd22fa82394b0788b5b465cdba8837b1d4e70b5"
+checksum = "sha256:14a065c8ced786be257eccf7023aaf549eaa2b7d55ec542b86cc5b9198f9fa31"
 
 [[file]]
 path = "justfiles/anvil/groups/pr-fast.just"

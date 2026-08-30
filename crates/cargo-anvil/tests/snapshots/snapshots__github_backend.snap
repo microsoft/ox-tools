@@ -3514,12 +3514,15 @@ _anvil-container-path host_path:
     }
     Write-Output $translated.Trim()
 
-# Print the composed Dockerfile's repository-relative path in its on-disk casing.
+# Verify the composed Dockerfile is present under the name the build uses.
 #
-# Anvil resolves every path it manages against what the repository already has,
-# so a checkout that carries `dockerfile` keeps that name and the regions are
-# maintained there. On a case-sensitive filesystem the canonical literal then
-# names nothing, and the build fails on a file the generator is maintaining.
+# The engine derives the ignore file's name from the Dockerfile's: BuildKit
+# reads `<dockerfile>.dockerignore` and there is no flag to point it elsewhere.
+# Anvil owns that artifact at the fixed path `.anvil/container/Dockerfile.dockerignore`,
+# so the two names have to agree, and only one of them can move. A case variant
+# is therefore refused rather than accommodated: building from `dockerfile`
+# would silently use no ignore file at all, streaming the whole worktree into
+# the build context and admitting inputs the tag does not cover.
 #
 # Also the one place that asserts the file exists: the tag's directory walk
 # cannot, because a missing Dockerfile simply contributes nothing to the hash
@@ -3530,16 +3533,20 @@ _anvil-container-dockerfile:
     $ErrorActionPreference = 'Stop'
     $dir = Join-Path '{{ replace(justfile_directory(), "'", "''") }}' '.anvil/container'
     $entries = @(Get-ChildItem -LiteralPath $dir -File -Force -ErrorAction SilentlyContinue)
-    # Exact case wins; -ceq because PowerShell's -eq is case-insensitive.
-    $match = @($entries | Where-Object { $_.Name -ceq 'Dockerfile' })[0]
-    if (-not $match) {
-        $match = @($entries | Where-Object { $_.Name -ieq 'Dockerfile' })[0]
+    # -ceq because PowerShell's -eq on strings is case-insensitive, which would
+    # make the exact name indistinguishable from a variant on a filesystem that
+    # can hold both.
+    if (@($entries | Where-Object { $_.Name -ceq 'Dockerfile' }).Count -eq 1) {
+        Write-Output '.anvil/container/Dockerfile'
+        exit 0
     }
-    if (-not $match) {
-        Write-Error 'anvil: container image input is missing: .anvil/container/Dockerfile'
+    $variant = @($entries | Where-Object { $_.Name -ieq 'Dockerfile' })[0]
+    if ($variant) {
+        Write-Error "anvil: the container image input must be named exactly '.anvil/container/Dockerfile', but this repository has '.anvil/container/$($variant.Name)'. The engine reads the ignore file as '<dockerfile>.dockerignore', and anvil maintains '.anvil/container/Dockerfile.dockerignore', so a differently-cased name would build with no ignore file. Rename it."
         exit 1
     }
-    Write-Output ".anvil/container/$($match.Name)"
+    Write-Error 'anvil: container image input is missing: .anvil/container/Dockerfile'
+    exit 1
 
 # Print the exec image reference for the current inputs, without building it.
 #
@@ -3673,23 +3680,42 @@ anvil-container-tag:
     # +x` that changes no content still changes the image and must rename the
     # tag. Git's index is the only source of that bit which answers identically
     # on every platform: Windows has no such bit, so reading it from the
-    # filesystem would make two checkouts of one commit disagree on the tag.
+    # filesystem would make two checkouts of one commit disagree on the tag, and
+    # a published image would stop resolving for half the people who use it.
     #
-    # A path git cannot account for -- no git on PATH, or a file that is
-    # untracked -- frames as non-executable. The cost is a cache miss against a
-    # host that knows better, never the reuse of an image that no longer matches
-    # its inputs.
+    # The index is authoritative only while the working tree agrees with it. A
+    # mode change that has not been staged would be copied by the build and
+    # missed by the tag, so it is refused below rather than absorbed.
+    #
+    # An untracked file's mode is not an input: it has no committed identity, so
+    # no other checkout can reproduce it and there is nothing for a shared tag
+    # to encode.
     #
     # quotePath=false so a non-ASCII path arrives verbatim rather than
     # backslash-escaped, which would key the set on a spelling the walk never
     # produces.
     $executable = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $tracked = @('.anvil/container', 'justfiles', 'rust-toolchain.toml')
     if (Get-Command git -ErrorAction SilentlyContinue) {
-        $staged = & git -c core.quotePath=false -C $repoRoot ls-files --stage -- '.anvil/container' 'justfiles' 'rust-toolchain.toml' 2>$null
+        $staged = & git -c core.quotePath=false -C $repoRoot ls-files --stage -- @tracked 2>$null
         if ($LASTEXITCODE -eq 0) {
             foreach ($entry in $staged) {
                 if ($entry -match '^100755 [0-9a-f]+ \d+\t(.+)$') {
                     [void]$executable.Add($Matches[1])
+                }
+            }
+        }
+        # `--raw` reports the index mode and the working-tree mode as the first
+        # two fields, so a mode-only change is visible even though the content
+        # is identical. On Windows core.fileMode is normally false and git
+        # reports no drift, which is correct: the filesystem has no bit to
+        # disagree with.
+        $drift = & git -c core.quotePath=false -C $repoRoot diff --no-ext-diff --raw -- @tracked 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            foreach ($entry in $drift) {
+                if ($entry -match '^:(\d{6}) (\d{6}) [0-9a-f]+ [0-9a-f]+ \S+\t(.+)$' -and $Matches[1] -ne $Matches[2]) {
+                    Write-Error "anvil: '$($Matches[3])' has mode $($Matches[2]) in the working tree and $($Matches[1]) in the index. The build copies the working tree while the image tag is computed from the index, so the image would not match its own reference. Stage the mode change (git add) and re-run."
+                    exit 1
                 }
             }
         }

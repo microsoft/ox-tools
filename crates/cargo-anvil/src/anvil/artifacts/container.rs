@@ -960,24 +960,29 @@ mod tests {
     }
 
     #[test]
-    fn the_dockerfile_is_found_under_the_casing_on_disk() {
-        // Anvil resolves every path it manages against what the repository
-        // already has, so a checkout carrying `dockerfile` keeps that name and
-        // the regions are maintained there. A recipe hard-coding the canonical
-        // literal then names nothing on a case-sensitive filesystem.
+    fn the_dockerfile_must_carry_the_canonical_name() {
+        // The engine reads the ignore file as `<dockerfile>.dockerignore` and
+        // anvil maintains it at `.anvil/container/Dockerfile.dockerignore`, so
+        // the two names have to agree and only one of them can move. A variant
+        // is refused, because building from `dockerfile` would find no ignore
+        // file and stream the whole worktree into the build context.
         assert!(
             !RECIPE.contains("$dockerfile = '.anvil/container/Dockerfile'"),
-            "the path must be resolved, not assumed"
+            "the path must come from the recipe that checks it"
         );
         assert!(RECIPE.contains("_anvil-container-dockerfile:"));
         // -ceq, because PowerShell's -eq on strings is case-insensitive and
-        // would make the exact-match pass indistinguishable from the fallback.
+        // would make the canonical name indistinguishable from a variant.
         assert!(RECIPE.contains("$_.Name -ceq 'Dockerfile'"));
-        assert!(RECIPE.contains("$_.Name -ieq 'Dockerfile'"));
+        assert!(RECIPE.contains("must be named exactly '.anvil/container/Dockerfile'"));
         // The one place that asserts the file exists: the tag's directory walk
         // cannot, because a missing Dockerfile contributes nothing to the hash
         // and yields a confident tag for an image that can never be built.
         assert!(RECIPE.contains("anvil: container image input is missing: .anvil/container/Dockerfile"));
+        // The ignore file is derived from that name, so it lands on the owned
+        // artifact and is normalized as the text it is -- otherwise a CRLF and
+        // an LF checkout of one commit disagree on the tag.
+        assert!(RECIPE.contains(r#"[void]$declaredText.Add("$dockerfile.dockerignore")"#));
     }
 
     #[test]

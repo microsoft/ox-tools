@@ -1164,32 +1164,42 @@ fn a_wrapped_tier_hides_its_checks_from_a_plan() {
     );
 }
 
-/// Anvil resolves every path it manages against what the repository already
-/// carries, so a checkout holding `dockerfile` keeps that name and the regions
-/// are maintained inside it. The container recipes have to agree, or on a
-/// case-sensitive filesystem the build names a file that does not exist.
+/// The engine derives the ignore file's name from the Dockerfile's, and anvil
+/// maintains that artifact at a fixed canonical path, so the two names have to
+/// agree. A case variant is refused rather than accommodated: building from
+/// `dockerfile` would find no `dockerfile.dockerignore`, silently stream the
+/// whole worktree into the build context, and admit inputs the tag does not
+/// cover.
 #[test]
-fn the_container_dockerfile_resolves_to_its_on_disk_casing() {
+fn a_case_variant_dockerfile_is_refused_rather_than_built_from() {
     if !tools_available() {
         return;
     }
 
-    for name in ["Dockerfile", "dockerfile", "DOCKERFILE"] {
-        let tmp = fixture(&[("container.just", CONTAINER)], &[]);
-        let root = tmp.path();
-        write(&root.join(".anvil/container").join(name), "FROM scratch\n");
+    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+    let root = tmp.path();
+    write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
+    let canonical = run_just(root, &["_anvil-container-dockerfile"], &[]);
+    assert!(
+        canonical.status.success(),
+        "the canonical name must resolve\nstderr:\n{}",
+        String::from_utf8_lossy(&canonical.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&canonical.stdout).trim(), ".anvil/container/Dockerfile");
 
-        let output = run_just(root, &["_anvil-container-dockerfile"], &[]);
+    // Only a case-sensitive filesystem can hold a variant that is a different
+    // file, which is exactly where the ignore-file lookup breaks.
+    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+    let root = tmp.path();
+    write(&root.join(".anvil/container/dockerfile"), "FROM scratch\n");
+    let holds_variant = !root.join(".anvil/container/Dockerfile").exists();
+    if holds_variant {
+        let variant = run_just(root, &["_anvil-container-dockerfile"], &[]);
+        assert_failed(&variant, "resolving a case-variant Dockerfile");
+        let stderr = String::from_utf8_lossy(&variant.stderr);
         assert!(
-            output.status.success(),
-            "resolving {name} failed\nstdout:\n{}\nstderr:\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout).trim(),
-            format!(".anvil/container/{name}"),
-            "the resolved path must carry the casing on disk"
+            stderr.contains("must be named exactly") && stderr.contains("dockerignore"),
+            "the refusal must name the rule and the reason\nstderr:\n{stderr}"
         );
     }
 
@@ -1203,24 +1213,7 @@ fn the_container_dockerfile_resolves_to_its_on_disk_casing() {
         "the failure must name the missing input\nstderr:\n{}",
         String::from_utf8_lossy(&missing.stderr)
     );
-
-    // Exact case wins over a fold. Only a case-sensitive filesystem can hold
-    // both spellings at once, so this is the one assertion that cannot run
-    // everywhere; on Windows the two names are the same file.
-    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
-    let root = tmp.path();
-    write(&root.join(".anvil/container/dockerfile"), "FROM scratch\n");
-    write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
-    if fs::read_dir(root.join(".anvil/container")).unwrap().count() == 2 {
-        let output = run_just(root, &["_anvil-container-dockerfile"], &[]);
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout).trim(),
-            ".anvil/container/Dockerfile",
-            "an exact-case match must win over a case-insensitive one"
-        );
-    }
 }
-
 /// `COPY` carries a file's executable bit into the image, so a `chmod +x` with
 /// no content change still changes what the image contains. The tag has to
 /// follow it, or the changed image keeps a reference that already resolves and
@@ -1264,4 +1257,42 @@ fn the_image_tag_follows_the_executable_bit() {
         "the executable bit must reach the digest, or a chmod leaves the image unnamed"
     );
     assert_eq!(plain, tag("0"), "the tag must depend on the inputs alone");
+}
+
+/// The index is authoritative for the tag only while the working tree agrees
+/// with it. A `chmod` that has not been staged is copied by the build and
+/// missed by the digest, so the reference would name an image the build does
+/// not produce; the run has to stop rather than absorb that.
+#[test]
+fn an_unstaged_mode_change_stops_the_run() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+    let root = tmp.path();
+    write(&root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"stable\"\n");
+    write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
+    write(&root.join("justfiles/anvil/setup.sh"), "echo hello\n");
+    write(
+        &root.join("fake-bin/git.ps1"),
+        "if ($args -contains 'ls-files') {\n    \
+         Write-Output \"100644 0000000000000000000000000000000000000000 0`tjustfiles/anvil/setup.sh\"\n}\n\
+         if ($args -contains 'diff' -and $env:FAKE_DRIFT -eq '1') {\n    \
+         Write-Output \":100644 100755 0000000 0000000 M`tjustfiles/anvil/setup.sh\"\n}\nexit 0\n",
+    );
+
+    let clean = run_just(root, &["anvil-container-tag"], &[("FAKE_DRIFT", OsStr::new("0"))]);
+    assert!(
+        clean.status.success(),
+        "an agreeing working tree must compute a tag\nstderr:\n{}",
+        String::from_utf8_lossy(&clean.stderr)
+    );
+
+    let drifted = run_just(root, &["anvil-container-tag"], &[("FAKE_DRIFT", OsStr::new("1"))]);
+    assert_failed(&drifted, "computing a tag against an unstaged mode change");
+    let stderr = String::from_utf8_lossy(&drifted.stderr);
+    assert!(
+        stderr.contains("working tree") && stderr.contains("git add"),
+        "the refusal must name the drift and the recovery\nstderr:\n{stderr}"
+    );
 }

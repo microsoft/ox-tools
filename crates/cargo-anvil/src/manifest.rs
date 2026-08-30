@@ -86,7 +86,15 @@ fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
     // -- `a\` counts a component on Windows yet ends no `/` segment, and
     // `..\x` climbs on Windows while reading as one filename on Unix. Rejected
     // rather than interpreted.
-    if path.contains('\\') {
+    //
+    // A drive qualifier divides the platforms the same way: `Path::components`
+    // reports `C:x.txt` as a `Prefix` on Windows and as one ordinary name on
+    // Unix, so the check below cannot see it there. Matched lexically instead.
+    let drive_qualified = {
+        let mut chars = path.chars();
+        matches!((chars.next(), chars.next()), (Some(letter), Some(':')) if letter.is_ascii_alphabetic())
+    };
+    if path.contains('\\') || drive_qualified {
         bail!("{context} '{path}' must be a relative path inside the repository");
     }
     let mut names = 0_usize;
@@ -565,6 +573,8 @@ mod tests {
             "a\\",
             "..\\outside.txt",
             "C:\\x.txt",
+            "C:x.txt",
+            "z:dir/file.txt",
         ] {
             // A TOML basic string treats `\` as an escape, so a path carrying
             // one has to arrive doubled or the document itself is malformed and
