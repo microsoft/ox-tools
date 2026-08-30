@@ -167,6 +167,7 @@ anvil-container-tag:
     $hookRel = '.anvil/container/hooks.ps1'
 
     $inputs = @('rust-toolchain.toml')
+    $links = @()
     # The declared inputs are text this tree owns, so their line endings are
     # normalized before hashing and a CRLF checkout agrees with an LF one.
     # Everything discovered by walking a directory is treated as text only when
@@ -197,9 +198,12 @@ anvil-container-tag:
     # on the tag and a published image would stop resolving.
     $containerRoot = Join-Path $repoRoot '.anvil/container'
     if (Test-Path -LiteralPath $containerRoot) {
-        foreach ($file in Get-ChildItem -LiteralPath $containerRoot -Recurse -File -Force |
+        foreach ($file in Get-ChildItem -LiteralPath $containerRoot -Recurse -Force |
             Where-Object { -not $_.Name.EndsWith('.anvil-proposed') }) {
-            $inputs += [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName) -replace '\\', '/'
+            if ($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $links += $file.FullName }
+            elseif (-not $file.PSIsContainer) {
+                $inputs += [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName) -replace '\\', '/'
+            }
         }
     }
     # Every generated recipe file. The image installs its tools by running
@@ -231,10 +235,27 @@ anvil-container-tag:
     # repository that customizes it gets the proposal written right here.
     $recipeRoot = Join-Path $repoRoot 'justfiles/anvil'
     if (Test-Path -LiteralPath $recipeRoot) {
-        foreach ($file in Get-ChildItem -LiteralPath $recipeRoot -Recurse -File -Force |
+        foreach ($file in Get-ChildItem -LiteralPath $recipeRoot -Recurse -Force |
             Where-Object { -not $_.Name.EndsWith('.anvil-proposed') }) {
-            $inputs += [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName) -replace '\\', '/'
+            if ($file.Attributes -band [System.IO.FileAttributes]::ReparsePoint) { $links += $file.FullName }
+            elseif (-not $file.PSIsContainer) {
+                $inputs += [System.IO.Path]::GetRelativePath($repoRoot, $file.FullName) -replace '\\', '/'
+            }
         }
+    }
+
+    # A symlink is refused rather than digested. The engine copies the link
+    # itself while any reading of it here follows it, so a retarget changes the
+    # image without changing a single byte the walk can see, and a link to a
+    # directory is not enumerated by the walk at all. Framing link text instead
+    # would have to work on Windows, where git materializes a symlink as an
+    # ordinary file unless the checkout was privileged, so the same commit would
+    # digest differently per platform. Anvil never creates one under these
+    # trees, so refusing costs nothing and closes the whole class.
+    if ($links.Count -gt 0) {
+        $named = ($links | ForEach-Object { [System.IO.Path]::GetRelativePath($repoRoot, $_) -replace '\\', '/' }) -join ', '
+        Write-Error "anvil: the container image inputs must be regular files, but these are links: $named. The engine copies a link as a link while the image tag is computed from what it points at, so the image would not match its own reference. Replace them with regular files."
+        exit 1
     }
 
     # Hash a tagged stream rather than raw concatenation, so no rearrangement of
@@ -288,7 +309,11 @@ anvil-container-tag:
     # quotePath=false so a non-ASCII path arrives verbatim rather than
     # backslash-escaped, which would key the map on a spelling the walk never
     # produces.
-    $indexMode = @{}
+    # Ordinal, like the sort and the dedup below: PowerShell's `@{}` folds case,
+    # so two paths differing only in case -- which git permits and the
+    # case-sensitive filesystem the image is built on can hold -- would collapse
+    # to one entry and both would be framed with whichever mode was stored last.
+    $indexMode = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
     $tracked = @('.anvil/container', 'justfiles', 'rust-toolchain.toml')
     if (Get-Command git -ErrorAction SilentlyContinue) {
         $staged = & git -c core.quotePath=false -C $repoRoot ls-files --stage -- @tracked 2>$null

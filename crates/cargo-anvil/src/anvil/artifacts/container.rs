@@ -667,7 +667,7 @@ mod tests {
             .find("$containerRoot = Join-Path $repoRoot '.anvil/container'")
             .expect("the tag must walk the container directory");
         assert!(
-            RECIPE[walk..].contains("Get-ChildItem -LiteralPath $containerRoot -Recurse -File -Force"),
+            RECIPE[walk..].contains("Get-ChildItem -LiteralPath $containerRoot -Recurse -Force"),
             "the walk must be recursive and include hidden entries"
         );
         // A missing Dockerfile must still be fatal: the walk alone would let
@@ -783,8 +783,14 @@ mod tests {
         // into the image. Filtering here would let it change the image's
         // contents without changing its tag. -Force because a dot-prefixed
         // file is copied like any other and would otherwise be skipped.
-        assert!(RECIPE.contains("-Recurse -File -Force"));
-        assert!(!RECIPE.contains("-Recurse -File -Force -Filter '*.just'"));
+        // Directories are enumerated too, because `-File` hides a link to one
+        // and a link is refused rather than digested.
+        assert!(RECIPE.contains("-Recurse -Force"));
+        assert!(!RECIPE.contains("-Recurse -Force -Filter '*.just'"));
+        assert!(
+            !RECIPE.contains("-Recurse -File -Force"),
+            "a link to a directory is invisible to a file-only walk"
+        );
         // ComputeHash, not the static HashData: the latter needs .NET 5, and
         // the prerequisite check accepts PowerShell 7.0 on .NET Core 3.1.
         assert!(!RECIPE.contains("SHA256]::HashData"));

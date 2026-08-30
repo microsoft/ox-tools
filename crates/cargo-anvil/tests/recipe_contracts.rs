@@ -1333,3 +1333,66 @@ fn a_working_tree_mode_the_tag_did_not_frame_stops_the_run() {
         );
     }
 }
+
+/// The engine copies a link as a link, while any read of one here follows it,
+/// so a retarget changes the image without changing a byte the walk can see --
+/// and a link to a directory is not enumerated by the walk at all. Framing the
+/// link text instead would have to work on Windows, where git materializes a
+/// symlink as an ordinary file unless the checkout was privileged, so the same
+/// commit would digest differently per platform. Anvil creates no link under
+/// these trees, so the whole class is refused.
+#[test]
+fn a_link_among_the_image_inputs_is_refused() {
+    if !tools_available() {
+        return;
+    }
+
+    for (kind, name, links_a_directory) in [("a file link", "linked.just", false), ("a directory link", "linked", true)] {
+        let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+        let root = tmp.path();
+        write(&root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"stable\"\n");
+        write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
+        write(&root.join("justfiles/anvil/mod.just"), "# recipes\n");
+        write(&root.join("elsewhere/target.just"), "# shared\n");
+
+        let link = root.join("justfiles/anvil").join(name);
+        let created = if links_a_directory {
+            symlink_dir(&root.join("elsewhere"), &link)
+        } else {
+            symlink_file(&root.join("elsewhere/target.just"), &link)
+        };
+        // Creating a link needs a privilege that not every environment grants.
+        // Where it is refused there is nothing to assert about.
+        if created.is_err() {
+            continue;
+        }
+
+        let output = run_just(root, &["anvil-container-tag"], &[]);
+        assert_failed(&output, &format!("computing a tag with {kind} among the inputs"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("regular") && stderr.contains(name),
+            "{kind} must be named in the refusal\nstderr:\n{stderr}"
+        );
+    }
+}
+
+#[cfg(windows)]
+fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+#[cfg(windows)]
+fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(target, link)
+}
+
+#[cfg(unix)]
+fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(unix)]
+fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
