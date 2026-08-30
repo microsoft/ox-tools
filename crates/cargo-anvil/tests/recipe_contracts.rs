@@ -1220,3 +1220,48 @@ fn the_container_dockerfile_resolves_to_its_on_disk_casing() {
         );
     }
 }
+
+/// `COPY` carries a file's executable bit into the image, so a `chmod +x` with
+/// no content change still changes what the image contains. The tag has to
+/// follow it, or the changed image keeps a reference that already resolves and
+/// the stale one is reused.
+///
+/// The bit is read from git's index rather than the filesystem, because Windows
+/// has no such bit and two checkouts of one commit must agree on the tag. The
+/// fixture's stub git is what makes that observable from either platform.
+#[test]
+fn the_image_tag_follows_the_executable_bit() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(&[("container.just", CONTAINER)], &[]);
+    let root = tmp.path();
+    write(&root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"stable\"\n");
+    write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
+    write(&root.join("justfiles/anvil/setup.sh"), "echo hello\n");
+    write(
+        &root.join("fake-bin/git.ps1"),
+        "if ($args -contains 'ls-files') {\n    \
+         $mode = if ($env:FAKE_EXECUTABLE -eq '1') { '100755' } else { '100644' }\n    \
+         Write-Output \"$mode 0000000000000000000000000000000000000000 0`tjustfiles/anvil/setup.sh\"\n}\nexit 0\n",
+    );
+
+    let tag = |executable: &str| {
+        let output = run_just(root, &["anvil-container-tag"], &[("FAKE_EXECUTABLE", OsStr::new(executable))]);
+        assert!(
+            output.status.success(),
+            "computing the tag failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    };
+
+    let plain = tag("0");
+    let executable = tag("1");
+    assert_ne!(
+        plain, executable,
+        "the executable bit must reach the digest, or a chmod leaves the image unnamed"
+    );
+    assert_eq!(plain, tag("0"), "the tag must depend on the inputs alone");
+}

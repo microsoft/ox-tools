@@ -3669,6 +3669,31 @@ anvil-container-tag:
     # same collision from the other direction.
     $ordered = [System.Collections.Generic.SortedSet[string]]::new(
         [string[]]$inputs, [System.StringComparer]::Ordinal)
+    # The executable bit is part of what `COPY` puts in the image, so a `chmod
+    # +x` that changes no content still changes the image and must rename the
+    # tag. Git's index is the only source of that bit which answers identically
+    # on every platform: Windows has no such bit, so reading it from the
+    # filesystem would make two checkouts of one commit disagree on the tag.
+    #
+    # A path git cannot account for -- no git on PATH, or a file that is
+    # untracked -- frames as non-executable. The cost is a cache miss against a
+    # host that knows better, never the reuse of an image that no longer matches
+    # its inputs.
+    #
+    # quotePath=false so a non-ASCII path arrives verbatim rather than
+    # backslash-escaped, which would key the set on a spelling the walk never
+    # produces.
+    $executable = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    if (Get-Command git -ErrorAction SilentlyContinue) {
+        $staged = & git -c core.quotePath=false -C $repoRoot ls-files --stage -- '.anvil/container' 'justfiles' 'rust-toolchain.toml' 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            foreach ($entry in $staged) {
+                if ($entry -match '^100755 [0-9a-f]+ \d+\t(.+)$') {
+                    [void]$executable.Add($Matches[1])
+                }
+            }
+        }
+    }
     # ComputeHash rather than the static HashData: the latter arrived in .NET 5,
     # and the prerequisite check accepts any PowerShell 7, including 7.0 on
     # .NET Core 3.1 where the static overload does not exist. Failing there
@@ -3687,8 +3712,9 @@ anvil-container-tag:
             } else {
                 $content = [System.IO.File]::ReadAllBytes($path)
             }
+            $mode = if ($executable.Contains($rel)) { 'x' } else { '-' }
             $header = [System.Text.Encoding]::UTF8.GetBytes(
-                'file ' + [System.Text.Encoding]::UTF8.GetByteCount($rel) + ' ' + $rel + ' ' + $content.Length + ' ')
+                'file ' + [System.Text.Encoding]::UTF8.GetByteCount($rel) + ' ' + $rel + ' ' + $mode + ' ' + $content.Length + ' ')
             [void]$sha.TransformBlock($header, 0, $header.Length, $null, 0)
             if ($content.Length -gt 0) {
                 [void]$sha.TransformBlock($content, 0, $content.Length, $null, 0)
