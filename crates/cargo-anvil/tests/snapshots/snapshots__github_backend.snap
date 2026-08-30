@@ -3676,12 +3676,14 @@ anvil-container-tag:
     # same collision from the other direction.
     $ordered = [System.Collections.Generic.SortedSet[string]]::new(
         [string[]]$inputs, [System.StringComparer]::Ordinal)
-    # The executable bit is part of what `COPY` puts in the image, so a `chmod
-    # +x` that changes no content still changes the image and must rename the
-    # tag. Git's index is the only source of that bit which answers identically
-    # on every platform: Windows has no such bit, so reading it from the
-    # filesystem would make two checkouts of one commit disagree on the tag, and
-    # a published image would stop resolving for half the people who use it.
+    # A file's git mode is part of what `COPY` puts in the image -- the
+    # executable bit, and whether the entry is a regular file or a symlink -- so
+    # a change that leaves the bytes alone still changes the image and must
+    # rename the tag. Git's index is the only source of that mode which answers
+    # identically on every platform: Windows has no executable bit, so reading
+    # it from the filesystem would make two checkouts of one commit disagree on
+    # the tag, and a published image would stop resolving for half the people
+    # who use it.
     #
     # The index is authoritative only while the working tree agrees with it. A
     # mode change that has not been staged would be copied by the build and
@@ -3692,16 +3694,16 @@ anvil-container-tag:
     # to encode.
     #
     # quotePath=false so a non-ASCII path arrives verbatim rather than
-    # backslash-escaped, which would key the set on a spelling the walk never
+    # backslash-escaped, which would key the map on a spelling the walk never
     # produces.
-    $executable = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $indexMode = @{}
     $tracked = @('.anvil/container', 'justfiles', 'rust-toolchain.toml')
     if (Get-Command git -ErrorAction SilentlyContinue) {
         $staged = & git -c core.quotePath=false -C $repoRoot ls-files --stage -- @tracked 2>$null
         if ($LASTEXITCODE -eq 0) {
             foreach ($entry in $staged) {
-                if ($entry -match '^100755 [0-9a-f]+ \d+\t(.+)$') {
-                    [void]$executable.Add($Matches[1])
+                if ($entry -match '^(\d{6}) [0-9a-f]+ \d+\t(.+)$') {
+                    $indexMode[$Matches[2]] = $Matches[1]
                 }
             }
         }
@@ -3713,18 +3715,18 @@ anvil-container-tag:
         # A zero working-tree mode is a deletion: the path is in neither the
         # build context nor the digest, so there is nothing to disagree about.
         # Every other entry is present in the context and is compared against
-        # the bit the digest actually framed, which comes from `ls-files
-        # --stage` above. The raw index-side mode is not that bit -- an
+        # the mode the digest actually framed, which comes from `ls-files
+        # --stage` above. The raw index-side mode is not that mode -- an
         # intent-to-add entry reports zero there while `ls-files` reports a real
-        # placeholder mode -- so comparing the two raw fields would both miss an
+        # placeholder -- so comparing the two raw fields would both miss an
         # executable `git add -N` file and reject an ordinary one.
         $drift = & git -c core.quotePath=false -C $repoRoot diff --no-ext-diff --raw -- @tracked 2>$null
         if ($LASTEXITCODE -eq 0) {
             foreach ($entry in $drift) {
                 if ($entry -match '^:\d{6} (\d{6}) [0-9a-f]+ [0-9a-f]+ \S+\t(.+)$') {
                     $worktreeMode, $driftPath = $Matches[1], $Matches[2]
-                    if ($worktreeMode -ne '000000' -and $executable.Contains($driftPath) -ne ($worktreeMode -eq '100755')) {
-                        Write-Error "anvil: '$driftPath' has mode $worktreeMode in the working tree, which is not the mode the image tag was computed from. The build copies the working tree, so the image would not match its own reference. Stage the mode change (git add) and re-run."
+                    if ($worktreeMode -ne '000000' -and $indexMode.ContainsKey($driftPath) -and $indexMode[$driftPath] -ne $worktreeMode) {
+                        Write-Error "anvil: '$driftPath' has mode $worktreeMode in the working tree, but the image tag was computed from mode $($indexMode[$driftPath]). The build copies the working tree, so the image would not match its own reference. Stage the change (git add) and re-run."
                         exit 1
                     }
                 }
@@ -3749,7 +3751,11 @@ anvil-container-tag:
             } else {
                 $content = [System.IO.File]::ReadAllBytes($path)
             }
-            $mode = if ($executable.Contains($rel)) { 'x' } else { '-' }
+            # The whole git mode, not just the executable bit: `COPY` preserves
+            # a symlink as a symlink, while the walk above reads through it, so
+            # replacing a regular file with a link to identical bytes would
+            # otherwise keep the tag. An untracked path has no framed mode.
+            $mode = if ($indexMode.ContainsKey($rel)) { $indexMode[$rel] } else { '-' }
             $header = [System.Text.Encoding]::UTF8.GetBytes(
                 'file ' + [System.Text.Encoding]::UTF8.GetByteCount($rel) + ' ' + $rel + ' ' + $mode + ' ' + $content.Length + ' ')
             [void]$sha.TransformBlock($header, 0, $header.Length, $null, 0)

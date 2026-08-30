@@ -1316,12 +1316,19 @@ fn a_working_tree_mode_the_tag_did_not_frame_stops_the_run() {
             "an intent-to-add entry that is executable",
             ":000000 100755 0000000 0000000 A\tjustfiles/anvil/setup.sh",
         ),
+        (
+            "a regular file replaced by a symlink",
+            ":100644 120000 0000000 0000000 T\tjustfiles/anvil/setup.sh",
+        ),
     ] {
         let output = tag(raw);
         assert_failed(&output, kind);
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // PowerShell wraps an error record and decorates each continuation, so
+        // a multi-word phrase is not a substring of what reaches stderr. It
+        // wraps at spaces though, so individual words survive intact.
         assert!(
-            stderr.contains("working tree") && stderr.contains("git add"),
+            stderr.contains("working") && stderr.contains("Stage"),
             "{kind} must name the drift and the recovery\nstderr:\n{stderr}"
         );
     }
