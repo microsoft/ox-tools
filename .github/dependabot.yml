@@ -18,11 +18,30 @@ updates:
       update-types: ["version-update:semver-patch"]
 
 - package-ecosystem: "github-actions"
-  directory: "/"
+  # "/" covers .github/workflows (both the hand-written workflows and the
+  # anvil-generated anvil-*.yml ones). The second directory covers
+  # cargo-anvil's templates, which are the source of truth for everything
+  # anvil emits -- including the composite actions under .github/actions,
+  # which Dependabot cannot see otherwise: for directory "/" it only reads
+  # an action.yml at the repository root, never .github/actions/*/action.yml.
+  #
+  # A generated workflow and its template must move together, or cargo-anvil
+  # sees the generated file as hand-edited and stops updating it (see
+  # crates/cargo-anvil/docs/design/updates.md section 5). group-by makes
+  # Dependabot raise one pull request per action spanning both directories.
+  # The anvil-regen workflow then reconciles the emitted tree and .anvil.lock
+  # on that branch.
+  directories:
+    - "/"
+    - "/crates/cargo-anvil/templates/github"
   schedule:
     interval: "monthly"
   commit-message:
     prefix: "chore: "
+  groups:
+    actions:
+      patterns: ["*"]
+      group-by: dependency-name
   # Wait 7 days after a release before proposing it, so the community has a
   # window to detect and report a compromised action release.
   cooldown:

@@ -21,6 +21,15 @@ on:
     paths:
       - "crates/cargo-anvil/**"
       - ".github/workflows/regenerate-check.yml"
+      # Anvil-owned artifacts. Editing one of these by hand (or via a
+      # Dependabot action bump) makes anvil treat the file as
+      # repository-customized and stop updating it, so the drift has to be
+      # visible on the pull request rather than only in the merge queue.
+      - ".github/workflows/anvil-*.yml"
+      - ".github/actions/anvil-*/**"
+      - "justfiles/anvil/**"
+      - ".anvil/**"
+      - ".anvil.lock"
   merge_group: {}
   workflow_dispatch: {}
 
