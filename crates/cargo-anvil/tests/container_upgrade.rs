@@ -680,14 +680,17 @@ fn a_case_variant_repository_dockerfile_is_refused_too() {
     );
 }
 
-/// A case-only rename of an already composed host leaves the lock keyed by the
-/// old spelling and the pass keyed by the new one. Nothing is missing -- every
-/// region is still in the file, rewritten this pass -- so the stale entries
-/// must transfer ownership rather than be treated as orphans: removing them
-/// would strip the pass's own writes and leave a Dockerfile with no `FROM`.
+/// A case-only rename of a composed host is refused rather than maintained.
+///
+/// The generated driver requires the declared spelling and refuses any other,
+/// so a file anvil kept up to date under a variant name would be one no recipe
+/// could use, with the generator reporting the tree in sync. The refusal has to
+/// leave the file byte-identical, regions included: the lock is still keyed by
+/// the old spelling, and treating those entries as orphans would strip the
+/// regions and leave a Dockerfile with no `FROM`.
 #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
 #[test]
-fn a_case_only_rename_of_a_composed_host_keeps_its_regions() {
+fn a_case_only_rename_of_a_composed_host_is_refused_and_changes_nothing() {
     let tmp = generated_tree();
     let root = tmp.path();
     let canonical = root.join(".anvil/container/Dockerfile");
@@ -707,14 +710,11 @@ fn a_case_only_rename_of_a_composed_host_keeps_its_regions() {
     let outcome = run_update(&Catalog::anvil(), &local(), root).unwrap();
 
     let after = std::fs::read_to_string(&lowercased).unwrap();
+    assert_eq!(after, composed, "a refused host must be left byte-identical:\n{after}");
     assert_eq!(
         after.matches("# >>> anvil-managed:").count(),
         regions_before,
-        "a case-only rename must not cost the host any of its regions:\n{after}"
-    );
-    assert!(
-        after.contains("\nFROM "),
-        "the composed file must still declare a base image:\n{after}"
+        "a refusal must not cost the host any of its regions:\n{after}"
     );
     let removed: Vec<&Target> = outcome
         .plan
@@ -724,6 +724,19 @@ fn a_case_only_rename_of_a_composed_host_keeps_its_regions() {
         .map(|i| &i.target)
         .collect();
     assert!(removed.is_empty(), "nothing may be removed for a case-only rename: {removed:?}");
+
+    let refusals: Vec<&String> = outcome
+        .plan
+        .refusals()
+        .iter()
+        .filter(|r| r.to_lowercase().contains(".anvil/container/dockerfile"))
+        .collect();
+    assert_eq!(refusals.len(), 1, "one diagnostic per host: {refusals:?}");
+    assert!(
+        refusals[0].contains("must be named exactly") && refusals[0].contains("Rename it"),
+        "the diagnostic must name the required spelling and the recovery: {}",
+        refusals[0]
+    );
 }
 
 /// The real on-disk spelling of the composed host, so the case tests cannot

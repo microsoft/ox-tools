@@ -635,6 +635,26 @@ mod tests {
 
     use super::*;
 
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_temporary_sibling_that_cannot_be_cleared_stops_the_write() {
+        // Only a missing temporary file is absorbed. Anything else means the
+        // name is occupied by something the write cannot go through, and
+        // continuing would report the failure against the wrong path. A
+        // directory occupies it here because `remove_file` refuses one on every
+        // platform, without needing a permission the test may not have.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("Justfile");
+        std::fs::create_dir(tmp.path().join("Justfile.anvil-tmp")).unwrap();
+
+        let err = write_file(&target, "written").unwrap_err();
+
+        assert!(
+            format!("{err}").contains("failed to clear the temporary file"),
+            "the failure must name the step that could not proceed, got: {err}"
+        );
+        assert!(!target.exists(), "the destination must be left untouched");
+    }
     #[cfg(unix)]
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]

@@ -365,6 +365,30 @@ fn push_region_at(
             // sentinels is the repository's from then on.
             None => ComposedHostState::SeedFromScaffold,
         };
+        // Resolved through a case variant. Case-insensitive resolution is right
+        // for an ordinary host, whose consumers open it by whatever name it
+        // has, but a composed host is read by something that requires the
+        // declared spelling: the container driver refuses any other, because
+        // `BuildKit` derives the ignore file's name from the Dockerfile's and
+        // there is no flag to point it elsewhere. Keeping the file up to date
+        // would leave the two halves disagreeing about one on-disk state, with
+        // the generator reporting the tree in sync while every recipe that uses
+        // it exits 1. The generator is the component that just wrote the file,
+        // so it is the one positioned to say so.
+        //
+        // A content state that already refuses keeps its own diagnosis: it
+        // describes the deeper problem, and its recovery -- move the file
+        // aside, restore the regions -- resolves the spelling along the way,
+        // whereas renaming first would only surface the same refusal again.
+        let state = if host == declared.path || matches!(state, ComposedHostState::Unsafe(_)) {
+            state
+        } else {
+            ComposedHostState::Unsafe(format!(
+                "it must be named exactly `{}`, and the recipes that consume it refuse any other \
+                 spelling, so anvil would be maintaining a file nothing can use. Rename it",
+                declared.path
+            ))
+        };
         if matches!(state, ComposedHostState::SeedFromScaffold) {
             hosts.set(&host, declared.scaffold.to_owned());
         }
@@ -918,6 +942,35 @@ mod tests {
             assert_eq!(
                 super::super::composed_placement(ORDER, SCAFFOLD, "a", Some(&host)),
                 RegionPlacement::At(0)
+            );
+        }
+
+        #[test]
+        fn a_crlf_host_still_keeps_the_scaffold_on_line_one() {
+            // `text` is read verbatim, while the scaffold is an LF `include_str!`,
+            // so a CRLF working tree must not look like a host that never carried
+            // the scaffold -- which would place the first region at byte 0, above
+            // the parser directive `BuildKit` honors nowhere else.
+            let host = format!("{SCAFFOLD}{}", region("b", "second\n")).replace('\n', "\r\n");
+            let RegionPlacement::At(offset) = super::super::composed_placement(ORDER, SCAFFOLD, "a", Some(&host)) else {
+                panic!("expected an offset placement");
+            };
+            assert!(offset > 0, "the directive must keep line 1 on a CRLF checkout");
+            assert!(
+                host[..offset].starts_with(SCAFFOLD.trim_end_matches('\n')),
+                "the offset must fall after the directive, not inside it"
+            );
+        }
+
+        #[test]
+        fn the_test_scaffold_is_the_one_production_uses() {
+            // Every case above is argued against a real Dockerfile. A stub that
+            // drifted from the emitted scaffold would let them all pass while
+            // production placed a region above the directive.
+            assert_eq!(
+                SCAFFOLD,
+                crate::anvil::artifacts::container::composed_host().scaffold,
+                "the placement tests must exercise the scaffold anvil actually seeds"
             );
         }
     }
