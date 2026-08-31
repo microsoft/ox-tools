@@ -217,7 +217,6 @@ pub fn upsert_region_with_placement(
     }
 
     if let RegionPlacement::At(offset) = placement {
-        let offset = offset.min(text.len());
         // Snap to a line boundary only when the offset is not already on one.
         // Callers point at the start of the line the region should displace
         // (typically a preceding region's `end_line.end`); advancing
@@ -226,18 +225,23 @@ pub fn upsert_region_with_placement(
         // offset that does fall mid-line is rounded forward, because splitting
         // a line around the sentinels turns one valid instruction into two
         // invalid halves.
-        // A byte offset from a caller need not fall on a character boundary,
-        // and slicing on one panics. Walk back to the nearest boundary first,
-        // so the line rounding below operates on an index that can be sliced.
-        let mut offset = offset.min(text.len());
-        while !text.is_char_boundary(offset) {
-            offset -= 1;
-        }
-        let on_line_boundary = offset == 0 || text[..offset].ends_with('\n');
+        //
+        // Everything below indexes the bytes rather than the `str`, because a
+        // caller's offset need not fall on a character boundary and slicing a
+        // `str` at one panics. A `'\n'` byte never occurs inside a multi-byte
+        // character, so rounding forward to just past one always lands on a
+        // character boundary as well as a line boundary, and a mid-character
+        // offset is mid-line by definition and therefore always rounded.
+        let offset = offset.min(text.len());
+        let bytes = text.as_bytes();
+        let on_line_boundary = offset == 0 || bytes[offset - 1] == b'\n';
         let offset = if on_line_boundary {
             offset
         } else {
-            text[offset..].find('\n').map_or(text.len(), |index| offset + index + 1)
+            bytes[offset..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(text.len(), |index| offset + index + 1)
         };
         let (before, after) = text.split_at(offset);
         let mut out = String::with_capacity(text.len() + rendered.len() + 2);
@@ -521,6 +525,22 @@ mod tests {
         assert_eq!(
             new,
             "# syntax=docker/dockerfile:1\n\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n\nFROM base\n"
+        );
+    }
+
+    #[test]
+    fn at_placement_inside_a_multi_byte_character_rounds_to_the_next_line() {
+        // Nothing in the type says a caller's byte offset falls on a character
+        // boundary, and splitting a `str` at one that does not panics. An
+        // offset inside a character is mid-line by definition, so it rounds
+        // forward to the next line just as any other mid-line offset does.
+        let host = "# rünlevel note\nFROM base\n";
+        let inside = host.find('ü').unwrap() + 1;
+        assert!(!host.is_char_boundary(inside), "the fixture must place the offset mid-character");
+        let new = upsert_region_with_placement(host, "x", "body\n", SYN, RegionPlacement::At(inside)).unwrap();
+        assert_eq!(
+            new,
+            "# rünlevel note\n\n# >>> anvil-managed: x\nbody\n# <<< anvil-managed: x\n\nFROM base\n"
         );
     }
 
