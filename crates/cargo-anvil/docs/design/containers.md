@@ -9,7 +9,7 @@ just anvil-container cargo build      # any other command
 just anvil-container                  # interactive shell
 ```
 
-Execution is opt-in per invocation: recipes run natively unless a container is requested by name. The feature is three
+Execution is opt-in per invocation: everything runs natively unless `anvil-container` is named. The feature is three
 generated artifacts and one optional hook script, with no configuration file.
 
 See [README.md](./README.md) for the overall design principles, [local.md](./local.md) for the recipe surface this
@@ -55,8 +55,8 @@ own agents. The image is pinned to resemble that environment, not to reproduce i
 
 ## 2. Command surface
 
-`anvil-container` takes the argv to run inside the image; every recipe continues to execute natively unless a
-container is requested by name. Anvil recipes are reached by naming `just`, like any other command:
+`anvil-container` takes the argv to run inside the image; nothing is routed there automatically, so everything
+continues to execute natively. Anvil recipes are reached by naming `just`, like any other command:
 
 ```bash
 just anvil-container just anvil-pr
@@ -287,7 +287,7 @@ compatible. A catalog on an older base installs from source instead.
 
 ## 5. Execution model
 
-One container is created per `anvil-container` invocation, however many checks the requested recipe runs, and is
+One container is created per `anvil-container` invocation, however many checks the requested command runs, and is
 removed on exit (`--rm`).
 
 ### 5.1 Mounts and working directory
@@ -385,7 +385,7 @@ Everything else a run needs comes from the hook (§7).
 ### 5.4 Re-entry
 
 `ANVIL_IN_CONTAINER=1` is set in the image and passed on each run. `anvil-container` checks it first and, inside the
-image, executes the requested recipe directly instead of launching another container, so a recipe that reaches
+image, executes the requested command directly instead of launching another container, so a recipe that reaches
 `anvil-container` transitively still performs its work once.
 
 ## 6. Engines and host setup
@@ -425,7 +425,7 @@ When the engine is reached through WSL it does not share the Windows filesystem 
 it hands over (bind-mount source, build context, `--file`) with `wslpath -a -u`. An untranslated path is not
 rejected by the engine; it silently resolves to an empty directory. The `--exec` form is required rather than
 cosmetic: plain `wsl.exe --` hands the command line to the distribution's login shell, which would expand `$NAME`
-and split on `;` in repository paths and forwarded recipe arguments alike. A path holding `$` would be truncated by
+and split on `;` in repository paths and forwarded command arguments alike. A path holding `$` would be truncated by
 that expansion and `wslpath -a` would still exit 0, bind-mounting the wrong directory.
 
 ### 6.2 Docker
