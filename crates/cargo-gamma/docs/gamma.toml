@@ -1,0 +1,285 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# A fully documented cargo-gamma configuration.
+#
+# Copy this file to `gamma.toml` in your workspace root and uncomment what you need.
+# Every key below is shown with the value cargo-gamma uses when the key is absent, so a file with
+# everything commented out behaves exactly like no file at all — which is what makes this safe to
+# copy wholesale and edit down.
+#
+#   cp docs/gamma.toml gamma.toml
+#
+# Every key is optional. A file that sets one key is a valid file; the rest keep whatever the
+# command line or the built-in default says.
+#
+# HOW SETTINGS COMBINE
+#
+#   Scalar keys (numbers, strings, booleans) are OVERRIDDEN by the command line: pass the flag and
+#   the file's value is ignored.
+#
+#   List keys (`files`, `cargo-args`, `packages`, …) are EXTENDED by the command line: the flag adds
+#   to what the file says rather than replacing it. There is deliberately no way to subtract; use
+#   `--no-config` to start from nothing.
+#
+#   `mutators` is the exception among lists: naming `--mutators` on the command line replaces this key
+#   entirely, because a selector list is a single decision rather than an accumulation.
+#
+# Unknown keys are a hard error rather than a warning, so a typo cannot silently do nothing.
+#
+# The full reference is docs/CONFIG.md; the options these mirror are in docs/CMDLINE.md.
+
+# ---------------------------------------------------------------------------------------------
+# Selecting what to mutate
+# ---------------------------------------------------------------------------------------------
+
+# Which mutators to apply, as the selector list you would write after `--mutators`.
+#
+# A selector is a mutator name (`arith.add_to_sub`), a family (`relational`), a preset
+# (`@default`), or `all`. Prefix with `!` to subtract. A list rather than a string so each entry
+# can carry a comment explaining why it is here; the entries are joined with commas and parsed by
+# exactly the same code that parses the flag.
+#
+# Default: the main catalog (equivalently, the `@default` preset). Add `@pedantic` explicitly for
+# valid but commonly low-yield mutations.
+#
+# mutators = [
+#     "@default",
+#     "!literal",        # this codebase has thousands of table constants; the noise is not worth it
+# ]
+
+# Globs limiting which files are mutated. Empty means every file in the selected packages.
+#
+# files = ["src/**/*.rs"]
+
+# Globs excluding files from mutation. Applied after `files`.
+#
+# exclude-files = [
+#     "src/generated/**",
+#     "**/build.rs",
+# ]
+
+# Packages to mutate. Empty follows Cargo: the owning package below a package root, or the
+# workspace's default members at the workspace root.
+#
+# packages = ["my-core", "my-api"]
+
+# Additional `Err(...)` values for the `fn_value.err_with` mutator, which replaces a function body
+# with an error. The default set covers common standard-library errors; add your own crate's.
+#
+# errors = ["MyError::Timeout", "MyError::NotFound"]
+
+# ---------------------------------------------------------------------------------------------
+# Cargo features
+# ---------------------------------------------------------------------------------------------
+
+# Features to activate. Discovery and the build always agree on these: finding mutants under one
+# feature set and compiling under another produces mutants that cannot exist.
+#
+# features = ["postgres", "tracing"]
+
+# Activate every feature of every selected package. Default: false.
+#
+# all-features = false
+
+# Do not activate the `default` feature. Default: false.
+#
+# no-default-features = false
+
+# ---------------------------------------------------------------------------------------------
+# Building
+# ---------------------------------------------------------------------------------------------
+
+# The cargo profile to build with. Default: cargo's own default for `cargo test`.
+#
+# An optimized profile can pay for a CPU-heavy suite because the build is paid once and the suite
+# is paid once per mutant. Define the opt-in `gamma` example from README.md in the workspace root
+# Cargo.toml, then select it here. Keep one profile across comparable runs: changing it invalidates
+# compiler-unviability reuse and can change the score.
+#
+# profile = "gamma"
+
+# Extra arguments for every cargo invocation. These reach cargo, not the test binaries.
+#
+# cargo-args = ["--offline", "--locked"]
+
+# Seconds the build may take before the run is abandoned. Default: unlimited.
+#
+# A run builds once, so a build that never finishes costs everything rather than one mutant.
+#
+# build-timeout = 1800.0
+
+# Multiple of the first successful build's duration a later build round is allowed.
+#
+# Rollback rounds rebuild the same tree with fewer mutants, so a round running far longer than the
+# first is a sign something is wrong rather than a slow machine. Default: unset.
+#
+# build-timeout-multiplier = 3.0
+
+# ---------------------------------------------------------------------------------------------
+# Running tests
+# ---------------------------------------------------------------------------------------------
+
+# How many mutants to test at once. Default: one more than the available parallelism (cores + 1).
+#
+# jobs = 8
+
+# The multiple of each test binary's baseline duration a mutant is allowed. Default: 1.5.
+#
+# test-timeout-multiplier = 1.5
+
+# A lower bound on the test binary timeout, however fast the baseline was. Default: 20 seconds.
+#
+# A test binary finishing in milliseconds would otherwise get a budget of just over that duration, which a loaded
+# machine can exceed for reasons having nothing to do with the mutant.
+#
+# minimum-test-timeout = 20.0
+
+# Extra arguments for every test binary. These reach the harness, not cargo.
+#
+# This is the configuration-file equivalent of the trailing `-- …` on the command line, which a
+# TOML file has no way to express.
+#
+# cargo-test-args = ["--test-threads=1"]
+
+# Packages whose tests may decide a verdict. Empty means each mutant is judged only by tests from
+# its own package, which is both the default and almost always what you want.
+#
+# test-packages = ["my-integration-tests"]
+
+# Let every workspace package's tests judge mutants they can reach.
+# Default: false.
+#
+# The widest possible oracle: slower, but it cannot miss a test in another package that would have
+# caught the mutant. The command-line equivalent is `--test-workspace`, and setting either is
+# enough — the file cannot switch the flag back off.
+#
+# test-workspace = true
+
+# Disable the default case-level reachability census and run each reachable test binary whole.
+# Default: false.
+#
+# Use this for suites whose reachability depends on threads, clocks, randomness or hash iteration
+# order. It does not override package or target filters.
+#
+# whole-test-binaries = false
+
+# Test target name globs that may decide a verdict. Empty means all of them.
+#
+# include-tests = ["unit_*"]
+
+# Test target name globs that must not decide a verdict.
+#
+# exclude-tests = ["*_slow", "e2e_*"]
+
+# Run test binaries with `cargo nextest` for per-test process isolation. Default: false.
+#
+# Enable when the suite depends on per-test process isolation — tests that set environment
+# variables, install process-wide handlers, or share a global singleton. Such a suite is not merely
+# slower under a threaded harness; it is red, and a red baseline stops the run.
+#
+# nextest = false
+
+# ---------------------------------------------------------------------------------------------
+# Baseline
+# ---------------------------------------------------------------------------------------------
+
+# Skip the baseline run. Default: false.
+#
+# Faster and strictly less trustworthy: without a baseline there is no evidence that a failing test
+# was caused by the mutant rather than by the suite already being red, and no measurement to derive
+# a timeout or a memory ceiling from.
+#
+# no-baseline = false
+
+# Believe a failing test without re-running it with no mutant active. Default: false.
+#
+# no-confirm = false
+
+# ---------------------------------------------------------------------------------------------
+# Memory
+# ---------------------------------------------------------------------------------------------
+
+# How much memory control to place around each test binary: "off", "measure" or "enforce".
+# Default: "enforce".
+#
+#   off      neither measure nor bound
+#   measure  report each test subtree's peak, but never stop a mutant for it
+#   enforce  hold every mutant to a ceiling derived from its binary's baseline peak
+#
+# The default matches the wall-clock timeout's reasoning: a mutation can turn bounded allocation
+# into unbounded allocation, and the person who most needs protecting from that is the one who never
+# thought to ask for it. Where the host cannot provide the accounting, a run that merely defaulted
+# into "enforce" drops to "off" and says so rather than refusing to start.
+#
+# memory = "enforce"
+
+# The multiple of a test binary's baseline peak memory a mutant of it may reach.
+#
+# memory-multiplier = 2.0
+
+# Absolute headroom added to a test binary's baseline peak, as a size.
+#
+# memory-headroom = "128MiB"
+
+# An explicit ceiling for every test binary, instead of one derived from the baseline.
+#
+# Required if you set `memory = "enforce"` together with `no-baseline = true`, since there is then
+# no measurement to derive a ceiling from.
+#
+# memory-limit = "2GiB"
+
+# A ceiling for the baseline runs themselves.
+#
+# baseline-memory-limit = "4GiB"
+
+# ---------------------------------------------------------------------------------------------
+# Run control
+# ---------------------------------------------------------------------------------------------
+
+# Caching and incremental execution mode: "no" or "build". Default: "build".
+#
+#   no     cold run: builds and tests every mutant from scratch
+#   build  reuses matching compiler unviability and checks previous killer tests first
+#
+# Test verdicts are never reused; every score-bearing outcome is established by this run.
+#
+# incremental = "build"
+
+# Fail the run if the mutation score is below this percentage. Default: no gate.
+#
+# Start below where you are today and ratchet upwards; a gate set above the current score turns
+# every build red and gets switched off within a week.
+#
+# min-score = 70.0
+
+# ---------------------------------------------------------------------------------------------
+# Sharding
+# ---------------------------------------------------------------------------------------------
+
+# Split the population across parallel CI jobs, then combine the reports with `cargo gamma merge`.
+#
+# Both keys are required together. Usually these come from the command line, since the index differs
+# per job, but the count can reasonably live here.
+#
+# [shard]
+# count = 8
+# index = 0
+
+# ---------------------------------------------------------------------------------------------
+# Artifact destination
+# ---------------------------------------------------------------------------------------------
+
+# Where all five user-facing artifacts are written. The directory is created if necessary.
+# Default: target/cargo-gamma in the original workspace.
+#
+# artifact-dir = "target/cargo-gamma"
+
+# Load the HTML viewer from a CDN instead of embedding it. Default: false.
+#
+# Produces a much smaller file, at the cost of needing network access to read it — which a CI
+# artifact opened from an air-gapped machine will not have.
+#
+# [reporters]
+#
+# html-external = false

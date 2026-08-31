@@ -38,7 +38,7 @@
 # TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
 # skip/splat preamble, this recipe stays multi-step: cargo-metadata
 # filter to library crates (cargo-semver-checks --workspace fails on
-# bin-only workspaces), intersect ANVIL_INCLUDE_AFFECTED with that
+# bin-only workspaces), intersect the affected set ($include) with that
 # set, verify the PR branch baseline is present, skip newly-added
 # manifest paths, then invoke per-crate against that baseline with
 # special handling for renamed crates ("package `<name>` not found in
@@ -46,15 +46,16 @@
 
 # Check affected crates for semantic versioning violations.
 [script("pwsh", "-NoProfile")]
-anvil-semver-check: anvil-semver-check-validate-prereqs
+anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $commentFile = 'target/anvil/comments/semver.md'
-    if ($env:ANVIL_INCLUDE_AFFECTED -eq '--skip') {
+    if ($include -eq '--skip') {
         Write-Host 'anvil-semver-check: no affected packages; skipping'
         Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
         exit 0
     }
-    $pkg = @(if ($env:ANVIL_INCLUDE_AFFECTED) { -split $env:ANVIL_INCLUDE_AFFECTED } else { '--workspace' })
+    $pkg = @(if ($include) { -split $include } else { '--workspace' })
     # Build the candidate package list. Keep each package's metadata so
     # its manifest path can also be checked in the baseline. Always
     # iterate per-package over library crates only -- cargo-semver-checks
@@ -157,16 +158,19 @@ anvil-semver-check: anvil-semver-check-validate-prereqs
             $findings.Add('```') | Out-Null
             $findings.Add('') | Out-Null
         } elseif ($semverExit -eq 101) {
-            # Exit 101 means the check could not complete. Two transitions
-            # intentionally have no comparable branch baseline: a package
-            # renamed in place and a baseline bin becoming a library.
+            # Exit 101 means the check could not complete. Some conditions
+            # intentionally have no usable branch baseline: a package renamed
+            # in place, a baseline bin becoming a library, or a dependency
+            # version in the baseline becoming yanked after that commit landed.
             $packageMissing = $output.Contains(('package `{0}` not found in' -f $p))
             $manifestParseFailed = $output.Contains('possibly due to errors:')
             $renamedPackage = $packageMissing -and -not $manifestParseFailed
             $baselineLibraryMissing = $output.Contains('has no lib target') -or
                                       $output.Contains('no library targets found')
-            if ($renamedPackage -or $baselineLibraryMissing) {
-                Write-Host "  $p has no comparable branch baseline; skipping (likely renamed or bin->lib transition)" -ForegroundColor Yellow
+            $baselineDependencyYanked = $output.Contains('is yanked') -and
+                                        ($output -match 'target[\\/]+semver-checks[\\/]+git-')
+            if ($renamedPackage -or $baselineLibraryMissing -or $baselineDependencyYanked) {
+                Write-Host "  $p has no usable branch baseline; skipping (renamed, bin->lib, or yanked baseline dependency)" -ForegroundColor Yellow
             } else {
                 Write-Warning "anvil-semver-check: $p could not be checked (cargo-semver-checks exit 101):`n$output"
                 $inconclusive.Add('#### `' + $p + '` (exit 101)') | Out-Null

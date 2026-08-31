@@ -115,7 +115,7 @@ flowchart LR
 |--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `semver-check`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
 | `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `llvm-cov` (instrumented `nextest`), `doc-test`, `examples`. Coverage is uploaded once from the canonical x86_64 Linux leg. |
-| `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped via `ANVIL_INCLUDE_AFFECTED` so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
+| `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped to the affected set so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
 | `pr-mutants`         | Linux x86_64 + Windows x86_64 + Linux aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | Diff-scoped mutation testing (`mutants --in-diff`). The recipe self-skips on `aarch64-pc-windows-msvc` (cargo-mutants doesn't build there), so the GH windows-arm leg is a no-op rather than a job failure. |
 
 The three `pr-slow*` groups are independent: failures in `pr-test` don't block `pr-runtime-analysis` or `pr-mutants` from running, and overall PR wall-clock is `max(pr-test, pr-runtime-analysis, pr-mutants)` per leg rather than the sum. Locally, `just anvil-pr-slow` is an umbrella recipe that runs all three sub-recipes sequentially so adopters who want "run everything slow" don't have to type three commands.
@@ -174,7 +174,7 @@ that provided the strongest version of the check.
 | `deny`                         | `cargo deny check`                                        | all |
 | `audit`                        | `cargo audit`                                             | oxidizer |
 | `udeps`                        | `cargo +<pinned-nightly> udeps --workspace --all-features` run **twice** — once with default targets (lib + bins) and once with `--all-targets`. cargo-udeps only analyzes the targets it's told to, and each run catches a variant the other masks: the default-targets run surfaces a dep in `[dependencies]` referenced only by tests/benches/examples (it should be a dev-dep; `--all-targets` would see it as "used"), while the `--all-targets` run surfaces unused `[dev-dependencies]` (never compiled by the default-targets run). Together they cover unused deps, unused dev-deps, and deps that should be dev-deps. | oxidizer, oxidizer-github |
-| `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected library crate. The PR target is the baseline. Exit 100 is a completed check with deny-level findings; exit 101 or another nonzero status means the comparison was inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory, matching the repository's native `semver` job (`continue-on-error: true`). Proven rename and bin→lib transitions with no comparable baseline are skipped without a comment. Anvil preflight failures such as invalid current-workspace metadata or an unavailable baseline ref still fail because the recipe cannot establish what to compare. | oxidizer-github |
+| `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected library crate. The PR target is the baseline. Exit 100 is a completed check with deny-level findings; exit 101 or another nonzero status means the comparison was inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory, matching the repository's native `semver` job (`continue-on-error: true`). Proven rename and bin→lib transitions with no comparable baseline, and dependencies proven to be yanked only in the checked-out baseline tree, are skipped without a comment. Anvil preflight failures such as invalid current-workspace metadata or an unavailable baseline ref still fail because the recipe cannot establish what to compare. | oxidizer-github |
 | `external-types`               | `cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path` per library crate (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are skipped). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
 
 ### `pr-slow`
@@ -200,7 +200,7 @@ This is the same set of checks that used to live in the standalone `pr-test` gro
 
 | Check     | Invocation                                                                                                                                                           | Source |
 |-----------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------|
-| `miri`    | `cargo +<pinned-nightly> miri test --all-features --tests` over the impact-affected packages. Uses libtest (one process per test binary), **not** `cargo miri nextest run`: under miri, nextest's process-per-test model pays miri's expensive std-initialization re-interpretation for *every* test and roughly doubles wall-time on a large suite (the dominant cost on the PR critical path). `--tests` runs lib/bin unit tests and integration tests (the same target set nextest ran) while excluding doctests, which miri can't run; it is used in preference to `--lib --tests` because `--lib` errors with "no library targets found" on a bin-only affected package under impact scoping. Slow tests opt out per-test with `#[cfg_attr(miri, ignore)]` -- anvil doesn't pass exotic `MIRIFLAGS`; the per-test opt-out is the canonical mechanism. libtest exits 0 when a binary's tests are all skipped, so no `--no-tests=pass` workaround is needed. The recipe defaults to `--workspace` locally when no impact env vars are set, so plain `just anvil-pr-runtime-analysis` runs the full miri suite. | oxidizer, oxidizer-github |
+| `miri`    | `cargo +<pinned-nightly> miri test --all-features --tests` over the impact-affected packages. Uses libtest (one process per test binary), **not** `cargo miri nextest run`: under miri, nextest's process-per-test model pays miri's expensive std-initialization re-interpretation for *every* test and roughly doubles wall-time on a large suite (the dominant cost on the PR critical path). `--tests` runs lib/bin unit tests and integration tests (the same target set nextest ran) while excluding doctests, which miri can't run; it is used in preference to `--lib --tests` because `--lib` errors with "no library targets found" on a bin-only affected package under impact scoping. Slow tests opt out per-test with `#[cfg_attr(miri, ignore)]` -- anvil doesn't pass exotic `MIRIFLAGS`; the per-test opt-out is the canonical mechanism. libtest exits 0 when a binary's tests are all skipped, so no `--no-tests=pass` workaround is needed. The recipe reads its scope from the `target/anvil/impact/` cache via `_anvil-impact-include`; because it depends on `anvil-impact`, a clean direct or PR invocation is impact-scoped (unaffected packages are skipped). It runs the full workspace only when scoping is off — the scheduled/full tiers set `ANVIL_IMPACT=off`, and a dirty local tree widens for safety. | oxidizer, oxidizer-github |
 | `careful` | `cargo +<catalog-nightly> careful test --all-features --locked` over the impact-affected packages. cargo-careful uses a debug-instrumented std in a stable cache path. Because Cargo fingerprints the sysroot path rather than its contents, the recipe records the actual `rustc -vV` and SHA-256 of the resolved `cargo-careful` executable in `target/anvil/careful-sysroot.id`; either changing triggers `cargo clean`. The executable hash is used because cargo-careful rejects version-only invocations. This remains correct when validation accepts a newer installed cargo-careful. | oxidizer-github |
 | `loom`    | For each `[[test]]` target that declares `required-features = ["loom"]`, `cargo test -p <pkg> --release --all-features --locked --test <target> -- --test-threads=1` with `RUSTFLAGS="--cfg loom"`. [`loom`](https://crates.io/crates/loom) is a permutation-based concurrency model checker that explores thread interleavings. Targets are detected **structurally** from `cargo metadata` (a test target whose `kind` contains `test` and whose `required-features` contains `loom`) -- not via a filename/cfg/comment heuristic -- and only those targets run, so loom never touches a crate's ordinary tests. The `loom` feature selects the target (`required-features`); `--cfg loom` activates loom (source swaps std↔loom atomics on `#[cfg(loom)]`, and `[target.'cfg(loom)'.dependencies] loom` links only under the cfg) -- both are required. Scoped per-package with `-p` (never `--workspace`) so the global cfg never leaks into deps reachable only through other members. **Fail-loud**: a crate that declares loom support (a `loom` feature or a `cfg(loom)` dependency) but exposes no such test target errors out rather than silently no-opping. When no crate ships a loom target the recipe skips (exit 0). | oxidizer-github |
 | `bolero`  | Uses the catalog nightly and release profile consistently to discover targets one package at a time, then runs each affected libfuzzer target for 60 seconds on Linux. Explicitly selecting `release` avoids cargo-bolero's implicit, adopter-defined `fuzz` profile and matches target execution. Per-package discovery is required because `cargo-bolero list` accepts only one `--package`; local whole-workspace runs enumerate workspace members before discovery. A successful empty discovery is a no-op; metadata, discovery, or parsing failure fails the check. Non-Linux hosts skip because cargo-bolero's native dependencies are unsupported there, while harnesses still run as ordinary tests. | oxidizer-github |
@@ -251,7 +251,7 @@ commit can't surface anything new.)
 
 | Check                    | Invocation                                                                                                                                                                                                                                                                                                                              | Source |
 |--------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------|
-| `miri`                   | Same recipe as the `pr-runtime-analysis` member, but invoked without impact env vars so the run is full-workspace. PR-tier miri is impact-scoped (so a PR touching crate A never exercises crate B under miri); the scheduled re-run ensures every crate gets miri coverage on `main` at least daily, catching UB introduced by an inter-crate change whose PR happened to scope it out. | oxidizer, oxidizer-github |
+| `miri`                   | Same recipe as the `pr-runtime-analysis` member, but the `scheduled-runtime-analysis` group forces `ANVIL_IMPACT=off` (emit-time `__IMPACT_MODE__`) so the run is full-workspace. PR-tier miri is impact-scoped (so a PR touching crate A never exercises crate B under miri); the scheduled re-run ensures every crate gets miri coverage on `main` at least daily, catching UB introduced by an inter-crate change whose PR happened to scope it out. | oxidizer, oxidizer-github |
 | `miri-tree-borrows`      | `MIRIFLAGS='-Zmiri-tree-borrows' RUSTFLAGS='--cfg miri_tree_borrows' cargo +<pinned-nightly> miri test --all-features --tests`. Tree-borrows tracks per-byte aliasing provenance and can exceed the 16 GB Linux runner; tests known to OOM under tree-borrows are quarantined per-test in source via `#[cfg_attr(miri_tree_borrows, ignore = "<reason>")]` so the suppression lives next to the test rather than in a sidecar file. The recipe declares the cfg name via `--check-cfg=cfg(miri_tree_borrows)` so non-miri builds don't warn. | oxidizer-github (rewritten as cfg-based) |
 | `miri-strict-provenance` | `MIRIFLAGS='-Zmiri-strict-provenance' RUSTFLAGS='--cfg miri_strict_provenance' cargo +<pinned-nightly> miri test --all-features --tests`. Surfaces integer-to-pointer casts that don't satisfy strict provenance; complementary to tree-borrows. Per-test opt-outs use `#[cfg_attr(miri_strict_provenance, ignore = "<reason>")]`. | oxidizer-github |
 | `miri-race-coverage`     | `MIRIFLAGS="-Zmiri-many-seeds=<low>..<high>" RUSTFLAGS='--cfg miri_race_coverage' cargo +<pinned-nightly> miri test --all-features --tests`. The `<low>..<high>` window rotates daily based on day-of-month (day N -> seeds `2N-1..2N+1`, exclusive upper bound -> 2 seeds/day, ~62 seeds/month). Rotating amortizes the seed space across the schedule rather than retesting the same seeds every night; race conditions surface as inter-seed nondeterminism rather than per-seed crashes, so coverage matters more than depth-per-seed. Per-test opt-outs use `#[cfg_attr(miri_race_coverage, ignore = "<reason>")]`. | oxidizer-github |
@@ -335,40 +335,50 @@ two different groups (one PR group, one scheduled group). Repos that want a
 belt-and-suspenders cron run of `just anvil-pr` on `main` can wire one up in their own
 workflow/pipeline file alongside the anvil composite actions / step templates.
 
-## 5. Impact-scoping check → env-var mapping
+## 5. Impact-scoping check → include mapping
 
 The tool uses [`cargo-delta`](https://crates.io/crates/cargo-delta) to skip checks for
-unaffected workspace members on PR runs. cargo-delta computes three concentric impact tiers
-(`required ⊇ affected ⊇ modified`) and emits each as a list of crate names. The
-`anvil-impact` building block formats each tier into a pre-built `--package X@ver --package Y@ver`
-string (or the literal sentinel `--skip` when the tier is empty), publishes the result as
-`ANVIL_INCLUDE_MODIFIED`, `ANVIL_INCLUDE_AFFECTED`, and `ANVIL_INCLUDE_REQUIRED`
-env vars, and the recipes in `checks.just` consume them. Each package is a version-qualified
-cargo spec (`name@version`) so `-p` resolves uniquely to the workspace member even when a
-like-named crate is also pulled in as a different-versioned transitive dependency.
+unaffected workspace members. cargo-delta computes three concentric impact tiers
+(`required ⊇ affected ⊇ modified`) from the committed diff against the base ref. The
+shared `anvil-impact` recipe (see [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe))
+runs cargo-delta once, writes `target/anvil/impact/`, and projects each tier — via the
+`_anvil-impact-format` helper — into a pre-built `--package X@ver --package Y@ver` string
+(or the literal sentinel `--skip` when the tier is empty). Each package is a
+version-qualified cargo spec (`name@version`) so `-p` resolves uniquely to the workspace
+member even when a like-named crate is also pulled in as a different-versioned transitive
+dependency.
+
+Every **impact-scoped** per-crate check depends on `anvil-impact` and resolves its
+category's scope by calling `_anvil-impact-include <category>` into a local `$include`
+variable, then consumes it (the unscoped checks below take no such dependency). The
+**same** cache is read in cloud workflows — the impact job uploads `target/anvil/impact/`
+as an artifact and each group job downloads it — so the identical code path runs locally
+and in CI, with no scoping threaded through environment variables. Scoping is on by
+default both locally and in CI; it is disabled only by `ANVIL_IMPACT=off` (the
+scheduled/full tiers), which makes every tier resolve to its full-workspace default.
 
 Each catalog check is tagged with one of four buckets:
 
-| Bucket    | Env var consumed              | Behavior in cloud workflows                                                              | Behavior locally (env unset)        |
+| Bucket    | `$include` tier               | Behavior when a tier value is present                                        | Behavior when unscoped (`ANVIL_IMPACT=off` / no cache) |
 |-----------|-------------------------------|-----------------------------------------------------------------------------|--------------------------------------|
-| modified  | `ANVIL_INCLUDE_MODIFIED`   | If `--skip`: exit 0. Otherwise run unconditionally (tool is workspace-wide). | Run unconditionally.                 |
-| affected  | `ANVIL_INCLUDE_AFFECTED`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
-| required  | `ANVIL_INCLUDE_REQUIRED`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
+| modified  | `_anvil-impact-include modified`   | If `--skip`: exit 0. Otherwise run unconditionally (tool is workspace-wide). | Run unconditionally.                 |
+| affected  | `_anvil-impact-include affected`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
+| required  | `_anvil-impact-include required`   | If `--skip`: exit 0. Otherwise splice the value into the cargo invocation.   | Default to `--workspace`.            |
 | unscoped  | *(none)*                       | Always run.                                                                  | Always run.                          |
 
 Bucket assignments per check:
 
 | Bucket    | Checks                                                                                                                |
 |-----------|-----------------------------------------------------------------------------------------------------------------------|
-| modified  | `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features`, `readme-check`, `spellcheck` |
-| affected  | `clippy`*, `llvm-cov`, `doc-test`, `examples`, `mutants` (diff and full), `miri`, `careful`, `loom`, `bolero`, `semver-check`, `external-types`, `bench` |
+| modified  | `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features` |
+| affected  | `clippy`*, `llvm-cov`, `doc-test`, `examples`, `mutants-diff`, `miri`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`, `careful`, `loom`, `bolero`, `semver-check`, `external-types`, `bench` |
 | required  | `doc-build`, `udeps`, `cargo-hack` (feature powerset)                                                                  |
-| unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`, `bench-history` |
+| unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `readme-check`, `spellcheck`, `bench-history` |
 
 \* cargo-delta's README recommends `clippy` with the modified tier. anvil deliberately
 runs it on the affected set instead: a change in a crate's API can introduce clippy lints
 (trait-bound mismatches, obviously-truthy-condition warnings keying off changed types) in a
-dependent crate, so downstream rev-deps need to lint too. The cost is small — clippy is
+dependent crate, so downstream reverse dependencies need to lint too. The cost is small — clippy is
 incremental — and the recall benefit avoids a class of merge surprises.
 
 `required` is `affected ∪ workspace-internal transitive deps`, not "the whole workspace".
@@ -379,12 +389,16 @@ deps), `cargo udeps` (unused-deps detection needs the resolved graph), `cargo ha
 
 `unscoped` is for checks that have nothing to do with workspace-member identity:
 `deny`/`audit` read `Cargo.lock`, `pr-title` reads PR metadata, `aprz` consults an
-external risk DB, and `bench-history` needs the same suite measured at every commit
-for its series to stay comparable. These ignore the env vars and always run.
+external risk DB. `readme-check` and `spellcheck` also belong here: their inputs include
+repo-level files cargo-delta does not map to any package — the workspace-level README
+template (`crates/README.j2` / `README.j2`) and the root `.spelling` dictionary — so a
+change to one of those would be silently scoped out. `bench-history` belongs here too: it
+needs the same suite measured at every commit for its series to stay comparable. These
+ignore impact scoping and always run.
 
 The sentinel `--skip` is a magic string that cannot be a valid cargo argument, so there
 is no collision with real package names. Recipes test for it with
-`[ "$VAR" = "--skip" ]` and exit 0 to keep the cloud-workflow job green while signalling that
+`$include -eq '--skip'` and exit 0 to keep the cloud-workflow job green while signalling that
 nothing in that tier needed to run.
 
 Impact and target discovery use three outcomes: work found, proven no work, and
@@ -395,11 +409,12 @@ When cargo-delta reports a manifest directory leaf instead of a package or libra
 name, Anvil accepts it only if it uniquely identifies one workspace package;
 missing or ambiguous aliases fail rather than silently dropping affected work.
 Advisory checks may report policy findings without failing, but failure to execute
-the advisory tool is still an operational error.
+the advisory tool is still an operational error unless the baseline itself has become
+unusable because one of its dependency versions was subsequently yanked.
 
 The recipe-side mechanics are in
-[local.md §4](./local.md#4-impact-scoping-pass-through-env-vars). the cloud workflow-side wiring (the
-`anvil-impact` building block, how downstream jobs consume the include vars) is in
+[local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe). The cloud workflow-side wiring (the
+`anvil-impact` building block, how downstream jobs consume the include files) is in
 [github.md](./github.md#impact-scoping) and [ado.md](./ado.md#impact-scoping).
 
 Trade-off acknowledged: the risk cargo-delta introduces is that a misconfigured analysis

@@ -253,7 +253,8 @@ jobs:
           enable-sccache: true
           rust-toolchain: RUST_NIGHTLY
           rust-components: llvm-tools-preview
-          cargo-tools: CARGO_LLVM_COV_VERSION
+          # Some coverage tests shell out to nextest and require it to be installed.
+          cargo-tools: CARGO_LLVM_COV_VERSION, CARGO_NEXTEST_VERSION
 
       # execute
       - name: Generate Coverage (all-features)

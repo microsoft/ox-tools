@@ -374,7 +374,12 @@ outstanding proposed updates.
 
 ### 8.2 Monorepo / multi-workspace
 
-Out of scope for v1. `anvil-*` recipes always operate on `--workspace` from the repo root.
+Out of scope for v1. `anvil-*` recipes target a **single** cargo workspace rooted at the
+repo (they invoke cargo from the repo root). This is about *which workspace* anvil drives,
+not *how many packages within it* a given check runs: on a clean PR, impact scoping (§4 of
+the local design, and the per-backend impact sections) may narrow an individual check to the
+modified/affected/required packages of that one workspace, while unscoped checks,
+scheduled/full runs, and the dirty-tree safety net still cover the whole `--workspace`.
 Repos with multiple workspaces (uncommon in the surveyed set) compose by having a separate
 anvil tree per workspace root, each with its own `cargo anvil`. Revisit after first
 adopters report friction.

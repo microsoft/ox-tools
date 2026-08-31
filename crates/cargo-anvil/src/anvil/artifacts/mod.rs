@@ -26,6 +26,30 @@ pub mod region;
 
 use crate::catalog::Artifact;
 
+/// The impact-scoping mode a group's CI job runs under -- the word emitted into
+/// `export ANVIL_IMPACT=<mode>` in the group's action/step template.
+///
+/// PR groups download the `target/anvil/impact` artifact and trust it verbatim
+/// (`consume`); scheduled groups force `off` so every tier runs full-workspace.
+/// This is the single source of truth for the tier-to-mode policy, shared by
+/// both the GitHub and ADO backends (the per-backend `GROUPS` lists remain
+/// render inventories, but the *policy* answer lives here once). The match is
+/// exhaustive by group and panics on an unrecognized group, so adding a group
+/// forces an explicit classification here rather than silently defaulting into
+/// `consume` -- which, since `consume` now hard-errors on a missing cache
+/// (impact.just), would fail the pipeline for an unclassified group instead of
+/// scoping it; either way, a missing classification is caught up front, not silent.
+#[must_use]
+pub(crate) fn impact_mode(group: &str) -> &'static str {
+    match group {
+        "pr-fast" | "pr-test" | "pr-runtime-analysis" | "pr-mutants" => "consume",
+        "scheduled-test" | "scheduled-advisories" | "scheduled-runtime-analysis" | "scheduled-exhaustive" | "scheduled-benchmarks" => "off",
+        other => {
+            panic!("impact_mode: unclassified group '{other}'; add it to the pr/scheduled arms in artifacts::impact_mode")
+        }
+    }
+}
+
 /// The full built-in artifact set, in emission order.
 #[must_use]
 pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
@@ -37,6 +61,7 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
         justfile::tools(),
         justfile::versions(),
         justfile::helpers(),
+        justfile::impact(),
         justfile::runner(),
         justfile::tiers(),
         region::justfile_imports(),
@@ -74,6 +99,20 @@ mod tests {
     use crate::catalog::Catalog;
 
     #[test]
+    fn impact_mode_classifies_pr_and_scheduled_groups() {
+        assert_eq!(impact_mode("pr-fast"), "consume");
+        assert_eq!(impact_mode("pr-mutants"), "consume");
+        assert_eq!(impact_mode("scheduled-test"), "off");
+        assert_eq!(impact_mode("scheduled-exhaustive"), "off");
+    }
+
+    #[test]
+    #[should_panic(expected = "unclassified group")]
+    fn impact_mode_panics_on_an_unclassified_group() {
+        let _ = impact_mode("mystery-group");
+    }
+
+    #[test]
     fn every_registry_entry_is_in_the_anvil_catalog() {
         let catalog = Catalog::anvil();
         let present = |artifact: &Artifact| catalog.artifacts().iter().any(|a| a == artifact);
@@ -83,6 +122,7 @@ mod tests {
             justfile::versions(),
             justfile::tools(),
             justfile::helpers(),
+            justfile::impact(),
             justfile::runner(),
             justfile::tiers(),
             region::justfile_imports(),

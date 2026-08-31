@@ -321,6 +321,50 @@ fn every_requested_recipe_is_checked_for_github_authentication() {
 }
 
 #[test]
+fn pr_recipes_run_without_github_token_handling() {
+    // main #76 moved the token-requiring GitHub work into `anvil-aprz`, so the
+    // PR recipes (`anvil-pr`, `_anvil-pr`, `anvil-pr-fast`) are deliberately NOT
+    // token-required. Run one with GITHUB_TOKEN set and assert the container
+    // receives no `/run/secrets/anvil-github-token` mount and triggers no
+    // isolated APRZ invocation -- the negative half of
+    // `Test-AnvilRecipeNeedsGitHubToken`, otherwise pinned only by
+    // generated-text snapshots. Accidentally re-adding any of the three recipes
+    // to that classifier would flip these assertions.
+    let tmp = repo_with_container();
+    let run = run_driver(
+        tmp.path(),
+        "",
+        "anvil-pr-fast",
+        &[("FAKE_DOCKER_IMAGE_EXISTS", "1"), ("GITHUB_TOKEN", "test-token")],
+    );
+
+    assert!(
+        run.status.success(),
+        "a PR recipe must run without GitHub token handling: {}",
+        run.stderr
+    );
+    assert!(
+        run.docker_log.lines().any(|line| line.contains("just anvil-pr-fast")),
+        "the requested PR recipe must still be forwarded to a container: {}",
+        run.docker_log
+    );
+    assert_eq!(
+        run.docker_log
+            .lines()
+            .filter(|line| line.starts_with("run ") && line.contains("just anvil-aprz"))
+            .count(),
+        0,
+        "a PR recipe must not trigger an isolated anvil-aprz invocation: {}",
+        run.docker_log
+    );
+    assert!(
+        !run.docker_log.contains("/run/secrets/anvil-github-token"),
+        "no token secret may be mounted for a PR recipe: {}",
+        run.docker_log
+    );
+}
+
+#[test]
 fn customization_can_provide_github_authentication() {
     let tmp = repo_with_container();
     let run = run_driver(

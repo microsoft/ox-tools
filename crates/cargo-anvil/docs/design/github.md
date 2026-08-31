@@ -12,9 +12,9 @@ need to change:
    opinionated default; users who need to customize edit in place and accept the
    proposal-on-update flow.
 2. **Reusable workflows** (`anvil-pr-impl.yml`, `anvil-scheduled-impl.yml`), containing the
-   impact job and the per-group jobs with all the `needs.impact.outputs.*` plumbing.
-   These change when anvil's groups or impact wiring evolve; most users won't ever edit
-   them.
+   impact jobs and the per-group jobs with all the impact-artifact upload/download
+   plumbing. These change when anvil's groups or impact wiring evolve; most users won't
+   ever edit them.
 3. **Shared composite actions** (`.github/actions/anvil-*/`). The reusable
    workflows pass a constant group name to one `anvil-run-group` action, which
    runs setup plus the matching `just anvil-<tier>-<group>` recipe and surfaces
@@ -68,7 +68,7 @@ flowchart LR
     setup_act[".github/actions/<br/>anvil-setup"]:::action
     run_group_act[".github/actions/<br/>anvil-run-group"]:::action
     codecov_act["codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f<br/>v7.0.0"]:::external
-    impact_just["cargo delta"]:::recipe
+    impact_just["just anvil-impact"]:::recipe
     fast_just["just anvil-pr-fast"]:::recipe
     test_just["just anvil-pr-test"]:::recipe
     runtime_just["just anvil-pr-runtime-analysis"]:::recipe
@@ -171,7 +171,7 @@ flowchart LR
     classDef recipe fill:#f3e8ff,stroke:#6f42c1,stroke-width:1px;
 ```
 
-Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it can read the cargo-delta output variables. That fan-in is elided from the diagram to keep it readable; the scheduled tier has no such dependency because scheduled runs always operate on the full workspace.
+Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it can download the per-OS impact artifact. That fan-in is elided from the diagram to keep it readable; the scheduled tier has no such dependency because scheduled runs always operate on the full workspace.
 
 ## 2. Emitted artifacts
 
@@ -183,7 +183,7 @@ Every PR-tier group job declares `needs: [impact-linux, impact-windows]` so it c
 │   │                                  owned   (annotate failing Just recipes)
 │   ├── anvil-run-group/action.yml      owned   (orchestrate any Just group)
 │   ├── anvil-report-status/action.yml  owned   (publish per-job commit statuses)
-│   ├── anvil-impact/action.yml        owned   (cargo-delta impact computation)
+│   ├── anvil-impact/action.yml        owned   (runs `just anvil-impact`, uploads impact artifact; omitted if .delta.toml disabled)
 └── workflows/
     ├── anvil-pr-impl.yml              owned   (reusable workflow doing the wiring)
     ├── anvil-scheduled-impl.yml         owned   (reusable workflow for the scheduled tier)
@@ -299,11 +299,11 @@ remove if they have specific reasons:
 
 ## 4. Owned reusable workflows
 
-`anvil-pr-impl.yml` is where the wiring lives. Every group job invokes the same
-`anvil-run-group` action and passes the same three impact-exclude inputs
-unconditionally; which ones a group's checks actually consume is the catalog's
-concern, not the wiring layer's. Moving a check between groups never changes
-the reusable workflow.
+`anvil-pr-impl.yml` is where the wiring lives. Every per-group job downloads the per-OS
+impact artifact into `target/anvil/impact/`, then invokes the shared `anvil-run-group`
+action in `consume` mode; which tiers a group's checks actually consume from that cache
+is the catalog's concern, not the wiring layer's. Moving a check between groups never
+changes the reusable workflow.
 
 Approximate shape (anvil writes this verbatim; users never edit it):
 
@@ -318,22 +318,26 @@ on:
       windows_arm_runner: { type: string, default: windows-11-arm }
 
 jobs:
-  impact:
-    name: "Preparation: Impact Analysis (linux)"
+  # Impact runs per OS family (see §6.1): a downstream leg consumes the
+  # impact set computed on ITS host, so an OS-conditional dep change is never
+  # scoped out. Each job UPLOADS its target/anvil/impact cache as an artifact;
+  # the two arm legs reuse their OS counterpart's artifact.
+  impact-linux:
     runs-on: ${{ inputs.linux_runner }}
-    outputs:
-      include_modified: ${{ steps.delta.outputs.include_modified }}
-      include_affected: ${{ steps.delta.outputs.include_affected }}
-      include_required: ${{ steps.delta.outputs.include_required }}
     steps:
       - uses: actions/checkout
         with: { fetch-depth: 0 }
-      - id: delta
-        uses: ./.github/actions/anvil-impact
+      - uses: ./.github/actions/anvil-impact   # runs `just anvil-impact` + upload-artifact anvil-impact-Linux
+  impact-windows:
+    runs-on: ${{ inputs.windows_runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: ./.github/actions/anvil-impact   # uploads anvil-impact-Windows
 
   pr-fast:
     name: "Check Group: Fast Checks (${{ matrix.os }})"
-    needs: impact
+    needs: [impact-linux, impact-windows]
     strategy:
       fail-fast: false
       matrix:
@@ -345,12 +349,17 @@ jobs:
     steps:
       - uses: actions/checkout
         with: { fetch-depth: 0 }  # semver-check needs origin/<base> resolvable for --baseline-rev
+      # Download the impact cache computed on this leg's OS into
+      # target/anvil/impact/ (arm reuses its OS-family artifact). pr-test /
+      # pr-runtime-analysis / pr-mutants do the identical download.
+      - uses: actions/download-artifact@v4
+        with:
+          name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
+          path: target/anvil/impact
       - uses: ./.github/actions/anvil-run-group
         with:
           group: pr-fast
-          include_modified: ${{ needs.impact.outputs.include_modified }}
-          include_affected: ${{ needs.impact.outputs.include_affected }}
-          include_required: ${{ needs.impact.outputs.include_required }}
+          impact_mode: consume   # scoped checks read the downloaded cache
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
 
@@ -358,7 +367,7 @@ jobs:
     name: "Check Group: Tests and Coverage (${{ matrix.os }})"
     # Tests + coverage: llvm-cov, doc-test, examples. Coverage upload
     # is gated to the canonical x86_64 Linux leg (omitted here for brevity).
-    needs: impact
+    needs: [impact-linux, impact-windows]
     strategy:
       fail-fast: false
       matrix:
@@ -369,13 +378,16 @@ jobs:
       || inputs.windows_arm_runner }}
     steps:
       - uses: actions/checkout
+      # preceded by the same per-OS download-artifact step as pr-fast
+      - uses: actions/download-artifact@v4
+        with:
+          name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
+          path: target/anvil/impact
       - uses: ./.github/actions/anvil-run-group
         with:
           group: pr-test
+          impact_mode: consume
           free-disk-space: true
-          include_modified: ${{ needs.impact.outputs.include_modified }}
-          include_affected: ${{ needs.impact.outputs.include_affected }}
-          include_required: ${{ needs.impact.outputs.include_required }}
 
   # pr-runtime-analysis (miri + careful) and pr-mutants (mutants) follow the same
   # shape; pr-mutants additionally sets `env: BASE_REF` for diff-scoped
@@ -402,15 +414,16 @@ blocking failure rather than leaving the run green with a lone red impact job.
 The wiring never branches on impact's *output values*, though. When impact succeeds,
 each group always runs; recipes inside the group decide whether a given check no-ops,
 by testing for the literal sentinel `--skip` in the relevant include var. This matters
-because unscoped checks (`fmt`, `deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
+because unscoped checks (`deny`, `audit`, `aprz`, `pr-title`, `mutants-full`)
 must run on every PR, including docs-only PRs where every tier comes back `--skip`. See
-[local.md §4](./local.md#4-impact-scoping-pass-through-env-vars) for the recipe-side
+[local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe) for the recipe-side
 contract.
 
 The scheduled reusable workflow is simpler — it omits the `impact` job and runs each group
-full-workspace. The include inputs default to empty strings, so recipes fall through to
-their local-default behavior (`--workspace`). The following is deliberately a
-non-executable schematic; the generated
+full-workspace. Scheduled group jobs receive no `include_*` inputs at all; instead each
+scheduled composite action hardcodes `ANVIL_IMPACT=off` in its run step, so `anvil-impact`
+no-ops and every tier resolves to its full-workspace default (`--workspace`). The following
+is deliberately a non-executable schematic; the generated
 [`scheduled-impl-workflow.yml`](../../templates/github/scheduled-impl-workflow.yml)
 is the canonical YAML:
 
@@ -432,9 +445,9 @@ caller anvil-scheduled.yml
 ```
 
 Every scheduled group invokes the shared `anvil-run-group` action. Those invocations
-don't receive any `include_*` inputs — their inputs default to empty strings (recipes
-default to `--workspace`) and the reusable workflow omits the passthrough. Threading
-them through is purely a PR-tier optimization; the scheduled tier never benefits.
+pass no `impact_mode`, so the executor's default (`off`) exports `ANVIL_IMPACT=off`,
+which makes `anvil-impact` a no-op and every tier resolves to its `--workspace` default.
+Impact scoping is purely a PR-tier optimization; the scheduled tier never benefits.
 
 Cloud impact explicitly loads the repository's `.delta.toml`, including the managed
 trip-wire patterns and any repository-owned parser, exclusion, or fixed comparison-
@@ -488,12 +501,17 @@ reusable workflows. The group name is data, not an emitted action path. This
 keeps setup, output capture, failed-recipe extraction, status publication, and
 failure propagation in one file in every adopting repository.
 
-The action has one uniform input surface: the group name, three impact-include
-variables, the disk-cleanup switch, and the status-publication switch. PR
-context is passed as environment variables by the reusable workflow. The
-reusable workflow does not need to know which include vars a group's checks
-consume; it threads all three to the shared action. Moving a check between
-groups or buckets remains a pure catalog change.
+The action's impact input surface is a single `impact_mode` toggle (`consume`
+for PR groups, `off` — the default — for scheduled groups). The impact *set* is
+never threaded as `--package` inputs: it is shared as a downloaded artifact
+(§6.1). The reusable workflow downloads `anvil-impact-<os>` into
+`target/anvil/impact/` before invoking the action, and the group's scoped checks
+read that cache directly via their `anvil-impact` dependency — the same code
+path as a local run. The action's other inputs are the disk-cleanup switch
+(`free-disk-space`), the status-publication switch (`publish_commit_statuses`),
+and the PR-context strings a check needs (passed as environment variables by the
+reusable workflow). Moving a check between groups or buckets remains a pure
+catalog change.
 
 ```yaml
 # .github/actions/anvil-run-group/action.yml  (owned)
@@ -503,21 +521,14 @@ inputs:
   group:
     description: Anvil group recipe name without the anvil- prefix.
     required: true
-  include_modified:
+  impact_mode:
     description: |
-      Pre-formatted --package args from anvil-impact for the modified
-      tier, or "--skip" when the modified set is empty. Empty string =
-      local invocation; recipes default to --workspace.
+      Impact-scoping mode exported as ANVIL_IMPACT before the group runs.
+      "consume" (PR groups) trusts the impact cache the caller downloaded
+      into target/anvil/impact/; "off" (scheduled groups, the default) runs
+      every tier full-workspace. Fixed by tier at the call site.
     required: false
-    default: ""
-  include_affected:
-    description: Same shape as include_modified, for the affected tier.
-    required: false
-    default: ""
-  include_required:
-    description: Same shape as include_modified, for the required tier.
-    required: false
-    default: ""
+    default: "off"
   free-disk-space:
     description: Remove unused toolchains from GitHub-hosted runners before setup.
     required: false
@@ -539,9 +550,11 @@ runs:
       shell: bash
       env:
         ANVIL_GROUP: ${{ inputs.group }}
-        ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
-        ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
-        ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
+        # The impact set reaches scoped checks through the downloaded
+        # target/anvil/impact cache (read via `_anvil-impact-include`), not
+        # threaded --package strings. This action only fixes the mode.
+        ANVIL_IMPACT: ${{ inputs.impact_mode }}
+        GITHUB_TOKEN: ${{ github.token }}
       run: |
         log="$RUNNER_TEMP/anvil-$ANVIL_GROUP.log"
         set +e
@@ -571,9 +584,7 @@ Input set on the shared group action:
 | Input              | Default   | Notes                                                                                                                                  |
 |--------------------|-----------|----------------------------------------------------------------------------------------------------------------------------------------|
 | `group`            | required  | Group recipe suffix, such as `pr-fast` or `scheduled-test`.                                                                           |
-| `include_modified` | `""`      | Forwarded as `ANVIL_INCLUDE_MODIFIED`. `--skip` → recipe exits 0. Empty → recipe defaults to `--workspace`.                          |
-| `include_affected` | `""`      | Forwarded as `ANVIL_INCLUDE_AFFECTED`. Same semantics.                                                                              |
-| `include_required` | `""`      | Forwarded as `ANVIL_INCLUDE_REQUIRED`. Same semantics.                                                                              |
+| `impact_mode`      | `"off"`   | Exported as `ANVIL_IMPACT`. `consume` (PR groups) trusts the downloaded `target/anvil/impact` cache; `off` (scheduled groups) runs every tier full-workspace. |
 | `free-disk-space`  | `"false"` | Forwarded to `anvil-setup`; ignored on macOS and self-hosted runners.                                                               |
 | `publish_commit_statuses` | `"false"` | Best-effort management of supplemental failure commit statuses for same-repository pull requests. Requires `statuses: write`; clean runs only supersede prior failures. |
 
@@ -589,11 +600,14 @@ The reusable workflow sets `PR_TITLE` on the `pr-fast` group step and
 `BASE_REF` on the `pr-mutants` group step. They are environment variables rather
 than action inputs because only the recipes consume them.
 
-The recipes themselves consume only the env vars they need; the catalog records the
-mapping (see [checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping)).
-Threading all three through every group-action invocation costs a few workflow
-lines but is the right separation: wiring is about "which jobs depend on impact
-and feed it forward", not about "which check needs which env var."
+The recipes themselves consume the downloaded impact cache (via
+`_anvil-impact-include`) and only the PR-context env vars they need; the catalog
+records the tier mapping (see
+[checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)).
+Fixing only the mode (`consume`/`off`) at each group-action invocation, rather
+than threading per-tier `--package` strings, keeps the right separation: wiring
+is about "which jobs depend on impact and feed it forward", not about "which
+check needs which env var."
 
 The shared action is an implementation detail of Anvil's generated reusable
 workflows. Anvil does not emit or support public per-group action paths.
@@ -756,39 +770,73 @@ Other groups retain the action's disabled default.
 
 ## 6. Impact scoping
 
-`.github/actions/anvil-impact/action.yml` is a composite action with no branch input.
-It resolves the target through `_anvil-base-ref` from `BASE_REF` or the GitHub PR
-environment, then runs:
+`.github/actions/anvil-impact/action.yml` is a composite action that runs the shared
+`anvil-impact` recipe — the same impact building block adopters run locally (see
+[local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact-recipe)). It:
 
 1. `./.github/actions/anvil-setup` with `group: none` (bootstrap rust + just +
    cache; no catalog tools).
-2. `just anvil-tool-cargo-delta-install binstall` -- only tool this composite
-   needs.
-3. Resolve the snapshot baseline with `_anvil-base-ref` and load the repository's
-   `.delta.toml`. Its `[git].remote_branch`, when present, remains fixed repository
-   policy for cargo-delta's changed-file detection.
-4. Run configured snapshots for the baseline worktree and current checkout, then
-   compare them with configured `cargo delta impact`.
-5. For each of the three tiers (`modified`, `affected`, `required`), format the crate
-   list into a pre-built `--package X@ver --package Y@ver …` string (version-qualified
-   cargo specs, so `-p` resolves uniquely even when a like-named transitive dependency
-   exists), or emit the sentinel `--skip` when the tier is empty.
+2. `just anvil-tool-cargo-delta-install binstall` -- the only tool this composite
+   needs. **This is the only job that runs cargo-delta to compute the impact
+   set.** (Group setup jobs also install cargo-delta as a prerequisite, but in
+   `consume` mode they never run it -- they read the downloaded impact cache.)
+3. `just anvil-impact`, which resolves the base ref (`_anvil-base-ref`), snapshots the
+   base ref (in a throwaway worktree) and the working tree, runs
+   `cargo delta impact`, and writes the durable cache under `target/anvil/impact/`:
+   the per-tier `include_<tier>.txt` lists (via `_anvil-impact-format`), `impact.json`,
+   and the `snapshots/`.
+4. Uploads that whole directory as the `anvil-impact-<runner.os>` artifact
+   (`actions/upload-artifact`).
 
-Outputs:
+### 6.1 How the impact result propagates to the group jobs
 
-| Output             | Meaning                                                                                                                                                                |
-|--------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `include_modified` | `--package X@ver --package Y@ver …` for cargo-delta's `modified` tier, or `--skip` when empty.                                                                          |
-| `include_affected` | Same shape, for the `affected` tier (modified ∪ workspace rev-deps).                                                                                                    |
-| `include_required` | Same shape, for the `required` tier (affected ∪ workspace-internal transitive deps).                                                                                    |
+The impact set propagates as an **uploaded workflow artifact** — the entire
+`target/anvil/impact/` cache — not as job outputs or environment variables. Each group
+job **downloads** it and its scoped checks read the cache directly, exactly as a local
+run does: this is the whole point — CI and local execution take the identical code
+path (`anvil-impact` → `include_<tier>.txt` → `_anvil-impact-include`), rather than CI
+threading pre-formatted strings that local runs never see. The chain in
+`anvil-pr-impl.yml`:
 
-The wiring never gates jobs on these outputs — every job runs regardless of `--skip`
-status. Per-recipe interpretation lives in the recipes themselves (see [local.md §4](./local.md#4-impact-scoping-pass-through-env-vars)).
-This is intentional: unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,
-`mutants-full`) must run on every PR even when every tier reports `--skip`.
+1. **Two impact jobs**, `impact-linux` and `impact-windows`, each run the
+   `anvil-impact` action, which uploads an `anvil-impact-Linux` / `anvil-impact-Windows`
+   artifact. Impact is computed per OS *family* because an OS-conditional dependency
+   (`[target.'cfg(target_os = …)'.dependencies]`) changes the reverse-dep set only in
+   that host's `cargo metadata` graph, so a single-OS computation could scope out a
+   cross-OS reverse-dependency; the two arm legs reuse their OS-family counterpart's artifact.
+2. **Every group job** declares `needs: [impact-linux, impact-windows]` and, after
+   checkout, downloads the matching leg's artifact into `target/anvil/impact/`,
+   selecting by matrix OS — e.g.
+   `name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}`.
+3. **The group composite action** (`group-action.yml`) runs `just anvil-<group>` with an
+   impact mode fixed **by group class at emit time** (never probed from a file). PR groups —
+   which always download the artifact — export `ANVIL_IMPACT=consume`. In consume mode
+   `anvil-impact` is a pure no-op — it trusts the downloaded cache verbatim and
+   **neither snapshots nor recomputes**, so it needs neither cargo-delta nor a fetched
+   base ref (a group job installs the former and shallow-checks-out without the latter).
+   Each scoped check then reads its category's scope from
+   `target/anvil/impact/include_<tier>.txt` via `_anvil-impact-include` (into a local
+   `$include` variable). This is why the group jobs stay lean and can't be tripped up by
+   an environmental difference from the impact job.
+4. **Scheduled group jobs download nothing** and always validate the full workspace, so
+   their group action exports `ANVIL_IMPACT=off`. Like the PR `consume`, this is fixed by
+   group class at emit time and is **not** derived from `target/anvil/impact/impact.state`: the
+   mode is a property of the group class, not something probed at runtime. (`anvil-setup` no
+   longer caches `target/` at all — see §setup — so the durable `impact.state` never
+   travels through the build cache; the group-class-fixed mode also means no leftover on-disk
+   state could ever flip a scheduled job into impact scoping and skip the full-workspace
+   backstop.)
+
+The wiring never gates jobs on the impact result — every job runs regardless of `--skip`
+status. This is intentional: unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,
+`mutants-full`) must run on every PR even when every tier reports `--skip`. Steps that
+need a per-tier side decision read the downloaded cache file directly (e.g. the Codecov
+upload is gated on the coverage files existing via `hashFiles(...)`), never on a job
+output.
+
 
 The check → bucket mapping is in
-[checks.md §5](./checks.md#5-impact-scoping-check--env-var-mapping).
+[checks.md §5](./checks.md#5-impact-scoping-check--include-mapping).
 
 ## 7. Rust toolchain
 
@@ -799,7 +847,7 @@ triggers `rustup` to download the pinned toolchain. For a published stable chann
 typically takes 10–30 seconds on Linux (somewhat longer on Windows and longer still for
 nightly with components). The auto-install runs once per job and is not cached across
 jobs by anvil — `~/.rustup` has high invalidation churn and the install cost is small
-relative to the cached cargo registry / `target/` paths (§8). Repos that want to skip
+relative to the cached cargo registry / tool paths (§8). Repos that want to skip
 even this per-job overhead can add their own toolchain-install step (e.g.
 `dtolnay/rust-toolchain@stable`) before the anvil composite action runs.
 
@@ -833,10 +881,22 @@ prefix restore keys still share prior installs across jobs.
 
 The cache covers:
 
-- The cargo registry, installed binaries, and Cargo's `.crates.toml` /
-  `.crates2.json` install metadata.
-- The `target/` directory (per anvil recipe; a per-recipe cache scope means a `pr-test`
-  cache hit doesn't have to wait on a `pr-fast` cache miss).
+- The `cargo install`-ed tools installed by the catalog setup recipes (`~/.cargo/bin/`
+  plus the `.crates.toml` / `.crates2.json` install ledgers) and the downloaded crate
+  registry (`~/.cargo/registry/`). The key includes `${{ github.job }}`, so a `pr-test`
+  cache hit doesn't have to wait on a `pr-fast` cache miss.
+
+The `target/` build directory is deliberately **not** cached. A per-job, per-OS, per-arch
+`target/` is large, and the many multi-GB entries would evict the high-value tool caches
+under the Actions 10 GB per-repo cache limit (LRU) — so caching it is a net loss here,
+with only modest dependency-recompile savings on top of the already-cached tools. Keeping
+`target/` out of the cache also means the impact stage's downloaded `target/anvil/impact/`
+artifact can never be clobbered by a `target/` cache restore.
+
+Because dependency artifacts aren't cached, the impl workflows set `CARGO_INCREMENTAL=0`
+(workflow-level `env:`): each job compiles from scratch anyway, and cargo's incremental
+mode only adds overhead (and a multi-GB `target/debug/incremental/` dir) with no cross-run
+benefit in that setting.
 
 ## 9. Security
 
@@ -888,7 +948,7 @@ The upload step:
 
 ```yaml
 - name: Upload coverage to Codecov
-  if: matrix.os != 'windows-arm' && needs.impact.outputs.skip != 'true'
+  if: matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info', 'target/coverage/lcov-no-default.info') != ''
   uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
   with:
     files: target/coverage/lcov.info

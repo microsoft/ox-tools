@@ -1,0 +1,4 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+exclude-files = ["crates/cargo-gamma-lib/src/testing.rs"]
