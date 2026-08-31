@@ -479,7 +479,7 @@ impl<'ast> Visit<'ast> for Defaults {
             return;
         }
 
-        if let Some((_bang, path, _for)) = &node.trait_
+        if let Some((path, _for)) = &node.trait_
             && self.paths.is_standard_trait(path)
             && let Some(name) = name_of(&node.self_ty)
         {
@@ -500,7 +500,7 @@ impl<'ast> Visit<'ast> for Defaults {
         // because the alias's target is what names the error either way.
         if name_of(&node.ty).as_deref() == Some("Result") {
             let defaulted = node.generics.params.iter().find_map(|param| match param {
-                GenericParam::Type(ty) => ty.default.as_ref().and_then(name_of),
+                GenericParam::Type(ty) => ty.default.as_ref().and_then(|(_, default)| name_of(default)),
                 _ => None,
             });
 
@@ -1040,6 +1040,7 @@ mod tests {
     #[test]
     fn name_of_reads_through_an_invisible_group() {
         let ty = Type::Group(syn::TypeGroup {
+            attrs: Vec::new(),
             group_token: syn::token::Group::default(),
             elem: Box::new(parse_quote!(Error)),
         });
