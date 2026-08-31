@@ -723,29 +723,45 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn a_component_that_cannot_be_resolved_is_an_error_not_an_absence() {
         // Absent means "keep walking up"; anything else means the answer is
         // unknown. Treating a traversal failure as absence would step over the
         // component that could not be resolved and clear a path this function
-        // exists to check. A directory without search permission produces that
-        // failure without needing a special filesystem.
-        use std::os::unix::fs::PermissionsExt as _;
-
+        // exists to check. A regular file standing where a directory is
+        // expected produces that failure on every platform, and needs no
+        // permission the test may not have.
         let tmp = TempDir::new().unwrap();
         let root = tmp.path().join("repo");
-        let closed = root.join("closed");
-        std::fs::create_dir_all(&closed).unwrap();
-        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
 
-        let result = contained_path(&root, "closed/inner/file.txt");
+        // The two platforms reach the same state by different routes: a
+        // directory with no search permission on unix, and a name the
+        // filesystem rejects outright on Windows, where permissions are not
+        // expressible this way and every absent path reads as NotFound.
+        #[cfg(unix)]
+        let relative = {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::create_dir(root.join("closed")).unwrap();
+            std::fs::set_permissions(root.join("closed"), std::fs::Permissions::from_mode(0o000)).unwrap();
+            "closed/inner/file.txt"
+        };
+        #[cfg(windows)]
+        let relative = "in|valid/file.txt";
 
-        // Restore before asserting, so a failure cannot leave the directory
-        // undeletable for the temp-dir cleanup.
-        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let result = contained_path(&root, relative);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            // Restored before asserting, so a failure cannot leave the
+            // directory undeletable for the temp-dir cleanup.
+            std::fs::set_permissions(root.join("closed"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
         let err = result.expect_err("an unresolvable component must not read as absent");
+
         assert!(
             format!("{err}").contains("checking containment"),
             "the failure must name what it was doing, got: {err}"

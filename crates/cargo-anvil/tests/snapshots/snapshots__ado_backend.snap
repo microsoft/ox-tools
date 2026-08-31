@@ -89,6 +89,10 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
 # ordinary content, and the `chmod` below would publish it world-readable. A
 # later `RUN` cannot undo that, because the earlier layer keeps them.
 #
+# `HOME` is not set by this image and `docker build` does not set it either, so
+# `${HOME}/.netrc` would expand to `/.netrc` and leave the file root actually
+# uses. Both spellings are named.
+#
 # `registry` and `git` must exist before the `chmod`. The run mounts a named
 # volume over each, and an engine seeds a new volume from the image path it
 # covers; a path that does not exist seeds as root-owned 0755, which the
@@ -99,7 +103,7 @@ COPY rust-toolchain.toml ./
 RUN printf "import 'justfiles/anvil/mod.just'\n" > Justfile \
     && just anvil-setup binstall \
     && rm -rf "${CARGO_HOME}/registry/cache" "${CARGO_HOME}/registry/src" \
-    && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME}/.netrc" \
+    && rm -f "${CARGO_HOME}/credentials" "${CARGO_HOME}/credentials.toml" "${HOME:-/root}/.netrc" /root/.netrc \
     && mkdir -p "${CARGO_HOME}/registry" "${CARGO_HOME}/git" \
     && chmod -R a+rwX "${CARGO_HOME}" "${RUSTUP_HOME}"
 # <<< anvil-managed: anvil-container-setup
