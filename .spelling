@@ -167,6 +167,7 @@ getters
 GFM
 Git's
 github
+glibc
 globbing
 glommio
 grey
@@ -279,6 +280,7 @@ pp
 pre-approved
 pre-generate
 pre-heating
+prebuilt
 prefixed
 prepend
 prepended
@@ -472,8 +474,16 @@ unscoped
 backtracker
 prerelease
 versioned
-Containerfile
+BuildKit
+Dockerfile
+dockerignore
+Podman
+podman
+toolset
+natively
+ARM64
 WSL
+variadic
 CSV
 CEL
 Codeberg
@@ -530,6 +540,7 @@ deprecations
 parallelization
 remediate
 recency
+unbuildable
 100%
 20%
 313
@@ -882,3 +893,4 @@ cryptographic
 groupable
 memoization
 triaging
+lexically

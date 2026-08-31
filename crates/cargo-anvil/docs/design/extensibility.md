@@ -466,55 +466,27 @@ the relevant `OwnedFile` (e.g. `checks.just`) wholesale rather than editing indi
 This is a modest, low-risk refactor: it data-drives the artifact list (§4) without disturbing the
 engine internals or the template format.
 
-### 6.1 Optional container runner
+### 6.1 Placement: `justfiles/` holds recipes only
 
-The public base catalog emits an explicit `anvil-container` recipe at
-`justfiles/anvil/container.just` and its Containerfile, Docker Engine drivers,
-content-address helper, and README under `.anvil/container/`. Native
-`just anvil-*` execution remains the default.
+One placement rule is enforced rather than left to discovery, because violating
+it fails in a confusing place. `justfiles/anvil/` may contain `.just` recipes
+and nothing else: [`CatalogBuilder::build`](#4-the-shape-of-a-catalog) rejects
+any other owned file under that prefix, so a derived catalog fails loudly at
+construction instead of shipping a file whose absence is noticed only later.
 
-A downstream catalog replaces only environment-specific artifacts such as
-`artifacts::container::containerfile()` and can add the standard
-`artifacts::container::customize_shell(...)` /
-`artifacts::container::customize_powershell(...)` files. The public drivers,
-image selection, caches, repository mounts, and recipe forwarding remain
-unchanged. Static image behavior stays in hashed artifacts; `customize.*`
-provides documented runtime orchestration.
+The reason is legibility rather than image identity. The image identity hashes
+every file under `justfiles/anvil/` recursively, and the build context admits
+the whole directory, so a non-recipe file placed there is copied into the image
+*and* covered by its tag — editing it renames the image and a rebuild follows.
+What the rule protects is the meaning of the directory: it is the recipe tree,
+`just` parses everything in it, and a catalog that hides an installer script
+there makes the tool set harder to reason about. Non-recipe assets belong in a
+tool-owned directory of their own, such as `.anvil/`.
 
-Two placement rules follow from how the container backend derives image
-identity and the build context, and both are enforced or documented rather
-than left to discovery:
-
-- **`justfiles/` holds `.just` recipes only.** The image ID hashes `*.just`
-  files under `justfiles/anvil/`, and the build-context allow-list admits only
-  those, so any other owned file placed there would be silently dropped from
-  both. [`CatalogBuilder::build`](#4-the-shape-of-a-catalog) rejects such an
-  artifact, so a derived catalog fails loudly at construction instead of
-  shipping a file the container backend ignores. Non-recipe assets belong in a
-  tool-owned directory such as `.anvil/`.
-- **Recipe locations outside the emitted shape need an ignore-file
-  override.** `Containerfile.dockerignore` is a deny-all allow-list whose
-  re-inclusions are per-directory (`justfiles/anvil/*.just`,
-  `justfiles/anvil/checks/*.just`, `justfiles/anvil/groups/*.just`,
-  `.anvil/container/*`); Docker only descends into a denied directory when
-  some re-inclusion pattern is prefixed by it. The image ID, by contrast,
-  hashes recipes recursively. A catalog that adds a recipe directory beyond
-  those three must also replace `artifacts::container::ignore_file()`;
-  otherwise the file is hashed into the image ID but never copied, and the
-  image build fails on the missing import. `.anvil/container/` is leaf-only on
-  both sides — the image-ID helpers list it one level deep, and
-  `.anvil/container/*/*` keeps the allow-list to the same depth — so a nested
-  asset is neither hashed nor copied, and a catalog that wants one must
-  replace the ignore file and the image-ID helpers together.
-
-`customize.sh`/`customize.ps1` are trusted host code: the driver sources them
-directly into its process before image construction and recipe execution, so
-they run with the invoking developer's permissions and outside the container
-sandbox. The runtime contract is file-based and ownership-neutral — a regular
-repository can commit the standard paths directly, without a derived catalog,
-with identical driver behavior. See the [container customization
-contract](./containers.md#8-container-customization) for the full
-interface, trust boundary, and security responsibilities.
+Containerized execution is itself an ordinary artifact group, customized with
+the same `replace_artifact` / `with_artifact` / `without_artifact` levers as
+anything else. The artifacts it exposes and the contract each one carries are
+specified in [containers.md](./containers.md#8-customization).
 
 The public engine contains no environment-specific image, registry, cloud, or
 credential-provider details.
