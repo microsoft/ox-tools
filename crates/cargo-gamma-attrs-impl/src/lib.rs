@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #![cfg(not(all(test, miri)))]
+#![doc(hidden)]
 #![forbid(
     unsafe_code,
     reason = "every raw platform call in this workspace lives in `cargo-gamma-unsafe`, behind a safe interface"

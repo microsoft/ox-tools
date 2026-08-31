@@ -13,17 +13,11 @@
 
 </div>
 
-This crate is an internal implementation detail of
-[`cargo-gamma`][__link0]. It contains the Rust source parsing,
-mutation collection, stable identity, and schema instrumentation pipeline.
-
-Do not depend on it directly. Its API may change incompatibly without notice; it is published
-only so that `cargo-gamma` can be installed through crates.io.
+This is an implementation detail of the cargo-gamma tool. Do not take a dependency on this crate
+as it may change in incompatible ways without warning.
 
 
 <hr/>
 <sub>
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-engine">source code</a>.
 </sub>
-
- [__link0]: https://crates.io/crates/cargo-gamma
