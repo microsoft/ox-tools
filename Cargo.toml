@@ -112,7 +112,7 @@ toml_edit = { version = "0.25.13", default-features = false, features = ["parse"
 tracing = { version = "0.1.44", default-features = false }
 tracing-subscriber = { version = "0.3.23", default-features = false }
 url = { version = "2.5.8", default-features = false }
-vlen = { version = "0.4.6", default-features = false }
+vu128 = { version = "1.1.0", default-features = false }
 walkdir = { version = "2.5.0", default-features = false }
 windows = { version = "0.62.2", default-features = false }
 windows-sys = { version = "0.61.2", default-features = false }

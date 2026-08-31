@@ -46,7 +46,7 @@ impl<'a, W: Write> RowWriter<'a, W> {
     #[inline]
     pub fn write_u64(&mut self, value: u64) {
         let mut buf = [0u8; 9];
-        let bytes_written = vlen::encode_u64(&mut buf, value);
+        let bytes_written = vu128::encode_u64(&mut buf, value);
         self.buffer.extend_from_slice(&buf[..bytes_written]);
     }
 
@@ -166,6 +166,31 @@ fn parse_pg_date(s: &str) -> Result<u64> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    fn encoded(value: u64) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        {
+            let mut writer = RowWriter::new(&mut buffer);
+            writer.write_u64(value);
+            writer.row_done().expect("writing to a Vec cannot fail");
+        }
+
+        buffer
+    }
+
+    /// The tables are a cache read back by later runs, so the integer encoding is an on-disk
+    /// contract rather than an implementation detail. These bytes pin one value from each of
+    /// the five `vu128` length classes, so replacing the encoder cannot silently invalidate
+    /// every table an older build wrote.
+    #[test]
+    fn writes_the_documented_variable_length_encoding() {
+        assert_eq!(encoded(0x7F), [0x7F]);
+        assert_eq!(encoded(0x80), [0x80, 0x02]);
+        assert_eq!(encoded(0x4000), [0xC0, 0x00, 0x02]);
+        assert_eq!(encoded(0x0020_0000), [0xE0, 0x00, 0x00, 0x02]);
+        assert_eq!(encoded(0x1000_0000), [0xF3, 0x00, 0x00, 0x00, 0x10]);
+        assert_eq!(encoded(u64::MAX), [0xF7, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]);
+    }
 
     #[test]
     fn absent_optional_u64_is_a_single_zero_byte() {
