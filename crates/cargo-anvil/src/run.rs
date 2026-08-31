@@ -492,11 +492,18 @@ fn composed_placement(order: &[&str], scaffold: &str, id: &str, text: Option<&st
             return RegionPlacement::At(region.end_line.end);
         }
     }
-    // Nothing precedes it, so it goes to the top -- but below the scaffold,
-    // which for a Dockerfile is the `# syntax=` parser directive that BuildKit
-    // honors only as the very first line.
-    RegionPlacement::At(if text.starts_with(scaffold.trim_end_matches('\n')) {
-        scaffold.trim_end_matches('\n').len()
+    // Nothing precedes it, so it goes to the top -- but below the scaffold's
+    // first line, which for a Dockerfile is the `# syntax=` parser directive
+    // that BuildKit honors only as the very first line.
+    //
+    // Matched a line at a time rather than as one prefix. A whole-scaffold
+    // comparison fails on any later divergence -- a CRLF working tree, or a
+    // scaffold that has since grown a line -- and the fallback is byte 0, which
+    // puts the region *above* the very line the branch exists to protect. The
+    // first line is the one that must not be preceded, so it is the one matched.
+    let opening = scaffold.lines().next().unwrap_or_default();
+    RegionPlacement::At(if !opening.is_empty() && text.starts_with(opening) {
+        opening.len()
     } else {
         0
     })
@@ -934,6 +941,22 @@ mod tests {
             };
             assert_eq!(offset, SCAFFOLD.trim_end_matches('\n').len());
             assert!(offset > 0, "the directive must keep line 1");
+        }
+
+        #[test]
+        fn a_scaffold_that_grew_still_places_below_its_first_line() {
+            // A scaffold is written once and never reconciled, so a file created
+            // by an earlier release carries only what that release seeded. If a
+            // later scaffold gains a line, a whole-prefix comparison stops
+            // matching every such file at once and drops the region to byte 0,
+            // above the directive. Only the first line is load-bearing.
+            const GROWN: &str = "# syntax=docker/dockerfile:1\n# added later\n";
+            let host = format!("{SCAFFOLD}{}", region("b", "second\n"));
+            let RegionPlacement::At(offset) = super::super::composed_placement(ORDER, GROWN, "a", Some(&host)) else {
+                panic!("expected an offset placement");
+            };
+            assert!(offset > 0, "the directive must keep line 1");
+            assert_eq!(offset, "# syntax=docker/dockerfile:1".len());
         }
 
         #[test]
