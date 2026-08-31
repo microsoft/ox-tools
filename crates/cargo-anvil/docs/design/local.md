@@ -416,12 +416,10 @@ toolchain file is invalid and produces an actionable error.
 `versions.just` holds the selector as the lazy, non-exported
 `_anvil_stable_toolchain_args` value. Its value is a multiline PowerShell array
 expression, not a command for Just's expression-time `shell()` function. Just
-interpolates the expression into an existing PowerShell recipe, where it
-evaluates to one `+toolchain` string. For a repository toolchain file, it asks
-`rustup show active-toolchain` from the repository root and uses rustup's
-resolved concrete toolchain. For an override or MSRV fallback, it uses that
-value directly. Toolchain names, including apostrophes, therefore remain
-runtime string data rather than source text that needs escaping or reparsing.
+interpolates the expression into an existing PowerShell recipe. A
+caller-provided `RUSTUP_TOOLCHAIN` or repository-root toolchain file evaluates
+to an empty array because rustup already consumes those inputs natively. Only
+the synthesized root MSRV fallback evaluates to one `+toolchain` string.
 `RUSTUP_TOOLCHAIN` is an input to selection, never a globally exported output.
 The expression embeds an escaped PowerShell literal produced from
 `justfile_directory()`, matching the setup resolver's repository root.
@@ -433,8 +431,8 @@ recipe process, for example
 `& cargo {{_anvil_stable_toolchain_args}} clippy ...`. Repository toolchain-file
 provisioning runs `rustc` from the repository root, so rustup natively owns the
 file's channel, path, profile, components, and targets. Default Clippy and
-rustfmt setup then passes `--toolchain` for the resolved concrete toolchain, so
-the component is installed on the compiler their checks probe. Nightly and
+rustfmt setup likewise lets native selectors choose the component target,
+adding `--toolchain` only for the synthesized MSRV fallback. Nightly and
 MSRV-specific checks keep their own explicit `+toolchain` arguments. No nested
 Just wrapper sits on the main Cargo/Rust command path. Selection has no
 OS-specific branch or host-shell quoting and does not change the adopter's

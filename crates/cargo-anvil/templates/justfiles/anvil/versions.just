@@ -42,29 +42,11 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 3
 
 if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
-    Write-Output ('+' + $env:RUSTUP_TOOLCHAIN)
     return
 }
 
 if ((Test-Path -LiteralPath (Join-Path $RepoRoot 'rust-toolchain') -PathType Leaf) -or
     (Test-Path -LiteralPath (Join-Path $RepoRoot 'rust-toolchain.toml') -PathType Leaf)) {
-    Push-Location -LiteralPath $RepoRoot
-    try {
-        $rustupOutput = @(& rustup show active-toolchain --verbose 2>&1)
-        if ($LASTEXITCODE -ne 0) {
-            throw "anvil: rustup could not resolve the repository toolchain file:`n$($rustupOutput -join "`n")"
-        }
-        # Verbose output puts the exact toolchain name on its own first line,
-        # avoiding ambiguity between spaces/parentheses in path toolchains and
-        # rustup's human-readable reason annotation.
-        $active = $rustupOutput | Select-Object -First 1
-        if ([string]::IsNullOrWhiteSpace([string] $active)) {
-            throw 'anvil: rustup returned no active repository toolchain'
-        }
-    } finally {
-        Pop-Location
-    }
-    Write-Output ('+' + [string] $active)
     return
 }
 

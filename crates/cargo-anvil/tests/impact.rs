@@ -1435,17 +1435,8 @@ fn snapshot_toolchain_probe(caller_toolchain: Option<&str>, toolchain_file: bool
             exit 0\n",
         ),
         (
-            "rustup.ps1",
-            "if (($args -contains 'show') -and ($args -contains 'active-toolchain')) {\n\
-            \x20   if ($args -contains '--verbose') {\n\
-            \x20       Write-Output 'file-active-toolchain'\n\
-            \x20       Write-Output 'active because: overridden by rust-toolchain.toml'\n\
-            \x20   } else {\n\
-            \x20       Write-Output 'file-active-toolchain (overridden by rust-toolchain.toml)'\n\
-            \x20   }\n\
-            \x20   exit 0\n\
-            }\n\
-            exit 0\n",
+            "rustc.ps1",
+            "if ($args -contains 'sysroot') { Write-Output '/toolchains/test (fork) toolchain' }\nexit 0\n",
         ),
     ]);
 
@@ -1492,12 +1483,13 @@ fn impact_snapshot_uses_current_checkout_toolchain_for_both_trees() {
         "baseline and current snapshots must both use Anvil's selected MSRV"
     );
 
-    // Case C: rustup resolves the current checkout's toolchain file once and
-    // the concrete identifier selects both snapshots.
+    // Case C: the baseline receives the current checkout's selected rustc
+    // sysroot as an unambiguous path toolchain. The current snapshot needs no
+    // override because it runs under the selecting repository file itself.
     let with_file = snapshot_toolchain_probe(None, true);
     assert_eq!(
         with_file,
-        vec!["file-active-toolchain".to_owned(), "file-active-toolchain".to_owned()],
-        "baseline and current snapshots must both use the current file's concrete active toolchain"
+        vec!["/toolchains/test (fork) toolchain".to_owned(), "<unset>".to_owned()],
+        "the baseline must inherit the current file selection while the current snapshot uses it natively"
     );
 }

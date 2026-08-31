@@ -239,25 +239,20 @@ _anvil-impact-snapshot:
         # the selected compiler from the current checkout to override any
         # different toolchain file in the baseline worktree. Environment/MSRV
         # selections are already valid rustup overrides. For a selecting
-        # toolchain file, ask rustup for the concrete active identifier so
-        # `path` selections are not mistaken for named toolchains.
+        # toolchain file, use the selected rustc sysroot as an unambiguous path
+        # toolchain.
         $stableArgs = {{_anvil_stable_toolchain_args}}
-        $baselineToolchain = if ($stableArgs.Count -eq 1) {
-            $stableArgs[0].Substring(1)
+        $baselineToolchain = if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
+            $env:RUSTUP_TOOLCHAIN.Trim()
+        } elseif ($stableArgs.Count -eq 1) {
+            ([string] $stableArgs[0]).Substring(1)
         } else {
-            $null
-        }
-        if ($null -eq $baselineToolchain) {
-            if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
-                Write-Error 'anvil-impact: rustup is required to resolve the active repository toolchain for the baseline snapshot'
+            $sysroot = @(& rustc --print sysroot)
+            if ($LASTEXITCODE -ne 0 -or $sysroot.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string] $sysroot[0])) {
+                Write-Error 'anvil-impact: rustc could not report the current checkout stable toolchain sysroot'
                 exit 1
             }
-            $active = (rustup show active-toolchain 2>$null)
-            if (($LASTEXITCODE -ne 0) -or -not $active) {
-                Write-Error 'anvil-impact: failed to resolve the active repository toolchain for the baseline snapshot'
-                exit 1
-            }
-            $baselineToolchain = (($active | Select-Object -First 1) -split '\s+')[0]
+            ([string] $sysroot[0]).Trim()
         }
 
         # Temp-root precedence follows the runner-managed scratch dir on each

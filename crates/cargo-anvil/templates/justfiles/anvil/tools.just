@@ -294,16 +294,16 @@ _anvil-resolve-stable action="install":
         return [pscustomobject]@{ Value = $msrv; Source = 'msrv'; Mapped = $false }
     }
 
-    function Install-Toolchain([object] $toolchain, [string] $label) {
+    function Install-Toolchain([string] $toolchain, [string] $label) {
         $installed = rustup toolchain list
         if ($LASTEXITCODE -ne 0) {
             throw 'anvil: rustup toolchain list failed'
         }
-        if (($installed -join "`n") -notmatch "(?m)^$([regex]::Escape($toolchain.Value))(?:-|$)") {
-            Write-Host "anvil: installing $label toolchain '$($toolchain.Value)'"
-            rustup toolchain install $toolchain.Value --profile minimal
+        if (($installed -join "`n") -notmatch "(?m)^$([regex]::Escape($toolchain))(?:-|$)") {
+            Write-Host "anvil: installing $label toolchain '$toolchain'"
+            rustup toolchain install $toolchain --profile minimal
             if ($LASTEXITCODE -ne 0) {
-                throw "anvil: failed to install $label toolchain '$($toolchain.Value)'"
+                throw "anvil: failed to install $label toolchain '$toolchain'"
             }
         }
     }
@@ -329,7 +329,7 @@ _anvil-resolve-stable action="install":
                     throw "anvil: mapped MSRV toolchain '$($msrvSelection.Value)' is unavailable; provision ANVIL_MSRV_TOOLCHAIN or unset it to let Anvil install the declared public MSRV"
                 }
             } else {
-                Install-Toolchain $msrvSelection 'MSRV'
+                Install-Toolchain $msrvSelection.Value 'MSRV'
             }
         } else {
             $msrvSelection.Value
@@ -337,36 +337,33 @@ _anvil-resolve-stable action="install":
         exit 0
     }
 
-    Assert-CompleteInternalToolchainConfiguration
-    $selection = if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
-        [pscustomobject]@{ Value = $env:RUSTUP_TOOLCHAIN; Source = 'environment' }
-    } elseif (Test-RootToolchainFile) {
-        [pscustomobject]@{ Value = $null; Source = 'file' }
-    } else {
-        [pscustomobject]@{ Value = Get-RootMsrv; Source = 'msrv' }
+    if ($action -ne 'install') {
+        throw "anvil: unsupported stable resolver action '$action'"
     }
 
-    if ($action -eq 'install') {
-        if ($selection.Source -eq 'file') {
-            Push-Location -LiteralPath $repoRoot
-            try {
-                & rustc --version
-                if ($LASTEXITCODE -ne 0) {
-                    throw 'anvil: rustup could not provision the repository toolchain file'
-                }
-            } finally {
-                Pop-Location
-            }
-        } elseif ($selection.Source -eq 'environment') {
-            & cargo "+$($selection.Value)" --version *> $null
-            if ($LASTEXITCODE -ne 0) {
-                throw "anvil: selected stable toolchain '$($selection.Value)' is unavailable; provision RUSTUP_TOOLCHAIN or unset it"
-            }
-        } else {
-            Install-Toolchain $selection 'stable'
+    Assert-CompleteInternalToolchainConfiguration
+    if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
+        & cargo --version *> $null
+        if ($LASTEXITCODE -ne 0) {
+            throw "anvil: selected stable toolchain '$($env:RUSTUP_TOOLCHAIN)' is unavailable; provision RUSTUP_TOOLCHAIN or unset it"
         }
         exit 0
     }
+
+    if (Test-RootToolchainFile) {
+        Push-Location -LiteralPath $repoRoot
+        try {
+            & rustc --version
+            if ($LASTEXITCODE -ne 0) {
+                throw 'anvil: rustup could not provision the repository toolchain file'
+            }
+        } finally {
+            Pop-Location
+        }
+        exit 0
+    }
+
+    Install-Toolchain (Get-RootMsrv) 'stable'
 
 # Provision the selected stable toolchain. Repository toolchain files are
 # processed natively by rustup. This is the shared prerequisite for setup paths
@@ -537,7 +534,8 @@ _check-toolchain toolchain:
 # the literal "default" (Anvil's selected stable toolchain) or a specific pinned
 # toolchain string (which must already be installed -- the per-component setup
 # recipes ensure this via a dependency on anvil-<toolchain>-install). Explicit
-# stable selections target `rustup component add --toolchain`.
+# MSRV fallback selections target `rustup component add --toolchain`; native
+# rustup selections use `rustup component add` without restating the selector.
 #
 # Probe-first: if the component is already available, skip the
 # `rustup component add`. This keeps the recipe idempotent and robust
@@ -609,9 +607,12 @@ _install-component toolchain component:
         exit 0
     }
 
-    if ($toolchain -eq 'default') {
+    if ($toolchain -eq 'default' -and $null -ne $selectedStableToolchain) {
         Write-Host "rustup component add --toolchain $selectedStableToolchain $component"
         rustup component add --toolchain $selectedStableToolchain $component
+    } elseif ($toolchain -eq 'default') {
+        Write-Host "rustup component add $component"
+        rustup component add $component
     } else {
         Write-Host "rustup component add --toolchain $toolchain $component"
         rustup component add --toolchain $toolchain $component

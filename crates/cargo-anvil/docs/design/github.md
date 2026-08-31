@@ -846,10 +846,12 @@ The check → bucket mapping is in
 The setup action bootstraps cargo-binstall and Just using the runner
 environment, then calls `_anvil-stable-rustc-version`. That helper depends on
 `anvil-toolchain-stable-install`, so the setup graph provisions a missing
-public selection and replays applicable file options before invoking `rustc`
-directly with the lazy optional `+toolchain` argument. The resulting version
-keys the cache; the workflow never invokes `_anvil-resolve-stable` itself and
-does not publish a resolved `RUSTUP_TOOLCHAIN` through `GITHUB_ENV`.
+public MSRV or lets rustup process a repository toolchain file before invoking
+`rustc` directly with the lazy optional `+toolchain` argument. Native rustup
+selectors produce no argument; only the root MSRV fallback is explicit. The
+resulting version keys the cache; the workflow never invokes
+`_anvil-resolve-stable` itself and does not publish a resolved
+`RUSTUP_TOOLCHAIN` through `GITHUB_ENV`.
 Each stable recipe lazily selects the same optional argument and invokes Cargo
 or Rust directly in its current PowerShell process. The selector is an inline
 PowerShell array expression rather than an expression-time shell subprocess, so

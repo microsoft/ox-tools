@@ -213,7 +213,7 @@ fn assert_failed(output: &Output, context: &str) {
 }
 
 #[test]
-fn stable_command_runs_directly_with_explicit_toolchain_arguments() {
+fn stable_command_leaves_environment_toolchain_selection_native() {
     if !tools_available() {
         return;
     }
@@ -246,7 +246,7 @@ fn stable_command_runs_directly_with_explicit_toolchain_arguments() {
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(fs::read_to_string(args_log).unwrap().trim(), "+test-stable doc2readme --check");
+    assert_eq!(fs::read_to_string(args_log).unwrap().trim(), "doc2readme --check");
     assert_eq!(
         fs::canonicalize(fs::read_to_string(cwd_log).unwrap().trim()).unwrap(),
         fs::canonicalize(tmp.path()).unwrap(),

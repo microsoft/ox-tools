@@ -165,10 +165,11 @@ that provided the strongest version of the check.
 
 Invocations shown without a pinned nightly or MSRV use the selected stable
 compiler. Their generated PowerShell recipes invoke Cargo directly with the
-lazy optional stable argument: an explicit `+toolchain` for a caller override
-or root MSRV, or the concrete toolchain that rustup resolves from a repository
-toolchain file. The shared inline PowerShell array expression evaluates in that
-same recipe process without a host-OS branch. Its repository root is fixed by
+lazy optional stable argument. Caller-provided `RUSTUP_TOOLCHAIN` and a
+repository-root toolchain file remain native rustup inputs and produce no
+argument; only the root MSRV fallback produces an explicit `+toolchain`. The
+shared inline PowerShell array expression evaluates in that same recipe process
+without a host-OS branch. Its repository root is fixed by
 `justfile_directory()`, so checks that enter crate directories retain the same
 selection as setup. They do not route the main command through a nested Just
 recipe.
