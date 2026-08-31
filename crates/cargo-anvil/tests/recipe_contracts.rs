@@ -1651,6 +1651,21 @@ fn bench_history_gate_reads_ci_markers_as_boolean_like() {
         both_streams(&output)
     );
 
+    // A present-but-blank marker is not a marker either.
+    let (_tmp, output) = run_bench_history(
+        ACTIVE_REGRESSION,
+        &[
+            ("ANVIL_BENCH_GATE", OsStr::new("")),
+            ("CI", OsStr::new("   ")),
+            ("TF_BUILD", OsStr::new("")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "a whitespace-only marker must not gate:{}",
+        both_streams(&output)
+    );
+
     // Anything else non-empty still gates: the CI side stays fail-closed.
     let (_tmp, output) = run_bench_history(
         ACTIVE_REGRESSION,
