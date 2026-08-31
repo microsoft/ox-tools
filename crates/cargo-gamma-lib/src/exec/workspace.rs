@@ -29,6 +29,8 @@ use crate::Result;
 use crate::discover::TargetFile;
 use crate::error::error;
 
+pub(crate) type CacheLocks = (File, Option<File>);
+
 /// The guard runtime's sources, embedded so that the vendored copy cannot drift from the real one.
 const RUNTIME_SOURCES: [(&str, &str); 3] = [
     ("lib.rs", include_str!("../../../cargo-gamma-rt/src/lib.rs")),
@@ -192,7 +194,18 @@ impl Workspace {
     }
 
     /// Copies and instruments the tree.
+    #[cfg(test)]
     pub(super) fn prepare(source: &Utf8Path, config: &Config, events: &mut impl Events) -> Result<Self> {
+        Self::prepare_with_locks(source, config, events, None)
+    }
+
+    /// Copies and instruments the tree while retaining locks taken before cache adoption.
+    pub(super) fn prepare_with_locks(
+        source: &Utf8Path,
+        config: &Config,
+        events: &mut impl Events,
+        locks: Option<CacheLocks>,
+    ) -> Result<Self> {
         config.cargo.validate()?;
 
         // Absolute from here on, so that the copy's own exclusion — which compares the scratch base
@@ -214,7 +227,12 @@ impl Workspace {
         fs::create_dir_all(base.as_std_path())
             .map_err(|cause| error!("could not create the scratch directory at `{base}`").caused_by(cause))?;
 
-        let (workspace_lock, cache_lock) = claim_cache(source, config.cache_dir.as_deref())?;
+        let (workspace_lock, cache_lock) = match locks {
+            Some(locks) => locks,
+            None => claim_cache(source, config.cache_dir.as_deref())?,
+        };
+        #[cfg(feature = "internals")]
+        crate::testing::pause_during_workspace_preparation(source);
 
         migrate_legacy_directory(&base, "tree", "workspace")?;
         migrate_legacy_directory(&base, "build", "target")?;
@@ -1147,7 +1165,7 @@ pub(crate) fn claim_workspace(root: &Utf8Path) -> Result<File> {
 }
 
 /// Takes every lock needed to use one workspace's reusable state.
-pub(crate) fn claim_cache(root: &Utf8Path, cache: Option<&Utf8Path>) -> Result<(File, Option<File>)> {
+pub(crate) fn claim_cache(root: &Utf8Path, cache: Option<&Utf8Path>) -> Result<CacheLocks> {
     let workspace = claim_workspace(root)?;
     let base = gamma_base(root, cache);
     let default = gamma_base(root, None);

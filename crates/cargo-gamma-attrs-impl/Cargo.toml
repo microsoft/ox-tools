@@ -19,6 +19,10 @@ repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma
 [package.metadata.docs.rs]
 all-features = true
 
+[package.metadata.ox-gen-readme]
+# This is an implementation detail of `cargo-gamma-attrs`; its README is an explicit stability warning.
+disable = true
+
 [package.metadata.cargo_check_external_types]
 # This implementation crate exists to provide proc-macro entry points, so its
 # public API necessarily accepts and returns proc-macro token streams.

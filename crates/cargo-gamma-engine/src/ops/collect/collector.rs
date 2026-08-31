@@ -452,7 +452,7 @@ impl<'a> Collector<'a> {
     fn impl_scope(&self, node: &ItemImpl) -> String {
         let self_type = type_name(&node.self_ty);
 
-        let Some((_bang, trait_path, _for)) = &node.trait_ else {
+        let Some((trait_path, _for)) = &node.trait_ else {
             return self_type;
         };
 
@@ -673,15 +673,20 @@ impl<'a> Collector<'a> {
         let wildcard = node
             .arms
             .iter()
-            .position(|arm| is_catch_all(&arm.pat) && arm.guard.is_none() && self.cfg.holds_for(&arm.attrs));
+            .position(|arm| !matches!(&arm.pat, Pat::Guard(_)) && is_catch_all(&arm.pat) && self.cfg.holds_for(&arm.attrs));
 
         for (index, arm) in node.arms.iter().enumerate() {
             if self.skipped(&arm.attrs) {
                 continue;
             }
 
-            if let Some((_if, guard)) = arm.guard.as_ref() {
-                self.condition("match_guard.negate", "match_guard.always_true", "match_guard.always_false", guard);
+            if let Pat::Guard(guarded) = &arm.pat {
+                self.condition(
+                    "match_guard.negate",
+                    "match_guard.always_true",
+                    "match_guard.always_false",
+                    &guarded.guard,
+                );
 
                 // An arm that already has a guard is disabled by forcing that guard false, which
                 // `match_guard.always_false` above already offers. Emitting a second mutant that
@@ -1336,7 +1341,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.in_default_impl = node
             .trait_
             .as_ref()
-            .is_some_and(|(_bang, path, _for)| self.default_paths.is_fallback_trait(path));
+            .is_some_and(|(path, _for)| self.default_paths.is_fallback_trait(path));
 
         self.generics.extend(undefaulted_parameters(&node.generics, &self.default_paths));
         self.defaulted
