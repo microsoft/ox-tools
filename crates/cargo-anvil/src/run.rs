@@ -518,7 +518,12 @@ fn composed_placement(order: &[&str], scaffold: &str, id: &str, text: Option<&st
     // puts the region *above* the very line the branch exists to protect. The
     // first line is the one that must not be preceded, so it is the one matched.
     let opening = scaffold.lines().next().unwrap_or_default();
-    RegionPlacement::At(if !opening.is_empty() && text.starts_with(opening) {
+    // The whole first line, not a prefix of it. `# syntax=docker/dockerfile:1`
+    // is a prefix of the equally valid `# syntax=docker/dockerfile:1.7`, and
+    // splicing at the declared length would cut that directive in half.
+    let first_line_end = text.find('\n').unwrap_or(text.len());
+    let first_line = text[..first_line_end].trim_end_matches('\r');
+    RegionPlacement::At(if !opening.is_empty() && first_line == opening {
         opening.len()
     } else {
         0
@@ -975,6 +980,18 @@ mod tests {
             assert_eq!(offset, "# syntax=docker/dockerfile:1".len());
         }
 
+        #[test]
+        fn a_longer_first_line_is_not_treated_as_the_scaffold() {
+            // `# syntax=docker/dockerfile:1` is a prefix of the equally valid
+            // `# syntax=docker/dockerfile:1.7`. Splicing at the declared length
+            // would cut that directive in half.
+            let host = format!("# syntax=docker/dockerfile:1.7\n{}", region("b", "second\n"));
+            assert_eq!(
+                super::super::composed_placement(ORDER, SCAFFOLD, "a", Some(&host)),
+                RegionPlacement::At(0),
+                "a first line that merely starts with the scaffold must not be split"
+            );
+        }
         #[test]
         fn a_host_without_the_scaffold_places_the_first_region_at_the_top() {
             let host = region("b", "second\n");

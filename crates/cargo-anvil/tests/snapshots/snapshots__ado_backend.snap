@@ -3951,13 +3951,21 @@ anvil-container-tag:
             # can answer for it. Reading it there is safe precisely because the
             # file is in no commit: nothing shared depends on two platforms
             # agreeing about it, which is the reason tracked modes come from the
-            # index instead. Windows has no executable bit and cannot create
-            # one, so it frames the ordinary mode.
+            # index instead.
+            #
+            # `test -x` rather than `FileInfo.UnixMode`, which needs the
+            # PSUnixFileStat experimental feature and is simply absent on
+            # PowerShell 7.0 -- the floor this recipe supports, and the reason
+            # ComputeHash is used below. A missing property would silently frame
+            # every untracked executable as an ordinary file.
             $mode = if ($indexMode.ContainsKey($rel)) {
                 $indexMode[$rel]
+            } elseif ($IsWindows) {
+                # No executable bit exists to read, and none can be created.
+                $untrackedMode
             } else {
-                $unixMode = (Get-Item -LiteralPath $path -Force).UnixMode
-                if ($unixMode -and $unixMode.Length -ge 4 -and $unixMode[3] -eq 'x') { '100755' } else { $untrackedMode }
+                & /usr/bin/env test -x $path
+                if ($LASTEXITCODE -eq 0) { '100755' } else { $untrackedMode }
             }
             $header = [System.Text.Encoding]::UTF8.GetBytes(
                 'file ' + [System.Text.Encoding]::UTF8.GetByteCount($rel) + ' ' + $rel + ' ' + $mode + ' ' + $content.Length + ' ')

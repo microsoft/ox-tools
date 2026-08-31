@@ -891,8 +891,12 @@ mod tests {
         // its mode. Framing a fixed value would let `chmod +x` change the image
         // without changing the tag, and the tag controls reuse inside this
         // checkout even though untracked content has no published identity.
-        assert!(RECIPE.contains("$unixMode = (Get-Item -LiteralPath $path -Force).UnixMode"));
-        assert!(RECIPE.contains("$unixMode[3] -eq 'x'"));
+        // `test -x`, not `FileInfo.UnixMode`: that property needs an
+        // experimental feature and is absent on PowerShell 7.0, the floor this
+        // recipe supports, where it would silently frame every untracked
+        // executable as an ordinary file.
+        assert!(RECIPE.contains("& /usr/bin/env test -x $path"));
+        assert!(!RECIPE.contains("(Get-Item -LiteralPath $path -Force).UnixMode"));
         // Tracked files must NOT be read this way: Windows has no executable
         // bit, so two checkouts of one commit would disagree on the tag.
         assert!(RECIPE.contains("if ($indexMode.ContainsKey($rel)) {"));
