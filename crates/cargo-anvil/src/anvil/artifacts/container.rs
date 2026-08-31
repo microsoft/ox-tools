@@ -53,7 +53,7 @@
 //!   `Anvil-ResolveImage`. The recipe loads the file when it is present,
 //!   regardless of who put it there.
 
-use crate::catalog::{Artifact, HostSelector, RegionId, RegionSpec};
+use crate::catalog::{Artifact, ComposedHost, HostSelector, RegionId, RegionSpec};
 use crate::region::CommentSyntax;
 
 const RECIPE: &str = include_str!("../../../templates/justfiles/anvil/container.just");
@@ -68,7 +68,7 @@ const DOCKERIGNORE: &str = include_str!("../../../templates/anvil/container/Dock
 /// one without being silently demoted, dropping the build to the default
 /// frontend with nothing failing to say so. The copyright notice follows it as
 /// ordinary repository content, editable like anything else in a gap.
-pub(crate) const DOCKERFILE_HEADER: &str = include_str!("../../../templates/anvil/container/Dockerfile.header");
+const DOCKERFILE_HEADER: &str = include_str!("../../../templates/anvil/container/Dockerfile.header");
 
 const DOCKERFILE_BASE_IMAGE: &str = include_str!("../../../templates/anvil/container/Dockerfile.baseimage.region");
 const DOCKERFILE_BASE: &str = include_str!("../../../templates/anvil/container/Dockerfile.base.region");
@@ -79,7 +79,7 @@ const DOCKERFILE_ENTRY: &str = include_str!("../../../templates/anvil/container/
 const RECIPE_PATH: &str = "justfiles/anvil/container.just";
 
 /// The composed Dockerfile the managed regions are spliced into.
-pub(crate) const DOCKERFILE_PATH: &str = ".anvil/container/Dockerfile";
+const DOCKERFILE_PATH: &str = ".anvil/container/Dockerfile";
 
 const DOCKERIGNORE_PATH: &str = ".anvil/container/Dockerfile.dockerignore";
 
@@ -92,7 +92,7 @@ const DOCKERIGNORE_PATH: &str = ".anvil/container/Dockerfile.dockerignore";
 /// `WORKDIR`/`CMD` close the file. The engine checks the on-disk sequence
 /// against this list and refuses rather than emitting a Dockerfile that is
 /// silently wrong.
-pub(crate) const DOCKERFILE_REGION_ORDER: &[&str] = &[
+const DOCKERFILE_REGION_ORDER: &[&str] = &[
     "anvil-container-base-image",
     "anvil-container-base",
     "anvil-container-tools",
@@ -102,6 +102,17 @@ pub(crate) const DOCKERFILE_REGION_ORDER: &[&str] = &[
 
 /// The path the recipe loads credentials from, when a file is present there.
 pub const HOOKS_PATH: &str = ".anvil/container/hooks.ps1";
+
+/// The Dockerfile as a composed host: scaffold plus the order its regions must
+/// appear in.
+#[must_use]
+pub fn composed_host() -> ComposedHost {
+    ComposedHost {
+        path: DOCKERFILE_PATH,
+        scaffold: DOCKERFILE_HEADER,
+        order: DOCKERFILE_REGION_ORDER,
+    }
+}
 
 /// The full container artifact group.
 #[must_use]

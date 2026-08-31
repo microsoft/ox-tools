@@ -12,11 +12,11 @@ use std::path::Path;
 use ohno::{AppError, bail};
 use tracing::info;
 
-use crate::anvil::artifacts::container;
+use crate::anvil::artifacts;
 use crate::anvil::artifacts::region::DELTA_REGION_ID;
 use crate::backend::{self, Backend};
 use crate::catalog::Catalog;
-use crate::catalog::artifact::{Artifact, HostSelector, RegionSpec};
+use crate::catalog::artifact::{Artifact, ComposedHost, HostSelector, RegionSpec};
 use crate::checksum::checksum_str;
 use crate::cli::Cli;
 use crate::decision::{Decision, RemovalDecision, decide_removal};
@@ -352,11 +352,12 @@ fn push_region_at(
     spec: &RegionSpec,
 ) -> Result<(), AppError> {
     let host = resolve_existing_case_insensitive(repo_root, host);
-    if let Some((scaffold, order)) = composed_host_spec(&host)
+    let composed_host = composed_host_spec(&host);
+    if let Some(declared) = composed_host
         && !composed.states.contains_key(&host)
     {
         let state = match hosts.get_or_read(repo_root, &host)? {
-            Some(text) => composed_host_state(order, &host, &text, manifest),
+            Some(text) => composed_host_state(declared.order, &host, &text, manifest),
             // Nothing on disk. The scaffold becomes the base the first region
             // splices into, carrying the parts of the file that cannot live
             // inside a region -- the `# syntax=` parser directive above all. It
@@ -365,7 +366,7 @@ fn push_region_at(
             None => ComposedHostState::SeedFromScaffold,
         };
         if matches!(state, ComposedHostState::SeedFromScaffold) {
-            hosts.set(&host, scaffold.to_owned());
+            hosts.set(&host, declared.scaffold.to_owned());
         }
         composed.states.insert(host.clone(), state);
     }
@@ -386,9 +387,9 @@ fn push_region_at(
         return Ok(());
     }
     let current = hosts.get_or_read(repo_root, &host)?;
-    let placement = composed_host_spec(&host).map_or_else(
+    let placement = composed_host.map_or_else(
         || region_placement(spec.id.as_str()),
-        |(scaffold, order)| composed_placement(order, scaffold, spec.id.as_str(), current.as_deref()),
+        |declared| composed_placement(declared.order, declared.scaffold, spec.id.as_str(), current.as_deref()),
     );
     let body = match delta_region_body(current.as_deref(), spec) {
         DeltaRegionBody::Managed => spec.body.as_str(),
@@ -485,30 +486,22 @@ fn region_placement(region_id: &str) -> RegionPlacement {
     }
 }
 
-/// The scaffold and region order for a host anvil composes rather than owns.
+/// The composed-host declaration for a host, when it has one.
 ///
 /// Most region hosts are files the repository already has (`Cargo.toml`,
 /// `deny.toml`) or files whose first region can be appended to nothing, and
-/// whose regions are order-independent — TOML tables, line sets. The container
-/// Dockerfile is neither.
-///
-/// The **scaffold** exists because `# syntax=docker/dockerfile:1` is a `BuildKit`
-/// parser directive honored only when nothing precedes it, not even a comment —
-/// so it cannot live inside a region, whose opening sentinel *is* a comment. It
-/// is written when the file is absent and never reconciled afterwards.
-///
-/// The **order** is load-bearing: `FROM` must precede every instruction that
-/// depends on it, and the toolchain must exist before `anvil-setup` runs.
+/// whose regions are order-independent, such as TOML tables and line sets.
+/// Those are not registered, and their regions append at end-of-file.
 ///
 /// The comparison ignores case because the caller has already replaced the
 /// canonical path with the host's real on-disk name. A repository that spelled
-/// the file `dockerfile` would otherwise miss this lookup entirely, and with it
-/// every guard below: the regions would be appended at end-of-file, under the
-/// repository's own `FROM`.
-fn composed_host_spec(host_relpath: &str) -> Option<(&'static str, &'static [&'static str])> {
-    host_relpath
-        .eq_ignore_ascii_case(container::DOCKERFILE_PATH)
-        .then_some((container::DOCKERFILE_HEADER, container::DOCKERFILE_REGION_ORDER))
+/// the host differently would otherwise miss this lookup entirely, and with it
+/// every guard below: its regions would be appended at end-of-file, under the
+/// content they have to precede.
+fn composed_host_spec(host_relpath: &str) -> Option<ComposedHost> {
+    artifacts::composed_hosts()
+        .into_iter()
+        .find(|host| host_relpath.eq_ignore_ascii_case(host.path))
 }
 
 /// What a composed host's current content allows anvil to do with it.
