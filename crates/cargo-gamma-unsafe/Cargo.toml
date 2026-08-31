@@ -19,6 +19,10 @@ repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma
 [package.metadata.docs.rs]
 all-features = true
 
+[package.metadata.ox-gen-readme]
+# This is an implementation detail of `cargo-gamma`; its README is an explicit stability warning.
+disable = true
+
 # Establish the lowest cross-platform baseline for this new crate. Raise it as coverage improves.
 [package.metadata.coverage-gate]
 min-lines-percent = 86.5

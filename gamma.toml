@@ -1,4 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-exclude-files = ["crates/cargo-gamma-lib/src/testing.rs"]
+exclude-files = [
+    # Repository automation invokes external tools rather than implementing product behavior.
+    "crates/automation/**",
+    # Integration-test fixtures are deliberately compiled through the `internals` feature.
+    "crates/cargo-gamma-lib/src/testing.rs",
+    # Process fault injection exists only to force test-only operating-system failure paths.
+    "crates/cargo-gamma-process/src/faults.rs",
+]

@@ -19,5 +19,6 @@ attributes exported by `cargo-gamma-attrs`.
 ## Stability
 
 The crate is published only to support `cargo-gamma-attrs`. Its Rust API is an
-implementation detail; the diagnostics and accepted attribute syntax are the
-user-visible contract.
+implementation detail, so its rustdoc is hidden and its hand-written README
+warns downstream users not to depend on it. The diagnostics and accepted
+attribute syntax are the user-visible contract.

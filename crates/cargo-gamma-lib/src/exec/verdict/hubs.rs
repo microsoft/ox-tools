@@ -271,22 +271,27 @@ mod loom_models {
 
     /// The live count returns to exactly zero after all four production reader roles finish.
     ///
-    /// The coordinator first establishes the four-reader high-water mark, then all four independent
-    /// reader threads finish concurrently. The contended `live` observation also models diagnostics
-    /// racing abandoned readers as they finally close. Every increment must still have exactly one
-    /// decrement.
+    /// The coordinator first establishes the four-reader high-water mark, then the two jobs finish
+    /// their two readers concurrently. Modeling each job as one thread preserves cross-job
+    /// contention and all four decrements without exploring equivalent permutations among four
+    /// symmetric finisher threads. The contended `live` observation also models diagnostics racing
+    /// abandoned readers as they finally close.
     pub(super) fn a_readers_gauge_returns_to_exactly_zero_under_any_interleaving() {
         loom::model(|| {
             let readers = Arc::new(Readers::new());
-            let mut finishers = Vec::with_capacity(CONCURRENT_READER_STREAMS);
+            let mut finishers = Vec::with_capacity(CONCURRENT_JOBS);
 
             for _stream in 0..CONCURRENT_READER_STREAMS {
                 readers.started();
             }
 
-            for _stream in 0..CONCURRENT_READER_STREAMS {
+            for _job in 0..CONCURRENT_JOBS {
                 let readers = Arc::clone(&readers);
-                finishers.push(loom::thread::spawn(move || readers.finished()));
+                finishers.push(loom::thread::spawn(move || {
+                    for _stream in 0..STREAMS_PER_JOB {
+                        readers.finished();
+                    }
+                }));
             }
 
             assert!(

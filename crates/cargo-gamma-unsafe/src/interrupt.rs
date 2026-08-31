@@ -678,9 +678,14 @@ mod tests {
             DELIVERED.store(true, Ordering::SeqCst);
         }
 
+        // C spells a signal handler as an integer, so the function has to be widened into one,
+        // exactly as `install_with` does for the production handler.
+        #[expect(clippy::fn_to_numeric_cast_any, reason = "the C signal API takes a handler as an integer")]
+        let record_handler: libc::sighandler_t = record as extern "C" fn(i32) as usize;
+
         // SAFETY: installs a handler for a signal this test both owns for its whole process and
         // chooses because it cannot terminate the process by default.
-        let _previous = unsafe { libc::signal(libc::SIGCHLD, record as *const () as libc::sighandler_t) };
+        let _previous = unsafe { libc::signal(libc::SIGCHLD, record_handler) };
 
         die(libc::SIGCHLD);
 

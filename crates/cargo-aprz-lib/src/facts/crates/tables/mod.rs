@@ -28,22 +28,22 @@
 //! Each table is stored as a binary file with the following structure:
 //!
 //! ```text
-//! ┌──────────────────────────────────────────────────────┐
-//! │ FORMAT_MAGIC: u64 (8 bytes)                          │
-//! │   - Magic number identifying format version          │
-//! ├──────────────────────────────────────────────────────┤
-//! │ ROW_COUNT: u64 (8 bytes)                             │
-//! │   - Total number of rows in table                    │
-//! ├──────────────────────────────────────────────────────┤
-//! │ TIMESTAMP: u64 (8 bytes)                             │
-//! │   - Unix epoch seconds when table was created        │
-//! │   - Used for TTL validation                          │
-//! ├──────────────────────────────────────────────────────┤
-//! │ Row Data (variable length)                           │
-//! │   - Variable-length encoded integers (vlen crate)    │
-//! │   - Strings stored as length prefix + UTF-8 bytes    │
-//! │   - Optional fields use discriminant byte            │
-//! └──────────────────────────────────────────────────────┘
+//! +------------------------------------------------------+
+//! | FORMAT_MAGIC: u64 (8 bytes)                          |
+//! |   - Magic number identifying format version          |
+//! +------------------------------------------------------+
+//! | ROW_COUNT: u64 (8 bytes)                             |
+//! |   - Total number of rows in table                    |
+//! +------------------------------------------------------+
+//! | TIMESTAMP: u64 (8 bytes)                             |
+//! |   - Unix epoch seconds when table was created        |
+//! |   - Used for TTL validation                          |
+//! +------------------------------------------------------+
+//! | Row Data (variable length)                           |
+//! |   - Variable-length encoded integers (vlen crate)    |
+//! |   - Strings stored as length prefix + UTF-8 bytes    |
+//! |   - Optional fields use discriminant byte            |
+//! +------------------------------------------------------+
 //! ```
 
 mod categories_table;

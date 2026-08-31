@@ -29,13 +29,92 @@ use core::time::Duration;
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
-use std::sync::{OnceLock, mpsc};
+use std::sync::{Mutex, OnceLock, mpsc};
 use std::{fs, panic, thread};
 
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 
 use crate::commands::Host;
 use crate::exec::Workspace;
+
+type PauseChannels = (mpsc::SyncSender<()>, mpsc::Receiver<()>);
+
+static WORKSPACE_PREPARATION_PAUSES: OnceLock<Mutex<crate::HashMap<Utf8PathBuf, PauseChannels>>> = OnceLock::new();
+
+/// A deterministic pause after workspace preparation receives a command's cache locks.
+#[derive(Debug)]
+pub struct WorkspacePreparationPause {
+    reached: mpsc::Receiver<()>,
+    release: Option<mpsc::SyncSender<()>>,
+    waiting: bool,
+}
+
+impl WorkspacePreparationPause {
+    /// Waits until workspace preparation receives the cache locks.
+    pub fn wait(&mut self) {
+        self.reached
+            .recv_timeout(Duration::from_mins(2))
+            .expect("the registered command should reach workspace preparation before the test budget expires");
+        self.waiting = true;
+    }
+
+    /// Allows the paused command to continue.
+    pub fn release(mut self) {
+        self.release_waiter();
+    }
+
+    fn release_waiter(&mut self) {
+        if self.waiting {
+            let sender = self
+                .release
+                .take()
+                .expect("a pause that reached the boundary retains exactly one release sender");
+            let _released = sender.send(());
+            self.waiting = false;
+        }
+    }
+}
+
+impl Drop for WorkspacePreparationPause {
+    fn drop(&mut self) {
+        self.release_waiter();
+    }
+}
+
+/// Registers a workspace-preparation pause for one workspace root.
+pub fn hold_during_workspace_preparation(root: Utf8PathBuf) -> WorkspacePreparationPause {
+    let (reached_sender, reached) = mpsc::sync_channel(0);
+    let (release, release_receiver) = mpsc::sync_channel(0);
+    let pauses = WORKSPACE_PREPARATION_PAUSES.get_or_init(|| Mutex::new(crate::HashMap::default()));
+    let prior = pauses
+        .lock()
+        .expect("a prior workspace-preparation test panicked while registering its pause")
+        .insert(root, (reached_sender, release_receiver));
+
+    assert!(prior.is_none(), "only one workspace-preparation pause may target a workspace");
+
+    WorkspacePreparationPause {
+        reached,
+        release: Some(release),
+        waiting: false,
+    }
+}
+
+pub(crate) fn pause_during_workspace_preparation(root: &Utf8Path) {
+    let Some(pauses) = WORKSPACE_PREPARATION_PAUSES.get() else {
+        return;
+    };
+    let pause = pauses
+        .lock()
+        .expect("a prior workspace-preparation test panicked while taking its pause")
+        .remove(root);
+
+    if let Some((reached, release)) = pause
+        && reached.send(()).is_ok()
+    {
+        let _released = release.recv();
+    }
+}
 
 /// A [`Host`] that captures both streams in memory.
 ///

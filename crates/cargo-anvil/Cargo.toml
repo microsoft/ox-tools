@@ -32,7 +32,7 @@ path = "src/main.rs"
 clap = { workspace = true, features = ["derive", "std", "help", "usage", "error-context", "string"] }
 mutants = { workspace = true }
 ohno = { workspace = true, features = ["app-err"] }
-sha2 = { workspace = true, features = ["std"] }
+sha2.workspace = true
 toml_edit = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt"] }
