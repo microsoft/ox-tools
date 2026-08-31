@@ -41,7 +41,14 @@ anvil-mutants-diff: anvil-mutants-diff-validate-prereqs anvil-impact
     if (-not $tmp_dir) { $tmp_dir = $env:AGENT_TEMPDIRECTORY }
     if (-not $tmp_dir) { $tmp_dir = [System.IO.Path]::GetTempPath() }
     $diff_path = Join-Path $tmp_dir 'anvil-mutants-diff.diff'
-    git diff "$base..HEAD" --output=$diff_path
+    # Diff the base against the WORKING TREE, not against HEAD.
+    # cargo-mutants validates every line of the diff against the file on
+    # disk and aborts when they disagree, so a commit-to-commit diff fails
+    # the moment anything is uncommitted -- which is the normal local state,
+    # since the point of running a tier locally is to check work in progress.
+    # CI has a clean tree, so the two forms are identical there and this is
+    # not a behaviour change for it.
+    git diff "$base" --output=$diff_path
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     cargo mutants --in-diff $diff_path --no-shuffle --jobs 0
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

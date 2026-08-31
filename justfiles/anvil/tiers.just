@@ -12,10 +12,7 @@
 
 # Run all pull request checks.
 [group("anvil")]
-anvil-pr: (_anvil-run "pr" anvil_runner)
-
-[private]
-_anvil-pr: anvil-pr-validate-prereqs \
+anvil-pr: anvil-pr-validate-prereqs \
     anvil-pr-fast \
     anvil-pr-slow
 
@@ -24,20 +21,18 @@ _anvil-pr: anvil-pr-validate-prereqs \
 # exhaustive checks that don't fit in a PR budget. Runs on a schedule
 # against `main`, not on PRs.
 #
-# The scheduled tier is deliberately NOT impact-scoped: it is the
-# catch-all that backstops PR-tier scoping. Because every impact-scoped
-# check depends on `anvil-impact` and self-populates its scope from the
-# cache, the tier must run with ANVIL_IMPACT=off so `_anvil-impact-include`
-# returns each tier's full-workspace default and the `anvil-impact`
-# dependency no-ops. A dependency-only recipe can't set env for its own
-# deps (deps run before the body), so the public tier routes through
-# `_anvil-run` with the `"off"` impact argument: `_anvil-run` exports
-# ANVIL_IMPACT=off before invoking the private `_anvil-scheduled` recipe,
-# whose deps then inherit it.
+# The scheduled tier is deliberately NOT impact-scoped: it is the catch-all
+# that backstops PR-tier scoping. Every impact-scoped check depends on
+# `anvil-impact` and populates its own scope from the cache, so the tier runs
+# with ANVIL_IMPACT=off, which makes `_anvil-impact-include` return each
+# category's full-workspace default and the `anvil-impact` dependency no-op.
+# A dependency-only recipe cannot set an environment variable for its own
+# dependencies, so the public tier wraps the private one through
+# `_anvil-unscoped`.
 
 # Run all scheduled checks.
 [group("anvil")]
-anvil-scheduled: (_anvil-run "scheduled" anvil_runner "off")
+anvil-scheduled: (_anvil-unscoped "scheduled")
 
 [private]
 _anvil-scheduled: anvil-scheduled-validate-prereqs \
@@ -47,16 +42,15 @@ _anvil-scheduled: anvil-scheduled-validate-prereqs \
     anvil-scheduled-exhaustive \
     anvil-scheduled-benchmarks
 
-# Runs everything full-workspace (ANVIL_IMPACT=off, via the `"off"` impact
-# argument to _anvil-run), same wrapper shape as anvil-scheduled.
+# Full-workspace for the same reason as the scheduled tier.
 
 # Full tier: PR + scheduled, end-to-end. Useful before tagging a release.
 [group("anvil")]
-anvil-full: (_anvil-run "full" anvil_runner "off")
+anvil-full: (_anvil-unscoped "full")
 
 [private]
 _anvil-full: anvil-full-validate-prereqs \
-    _anvil-pr \
+    anvil-pr \
     _anvil-scheduled
 
 # Tier-level + global setup + validate-prereqs

@@ -24,7 +24,7 @@ pub mod github;
 pub mod justfile;
 pub mod region;
 
-use crate::catalog::Artifact;
+use crate::catalog::{Artifact, ComposedHost};
 
 /// The impact-scoping mode a group's CI job runs under -- the word emitted into
 /// `export ANVIL_IMPACT=<mode>` in the group's action/step template.
@@ -36,7 +36,7 @@ use crate::catalog::Artifact;
 /// render inventories, but the *policy* answer lives here once). The match is
 /// exhaustive by group and panics on an unrecognized group, so adding a group
 /// forces an explicit classification here rather than silently defaulting into
-/// `consume` -- which, since `consume` now hard-errors on a missing cache
+/// `consume` -- which, since `consume` hard-errors on a missing cache
 /// (impact.just), would fail the pipeline for an unclassified group instead of
 /// scoping it; either way, a missing classification is caught up front, not silent.
 #[must_use]
@@ -62,10 +62,8 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
         justfile::versions(),
         justfile::helpers(),
         justfile::impact(),
-        justfile::runner(),
         justfile::tiers(),
         region::justfile_imports(),
-        region::justfile_runner(),
         region::workspace_lints(),
         region::single_crate_lints(),
         region::member_lints(),
@@ -92,11 +90,51 @@ pub(crate) fn anvil_artifacts() -> Vec<Artifact> {
     out
 }
 
+/// The built-in hosts whose region order is semantic.
+///
+/// The engine consults this to decide where a region absent from an existing
+/// file belongs, and what to seed a missing file with. A host is listed only
+/// when its regions genuinely do not commute; everything not listed keeps the
+/// default of appending an absent region at end-of-file. See [`ComposedHost`]
+/// for what listing one commits the engine to.
+#[must_use]
+pub(crate) fn composed_hosts() -> Vec<ComposedHost> {
+    vec![container::composed_host()]
+}
+
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::catalog::Catalog;
+    use crate::catalog::{Catalog, HostSelector};
+
+    /// Every composed host must declare exactly the regions the built-in
+    /// artifacts target at its path, in the same order.
+    ///
+    /// The declared order is what decides where a region absent from an
+    /// existing file lands, so a region added to a host without being added to
+    /// its order would be appended at end-of-file, below the instructions that
+    /// depend on it, in a file the engine then refuses. The comparison is
+    /// against the built-in set rather than a live catalog, so a fork that adds
+    /// its own region does not fail this.
+    #[test]
+    fn every_composed_host_declares_the_regions_that_target_it() {
+        let artifacts = anvil_artifacts();
+        for host in composed_hosts() {
+            let targeting: Vec<&str> = artifacts
+                .iter()
+                .filter_map(|artifact| match artifact {
+                    Artifact::Region(spec) if spec.host == HostSelector::Path(host.path.to_owned()) => Some(spec.id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                targeting, host.order,
+                "{}: the declared region order must match the regions that target it",
+                host.path
+            );
+        }
+    }
 
     #[test]
     fn impact_mode_classifies_pr_and_scheduled_groups() {
@@ -123,10 +161,8 @@ mod tests {
             justfile::tools(),
             justfile::helpers(),
             justfile::impact(),
-            justfile::runner(),
             justfile::tiers(),
             region::justfile_imports(),
-            region::justfile_runner(),
             region::workspace_lints(),
             region::single_crate_lints(),
             region::member_lints(),

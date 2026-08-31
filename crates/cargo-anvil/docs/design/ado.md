@@ -637,7 +637,7 @@ elide the Windows job entirely if their root pipeline is shaped to support that.
 The scheduled stages template is simpler — it omits the `impact` stage and runs each
 group full-workspace, with the same `linuxPool` / `windowsPool` parameter shape and
 the same `steps/job.yml` delegation. Scheduled step templates pass no `include*`
-parameters; the scheduled group recipes route through `_anvil-run` with
+parameters; the scheduled group recipes wrap in `_anvil-unscoped`, which exports
 `ANVIL_IMPACT=off`, so `anvil-impact` no-ops and every category resolves to its
 full-workspace default (`--workspace`).
 
