@@ -534,6 +534,7 @@ runs:
         failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed\( on line [0-9][0-9]*\)\{0,1\} with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
         echo "failed_recipe=${failed_recipe:-anvil-$ANVIL_GROUP}" >> "$GITHUB_OUTPUT"
         echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+        exit "$status"
     - name: Publish supplemental Anvil commit status
       if: always() && inputs.publish_commit_statuses == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
       continue-on-error: true
@@ -543,10 +544,6 @@ runs:
         setup_outcome: ${{ steps.setup.outcome }}
         exit_code: ${{ steps.run.outputs.exit_code }}
         failed_recipe: ${{ steps.run.outputs.failed_recipe }}
-    - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
-      if: always() && steps.run.outputs.exit_code != '' && steps.run.outputs.exit_code != '0'
-      shell: bash
-      run: exit 1
 ```
 
 Input set on the shared group action:
@@ -804,7 +801,7 @@ The wiring never gates jobs on the impact result — every job runs regardless o
 status. This is intentional: unscoped checks (`deny`, `audit`, `aprz`, `pr-title`,
 `mutants-full`) must run on every PR even when every tier reports `--skip`. Steps that
 need a per-tier side decision read the downloaded cache file directly (e.g. the Codecov
-upload is gated on the coverage files existing via `hashFiles(...)`), never on a job
+upload is gated on both coverage files existing via `hashFiles(...)`), never on a job
 output.
 
 
@@ -910,8 +907,8 @@ After `pr-test` (and `scheduled-test`) runs the `anvil-llvm-cov` recipe, the reu
 workflow uploads the resulting coverage files to Codecov from every leg of the matrix
 except `windows-11-arm`. The upload condition uses `always()` plus a file-existence
 guard: completed coverage reports are retained even when the coverage gate or a later
-group recipe fails, while failures before report generation do not trigger an empty
-upload. The windows-arm leg is excluded because its
+group recipe fails, while failures before both feature configurations complete do not
+trigger an empty or partial upload. The windows-arm leg is excluded because its
 LLVM-coverage instrumentation produces `malformed instrumentation profile data: symbol
 name is empty` errors that make the profile unusable. Coverage from every other leg is
 necessary because OS/arch-gated code (`cfg(target_os = ...)`, `cfg(target_arch = ...)`)
@@ -924,7 +921,7 @@ The upload step:
 
 ```yaml
 - name: Upload coverage to Codecov
-  if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info', 'target/coverage/lcov-no-default.info') != ''
+  if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info') != '' && hashFiles('target/coverage/lcov-no-default.info') != ''
   uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
   with:
     files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info

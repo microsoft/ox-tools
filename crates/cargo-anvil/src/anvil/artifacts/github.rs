@@ -423,8 +423,9 @@ export -f just
             "Codecov upload step should be declared exactly once (gated per-leg via `if:`)"
         );
         assert!(PR_IMPL_WORKFLOW.contains(
-            "if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info', \
-             'target/coverage/lcov-no-default.info') != ''"
+            "if: always() && matrix.os != 'windows-arm' && \
+             hashFiles('target/coverage/lcov-all-features.info') != '' && \
+             hashFiles('target/coverage/lcov-no-default.info') != ''"
         ));
         assert!(PR_IMPL_WORKFLOW.contains("flags: ${{ matrix.os }}"));
         assert_eq!(
@@ -455,8 +456,9 @@ export -f just
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("publish-failure:"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("codecov/codecov-action"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains(
-            "if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info', \
-             'target/coverage/lcov-no-default.info') != ''"
+            "if: always() && matrix.os != 'windows-arm' && \
+             hashFiles('target/coverage/lcov-all-features.info') != '' && \
+             hashFiles('target/coverage/lcov-no-default.info') != ''"
         ));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("vars.ANVIL_PUBLISH_FAILURE_ISSUE != 'false'"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("contains(needs.*.result, 'failure')"));
