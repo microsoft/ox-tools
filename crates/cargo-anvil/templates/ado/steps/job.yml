@@ -17,6 +17,10 @@
 #   - name      (string)   Job name; ADO derives the display name from it.
 #   - pool      (object)   Pool block, passed verbatim to ADO's `pool:` key.
 #   - steps     (stepList) Body of the job. Templated step lists are fine.
+#                          A step list may lead with its own `checkout: self`
+#                          (the benchmark group does, for depth and LFS), so a
+#                          wrapper must NOT add a checkout of its own -- doing
+#                          so would give those jobs two.
 #   - inputArtifacts (object) Optional list of pipeline artifacts to download
 #                          BEFORE the steps run. Each item: { name, path }.
 #                          The default wrapper prepends one
@@ -27,14 +31,18 @@
 #                          `anvil-impact-<os>` artifact into target/anvil/impact
 #                          and its checks read the cache exactly as a local run.
 #   - artifacts (object)   Optional list of pipeline artifacts to publish.
-#                          Each item: { name: string, path: string }.
-#                          The default wrapper appends one
-#                          PublishPipelineArtifact@1 task per entry; 1ESPT
-#                          wrappers translate these into
+#                          Each item: { name: string, path: string,
+#                          condition: string (optional) }. The default wrapper
+#                          appends one PublishPipelineArtifact@1 task per
+#                          entry; 1ESPT wrappers translate these into
 #                          templateContext.outputs.pipelineArtifact blocks
 #                          at job level. The contract is the same either way,
 #                          so the stages templates don't need to know which
 #                          backend they're targeting.
+#                          `condition` defaults to succeededOrFailed(); a
+#                          caller that must not publish in some states sets
+#                          it, and a fork is expected to carry it through to
+#                          whatever output shape it emits.
 parameters:
   - name: name
     type: string
@@ -70,7 +78,10 @@ jobs:
       - ${{ each artifact in parameters.artifacts }}:
           - task: PublishPipelineArtifact@1
             displayName: Publish ${{ artifact.name }}
-            condition: succeededOrFailed()
+            ${{ if artifact.condition }}:
+              condition: ${{ artifact.condition }}
+            ${{ else }}:
+              condition: succeededOrFailed()
             inputs:
               targetPath: ${{ artifact.path }}
               artifact: ${{ artifact.name }}

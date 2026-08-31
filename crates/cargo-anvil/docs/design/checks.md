@@ -52,6 +52,7 @@ flowchart LR
     sched --> s_adv[anvil-scheduled-advisories]:::group
     sched --> s_runtime[anvil-scheduled-runtime-analysis]:::group
     sched --> s_exh[anvil-scheduled-exhaustive]:::group
+    sched --> s_bench[anvil-scheduled-benchmarks]:::group
 
     pr_fast --> fmt[fmt]:::check
     pr_fast --> clippy[clippy]:::check
@@ -99,6 +100,8 @@ flowchart LR
     s_exh --> cargo_hack[cargo-hack]:::check
     s_exh --> bench[bench]:::check
 
+    s_bench --> bench_history[bench-history]:::check
+
     classDef tier fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
     classDef group fill:#f6f8fa,stroke:#586069,stroke-width:1px;
     classDef check fill:#f3e8ff,stroke:#6f42c1,stroke-width:1px,font-size:10px;
@@ -117,7 +120,7 @@ flowchart LR
 
 The three `pr-slow*` groups are independent: failures in `pr-test` don't block `pr-runtime-analysis` or `pr-mutants` from running, and overall PR wall-clock is `max(pr-test, pr-runtime-analysis, pr-mutants)` per leg rather than the sum. Locally, `just anvil-pr-slow` is an umbrella recipe that runs all three sub-recipes sequentially so adopters who want "run everything slow" don't have to type three commands.
 
-### scheduled tier (4 groups)
+### scheduled tier (5 groups)
 
 | Group                | OS scope                  | Purpose                                                                                                                                |
 |----------------------|---------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
@@ -125,6 +128,7 @@ The three `pr-slow*` groups are independent: failures in `pr-test` don't block `
 | `scheduled-advisories` | Same default as `pr-fast` | Runs checks whose outcome can change without a commit to this repo: `deny`, `audit`, `aprz` (external databases), `clippy` (lint set evolves with toolchain). Cross-OS because clippy compiles per host. |
 | `scheduled-runtime-analysis` | Same default as `pr-runtime-analysis` | Whole-workspace runtime correctness under `miri`, tree-borrows, strict-provenance, and race-coverage. One job per OS leg runs the four profiles sequentially so they share setup and cache state; parallelism is across OS legs. |
 | `scheduled-exhaustive` | Linux x86_64 + Windows x86_64 | Full `cargo mutants`, cargo-hack feature powerset, and benchmark compilation. The default matrix is x86-only because cargo-mutants is unsupported on Windows ARM. |
+| `scheduled-benchmarks` | Same default as `scheduled-exhaustive` | Runs the benchmarks and analyzes the accumulated history with `cargo-bench-history` to detect performance regressions, restoring and publishing that history as a build artifact and failing on an active regression. Its own group so the history round-trip and fail-on-regression semantics stay isolated from the other exhaustive work. See [benchmarks.md](./benchmarks.md). |
 
 **Backend asymmetry on ARM coverage.** The GitHub backend ships a four-leg default matrix
 (Linux/Windows × x86_64/aarch64) because GH has Microsoft-hosted ARM runners
@@ -264,7 +268,16 @@ The `miri` row above is the one place the catalog deliberately duplicates a chec
 |-----------------------|--------------------------------------------------------------------------------------------------------------|--------|
 | `mutants-full`        | `cargo mutants --workspace --no-shuffle --jobs 0`                                                            | oxidizer-github, oxidizer (sharded cross-OS) |
 | `cargo-hack` powerset | `cargo hack --workspace --feature-powerset --depth 2 check`                                                  | oxidizer, oxidizer-github |
-| `bench`               | `cargo bench --workspace --all-features --no-run`; benchmark execution is intentionally outside the catalog because runtime requirements are repository-specific | oxidizer |
+| `bench`               | `cargo bench --workspace --all-features --no-run`; compile-only, so a broken bench target is caught without paying for a measurement run | oxidizer |
+
+### `scheduled-benchmarks`
+
+| Check          | Invocation                                                                                                                                                     | Source |
+|----------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------|--------|
+| `bench-history` | `cargo bench-history` collect → apply-blessings → analyze over the history restored from the previous scheduled run; exits non-zero on an active regression. | new    |
+
+Unlike the compile-only `bench` above, this check actually *runs* the benchmarks and
+judges the resulting trend. See [benchmarks.md](./benchmarks.md).
 
 ## 3. Per-check vs grouped cloud workflows execution
 
@@ -312,7 +325,10 @@ What that means concretely:
 - **Run only in scheduled** -- the expensive whole-workspace work that doesn't fit a PR
   budget: the non-stacked miri profiles `miri-tree-borrows`, `miri-strict-provenance`,
   `miri-race-coverage` (in `scheduled-runtime-analysis`); full `mutants`,
-  `cargo-hack --feature-powerset`, `bench` (in `scheduled-exhaustive`).
+  `cargo-hack --feature-powerset`, and the compile-only `bench` (in
+  `scheduled-exhaustive`). Benchmark *regression detection* — running the
+  benches and analyzing the accumulated history — is also scheduled-only and is
+  designed in [benchmarks.md](./benchmarks.md).
 
 The single-tier-per-group rule still holds: when a check appears in both tiers it lives in
 two different groups (one PR group, one scheduled group). Repos that want a
@@ -357,7 +373,7 @@ Bucket assignments per check:
 | modified  | `fmt`, `cargo-sort`, `license-headers`, `ensure-no-cyclic-deps`, `ensure-no-default-features` |
 | affected  | `clippy`*, `llvm-cov`, `doc-test`, `examples`, `mutants-diff`, `miri`, `miri-tree-borrows`, `miri-strict-provenance`, `miri-race-coverage`, `careful`, `loom`, `bolero`, `semver-check`, `external-types`, `bench` |
 | required  | `doc-build`, `udeps`, `cargo-hack` (feature powerset)                                                                  |
-| unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `readme-check`, `spellcheck` |
+| unscoped  | `pr-title`, `deny`, `audit`, `aprz`, `mutants-full`, `readme-check`, `spellcheck`, `bench-history` |
 
 \* cargo-delta's README recommends `clippy` with the modified tier. anvil deliberately
 runs it on the affected set instead: a change in a crate's API can introduce clippy lints
@@ -376,8 +392,9 @@ deps), `cargo udeps` (unused-deps detection needs the resolved graph), `cargo ha
 external risk DB. `readme-check` and `spellcheck` also belong here: their inputs include
 repo-level files cargo-delta does not map to any package — the workspace-level README
 template (`crates/README.j2` / `README.j2`) and the root `.spelling` dictionary — so a
-change to one of those would be silently scoped out. These ignore impact scoping and
-always run.
+change to one of those would be silently scoped out. `bench-history` belongs here too: it
+needs the same suite measured at every commit for its series to stay comparable. These
+ignore impact scoping and always run.
 
 The sentinel `--skip` is a magic string that cannot be a valid cargo argument, so there
 is no collision with real package names. Recipes test for it with

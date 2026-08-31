@@ -24,6 +24,14 @@ on:
         description: Runner label for aarch64 Windows jobs.
         type: string
         default: windows-11-arm
+      bench_machine_key:
+        description: |
+          Machine key the benchmark history is partitioned by. Leave empty to
+          use cargo-bench-history's hardware fingerprint. Set a stable pool
+          label when the runner pool is heterogeneous enough to fragment a
+          series into partitions too sparse to analyze.
+        type: string
+        default: ""
     secrets:
       CODECOV_TOKEN:
         description: |
@@ -141,6 +149,35 @@ jobs:
         with:
           group: scheduled-exhaustive
 
+  scheduled-benchmarks:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [linux, windows]
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner || inputs.windows_runner }}
+    permissions:
+      contents: read
+      # Restoring the history walks the Actions runs/artifacts API. An action
+      # cannot request permissions, so this has to be granted here.
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The analysis orders each series by first-parent commit topology
+          # and locates the merge-base, so it needs the whole commit graph.
+          # The checkout has already happened by the time an action runs, so
+          # this too has to be set here.
+          fetch-depth: 0
+          lfs: true
+      - uses: ./.github/actions/anvil-run-group
+        with:
+          group: scheduled-benchmarks
+          bench_history: true
+          # Per-leg identity: the matrix value is in scope here and nowhere
+          # inside the action.
+          bench_artifact: bench-history-${{ matrix.os }}
+          bench_machine_key: ${{ inputs.bench_machine_key }}
+
   publish-failure:
     name: Publish scheduled failure
     needs:
@@ -148,6 +185,7 @@ jobs:
       - scheduled-advisories
       - scheduled-runtime-analysis
       - scheduled-exhaustive
+      - scheduled-benchmarks
     if: ${{ always() && vars.ANVIL_PUBLISH_FAILURE_ISSUE != 'false'
       && contains(needs.*.result, 'failure') }}
     runs-on: ${{ inputs.linux_runner }}

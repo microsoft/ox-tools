@@ -180,6 +180,23 @@ different base or extra packages edits them in place, and drift handling
 preserves the edit (see [containers.md](./containers.md#8-customization)). A
 "DO NOT EDIT" marker would contradict the customization path both are for.
 
+### 2.1 Growing a contract a fork implements
+
+`steps/job.yml` is the one owned file adopters are expected to fork, so its
+parameter contract is the one place where a change can silently do nothing. A
+generated file that binds a *new parameter* the fork does not declare fails
+template expansion loudly. A new *optional field inside an existing object*
+parameter is the dangerous case: the fork accepts the object, ignores the field,
+and diverges in behaviour with no error anywhere — the emitter, `.anvil.lock` and
+the update flow cannot see it.
+
+The rule that follows: **a behaviour that protects data must not depend on a fork
+having adopted a field.** Express it so the generated side is safe on its own, and
+let the contract field be a second line of defence. `artifacts[].condition` is the
+worked example — it guards against publishing a truncated benchmark history, and
+the restore step is written so a failed restore leaves nothing to publish at all,
+which holds even for a wrapper that predates the field.
+
 ## 3. Managed regions
 
 Co-owned files with one or more tool-managed sections delimited by sentinel comments.

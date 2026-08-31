@@ -146,7 +146,12 @@ anvil-scheduled-advisories: anvil-deny anvil-audit anvil-aprz anvil-clippy
 anvil-scheduled-runtime-analysis: anvil-miri anvil-miri-tree-borrows \
                                   anvil-miri-strict-provenance anvil-miri-race-coverage
 anvil-scheduled-exhaustive: anvil-mutants-full anvil-cargo-hack anvil-bench
+anvil-scheduled-benchmarks: anvil-bench-history
 ```
+
+The `scheduled-benchmarks` group runs the same recipe locally, but benchmark
+regression analysis needs the shared CI history that a local checkout does not
+have; its local behavior is described in [benchmarks.md §6](./benchmarks.md).
 
 ### tiers.just
 
@@ -157,7 +162,7 @@ in a deterministic order:
 anvil-pr: anvil-pr-validate-prereqs anvil-pr-fast anvil-pr-slow
 anvil-scheduled: anvil-scheduled-validate-prereqs anvil-scheduled-test \
                  anvil-scheduled-advisories anvil-scheduled-runtime-analysis \
-                 anvil-scheduled-exhaustive
+                 anvil-scheduled-exhaustive anvil-scheduled-benchmarks
 anvil-full: anvil-pr anvil-scheduled
 ```
 

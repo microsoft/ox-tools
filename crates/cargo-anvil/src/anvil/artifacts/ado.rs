@@ -23,6 +23,12 @@ const ADVISORY_COMMENTS_STEP: &str = include_str!("../../../templates/ado/steps/
 /// Embedded body of the dirty-file job wrapper.
 const JOB_WRAPPER: &str = include_str!("../../../templates/ado/steps/job.yml");
 
+/// Embedded body of the benchmark-history restore step template.
+const BENCH_HISTORY_RESTORE_STEP: &str = include_str!("../../../templates/ado/steps/bench-history-restore.yml");
+
+/// Embedded body of the benchmark-findings build-summary step template.
+const BENCH_HISTORY_SUMMARY_STEP: &str = include_str!("../../../templates/ado/steps/bench-history-summary.yml");
+
 /// Embedded body of the PR-tier stages template.
 const PR_STAGES: &str = include_str!("../../../templates/ado/pr-stages.yml");
 
@@ -55,6 +61,7 @@ const GROUPS: &[&str] = &[
     "scheduled-advisories",
     "scheduled-runtime-analysis",
     "scheduled-exhaustive",
+    "scheduled-benchmarks",
 ];
 
 /// Embedded template for one per-group step. `__GROUP__` is substituted with
@@ -67,6 +74,54 @@ const GROUP_PLACEHOLDER: &str = "__GROUP__";
 /// Placeholder token the per-group template uses for the impact-mode selection.
 const IMPACT_MODE_PLACEHOLDER: &str = "__IMPACT_MODE__";
 
+/// Placeholder lines for steps a group needs around the uniform runner.
+/// Substituted away entirely for groups that need none.
+const PRE_STEPS_PLACEHOLDER: &str = "__PRE_STEPS__\n";
+const POST_STEPS_PLACEHOLDER: &str = "__POST_STEPS__\n";
+
+/// Steps that run before the uniform group runner, per group.
+///
+/// These live in the group's own emitted step template rather than at the
+/// call site, so `pr.yml` / `scheduled.yml` stay a plain list of groups. A
+/// group absent from the table gets nothing.
+///
+/// The bodies are template files like every other emitted YAML, rather than
+/// Rust string literals: they are fragments of a `steps:` list, so they are
+/// not standalone-valid templates, but keeping them in `templates/ado/`
+/// means the indentation is real YAML instead of escapes.
+const GROUP_PRE_STEPS: &[(&str, &str)] = &[(
+    "scheduled-benchmarks",
+    include_str!("../../../templates/ado/steps/scheduled-benchmarks-pre.yml"),
+)];
+
+/// Steps that run after the uniform group runner, per group.
+const GROUP_POST_STEPS: &[(&str, &str)] = &[
+    (
+        "scheduled-test",
+        include_str!("../../../templates/ado/steps/scheduled-test-post.yml"),
+    ),
+    (
+        "scheduled-benchmarks",
+        include_str!("../../../templates/ado/steps/scheduled-benchmarks-post.yml"),
+    ),
+];
+
+/// The extra steps registered for `group`, with the fragment's own license
+/// header removed: the emitted file already carries one, and a second copy
+/// mid-list is noise. The explanatory comments are kept.
+fn extra_steps(table: &'static [(&'static str, &'static str)], group: &str) -> String {
+    let Some(text) = table.iter().find_map(|&(name, steps)| (name == group).then_some(steps)) else {
+        return String::new();
+    };
+    let body: Vec<&str> = text
+        .lines()
+        .skip_while(|line| line.starts_with("# Copyright") || line.starts_with("# Licensed") || *line == "#")
+        .collect();
+    let mut out = body.join("\n");
+    out.push('\n');
+    out
+}
+
 /// Render the step template for one group.
 #[must_use]
 fn render_group_step(group: &str) -> String {
@@ -78,6 +133,8 @@ fn render_group_step(group: &str) -> String {
         rendered.replace_range(pos..pos + IMPACT_MODE_PLACEHOLDER.len(), impact_mode(group));
     }
     rendered
+        .replace(PRE_STEPS_PLACEHOLDER, &extra_steps(GROUP_PRE_STEPS, group))
+        .replace(POST_STEPS_PLACEHOLDER, &extra_steps(GROUP_POST_STEPS, group))
 }
 
 /// Repo-root-relative path for one group's step template.
@@ -109,6 +166,28 @@ pub fn advisory_comments() -> Artifact {
 #[must_use]
 pub fn job_wrapper() -> Artifact {
     Artifact::backend_file(Backend::Ado, ".pipelines/anvil/steps/job.yml", JOB_WRAPPER)
+}
+
+/// `.pipelines/anvil/steps/bench-history-restore.yml` — restores the
+/// benchmark history the previous scheduled run published.
+#[must_use]
+pub fn bench_history_restore() -> Artifact {
+    Artifact::backend_file(
+        Backend::Ado,
+        ".pipelines/anvil/steps/bench-history-restore.yml",
+        BENCH_HISTORY_RESTORE_STEP,
+    )
+}
+
+/// `.pipelines/anvil/steps/bench-history-summary.yml` — attaches the
+/// benchmark findings to the build summary.
+#[must_use]
+pub fn bench_history_summary() -> Artifact {
+    Artifact::backend_file(
+        Backend::Ado,
+        ".pipelines/anvil/steps/bench-history-summary.yml",
+        BENCH_HISTORY_SUMMARY_STEP,
+    )
 }
 
 /// `.pipelines/anvil/pr.yml` — the PR-tier stages template.
@@ -175,12 +254,20 @@ pub(crate) const GROUP_STEPS: &[(&str, &str)] = &[
         ".pipelines/anvil/steps/scheduled-runtime-analysis.yml",
     ),
     ("scheduled-exhaustive", ".pipelines/anvil/steps/scheduled-exhaustive.yml"),
+    ("scheduled-benchmarks", ".pipelines/anvil/steps/scheduled-benchmarks.yml"),
 ];
 
 /// All ADO backend artifacts in emission order.
 #[must_use]
 pub(crate) fn all() -> Vec<Artifact> {
-    let mut out = vec![setup_step(), impact_step(), advisory_comments(), job_wrapper()];
+    let mut out = vec![
+        setup_step(),
+        impact_step(),
+        advisory_comments(),
+        job_wrapper(),
+        bench_history_restore(),
+        bench_history_summary(),
+    ];
     for (group, path) in GROUP_STEPS {
         out.push(Artifact::backend_file(Backend::Ado, path, render_group_step(group)));
     }
@@ -387,21 +474,111 @@ mod tests {
     }
 
     #[test]
-    fn scheduled_stages_has_four_groups() {
+    fn per_group_step_keys_name_real_groups() {
+        // `extra_steps` matches by string equality and falls back to "", so a
+        // renamed or dropped group would silently lose its steps -- and for
+        // the benchmark group that means analyzing an empty store and
+        // reporting "no regressions", the one outcome it must never produce
+        // by accident.
+        for (table, label) in [(GROUP_PRE_STEPS, "pre"), (GROUP_POST_STEPS, "post")] {
+            let mut seen = Vec::new();
+            for &(group, _) in table {
+                assert!(GROUPS.contains(&group), "{label}-step key '{group}' is not a catalog group");
+                assert!(!seen.contains(&group), "{label}-step key '{group}' is registered twice");
+                seen.push(group);
+            }
+        }
+    }
+
+    #[test]
+    fn scheduled_stages_has_five_groups() {
         for needle in [
             "stage: scheduled_test",
             "stage: scheduled_advisories",
             "stage: scheduled_runtime_analysis",
             "stage: scheduled_exhaustive",
+            "stage: scheduled_benchmarks",
         ] {
             assert!(SCHEDULED_STAGES.contains(needle), "scheduled stages missing '{needle}'");
         }
-        assert!(SCHEDULED_STAGES.contains("PublishCodeCoverageResults@2"));
+        // Coverage publication lives in the group's own step template now;
+        // the stages file is a plain list of groups.
+        assert!(render_group_step("scheduled-test").contains("PublishCodeCoverageResults@2"));
         assert!(SCHEDULED_STAGES.contains("- template: steps/job.yml"));
         assert!(
             !SCHEDULED_STAGES.contains("\n      - job: "),
             "Scheduled stages defines a bare `- job:` instead of going through steps/job.yml"
         );
+    }
+
+    #[test]
+    fn scheduled_benchmarks_stage_round_trips_the_history_artifact() {
+        // The stage is a plain list of groups; the round-trip lives in the
+        // group's own step template.
+        let group_step = render_group_step("scheduled-benchmarks");
+        assert!(
+            !JOB_WRAPPER.contains("fetchDepth"),
+            "the job wrapper contract must stay frozen; put checkout in the group's step template"
+        );
+        assert!(group_step.contains("- checkout: self"));
+        assert!(group_step.contains("fetchDepth: 0"));
+        // Benchmark inputs can be LFS-tracked.
+        assert!(group_step.contains("lfs: true"));
+        assert!(group_step.contains("template: bench-history-restore.yml"));
+        assert!(group_step.contains("template: bench-history-summary.yml"));
+        // A group with no registered extras gets none of this.
+        assert!(!render_group_step("scheduled-exhaustive").contains("bench-history"));
+        assert!(!render_group_step("scheduled-exhaustive").contains("checkout: self"));
+        // Coverage publication likewise moved off the call site.
+        assert!(render_group_step("scheduled-test").contains("PublishCodeCoverageResults@2"));
+        assert!(
+            !SCHEDULED_STAGES.contains("PublishCodeCoverageResults@2"),
+            "the stages template must not carry per-group steps"
+        );
+        // The publish stays a job-level output so a forked (1ESPT) wrapper
+        // still translates it; the guard rides along as a `condition`.
+        assert_eq!(
+            SCHEDULED_STAGES
+                .matches("condition: and(succeededOrFailed(), ne(variables['ANVIL_BENCH_RESTORE'], ''))")
+                .count(),
+            2,
+            "each leg's artifact entry carries the restore guard"
+        );
+        assert!(JOB_WRAPPER.contains("${{ if artifact.condition }}"));
+        // Take the newest build carrying the artifact whatever its outcome:
+        // restoring only from green builds would drop every sample collected
+        // while the pipeline was red from a regression.
+        assert!(BENCH_HISTORY_RESTORE_STEP.contains("queryOrder=finishTimeDescending"));
+        // Absence and operational failure must stay distinguishable, or one
+        // transient error publishes an empty store over a good history.
+        assert!(BENCH_HISTORY_RESTORE_STEP.contains("if ($status -eq 404) { continue }"));
+        assert!(BENCH_HISTORY_RESTORE_STEP.contains("Complete-Restore 'restored'"));
+        assert!(BENCH_HISTORY_RESTORE_STEP.contains("Complete-Restore 'cold-start'"));
+        // Fail-closed by construction, and atomically: the store is assembled
+        // beside the published path and moved into place in one step, so
+        // neither an operational failure nor a copy that dies partway leaves
+        // anything for a wrapper that ignores the artifact condition to
+        // upload over the accumulated chain.
+        assert_eq!(
+            BENCH_HISTORY_RESTORE_STEP
+                .matches("Move-Item -LiteralPath $pending -Destination $path")
+                .count(),
+            1,
+            "the store path must appear only via the atomic move"
+        );
+        assert!(
+            !BENCH_HISTORY_RESTORE_STEP.contains("Copy-Item -Path (Join-Path $staging '*') -Destination $path"),
+            "copying straight into the published path can leave a partial store there"
+        );
+        assert!(
+            !BENCH_HISTORY_RESTORE_STEP.contains("continueOnError"),
+            "a blanket continueOnError would read every failure as a cold start"
+        );
+        assert!(BENCH_HISTORY_SUMMARY_STEP.contains("##vso[task.uploadsummary]"));
+        assert!(BENCH_HISTORY_SUMMARY_STEP.contains("condition: succeededOrFailed()"));
+        // The machine-key escape hatch is an input on this backend too.
+        assert!(SCHEDULED_STAGES.contains("name: benchMachineKey"));
+        assert!(SCHEDULED_STAGES.contains("ANVIL_BENCH_MACHINE_KEY: ${{ parameters.benchMachineKey }}"));
     }
 
     #[test]

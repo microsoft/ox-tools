@@ -39,7 +39,8 @@ _anvil-scheduled: anvil-scheduled-validate-prereqs \
     anvil-scheduled-test \
     anvil-scheduled-advisories \
     anvil-scheduled-runtime-analysis \
-    anvil-scheduled-exhaustive
+    anvil-scheduled-exhaustive \
+    anvil-scheduled-benchmarks
 
 # Full-workspace for the same reason as the scheduled tier.
 
@@ -82,7 +83,8 @@ anvil-scheduled-setup installer="install": \
     (anvil-scheduled-test-setup installer) \
     (anvil-scheduled-advisories-setup installer) \
     (anvil-scheduled-runtime-analysis-setup installer) \
-    (anvil-scheduled-exhaustive-setup installer)
+    (anvil-scheduled-exhaustive-setup installer) \
+    (anvil-scheduled-benchmarks-setup installer)
 
 # Validate prerequisites for the `anvil-scheduled` recipe.
 [group("anvil-setup")]
@@ -90,7 +92,8 @@ anvil-scheduled-validate-prereqs: \
     anvil-scheduled-test-validate-prereqs \
     anvil-scheduled-advisories-validate-prereqs \
     anvil-scheduled-runtime-analysis-validate-prereqs \
-    anvil-scheduled-exhaustive-validate-prereqs
+    anvil-scheduled-exhaustive-validate-prereqs \
+    anvil-scheduled-benchmarks-validate-prereqs
 
 # Install prerequisites for the `anvil-full` recipe.
 [group("anvil-setup")]

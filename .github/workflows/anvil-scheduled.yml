@@ -21,5 +21,8 @@ jobs:
     # and restores that scope only on publish-failure.
     permissions:
       contents: read
+      # The scheduled-benchmarks job restores its history artifact, which
+      # reads the Actions runs/artifacts API. Narrowed to that job inside.
+      actions: read
       issues: write
     secrets: inherit

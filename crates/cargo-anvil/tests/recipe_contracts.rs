@@ -109,6 +109,44 @@ if ($args -contains 'nextest') {
     }
     exit [int]$env:FAKE_NEXTEST_EXIT
 }
+if ($args -contains 'bench-history') {
+    # $args inside a function refers to that function's own arguments, so
+    # the script's are captured here and passed in explicitly.
+    $cbhArgs = $args
+    # Writes whatever report the scenario asked for to the path the recipe
+    # passed, so the recipe's own parsing and gating are what get exercised.
+    function Write-Report([string[]]$all, [string]$flag, [string]$content) {
+        $index = [array]::IndexOf($all, $flag)
+        if ($index -ge 0 -and $content) {
+            $target = $all[$index + 1]
+            $parent = Split-Path -Parent $target
+            if ($parent) { New-Item -ItemType Directory -Force -Path $parent | Out-Null }
+            Set-Content -LiteralPath $target -Value $content -Encoding UTF8
+        }
+    }
+    if ($cbhArgs -contains 'collect') { exit [int]$env:FAKE_CBH_COLLECT_EXIT }
+    if ($cbhArgs -contains 'analyze') {
+        Write-Report $cbhArgs '--json' $env:FAKE_CBH_FINDINGS
+        Write-Report $cbhArgs '--markdown' 'findings'
+        Write-Report $cbhArgs '--markdown-summary' 'summary'
+        exit [int]$env:FAKE_CBH_ANALYZE_EXIT
+    }
+    if ($cbhArgs -contains 'list') {
+        if ($cbhArgs -contains 'runs') {
+            $runs = if ($env:FAKE_CBH_RUNS) {
+                $env:FAKE_CBH_RUNS
+            } else {
+                '{"sets":[{"commits":[{"commit":"8392995a3b94","runs":1,"clean":1,"dirty":0}]}]}'
+            }
+            Write-Report $cbhArgs '--json' $runs
+        } else {
+            Write-Report $cbhArgs '--json' $env:FAKE_CBH_BLESSINGS
+        }
+        exit 0
+    }
+    if ($cbhArgs -contains 'bless') { exit [int]$env:FAKE_CBH_BLESS_EXIT }
+    exit 0
+}
 if ($args -contains 'binstall') {
     exit [int]$env:FAKE_BINSTALL_EXIT
 }
@@ -164,7 +202,7 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
     let bin = tmp.path().join("fake-bin");
     fs::create_dir_all(&bin).unwrap();
     write(&bin.join("cargo.ps1"), FAKE_CARGO_PS1);
-    write(&bin.join("git.ps1"), "exit 0\n");
+    write(&bin.join("git.ps1"), FAKE_GIT);
     tmp
 }
 
@@ -1451,4 +1489,795 @@ fn symlink_file(target: &Path, link: &Path) -> std::io::Result<()> {
 #[cfg(unix)]
 fn symlink_dir(target: &Path, link: &Path) -> std::io::Result<()> {
     std::os::unix::fs::symlink(target, link)
+}
+
+const BENCH_HISTORY: &str = include_str!("../templates/justfiles/anvil/checks/bench-history.just");
+
+/// A findings report with one active regression — the state that must gate.
+const ACTIVE_REGRESSION: &str = r#"{"notable":true,"findings":[
+  {"segments":["emit_alloc","churn"],"kind":"wall_time","direction":"regression",
+   "active":true,"relative_delta":0.4966,"confidence":1.0,"commit":"8392995a"}]}"#;
+
+/// The same finding after it recovered: reported, but nothing to act on.
+const INACTIVE_REGRESSION: &str = r#"{"notable":true,"findings":[
+  {"segments":["emit_alloc","churn"],"kind":"wall_time","direction":"regression",
+   "active":false,"relative_delta":0.4966,"confidence":1.0,"commit":"8392995a"}]}"#;
+
+/// An improvement — never a reason to fail.
+const IMPROVEMENT: &str = r#"{"notable":true,"findings":[
+  {"segments":["emit_alloc","churn"],"kind":"wall_time","direction":"improvement",
+   "active":true,"relative_delta":-0.31,"confidence":1.0,"commit":"8392995a"}]}"#;
+
+/// What an empty workspace analyzes to: no runs, no findings.
+const NO_FINDINGS: &str = r#"{"notable":false,"findings":[]}"#;
+
+/// The stand-in `git`, covering the commit resolution the blessing
+/// reconciliation performs.
+const FAKE_GIT: &str = r"
+if ($args -contains 'rev-parse') {
+    # The recipe resolves a possibly-abbreviated commit before blessing;
+    # FAKE_GIT_UNKNOWN_COMMIT makes that resolution fail.
+    if ($env:FAKE_GIT_UNKNOWN_COMMIT) { exit 128 }
+    Write-Output '8392995a3b94218612437d0b868df2a48029b6ea'
+    exit 0
+}
+exit 0
+";
+
+/// Both streams of a recipe run, for assertion messages.
+///
+/// A recipe that dies before producing output says why on stderr, so a
+/// failure message carrying only stdout hides the actual cause.
+fn both_streams(output: &Output) -> String {
+    format!(
+        "\n--- stdout ---\n{}\n--- stderr ---\n{}\n--- status: {:?} ---",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        output.status
+    )
+}
+
+/// Runs `anvil-bench-history` in a fixture, with the fake cbh returning
+/// `findings` and the given extra environment. Gating is CI-only, so the
+/// scenarios that assert on the exit code set `ANVIL_BENCH_GATE`.
+fn run_bench_history(findings: &str, extra: &[(&str, &OsStr)]) -> (TempDir, Output) {
+    let tmp = fixture(
+        &[("bench-history.just", BENCH_HISTORY)],
+        &[
+            "anvil-tool-cargo-bench-history-validate-prereqs",
+            "anvil-tool-cargo-bench-history-install installer=\"install\"",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    let mut environment: Vec<(&str, &OsStr)> = vec![
+        ("FAKE_CBH_FINDINGS", OsStr::new(findings)),
+        ("FAKE_CARGO_LOG", log.as_os_str()),
+        ("ANVIL_BENCH_GATE", OsStr::new("1")),
+    ];
+    environment.extend_from_slice(extra);
+    let output = run_just(tmp.path(), &["anvil-bench-history"], &environment);
+    (tmp, output)
+}
+
+fn cargo_calls(root: &Path) -> String {
+    std::fs::read_to_string(root.join("cargo.log")).unwrap_or_default()
+}
+
+#[test]
+fn bench_history_gates_on_active_regressions_only() {
+    if !tools_available() {
+        return;
+    }
+
+    // An active regression is the one state that gates.
+    let (tmp, output) = run_bench_history(ACTIVE_REGRESSION, &[]);
+    assert_failed(&output, "an active regression");
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("emit_alloc/churn"), "names the benchmark:{}", both_streams(&output));
+    assert!(text.contains("8392995a"), "names the attributed commit:{}", both_streams(&output));
+    let calls = cargo_calls(tmp.path());
+    assert!(calls.contains("bench-history collect"), "calls:\n{calls}");
+    assert!(calls.contains("bench-history analyze"), "calls:\n{calls}");
+
+    // A recovered regression and an improvement both need no action.
+    for (findings, label) in [(INACTIVE_REGRESSION, "inactive"), (IMPROVEMENT, "improvement")] {
+        let (_tmp, output) = run_bench_history(findings, &[]);
+        assert!(output.status.success(), "{label} finding must not gate:{}", both_streams(&output));
+    }
+
+    // A workspace with no benchmarks analyzes to nothing and stays green:
+    // adopting the capability must not turn such a repo permanently red.
+    let (_tmp, output) = run_bench_history(NO_FINDINGS, &[]);
+    assert!(
+        output.status.success(),
+        "an empty history must be a clean no-op:{}",
+        both_streams(&output)
+    );
+}
+
+#[test]
+fn bench_history_reports_without_gating_outside_ci() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("bench-history.just", BENCH_HISTORY)],
+        &[
+            "anvil-tool-cargo-bench-history-validate-prereqs",
+            "anvil-tool-cargo-bench-history-install installer=\"install\"",
+        ],
+    );
+    // No ANVIL_BENCH_GATE, and the CI markers explicitly cleared: a laptop's
+    // measurement noise must not fail a pre-release `anvil-full` and invite
+    // silencing it with a committed blessing.
+    let output = run_just(
+        tmp.path(),
+        &["anvil-bench-history"],
+        &[
+            ("FAKE_CBH_FINDINGS", OsStr::new(ACTIVE_REGRESSION)),
+            ("CI", OsStr::new("")),
+            ("TF_BUILD", OsStr::new("")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "a local run reports but does not gate:{}",
+        both_streams(&output)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("emit_alloc/churn"), "still reports the finding:\n{text}");
+    assert!(text.contains("ANVIL_BENCH_GATE"), "points at the opt-in:\n{text}");
+}
+
+#[test]
+fn bench_history_gate_reads_ci_markers_as_boolean_like() {
+    if !tools_available() {
+        return;
+    }
+    // PowerShell treats every non-empty string as true, so an exported
+    // CI=false would otherwise gate a local run on a shared trend measured
+    // on that developer's own hardware.
+    let (_tmp, output) = run_bench_history(
+        ACTIVE_REGRESSION,
+        &[
+            ("ANVIL_BENCH_GATE", OsStr::new("")),
+            ("CI", OsStr::new("false")),
+            ("TF_BUILD", OsStr::new("")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "CI=false must not gate a local run:{}",
+        both_streams(&output)
+    );
+
+    // A present-but-blank marker is not a marker either.
+    let (_tmp, output) = run_bench_history(
+        ACTIVE_REGRESSION,
+        &[
+            ("ANVIL_BENCH_GATE", OsStr::new("")),
+            ("CI", OsStr::new("   ")),
+            ("TF_BUILD", OsStr::new("")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "a whitespace-only marker must not gate:{}",
+        both_streams(&output)
+    );
+
+    // Anything else non-empty still gates: the CI side stays fail-closed.
+    let (_tmp, output) = run_bench_history(
+        ACTIVE_REGRESSION,
+        &[
+            ("ANVIL_BENCH_GATE", OsStr::new("")),
+            ("CI", OsStr::new("true")),
+            ("TF_BUILD", OsStr::new("")),
+        ],
+    );
+    assert_failed(&output, "CI=true");
+}
+
+#[test]
+fn bench_history_propagates_tool_failure() {
+    if !tools_available() {
+        return;
+    }
+    // A tool that fails to *run* is not "no regressions".
+    let (_tmp, output) = run_bench_history(NO_FINDINGS, &[("FAKE_CBH_COLLECT_EXIT", OsStr::new("3"))]);
+    assert_failed(&output, "a failing collect");
+}
+
+#[test]
+fn bench_history_refuses_a_store_the_wiring_does_not_publish() {
+    if !tools_available() {
+        return;
+    }
+
+    // The wiring announces the one path it restores into and publishes from.
+    // A store pointing anywhere else would never persist, so every run would
+    // cold-start and analyze to a clean no-op -- reporting green exactly when
+    // the history needed to report red has been lost.
+    let (_tmp, output) = run_bench_history(
+        NO_FINDINGS,
+        &[
+            ("ANVIL_BENCH_WIRED_STORE", OsStr::new("target/anvil/bench-history")),
+            ("ANVIL_BENCH_HISTORY_STORE", OsStr::new("target/somewhere-else")),
+        ],
+    );
+    assert_failed(&output, "a store the wiring does not publish");
+
+    // Agreement is not a desync, however it is spelled: the comparison is on
+    // the resolved path, not the literal string.
+    let (_tmp, output) = run_bench_history(
+        NO_FINDINGS,
+        &[
+            ("ANVIL_BENCH_WIRED_STORE", OsStr::new("target/anvil/bench-history")),
+            ("ANVIL_BENCH_HISTORY_STORE", OsStr::new("target/anvil/../anvil/bench-history")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "the same path spelled differently is not a desync:{}",
+        both_streams(&output)
+    );
+
+    // Without wiring there is nothing to disagree with: a local run may put
+    // its store wherever it likes.
+    let (_tmp, output) = run_bench_history(NO_FINDINGS, &[("ANVIL_BENCH_HISTORY_STORE", OsStr::new("target/somewhere-else"))]);
+    assert!(
+        output.status.success(),
+        "an unwired run may choose its own store:{}",
+        both_streams(&output)
+    );
+}
+
+/// Runs the private blessing reconciliation directly, so the prefix-matching
+/// boundary is pinned without going through a whole analysis.
+fn run_bless(blessings_file: &str, applied: &str) -> (TempDir, Output) {
+    let tmp = fixture(
+        &[("bench-history.just", BENCH_HISTORY)],
+        &[
+            "anvil-tool-cargo-bench-history-validate-prereqs",
+            "anvil-tool-cargo-bench-history-install installer=\"install\"",
+        ],
+    );
+    write(&tmp.path().join(".config/bench-blessings.toml"), blessings_file);
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["_anvil-bench-history-bless", "store", ".config/bench-blessings.toml"],
+        &[("FAKE_CBH_BLESSINGS", OsStr::new(applied)), ("FAKE_CARGO_LOG", log.as_os_str())],
+    );
+    (tmp, output)
+}
+
+#[test]
+fn bench_history_bless_reconciles_on_exact_prefix_identity() {
+    if !tools_available() {
+        return;
+    }
+    let requested = "[[blessing]]\n\
+        benchmark = \"emit_alloc\"\n\
+        commit = \"8392995a\"\n\
+        reason = \"arena allocator tradeoff\"\n";
+
+    // A stored blessing of the *narrower* `emit_alloc/churn` does not cover
+    // the requested broader `emit_alloc`. Treating it as already-applied
+    // would leave the build red while claiming nothing needed doing.
+    let narrower = r#"{"blessings":[{"commit":"8392995a3b94","benchmark":"emit_alloc/churn"}]}"#;
+    let (tmp, output) = run_bless(requested, narrower);
+    assert!(
+        output.status.success(),
+        "reconciliation failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        cargo_calls(tmp.path()).contains("bench-history bless"),
+        "a narrower stored blessing must not satisfy a broader request:{}",
+        both_streams(&output)
+    );
+
+    // The exact same id already recorded is a no-op, so a scheduled run never
+    // re-appends a sidecar that is already in effect. Window-shaped, because
+    // `list blessings --all` reports concrete ids and never `prefixes` --
+    // fixtures in the HEAD shape would cover a branch that never runs here.
+    let exact = r#"{"blessings":[{"commit":"8392995a3b94","benchmark":"emit_alloc"}]}"#;
+    let (tmp, output) = run_bless(requested, exact);
+    assert!(output.status.success());
+    assert!(
+        !cargo_calls(tmp.path()).contains("bench-history bless"),
+        "an already-applied blessing must not be re-appended:{}",
+        both_streams(&output)
+    );
+}
+
+#[test]
+fn bench_history_bless_skips_commits_the_store_has_forgotten() {
+    if !tools_available() {
+        return;
+    }
+    let requested = "[[blessing]]\n\
+        benchmark = \"emit_alloc\"\n\
+        commit = \"8392995a\"\n\
+        reason = \"arena allocator tradeoff\"\n";
+
+    // cbh refuses to bless a context commit it holds no run for, and `collect`
+    // only ever records the current commit, so a commit lost to a cold start
+    // or artifact eviction can never come back. Applying it anyway would fail
+    // the recipe before analyze on every run, leaving the group permanently
+    // red until a human edited the ledger.
+    let tmp = fixture(
+        &[("bench-history.just", BENCH_HISTORY)],
+        &[
+            "anvil-tool-cargo-bench-history-validate-prereqs",
+            "anvil-tool-cargo-bench-history-install installer=\"install\"",
+        ],
+    );
+    write(&tmp.path().join(".config/bench-blessings.toml"), requested);
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["_anvil-bench-history-bless", "store", ".config/bench-blessings.toml"],
+        &[
+            ("FAKE_CBH_BLESSINGS", OsStr::new(r#"{"blessings":[]}"#)),
+            ("FAKE_CBH_RUNS", OsStr::new(r#"{"sets":[]}"#)),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "a forgotten commit must not fail the recipe:{}",
+        both_streams(&output)
+    );
+    assert!(
+        !cargo_calls(tmp.path()).contains("bench-history bless"),
+        "nothing to accept at a commit the store has forgotten:{}",
+        both_streams(&output)
+    );
+}
+
+#[test]
+fn bench_history_bless_rejects_malformed_entries() {
+    if !tools_available() {
+        return;
+    }
+    let applied = r#"{"blessings":[]}"#;
+
+    // A `#` inside a value is content, not a comment: silently truncating a
+    // reason citing an issue number would lose exactly what makes the audit
+    // trail worth keeping.
+    let hashed = "[[blessing]]\n\
+        benchmark = \"emit_alloc\"\n\
+        commit = \"8392995a\"\n\
+        reason = \"accepted in #1234\"\n";
+    let (tmp, output) = run_bless(hashed, applied);
+    assert!(
+        output.status.success(),
+        "a # inside a quoted value is content:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("#1234"),
+        "the reason must survive intact:{}",
+        both_streams(&output)
+    );
+    assert!(cargo_calls(tmp.path()).contains("bench-history bless"));
+
+    // Anything the subset cannot represent is rejected, not reinterpreted.
+    for (body, label) in [
+        ("[[blessing]]\nbenchmark = emit_alloc\n", "unquoted value"),
+        ("[[blessing]]\nbenchmark = \"a\"\ncommit = \"b\"\n", "missing reason"),
+        ("[[other]]\nbenchmark = \"a\"\n", "unexpected table"),
+        // A leading `-` would reach cbh as a flag rather than a benchmark id.
+        // `--all` in particular has a real meaning there: accept *every*
+        // benchmark at the commit, while the log claims one named `--all`.
+        (
+            "[[blessing]]\nbenchmark = \"--all\"\ncommit = \"8392995a\"\nreason = \"r\"\n",
+            "an option-shaped benchmark",
+        ),
+        (
+            "[[blessing]]\nbenchmark = \"emit_alloc\"\ncommit = \"--all\"\nreason = \"r\"\n",
+            "an option-shaped commit",
+        ),
+    ] {
+        let (_tmp, output) = run_bless(body, applied);
+        assert_failed(&output, label);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Benchmark-history restore blocks.
+//
+// These carry the most control flow in the benchmark wiring, and the invariant
+// they exist for -- an operational failure must never be mistaken for "no
+// history yet" -- is invisible to a `contains` assertion on the emitted YAML.
+// Both are therefore extracted from their template and executed against mocked
+// transports.
+// ---------------------------------------------------------------------------
+
+const GH_BENCH_RESTORE: &str = include_str!("../templates/github/run-group-action.yml");
+
+const ADO_RESTORE: &str = include_str!("../templates/ado/steps/bench-history-restore.yml");
+
+/// Extracts a block scalar (`run: |` / `pwsh: |`) from `yaml`, starting the
+/// search at `after` and dedenting the body.
+fn block_scalar(yaml: &str, after: &str, key: &str) -> String {
+    let start = yaml.find(after).unwrap_or_else(|| panic!("marker '{after}' not found"));
+    let rest = &yaml[start..];
+    let key_offset = rest.find(key).unwrap_or_else(|| panic!("key '{key}' not found after '{after}'"));
+    let key_line_start = rest[..key_offset].rfind('\n').map_or(0, |index| index + 1);
+    let indent = key_offset - key_line_start;
+
+    let body = &rest[key_offset + key.len()..];
+    let mut lines = Vec::new();
+    for line in body.lines().skip(1) {
+        let line_indent = line.len() - line.trim_start().len();
+        if !line.trim().is_empty() && line_indent <= indent {
+            break;
+        }
+        lines.push(if line.len() > indent + 2 { &line[indent + 2..] } else { "" });
+    }
+    lines.join("\n")
+}
+
+fn git_bash() -> Option<&'static str> {
+    let candidate = r"C:\Program Files\Git\bin\bash.exe";
+    Path::new(candidate).is_file().then_some(candidate)
+}
+
+/// Runs the GitHub restore block with a stubbed `gh`.
+///
+/// `runs` are the run ids the listing yields, newest first; `artifact_runs`
+/// are those the artifacts API reports as carrying the artifact.
+fn run_github_restore(
+    runs: &str,
+    artifact_runs: &str,
+    download_exit: &str,
+    runs_exit: &str,
+    nested: bool,
+) -> (TempDir, Output, String, String) {
+    let bash = git_bash().expect("git bash checked by caller");
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    write(
+        &root.join("bin/gh"),
+        r#"#!/usr/bin/env bash
+if [ "$1" = "run" ] && [ "$2" = "list" ]; then
+  if [ -n "$FAKE_GH_RUNS_EXIT" ] && [ "$FAKE_GH_RUNS_EXIT" != "0" ]; then
+    echo "gh: HTTP 502 Bad Gateway (api.github.com)" >&2
+    exit "$FAKE_GH_RUNS_EXIT"
+  fi
+  for id in $FAKE_GH_RUNS; do echo "$id"; done
+  exit 0
+fi
+if [ "$1" = "api" ]; then
+  for arg in "$@"; do
+    case "$arg" in
+      */actions/runs/*/artifacts)
+        rid="${arg##*/runs/}"
+        rid="${rid%%/artifacts}"
+        for id in $FAKE_GH_ARTIFACT_RUNS; do
+          if [ "$id" = "$rid" ]; then echo "artifact-$id"; exit 0; fi
+        done
+        ;;
+    esac
+  done
+  exit 0
+fi
+if [ "$1" = "run" ] && [ "$2" = "download" ]; then
+  if [ "${FAKE_GH_DOWNLOAD_EXIT:-0}" != "0" ]; then exit "$FAKE_GH_DOWNLOAD_EXIT"; fi
+  # Mimic the payload layout: flat by default (what a single --name gives),
+  # nested under the artifact name when the scenario asks for it.
+  dest=""
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--dir" ]; then dest="$arg"; fi
+    prev="$arg"
+  done
+  if [ "$FAKE_GH_NESTED" = "1" ]; then dest="$dest/$ARTIFACT"; fi
+  mkdir -p "$dest"
+  echo "{}" > "$dest/run.json"
+  exit 0
+fi
+exit 0
+"#,
+    );
+
+    let script = block_scalar(GH_BENCH_RESTORE, "- name: Restore benchmark history", "run: |");
+    write(&root.join("restore.sh"), &script);
+
+    // `gh` is bound as a shell function rather than found on PATH. Git for
+    // Windows' bash prepends its own entries to whatever PATH it is handed,
+    // so a stub placed on PATH can be shadowed by a real `gh` earlier in the
+    // resolution order -- which silently exercises the developer's GitHub CLI
+    // instead of the fixture. Function lookup precedes PATH, so this cannot
+    // be shadowed.
+    write(&root.join("run.sh"), "gh() { bash \"$STUB_GH\" \"$@\"; }\n. ./restore.sh\n");
+
+    let github_env = root.join("env.txt");
+    let summary = root.join("summary.md");
+    write(&github_env, "");
+    write(&summary, "");
+
+    let output = Command::new(bash)
+        .arg("run.sh")
+        .current_dir(root)
+        .env("STUB_GH", root.join("bin/gh").display().to_string().replace('\\', "/"))
+        .env("FAKE_GH_RUNS", runs)
+        .env("FAKE_GH_ARTIFACT_RUNS", artifact_runs)
+        .env("FAKE_GH_DOWNLOAD_EXIT", download_exit)
+        .env("FAKE_GH_RUNS_EXIT", runs_exit)
+        .env("FAKE_GH_NESTED", if nested { "1" } else { "0" })
+        .env("ARTIFACT", "bench-history-linux")
+        .env("DEFAULT_BRANCH", "main")
+        .env("WORKFLOW", "anvil-scheduled")
+        .env("REPO", "owner/repo")
+        .env("WINDOW", "30")
+        .env("GITHUB_ENV", &github_env)
+        .env("GITHUB_STEP_SUMMARY", &summary)
+        .output()
+        .expect("bash runs the extracted restore block");
+
+    let env_text = std::fs::read_to_string(&github_env).unwrap_or_default();
+    let summary_text = std::fs::read_to_string(&summary).unwrap_or_default();
+    (tmp, output, env_text, summary_text)
+}
+
+#[test]
+fn github_restore_separates_absence_from_failure() {
+    if git_bash().is_none() {
+        eprintln!("skipping: git bash not installed");
+        return;
+    }
+
+    // (1) The newest run has no artifact; an older one does. The walk must
+    // reach it rather than cold-starting on the first miss.
+    let (tmp, output, env, _summary) = run_github_restore("30 20 10", "10", "0", "0", false);
+    assert!(
+        output.status.success(),
+        "walking back should succeed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(env.contains("ANVIL_BENCH_RESTORE=restored"), "env:\n{env}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("run 10"),
+        "should name the run it restored from:{}",
+        both_streams(&output)
+    );
+    // The payload has to land *in* the store, not one level under it. A
+    // nested copy loses the history silently: every run then cold-starts
+    // and analyzes to a clean no-op.
+    let store = tmp.path().join("target/anvil/bench-history/run.json");
+    assert!(store.is_file(), "the restored payload must land in the store root");
+
+    // `gh run download` extracts a single `--name` straight into `--dir`,
+    // but nests one directory per artifact when several are requested.
+    // Tolerate both, so a change in that behaviour cannot silently empty
+    // the store.
+    let (tmp_nested, output, env, _summary) = run_github_restore("30 20 10", "10", "0", "0", true);
+    assert!(output.status.success(), "nested layout:{}", both_streams(&output));
+    assert!(env.contains("ANVIL_BENCH_RESTORE=restored"), "env:\n{env}");
+    assert!(
+        tmp_nested.path().join("target/anvil/bench-history/run.json").is_file(),
+        "a nested artifact directory must be lifted into the store root"
+    );
+
+    // (2) No run in the window carries it: a genuine cold start, and it must
+    // be visible on the summary rather than only in the log.
+    let (_tmp, output, env, summary) = run_github_restore("30 20 10", "", "0", "0", false);
+    assert!(output.status.success());
+    assert!(env.contains("ANVIL_BENCH_RESTORE=cold-start"), "env:\n{env}");
+    assert!(summary.contains("cold start"), "summary:\n{summary}");
+
+    // (3) The artifact exists but the download fails. This is the branch whose
+    // silent reintroduction re-creates the history-loss bug: it must fail and
+    // leave no publishable restore state.
+    let (_tmp, output, env, _summary) = run_github_restore("30 20 10", "30", "1", "0", false);
+    assert_failed(&output, "a failing download");
+    assert!(
+        !env.contains("ANVIL_BENCH_RESTORE"),
+        "a failed restore must not mark a publishable state:\n{env}"
+    );
+
+    // (4) Listing the runs fails outright. `set -e` does not apply to a
+    // command substitution consumed as a `for` word list, so this branch
+    // would otherwise fall through to a cold start and publish a truncated
+    // store over the chain while reporting green.
+    let (_tmp, output, env, _summary) = run_github_restore("30 20 10", "10", "0", "1", false);
+    assert_failed(&output, "a failing run listing");
+    assert!(!env.contains("ANVIL_BENCH_RESTORE"), "a failed listing is not a cold start:\n{env}");
+}
+
+/// Runs the ADO restore block with mocked REST/download/extract cmdlets.
+///
+/// `artifact_builds` are the build ids whose artifact query succeeds; every
+/// other build answers 404 (absence). `failure` injects an operational fault:
+/// "query" (non-404 status), "download", or "extract".
+fn run_ado_restore(builds: &str, artifact_builds: &str, failure: &str, no_default_branch: bool) -> (TempDir, Output, String) {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+
+    let body = block_scalar(ADO_RESTORE, "steps:", "pwsh: |")
+        .replace("${{ parameters.artifact }}", "bench-history-linux")
+        .replace("${{ parameters.path }}", "store")
+        .replace("${{ parameters.window }}", "30");
+
+    // Function definitions shadow cmdlets of the same name, so the block runs
+    // unchanged against these stand-ins.
+    let prelude = r#"
+# An exception whose Response.StatusCode.value__ the block can read, which is
+# how it tells absence (404) from an operational failure (anything else).
+class FakeHttpException : System.Exception {
+    [object]$Response
+    FakeHttpException([int]$status) : base("http $status") {
+        $this.Response = [pscustomobject]@{ StatusCode = [pscustomobject]@{ value__ = $status } }
+    }
+}
+function Invoke-RestMethod {
+    param([string]$Uri, $Headers)
+    if ($Uri -like '*/definitions/*') {
+        # The pipeline definition carries the default branch the series is
+        # keyed on. FAKE_ADO_NO_DEFAULT_BRANCH withholds it.
+        if ($env:FAKE_ADO_NO_DEFAULT_BRANCH) {
+            return [pscustomobject]@{ repository = [pscustomobject]@{ defaultBranch = $null } }
+        }
+        return [pscustomobject]@{ repository = [pscustomobject]@{ defaultBranch = 'refs/heads/main' } }
+    }
+    if ($Uri -notlike '*/artifacts*') {
+        $ids = $env:FAKE_ADO_BUILDS -split ' ' | Where-Object { $_ }
+        return [pscustomobject]@{ value = @($ids | ForEach-Object { [pscustomobject]@{ id = $_ } }) }
+    }
+    $buildId = ($Uri -replace '.*/builds/', '') -replace '/artifacts.*', ''
+    $carries = ($env:FAKE_ADO_ARTIFACT_BUILDS -split ' ') -contains $buildId
+    if (-not $carries) { throw [FakeHttpException]::new(404) }
+    if ($env:FAKE_ADO_FAILURE -eq 'query') { throw [FakeHttpException]::new(500) }
+    return [pscustomobject]@{ resource = [pscustomobject]@{ downloadUrl = "https://example/$buildId" } }
+}
+function Invoke-WebRequest {
+    param([string]$Uri, $Headers, [string]$OutFile)
+    if ($env:FAKE_ADO_FAILURE -eq 'download') { throw 'download failed' }
+    Set-Content -LiteralPath $OutFile -Value 'zip'
+}
+function Expand-Archive {
+    param([string]$LiteralPath, [string]$DestinationPath, [switch]$Force)
+    if ($env:FAKE_ADO_FAILURE -eq 'extract') { throw 'corrupt archive' }
+    New-Item -ItemType Directory -Force -Path $DestinationPath | Out-Null
+    Set-Content -LiteralPath (Join-Path $DestinationPath 'run.json') -Value '{}'
+}
+"#;
+
+    write(&root.join("restore.ps1"), &format!("{prelude}\n{body}"));
+
+    let output = Command::new("pwsh")
+        .args(["-NoProfile", "-File", "restore.ps1"])
+        .current_dir(root)
+        .env("FAKE_ADO_BUILDS", builds)
+        .env("FAKE_ADO_ARTIFACT_BUILDS", artifact_builds)
+        .env("FAKE_ADO_FAILURE", failure)
+        .env("FAKE_ADO_NO_DEFAULT_BRANCH", if no_default_branch { "1" } else { "" })
+        .env("SYSTEM_ACCESSTOKEN", "token")
+        .env("SYSTEM_COLLECTIONURI", "https://example/")
+        .env("SYSTEM_TEAMPROJECTID", "project")
+        .env("SYSTEM_DEFINITIONID", "7")
+        .env("BUILD_SOURCEBRANCH", "refs/heads/main")
+        .env("BUILD_BUILDID", "999")
+        .output()
+        .expect("pwsh runs the extracted restore block");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    (tmp, output, stdout)
+}
+
+#[test]
+fn ado_restore_separates_absence_from_failure() {
+    if Command::new("pwsh").arg("--version").output().is_err() {
+        eprintln!("skipping: pwsh not installed");
+        return;
+    }
+
+    // A 404 on the newest build walks back to an older one that has it.
+    let (_tmp, output, stdout) = run_ado_restore("30 20 10", "10", "", false);
+    assert!(
+        output.status.success(),
+        "walking back should succeed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("restoring"), "stdout:\n{stdout}");
+    assert!(stdout.contains("ANVIL_BENCH_RESTORE]restored"), "stdout:\n{stdout}");
+
+    // Nothing in the window carries it: a genuine cold start.
+    let (_tmp, output, stdout) = run_ado_restore("30 20 10", "", "", false);
+    assert!(output.status.success());
+    assert!(stdout.contains("ANVIL_BENCH_RESTORE]cold-start"), "stdout:\n{stdout}");
+
+    // Every operational fault must fail without marking a publishable state,
+    // which is what the guarded publish depends on to avoid overwriting a
+    // good chain with a truncated store.
+    for failure in ["query", "download", "extract"] {
+        let (_tmp, output, stdout) = run_ado_restore("30 20 10", "30", failure, false);
+        assert_failed(&output, failure);
+        assert!(
+            !stdout.contains("ANVIL_BENCH_RESTORE]"),
+            "{failure} must not set a restore state:\n{stdout}"
+        );
+    }
+
+    // The series is keyed on the default branch. If that cannot be resolved
+    // the leg does not know which chain it is extending, and silently keying
+    // on the branch this build ran on would fork a one-sample history and
+    // report it as clean.
+    let (_tmp, output, stdout) = run_ado_restore("30 20 10", "10", "", true);
+    assert_failed(&output, "an unresolvable default branch");
+    assert!(
+        !stdout.contains("ANVIL_BENCH_RESTORE]"),
+        "an unidentified series must not set a restore state:\n{stdout}"
+    );
+}
+
+#[test]
+fn bench_history_bless_listings_are_process_scoped() {
+    if !tools_available() {
+        return;
+    }
+    // The blessing reconciliation writes `list blessings` output to a temp
+    // file before reading it back. A fixed name lets two jobs sharing a
+    // machine -- matrix legs on a self-hosted agent, concurrent local runs --
+    // read each other's listing. Reverting the process scoping must trip
+    // this deterministically rather than by chance under parallel runs.
+    let shared_temp = TempDir::new().unwrap();
+
+    // Each invocation asks for a different benchmark and is told a different
+    // already-applied set, so consuming the other's listing is observable:
+    // each would then think its blessing was already in effect and skip it.
+    let cases = [
+        ("alpha", r#"{"blessings":[{"commit":"8392995a3b94","prefixes":["beta"]}]}"#),
+        ("beta", r#"{"blessings":[{"commit":"8392995a3b94","prefixes":["alpha"]}]}"#),
+    ];
+
+    for (benchmark, applied) in cases {
+        let file = format!("[[blessing]]\nbenchmark = \"{benchmark}\"\ncommit = \"8392995a\"\nreason = \"deliberate\"\n");
+        let tmp = fixture(
+            &[("bench-history.just", BENCH_HISTORY)],
+            &[
+                "anvil-tool-cargo-bench-history-validate-prereqs",
+                "anvil-tool-cargo-bench-history-install installer=\"install\"",
+            ],
+        );
+        write(&tmp.path().join(".config/bench-blessings.toml"), &file);
+        let log = tmp.path().join("cargo.log");
+        let output = run_just(
+            tmp.path(),
+            &["_anvil-bench-history-bless", "store", ".config/bench-blessings.toml"],
+            &[
+                ("FAKE_CBH_BLESSINGS", OsStr::new(applied)),
+                ("FAKE_CARGO_LOG", log.as_os_str()),
+                // Both invocations share one temp directory, which is what a
+                // fixed listing filename would collide in.
+                ("RUNNER_TEMP", shared_temp.path().as_os_str()),
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "reconciliation failed for {benchmark}:{}",
+            both_streams(&output)
+        );
+        // Its own listing says a *different* benchmark is blessed, so this
+        // one must still be applied.
+        assert!(
+            cargo_calls(tmp.path()).contains("bench-history bless"),
+            "{benchmark} must be blessed from its own listing:{}",
+            both_streams(&output)
+        );
+    }
+
+    // One listing file per process, so the two runs never shared one.
+    let listings: Vec<_> = std::fs::read_dir(shared_temp.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("anvil-bench-blessings"))
+        .collect();
+    assert_eq!(listings.len(), 2, "each invocation must write its own listing, got: {listings:?}");
 }

@@ -170,6 +170,12 @@ flowchart LR
     sadv_setup ==> sadv_setup_just
     sexh_setup ==> sexh_setup_just
 
+    sched_stages --> sbench_s["stage: scheduled_benchmarks<br/>linux + windows jobs"]:::stage
+    sbench_s ==> sbench_step[".pipelines/anvil/<br/>steps/scheduled-benchmarks.yml"]:::step
+    sbench_step ==> sbench_setup[".pipelines/anvil/<br/>steps/setup.yml"]:::step
+    sbench_step ==> sbench_just["just anvil-scheduled-benchmarks"]:::recipe
+    sbench_setup ==> sbench_setup_just["just anvil-setup"]:::recipe
+
     classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
     classDef root fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
     classDef impl fill:#dff0d8,stroke:#28a745,stroke-width:1px;
@@ -208,6 +214,8 @@ Note the ADO topology differs from GitHub Actions in two places:
         │                                    `pool`, `steps`, `artifacts`;
         │                                    users edit to inject 1ESPT
         │                                    `templateContext:` etc.)
+        ├── bench-history-restore.yml owned (restore the benchmark history artifact)
+        ├── bench-history-summary.yml owned (attach benchmark findings to the build summary)
         ├── pr-fast.yml             owned   (one step template per group)
         ├── pr-test.yml            owned
         ├── pr-runtime-analysis.yml            owned
@@ -215,7 +223,8 @@ Note the ADO topology differs from GitHub Actions in two places:
         ├── scheduled-test.yml        owned
         ├── scheduled-advisories.yml  owned
         ├── scheduled-runtime-analysis.yml  owned
-        └── scheduled-exhaustive.yml  owned
+        ├── scheduled-exhaustive.yml  owned
+        └── scheduled-benchmarks.yml  owned
 ```
 
 All files are regular owned files tracked by the sidecar `.anvil.lock` manifest
@@ -371,7 +380,13 @@ The contract is intentionally small and stable:
 | `pool`      | `object`   | yes      | Pool block, passed verbatim to ADO's `pool:` key. `linuxPool` and `windowsPool` at the stage level are object parameters, so users can override their shape (e.g. `{ name, os, image }` for 1ESPT). |
 | `steps`     | `stepList` | yes      | Body of the job. Templated step lists are fine — the wrapper splices them in via `${{ each step in parameters.steps }}: - ${{ step }}`.                                                |
 | `inputArtifacts` | `object` | no  | List of pipeline artifacts to download *before* the steps run. Each item: `{ name: string, path: string }`. Default wrapper prepends one `DownloadPipelineArtifact@2` per entry; 1ESPT wrappers translate the same list into their own download mechanism (e.g. `templateContext.inputs`). This is how the impact set is shared — each PR group job downloads its OS's `anvil-impact-<os>` artifact into `target/anvil/impact` and its checks read the cache exactly as a local run. |
-| `artifacts` | `object`   | no       | List of pipeline artifacts to publish. Each item: `{ name: string, path: string }`. Default wrapper appends one `PublishPipelineArtifact@1` per entry; 1ESPT wrappers translate the same list into `templateContext.outputs.pipelineArtifact` blocks. The stages templates don't need to know which backend they're targeting. |
+| `artifacts` | `object`   | no       | List of pipeline artifacts to publish. Each item: `{ name: string, path: string, condition: string (optional) }`. Default wrapper appends one `PublishPipelineArtifact@1` per entry; 1ESPT wrappers translate the same list into `templateContext.outputs.pipelineArtifact` blocks. `condition` defaults to `succeededOrFailed()`; a caller that must not publish in some states sets it, and a fork carries it through to whatever output shape it emits. The stages templates don't need to know which backend they're targeting. |
+
+A job that needs a non-default checkout (depth, LFS) puts an explicit `checkout`
+step at the head of its own `steps` list rather than growing this contract. The
+contract stays frozen because a forked wrapper cannot be expected to declare a
+parameter added after the fork, and a stages template binding one would fail
+expansion for the entire pipeline.
 
 The default wrapper anvil ships downloads any `inputArtifacts`, splices in the
 `steps`, then publishes any `artifacts`:
@@ -398,7 +413,10 @@ jobs:
       - ${{ each artifact in parameters.artifacts }}:
           - task: PublishPipelineArtifact@1
             displayName: Publish ${{ artifact.name }}
-            condition: succeededOrFailed()
+            ${{ if artifact.condition }}:
+              condition: ${{ artifact.condition }}
+            ${{ else }}:
+              condition: succeededOrFailed()
             inputs:
               targetPath: ${{ artifact.path }}
               artifact: ${{ artifact.name }}
@@ -424,7 +442,10 @@ jobs:
             - output: pipelineArtifact
               targetPath: ${{ artifact.path }}
               artifactName: ${{ artifact.name }}
-              condition: succeededOrFailed()
+              ${{ if artifact.condition }}:
+                condition: ${{ artifact.condition }}
+              ${{ else }}:
+                condition: succeededOrFailed()
     steps:
       - ${{ each step in parameters.steps }}:
           - ${{ step }}
@@ -468,6 +489,19 @@ resolves template paths relative to the file containing the `template:`
 keyword, which for parameters defined at the call site is the stages template
 itself — so the path is written relative to `pr.yml` / `scheduled.yml`, *not*
 relative to `steps/job.yml`.
+
+**Per-group steps.** Some groups need steps around the uniform runner — the
+benchmark group checks out at full depth and round-trips its history store,
+`scheduled-test` publishes coverage. Those are spliced into the group's own
+emitted step template at generation time, not written at the call site, so the
+stages templates stay a plain list of groups. Moving a check between groups, or
+giving a group extra steps, never edits `pr.yml` / `scheduled.yml`.
+
+The one thing that cannot move is a **job-level output**: `artifacts` is declared
+where the job is constructed, because a forked wrapper translates that list into
+its own output shape and a publish task inside the step list would bypass the
+translation. That declaration is therefore the only per-group content the stages
+templates carry.
 
 ### 4.2 Stages template shape
 
@@ -900,3 +934,67 @@ Adding a new advisory check is a two-step change: the recipe writes
 entry. There's deliberately no auto-discovery loop over the convention dir — explicit
 per-check entries keep stale comments deterministically clearable when a check is
 removed from the catalog.
+
+## 12. Benchmark regression detection
+
+The scheduled benchmark group (see [benchmarks.md](./benchmarks.md)) runs
+`cargo-bench-history`, whose history persists across scheduled runs as **pipeline
+artifacts**, reusing the §4.1 job-wrapper `artifacts` contract to publish. The
+history is partitioned per machine, so each leg of the group's matrix carries its
+own artifact (`bench-history-<leg>`).
+
+Each scheduled benchmark job:
+
+1. checks out with full history and LFS, and restores, applies blessings, runs
+   the analysis and attaches findings — all inside `steps/scheduled-benchmarks.yml`,
+   the group's own emitted step template (§4.1), so the stages template stays a
+   plain list of groups;
+2. the restore walks the pipeline's own builds on the branch newest-first
+   (`_apis/build/builds?…&queryOrder=finishTimeDescending`) and, per build, queries
+   the artifacts endpoint for this leg's artifact. A `404` means that build simply
+   has no such artifact and the walk continues; any other status is an operational
+   failure and fails the job. Finding none across the whole window is a genuine cold
+   start;
+3. **publishes** the updated store through the wrapper's `artifacts` parameter
+   (`{ name: bench-history-$(Agent.JobName), path: <store>, condition: … }`), which
+   the default wrapper emits as `PublishPipelineArtifact@1` and 1ESPT wrappers as a
+   `pipelineArtifact` output. The name is keyed on the job, which ADO guarantees is
+   unique within a stage, so two legs can never declare one artifact and merge two
+   machines' samples into a single series.
+
+The restore stages its download and creates the store path **only once it has
+reached a known state** — restored, or a positively identified cold start. An
+operational failure therefore leaves no store directory at all, so a publisher that
+runs unconditionally has nothing to upload and the chain survives. That matters
+because `artifacts[].condition` is an optional field: a wrapper forked before it
+existed accepts the entry and ignores the condition silently, and this is exactly
+the case where ignoring it would overwrite good history. The condition remains as a
+second line of defence, not the only one.
+
+`DownloadPipelineArtifact@2` is not used for the restore: `latestFromBranch` resolves
+a single build and does not walk, so a cancelled or never-publishing latest build
+would cold-start a store that still has usable history.
+
+The walk is outcome-agnostic, which is what keeps the chain intact across a
+regression: a flagged regression fails the stage, so a success-only restore would
+discard every sample taken while the pipeline stayed red. Publishing is likewise not
+limited to green runs. The `condition` on the artifact entry lives in the `artifacts`
+contract (§4.1) rather than in a publish task the benchmark group emits itself, which
+would bypass the translation a forked wrapper performs.
+
+Surfacing is by **build failure**, not a PR comment — the regression is discovered
+after merge (see [benchmarks.md §5](./benchmarks.md)). The benchmark recipe exits
+non-zero on an active regression, failing the stage; ADO's existing failed-build
+**notification subscriptions** fire, and the findings live in the build summary.
+
+Because the build status is one bit, while the pipeline is already red from one
+regression a newly appearing second one does not re-fire the native notification;
+the findings remain in the build summary.
+
+Blessings are applied from a committed `.config/bench-blessings.toml` before analyze
+(step 3) — a reviewed pull request, not an out-of-band action.
+
+The machine key the history is partitioned by is a `benchMachineKey` parameter on the
+stages template, surfaced as a stage-level `ANVIL_BENCH_MACHINE_KEY` variable. Empty
+uses the hardware fingerprint; a stable pool label trades partition fidelity for
+density on a heterogeneous pool.

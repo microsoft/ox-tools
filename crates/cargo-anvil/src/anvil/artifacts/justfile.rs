@@ -95,6 +95,7 @@ const CHECK_FILES: &[(&str, &str)] = split_recipe_files!(
         "aprz",
         "audit",
         "bench",
+        "bench-history",
         "bolero",
         "careful",
         "cargo-hack",
@@ -139,6 +140,7 @@ const GROUP_FILES: &[(&str, &str)] = split_recipe_files!(
         "scheduled-advisories",
         "scheduled-runtime-analysis",
         "scheduled-exhaustive",
+        "scheduled-benchmarks",
     ]
 );
 
@@ -253,6 +255,7 @@ mod tests {
             ("aprz", Unscoped),
             ("audit", Unscoped),
             ("bench", Affected),
+            ("bench-history", Unscoped),
             ("bolero", Affected),
             ("careful", Affected),
             ("cargo-hack", Required),
@@ -502,7 +505,7 @@ mod tests {
         let unscoped = EXPECTED_CHECK_POLICY.len() - scoped;
         assert_eq!(
             (scoped, unscoped),
-            (23, 7),
+            (23, 8),
             "impact scoped/unscoped split changed; update EXPECTED_CHECK_POLICY deliberately"
         );
     }
@@ -539,6 +542,7 @@ mod tests {
             "anvil-scheduled-test:",
             "anvil-scheduled-advisories:",
             "anvil-scheduled-exhaustive:",
+            "anvil-scheduled-benchmarks:",
         ] {
             assert!(groups.contains(needle), "groups tree missing '{needle}'");
         }
@@ -568,6 +572,7 @@ mod tests {
             "scheduled-advisories",
             "scheduled-runtime-analysis",
             "scheduled-exhaustive",
+            "scheduled-benchmarks",
         ] {
             assert!(
                 groups.contains(&format!("anvil-{g}: (_anvil-unscoped \"{g}\")")),
@@ -630,6 +635,36 @@ mod tests {
     }
 
     #[test]
+    fn bench_history_gates_on_active_regressions_and_applies_blessings() {
+        let (_, body) = CHECK_FILES
+            .iter()
+            .find(|(path, _)| *path == "justfiles/anvil/checks/bench-history.just")
+            .expect("bench-history check template is registered");
+
+        // cargo-bench-history never fails on findings, so the recipe must
+        // read the JSON report and gate on active regressions itself.
+        for needle in [
+            "cargo bench-history collect",
+            "--skip-existing",
+            "cargo bench-history analyze",
+            "_anvil-bench-history-bless",
+            "cargo bench-history bless",
+            "cargo bench-history list blessings",
+            ".config/bench-blessings.toml",
+            "$_.direction -eq 'regression' -and $_.active",
+        ] {
+            assert!(body.contains(needle), "bench-history template missing '{needle}'");
+        }
+
+        // The series is only comparable when the same suite is measured at
+        // every commit, so the recipe must not honour impact scoping.
+        assert!(
+            !body.contains("ANVIL_INCLUDE_AFFECTED"),
+            "bench-history must measure the whole workspace, not an impact-scoped subset"
+        );
+    }
+
+    #[test]
     fn tiers_just_template_has_three_tiers() {
         for needle in ["anvil-pr:", "anvil-scheduled:", "anvil-full:", "_anvil-scheduled:", "_anvil-full:"] {
             assert!(TIERS_JUST.contains(needle), "tiers.just missing '{needle}'");
@@ -665,6 +700,7 @@ mod tests {
             "anvil-scheduled-advisories",
             "anvil-scheduled-runtime-analysis",
             "anvil-scheduled-exhaustive",
+            "anvil-scheduled-benchmarks",
         ] {
             assert!(TIERS_JUST.contains(needle), "scheduled tier must reference group '{needle}'");
         }
@@ -707,6 +743,7 @@ mod tests {
             "import? 'container.just'",
             "import 'groups/pr-fast.just'",
             "import 'groups/scheduled-exhaustive.just'",
+            "import 'groups/scheduled-benchmarks.just'",
             "import 'tiers.just'",
             "import 'tools.just'",
             "import 'versions.just'",

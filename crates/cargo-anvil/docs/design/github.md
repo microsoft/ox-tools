@@ -20,6 +20,9 @@ need to change:
    runs setup plus the matching `just anvil-<tier>-<group>` recipe and surfaces
    the concrete failure without duplicating group membership. See
    [Failure attribution and commit statuses](#failure-attribution-and-commit-statuses).
+   A group needing steps around the runner (the benchmark group's history
+   round-trip) turns them on with an input, so the workflows stay a plain
+   list of groups and the other groups skip the steps.
 
 See also:
 
@@ -152,6 +155,12 @@ flowchart LR
     run_group_act ==> srun_just
     run_group_act ==> sexh_just
     setup_act ==> setup_just
+
+    sched_impl --> sbench_job["scheduled-benchmarks<br/>matrix: linux, windows"]:::job
+    sbench_job ==> sbench_act[".github/actions/<br/>anvil-scheduled-benchmarks"]:::action
+    sbench_act ==> sbench_setup[".github/actions/<br/>anvil-setup"]:::action
+    sbench_act ==> sbench_just["just anvil-scheduled-benchmarks"]:::recipe
+    sbench_setup ==> sbench_setup_just["just anvil-setup"]:::recipe
 
     classDef trigger fill:#fff4d6,stroke:#b08800,stroke-width:1px;
     classDef root fill:#e6f0ff,stroke:#0366d6,stroke-width:2px;
@@ -420,15 +429,17 @@ is the canonical YAML:
 
 ```text
 caller anvil-scheduled.yml
-  permissions upper bound: contents:read + issues:write
+  permissions upper bound: contents:read + actions:read + issues:write
   └─ called anvil-scheduled-impl.yml
        default reset: contents:read
        ├─ scheduled-test             (Linux/Windows × x64/ARM64)
        ├─ scheduled-advisories       (Linux/Windows × x64/ARM64)
        ├─ scheduled-runtime-analysis (Linux/Windows × x64/ARM64)
        ├─ scheduled-exhaustive       (Linux/Windows x64)
+       ├─ scheduled-benchmarks       (Linux/Windows x64)
+       │    job override: actions:read (history-artifact restore)
        └─ publish-failure
-            needs: all four scheduled groups
+            needs: all five scheduled groups
             condition: at least one failure and publication not disabled
             job override: issues:write only
 ```
@@ -451,11 +462,30 @@ The reusable workflow declares a small input set so the root workflow can pass o
 | `windows_runner`     | string | `windows-latest`     | Runner label for x86_64 Windows jobs.                  |
 | `linux_arm_runner`   | string | `ubuntu-24.04-arm`   | Runner label for aarch64 Linux jobs.                   |
 | `windows_arm_runner` | string | `windows-11-arm`     | Runner label for aarch64 Windows jobs.                 |
+| `bench_machine_key`  | string | *(empty)*            | Machine key the benchmark history is partitioned by (scheduled workflow only). |
 
-The input surface is intentionally narrow: only per-leg *runner labels* are exposed,
-because swapping in self-hosted runners is the one common need that doesn't require
-otherwise touching the workflow. The OS matrix shape (which legs run) is fixed in the
-workflow source — see the discussion under the PR snippet above.
+The input surface is **per-leg runner labels plus a per-capability knob where the
+capability's behaviour depends on the runner fleet rather than on the source tree**.
+Runner labels are exposed because swapping in self-hosted runners is the one common
+need that doesn't require otherwise touching the workflow. `bench_machine_key` earns
+an input on the same test: benchmark history is partitioned by a hardware
+fingerprint, so a heterogeneous pool can fragment a series into partitions too sparse
+to analyze, and only the adopter knows whether their fleet is uniform enough to
+substitute a stable pool label. That is a property of *their* runners, invisible to
+the catalog, so no recipe default or env var can supply it.
+
+A knob that fails that test — anything the catalog could decide, or that varies per
+developer rather than per fleet — stays an env var read by the recipe
+(`ANVIL_BENCH_HISTORY_STORE` is the local-only counterexample) rather than growing
+this surface.
+
+Setting an input means editing the generated root workflow, which takes ownership of
+it through the dirty-file flow (§3): subsequent updates Propose into an
+`.anvil-proposed` sibling instead of overwriting. That cost is real and is why the
+surface stays small.
+
+The OS matrix shape (which legs run) is fixed in the workflow source — see the
+discussion under the PR snippet above.
 
 The reusable workflows also declare an optional `workflow_call` secret
 `CODECOV_TOKEN`. See §10 (Coverage upload) for how it's used.
@@ -1057,3 +1087,61 @@ a matching `Upsert anvil-<NEW>` / `Clear anvil-<NEW>` pair with
 `header: anvil-<NEW>`. There's deliberately no auto-discovery loop over the
 convention dir — explicit per-check steps keep stale comments deterministically
 clearable when a check is removed from the catalog.
+
+## 12. Benchmark regression detection
+
+The scheduled benchmark group (see [benchmarks.md](./benchmarks.md)) runs
+`cargo-bench-history`, whose history persists across scheduled runs as GitHub
+**Actions artifacts**. The history is partitioned per machine, so each leg of the
+group's matrix carries its own artifact (`bench-history-<matrix.os>`).
+
+The round-trip lives in the **shared group action**, behind an input, rather than
+in the workflow or in an action of its own. Actions are the only reuse primitive
+that shares a runner with the group run, which restore and save must: a reusable
+workflow would put them on a different machine from the store they manage.
+Groups that leave the input off skip the steps entirely, so the scheduled
+workflow stays a plain list of groups.
+
+The action cannot supply everything, and the remainder is exactly what GitHub
+scopes to the job: an action cannot request `permissions`, and the checkout has
+already happened before it starts. So the `actions: read` grant and the
+full-depth checkout stay in the workflow, along with the matrix. The artifact
+name is passed in for the same reason — the matrix value is in scope only at the
+call site.
+
+Each scheduled benchmark job:
+
+1. checks out with `fetch-depth: 0` and `lfs: true` (analysis reads the commit
+   graph; benchmark inputs may be LFS-tracked);
+2. **restores** the history by walking back from the newest `anvil-scheduled` run
+   on the default branch and taking the first that carries the leg's artifact; the
+   first run finds none and starts empty;
+3. applies any pending blessings, runs collect + analyze, writing findings to the
+   job summary and to a findings file;
+4. **saves** the updated store with `actions/upload-artifact`, whatever the job's
+   outcome, so the samples collected while the pipeline is red are not lost.
+   Retention is set so the latest artifact outlives the gap to the next scheduled
+   run.
+
+The restore step queries the runs and artifacts APIs, so the job needs
+`actions: read`. A reusable workflow cannot grant itself more than its caller, so
+the root workflow passes it through and the impl workflow narrows it to the
+benchmark job; the PR workflow keeps `contents: read`.
+
+Restoring from the newest run that *carries* the artifact rather than the newest
+*successful* one is what keeps the chain intact across a regression: a flagged
+regression fails the job, so a success-only restore would discard every sample
+taken while the pipeline stayed red.
+
+Surfacing is by **build failure**, not a PR comment — the regression is discovered
+after merge (see [benchmarks.md §5](./benchmarks.md)). The benchmark recipe exits
+non-zero on an active regression, failing the job, and `scheduled-benchmarks` is
+one of the jobs `publish-failure` depends on (§11), so the regression reaches a
+human through the same tracking issue as any other scheduled failure. The
+per-finding detail — each benchmark, its magnitude, its attributed commit, and
+cbh's trend chart — is written to the job summary, which the issue links to, so
+the failed run carries everything a reviewer needs to decide *fix or bless*.
+
+Blessings are applied from a committed `.config/bench-blessings.toml` before analyze
+(step 3), so accepting an intentional change is a reviewed pull request rather than an
+out-of-band action.

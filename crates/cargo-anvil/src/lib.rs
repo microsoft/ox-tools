@@ -319,6 +319,7 @@
 //!     <tr><td rowspan="3"><code>scheduled-exhaustive</code></td><td><a href="https://mutants.rs/">mutants-full</a></td><td></td></tr>
 //!     <tr><td><a href="https://crates.io/crates/cargo-hack">cargo-hack</a></td><td>feature powerset</td></tr>
 //!     <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-bench.html">bench</a></td><td>compile-only</td></tr>
+//!     <tr><td><code>scheduled-benchmarks</code></td><td><a href="https://github.com/folo-rs/folo/tree/main/packages/cargo-bench-history">bench-history</a></td><td>regression detection over the accumulated benchmark history</td></tr>
 //!   </tbody>
 //! </table>
 //!

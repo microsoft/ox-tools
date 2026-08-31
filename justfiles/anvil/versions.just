@@ -51,6 +51,7 @@ rust_nightly_external_types := "nightly-2026-03-20"
 
 cargo_aprz_version := "1.1.0"
 cargo_audit_version := "0.22.2"
+cargo_bench_history_version := "0.0.9"
 cargo_bolero_version := "0.13.4"
 cargo_careful_version := "0.4.10"
 cargo_check_external_types_version := "0.5.0"

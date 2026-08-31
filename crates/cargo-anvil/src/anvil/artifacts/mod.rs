@@ -43,7 +43,7 @@ use crate::catalog::{Artifact, ComposedHost};
 pub(crate) fn impact_mode(group: &str) -> &'static str {
     match group {
         "pr-fast" | "pr-test" | "pr-runtime-analysis" | "pr-mutants" => "consume",
-        "scheduled-test" | "scheduled-advisories" | "scheduled-runtime-analysis" | "scheduled-exhaustive" => "off",
+        "scheduled-test" | "scheduled-advisories" | "scheduled-runtime-analysis" | "scheduled-exhaustive" | "scheduled-benchmarks" => "off",
         other => {
             panic!("impact_mode: unclassified group '{other}'; add it to the pr/scheduled arms in artifacts::impact_mode")
         }

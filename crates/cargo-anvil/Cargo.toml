@@ -39,11 +39,16 @@ tracing-subscriber = { workspace = true, features = ["fmt"] }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
+criterion = { workspace = true }
 insta = { workspace = true, features = ["filters"] }
 predicates = { workspace = true }
 serial_test = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
+
+[[bench]]
+name = "catalog"
+harness = false
 
 # >>> anvil-managed: anvil-lints
 [lints]

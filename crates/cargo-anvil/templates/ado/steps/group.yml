@@ -12,7 +12,12 @@
 # read that cache via their `anvil-impact` dependency -- the same code path as
 # a local run. Scheduled group jobs download nothing and run full-workspace
 # (see the bash step).
+#
+# Steps that a particular group needs around the uniform runner are spliced
+# in at the same time, so the stages templates stay a plain list of groups
+# with no per-group customization at the call site.
 steps:
+__PRE_STEPS__
   - template: setup.yml
     parameters:
       group: __GROUP__
@@ -61,3 +66,4 @@ steps:
       # pure cost with no cross-run benefit. Mirrors the GitHub impl workflows'
       # workflow-level CARGO_INCREMENTAL=0.
       CARGO_INCREMENTAL: "0"
+__POST_STEPS__

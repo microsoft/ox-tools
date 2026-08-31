@@ -13,37 +13,32 @@ parameters:
   - name: windowsPool
     type: object
     default: { vmImage: windows-latest }
+  - name: benchMachineKey
+    type: string
+    # Machine key the benchmark history is partitioned by. Empty uses
+    # cargo-bench-history's hardware fingerprint; set a stable pool label
+    # when the agent pool is heterogeneous enough to fragment a series into
+    # partitions too sparse to analyze.
+    default: ''
 
 stages:
   - stage: scheduled_test
     displayName: anvil scheduled-test
     jobs:
-      # Publish coverage from both legs so OS-gated code is fully
-      # represented (see the pr-stages.yml comment for the rationale).
+      # Coverage is published from both legs so OS-gated code is fully
+      # represented; that step lives in steps/scheduled-test.yml.
       - template: steps/job.yml
         parameters:
           name: linux
           pool: ${{ parameters.linuxPool }}
           steps:
             - template: steps/scheduled-test.yml
-            - task: PublishCodeCoverageResults@2
-              condition: succeededOrFailed()
-              displayName: Publish coverage (linux)
-              inputs:
-                summaryFileLocation: target/coverage/cobertura-*.xml
-                failIfCoverageEmpty: false
       - template: steps/job.yml
         parameters:
           name: windows
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-test.yml
-            - task: PublishCodeCoverageResults@2
-              condition: succeededOrFailed()
-              displayName: Publish coverage (windows)
-              inputs:
-                summaryFileLocation: target/coverage/cobertura-*.xml
-                failIfCoverageEmpty: false
 
   - stage: scheduled_advisories
     displayName: anvil scheduled-advisories
@@ -106,3 +101,42 @@ stages:
           pool: ${{ parameters.windowsPool }}
           steps:
             - template: steps/scheduled-exhaustive.yml
+
+  - stage: scheduled_benchmarks
+    displayName: anvil scheduled-benchmarks
+    dependsOn: []
+    variables:
+      # Read by the bench-history recipe; empty means "use the hardware
+      # fingerprint". ADO exports pipeline variables as environment
+      # variables, so this reaches the recipe without further plumbing.
+      ANVIL_BENCH_MACHINE_KEY: ${{ parameters.benchMachineKey }}
+    jobs:
+      # The history round-trip lives in steps/scheduled-benchmarks.yml. Only
+      # the artifact declaration is here, because publishing is a job-level
+      # output: a forked (1ESPT) wrapper translates this list into its own
+      # output shape, which a task inside the step list would bypass.
+      #
+      # The condition is the guard that keeps an operational restore failure
+      # from overwriting a good chain with a truncated store; failed runs
+      # still publish, since a flagged regression fails the job and those
+      # samples belong in the history.
+      - template: steps/job.yml
+        parameters:
+          name: linux
+          pool: ${{ parameters.linuxPool }}
+          artifacts:
+            - name: bench-history-$(Agent.JobName)
+              path: target/anvil/bench-history
+              condition: and(succeededOrFailed(), ne(variables['ANVIL_BENCH_RESTORE'], ''))
+          steps:
+            - template: steps/scheduled-benchmarks.yml
+      - template: steps/job.yml
+        parameters:
+          name: windows
+          pool: ${{ parameters.windowsPool }}
+          artifacts:
+            - name: bench-history-$(Agent.JobName)
+              path: target/anvil/bench-history
+              condition: and(succeededOrFailed(), ne(variables['ANVIL_BENCH_RESTORE'], ''))
+          steps:
+            - template: steps/scheduled-benchmarks.yml
