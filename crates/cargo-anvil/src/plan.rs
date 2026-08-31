@@ -582,15 +582,27 @@ fn contained_path(repo_root: &Path, relpath: &str) -> Result<PathBuf, AppError> 
 
     let mut probe = abs.as_path();
     loop {
-        if let Ok(resolved) = probe.canonicalize() {
-            if !resolved.starts_with(&root) {
-                bail!(
-                    "manifest path '{relpath}' resolves to {}, outside the repository at {}",
-                    resolved.display(),
-                    root.display()
-                );
+        match probe.canonicalize() {
+            Ok(resolved) => {
+                if !resolved.starts_with(&root) {
+                    bail!(
+                        "manifest path '{relpath}' resolves to {}, outside the repository at {}",
+                        resolved.display(),
+                        root.display()
+                    );
+                }
+                return Ok(abs);
             }
-            return Ok(abs);
+            // Absent is the ordinary case: the path is a file anvil is about to
+            // create, so the walk continues to whatever does exist above it.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            // Anything else -- a directory that cannot be traversed, most of
+            // all -- means the answer is unknown, not "absent". Treating it as
+            // absent would step over the component that could not be resolved
+            // and clear a path this function exists to check.
+            Err(error) => {
+                return Err(error).into_app_err_with(|| format!("failed to resolve {} while checking containment", probe.display()));
+            }
         }
         probe = probe
             .parent()
@@ -711,6 +723,34 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_component_that_cannot_be_resolved_is_an_error_not_an_absence() {
+        // Absent means "keep walking up"; anything else means the answer is
+        // unknown. Treating a traversal failure as absence would step over the
+        // component that could not be resolved and clear a path this function
+        // exists to check. A directory without search permission produces that
+        // failure without needing a special filesystem.
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        let closed = root.join("closed");
+        std::fs::create_dir_all(&closed).unwrap();
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = contained_path(&root, "closed/inner/file.txt");
+
+        // Restore before asserting, so a failure cannot leave the directory
+        // undeletable for the temp-dir cleanup.
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = result.expect_err("an unresolvable component must not read as absent");
+        assert!(
+            format!("{err}").contains("checking containment"),
+            "the failure must name what it was doing, got: {err}"
+        );
+    }
     #[cfg(unix)]
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
