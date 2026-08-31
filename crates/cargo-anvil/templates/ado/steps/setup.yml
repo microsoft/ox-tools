@@ -18,30 +18,15 @@ parameters:
     type: string
     default: ''
 steps:
-  - bash: |
-      if ! command -v just >/dev/null 2>&1 ; then
-        cargo install --locked just
-      fi
-    displayName: anvil setup (install just)
-
-  - pwsh: |
-      $version = (& just _anvil-stable-rustc-version | Select-Object -Last 1)
-      if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($version)) {
-        throw 'anvil: failed to provision the selected stable toolchain'
-      }
-      $version = $version.Trim()
-      Write-Host "##vso[task.setvariable variable=anvil_rustc_version]$version"
-    displayName: anvil setup (provision stable toolchain and capture version)
+  # Restore Cargo's registry and installed binaries before bootstrapping Just,
+  # so warm ADO jobs do not compile Just again before reaching the cache.
+  # Rustup toolchains are not stored under Cargo home, so the selected compiler
+  # version does not affect this cache's contents.
   - task: Cache@2
     inputs:
-      # Same key shape as the GitHub side: OS + arch + rustc version +
-      # lockfile hashes + catalog hash. Including arch keeps any
-      # future ARM pool an adopter adds from colliding with x86_64 on
-      # the same OS namespace.
-      key: 'anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(anvil_rustc_version) | Cargo.toml | Cargo.lock | .cargo/config.toml | rust-toolchain | rust-toolchain.toml | justfiles/anvil/versions.just'
+      key: 'anvil-v2 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | Cargo.toml | Cargo.lock | .cargo/config.toml | rust-toolchain | rust-toolchain.toml | justfiles/anvil/versions.just'
       restoreKeys: |
-        anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(anvil_rustc_version)
-        anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)"
+        anvil-v2 | "$(Agent.OS)" | "$(Agent.OSArchitecture)"
       path: |
         $(HOME)/.cargo/registry/cache/
         $(HOME)/.cargo/registry/index/
@@ -49,6 +34,19 @@ steps:
         $(HOME)/.cargo/.crates.toml
         $(HOME)/.cargo/.crates2.json
     displayName: anvil setup (cache cargo home)
+
+  - bash: |
+      if ! command -v just >/dev/null 2>&1 ; then
+        cargo install --locked just
+      fi
+    displayName: anvil setup (install just)
+
+  - pwsh: |
+      & just anvil-toolchain-stable-install
+      if ($LASTEXITCODE -ne 0) {
+        throw 'anvil: failed to provision the selected stable toolchain'
+      }
+    displayName: anvil setup (provision stable toolchain)
 
   # Hand everything else off to the catalog recipe. Idempotent. ADO
   # uses the default `install` backend (source builds) because

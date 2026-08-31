@@ -342,8 +342,8 @@ install recipe can run:
 Trade-off acknowledged: `cargo install --locked` is slow on a cold cache (several
 minutes for the full catalog). It is also the most reliable mechanism in restricted
 networks. Caching (via the GH cache action and the ADO pipeline workspace cache) is
-configured by the setup action/template to key on `Cargo.lock`, the toolchain
-channel, and `versions.just`. See
+configured by the setup action/template to key on repository manifests,
+toolchain configuration, and `versions.just`. See
 [github.md](./github.md#caching) and [ado.md](./ado.md#caching).
 
 #### 3.3.1 System-level prerequisites
@@ -446,7 +446,7 @@ provisioning. Rustup processes repository toolchain files directly; the private
 `_anvil-resolve-stable` implementation handles public MSRV installation and
 internal mapping. Leaf setup recipes reach the primitive directly or through
 the shared Cargo-tool/default-component installers; group, tier, and
-`anvil-setup` recipes inherit and deduplicate that dependency. Cloud version
+`anvil-setup` recipes inherit and deduplicate that dependency. GitHub version
 capture uses the private `_anvil-stable-rustc-version` recipe, whose dependency
 provisions stable before it invokes `rustc` directly with the lazy argument.
 Workflows and container construction therefore invoke setup operations rather
@@ -471,8 +471,9 @@ features. A selecting toolchain file does not suppress this minimum-version run.
 `ANVIL_MSRV_TOOLCHAIN` optionally maps the declared MSRV to a provisioned internal
 toolchain. Without a root MSRV the recipe is a no-op.
 
-`anvil-tool-rustc-validate-prereqs` verifies the selected compiler and the
-workspace MSRV compatibility rule. Per-check toolchain requirements (for
+`anvil-tool-rustc-validate-prereqs` verifies that `rustc` is available and
+enforces the workspace MSRV compatibility rule. Stable setup separately
+provisions the selected compiler. Per-check toolchain requirements (for
 example, miri, careful, and udeps
 need nightly) remain enforced by the matching
 `anvil-toolchain-<name>-validate-prereqs` recipe. Explicit `cargo +toolchain`

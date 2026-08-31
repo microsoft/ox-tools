@@ -747,18 +747,16 @@ mechanics are in [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact
 ## 6. Rust toolchain
 
 The user's root pipeline or compliance template installs the Rust/rustup
-bootstrap before the Anvil stages run. After bootstrapping Just, the generated
-setup step calls `_anvil-stable-rustc-version`. Its
-`anvil-toolchain-stable-install` dependency provisions a public selection or
-prepares an externally provisioned internal selection before invoking `rustc`
-directly with the lazy optional `+toolchain` argument. The resulting version
-keys the cache. The template never invokes `_anvil-resolve-stable` itself and
-does not publish a resolved `RUSTUP_TOOLCHAIN` to subsequent steps. Each stable
-recipe evaluates the inline PowerShell array expression and invokes Cargo or
-Rust directly in its current PowerShell process. Selection has no
-expression-time subprocess, host-OS branch, or change to the adopter's
-configured shell. A selecting toolchain file remains unoverridden so rustup
-processes the complete file.
+bootstrap before the Anvil stages run. The generated setup step restores Cargo
+home before bootstrapping Just, then calls `anvil-toolchain-stable-install` to
+provision a public selection or prepare an externally provisioned internal
+selection. The template never invokes `_anvil-resolve-stable` itself and does
+not publish a resolved `RUSTUP_TOOLCHAIN` to subsequent steps. Each stable recipe
+evaluates the inline PowerShell array expression and invokes Cargo or Rust
+directly in its current PowerShell process. Selection has no expression-time
+subprocess, host-OS branch, or change to the adopter's configured shell. A
+selecting toolchain file remains unoverridden so rustup processes the complete
+file.
 
 Selection follows the shared local contract: an existing `RUSTUP_TOOLCHAIN`, then a
 root toolchain file with `channel` or `path`, then the root MSRV. Internal pipelines
@@ -780,16 +778,18 @@ the same setup primitive.
 Shared Cargo-tool/default-component setup and stable-only leaf setup all depend
 on `anvil-toolchain-stable-install`; Just deduplicates it for group/full
 fan-out. `anvil-tool-rustc-validate-prereqs` remains read-only and validates
-the selected compiler and workspace MSRV compatibility rule. For
+that `rustc` is available plus the workspace MSRV compatibility rule. For
 nightly-requiring checks, the matching toolchain-validate-prereqs recipe fails
 with a suggestion to ask the team's pipeline owner to add that dated nightly
 to msrustup.
 
 ## 7. Caching
 
-`setup.yml` computes a cache key from agent OS and architecture, the actual
-`rustc --version`, and hashes of `Cargo.lock`, `.cargo/config.toml`,
-`rust-toolchain.toml`, and `versions.just`. It uses the ADO `Cache@2` task.
+`setup.yml` restores Cargo home before bootstrapping Just so a warm job does not
+compile Just before reaching the cache. The ADO `Cache@2` key uses agent OS and
+architecture plus hashes of the root Cargo manifests, Cargo configuration,
+toolchain files, and `versions.just`. The selected compiler version is omitted
+because rustup toolchains are outside Cargo home.
 
 The cache covers:
 

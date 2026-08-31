@@ -750,7 +750,7 @@ mod tests {
         assert!(!VERSIONS_JUST.contains("os_family()"));
         assert!(!VERSIONS_JUST.contains("shell("));
         assert!(!VERSIONS_JUST.contains("[scriptblock]::Create"));
-        assert!(TOOLS_JUST.contains("_anvil-resolve-stable action=\"resolve\":"));
+        assert!(TOOLS_JUST.contains("_anvil-resolve-stable action=\"install\":"));
         assert!(!TOOLS_JUST.contains("_anvil-with-stable"));
         assert!(TOOLS_JUST.contains("& cargo {{_anvil_stable_toolchain_args}}"));
         assert!(VERSIONS_JUST.contains("rustup show active-toolchain"));
@@ -847,12 +847,15 @@ mod tests {
         use std::process::{Command, Output};
         use std::{env, fs};
 
-        use tempfile::TempDir;
+        use tempfile::{Builder, TempDir};
 
         use super::{TOOLS_JUST, VERSIONS_JUST};
 
         fn fixture(cargo_toml: &str) -> TempDir {
-            let temp = TempDir::new().expect("temporary repository must be creatable");
+            let temp = Builder::new()
+                .prefix("anvil repo's [copy] (fork) ")
+                .tempdir()
+                .expect("temporary repository must be creatable");
             fs::write(temp.path().join("Cargo.toml"), cargo_toml).expect("manifest fixture must be writable");
             fs::write(temp.path().join("versions.just"), VERSIONS_JUST).expect("versions fixture must be writable");
             fs::write(temp.path().join("tools.just"), TOOLS_JUST).expect("tools fixture must be writable");
@@ -905,9 +908,6 @@ mod tests {
             match args {
                 [] => {
                     command.arg("_anvil-test-stable-args");
-                }
-                ["-ForEnvironment"] => {
-                    command.args(["_anvil-resolve-stable", "for-environment"]);
                 }
                 ["-InstallIfMissing"] => {
                     command.arg("anvil-toolchain-stable-install");
@@ -985,7 +985,7 @@ mod tests {
                 fs::write(shim.path().join("cargo.cmd"), "@echo off\r\necho %*\r\nexit /b 0\r\n").expect("Cargo shim must be writable");
                 fs::write(
                     shim.path().join("rustup.cmd"),
-                    "@echo off\r\nif \"%1 %2\"==\"show active-toolchain\" echo C:\\toolchains\\test toolchain (overridden by fixture)\r\nexit /b 0\r\n",
+                    "@echo off\r\nif \"%1 %2\"==\"show active-toolchain\" echo C:\\toolchains\\test toolchain (overridden by 'checkout (fork)')\r\nexit /b 0\r\n",
                 )
                 .expect("rustup shim must be writable");
             }
@@ -999,7 +999,7 @@ mod tests {
                 let rustup = shim.path().join("rustup");
                 fs::write(
                     &rustup,
-                    "#!/bin/sh\nif [ \"$*\" = 'show active-toolchain' ]; then echo '/toolchains/test toolchain (overridden by fixture)'; fi\nexit 0\n",
+                    "#!/bin/sh\nif [ \"$*\" = 'show active-toolchain' ]; then echo \"/toolchains/test toolchain (overridden by 'checkout (fork)')\"; fi\nexit 0\n",
                 )
                 .expect("rustup shim must be writable");
                 fs::set_permissions(&rustup, fs::Permissions::from_mode(0o755)).expect("rustup shim must be executable");
@@ -1097,7 +1097,8 @@ mod tests {
                 let diagnostic = normalized_diagnostic(&output);
                 assert!(
                     diagnostic.contains("rustup could not resolve")
-                        && (diagnostic.contains("empty toolchain override") || diagnostic.contains("error parsing override file")),
+                        && diagnostic.contains("override")
+                        && (diagnostic.contains("empty") || diagnostic.contains("error parsing")),
                     "unexpected resolver diagnostic: {diagnostic}"
                 );
             }
@@ -1272,7 +1273,7 @@ mod tests {
                 "unexpected resolver diagnostic: {diagnostic}"
             );
 
-            let output = run_validation("1.92", None);
+            let output = run_validation("1.92.0", None);
             assert!(
                 output.status.success(),
                 "member MSRVs at or below the root must be compatible: {}",
@@ -1322,11 +1323,16 @@ mod tests {
                 let shim = TempDir::new().expect("toolchain shim directory must be creatable");
                 let rustup_log = shim.path().join("rustup.log");
                 let cargo_log = shim.path().join("cargo.log");
+                let installed_output = installed
+                    .lines()
+                    .map(|line| format!("Write-Output '{line}'"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
                 fs::write(
                     shim.path().join("rustup.ps1"),
                     format!(
                         "Add-Content -LiteralPath $env:ANVIL_RUSTUP_LOG -Value ($args -join ' ')\n\
-                         if (($args -contains 'toolchain') -and ($args -contains 'list')) {{ Write-Output '{installed}' }}\n\
+                         if (($args -contains 'toolchain') -and ($args -contains 'list')) {{ {installed_output} }}\n\
                          exit 0\n"
                     ),
                 )
@@ -1358,7 +1364,12 @@ mod tests {
 
             let temp = fixture("[workspace.package]\nrust-version = \"1.93\"\n");
 
-            let (output, rustup_calls, cargo_calls) = run_install(temp.path(), None, "1.93-x86_64-pc-windows-msvc", 0);
+            let (output, rustup_calls, cargo_calls) = run_install(
+                temp.path(),
+                None,
+                "nightly-2026-01-01-x86_64-pc-windows-msvc\n1.93-x86_64-pc-windows-msvc",
+                0,
+            );
             assert!(
                 output.status.success(),
                 "installed public MSRV provisioning failed: {}",

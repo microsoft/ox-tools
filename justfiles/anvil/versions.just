@@ -48,7 +48,7 @@ if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
 
 if ((Test-Path -LiteralPath (Join-Path $RepoRoot 'rust-toolchain') -PathType Leaf) -or
     (Test-Path -LiteralPath (Join-Path $RepoRoot 'rust-toolchain.toml') -PathType Leaf)) {
-    Push-Location $RepoRoot
+    Push-Location -LiteralPath $RepoRoot
     try {
         $rustupOutput = @(& rustup show active-toolchain 2>&1)
         if ($LASTEXITCODE -ne 0) {
@@ -62,7 +62,7 @@ if ((Test-Path -LiteralPath (Join-Path $RepoRoot 'rust-toolchain') -PathType Lea
         Pop-Location
     }
     $resolved = [string] $active
-    $sourceMarker = $resolved.LastIndexOf(' (')
+    $sourceMarker = $resolved.IndexOf(' (')
     if ($sourceMarker -ge 0) {
         $resolved = $resolved.Substring(0, $sourceMarker)
     }

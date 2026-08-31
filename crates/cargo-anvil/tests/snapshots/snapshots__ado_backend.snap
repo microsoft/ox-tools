@@ -2466,30 +2466,15 @@ parameters:
     type: string
     default: ''
 steps:
-  - bash: |
-      if ! command -v just >/dev/null 2>&1 ; then
-        cargo install --locked just
-      fi
-    displayName: anvil setup (install just)
-
-  - pwsh: |
-      $version = (& just _anvil-stable-rustc-version | Select-Object -Last 1)
-      if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($version)) {
-        throw 'anvil: failed to provision the selected stable toolchain'
-      }
-      $version = $version.Trim()
-      Write-Host "##vso[task.setvariable variable=anvil_rustc_version]$version"
-    displayName: anvil setup (provision stable toolchain and capture version)
+  # Restore Cargo's registry and installed binaries before bootstrapping Just,
+  # so warm ADO jobs do not compile Just again before reaching the cache.
+  # Rustup toolchains are not stored under Cargo home, so the selected compiler
+  # version does not affect this cache's contents.
   - task: Cache@2
     inputs:
-      # Same key shape as the GitHub side: OS + arch + rustc version +
-      # lockfile hashes + catalog hash. Including arch keeps any
-      # future ARM pool an adopter adds from colliding with x86_64 on
-      # the same OS namespace.
-      key: 'anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(anvil_rustc_version) | Cargo.toml | Cargo.lock | .cargo/config.toml | rust-toolchain | rust-toolchain.toml | justfiles/anvil/versions.just'
+      key: 'anvil-v2 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | Cargo.toml | Cargo.lock | .cargo/config.toml | rust-toolchain | rust-toolchain.toml | justfiles/anvil/versions.just'
       restoreKeys: |
-        anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | rust$(anvil_rustc_version)
-        anvil-v1 | "$(Agent.OS)" | "$(Agent.OSArchitecture)"
+        anvil-v2 | "$(Agent.OS)" | "$(Agent.OSArchitecture)"
       path: |
         $(HOME)/.cargo/registry/cache/
         $(HOME)/.cargo/registry/index/
@@ -2497,6 +2482,19 @@ steps:
         $(HOME)/.cargo/.crates.toml
         $(HOME)/.cargo/.crates2.json
     displayName: anvil setup (cache cargo home)
+
+  - bash: |
+      if ! command -v just >/dev/null 2>&1 ; then
+        cargo install --locked just
+      fi
+    displayName: anvil setup (install just)
+
+  - pwsh: |
+      & just anvil-toolchain-stable-install
+      if ($LASTEXITCODE -ne 0) {
+        throw 'anvil: failed to provision the selected stable toolchain'
+      }
+    displayName: anvil setup (provision stable toolchain)
 
   # Hand everything else off to the catalog recipe. Idempotent. ADO
   # uses the default `install` backend (source builds) because
@@ -6364,14 +6362,12 @@ anvil-tool-pwsh-validate-prereqs:
 # Rustup owns toolchain-file parsing, installation, and file options. Anvil only
 # handles explicit environment overrides and the root Cargo MSRV fallback.
 [script("pwsh", "-NoProfile")]
-_anvil-resolve-stable action="resolve":
+_anvil-resolve-stable action="install":
     $ErrorActionPreference = 'Stop'
     Set-StrictMode -Version 3
 
     $action = '{{action}}'
     $validActions = @(
-        'resolve',
-        'for-environment',
         'install',
         'validate-workspace-msrv',
         'msrv',
@@ -6382,7 +6378,7 @@ _anvil-resolve-stable action="resolve":
         exit 2
     }
 
-    $repoRoot = '{{justfile_directory()}}'
+    $repoRoot = '{{replace(justfile_directory(), "'", "''")}}'
 
     function Test-RootToolchainFile {
         return (
@@ -6441,9 +6437,18 @@ _anvil-resolve-stable action="resolve":
             throw "anvil: workspace packages without a resolved rust-version: $($missing -join ', '); declare one or select a toolchain explicitly"
         }
 
+        function ConvertTo-ComparableRustVersion([string] $value) {
+            if ($value -notmatch '^\s*(\d+)\.(\d+)(?:\.(\d+))?\s*$') {
+                throw "anvil: invalid resolved rust-version '$value'"
+            }
+            $patch = if ([string]::IsNullOrWhiteSpace($Matches[3])) { 0 } else { [int] $Matches[3] }
+            return [version]::new([int] $Matches[1], [int] $Matches[2], $patch)
+        }
+
+        $rootVersion = ConvertTo-ComparableRustVersion $rootMsrv
         $newer = @(
             $members |
-                Where-Object { [version] ([string] $_.rust_version) -gt [version] $rootMsrv } |
+                Where-Object { (ConvertTo-ComparableRustVersion ([string] $_.rust_version)) -gt $rootVersion } |
                 ForEach-Object { "$($_.name) ($($_.rust_version))" }
         )
         if ($newer.Count -gt 0) {
@@ -6480,7 +6485,7 @@ _anvil-resolve-stable action="resolve":
         if ($LASTEXITCODE -ne 0) {
             throw 'anvil: rustup toolchain list failed'
         }
-        if ($installed -notmatch "(?m)^$([regex]::Escape($toolchain.Value))(?:-|$)") {
+        if (($installed -join "`n") -notmatch "(?m)^$([regex]::Escape($toolchain.Value))(?:-|$)") {
             Write-Host "anvil: installing $label toolchain '$($toolchain.Value)'"
             rustup toolchain install $toolchain.Value --profile minimal
             if ($LASTEXITCODE -ne 0) {
@@ -6529,7 +6534,7 @@ _anvil-resolve-stable action="resolve":
 
     if ($action -eq 'install') {
         if ($selection.Source -eq 'file') {
-            Push-Location $repoRoot
+            Push-Location -LiteralPath $repoRoot
             try {
                 & rustc --version
                 if ($LASTEXITCODE -ne 0) {
@@ -6549,12 +6554,6 @@ _anvil-resolve-stable action="resolve":
         exit 0
     }
 
-    if ($action -eq 'for-environment' -and $selection.Source -eq 'file') {
-        ''
-    } else {
-        $selection.Value
-    }
-
 # Provision the selected stable toolchain. Repository toolchain files are
 # processed natively by rustup. This is the shared prerequisite for setup paths
 # that execute stable Cargo/Rust or install Cargo tools; Just deduplicates it
@@ -6562,7 +6561,7 @@ _anvil-resolve-stable action="resolve":
 [group("anvil-setup")]
 anvil-toolchain-stable-install: (_anvil-resolve-stable "install")
 
-# Report the selected stable rustc version for cloud cache keys. Provisioning
+# Report the selected stable rustc version for GitHub cache keys. Provisioning
 # is a dependency so workflow surfaces invoke one setup-aware operation rather
 # than orchestrating the resolver directly.
 [private]
@@ -7242,7 +7241,7 @@ if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
 
 if ((Test-Path -LiteralPath (Join-Path $RepoRoot 'rust-toolchain') -PathType Leaf) -or
     (Test-Path -LiteralPath (Join-Path $RepoRoot 'rust-toolchain.toml') -PathType Leaf)) {
-    Push-Location $RepoRoot
+    Push-Location -LiteralPath $RepoRoot
     try {
         $rustupOutput = @(& rustup show active-toolchain 2>&1)
         if ($LASTEXITCODE -ne 0) {
@@ -7256,7 +7255,7 @@ if ((Test-Path -LiteralPath (Join-Path $RepoRoot 'rust-toolchain') -PathType Lea
         Pop-Location
     }
     $resolved = [string] $active
-    $sourceMarker = $resolved.LastIndexOf(' (')
+    $sourceMarker = $resolved.IndexOf(' (')
     if ($sourceMarker -ge 0) {
         $resolved = $resolved.Substring(0, $sourceMarker)
     }

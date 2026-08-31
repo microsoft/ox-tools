@@ -176,14 +176,12 @@ anvil-tool-pwsh-validate-prereqs:
 # Rustup owns toolchain-file parsing, installation, and file options. Anvil only
 # handles explicit environment overrides and the root Cargo MSRV fallback.
 [script("pwsh", "-NoProfile")]
-_anvil-resolve-stable action="resolve":
+_anvil-resolve-stable action="install":
     $ErrorActionPreference = 'Stop'
     Set-StrictMode -Version 3
 
     $action = '{{action}}'
     $validActions = @(
-        'resolve',
-        'for-environment',
         'install',
         'validate-workspace-msrv',
         'msrv',
@@ -194,7 +192,7 @@ _anvil-resolve-stable action="resolve":
         exit 2
     }
 
-    $repoRoot = '{{justfile_directory()}}'
+    $repoRoot = '{{replace(justfile_directory(), "'", "''")}}'
 
     function Test-RootToolchainFile {
         return (
@@ -253,9 +251,18 @@ _anvil-resolve-stable action="resolve":
             throw "anvil: workspace packages without a resolved rust-version: $($missing -join ', '); declare one or select a toolchain explicitly"
         }
 
+        function ConvertTo-ComparableRustVersion([string] $value) {
+            if ($value -notmatch '^\s*(\d+)\.(\d+)(?:\.(\d+))?\s*$') {
+                throw "anvil: invalid resolved rust-version '$value'"
+            }
+            $patch = if ([string]::IsNullOrWhiteSpace($Matches[3])) { 0 } else { [int] $Matches[3] }
+            return [version]::new([int] $Matches[1], [int] $Matches[2], $patch)
+        }
+
+        $rootVersion = ConvertTo-ComparableRustVersion $rootMsrv
         $newer = @(
             $members |
-                Where-Object { [version] ([string] $_.rust_version) -gt [version] $rootMsrv } |
+                Where-Object { (ConvertTo-ComparableRustVersion ([string] $_.rust_version)) -gt $rootVersion } |
                 ForEach-Object { "$($_.name) ($($_.rust_version))" }
         )
         if ($newer.Count -gt 0) {
@@ -292,7 +299,7 @@ _anvil-resolve-stable action="resolve":
         if ($LASTEXITCODE -ne 0) {
             throw 'anvil: rustup toolchain list failed'
         }
-        if ($installed -notmatch "(?m)^$([regex]::Escape($toolchain.Value))(?:-|$)") {
+        if (($installed -join "`n") -notmatch "(?m)^$([regex]::Escape($toolchain.Value))(?:-|$)") {
             Write-Host "anvil: installing $label toolchain '$($toolchain.Value)'"
             rustup toolchain install $toolchain.Value --profile minimal
             if ($LASTEXITCODE -ne 0) {
@@ -341,7 +348,7 @@ _anvil-resolve-stable action="resolve":
 
     if ($action -eq 'install') {
         if ($selection.Source -eq 'file') {
-            Push-Location $repoRoot
+            Push-Location -LiteralPath $repoRoot
             try {
                 & rustc --version
                 if ($LASTEXITCODE -ne 0) {
@@ -361,12 +368,6 @@ _anvil-resolve-stable action="resolve":
         exit 0
     }
 
-    if ($action -eq 'for-environment' -and $selection.Source -eq 'file') {
-        ''
-    } else {
-        $selection.Value
-    }
-
 # Provision the selected stable toolchain. Repository toolchain files are
 # processed natively by rustup. This is the shared prerequisite for setup paths
 # that execute stable Cargo/Rust or install Cargo tools; Just deduplicates it
@@ -374,7 +375,7 @@ _anvil-resolve-stable action="resolve":
 [group("anvil-setup")]
 anvil-toolchain-stable-install: (_anvil-resolve-stable "install")
 
-# Report the selected stable rustc version for cloud cache keys. Provisioning
+# Report the selected stable rustc version for GitHub cache keys. Provisioning
 # is a dependency so workflow surfaces invoke one setup-aware operation rather
 # than orchestrating the resolver directly.
 [private]
