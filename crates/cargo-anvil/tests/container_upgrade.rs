@@ -106,7 +106,7 @@ fn rewind_to_runner_layout(root: &Path) -> Manifest {
 
     for artifact in artifacts::container::all() {
         // The Dockerfile is composed now, so the group is a mix: the recipe and
-        // the ignore file are owned, the image definition is four regions in a
+        // the ignore file are owned, the image definition is five regions in a
         // host this rewind deletes outright.
         let path = match artifact {
             cargo_anvil::Artifact::OwnedFile(spec) => spec.path,
@@ -287,7 +287,7 @@ fn an_edited_retired_asset_is_handed_back_rather_than_deleted() {
 
 /// The release before this one owned `.anvil/container/Dockerfile` outright: a
 /// single generated file a repository was invited to edit in place. This
-/// release composes the same path from four managed regions.
+/// release composes the same path from five managed regions.
 ///
 /// The upgrade must replace that file, not append to it. Appending would leave
 /// the whole previous definition above the regions -- a second `FROM`, a second
@@ -634,7 +634,7 @@ fn a_malformed_sentinel_is_named_in_the_refusal() {
 /// spelling. A repository that wrote a lower-cased `dockerfile` -- the commoner
 /// spelling in the wild, and indistinguishable from the canonical one on
 /// Windows and macOS -- would otherwise miss the composed-host lookup entirely,
-/// get no refusal, and have anvil's six regions appended below its own `FROM`.
+/// get no refusal, and have anvil's five regions appended below its own `FROM`.
 #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
 #[test]
 fn a_case_variant_repository_dockerfile_is_refused_too() {

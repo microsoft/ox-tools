@@ -101,8 +101,11 @@ fn ensure_contained(path: &str, context: &str) -> Result<(), AppError> {
     for component in Path::new(path).components() {
         match component {
             Component::Normal(_) => names += 1,
-            Component::CurDir => {}
-            Component::RootDir | Component::Prefix(_) | Component::ParentDir => {
+            // `.` is not a directory entry, so `resolve_existing_case_insensitive`
+            // cannot fold it away: `./Justfile` stays a second spelling of a live
+            // path, and a liveness check that compares resolved strings misses it.
+            // Rejected so one file has one key.
+            Component::CurDir | Component::RootDir | Component::Prefix(_) | Component::ParentDir => {
                 bail!("{context} '{path}' must be a relative path inside the repository");
             }
         }
@@ -575,6 +578,11 @@ mod tests {
             "C:\\x.txt",
             "C:x.txt",
             "z:dir/file.txt",
+            // `.` is a second spelling of a live path that resolution cannot
+            // fold away, so it is rejected rather than accepted as an alias.
+            ".",
+            "./",
+            "./Justfile",
         ] {
             // A TOML basic string treats `\` as an escape, so a path carrying
             // one has to arrive doubled or the document itself is malformed and
@@ -598,7 +606,10 @@ mod tests {
 
     #[test]
     fn rejects_a_path_that_names_no_file() {
-        for empty in ["", ".", "./", "a/.", "a/"] {
+        // `a/.` reaches here rather than the escape test: `Path::components`
+        // folds a trailing `.` away, so the component loop never sees it and the
+        // final-segment check is what catches it.
+        for empty in ["", "a/", "a/."] {
             let toml = format!("version = 1\ntool = \"anvil\"\n\n[[file]]\npath = \"{empty}\"\nchecksum = \"sha256:x\"\n");
             let err = Manifest::parse(&toml).unwrap_err();
             assert!(

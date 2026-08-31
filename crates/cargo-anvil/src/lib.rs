@@ -239,7 +239,7 @@
 //! ### Customizing the image
 //!
 //! `.anvil/container/Dockerfile` is a **user-composed file with managed
-//! regions**: anvil owns six regions inside it and keeps them current, and the
+//! regions**: anvil owns five regions inside it and keeps them current, and the
 //! gaps between them are the repository's. Add to the gap that matches when the
 //! addition is needed -- re-declare `ARG BASE_IMAGE` to build on another base,
 //! a root CA or proxy before the first download, libraries a catalog tool

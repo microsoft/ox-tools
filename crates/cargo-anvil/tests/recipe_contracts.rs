@@ -1236,7 +1236,9 @@ fn the_image_tag_follows_the_executable_bit() {
         &root.join("fake-bin/git.ps1"),
         "if ($args -contains 'ls-files') {\n    \
          $mode = if ($env:FAKE_EXECUTABLE -eq '1') { '100755' } else { '100644' }\n    \
-         Write-Output \"$mode 0000000000000000000000000000000000000000 0`tjustfiles/anvil/setup.sh\"\n}\nexit 0\n",
+         Write-Output \"$mode 0000000000000000000000000000000000000000 0`tjustfiles/anvil/setup.sh\"\n    \
+         Write-Output \"100644 0000000000000000000000000000000000000000 0`trust-toolchain.toml\"\n    \
+         Write-Output \"100644 0000000000000000000000000000000000000000 0`t.anvil/container/Dockerfile\"\n}\nexit 0\n",
     );
 
     let tag = |executable: &str| {
@@ -1284,7 +1286,9 @@ fn a_working_tree_mode_the_tag_did_not_frame_stops_the_run() {
     write(
         &root.join("fake-bin/git.ps1"),
         "if ($args -contains 'ls-files') {\n    \
-         Write-Output \"100644 0000000000000000000000000000000000000000 0`tjustfiles/anvil/setup.sh\"\n}\n\
+         Write-Output \"100644 0000000000000000000000000000000000000000 0`tjustfiles/anvil/setup.sh\"\n    \
+         Write-Output \"100644 0000000000000000000000000000000000000000 0`trust-toolchain.toml\"\n    \
+         Write-Output \"100644 0000000000000000000000000000000000000000 0`t.anvil/container/Dockerfile\"\n}\n\
          if ($args -contains 'diff' -and $env:FAKE_RAW) {\n    Write-Output $env:FAKE_RAW\n}\nexit 0\n",
     );
 

@@ -604,6 +604,19 @@ fn write_file(path: &Path, content: &str) -> Result<(), AppError> {
         .expect("write_file targets are always repo-root-joined paths, which always have a parent");
     std::fs::create_dir_all(parent).into_app_err_with(|| format!("failed to create parent directory {}", parent.display()))?;
     let tmp = make_temp_path(path);
+    // The destination was checked for containment, but the write lands on this
+    // sibling first and it never was. A checkout can carry `Justfile.anvil-tmp`
+    // as a link out of the tree just as easily as `Justfile`, and `fs::write`
+    // opens with create+truncate, which follows one. Removing it first turns a
+    // followed link into a replaced link; the name is anvil's own, so nothing
+    // that belongs to the repository is at stake.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e).into_app_err_with(|| format!("failed to clear the temporary file {}", tmp.display()));
+        }
+    }
     std::fs::write(&tmp, content).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
     std::fs::rename(&tmp, path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
@@ -622,6 +635,29 @@ mod tests {
 
     use super::*;
 
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_linked_temporary_sibling_is_replaced_rather_than_followed() {
+        // The destination is containment-checked, but the write lands on
+        // `<path>.anvil-tmp` first. `fs::write` opens with create+truncate,
+        // which follows a link, so a checkout carrying that name as a link out
+        // of the tree would have the content written wherever it points.
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, "untouched").unwrap();
+        let target = tmp.path().join("Justfile");
+        std::os::unix::fs::symlink(&outside, tmp.path().join("Justfile.anvil-tmp")).unwrap();
+
+        write_file(&target, "written").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "written");
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "untouched",
+            "the write followed the link out of the tree"
+        );
+    }
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
     fn a_path_inside_the_repository_is_joined_as_given() {

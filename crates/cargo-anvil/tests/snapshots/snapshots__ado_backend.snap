@@ -5,9 +5,6 @@ expression: render_tree(tmp.path())
 === .anvil/container/Dockerfile ===
 # syntax=docker/dockerfile:1
 
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
 # >>> anvil-managed: anvil-container-base-image
 # Prebuilt binaries installed by `anvil-setup binstall` link against this
 # image's glibc, so it tracks the Linux runner the generated workflows use.
@@ -3697,11 +3694,14 @@ anvil-container-tag:
 
     $inputs = @('rust-toolchain.toml')
     $links = @()
-    # The declared input and the two walk roots are checked here, because a walk
-    # only ever reports descendants: a link that *is* the root is traversed or
-    # read through and never appears in its own output. Same hazard as a link
-    # below them -- the engine copies the link while everything here follows it.
-    foreach ($declared in @('rust-toolchain.toml', '.anvil/container', 'justfiles/anvil')) {
+    # The declared input and every directory on the way to a walk root are
+    # checked here, because a walk only ever reports descendants: a link that
+    # *is* a root, or that is a parent of one, is traversed through and never
+    # appears in its own output. `COPY justfiles ./justfiles` copies from
+    # `justfiles`, not from `justfiles/anvil`, so a link at the parent is copied
+    # as a link while everything here reads through it -- the same divergence
+    # this guard exists to refuse, reached one level up.
+    foreach ($declared in @('rust-toolchain.toml', '.anvil', '.anvil/container', 'justfiles', 'justfiles/anvil')) {
         $item = Get-Item -LiteralPath (Join-Path $repoRoot $declared) -Force -ErrorAction SilentlyContinue
         if ($item -and ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) {
             $links += $item.FullName
@@ -3837,54 +3837,76 @@ anvil-container-tag:
     # the tag, and a published image would stop resolving for half the people
     # who use it.
     #
+    # Because the mode comes from the index, the index has to be able to answer
+    # for every input. Two states are refused rather than absorbed, since both
+    # would otherwise frame a mode of `-` and silently rename every image:
+    # git being unavailable, and an input the index does not know about. A
+    # missing git is not a degraded mode here -- it is the difference between
+    # two hosts computing different tags for identical bytes.
+    #
     # The index is authoritative only while the working tree agrees with it. A
     # mode change that has not been staged would be copied by the build and
-    # missed by the tag, so it is refused below rather than absorbed.
-    #
-    # An untracked file's mode is not an input: it has no committed identity, so
-    # no other checkout can reproduce it and there is nothing for a shared tag
-    # to encode.
+    # missed by the tag, so it is refused below too.
     #
     # quotePath=false so a non-ASCII path arrives verbatim rather than
     # backslash-escaped, which would key the map on a spelling the walk never
     # produces.
+    #
     # Ordinal, like the sort and the dedup below: PowerShell's `@{}` folds case,
     # so two paths differing only in case -- which git permits and the
     # case-sensitive filesystem the image is built on can hold -- would collapse
     # to one entry and both would be framed with whichever mode was stored last.
+    #
+    # Scoped to exactly what the digest hashes. `justfiles` would reach recipes
+    # outside `justfiles/anvil`, which neither the walk hashes nor the ignore
+    # file admits, so an unstaged `chmod` on one of those would refuse a build
+    # it cannot affect.
     $indexMode = [System.Collections.Generic.Dictionary[string, string]]::new([System.StringComparer]::Ordinal)
-    $tracked = @('.anvil/container', 'justfiles', 'rust-toolchain.toml')
-    if (Get-Command git -ErrorAction SilentlyContinue) {
-        $staged = & git -c core.quotePath=false -C $repoRoot ls-files --stage -- @tracked 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            foreach ($entry in $staged) {
-                if ($entry -match '^(\d{6}) [0-9a-f]+ \d+\t(.+)$') {
-                    $indexMode[$Matches[2]] = $Matches[1]
-                }
-            }
+    $tracked = @('.anvil/container', 'justfiles/anvil', 'rust-toolchain.toml')
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Write-Error 'anvil: git is required to compute the container image tag, because the image inputs are framed with the file modes git records. Without it two hosts would compute different tags for identical content. Install git, or set ANVIL_CONTAINER_ENGINE aside and build the image where git is available.'
+        exit 1
+    }
+    $staged = & git -c core.quotePath=false -C $repoRoot ls-files --stage -- @tracked 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "anvil: could not read the git index for the container image inputs (git ls-files exited $LASTEXITCODE). The image tag is framed with the modes git records, so it cannot be computed without them."
+        exit 1
+    }
+    foreach ($entry in $staged) {
+        if ($entry -match '^(\d{6}) [0-9a-f]+ \d+\t(.+)$') {
+            $indexMode[$Matches[2]] = $Matches[1]
         }
-        # `--raw` reports the working-tree mode as its second field, so a
-        # mode-only change is visible even though the content is identical. On
-        # Windows core.fileMode is normally false and git reports no drift,
-        # which is correct: the filesystem has no bit to disagree with.
-        #
-        # A zero working-tree mode is a deletion: the path is in neither the
-        # build context nor the digest, so there is nothing to disagree about.
-        # Every other entry is present in the context and is compared against
-        # the mode the digest actually framed, which comes from `ls-files
-        # --stage` above. The raw index-side mode is not that mode -- an
-        # intent-to-add entry reports zero there while `ls-files` reports a real
-        # placeholder -- so comparing the two raw fields would both miss an
-        # executable `git add -N` file and reject an ordinary one.
-        $drift = & git -c core.quotePath=false -C $repoRoot diff --no-ext-diff --raw -- @tracked 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            foreach ($entry in $drift) {
-                if ($entry -match '^:\d{6} (\d{6}) [0-9a-f]+ [0-9a-f]+ \S+\t(.+)$') {
-                    $worktreeMode, $driftPath = $Matches[1], $Matches[2]
-                    if ($worktreeMode -ne '000000' -and $indexMode.ContainsKey($driftPath) -and $indexMode[$driftPath] -ne $worktreeMode) {
-                        Write-Error "anvil: '$driftPath' has mode $worktreeMode in the working tree, but the image tag was computed from mode $($indexMode[$driftPath]). The build copies the working tree, so the image would not match its own reference. Stage the change (git add) and re-run."
-                        exit 1
-                    }
+    }
+    # An input git does not know about has no mode to frame. Framing a
+    # placeholder would make the tag turn on whether a file happens to be
+    # tracked, so an image built from a commit would not match one built from
+    # the same commit plus an untracked stray.
+    $untracked = @($ordered | Where-Object { -not $indexMode.ContainsKey($_) })
+    if ($untracked.Count -gt 0) {
+        Write-Error "anvil: these container image inputs are not tracked by git: $($untracked -join ', '). The image tag is framed with the modes git records, so every input must be in the index. Commit them, stage them with git add, or remove them."
+        exit 1
+    }
+    # `--raw` reports the working-tree mode as its second field, so a
+    # mode-only change is visible even though the content is identical. On
+    # Windows core.fileMode is normally false and git reports no drift,
+    # which is correct: the filesystem has no bit to disagree with.
+    #
+    # A zero working-tree mode is a deletion: the path is in neither the
+    # build context nor the digest, so there is nothing to disagree about.
+    # Every other entry is present in the context and is compared against
+    # the mode the digest actually framed, which comes from `ls-files
+    # --stage` above. The raw index-side mode is not that mode -- an
+    # intent-to-add entry reports zero there while `ls-files` reports a real
+    # placeholder -- so comparing the two raw fields would both miss an
+    # executable `git add -N` file and reject an ordinary one.
+    $drift = & git -c core.quotePath=false -C $repoRoot diff --no-ext-diff --raw -- @tracked 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        foreach ($entry in $drift) {
+            if ($entry -match '^:\d{6} (\d{6}) [0-9a-f]+ [0-9a-f]+ \S+\t(.+)$') {
+                $worktreeMode, $driftPath = $Matches[1], $Matches[2]
+                if ($worktreeMode -ne '000000' -and $indexMode.ContainsKey($driftPath) -and $indexMode[$driftPath] -ne $worktreeMode) {
+                    Write-Error "anvil: '$driftPath' has mode $worktreeMode in the working tree, but the image tag was computed from mode $($indexMode[$driftPath]). The build copies the working tree, so the image would not match its own reference. Stage the change (git add) and re-run."
+                    exit 1
                 }
             }
         }
@@ -3910,8 +3932,9 @@ anvil-container-tag:
             # The whole git mode, not just the executable bit: `COPY` preserves
             # a symlink as a symlink, while the walk above reads through it, so
             # replacing a regular file with a link to identical bytes would
-            # otherwise keep the tag. An untracked path has no framed mode.
-            $mode = if ($indexMode.ContainsKey($rel)) { $indexMode[$rel] } else { '-' }
+            # otherwise keep the tag. Every input is tracked by the check above,
+            # so the index always has a mode for it.
+            $mode = $indexMode[$rel]
             $header = [System.Text.Encoding]::UTF8.GetBytes(
                 'file ' + [System.Text.Encoding]::UTF8.GetByteCount($rel) + ' ' + $rel + ' ' + $mode + ' ' + $content.Length + ' ')
             [void]$sha.TransformBlock($header, 0, $header.Length, $null, 0)
@@ -4267,6 +4290,19 @@ anvil-container *command:
             # anything else cannot be expressed as a single mount, and emitting a
             # path that climbs out of it would fail inside the container instead.
             if ($rel -eq '.') {
+                # git-dir equal to common-dir means there is no separate worktree
+                # entry: a `--separate-git-dir` clone or a submodule. A submodule
+                # also records `core.worktree`, resolved relative to the git
+                # directory, and remounting the git directory moves what that
+                # relative path resolves to. The value belongs to the repository,
+                # so it is not ours to rewrite, and git inside the container
+                # would otherwise report a worktree that does not exist -- which
+                # is why this is refused here rather than left to fail there.
+                $coreWorktree = & git -C $repoRoot config --get core.worktree 2>$null
+                if ($LASTEXITCODE -eq 0 -and $coreWorktree) {
+                    Write-Error "anvil: this checkout sets core.worktree ($coreWorktree) and keeps its git directory outside itself, which is the shape of a submodule. The git directory has to be remounted for the container, and that moves what core.worktree resolves against, so git inside the container would not find the worktree. Run the container from the superproject, or from an ordinary clone."
+                    exit 1
+                }
                 $containerGitDir = '/anvil/gitdir'
             } elseif ($rel.StartsWith('../') -or [System.IO.Path]::IsPathRooted($rel)) {
                 Write-Error "anvil: this checkout's git directory ($gitDirAbs) is not inside its common git directory ($gitCommonAbs), so the two cannot be mounted as one tree. Run the container from an ordinary clone or a git worktree checkout."

@@ -66,8 +66,12 @@ const DOCKERIGNORE: &str = include_str!("../../../templates/anvil/container/Dock
 /// honors the directive only as the very first line, before any comment. A
 /// region's opening sentinel *is* a comment, so the directive cannot live inside
 /// one without being silently demoted, dropping the build to the default
-/// frontend with nothing failing to say so. The copyright notice follows it as
-/// ordinary repository content, editable like anything else in a gap.
+/// frontend with nothing failing to say so.
+///
+/// Nothing else belongs here. The scaffold is also what the engine matches a
+/// host's opening bytes against when deciding where a missing first region
+/// goes, so every line added is a line an existing file must already carry to
+/// be recognized -- and content anvil could never correct afterwards.
 const DOCKERFILE_HEADER: &str = include_str!("../../../templates/anvil/container/Dockerfile.header");
 
 const DOCKERFILE_BASE_IMAGE: &str = include_str!("../../../templates/anvil/container/Dockerfile.baseimage.region");
@@ -685,10 +689,13 @@ mod tests {
         // it contribute nothing and yield a confident tag for an unbuildable
         // image. The resolver asserts existence, and the tag resolves the path
         // through it before walking.
-        let resolve = RECIPE[..walk]
-            .rfind("_anvil-container-dockerfile\n")
+        // Searched over the whole recipe, not a prefix: `rfind` on `RECIPE[..walk]`
+        // can only return an index below `walk`, so comparing them would assert
+        // nothing and would keep passing if the ordering were removed.
+        let resolve = RECIPE
+            .find("_anvil-container-dockerfile\n")
             .expect("the tag must resolve the Dockerfile before hashing the directory");
-        assert!(resolve < walk);
+        assert!(resolve < walk, "the Dockerfile must be resolved before the walk hashes it");
         assert!(RECIPE.contains("anvil: container image input is missing: .anvil/container/Dockerfile"));
     }
 
@@ -850,13 +857,19 @@ mod tests {
         // is not -- PID 1's environment reaches every build script and proc
         // macro, where natively the recipe mints it in its own process -- so it
         // happens only for a command whose plan reads the variable.
+        // Each search covers the whole recipe, so the comparison below is the
+        // thing under test. Bounding a search by an earlier match makes the
+        // ordering true by construction and the assertion vacuous.
         let derive = RECIPE.find("gh auth token --hostname").expect("the gh fallback must exist");
-        let guard = RECIPE[..derive].rfind("if ($needsToken)").expect("the derive must be guarded");
-        let plan = RECIPE[..guard]
-            .rfind("$plan -match 'GITHUB_TOKEN'")
+        let guard = RECIPE.find("if ($needsToken)").expect("the derive must be guarded");
+        let plan = RECIPE
+            .find("$plan -match 'GITHUB_TOKEN'")
             .expect("the plan must decide whether a token is needed");
-        let dry_run = RECIPE[..plan].rfind("--dry-run @target").expect("the plan must come from just");
-        assert!(dry_run < plan && plan < guard, "compute the plan, match it, then derive");
+        let dry_run = RECIPE.find("--dry-run @target").expect("the plan must come from just");
+        assert!(
+            dry_run < plan && plan < guard && guard < derive,
+            "compute the plan, match it, guard on it, then derive"
+        );
         // Through the launching binary, like every other nested call: a bare
         // `just` here fails silently when the caller invoked it by absolute
         // path, and an empty plan reads as "no token needed".

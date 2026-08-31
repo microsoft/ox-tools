@@ -138,8 +138,10 @@ the catalog — a repository adds to a gap and keeps receiving base-image and to
 inside a region freezes them.
 
 Line 1 is `# syntax=docker/dockerfile:1` and belongs to no region, because BuildKit honors the directive only when
-nothing precedes it and a region sentinel is a comment. Anvil writes it, and the copyright notice under it, when it
-creates the file and never touches either again; both are the repository's from then on.
+nothing precedes it and a region sentinel is a comment. Anvil writes it when it creates the file and never touches it
+again. It is also the only thing anvil seeds: the scaffold is what the engine matches an existing file's opening bytes
+against when deciding where a missing first region belongs, so anything else put there would have to be present in
+every file already written for that file to still be recognized.
 
 **Why not an owned file.** An edited owned file is preserved and anvil's version is written to `.anvil-proposed`
 (`updates.md` §2). There is no three-way merge and no recorded common ancestor, so each upgrade leaves two files to
@@ -225,11 +227,21 @@ excluded: a credential must never influence a tag.
 ### 4.2 Digest
 
 Inputs are sorted by relative path with an ordinal comparison, then serialized into one stream in which each entry
-contributes a literal `file`, the UTF-8 byte length of its relative path, the path, the UTF-8 byte length of its
-content, and the content. Length-prefixing the two variable-length fields is what makes the stream self-delimiting:
-newline framing would let a file whose body happened to contain `file`, a path and a newline serialize identically to
-two files splitting at that point, so two different input sets could name one image. The lengths are byte counts of
-the same UTF-8 encoding the stream is hashed in, so an independent re-implementation arrives at the same bytes.
+contributes a literal `file`, the UTF-8 byte length of its relative path, the path, the file's git mode, the UTF-8
+byte length of its content, and the content. Length-prefixing the two variable-length fields is what makes the stream
+self-delimiting: newline framing would let a file whose body happened to contain `file`, a path and a newline
+serialize identically to two files splitting at that point, so two different input sets could name one image. The
+lengths are byte counts of the same UTF-8 encoding the stream is hashed in, so an independent re-implementation
+arrives at the same bytes.
+
+The mode is the six-digit value git records — `100644`, `100755`, `120000` — taken from the index rather than the
+filesystem, because Windows has no executable bit and the same commit must produce the same tag on every platform.
+It is framed because `COPY` carries it into the image: a `chmod +x` changes what the image contains without changing
+a byte. Making the index authoritative costs two refusals, both of which fail the run rather than name an image that
+does not match: an input git cannot account for (git absent, or a file not in the index) has no mode to frame, and a
+working-tree mode that disagrees with the index would be copied by the build and missed by the tag. A symlink among
+the inputs is refused outright, since the engine copies the link while the digest reads through it.
+
 Tagging entries this way
 prevents a rearrangement of names and contents from colliding. Line endings are normalized to LF for `.just` recipes
 and the declared text inputs, so those agree across a CRLF and an LF checkout; every other file the walk admits is
@@ -283,17 +295,20 @@ removed on exit (`--rm`).
 | Mount | Target | Purpose |
 | --- | --- | --- |
 | repository root (bind) | `/workspace` | The worktree under test, including `target/`. |
-| common git directory (bind, linked worktrees only) | `/anvil/gitdir` | Git history, when the checkout does not carry it. |
+| common git directory (bind, redirected checkouts only) | `/anvil/gitdir` | Git history, when the checkout does not carry it. |
 | `anvil-<repo>-cargo-registry` (volume) | `/usr/local/cargo/registry` | Downloaded crate sources. |
 | `anvil-<repo>-cargo-git` (volume) | `/usr/local/cargo/git` | Git checkouts of git dependencies. |
 
-A linked worktree (`git worktree add`) keeps its git directory outside the checkout and stores an absolute host path
-in `.git`, which does not exist inside the container. The recipe resolves this while assembling the run, before the
-container starts: it compares `git rev-parse --git-dir` against `--git-common-dir`, and when they differ it adds a
-bind mount for the common directory and a second one placing a generated `.git` file over the checkout's own, naming
-that mount. Git then resolves the history by ordinary discovery. This is what lets the checks that read history — the
-impact-scoped filters, `anvil-mutants-diff`, `anvil-semver-check` — work from a worktree at all; without it git
-resolves nothing inside the container and each of them fails a long way from the cause.
+A checkout whose `.git` is a file — a linked worktree (`git worktree add`), a `--separate-git-dir` clone, a submodule —
+keeps its git directory elsewhere and records an absolute host path there, which does not exist inside the container.
+The recipe resolves this while assembling the run, before the container starts: it keys on the shape of `.git` rather
+than on the git directory differing from the common one, because a redirect without a separate worktree entry leaves
+the two equal. It adds a bind mount for the common directory and a second one placing a generated `.git` file over the
+checkout's own, naming that mount. Git then resolves the history by ordinary discovery. This is what lets the checks
+that read history — the impact-scoped filters, `anvil-mutants-diff`, `anvil-semver-check` — work from a worktree at
+all; without it git resolves nothing inside the container and each of them fails a long way from the cause. A git
+directory that does not sit under its common directory cannot be expressed as one mount and is refused rather than
+mounted at a path that climbs out of it.
 
 The redirection is confined to the checkout: a git command run elsewhere in the container, such as `git init` in a
 scratch directory, is unaffected. That is why a generated `.git` file is used rather than `GIT_DIR`, which is ambient

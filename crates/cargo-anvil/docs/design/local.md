@@ -62,7 +62,7 @@ repo/
 ```
 
 The Justfile region is not the only file anvil adds to that the user co-owns: the
-container `Dockerfile` is composed the same way, from four managed regions with
+container `Dockerfile` is composed the same way, from five managed regions with
 the repository's own instructions in the gaps between them (see
 [containers.md](./containers.md)). Generated recipes live inside `justfiles/anvil/`;
 the container image definition lives inside `.anvil/container/`. Generated files in
