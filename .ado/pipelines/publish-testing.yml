@@ -29,7 +29,7 @@ resources:
   - repository: ox-sdk
     type: git
     name: ox-sdk
-    ref: refs/heads/u/makolnek/ms-prod-1.97-publish
+    ref: refs/heads/u/makolnek/ms-prod-1.97-publish-e2e
 
 extends:
   template: .pipelines/templates/OxidizerGitHub.Publish.yml@ox-sdk
