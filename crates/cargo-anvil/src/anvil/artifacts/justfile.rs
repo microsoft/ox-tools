@@ -364,7 +364,7 @@ mod tests {
         let checks = all_check_bodies();
         for needle in [
             "anvil-bolero: target discovery failed",
-            "anvil-readme-check: cargo metadata failed",
+            "${prefix}: cargo metadata failed",
             "running tests without coverage for opted-out packages",
             "all affected packages opted out of coverage",
             "could not resolve the cargo-careful executable",
@@ -378,6 +378,10 @@ mod tests {
         assert!(
             checks.contains("bolero list --profile release --package $packageName"),
             "bolero discovery must use the execution profile once per affected package"
+        );
+        assert!(
+            checks.contains("bolero test --profile release --engine libfuzzer"),
+            "bolero execution must use the profile option accepted by the pinned cargo-bolero"
         );
         assert!(
             !checks.contains("bolero list @bareArgs"),

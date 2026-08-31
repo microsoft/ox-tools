@@ -293,6 +293,7 @@ mod tests {
 
     fn empty_path_type() -> Type {
         Type::Path(TypePath {
+            attrs: Vec::new(),
             qself: None,
             path: Path {
                 leading_colon: None,

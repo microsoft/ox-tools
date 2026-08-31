@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use cel_interpreter::Program;
+use cel::Program;
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 

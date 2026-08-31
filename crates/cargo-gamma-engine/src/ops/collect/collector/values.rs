@@ -619,6 +619,7 @@ mod tests {
 
     fn empty_path_type() -> Type {
         Type::Path(TypePath {
+            attrs: Vec::new(),
             qself: None,
             path: Path {
                 leading_colon: None,
@@ -681,6 +682,7 @@ mod tests {
     fn iterator_item_requires_an_impl_trait_with_item_binding() {
         let plain: Type = parse_quote!(Vec<u8>);
         let imp = Type::ImplTrait(TypeImplTrait {
+            attrs: Vec::new(),
             impl_token: syn::token::Impl::default(),
             bounds: Punctuated::from_iter([
                 TypeParamBound::Lifetime(parse_quote!('static)),
