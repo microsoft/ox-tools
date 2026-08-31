@@ -26,7 +26,7 @@ anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs anvil-impact
     $env:MIRIFLAGS = "-Zmiri-many-seeds=$low..$high $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_race_coverage $($env:RUSTFLAGS)".Trim()
     Write-Host "anvil-miri-race-coverage: seed window $low..$high (day $day)"
-    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg
+    & "{{ just_executable() }}" _anvil-miri-test @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-miri-race-coverage` recipe.

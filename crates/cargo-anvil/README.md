@@ -380,8 +380,10 @@ metadata conventions — see its documentation.
 
 #### Undefined-behavior checking (`miri`)
 
-The PR-tier `miri` check runs `cargo miri test --all-features --tests`
-(libtest, not nextest — process-per-test is roughly twice as slow under miri).
+The PR-tier `miri` check compiles `cargo miri test --all-features --tests`
+once, then runs the resulting libtest artifacts concurrently through
+`cargo-miri runner`. Set `ANVIL_MIRI_JOBS` to a positive integer to override
+the default of one worker per logical processor.
 Opt a test out of miri when it touches the filesystem, spawns
 subprocesses, or otherwise can’t run under the interpreter:
 
@@ -398,6 +400,14 @@ under tree-borrows):
 #[cfg_attr(miri_tree_borrows,      ignore = "OOMs under -Zmiri-tree-borrows")]
 #[cfg_attr(miri_strict_provenance, ignore = "int-to-ptr cast by design")]
 #[cfg_attr(miri_race_coverage,     ignore = "nondeterministic across seeds")]
+```
+
+A package whose own test targets should not run under Miri can opt out while
+remaining available as a dependency:
+
+```toml
+[package.metadata.anvil.miri]
+exclude = true
 ```
 
 #### Concurrency model checking (`loom`)
@@ -491,7 +501,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbVqn03OrTnSYblGjeKgXeGVgb6z3iwQiK18Abc5kLxsXto9xhZIGDa2NhcmdvLWFudmlsZTAuNy4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbuGq_21P1SEgbzCydhv8U_5YbdU8P3Xr8mq0bxCNuyqQdSghhZIGDa2NhcmdvLWFudmlsZTAuNy4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.7.0/cargo_anvil/?search=artifacts

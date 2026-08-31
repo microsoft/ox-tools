@@ -400,6 +400,42 @@ mod tests {
     }
 
     #[test]
+    fn miri_profiles_delegate_to_the_parallel_artifact_runner() {
+        let miri = CHECK_FILES
+            .iter()
+            .find_map(|(path, body)| path.ends_with("/miri.just").then_some(*body))
+            .expect("miri.just is registered in CHECK_FILES");
+        for needle in [
+            "_anvil-miri-test *package_args:",
+            "miri test --all-features --tests --no-run --message-format=json-render-diagnostics",
+            "$message.profile.test -ne $true",
+            "ForEach-Object -Parallel",
+            "-ThrottleLimit $jobs",
+            "rustc $toolchain --print sysroot",
+            "ANVIL_MIRI_JOBS must be a positive integer",
+            "##[group]Miri artifact",
+            "::group::Miri artifact",
+        ] {
+            assert!(miri.contains(needle), "miri runner is missing '{needle}'");
+        }
+        assert!(
+            miri.contains("$env:MIRI_BE_RUSTC = 'host'"),
+            "standalone cargo-miri runner calls need the same ambient rustc mode recorded at build time"
+        );
+
+        for check in ["miri", "miri-tree-borrows", "miri-strict-provenance", "miri-race-coverage"] {
+            let body = CHECK_FILES
+                .iter()
+                .find_map(|(path, body)| path.ends_with(&format!("/{check}.just")).then_some(*body))
+                .unwrap_or_else(|| panic!("{check}.just is registered in CHECK_FILES"));
+            assert!(
+                body.contains("& \"{{ just_executable() }}\" _anvil-miri-test @pkg"),
+                "{check}.just must delegate to the shared Miri artifact runner"
+            );
+        }
+    }
+
+    #[test]
     fn impact_recipe_is_defined_and_reuses_shared_helpers() {
         // The single impact building block: snapshot + compute + resolve.
         for needle in ["anvil-impact:", "_anvil-impact-snapshot:", "_anvil-impact-include tier:"] {

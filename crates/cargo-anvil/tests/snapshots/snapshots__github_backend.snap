@@ -2773,7 +2773,7 @@ anvil-miri-race-coverage: anvil-miri-race-coverage-validate-prereqs anvil-impact
     $env:MIRIFLAGS = "-Zmiri-many-seeds=$low..$high $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_race_coverage $($env:RUSTFLAGS)".Trim()
     Write-Host "anvil-miri-race-coverage: seed window $low..$high (day $day)"
-    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg
+    & "{{ just_executable() }}" _anvil-miri-test @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-miri-race-coverage` recipe.
@@ -2802,7 +2802,7 @@ anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs anvi
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
     $env:MIRIFLAGS = "-Zmiri-strict-provenance $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_strict_provenance $($env:RUSTFLAGS)".Trim()
-    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg
+    & "{{ just_executable() }}" _anvil-miri-test @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-miri-strict-provenance` recipe.
@@ -2845,7 +2845,7 @@ anvil-miri-tree-borrows: anvil-miri-tree-borrows-validate-prereqs anvil-impact
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
     $env:MIRIFLAGS = "-Zmiri-tree-borrows $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_tree_borrows $($env:RUSTFLAGS)".Trim()
-    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg
+    & "{{ just_executable() }}" _anvil-miri-test @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # The three nightly-miri profiles share the same toolchain prereqs
@@ -2875,6 +2875,249 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 # unaffected packages are skipped. Full-workspace runs come from the
 # scheduled/full tiers (which force ANVIL_IMPACT=off) or a dirty local tree
 # (which widens for safety).
+
+# Compile all selected packages together, then run their Miri test artifacts in
+# parallel. The single Cargo invocation preserves workspace feature unification,
+# while artifact-level parallelism uses runner CPUs that `cargo miri test`
+# otherwise leaves idle.
+#
+# Packages can opt their own test targets out through:
+#
+# [package.metadata.anvil.miri]
+# exclude = true
+#
+# They can still compile as dependencies of selected consumers. Workspace runs
+# translate the metadata to `--exclude`; impact-scoped runs remove matching
+# `--package name@version` pairs before compilation.
+#
+# ANVIL_MIRI_JOBS overrides the default of one process per logical processor.
+# Memory telemetry is informational and never silently reduces concurrency.
+[script("pwsh", "-NoProfile")]
+_anvil-miri-test *package_args:
+    $ErrorActionPreference = 'Stop'
+    $packageArgs = @('{{ replace(package_args, "'", "''") }}' -split '\s+' | Where-Object { $_ })
+
+    $metadataJson = & cargo metadata --no-deps --format-version 1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error 'anvil miri: cargo metadata failed'
+        exit $LASTEXITCODE
+    }
+    try {
+        $metadata = $metadataJson | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+        Write-Error "anvil miri: could not parse cargo metadata output: $($_.Exception.Message)"
+        exit 1
+    }
+
+    $workspaceMembers = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($member in $metadata.workspace_members) {
+        [void]$workspaceMembers.Add([string]$member)
+    }
+    $packageDirectories = @{}
+    $excludedPackages = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    $excludedPackageIds = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($package in $metadata.packages) {
+        $packageId = [string]$package.id
+        if (-not $workspaceMembers.Contains($packageId)) { continue }
+        $packageDirectories[$packageId] = Split-Path -Parent ([string]$package.manifest_path)
+        if ($package.metadata.anvil.miri.exclude -eq $true) {
+            [void]$excludedPackages.Add([string]$package.name)
+            [void]$excludedPackageIds.Add($packageId)
+        }
+    }
+
+    if ($packageArgs -contains '--workspace') {
+        foreach ($packageName in $excludedPackages) {
+            $packageArgs += @('--exclude', $packageName)
+        }
+    } else {
+        $filtered = [System.Collections.Generic.List[string]]::new()
+        for ($i = 0; $i -lt $packageArgs.Count; $i++) {
+            if ($packageArgs[$i] -ne '--package') {
+                Write-Error "anvil miri: unexpected impact argument '$($packageArgs[$i])'"
+                exit 1
+            }
+            if (($i + 1) -ge $packageArgs.Count) {
+                Write-Error 'anvil miri: --package is missing its package spec'
+                exit 1
+            }
+            $packageSpec = $packageArgs[++$i]
+            $packageName = ($packageSpec -split '@', 2)[0]
+            if ($excludedPackages.Contains($packageName)) { continue }
+            $filtered.Add('--package')
+            $filtered.Add($packageSpec)
+        }
+        $packageArgs = $filtered.ToArray()
+        if ($packageArgs.Count -eq 0) {
+            Write-Host 'anvil miri: all selected packages are excluded; nothing to test'
+            exit 0
+        }
+    }
+
+    $logRoot = Join-Path ([IO.Path]::GetTempPath()) "anvil-miri-$PID-$([guid]::NewGuid())"
+    New-Item -ItemType Directory -Path $logRoot | Out-Null
+    try {
+        $artifactManifest = Join-Path $logRoot 'artifacts.jsonl'
+        $toolchain = '+{{ rust_nightly }}'
+        & cargo $toolchain miri test --all-features --tests --no-run --message-format=json-render-diagnostics @packageArgs 1> $artifactManifest
+        $buildExitCode = $LASTEXITCODE
+
+        $artifacts = [System.Collections.Generic.List[object]]::new()
+        $seenArtifacts = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+        foreach ($line in Get-Content -LiteralPath $artifactManifest) {
+            try {
+                $message = $line | ConvertFrom-Json -ErrorAction Stop
+            } catch {
+                Write-Error "anvil miri: could not parse Cargo JSON output: $($_.Exception.Message)"
+                exit 1
+            }
+            if ($message.reason -eq 'compiler-message' -and $message.message.rendered) {
+                [Console]::Error.Write($message.message.rendered)
+                continue
+            }
+            if ($message.reason -ne 'compiler-artifact' -or -not $message.executable -or $message.profile.test -ne $true) {
+                continue
+            }
+            $artifactPath = [string]$message.executable
+            if (-not $seenArtifacts.Add($artifactPath)) { continue }
+            $packageId = [string]$message.package_id
+            if ($excludedPackageIds.Contains($packageId)) { continue }
+            if (-not $packageDirectories.ContainsKey($packageId)) {
+                Write-Error "anvil miri: package metadata not found for artifact package '$packageId'"
+                exit 1
+            }
+            $artifacts.Add([pscustomobject]@{
+                Path = $artifactPath
+                Name = Split-Path -Leaf $artifactPath
+                WorkingDirectory = $packageDirectories[$packageId]
+            })
+        }
+
+        if ($buildExitCode -ne 0) { exit $buildExitCode }
+        if ($artifacts.Count -eq 0) {
+            Write-Host 'anvil miri: Cargo produced no runnable test artifacts; nothing to test'
+            exit 0
+        }
+
+        $sysrootOutput = @(& cargo $toolchain miri setup --print-sysroot)
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        if ($sysrootOutput.Count -eq 0 -or -not $sysrootOutput[-1]) {
+            Write-Error 'anvil miri: cargo miri setup did not report a sysroot'
+            exit 1
+        }
+        $env:MIRI_SYSROOT = $sysrootOutput[-1]
+        $toolchainSysroot = & rustc $toolchain --print sysroot
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($toolchainSysroot)) {
+            Write-Error "anvil miri: could not resolve the $toolchain toolchain sysroot"
+            exit 1
+        }
+        $toolchainBin = Join-Path $toolchainSysroot.Trim() 'bin'
+        $runner = @(
+            'cargo-miri.exe', 'cargo-miri', 'cargo-miri.ps1' |
+                ForEach-Object { Join-Path $toolchainBin $_ } |
+                Where-Object { Test-Path -LiteralPath $_ -PathType Leaf }
+        ) | Select-Object -First 1
+        if (-not $runner) {
+            Write-Error "anvil miri: cargo-miri was not found under '$toolchainBin'"
+            exit 1
+        }
+        # cargo-miri records MIRI_BE_RUSTC=host in each artifact. Keeping the
+        # same value in the standalone runner environment lets phase_runner
+        # suppress that recorded value before launching Miri for interpretation.
+        $env:MIRI_BE_RUSTC = 'host'
+
+        $jobs = 0
+        if ($env:ANVIL_MIRI_JOBS) {
+            if (-not [int]::TryParse($env:ANVIL_MIRI_JOBS, [ref]$jobs) -or $jobs -lt 1) {
+                Write-Error "ANVIL_MIRI_JOBS must be a positive integer, got '$($env:ANVIL_MIRI_JOBS)'"
+                exit 1
+            }
+        } else {
+            $jobs = [Environment]::ProcessorCount
+        }
+        $jobs = [Math]::Min($jobs, $artifacts.Count)
+
+        [GC]::Collect()
+        [GC]::WaitForPendingFinalizers()
+        $memoryInfo = [GC]::GetGCMemoryInfo()
+        $gcAvailableGiB = [Math]::Round($memoryInfo.TotalAvailableMemoryBytes / 1GB, 1)
+        $memoryLoadGiB = [Math]::Round($memoryInfo.MemoryLoadBytes / 1GB, 1)
+        $highMemoryLoadGiB = [Math]::Round($memoryInfo.HighMemoryLoadThresholdBytes / 1GB, 1)
+        Write-Host "anvil miri: $([Environment]::ProcessorCount) logical processor(s); GC reports $gcAvailableGiB GiB available, $memoryLoadGiB GiB load, $highMemoryLoadGiB GiB high-load threshold"
+        Write-Host "anvil miri: running $($artifacts.Count) test artifacts with $jobs concurrent process(es)"
+
+        $orderedArtifacts = @($artifacts | Sort-Object Name, Path)
+        $work = for ($i = 0; $i -lt $orderedArtifacts.Count; $i++) {
+            [pscustomobject]@{
+                Index = $i
+                Artifact = $orderedArtifacts[$i].Path
+                Name = $orderedArtifacts[$i].Name
+                WorkingDirectory = $orderedArtifacts[$i].WorkingDirectory
+            }
+        }
+        $results = @(
+            $work | ForEach-Object -Parallel {
+                $ErrorActionPreference = 'Stop'
+                function Get-MemoryTelemetry {
+                    [GC]::Collect()
+                    [GC]::WaitForPendingFinalizers()
+                    $info = [GC]::GetGCMemoryInfo()
+                    $capacityGiB = [Math]::Round($info.TotalAvailableMemoryBytes / 1GB, 1)
+                    $loadGiB = [Math]::Round($info.MemoryLoadBytes / 1GB, 1)
+                    $headroomGiB = [Math]::Round(
+                        [Math]::Max([long]0, $info.TotalAvailableMemoryBytes - $info.MemoryLoadBytes) / 1GB,
+                        1
+                    )
+                    "GC load $loadGiB/$capacityGiB GiB, estimated headroom $headroomGiB GiB"
+                }
+
+                $item = $_
+                $log = Join-Path $using:logRoot "$($item.Index).log"
+                Write-Host "anvil miri: starting $($item.Name) ($(Get-MemoryTelemetry))"
+                Push-Location -LiteralPath $item.WorkingDirectory
+                try {
+                    & $using:runner runner $item.Artifact *> $log
+                    $exitCode = $LASTEXITCODE
+                } catch {
+                    $_ | Out-String | Set-Content -LiteralPath $log
+                    $exitCode = 1
+                } finally {
+                    Pop-Location
+                }
+                Write-Host "anvil miri: completed $($item.Name) (exit $exitCode; $(Get-MemoryTelemetry))"
+                [pscustomobject]@{
+                    Index = $item.Index
+                    Name = $item.Name
+                    ExitCode = $exitCode
+                    Log = $log
+                }
+            } -ThrottleLimit $jobs
+        )
+
+        foreach ($result in $results | Sort-Object Index) {
+            if ($env:GITHUB_ACTIONS -eq 'true') {
+                Write-Host "::group::Miri artifact $($result.Name)"
+            } elseif ($env:TF_BUILD -eq 'True') {
+                Write-Host "##[group]Miri artifact $($result.Name)"
+            } else {
+                Write-Host "`n=== Miri artifact $($result.Name) ==="
+            }
+            Get-Content -LiteralPath $result.Log | ForEach-Object { Write-Host $_ }
+            if ($env:GITHUB_ACTIONS -eq 'true') {
+                Write-Host '::endgroup::'
+            } elseif ($env:TF_BUILD -eq 'True') {
+                Write-Host '##[endgroup]'
+            }
+        }
+
+        $failed = @($results | Where-Object ExitCode -ne 0)
+        if ($failed.Count -ne 0) {
+            [Console]::Error.WriteLine("anvil miri: failed artifacts: $($failed.Name -join ', ')")
+            exit 1
+        }
+    } finally {
+        Remove-Item -LiteralPath $logRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
 
 # Run Miri tests for affected workspace packages.
 [script("pwsh", "-NoProfile")]
@@ -2907,7 +3150,8 @@ anvil-miri: anvil-miri-validate-prereqs anvil-impact
     # whose tests are all `#[cfg_attr(miri, ignore)]` -- the canonical
     # opt-out for build-tooling / CLI crates), so the old nextest
     # `--no-tests=pass` workaround is no longer needed.
-    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @(if ($include) { -split $include } else { '--workspace' })
+    $pkg = @(if ($include) { -split $include } else { '--workspace' })
+    & "{{ just_executable() }}" _anvil-miri-test @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # --- pr-runtime-analysis members ---
