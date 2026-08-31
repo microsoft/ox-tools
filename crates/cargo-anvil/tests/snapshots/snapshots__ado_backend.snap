@@ -857,10 +857,15 @@ steps:
           Invoke-WebRequest -Uri $found.resource.downloadUrl -Headers $headers -OutFile $zip
           Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
           # The archive nests its contents under a directory named for the
-          # artifact; lift them up into the staging directory.
+          # artifact; lift them up into the staging directory. An artifact
+          # that is present but empty is a valid restore -- a workspace with
+          # no benchmarks yet publishes exactly that -- and `Copy-Item` over
+          # an empty wildcard throws, so the copy is guarded.
           $inner = Join-Path $extract $artifact
           $source = if (Test-Path $inner) { $inner } else { $extract }
-          Copy-Item -Path (Join-Path $source '*') -Destination $staging -Recurse -Force
+          if (Test-Path (Join-Path $source '*')) {
+              Copy-Item -Path (Join-Path $source '*') -Destination $staging -Recurse -Force
+          }
           Complete-Restore 'restored'
           exit 0
       }
@@ -2194,7 +2199,17 @@ anvil-bench-history: anvil-bench-history-validate-prereqs
     # CI sets its own marker (GitHub: CI, ADO: TF_BUILD); locally the gate
     # is opt-in via ANVIL_BENCH_GATE. Reporting above is unconditional --
     # only the exit code differs.
-    $gate = $env:ANVIL_BENCH_GATE -eq '1' -or $env:CI -or $env:TF_BUILD
+    #
+    # Read as boolean-like rather than for truthiness: PowerShell treats any
+    # non-empty string as true, so a developer with CI=false exported would
+    # otherwise have local runs fail on a shared trend measured on their own
+    # hardware. Unrecognised non-empty values still gate, keeping the CI side
+    # fail-closed.
+    function Test-Flag([string]$value) {
+        if (-not $value) { return $false }
+        return $value.Trim().ToLowerInvariant() -notin @('0', 'false', 'no', 'off')
+    }
+    $gate = (Test-Flag $env:ANVIL_BENCH_GATE) -or (Test-Flag $env:CI) -or (Test-Flag $env:TF_BUILD)
     if (-not $gate) {
         Write-Host 'Reporting only: a local run does not gate on the shared trend.' -ForegroundColor Yellow
         Write-Host 'These numbers come from this machine, whose noise a shared runner pool does not have.'

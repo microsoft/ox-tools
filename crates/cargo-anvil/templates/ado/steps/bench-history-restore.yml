@@ -125,10 +125,15 @@ steps:
           Invoke-WebRequest -Uri $found.resource.downloadUrl -Headers $headers -OutFile $zip
           Expand-Archive -LiteralPath $zip -DestinationPath $extract -Force
           # The archive nests its contents under a directory named for the
-          # artifact; lift them up into the staging directory.
+          # artifact; lift them up into the staging directory. An artifact
+          # that is present but empty is a valid restore -- a workspace with
+          # no benchmarks yet publishes exactly that -- and `Copy-Item` over
+          # an empty wildcard throws, so the copy is guarded.
           $inner = Join-Path $extract $artifact
           $source = if (Test-Path $inner) { $inner } else { $extract }
-          Copy-Item -Path (Join-Path $source '*') -Destination $staging -Recurse -Force
+          if (Test-Path (Join-Path $source '*')) {
+              Copy-Item -Path (Join-Path $source '*') -Destination $staging -Recurse -Force
+          }
           Complete-Restore 'restored'
           exit 0
       }

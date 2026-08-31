@@ -10,10 +10,17 @@
 # carried between runs. Keeping it in its own group isolates that history
 # round-trip and its fail-on-regression semantics from the rest of the
 # scheduled work, so a red build names the regression unambiguously.
+#
+# Routed through _anvil-unscoped like every scheduled group: the series only
+# stays comparable if the same suite is measured at every commit, so scoping
+# the run to a change set would silently break detection.
 
 # Run the scheduled benchmark regression detection.
 [group("anvil")]
-anvil-scheduled-benchmarks: anvil-scheduled-benchmarks-validate-prereqs \
+anvil-scheduled-benchmarks: (_anvil-unscoped "scheduled-benchmarks")
+
+[private]
+_anvil-scheduled-benchmarks: anvil-scheduled-benchmarks-validate-prereqs \
     anvil-bench-history
 
 # Install prerequisites for the `anvil-scheduled-benchmarks` recipe.

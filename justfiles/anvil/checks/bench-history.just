@@ -9,8 +9,8 @@
 # Unscoped by design. A benchmark's series is only comparable when the
 # same suite is measured at every commit, so impact-scoping the run would
 # punch holes in the history that detection cannot distinguish from a
-# benchmark being deleted. The recipe therefore ignores the
-# ANVIL_INCLUDE_* contract and always measures the whole workspace.
+# benchmark being deleted. The recipe therefore ignores impact scoping and
+# always measures the whole workspace.
 #
 # Environment contract (all optional):
 #   ANVIL_BENCH_HISTORY_STORE  history directory (default target/anvil/bench-history).
@@ -131,7 +131,17 @@ anvil-bench-history: anvil-bench-history-validate-prereqs
     # CI sets its own marker (GitHub: CI, ADO: TF_BUILD); locally the gate
     # is opt-in via ANVIL_BENCH_GATE. Reporting above is unconditional --
     # only the exit code differs.
-    $gate = $env:ANVIL_BENCH_GATE -eq '1' -or $env:CI -or $env:TF_BUILD
+    #
+    # Read as boolean-like rather than for truthiness: PowerShell treats any
+    # non-empty string as true, so a developer with CI=false exported would
+    # otherwise have local runs fail on a shared trend measured on their own
+    # hardware. Unrecognised non-empty values still gate, keeping the CI side
+    # fail-closed.
+    function Test-Flag([string]$value) {
+        if (-not $value) { return $false }
+        return $value.Trim().ToLowerInvariant() -notin @('0', 'false', 'no', 'off')
+    }
+    $gate = (Test-Flag $env:ANVIL_BENCH_GATE) -or (Test-Flag $env:CI) -or (Test-Flag $env:TF_BUILD)
     if (-not $gate) {
         Write-Host 'Reporting only: a local run does not gate on the shared trend.' -ForegroundColor Yellow
         Write-Host 'These numbers come from this machine, whose noise a shared runner pool does not have.'

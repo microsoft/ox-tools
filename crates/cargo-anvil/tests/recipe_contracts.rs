@@ -1630,6 +1630,40 @@ fn bench_history_reports_without_gating_outside_ci() {
 }
 
 #[test]
+fn bench_history_gate_reads_ci_markers_as_boolean_like() {
+    if !tools_available() {
+        return;
+    }
+    // PowerShell treats every non-empty string as true, so an exported
+    // CI=false would otherwise gate a local run on a shared trend measured
+    // on that developer's own hardware.
+    let (_tmp, output) = run_bench_history(
+        ACTIVE_REGRESSION,
+        &[
+            ("ANVIL_BENCH_GATE", OsStr::new("")),
+            ("CI", OsStr::new("false")),
+            ("TF_BUILD", OsStr::new("")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "CI=false must not gate a local run:{}",
+        both_streams(&output)
+    );
+
+    // Anything else non-empty still gates: the CI side stays fail-closed.
+    let (_tmp, output) = run_bench_history(
+        ACTIVE_REGRESSION,
+        &[
+            ("ANVIL_BENCH_GATE", OsStr::new("")),
+            ("CI", OsStr::new("true")),
+            ("TF_BUILD", OsStr::new("")),
+        ],
+    );
+    assert_failed(&output, "CI=true");
+}
+
+#[test]
 fn bench_history_propagates_tool_failure() {
     if !tools_available() {
         return;
