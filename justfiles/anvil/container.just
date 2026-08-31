@@ -414,7 +414,7 @@ anvil-container-tag:
             # a symlink as a symlink, while the walk above reads through it, so
             # replacing a regular file with a link to identical bytes would
             # otherwise keep the tag. A link is refused before this, so an
-            # untracked input is a regular file by now.
+            # untracked input at this point is a regular file.
             #
             # An untracked file has no index entry, and `git diff --raw` does
             # not report one either, so the filesystem is the only thing that

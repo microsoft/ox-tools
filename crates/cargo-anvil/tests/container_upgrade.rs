@@ -105,7 +105,7 @@ fn rewind_to_runner_layout(root: &Path) -> Manifest {
     let mut manifest = Manifest::load(root).unwrap();
 
     for artifact in artifacts::container::all() {
-        // The Dockerfile is composed now, so the group is a mix: the recipe and
+        // The Dockerfile is composed, so the group is a mix: the recipe and
         // the ignore file are owned, the image definition is five regions in a
         // host this rewind deletes outright.
         let path = match artifact {

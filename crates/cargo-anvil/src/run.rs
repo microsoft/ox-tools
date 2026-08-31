@@ -760,7 +760,7 @@ fn plan_removals(
         // model. Deleting it here would erase what the region writes planned
         // for the same pass just produced, and the user content around them
         // with it. Drop the stale manifest entry and leave the file alone; the
-        // region entries now describe what anvil owns inside it.
+        // region entries describe what anvil owns inside it.
         //
         // Unless the host was *refused*, in which case anvil declined to touch
         // it and the lock entry is the provenance the next run reclassifies
