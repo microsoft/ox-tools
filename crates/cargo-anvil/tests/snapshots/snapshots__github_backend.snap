@@ -3571,7 +3571,13 @@ anvil-container-tag:
     $dockerfile = "$dockerfile".Trim()
     $hookRel = '.anvil/container/hooks.ps1'
 
-    $inputs = @('rust-toolchain.toml')
+    # Both named rather than left to the walk, so that either one going missing
+    # is a hard failure at the check below. The walk cannot notice an absent
+    # file, and the ignore file's absence is the worse of the two: the build
+    # still succeeds, but BuildKit falls back to a root ignore file or none, so
+    # the context widens to files the digest does not hash and the tag stops
+    # covering what `COPY` puts in the image.
+    $inputs = @('rust-toolchain.toml', "$dockerfile.dockerignore")
     $links = @()
     # The declared input and every directory on the way to a walk root are
     # checked here, because a walk only ever reports descendants: a link that

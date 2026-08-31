@@ -1231,6 +1231,7 @@ fn the_image_tag_follows_the_executable_bit() {
     let root = tmp.path();
     write(&root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"stable\"\n");
     write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
+    write(&root.join(".anvil/container/Dockerfile.dockerignore"), "*\n!justfiles\n");
     write(&root.join("justfiles/anvil/setup.sh"), "echo hello\n");
     write(
         &root.join("fake-bin/git.ps1"),
@@ -1238,7 +1239,8 @@ fn the_image_tag_follows_the_executable_bit() {
          $mode = if ($env:FAKE_EXECUTABLE -eq '1') { '100755' } else { '100644' }\n    \
          Write-Output \"$mode 0000000000000000000000000000000000000000 0`tjustfiles/anvil/setup.sh\"\n    \
          Write-Output \"100644 0000000000000000000000000000000000000000 0`trust-toolchain.toml\"\n    \
-         Write-Output \"100644 0000000000000000000000000000000000000000 0`t.anvil/container/Dockerfile\"\n}\nexit 0\n",
+         Write-Output \"100644 0000000000000000000000000000000000000000 0`t.anvil/container/Dockerfile\"\n    \
+         Write-Output \"100644 0000000000000000000000000000000000000000 0`t.anvil/container/Dockerfile.dockerignore\"\n}\nexit 0\n",
     );
 
     let tag = |executable: &str| {
@@ -1251,6 +1253,20 @@ fn the_image_tag_follows_the_executable_bit() {
         );
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     };
+
+    // The ignore file is what narrows the build context to `justfiles/anvil`.
+    // Absent, the build still succeeds but copies files the digest never
+    // hashes, so the tag stops covering what the image contains. The walk
+    // cannot notice an absent file, so it is named as a required input.
+    std::fs::remove_file(root.join(".anvil/container/Dockerfile.dockerignore")).unwrap();
+    let missing = run_just(root, &["anvil-container-tag"], &[("FAKE_EXECUTABLE", OsStr::new("0"))]);
+    assert_failed(&missing, "computing a tag without the ignore file");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("missing"),
+        "the failure must name the missing input\nstderr:\n{}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+    write(&root.join(".anvil/container/Dockerfile.dockerignore"), "*\n!justfiles\n");
 
     let plain = tag("0");
     let executable = tag("1");
@@ -1279,6 +1295,7 @@ fn a_working_tree_mode_the_tag_did_not_frame_stops_the_run() {
     let root = tmp.path();
     write(&root.join("rust-toolchain.toml"), "[toolchain]\nchannel = \"stable\"\n");
     write(&root.join(".anvil/container/Dockerfile"), "FROM scratch\n");
+    write(&root.join(".anvil/container/Dockerfile.dockerignore"), "*\n!justfiles\n");
     write(&root.join("justfiles/anvil/setup.sh"), "echo hello\n");
     // The digest frames this path from `ls-files --stage`, which reports
     // 100644 in every case below -- including the intent-to-add ones, where
@@ -1288,7 +1305,8 @@ fn a_working_tree_mode_the_tag_did_not_frame_stops_the_run() {
         "if ($args -contains 'ls-files') {\n    \
          Write-Output \"100644 0000000000000000000000000000000000000000 0`tjustfiles/anvil/setup.sh\"\n    \
          Write-Output \"100644 0000000000000000000000000000000000000000 0`trust-toolchain.toml\"\n    \
-         Write-Output \"100644 0000000000000000000000000000000000000000 0`t.anvil/container/Dockerfile\"\n}\n\
+         Write-Output \"100644 0000000000000000000000000000000000000000 0`t.anvil/container/Dockerfile\"\n    \
+         Write-Output \"100644 0000000000000000000000000000000000000000 0`t.anvil/container/Dockerfile.dockerignore\"\n}\n\
          if ($args -contains 'diff' -and $env:FAKE_RAW) {\n    Write-Output $env:FAKE_RAW\n}\nexit 0\n",
     );
 
@@ -1371,6 +1389,7 @@ fn a_link_among_the_image_inputs_is_refused() {
         for (path, body) in [
             ("rust-toolchain.toml", "[toolchain]\nchannel = \"stable\"\n"),
             (".anvil/container/Dockerfile", "FROM scratch\n"),
+            (".anvil/container/Dockerfile.dockerignore", "*\n!justfiles\n"),
             ("justfiles/anvil/mod.just", "# recipes\n"),
         ] {
             if !path.starts_with(name) {
