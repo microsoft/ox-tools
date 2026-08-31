@@ -19,6 +19,10 @@ repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma
 [package.metadata.docs.rs]
 all-features = true
 
+[package.metadata.ox-gen-readme]
+# This is an implementation detail of `cargo-gamma`; its README is an explicit stability warning.
+disable = true
+
 # Establish the cross-platform CI baseline for this new crate. Raise it as coverage improves.
 [package.metadata.coverage-gate]
 min-lines-percent = 96.8
@@ -68,6 +72,7 @@ libc = { workspace = true, features = ["std"] }
 
 [dev-dependencies]
 bolero = { workspace = true }
+bolero-engine = { workspace = true, features = ["any"] }
 # Only the integration test that pins the proc-macro's hand-copied limit constants against this
 # library's own needs it; it is never used outside `#[cfg(test)]`/`tests/`.
 cargo-gamma-attrs-impl = { workspace = true }

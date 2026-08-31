@@ -388,6 +388,53 @@ fn a_second_run_reestablishes_the_first_runs_kills() {
 }
 
 #[test]
+fn an_incremental_command_holds_its_cache_lock_from_adoption_through_preparation() {
+    step_aside_if_nested!();
+    let dir = std::sync::Arc::new(workspace(SUBJECT));
+    let cache = TempDir::new().expect("could not create the redirected cache");
+    let cache = cache.path().to_str().expect("cache path is not UTF-8").to_owned();
+    let args = ["--mutators", "relational", "--incremental", "build", "--cache-dir", cache.as_str()];
+    let (warmed, output) = session(&dir, &args);
+
+    assert_eq!(warmed, EXIT_OK, "{output}");
+
+    let root = Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).expect("workspace path is not UTF-8");
+    let mut pause = cargo_gamma_lib::testing::hold_during_workspace_preparation(root);
+    let first_dir = std::sync::Arc::clone(&dir);
+    let first_cache = cache.clone();
+    let first = std::thread::spawn(move || {
+        session(
+            &first_dir,
+            &[
+                "--mutators",
+                "relational",
+                "--incremental",
+                "build",
+                "--cache-dir",
+                first_cache.as_str(),
+            ],
+        )
+    });
+
+    pause.wait();
+
+    let (blocked, output) = session(&dir, &args);
+
+    assert_ne!(blocked, EXIT_OK, "{output}");
+    assert!(output.contains("already using"), "{output}");
+
+    pause.release();
+
+    let (first_code, output) = first.join().expect("the paused incremental command should finish after release");
+
+    assert_eq!(first_code, EXIT_OK, "{output}");
+
+    let (reacquired, output) = session(&dir, &args);
+
+    assert_eq!(reacquired, EXIT_OK, "{output}");
+}
+
+#[test]
 fn an_unasserted_side_effect_leaves_a_survivor() {
     step_aside_if_nested!();
     let dir = workspace(SUBJECT);

@@ -750,7 +750,6 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         || (crate::HashMap::default(), 0, Vec::new()),
         |prepared| adopt(args, &mut survey, &prepared.base, Some(&prepared.context), &prepared.inputs),
     );
-    drop(cache_locks);
 
     // A dry run reports on the whole population and builds nothing, so there is no package-by-
     // package sequence to interleave the scan with; it is simply scanned.
@@ -790,7 +789,7 @@ fn measured<H: Host>(host: &mut H, args: &RunArgs, progress_when: When, styler: 
         verdict_log: VerdictLog::default(),
     };
 
-    let outcome = exec::run(&survey, &selection, &config, &mut events);
+    let outcome = exec::run_with_locks(&survey, &selection, &config, &mut events, cache_locks);
 
     // A phase that failed never got to say what it found, so the line it opened is still waiting
     // for an ending. Close it before the error is printed, or the error arrives as the rest of

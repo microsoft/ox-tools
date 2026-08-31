@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 #![no_std]
+#![doc(hidden)]
 #![cfg_attr(
     all(any(unix, windows), miri),
     expect(

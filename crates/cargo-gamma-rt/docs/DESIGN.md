@@ -15,6 +15,8 @@ equivalent to the original program.
 - No features and no build script.
 - `no_std` compatibility.
 - The library target remains named `gamma_rt`.
+- Rustdoc is hidden, and the hand-written README warns downstream users not to
+  depend on this implementation crate.
 
 These constraints prevent injection from perturbing dependency resolution,
 feature unification, offline builds, or the target crate's standard-library
