@@ -885,6 +885,20 @@ mod tests {
     }
 
     #[test]
+    fn an_untracked_input_is_framed_from_the_filesystem() {
+        // git has no record of an untracked file and `diff --raw` does not
+        // report one, so the filesystem is the only thing that can answer for
+        // its mode. Framing a fixed value would let `chmod +x` change the image
+        // without changing the tag, and the tag controls reuse inside this
+        // checkout even though untracked content has no published identity.
+        assert!(RECIPE.contains("$unixMode = (Get-Item -LiteralPath $path -Force).UnixMode"));
+        assert!(RECIPE.contains("$unixMode[3] -eq 'x'"));
+        // Tracked files must NOT be read this way: Windows has no executable
+        // bit, so two checkouts of one commit would disagree on the tag.
+        assert!(RECIPE.contains("if ($indexMode.ContainsKey($rel)) {"));
+    }
+
+    #[test]
     fn planning_follows_a_recipe_launched_as_a_child_process() {
         // `just --dry-run` prints the bodies just runs itself. The unscoped tier
         // wrapper runs its tier as a child process instead, so a plan of

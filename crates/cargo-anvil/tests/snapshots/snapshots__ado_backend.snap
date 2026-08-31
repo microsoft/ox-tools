@@ -3944,8 +3944,21 @@ anvil-container-tag:
             # a symlink as a symlink, while the walk above reads through it, so
             # replacing a regular file with a link to identical bytes would
             # otherwise keep the tag. A link is refused before this, so an
-            # untracked input is an ordinary file and frames as one.
-            $mode = if ($indexMode.ContainsKey($rel)) { $indexMode[$rel] } else { $untrackedMode }
+            # untracked input is a regular file by now.
+            #
+            # An untracked file has no index entry, and `git diff --raw` does
+            # not report one either, so the filesystem is the only thing that
+            # can answer for it. Reading it there is safe precisely because the
+            # file is in no commit: nothing shared depends on two platforms
+            # agreeing about it, which is the reason tracked modes come from the
+            # index instead. Windows has no executable bit and cannot create
+            # one, so it frames the ordinary mode.
+            $mode = if ($indexMode.ContainsKey($rel)) {
+                $indexMode[$rel]
+            } else {
+                $unixMode = (Get-Item -LiteralPath $path -Force).UnixMode
+                if ($unixMode -and $unixMode.Length -ge 4 -and $unixMode[3] -eq 'x') { '100755' } else { $untrackedMode }
+            }
             $header = [System.Text.Encoding]::UTF8.GetBytes(
                 'file ' + [System.Text.Encoding]::UTF8.GetByteCount($rel) + ' ' + $rel + ' ' + $mode + ' ' + $content.Length + ' ')
             [void]$sha.TransformBlock($header, 0, $header.Length, $null, 0)
