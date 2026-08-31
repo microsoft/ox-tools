@@ -27,6 +27,16 @@ const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-ch
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
 const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
+const REGENERATE_WORKFLOW: &str = include_str!("../../../.github/workflows/regenerate-check.yml");
+
+#[test]
+fn regeneration_check_runs_on_every_pull_request() {
+    assert!(REGENERATE_WORKFLOW.contains("pull_request: {}"));
+    assert!(
+        !REGENERATE_WORKFLOW.contains("\n    paths:"),
+        "the dogfood drift gate must not be limited by changed paths"
+    );
+}
 
 #[test]
 fn loom_does_not_globally_limit_exploration() {

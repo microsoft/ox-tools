@@ -98,19 +98,21 @@ pub fn run_update(catalog: &Catalog, args: &Cli, start_dir: &Path) -> Result<Run
         "anvil"
     );
 
-    let plan = build_plan(&repo_root, &ws, &manifest, &backends, catalog)?;
+    let mut plan = build_plan(&repo_root, &ws, &manifest, &backends, catalog)?;
+    let mut next = plan.projected_manifest(&manifest);
+    next.tool = Some(catalog.cli().subcommand.clone());
+    next.tool_version = Some(catalog.cli().version.clone());
+    next.catalog_checksum = Some(catalog.checksum());
 
-    let applied = if args.dry_run {
-        false
-    } else {
-        let mut next = plan.apply(&repo_root, &manifest)?;
-        // Stamp this tool's provenance on every save.
-        next.tool = Some(catalog.cli().subcommand.clone());
-        next.tool_version = Some(catalog.cli().version.clone());
-        next.catalog_checksum = Some(catalog.checksum());
+    let expected_manifest = next.to_toml();
+    let current_manifest = read_file_if_present(&Manifest::path_for(&repo_root))?;
+    plan.set_manifest_update_required(current_manifest.as_deref() != Some(expected_manifest.as_str()));
+
+    let applied = !args.dry_run;
+    if applied {
+        plan.apply_files(&repo_root)?;
         next.save(&repo_root)?;
-        true
-    };
+    }
 
     Ok(RunOutcome {
         plan,
@@ -658,6 +660,71 @@ mod tests {
         assert!(outcome.plan.has_changes());
         assert!(!tmp.path().join("justfiles/anvil/tools.just").exists());
         assert!(!tmp.path().join(".anvil.lock").exists());
+    }
+
+    #[mutants::skip]
+    fn assert_dry_run_detects_manifest_drift(mutate: impl FnOnce(&mut Manifest)) {
+        let tmp = empty_workspace();
+        let catalog = Catalog::anvil();
+        let _ = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+
+        let mut manifest = Manifest::load(tmp.path()).unwrap();
+        mutate(&mut manifest);
+        manifest.save(tmp.path()).unwrap();
+        let stale_lock = fs::read_to_string(Manifest::path_for(tmp.path())).unwrap();
+
+        let mut args = local_only();
+        args.dry_run = true;
+        let outcome = run_update(&catalog, &args, tmp.path()).unwrap();
+
+        assert!(!outcome.applied);
+        assert_eq!(outcome.plan.dry_run_exit_code(), 1);
+        assert!(outcome.plan.summary(Some(&manifest)).contains(".anvil.lock"));
+        assert_eq!(fs::read_to_string(Manifest::path_for(tmp.path())).unwrap(), stale_lock);
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn dry_run_detects_stale_manifest_checksum() {
+        assert_dry_run_detects_manifest_drift(|manifest| {
+            let path = manifest.files.keys().next().unwrap().clone();
+            manifest.files.insert(path, "sha256:stale".to_owned());
+        });
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn dry_run_detects_missing_manifest_region() {
+        assert_dry_run_detects_manifest_drift(|manifest| {
+            let key = manifest.regions.keys().next().unwrap().clone();
+            manifest.regions.remove(&key);
+        });
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn dry_run_detects_stale_catalog_checksum() {
+        assert_dry_run_detects_manifest_drift(|manifest| {
+            manifest.catalog_checksum = Some("sha256:stale".to_owned());
+        });
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn dry_run_detects_noncanonical_manifest_text() {
+        let tmp = empty_workspace();
+        let catalog = Catalog::anvil();
+        let _ = run_update(&catalog, &local_only(), tmp.path()).unwrap();
+        let lock_path = Manifest::path_for(tmp.path());
+        let canonical = fs::read_to_string(&lock_path).unwrap();
+        fs::write(&lock_path, format!("{canonical}\n")).unwrap();
+
+        let mut args = local_only();
+        args.dry_run = true;
+        let outcome = run_update(&catalog, &args, tmp.path()).unwrap();
+
+        assert_eq!(outcome.plan.dry_run_exit_code(), 1);
+        assert_eq!(fs::read_to_string(lock_path).unwrap(), format!("{canonical}\n"));
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
