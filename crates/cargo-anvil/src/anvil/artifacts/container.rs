@@ -926,7 +926,10 @@ mod tests {
         // mount, on a path that does not exist in the container.
         assert!(RECIPE.contains("invocation_directory_native()"));
         assert!(!RECIPE.contains("replace(invocation_directory(), "));
-        assert!(RECIPE.contains("$rel.StartsWith('..')"));
+        // -eq '..' or a ../ prefix, never a bare .. prefix: a repository
+        // directory named ..data is inside the root and must not be refused.
+        assert!(RECIPE.contains("$rel -eq '..' -or $rel.StartsWith('../')"));
+        assert!(!RECIPE.contains("if ($rel.StartsWith('..')) {"));
     }
 
     #[test]

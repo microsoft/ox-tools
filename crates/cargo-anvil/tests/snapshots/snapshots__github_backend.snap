@@ -4120,7 +4120,11 @@ anvil-container *command:
     # outside the mount, so it fails on a path that does not exist in the
     # container. The `_native` form is the one that agrees with the root.
     $rel = [System.IO.Path]::GetRelativePath($repoRoot, '{{ replace(invocation_directory_native(), "'", "''") }}') -replace '\\', '/'
-    if ($rel.StartsWith('..')) {
+    # `-eq '..'` or a `../` prefix, not a bare `..` prefix: `GetRelativePath`
+    # returns a plain relative path for anything inside the root, so a directory
+    # named `..data` -- the shape a projected mount uses -- is inside and must
+    # not be refused.
+    if ($rel -eq '..' -or $rel.StartsWith('../')) {
         Write-Error "anvil: run this from inside the repository; $rel is outside $repoRoot"
         exit 1
     }
@@ -4220,10 +4224,24 @@ anvil-container *command:
     # Match the caller's uid/gid on Linux. Without this everything the run
     # writes under the bind mount -- target/, generated files -- lands as root
     # on the host, and the next native cargo build or git clean fails with
-    # EACCES a long way from the cause. Docker Desktop on Windows and macOS
-    # already maps ownership, and `id` is not there to ask.
-    if (-not $IsWindows -and -not $IsMacOS) {
-        $hostUid = (id -u); $hostGid = (id -g)
+    # EACCES a long way from the cause.
+    #
+    # The question is how the *selected engine* maps users, not what the host
+    # OS is. Docker Desktop on Windows and macOS maps ownership itself, and
+    # `id` is not there to ask. But an engine living inside WSL does not: the
+    # repository is reached over `/mnt/c`, which presents every file as the
+    # distribution's default user while the container runs as root, so git
+    # refuses the checkout as dubiously owned and every history-reading check
+    # fails. That engine is Linux however Windows the host is, so it takes the
+    # Linux path -- asking the distribution for the uid, since the host has no
+    # `id`.
+    $mapsOwnership = ($IsWindows -or $IsMacOS) -and -not $engine.StartsWith('wsl.exe|')
+    if (-not $mapsOwnership) {
+        if ($engine.StartsWith('wsl.exe|')) {
+            $hostUid = (& wsl.exe --exec id -u); $hostGid = (& wsl.exe --exec id -g)
+        } else {
+            $hostUid = (id -u); $hostGid = (id -g)
+        }
         if ($LASTEXITCODE -eq 0 -and $hostUid -ne '0') {
             $runArgs += @('--user', "${hostUid}:${hostGid}")
             # That uid has no passwd entry, so the engine leaves HOME as `/`.

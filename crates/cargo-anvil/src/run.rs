@@ -411,6 +411,22 @@ fn push_region_at(
         return Ok(());
     }
     let current = hosts.get_or_read(repo_root, &host)?;
+    if let Some(declared) = composed_host
+        && !declared.order.contains(&spec.id.as_str())
+    {
+        // End-of-file is the default placement everywhere else, and it is wrong
+        // here by construction: it lands below the region that closes the file.
+        // A built-in region reaching this is caught by the registry test in
+        // `artifacts::mod`, but a downstream catalog can add one at run time,
+        // and appending it below `CMD` would be silent and would classify the
+        // host as composable on every later run.
+        bail!(
+            "region '{}' targets the composed host '{host}', whose region order is semantic, \
+             but is not declared in that order. Add it to the host's `ComposedHost::order` \
+             at the position it must occupy.",
+            spec.id.as_str()
+        );
+    }
     let placement = composed_host.map_or_else(
         || region_placement(spec.id.as_str()),
         |declared| composed_placement(declared.order, declared.scaffold, spec.id.as_str(), current.as_deref()),
@@ -1011,6 +1027,35 @@ mod tests {
         );
         write(&root.join("crates/alpha/src/lib.rs"), "");
         tmp
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_fork_region_absent_from_the_composed_order_is_refused() {
+        // A downstream catalog can add a region to a composed host at run time,
+        // where the registry test in `artifacts::mod` cannot see it. Placement
+        // defaults to end-of-file, which for this host is below the region that
+        // closes the file, and the host would still classify as composable on
+        // every later run -- so planning stops instead of appending below `CMD`.
+        let tmp = empty_workspace();
+        let catalog = Catalog::anvil()
+            .into_builder()
+            .with_artifact(Artifact::region(crate::catalog::RegionSpec {
+                host: crate::catalog::HostSelector::Path(".anvil/container/Dockerfile".to_owned()),
+                id: crate::catalog::RegionId::new("fork-invented"),
+                body: "RUN echo fork\n".to_owned(),
+                syntax: CommentSyntax::Hash,
+            }))
+            .build()
+            .unwrap();
+
+        let err = run_update(&catalog, &local_only(), tmp.path()).unwrap_err();
+
+        let message = format!("{err}");
+        assert!(
+            message.contains("fork-invented") && message.contains("order"),
+            "the refusal must name the region and the contract it breaks, got: {message}"
+        );
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
