@@ -1235,7 +1235,7 @@ fn the_image_tag_follows_the_executable_bit() {
     write(&root.join("justfiles/anvil/setup.sh"), "echo hello\n");
     write(
         &root.join("fake-bin/git.ps1"),
-        "if ($args -contains 'ls-files') {\n    \
+        "if ($args -contains 'ls-files' -and $env:FAKE_UNTRACKED -ne '1') {\n    \
          $mode = if ($env:FAKE_EXECUTABLE -eq '1') { '100755' } else { '100644' }\n    \
          Write-Output \"$mode 0000000000000000000000000000000000000000 0`tjustfiles/anvil/setup.sh\"\n    \
          Write-Output \"100644 0000000000000000000000000000000000000000 0`trust-toolchain.toml\"\n    \
@@ -1253,6 +1253,17 @@ fn the_image_tag_follows_the_executable_bit() {
         );
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     };
+
+    // A freshly generated repository has staged nothing, so the first container
+    // run meets a tree git knows nothing about. It must still compute a tag:
+    // an untracked file is in no commit, so no other checkout reproduces it and
+    // no published image depends on it.
+    let unstaged = run_just(root, &["anvil-container-tag"], &[("FAKE_UNTRACKED", OsStr::new("1"))]);
+    assert!(
+        unstaged.status.success(),
+        "an untracked input must not block the tag\nstderr:\n{}",
+        String::from_utf8_lossy(&unstaged.stderr)
+    );
 
     // The ignore file is what narrows the build context to `justfiles/anvil`.
     // Absent, the build still succeeds but copies files the digest never
@@ -1302,7 +1313,7 @@ fn a_working_tree_mode_the_tag_did_not_frame_stops_the_run() {
     // the raw index mode is zero but the placeholder is a real mode.
     write(
         &root.join("fake-bin/git.ps1"),
-        "if ($args -contains 'ls-files') {\n    \
+        "if ($args -contains 'ls-files' -and $env:FAKE_UNTRACKED -ne '1') {\n    \
          Write-Output \"100644 0000000000000000000000000000000000000000 0`tjustfiles/anvil/setup.sh\"\n    \
          Write-Output \"100644 0000000000000000000000000000000000000000 0`trust-toolchain.toml\"\n    \
          Write-Output \"100644 0000000000000000000000000000000000000000 0`t.anvil/container/Dockerfile\"\n    \

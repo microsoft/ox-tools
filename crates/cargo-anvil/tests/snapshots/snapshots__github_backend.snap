@@ -3762,15 +3762,14 @@ anvil-container-tag:
             $indexMode[$Matches[2]] = $Matches[1]
         }
     }
-    # An input git does not know about has no mode to frame. Framing a
-    # placeholder would make the tag turn on whether a file happens to be
-    # tracked, so an image built from a commit would not match one built from
-    # the same commit plus an untracked stray.
-    $untracked = @($ordered | Where-Object { -not $indexMode.ContainsKey($_) })
-    if ($untracked.Count -gt 0) {
-        Write-Error "anvil: these container image inputs are not tracked by git: $($untracked -join ', '). The image tag is framed with the modes git records, so every input must be in the index. Commit them, stage them with git add, or remove them."
-        exit 1
-    }
+    # An input git does not know about is framed as an ordinary file. Its mode
+    # cannot be read the same way on every platform, and it is not in any
+    # commit, so no other checkout can reproduce it and no published image can
+    # depend on it -- the reproducibility the index protects is a property of
+    # committed content. Refusing here instead would block the first container
+    # run of a freshly generated repository, before anything has been staged,
+    # which is the most common way the feature is met.
+    $untrackedMode = '100644'
     # `--raw` reports the working-tree mode as its second field, so a
     # mode-only change is visible even though the content is identical. On
     # Windows core.fileMode is normally false and git reports no drift,
@@ -3819,9 +3818,9 @@ anvil-container-tag:
             # The whole git mode, not just the executable bit: `COPY` preserves
             # a symlink as a symlink, while the walk above reads through it, so
             # replacing a regular file with a link to identical bytes would
-            # otherwise keep the tag. Every input is tracked by the check above,
-            # so the index always has a mode for it.
-            $mode = $indexMode[$rel]
+            # otherwise keep the tag. A link is refused before this, so an
+            # untracked input is an ordinary file and frames as one.
+            $mode = if ($indexMode.ContainsKey($rel)) { $indexMode[$rel] } else { $untrackedMode }
             $header = [System.Text.Encoding]::UTF8.GetBytes(
                 'file ' + [System.Text.Encoding]::UTF8.GetByteCount($rel) + ' ' + $rel + ' ' + $mode + ' ' + $content.Length + ' ')
             [void]$sha.TransformBlock($header, 0, $header.Length, $null, 0)
