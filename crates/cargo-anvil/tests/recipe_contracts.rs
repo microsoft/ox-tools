@@ -1116,7 +1116,7 @@ fn bench_history_bless_rejects_malformed_entries() {
 // transports.
 // ---------------------------------------------------------------------------
 
-const GH_BENCH_RESTORE: &str = include_str!("../templates/github/scheduled-impl-workflow.yml");
+const GH_BENCH_RESTORE: &str = include_str!("../templates/github/run-group-action.yml");
 const ADO_RESTORE: &str = include_str!("../templates/ado/steps/bench-history-restore.yml");
 
 /// Extracts a block scalar (`run: |` / `pwsh: |`) from `yaml`, starting the

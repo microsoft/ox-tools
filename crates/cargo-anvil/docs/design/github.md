@@ -21,8 +21,8 @@ need to change:
    the concrete failure without duplicating group membership. See
    [Failure attribution and commit statuses](#failure-attribution-and-commit-statuses).
    A group needing steps around the runner (the benchmark group's history
-   round-trip) carries them in its own job, since only the workflow knows the
-   matrix leg those steps have to name.
+   round-trip) turns them on with an input, so the workflows stay a plain
+   list of groups and the other groups skip the steps.
 
 See also:
 
@@ -1035,10 +1035,19 @@ The scheduled benchmark group (see [benchmarks.md](./benchmarks.md)) runs
 **Actions artifacts**. The history is partitioned per machine, so each leg of the
 group's matrix carries its own artifact (`bench-history-<matrix.os>`).
 
-The round-trip lives in the group's **composite action**, not in the workflow: the
-scheduled workflow's benchmark job is a checkout plus the group action, like every
-other job. Only job-level concerns stay in the workflow — the matrix, the
-`actions: read` grant, the full-depth checkout, and the machine-key input.
+The round-trip lives in the **shared group action**, behind an input, rather than
+in the workflow or in an action of its own. Actions are the only reuse primitive
+that shares a runner with the group run, which restore and save must: a reusable
+workflow would put them on a different machine from the store they manage.
+Groups that leave the input off skip the steps entirely, so the scheduled
+workflow stays a plain list of groups.
+
+The action cannot supply everything, and the remainder is exactly what GitHub
+scopes to the job: an action cannot request `permissions`, and the checkout has
+already happened before it starts. So the `actions: read` grant and the
+full-depth checkout stay in the workflow, along with the matrix. The artifact
+name is passed in for the same reason — the matrix value is in scope only at the
+call site.
 
 Each scheduled benchmark job:
 

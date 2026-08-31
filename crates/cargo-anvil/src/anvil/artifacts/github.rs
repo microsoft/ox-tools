@@ -459,46 +459,64 @@ export -f just
 
     #[test]
     fn scheduled_benchmarks_job_round_trips_the_history_artifact() {
-        // The round-trip lives in the job rather than behind a shared action:
-        // only the workflow knows the matrix leg, and a composite action
-        // cannot read the caller's `env` context through an expression.
+        // The round-trip is a parameter of the shared group action, not a
+        // second way to run a group: the eight other jobs skip it, and the
+        // scheduled workflow stays a plain list of groups.
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("bench_history: true"));
+        // Per-leg identity is supplied by the caller. The matrix value is in
+        // scope only in the workflow, and merging two runners' samples into
+        // one series would destroy the comparison.
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("bench_artifact: bench-history-${{ matrix.os }}"));
+        assert_eq!(
+            SCHEDULED_IMPL_WORKFLOW.matches("bench_history: true").count(),
+            1,
+            "only the benchmark group pays for the history round-trip"
+        );
+        // Neither of these can be expressed inside an action: an action
+        // cannot request permissions, and the checkout has already run by
+        // the time it starts. They are the whole per-group remainder.
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("fetch-depth: 0"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("ANVIL_BENCH_ARTIFACT: bench-history-${{ matrix.os }}"));
-        // The upload's name is a literal expression, not an env lookup:
-        // upload-artifact's `with:` is evaluated where `matrix` is in scope.
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("name: bench-history-${{ matrix.os }}"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("actions/upload-artifact@"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("gh run download"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("GITHUB_STEP_SUMMARY"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("actions: read"));
+        assert!(SCHEDULED_ROOT_WORKFLOW.contains("actions: read"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("bench_machine_key:"));
+
+        // Everything else lives in the action, guarded so the other groups
+        // skip it.
+        assert!(RUN_GROUP_ACTION.contains("if: inputs.bench_history == 'true'"));
+        assert!(RUN_GROUP_ACTION.contains("ARTIFACT: ${{ inputs.bench_artifact }}"));
+        assert!(RUN_GROUP_ACTION.contains("name: ${{ inputs.bench_artifact }}"));
+        assert!(RUN_GROUP_ACTION.contains("ANVIL_BENCH_MACHINE_KEY: ${{ inputs.bench_machine_key }}"));
+        assert!(RUN_GROUP_ACTION.contains("actions/upload-artifact@"));
+        assert!(RUN_GROUP_ACTION.contains("gh run download"));
+        assert!(RUN_GROUP_ACTION.contains("GITHUB_STEP_SUMMARY"));
+        // An enabled round-trip with no artifact name would restore nothing
+        // and publish nothing, reporting a false clean every run.
+        assert!(RUN_GROUP_ACTION.contains("if [ -z \"$ARTIFACT\" ]; then"));
         // The workflow is identified by its runtime name, not a literal
         // filename: the root workflow is owned and renameable, and a rename
         // must not silently reset the series.
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("WORKFLOW: ${{ github.workflow }}"));
+        assert!(RUN_GROUP_ACTION.contains("WORKFLOW: ${{ github.workflow }}"));
         assert!(
-            !SCHEDULED_IMPL_WORKFLOW.contains("--workflow anvil-scheduled.yml"),
+            !RUN_GROUP_ACTION.contains("--workflow anvil-scheduled.yml"),
             "a hardcoded workflow filename breaks on rename"
         );
         // Absence and operational failure must stay distinguishable. The run
         // listing is assigned rather than consumed by `for`, because `set -e`
         // ignores a command substitution used as a word list -- a failed
         // listing would otherwise read as a cold start.
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("if ! run_ids="));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("select(.name == \\\"$ARTIFACT\\\" and .expired == false)"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("complete_restore restored"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("complete_restore cold-start"));
+        assert!(RUN_GROUP_ACTION.contains("if ! run_ids="));
+        assert!(RUN_GROUP_ACTION.contains("select(.name == \\\"$ARTIFACT\\\" and .expired == false)"));
+        assert!(RUN_GROUP_ACTION.contains("complete_restore restored"));
+        assert!(RUN_GROUP_ACTION.contains("complete_restore cold-start"));
         // Fail-closed by construction: the store path is created only inside
         // complete_restore, so an operational failure leaves nothing to
         // upload over the accumulated chain.
         assert_eq!(
-            SCHEDULED_IMPL_WORKFLOW.matches("mkdir -p target/anvil/bench-history").count(),
+            RUN_GROUP_ACTION.matches("mkdir -p target/anvil/bench-history").count(),
             1,
             "the store path must be created only on a completed restore"
         );
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("if: always() && env.ANVIL_BENCH_RESTORE != ''"));
-        // The machine-key escape hatch has to be reachable in CI, which
-        // workflow-level env is not across a called reusable workflow.
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("bench_machine_key:"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("ANVIL_BENCH_MACHINE_KEY: ${{ inputs.bench_machine_key }}"));
+        assert!(RUN_GROUP_ACTION.contains("if: always() && inputs.bench_history == 'true' && env.ANVIL_BENCH_RESTORE != ''"));
         // Notifying a human is the scheduled tier's own publish-failure job,
         // which this group must be a dependency of -- otherwise a benchmark
         // regression fails the run without ever reaching the tracking issue.
@@ -512,10 +530,6 @@ export -f just
             publish_needs.contains("- scheduled-benchmarks"),
             "publish-failure must depend on scheduled-benchmarks:\n{publish_needs}"
         );
-        // Restoring the history reads the runs/artifacts API, and a
-        // reusable workflow cannot grant itself more than its caller.
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("actions: read"));
-        assert!(SCHEDULED_ROOT_WORKFLOW.contains("actions: read"));
     }
 
     #[test]

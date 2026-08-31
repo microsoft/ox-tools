@@ -42,6 +42,29 @@ inputs:
       Clean runs only supersede prior failures.
     default: "false"
     required: false
+  bench_history:
+    description: >-
+      Round-trip a cargo-bench-history store around the group run, so the
+      regression analysis has cross-run history to compare against. The
+      caller must grant actions: read and check out full history
+      (fetch-depth: 0), neither of which an action can request for itself.
+    default: "false"
+    required: false
+  bench_artifact:
+    description: >-
+      Artifact name carrying this leg's history. Must be unique per matrix
+      leg: the history is partitioned per machine, and merging two runners'
+      samples into one series destroys the comparison. Supplied by the
+      caller, which is the only place the matrix value is in scope.
+    default: ""
+    required: false
+  bench_machine_key:
+    description: >-
+      Overrides cargo-bench-history's hardware fingerprint with a stable
+      pool label, for runner pools heterogeneous enough to fragment a series
+      into partitions too sparse to analyze.
+    default: ""
+    required: false
 runs:
   using: composite
   steps:
@@ -50,6 +73,101 @@ runs:
       with:
         group: ${{ inputs.group }}
         free-disk-space: ${{ inputs.free-disk-space }}
+
+    - name: Restore benchmark history
+      if: inputs.bench_history == 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        ARTIFACT: ${{ inputs.bench_artifact }}
+        DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        # The caller's workflow *name*, not a hardcoded filename: the root
+        # scheduled workflow is an owned, renameable file, and a rename must
+        # not silently reset the series.
+        WORKFLOW: ${{ github.workflow }}
+        REPO: ${{ github.repository }}
+        WINDOW: "30"
+      run: |
+        set -euo pipefail
+
+        if [ -z "$ARTIFACT" ]; then
+          echo "::error::bench_history is enabled but bench_artifact is empty;" \
+               "refusing to continue, since an unnamed store cannot be restored" \
+               "or published and every run would report a false clean."
+          exit 1
+        fi
+
+        # Staged first. The store path is created only once the restore has
+        # reached a known state, so an operational failure leaves no store
+        # at all and a publisher that runs unconditionally has nothing to
+        # upload over the accumulated chain.
+        staging="$(mktemp -d)"
+
+        complete_restore() {
+          mkdir -p target/anvil/bench-history
+          if [ -n "$(ls -A "$staging" 2>/dev/null)" ]; then
+            cp -R "$staging/." target/anvil/bench-history/
+          fi
+          echo "ANVIL_BENCH_RESTORE=$1" >> "$GITHUB_ENV"
+          # The recipe refuses to write anywhere but here, so an override
+          # cannot silently detach it from the store that is published.
+          echo "ANVIL_BENCH_WIRED_STORE=target/anvil/bench-history" >> "$GITHUB_ENV"
+        }
+
+        # Assigned rather than consumed directly by `for`: `set -e` ignores
+        # the exit status of a command substitution used as a word list, so
+        # a failed listing would yield an empty list and fall through to a
+        # cold start -- publishing a truncated store over the chain and
+        # reporting green for want of the history needed to report red.
+        if ! run_ids="$(gh run list --workflow "$WORKFLOW" \
+            --branch "$DEFAULT_BRANCH" --limit "$WINDOW" \
+            --json databaseId --jq '.[].databaseId')"; then
+          echo "::error::could not list $WORKFLOW runs on $DEFAULT_BRANCH;" \
+               "refusing to continue, since treating this as a cold start" \
+               "would publish a truncated store over the existing chain."
+          exit 1
+        fi
+
+        # Walk back from the newest run and take the first that carries this
+        # leg's artifact. Restoring from the latest *successful* run would
+        # drop every sample collected while the pipeline was red from a
+        # regression -- precisely the window that matters.
+        #
+        # Absence and failure are kept distinct. A run is only a candidate
+        # once the artifacts API confirms the artifact exists and has not
+        # expired; a download that then fails is an operational error
+        # (token, API, corrupt payload) and fails the job rather than being
+        # silently downgraded to a cold start.
+        for run_id in $run_ids; do
+          artifact_id=$(gh api --paginate \
+            "repos/$REPO/actions/runs/$run_id/artifacts" \
+            --jq ".artifacts[] | select(.name == \"$ARTIFACT\" and .expired == false) | .id" \
+            | head -n1)
+          [ -n "$artifact_id" ] || continue
+
+          if ! gh run download "$run_id" --name "$ARTIFACT" --dir "$staging"; then
+            echo "::error::found $ARTIFACT in run $run_id but could not download it;" \
+                 "failing rather than continuing with an empty history, which would" \
+                 "publish a truncated store over the existing chain."
+            exit 1
+          fi
+          echo "restored benchmark history from run $run_id"
+          complete_restore restored
+          exit 0
+        done
+
+        # No run in the window carried the artifact: a genuine cold start
+        # (first run, or the chain lapsed), which is a valid empty store.
+        # Surfaced on the summary rather than only in this log -- "history
+        # quietly restarted" must not look like "no regressions".
+        complete_restore cold-start
+        echo "no $ARTIFACT artifact in the last $WINDOW scheduled runs; starting a new history"
+        {
+          printf '### Benchmark history: cold start\n\n'
+          printf 'No `%s` artifact was found in the last %s `%s` runs on `%s`, ' \
+            "$ARTIFACT" "$WINDOW" "$WORKFLOW" "$DEFAULT_BRANCH"
+          printf 'so this run starts a new series. Trend detection needs several runs of history.\n'
+        } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Run Anvil group
       id: run
@@ -60,6 +178,7 @@ runs:
         ANVIL_INCLUDE_MODIFIED: ${{ inputs.include_modified }}
         ANVIL_INCLUDE_AFFECTED: ${{ inputs.include_affected }}
         ANVIL_INCLUDE_REQUIRED: ${{ inputs.include_required }}
+        ANVIL_BENCH_MACHINE_KEY: ${{ inputs.bench_machine_key }}
         # Some checks (e.g. cargo-aprz) call GitHub's API. The built-in token
         # gives them the authenticated quota without adding group knowledge
         # to this action.
@@ -82,6 +201,33 @@ runs:
 
     # Reporting is supplemental: run after success or failure, but never let
     # an API outage determine the authoritative workflow-job result.
+    - name: Save benchmark history
+      # always(): the run's own samples belong in the history even when the
+      # analysis flagged a regression and failed the group.
+      #
+      # Guarded on the restore having reached a known state: if the restore
+      # failed operationally the store is not a continuation of the chain,
+      # and publishing it would overwrite good history with a truncated
+      # snapshot.
+      if: always() && inputs.bench_history == 'true' && env.ANVIL_BENCH_RESTORE != ''
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: ${{ inputs.bench_artifact }}
+        path: target/anvil/bench-history
+        # Comfortably longer than the scheduled cadence, so a paused or
+        # infrequent schedule does not break the chain.
+        retention-days: 90
+        if-no-files-found: ignore
+
+    - name: Publish benchmark findings
+      if: always() && inputs.bench_history == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -f target/anvil/bench/findings.md ]; then
+          cat target/anvil/bench/findings.md >> "$GITHUB_STEP_SUMMARY"
+        fi
+
     - name: Publish supplemental Anvil commit status
       if: always() && inputs.publish_commit_statuses == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
       continue-on-error: true
