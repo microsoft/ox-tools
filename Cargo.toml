@@ -27,8 +27,8 @@ anyhow = { version = "1.0.104", default-features = false }
 assert_cmd = { version = "2.2.2", default-features = false }
 async-once-cell = { version = "0.5", default-features = false }
 blake3 = { version = "1.8.7", default-features = false }
+# bolero-libfuzzer 0.13.0 calls bolero_engine::any; bolero/std enables that API for its host build.
 bolero = { version = "0.13.4", default-features = false, features = ["std"] }
-# bolero-libfuzzer 0.13.0 calls bolero_engine::any without enabling the feature itself.
 bolero-engine = { version = "0.13.4", default-features = false }
 bytes = { version = "1.12.1", default-features = false }
 camino = { version = "1.2.5", default-features = false }
