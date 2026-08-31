@@ -1437,7 +1437,12 @@ fn snapshot_toolchain_probe(caller_toolchain: Option<&str>, toolchain_file: bool
         (
             "rustup.ps1",
             "if (($args -contains 'show') -and ($args -contains 'active-toolchain')) {\n\
-            \x20   Write-Output 'file-active-toolchain (overridden by rust-toolchain.toml)'\n\
+            \x20   if ($args -contains '--verbose') {\n\
+            \x20       Write-Output 'file-active-toolchain'\n\
+            \x20       Write-Output 'active because: overridden by rust-toolchain.toml'\n\
+            \x20   } else {\n\
+            \x20       Write-Output 'file-active-toolchain (overridden by rust-toolchain.toml)'\n\
+            \x20   }\n\
             \x20   exit 0\n\
             }\n\
             exit 0\n",

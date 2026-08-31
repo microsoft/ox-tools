@@ -50,23 +50,21 @@ if ((Test-Path -LiteralPath (Join-Path $RepoRoot 'rust-toolchain') -PathType Lea
     (Test-Path -LiteralPath (Join-Path $RepoRoot 'rust-toolchain.toml') -PathType Leaf)) {
     Push-Location -LiteralPath $RepoRoot
     try {
-        $rustupOutput = @(& rustup show active-toolchain 2>&1)
+        $rustupOutput = @(& rustup show active-toolchain --verbose 2>&1)
         if ($LASTEXITCODE -ne 0) {
             throw "anvil: rustup could not resolve the repository toolchain file:`n$($rustupOutput -join "`n")"
         }
-        $active = $rustupOutput | Select-Object -Last 1
+        # Verbose output puts the exact toolchain name on its own first line,
+        # avoiding ambiguity between spaces/parentheses in path toolchains and
+        # rustup's human-readable reason annotation.
+        $active = $rustupOutput | Select-Object -First 1
         if ([string]::IsNullOrWhiteSpace([string] $active)) {
             throw 'anvil: rustup returned no active repository toolchain'
         }
     } finally {
         Pop-Location
     }
-    $resolved = [string] $active
-    $sourceMarker = $resolved.IndexOf(' (')
-    if ($sourceMarker -ge 0) {
-        $resolved = $resolved.Substring(0, $sourceMarker)
-    }
-    Write-Output ('+' + $resolved)
+    Write-Output ('+' + [string] $active)
     return
 }
 

@@ -985,7 +985,7 @@ mod tests {
                 fs::write(shim.path().join("cargo.cmd"), "@echo off\r\necho %*\r\nexit /b 0\r\n").expect("Cargo shim must be writable");
                 fs::write(
                     shim.path().join("rustup.cmd"),
-                    "@echo off\r\nif \"%1 %2\"==\"show active-toolchain\" echo C:\\toolchains\\test toolchain (overridden by 'checkout (fork)')\r\nexit /b 0\r\n",
+                    "@echo off\r\nif \"%*\"==\"show active-toolchain --verbose\" echo C:\\Program Files ^(x86^)\\custom rust\r\nexit /b 0\r\n",
                 )
                 .expect("rustup shim must be writable");
             }
@@ -999,7 +999,7 @@ mod tests {
                 let rustup = shim.path().join("rustup");
                 fs::write(
                     &rustup,
-                    "#!/bin/sh\nif [ \"$*\" = 'show active-toolchain' ]; then echo \"/toolchains/test toolchain (overridden by 'checkout (fork)')\"; fi\nexit 0\n",
+                    "#!/bin/sh\nif [ \"$*\" = 'show active-toolchain --verbose' ]; then echo '/toolchains/test (fork) toolchain'; fi\nexit 0\n",
                 )
                 .expect("rustup shim must be writable");
                 fs::set_permissions(&rustup, fs::Permissions::from_mode(0o755)).expect("rustup shim must be executable");
@@ -1037,9 +1037,9 @@ mod tests {
                 normalized_diagnostic(&output)
             );
             let expected_file_toolchain = if cfg!(windows) {
-                "\"+C:\\toolchains\\test toolchain\" --version"
+                "\"+C:\\Program Files (x86)\\custom rust\" --version"
             } else {
-                "+/toolchains/test toolchain --version"
+                "+/toolchains/test (fork) toolchain --version"
             };
             assert_eq!(
                 String::from_utf8(output.stdout).expect("Cargo shim output must be UTF-8").trim(),
@@ -1098,7 +1098,9 @@ mod tests {
                 assert!(
                     diagnostic.contains("rustup could not resolve")
                         && diagnostic.contains("override")
-                        && (diagnostic.contains("empty") || diagnostic.contains("error parsing")),
+                        && (diagnostic.contains("empty")
+                            || diagnostic.contains("could not parse")
+                            || (diagnostic.contains("error") && diagnostic.contains("parsing"))),
                     "unexpected resolver diagnostic: {diagnostic}"
                 );
             }
@@ -1122,7 +1124,7 @@ mod tests {
                 .expect("Cargo shim must be writable");
                 fs::write(
                     shim.path().join("rustup.cmd"),
-                    "@echo off\r\n>>\"%ANVIL_RUSTUP_LOG%\" echo %*\r\nif \"%1 %2\"==\"show active-toolchain\" echo 1.94-test-host (overridden by fixture)\r\nexit /b 0\r\n",
+                    "@echo off\r\n>>\"%ANVIL_RUSTUP_LOG%\" echo %*\r\nif \"%*\"==\"show active-toolchain --verbose\" echo 1.94-test-host\r\nexit /b 0\r\n",
                 )
                 .expect("rustup shim must be writable");
             }
@@ -1133,7 +1135,7 @@ mod tests {
                 for (name, log_variable, status) in [("cargo", "ANVIL_CARGO_LOG", 1), ("rustup", "ANVIL_RUSTUP_LOG", 0)] {
                     let executable = shim.path().join(name);
                     let extra = if name == "rustup" {
-                        "if [ \"$*\" = 'show active-toolchain' ]; then echo '1.94-test-host (overridden by fixture)'; fi\n"
+                        "if [ \"$*\" = 'show active-toolchain --verbose' ]; then echo '1.94-test-host'; fi\n"
                     } else {
                         ""
                     };
@@ -1197,7 +1199,7 @@ mod tests {
                     .any(|line| line == "component add --toolchain 1.94-test-host clippy")
             );
             assert!(
-                rustup_call.lines().any(|line| line == "show active-toolchain"),
+                rustup_call.lines().any(|line| line == "show active-toolchain --verbose"),
                 "repository-selected component installation must ask rustup for the active toolchain"
             );
         }
