@@ -29,14 +29,10 @@ const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
 
 #[test]
-fn loom_has_an_overridable_ci_preemption_bound() {
+fn loom_does_not_globally_limit_exploration() {
     assert!(
-        LOOM.contains("IsNullOrWhiteSpace($env:LOOM_MAX_PREEMPTIONS)"),
-        "loom must preserve an adopter-provided exploration bound"
-    );
-    assert!(
-        LOOM.contains("$env:LOOM_MAX_PREEMPTIONS = '2'"),
-        "loom must default CI to its documented two-preemption bound"
+        !LOOM.contains("LOOM_MAX_PREEMPTIONS"),
+        "loom models must own their exploration scope rather than inheriting a global preemption cap"
     );
 }
 

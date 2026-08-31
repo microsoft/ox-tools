@@ -3661,9 +3661,8 @@ anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-pre
 # only through *other* members (e.g. concurrent-queue), and run
 # single-threaded (loom drives its own scheduling). --release per the
 # loom docs: permutation exploration is wall-clock dominated by the SUT.
-# CI defaults Loom to its documented two-preemption bound so one large
-# state space cannot consume the whole job. Adopters can override the
-# bound (including with a higher value) through LOOM_MAX_PREEMPTIONS.
+# Anvil does not impose a global exploration bound: each model owns its
+# topology and must remain tractable under exhaustive exploration.
 #
 # Fail-loud guard: a crate that *declares* loom support -- a `loom`
 # feature or a `cfg(loom)`-gated dependency -- but exposes no
@@ -3737,10 +3736,6 @@ anvil-loom: anvil-loom-validate-prereqs anvil-impact
     }
 
     $env:RUSTFLAGS = "--cfg loom $($env:RUSTFLAGS)".Trim()
-    if ([string]::IsNullOrWhiteSpace($env:LOOM_MAX_PREEMPTIONS)) {
-        $env:LOOM_MAX_PREEMPTIONS = '2'
-    }
-    Write-Host "anvil-loom: maximum preemptions per execution: $env:LOOM_MAX_PREEMPTIONS"
     foreach ($lt in $loomTargets) {
         Write-Host "anvil-loom: $($lt.pkg) :: $($lt.target)"
         & cargo test -p $lt.pkg --release --all-features --locked --test $lt.target -- --test-threads=1
