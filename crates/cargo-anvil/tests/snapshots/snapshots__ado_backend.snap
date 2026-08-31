@@ -2206,7 +2206,7 @@ anvil-bench-history: anvil-bench-history-validate-prereqs
     # hardware. Unrecognised non-empty values still gate, keeping the CI side
     # fail-closed.
     function Test-Flag([string]$value) {
-        if (-not $value) { return $false }
+        if ([string]::IsNullOrWhiteSpace($value)) { return $false }
         return $value.Trim().ToLowerInvariant() -notin @('0', 'false', 'no', 'off')
     }
     $gate = (Test-Flag $env:ANVIL_BENCH_GATE) -or (Test-Flag $env:CI) -or (Test-Flag $env:TF_BUILD)
