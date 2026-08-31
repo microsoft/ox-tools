@@ -649,6 +649,25 @@ mod tests {
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
     #[test]
+    fn an_existing_temporary_sibling_is_cleared_and_the_write_proceeds() {
+        // The removal succeeding is its own case: an ordinary run finds nothing
+        // there and takes the NotFound arm instead. Only the unix symlink test
+        // reached this one, so it was uncovered on Windows and the coverage
+        // gate caught it.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("Justfile");
+        std::fs::write(tmp.path().join("Justfile.anvil-tmp"), "stale").unwrap();
+
+        write_file(&target, "written").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "written");
+        assert!(
+            !tmp.path().join("Justfile.anvil-tmp").exists(),
+            "the temporary file must not survive the rename"
+        );
+    }
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
     fn a_temporary_sibling_that_cannot_be_cleared_stops_the_write() {
         // Only a missing temporary file is absorbed. Anything else means the
         // name is occupied by something the write cannot go through, and

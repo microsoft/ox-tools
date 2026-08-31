@@ -226,6 +226,13 @@ pub fn upsert_region_with_placement(
         // offset that does fall mid-line is rounded forward, because splitting
         // a line around the sentinels turns one valid instruction into two
         // invalid halves.
+        // A byte offset from a caller need not fall on a character boundary,
+        // and slicing on one panics. Walk back to the nearest boundary first,
+        // so the line rounding below operates on an index that can be sliced.
+        let mut offset = offset.min(text.len());
+        while !text.is_char_boundary(offset) {
+            offset -= 1;
+        }
         let on_line_boundary = offset == 0 || text[..offset].ends_with('\n');
         let offset = if on_line_boundary {
             offset
