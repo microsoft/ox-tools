@@ -60,7 +60,7 @@ internals = []
 bytes = { workspace = true }
 camino = { workspace = true }
 cargo_metadata = { workspace = true }
-cel-interpreter = { workspace = true, features = ["chrono"] }
+cel = { workspace = true, features = ["chrono"] }
 chrono = { workspace = true, features = ["serde", "clock", "std", "now"] }
 clap = { workspace = true, features = [
     "std",

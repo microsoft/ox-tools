@@ -36,6 +36,7 @@ use std::{env, fs};
 
 use cargo_anvil::Catalog;
 use cargo_anvil::test_support::{Cli, run_update};
+use serial_test::serial;
 use tempfile::TempDir;
 
 fn write(path: &Path, contents: &str) {
@@ -265,6 +266,7 @@ fn run_impact(root: &Path) -> String {
 }
 
 #[test]
+#[serial]
 fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
     if !tools_available() {
         return;
@@ -356,6 +358,7 @@ fn impact_cache_regenerates_per_key_and_reuses_when_unchanged() {
 }
 
 #[test]
+#[serial]
 fn baseline_regenerates_when_delta_config_changes_without_moving_the_base() {
     if !tools_available() {
         return;
@@ -414,6 +417,7 @@ fn baseline_regenerates_when_delta_config_changes_without_moving_the_base() {
 }
 
 #[test]
+#[serial]
 fn current_snapshot_ignores_tracked_target_changes_without_moving_head() {
     if !tools_available() {
         return;
@@ -473,6 +477,7 @@ fn current_snapshot_ignores_tracked_target_changes_without_moving_head() {
 }
 
 #[test]
+#[serial]
 fn impact_empty_output_when_head_equals_base() {
     if !tools_available() {
         return;
@@ -516,6 +521,7 @@ fn impact_empty_output_when_head_equals_base() {
 }
 
 #[test]
+#[serial]
 fn impact_off_short_circuits_without_computing() {
     if !core_tools_available() {
         return;
@@ -548,6 +554,7 @@ fn impact_off_short_circuits_without_computing() {
 }
 
 #[test]
+#[serial]
 fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
     if !tools_available() {
         return;
@@ -616,6 +623,7 @@ fn impact_widens_to_full_workspace_when_working_tree_is_dirty() {
 }
 
 #[test]
+#[serial]
 fn impact_include_reads_zero_byte_modified_file_without_throwing() {
     if !tools_available() {
         return;
@@ -651,6 +659,7 @@ fn impact_include_reads_zero_byte_modified_file_without_throwing() {
 }
 
 #[test]
+#[serial]
 fn impact_dirty_tree_widens_without_needing_a_resolvable_base() {
     if !core_tools_available() {
         return;
@@ -707,6 +716,7 @@ fn impact_dirty_tree_widens_without_needing_a_resolvable_base() {
 }
 
 #[test]
+#[serial]
 fn impact_consume_mode_trusts_cache_without_recompute() {
     if !tools_available() {
         return;
@@ -752,6 +762,7 @@ fn impact_consume_mode_trusts_cache_without_recompute() {
 }
 
 #[test]
+#[serial]
 fn consumer_reuses_cache_with_unresolvable_base_only_under_consume() {
     if !tools_available() {
         return;
@@ -809,6 +820,7 @@ fn consumer_reuses_cache_with_unresolvable_base_only_under_consume() {
 }
 
 #[test]
+#[serial]
 fn impact_falls_back_to_full_workspace_when_base_has_no_workspace() {
     if !tools_available() {
         return;
@@ -904,6 +916,7 @@ fn path_with_prefix(dir: &Path) -> OsString {
 }
 
 #[test]
+#[serial]
 fn scoped_check_consumes_cached_package_list_and_skips_on_sentinel() {
     if !tools_available() {
         return;
@@ -1000,6 +1013,7 @@ fn fake_cargo_with_metadata(dir: &Path, log: &Path, metadata_json: &Path) {
 }
 
 #[test]
+#[serial]
 fn loom_runs_declared_targets_in_full_workspace_mode() {
     if !tools_available() {
         return;
@@ -1047,6 +1061,7 @@ fn loom_runs_declared_targets_in_full_workspace_mode() {
 }
 
 #[test]
+#[serial]
 fn invalid_anvil_impact_value_fails_loudly_without_computing() {
     if !core_tools_available() {
         return;
@@ -1089,6 +1104,7 @@ fn invalid_anvil_impact_value_fails_loudly_without_computing() {
 }
 
 #[test]
+#[serial]
 fn missing_base_ref_on_clean_tree_fails_with_fetch_guidance() {
     if !tools_available() {
         return;
@@ -1121,6 +1137,7 @@ fn missing_base_ref_on_clean_tree_fails_with_fetch_guidance() {
 }
 
 #[test]
+#[serial]
 fn shallow_clone_fails_with_unshallow_guidance() {
     if !tools_available() {
         return;
@@ -1146,6 +1163,7 @@ fn shallow_clone_fails_with_unshallow_guidance() {
 }
 
 #[test]
+#[serial]
 fn consume_without_downloaded_cache_fails_loudly() {
     if !core_tools_available() {
         return;
@@ -1248,6 +1266,7 @@ fn run_format(root: &Path, tier: &str, impact_json_rel: &str) -> (String, String
 }
 
 #[test]
+#[serial]
 fn impact_format_fails_hard_on_unmappable_name() {
     if !tools_available() {
         return;
@@ -1272,6 +1291,7 @@ fn impact_format_fails_hard_on_unmappable_name() {
 }
 
 #[test]
+#[serial]
 fn impact_format_maps_proc_macro_target_name_to_its_package() {
     if !tools_available() {
         return;
@@ -1368,6 +1388,7 @@ fn snapshot_toolchain_probe(caller_toolchain: Option<&str>) -> Vec<String> {
 }
 
 #[test]
+#[serial]
 fn impact_snapshot_runs_baseline_under_active_toolchain_then_restores_caller_value() {
     if !core_tools_available() {
         return;

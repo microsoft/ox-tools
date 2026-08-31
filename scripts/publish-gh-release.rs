@@ -11,7 +11,7 @@ edition = "2024"
 
 [dependencies]
 argh = "0.1"
-ohno = { version = "0.4", features = ["app-err"] }
+ohno = { version = "0.5", features = ["app-err"] }
 ---
 
 use std::fs;

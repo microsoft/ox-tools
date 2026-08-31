@@ -32,7 +32,6 @@ install-tools:
         cargo-semver-checks@$env:CARGO_SEMVER_CHECKS_VERSION `
         cargo-sort@$env:CARGO_SORT_VERSION `
         cargo-udeps@$env:CARGO_UDEPS_VERSION `
-        cargo-workspaces@$env:CARGO_WORKSPACES_VERSION `
         --locked
 
     # This tool is not well maintained and fails to actually build if using locked dependencies. Okay then.
