@@ -736,31 +736,23 @@ mod tests {
         let root = tmp.path().join("repo");
         std::fs::create_dir_all(&root).unwrap();
 
-        // The two platforms reach the same state by different routes: a
-        // directory with no search permission on unix, and a name the
-        // filesystem rejects outright on Windows, where permissions are not
-        // expressible this way and every absent path reads as NotFound.
+        // The two platforms reach the same state by different routes: a regular
+        // file standing where a directory is expected on unix, which fails with
+        // ENOTDIR, and a name the filesystem rejects outright on Windows, where
+        // that same shape reports NotFound instead.
+        //
+        // Neither depends on a permission. An earlier version used a directory
+        // with no search bit, which root ignores -- so it passed for an ordinary
+        // user and failed inside the container, where the run is often root.
         #[cfg(unix)]
         let relative = {
-            use std::os::unix::fs::PermissionsExt as _;
-            std::fs::create_dir(root.join("closed")).unwrap();
-            std::fs::set_permissions(root.join("closed"), std::fs::Permissions::from_mode(0o000)).unwrap();
-            "closed/inner/file.txt"
+            std::fs::write(root.join("notadir"), "regular file").unwrap();
+            "notadir/inner/file.txt"
         };
         #[cfg(windows)]
         let relative = "in|valid/file.txt";
 
-        let result = contained_path(&root, relative);
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            // Restored before asserting, so a failure cannot leave the
-            // directory undeletable for the temp-dir cleanup.
-            std::fs::set_permissions(root.join("closed"), std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
-
-        let err = result.expect_err("an unresolvable component must not read as absent");
+        let err = contained_path(&root, relative).expect_err("an unresolvable component must not read as absent");
 
         assert!(
             format!("{err}").contains("checking containment"),
