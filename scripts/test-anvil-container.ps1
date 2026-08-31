@@ -760,9 +760,16 @@ Write-Section '10. Recipes run natively inside the image'
 
 # Sections 7-9 build the image that carries the secret stanza; without them the
 # current reference is the plain one.
+#
+# Impact scoping is switched off because this fixture is a fresh `git init`
+# with no `origin/main`, so the snapshot behind `anvil-fmt` has no base ref to
+# diff against. That is a property of the fixture, not of containerized
+# execution, and this section is about the re-entry guard running the recipe
+# natively rather than about history being reachable.
 $nestedReference = if ($buildSecretsSupported) { $secretReference } else { Get-ImageReference -Repo $repo }
 $nested = Invoke-Engine -Arguments @(
-    'run', '--rm', '-e', 'ANVIL_IN_CONTAINER=1', '-v', "$(ConvertTo-EnginePath $repo):/workspace", '-w', '/workspace',
+    'run', '--rm', '-e', 'ANVIL_IN_CONTAINER=1', '-e', 'ANVIL_IMPACT=off',
+    '-v', "$(ConvertTo-EnginePath $repo):/workspace", '-w', '/workspace',
     $nestedReference, 'just', 'anvil-container', 'just', 'anvil-fmt'
 ) -AllowFailure
 Assert-Equal 'anvil-container passes through inside the image' 0 $nested.ExitCode
