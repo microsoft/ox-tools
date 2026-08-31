@@ -97,8 +97,17 @@ runs:
 
         complete_restore() {
           mkdir -p target/anvil/bench-history
-          if [ -n "$(ls -A "$staging" 2>/dev/null)" ]; then
-            cp -R "$staging/." target/anvil/bench-history/
+          # `gh run download` with a single `--name` extracts into --dir
+          # directly, but with several it nests under one directory per
+          # artifact. Lift a nested layout if we ever see one: getting this
+          # wrong loses the history silently and every run reports a clean
+          # cold start, which is the one failure this feature must not have.
+          src="$staging"
+          if [ -d "$staging/$ARTIFACT" ]; then
+            src="$staging/$ARTIFACT"
+          fi
+          if [ -n "$(ls -A "$src" 2>/dev/null)" ]; then
+            cp -R "$src/." target/anvil/bench-history/
           fi
           echo "ANVIL_BENCH_RESTORE=$1" >> "$GITHUB_ENV"
           # The recipe refuses to write anywhere but here, so an override

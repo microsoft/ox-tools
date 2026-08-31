@@ -1930,7 +1930,13 @@ fn git_bash() -> Option<&'static str> {
 ///
 /// `runs` are the run ids the listing yields, newest first; `artifact_runs`
 /// are those the artifacts API reports as carrying the artifact.
-fn run_github_restore(runs: &str, artifact_runs: &str, download_exit: &str, runs_exit: &str) -> (TempDir, Output, String, String) {
+fn run_github_restore(
+    runs: &str,
+    artifact_runs: &str,
+    download_exit: &str,
+    runs_exit: &str,
+    nested: bool,
+) -> (TempDir, Output, String, String) {
     let bash = git_bash().expect("git bash checked by caller");
     let tmp = TempDir::new().unwrap();
     let root = tmp.path();
@@ -1961,7 +1967,19 @@ if [ "$1" = "api" ]; then
   exit 0
 fi
 if [ "$1" = "run" ] && [ "$2" = "download" ]; then
-  exit "${FAKE_GH_DOWNLOAD_EXIT:-0}"
+  if [ "${FAKE_GH_DOWNLOAD_EXIT:-0}" != "0" ]; then exit "$FAKE_GH_DOWNLOAD_EXIT"; fi
+  # Mimic the payload layout: flat by default (what a single --name gives),
+  # nested under the artifact name when the scenario asks for it.
+  dest=""
+  prev=""
+  for arg in "$@"; do
+    if [ "$prev" = "--dir" ]; then dest="$arg"; fi
+    prev="$arg"
+  done
+  if [ "$FAKE_GH_NESTED" = "1" ]; then dest="$dest/$ARTIFACT"; fi
+  mkdir -p "$dest"
+  echo "{}" > "$dest/run.json"
+  exit 0
 fi
 exit 0
 "#,
@@ -1991,6 +2009,7 @@ exit 0
         .env("FAKE_GH_ARTIFACT_RUNS", artifact_runs)
         .env("FAKE_GH_DOWNLOAD_EXIT", download_exit)
         .env("FAKE_GH_RUNS_EXIT", runs_exit)
+        .env("FAKE_GH_NESTED", if nested { "1" } else { "0" })
         .env("ARTIFACT", "bench-history-linux")
         .env("DEFAULT_BRANCH", "main")
         .env("WORKFLOW", "anvil-scheduled")
@@ -2015,7 +2034,7 @@ fn github_restore_separates_absence_from_failure() {
 
     // (1) The newest run has no artifact; an older one does. The walk must
     // reach it rather than cold-starting on the first miss.
-    let (_tmp, output, env, _summary) = run_github_restore("30 20 10", "10", "0", "0");
+    let (tmp, output, env, _summary) = run_github_restore("30 20 10", "10", "0", "0", false);
     assert!(
         output.status.success(),
         "walking back should succeed:\n{}",
@@ -2027,10 +2046,27 @@ fn github_restore_separates_absence_from_failure() {
         "should name the run it restored from:{}",
         both_streams(&output)
     );
+    // The payload has to land *in* the store, not one level under it. A
+    // nested copy loses the history silently: every run then cold-starts
+    // and analyzes to a clean no-op.
+    let store = tmp.path().join("target/anvil/bench-history/run.json");
+    assert!(store.is_file(), "the restored payload must land in the store root");
+
+    // `gh run download` extracts a single `--name` straight into `--dir`,
+    // but nests one directory per artifact when several are requested.
+    // Tolerate both, so a change in that behaviour cannot silently empty
+    // the store.
+    let (tmp_nested, output, env, _summary) = run_github_restore("30 20 10", "10", "0", "0", true);
+    assert!(output.status.success(), "nested layout:{}", both_streams(&output));
+    assert!(env.contains("ANVIL_BENCH_RESTORE=restored"), "env:\n{env}");
+    assert!(
+        tmp_nested.path().join("target/anvil/bench-history/run.json").is_file(),
+        "a nested artifact directory must be lifted into the store root"
+    );
 
     // (2) No run in the window carries it: a genuine cold start, and it must
     // be visible on the summary rather than only in the log.
-    let (_tmp, output, env, summary) = run_github_restore("30 20 10", "", "0", "0");
+    let (_tmp, output, env, summary) = run_github_restore("30 20 10", "", "0", "0", false);
     assert!(output.status.success());
     assert!(env.contains("ANVIL_BENCH_RESTORE=cold-start"), "env:\n{env}");
     assert!(summary.contains("cold start"), "summary:\n{summary}");
@@ -2038,7 +2074,7 @@ fn github_restore_separates_absence_from_failure() {
     // (3) The artifact exists but the download fails. This is the branch whose
     // silent reintroduction re-creates the history-loss bug: it must fail and
     // leave no publishable restore state.
-    let (_tmp, output, env, _summary) = run_github_restore("30 20 10", "30", "1", "0");
+    let (_tmp, output, env, _summary) = run_github_restore("30 20 10", "30", "1", "0", false);
     assert_failed(&output, "a failing download");
     assert!(
         !env.contains("ANVIL_BENCH_RESTORE"),
@@ -2049,7 +2085,7 @@ fn github_restore_separates_absence_from_failure() {
     // command substitution consumed as a `for` word list, so this branch
     // would otherwise fall through to a cold start and publish a truncated
     // store over the chain while reporting green.
-    let (_tmp, output, env, _summary) = run_github_restore("30 20 10", "10", "0", "1");
+    let (_tmp, output, env, _summary) = run_github_restore("30 20 10", "10", "0", "1", false);
     assert_failed(&output, "a failing run listing");
     assert!(!env.contains("ANVIL_BENCH_RESTORE"), "a failed listing is not a cold start:\n{env}");
 }
