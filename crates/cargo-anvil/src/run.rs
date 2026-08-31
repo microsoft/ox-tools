@@ -518,16 +518,18 @@ fn composed_placement(order: &[&str], scaffold: &str, id: &str, text: Option<&st
     // puts the region *above* the very line the branch exists to protect. The
     // first line is the one that must not be preceded, so it is the one matched.
     let opening = scaffold.lines().next().unwrap_or_default();
-    // The whole first line, not a prefix of it. `# syntax=docker/dockerfile:1`
-    // is a prefix of the equally valid `# syntax=docker/dockerfile:1.7`, and
-    // splicing at the declared length would cut that directive in half.
+    // A parser directive is `# key=value`, and the value may legitimately differ
+    // from the scaffold's -- a repository on a newer frontend carries
+    // `# syntax=docker/dockerfile:1.7`. Match on the key and splice after the
+    // whole line the file actually carries: equality would push the region above
+    // an upgraded directive, and a bare prefix match would cut the file's own
+    // line in half.
     let first_line_end = text.find('\n').unwrap_or(text.len());
     let first_line = text[..first_line_end].trim_end_matches('\r');
-    RegionPlacement::At(if !opening.is_empty() && first_line == opening {
-        opening.len()
-    } else {
-        0
-    })
+    let key = opening.split_once('=').map(|(key, _)| key);
+    let carries_directive =
+        !opening.is_empty() && (first_line == opening || key.is_some_and(|key| opening.starts_with(key) && first_line.starts_with(key)));
+    RegionPlacement::At(if carries_directive { first_line.len() } else { 0 })
 }
 
 fn region_placement(region_id: &str) -> RegionPlacement {
@@ -981,15 +983,30 @@ mod tests {
         }
 
         #[test]
-        fn a_longer_first_line_is_not_treated_as_the_scaffold() {
-            // `# syntax=docker/dockerfile:1` is a prefix of the equally valid
-            // `# syntax=docker/dockerfile:1.7`. Splicing at the declared length
-            // would cut that directive in half.
-            let host = format!("# syntax=docker/dockerfile:1.7\n{}", region("b", "second\n"));
+        fn an_upgraded_parser_directive_keeps_line_one() {
+            // `# syntax=docker/dockerfile:1.7` is an equally valid directive and
+            // a repository may well have upgraded to it. Equality with the
+            // scaffold fails, so the region must still land after the whole
+            // line the file carries: at byte 0 it would sit above the directive
+            // and BuildKit would ignore the frontend pin, and at the scaffold's
+            // own length it would cut the directive in half.
+            const UPGRADED: &str = "# syntax=docker/dockerfile:1.7";
+            let host = format!("{UPGRADED}\n{}", region("b", "second\n"));
             assert_eq!(
                 super::super::composed_placement(ORDER, SCAFFOLD, "a", Some(&host)),
-                RegionPlacement::At(0),
-                "a first line that merely starts with the scaffold must not be split"
+                RegionPlacement::At(UPGRADED.len()),
+                "the region belongs after the directive the file actually carries"
+            );
+        }
+
+        #[test]
+        fn a_first_line_that_is_not_a_parser_directive_places_at_the_top() {
+            // Only a directive earns the reserved first line. Anything else is
+            // ordinary content the region goes above.
+            let host = format!("FROM scratch\n{}", region("b", "second\n"));
+            assert_eq!(
+                super::super::composed_placement(ORDER, SCAFFOLD, "a", Some(&host)),
+                RegionPlacement::At(0)
             );
         }
         #[test]

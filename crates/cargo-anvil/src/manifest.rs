@@ -292,6 +292,19 @@ impl Manifest {
         let path = Self::path_for(repo_root);
         let text = self.to_toml();
         let tmp = path.with_extension("lock.tmp");
+        // The write lands on this sibling before the rename, and `fs::write`
+        // opens with create+truncate, which follows a symlink. A checkout can
+        // carry `.anvil.lock.tmp` as a link out of the tree just as easily as
+        // any other name. Clearing it first turns a followed link into a
+        // replaced link; the name is anvil's own, so nothing that belongs to
+        // the repository is at stake. Only a missing file is absorbed.
+        match std::fs::remove_file(&tmp) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e).into_app_err_with(|| format!("failed to clear the temporary file {}", tmp.display()));
+            }
+        }
         std::fs::write(&tmp, text.as_bytes()).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
         std::fs::rename(&tmp, &path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
         Ok(())
@@ -490,6 +503,32 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let m = Manifest::load(tmp.path()).unwrap();
         assert_eq!(m, Manifest::default());
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn save_clears_a_stale_temporary_sibling() {
+        // The temporary file is anvil's own name, so an existing one is
+        // replaced rather than written through -- otherwise a symlink left at
+        // that path would redirect the write outside the repository.
+        let tmp = TempDir::new().unwrap();
+        let sibling = Manifest::path_for(tmp.path()).with_extension("lock.tmp");
+        std::fs::write(&sibling, b"stale").unwrap();
+        sample_manifest().save(tmp.path()).unwrap();
+        assert!(!sibling.exists(), "the temporary sibling must not survive the rename");
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn save_stops_when_the_temporary_sibling_cannot_be_cleared() {
+        // Only a missing temporary file is absorbed. A directory occupies the
+        // name here because `remove_file` refuses one on every platform,
+        // without needing a permission the test may not have.
+        let tmp = TempDir::new().unwrap();
+        let sibling = Manifest::path_for(tmp.path()).with_extension("lock.tmp");
+        std::fs::create_dir(&sibling).unwrap();
+        let err = sample_manifest().save(tmp.path()).unwrap_err();
+        assert!(err.to_string().contains("failed to clear"), "{err}");
     }
 
     #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
