@@ -90,7 +90,7 @@ rustdoc-types-v55 = { package = "rustdoc-types", version = "0.55.0", default-fea
 rustdoc-types-v56 = { package = "rustdoc-types", version = "0.56.0", default-features = false }
 rustdoc-types-v57 = { package = "rustdoc-types", version = "0.57.4", default-features = false }
 rustsec = { version = "0.33.0", default-features = false }
-seatbelt = { version = "0.7.0", default-features = false }
+seatbelt = { version = "0.8.0", default-features = false }
 semver = { version = "1.0.28", default-features = false }
 serde = { version = "1.0.228", default-features = false }
 serde_json = { version = "1.0.145", default-features = false }
