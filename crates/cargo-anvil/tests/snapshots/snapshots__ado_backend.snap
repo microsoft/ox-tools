@@ -3906,14 +3906,16 @@ anvil-container-tag:
     # placeholder -- so comparing the two raw fields would both miss an
     # executable `git add -N` file and reject an ordinary one.
     $drift = & git -c core.quotePath=false -C $repoRoot diff --no-ext-diff --raw -- @tracked 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        foreach ($entry in $drift) {
-            if ($entry -match '^:\d{6} (\d{6}) [0-9a-f]+ [0-9a-f]+ \S+\t(.+)$') {
-                $worktreeMode, $driftPath = $Matches[1], $Matches[2]
-                if ($worktreeMode -ne '000000' -and $indexMode.ContainsKey($driftPath) -and $indexMode[$driftPath] -ne $worktreeMode) {
-                    Write-Error "anvil: '$driftPath' has mode $worktreeMode in the working tree, but the image tag was computed from mode $($indexMode[$driftPath]). The build copies the working tree, so the image would not match its own reference. Stage the change (git add) and re-run."
-                    exit 1
-                }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "anvil: could not compare the working tree against the git index for the container image inputs (git diff exited $LASTEXITCODE). The tag is framed with index modes, and this query is what proves the working tree still matches them, so it cannot be skipped."
+        exit 1
+    }
+    foreach ($entry in $drift) {
+        if ($entry -match '^:\d{6} (\d{6}) [0-9a-f]+ [0-9a-f]+ \S+\t(.+)$') {
+            $worktreeMode, $driftPath = $Matches[1], $Matches[2]
+            if ($worktreeMode -ne '000000' -and $indexMode.ContainsKey($driftPath) -and $indexMode[$driftPath] -ne $worktreeMode) {
+                Write-Error "anvil: '$driftPath' has mode $worktreeMode in the working tree, but the image tag was computed from mode $($indexMode[$driftPath]). The build copies the working tree, so the image would not match its own reference. Stage the change (git add) and re-run."
+                exit 1
             }
         }
     }
