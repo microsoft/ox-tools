@@ -1,0 +1,9 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+#![cfg(loom)]
+
+#[test]
+fn concurrency_models() {
+    cargo_gamma_unsafe::run_loom_models();
+}

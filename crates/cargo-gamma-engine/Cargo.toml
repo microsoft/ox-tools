@@ -1,0 +1,49 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-gamma-engine"
+description = "Internal Rust source mutation engine for cargo-gamma"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["cargo", "mutation-testing", "testing"]
+categories = ["development-tools::testing"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-engine"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.ox-gen-readme]
+# This is an implementation detail of `cargo-gamma`; its README is an explicit stability warning.
+disable = true
+
+# Establish the cross-platform CI baseline for this new crate. Raise it as coverage improves.
+[package.metadata.coverage-gate]
+min-lines-percent = 99.2
+
+[dependencies]
+blake3 = { workspace = true, features = ["std"] }
+camino = { workspace = true }
+compact_str = { workspace = true, features = ["serde", "std"] }
+proc-macro2 = { workspace = true, features = ["span-locations", "proc-macro"] }
+rustc-hash = { workspace = true, features = ["std"] }
+rustc_lexer = { workspace = true }
+serde = { workspace = true, features = ["derive", "rc", "std"] }
+strsim = { workspace = true }
+syn = { workspace = true, features = ["full", "parsing", "printing", "visit", "extra-traits", "clone-impls", "proc-macro"] }
+
+[dev-dependencies]
+bolero = { workspace = true }
+bolero-engine = { workspace = true, features = ["any"] }
+walkdir = { workspace = true }
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints

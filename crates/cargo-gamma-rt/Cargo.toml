@@ -1,0 +1,53 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-gamma-rt"
+description = "Runtime support library injected into crates under mutation test by cargo-gamma"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["cargo", "mutation-testing", "testing"]
+categories = ["development-tools::testing"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-rt"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.ox-gen-readme]
+# This is an implementation detail of `cargo-gamma`; its README is an explicit stability warning.
+disable = true
+
+# Establish the lowest Windows baseline for this new crate. Raise it as coverage improves.
+[package.metadata.coverage-gate]
+min-lines-percent = 90.8
+
+# HARD CONSTRAINT: zero production dependencies and no build.rs. This crate is injected into the
+# dependency graph of the crate under test; anything else perturbs feature unification and breaks
+# --offline. The empty `loom` feature selects only the repository's dedicated model target.
+[lib]
+name = "gamma_rt"
+
+[features]
+# The vendored runtime never enables this feature, so an ambient `--cfg loom` still keeps the
+# injected copy on its dependency-free atomic path.
+loom = []
+
+[dependencies]
+
+[target.'cfg(loom)'.dependencies]
+loom = { workspace = true }
+
+[[test]]
+name = "loom"
+required-features = ["loom"]
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints

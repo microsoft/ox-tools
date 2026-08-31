@@ -1,0 +1,68 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-gamma-unsafe"
+description = "The platform calls cargo-gamma cannot make safely, behind a safe interface"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["cargo", "mutation-testing", "testing"]
+categories = ["development-tools::testing"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-unsafe"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.ox-gen-readme]
+# This is an implementation detail of `cargo-gamma`; its README is an explicit stability warning.
+disable = true
+
+# Establish the lowest cross-platform baseline for this new crate. Raise it as coverage improves.
+[package.metadata.coverage-gate]
+min-lines-percent = 86.5
+
+[features]
+# Selects the dedicated Loom integration target. The scheduler itself is still activated through
+# `RUSTFLAGS="--cfg loom"`.
+loom = []
+
+[target.'cfg(loom)'.dependencies]
+loom = { workspace = true }
+
+# HARD CONSTRAINT: this is the only crate in the workspace permitted to write `unsafe`, apart
+# from `cargo-gamma-rt`, which cannot depend on anything at all. Every other crate carries
+# `#![forbid(unsafe_code)]`, so anything needing a raw platform call has to come here and leave
+# behind an interface that is safe to call.
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true, features = ["std"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_Security",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
+    "Win32_System_JobObjects",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+tempfile = { workspace = true }
+
+[[test]]
+name = "loom"
+required-features = ["loom"]
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints

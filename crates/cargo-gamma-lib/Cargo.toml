@@ -1,0 +1,125 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+[package]
+name = "cargo-gamma-lib"
+description = "Internal library for cargo-gamma"
+version = "0.1.0"
+readme = "README.md"
+keywords = ["cargo", "mutation-testing", "testing"]
+categories = ["development-tools::testing"]
+
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma-lib"
+
+[package.metadata.docs.rs]
+all-features = true
+
+[package.metadata.ox-gen-readme]
+# This is an implementation detail of `cargo-gamma`; its README is an explicit stability warning.
+disable = true
+
+# Establish the cross-platform CI baseline for this new crate. Raise it as coverage improves.
+[package.metadata.coverage-gate]
+min-lines-percent = 96.8
+
+[features]
+# Exposes the crate's internal modules so that the integration tests in `tests/` can drive them
+# directly. Enabled only by this crate's dev-dependency on itself; never enable it from outside.
+internals = ["dep:tempfile"]
+# Selects the dedicated Loom integration target. The scheduler itself is still activated by
+# `RUSTFLAGS="--cfg loom"` in the repository check.
+loom = []
+
+[dependencies]
+blake3 = { workspace = true, features = ["std"] }
+camino = { workspace = true }
+cargo-gamma-engine = { workspace = true }
+cargo-gamma-process = { workspace = true }
+cargo-gamma-rt = { workspace = true }
+cargo-gamma-unsafe = { workspace = true }
+cargo_metadata = { workspace = true }
+clap = { workspace = true, features = ["std", "derive", "color", "help", "error-context", "usage", "suggestions", "env", "wrap_help"] }
+clap_complete = { workspace = true }
+compact_str = { workspace = true, features = ["serde", "std"] }
+ignore = { workspace = true }
+owo-colors = { workspace = true }
+proc-macro2 = { workspace = true, features = ["span-locations", "proc-macro"] }
+reflink-copy = { workspace = true }
+rustc-hash = { workspace = true, features = ["std"] }
+serde = { workspace = true, features = ["derive", "rc", "std"] }
+serde_json = { workspace = true, features = ["std"] }
+syn = { workspace = true, features = ["full", "parsing", "printing", "visit", "extra-traits", "clone-impls", "proc-macro"] }
+tempfile = { workspace = true, optional = true }
+toml = { workspace = true, features = ["parse", "display", "serde", "std"] }
+toml_edit = { workspace = true, features = ["parse", "display"] }
+walkdir = { workspace = true }
+
+# loom drives the deterministic-scheduler models in `exec::verdict::hubs`, which only compile under
+# `--cfg loom`. Gating the dependency on that cfg keeps it out of every ordinary build and test:
+# `cfg(loom)` is never set unless `RUSTFLAGS="--cfg loom"` is passed, so this resolves to nothing in
+# a normal `cargo build`/`cargo test`. It is declared as a normal (not dev) dependency because cargo
+# only honours a custom `--cfg` from `RUSTFLAGS` for `[target.'cfg(...)'.dependencies]`.
+[target.'cfg(loom)'.dependencies]
+loom = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+bolero = { workspace = true }
+bolero-engine = { workspace = true, features = ["any"] }
+# Only the integration test that pins the proc-macro's hand-copied limit constants against this
+# library's own needs it; it is never used outside `#[cfg(test)]`/`tests/`.
+cargo-gamma-attrs-impl = { workspace = true }
+cargo-gamma-process = { workspace = true, features = ["fault-injection"] }
+tempfile = { workspace = true }
+
+[[test]]
+name = "agreement"
+required-features = ["internals"]
+
+[[test]]
+name = "cli"
+required-features = ["internals"]
+
+[[test]]
+name = "docs"
+required-features = ["internals"]
+
+[[test]]
+name = "gate"
+required-features = ["internals"]
+
+[[test]]
+name = "instrumented_compiles"
+required-features = ["internals"]
+
+[[test]]
+name = "loom"
+required-features = ["loom"]
+
+[[test]]
+name = "regressions"
+required-features = ["internals"]
+
+[[test]]
+name = "schema_conformance"
+required-features = ["internals"]
+
+[[test]]
+name = "session"
+required-features = ["internals"]
+
+[[test]]
+name = "units"
+required-features = ["internals"]
+
+# >>> anvil-managed: anvil-lints
+[lints]
+workspace = true
+# <<< anvil-managed: anvil-lints
