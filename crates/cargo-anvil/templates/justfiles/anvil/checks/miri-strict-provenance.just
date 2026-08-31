@@ -15,7 +15,7 @@ anvil-miri-strict-provenance: anvil-miri-strict-provenance-validate-prereqs anvi
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
     $env:MIRIFLAGS = "-Zmiri-strict-provenance $($env:MIRIFLAGS)".Trim()
     $env:RUSTFLAGS = "--cfg miri_strict_provenance $($env:RUSTFLAGS)".Trim()
-    & cargo '+{{ rust_nightly }}' miri test --all-features --tests @pkg
+    & "{{ just_executable() }}" _anvil-miri-test @pkg
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Install prerequisites for the `anvil-miri-strict-provenance` recipe.

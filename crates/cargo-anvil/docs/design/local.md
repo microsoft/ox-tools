@@ -630,7 +630,28 @@ moves, and the working-tree snapshot only when the tree changes; an unchanged re
 a full cache hit (`anvil-impact: impact set up to date`). To force a recompute, delete
 `target/anvil/impact/`.
 
-### 4.4 Uncommitted changes widen to the full workspace
+### 4.4 Miri artifact concurrency
+
+Miri compiles the selected package scope once, then executes its independent
+libtest artifacts concurrently. `ANVIL_MIRI_JOBS` overrides the default of one
+worker per logical processor and must be a positive integer. The worker count is
+always clamped to the number of discovered artifacts. Memory-load telemetry is
+reported for calibration but does not silently reduce concurrency; use the
+override when a runner needs a lower memory footprint.
+
+Packages whose own test targets are unsuitable or unproductive under Miri can
+declare:
+
+```toml
+[package.metadata.anvil.miri]
+exclude = true
+```
+
+The package can still be compiled as a dependency of another selected package.
+Prefer per-test `cfg_attr(miri, ignore = "...")` or the profile-specific cfgs
+when only individual tests need suppression.
+
+### 4.5 Uncommitted changes widen to the full workspace
 
 cargo-delta scopes on the **committed** diff of `HEAD` against the base ref, so an
 uncommitted change — a crate you are actively editing but have not committed — is invisible
@@ -645,7 +666,7 @@ so CI always gets the scoped, committed-diff result. It is deliberately conserva
 fast — a dirty tree runs everything. Commit to scope by impact, or use `ANVIL_IMPACT=off`
 (which also runs the full workspace, and additionally skips cargo-delta entirely).
 
-### 4.5 Base-ref resolution and failure modes
+### 4.6 Base-ref resolution and failure modes
 
 `anvil-impact` resolves the base ref through `_anvil-base-ref` and computes the committed
 diff of `HEAD` against it. It deliberately **does not** run `git fetch`: mutating git state
