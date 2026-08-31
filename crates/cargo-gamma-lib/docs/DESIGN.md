@@ -24,4 +24,5 @@ verdicts, incremental reuse, reporting, and command dispatch.
 
 The primary public contract is the `cargo gamma` command surface and its
 configuration, reports, diagnostics, and exit codes. The Rust API is an
-implementation detail used by the thin executable crate.
+implementation detail used by the thin executable crate. Its rustdoc is hidden,
+and its hand-written README warns downstream users not to depend on it.

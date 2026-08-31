@@ -25,4 +25,6 @@ identity, mutator selection, and mutant-schema instrumentation.
 ## Stability
 
 The crate is published so `cargo-gamma` can be installed from crates.io. Its
-Rust API is internal and carries no independent compatibility guarantee.
+Rust API is internal and carries no independent compatibility guarantee. Its
+rustdoc is hidden, and its hand-written README warns downstream users not to
+depend on it.

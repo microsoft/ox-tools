@@ -43,12 +43,22 @@ const GROUP_LIMIT: usize = 5;
 /// baseline does not pass — a failing baseline means every comparison in the run has nothing to
 /// compare against.
 pub fn run(survey: &Survey, selection: &Selection, config: &Config, events: &mut impl Events) -> Result<Measured> {
+    run_with_locks(survey, selection, config, events, None)
+}
+
+pub(crate) fn run_with_locks(
+    survey: &Survey,
+    selection: &Selection,
+    config: &Config,
+    events: &mut impl Events,
+    locks: Option<super::workspace::CacheLocks>,
+) -> Result<Measured> {
     let Measured {
         mut plan,
         built,
         stuck,
         dropped,
-    } = measure(survey, selection, config, events)?;
+    } = measure_with_locks(survey, selection, config, events, locks)?;
 
     // Nothing was live, so nothing was copied, built or measured. The plan still describes every
     // mutant that was found and why each one is not being run, which is what the caller reports.
@@ -456,6 +466,16 @@ struct Cleared {
 /// made to succeed, or the baseline does not pass — a failing baseline means every comparison in
 /// the run has nothing to compare against.
 pub fn measure(survey: &Survey, selection: &Selection, config: &Config, events: &mut impl Events) -> Result<Measured> {
+    measure_with_locks(survey, selection, config, events, None)
+}
+
+fn measure_with_locks(
+    survey: &Survey,
+    selection: &Selection,
+    config: &Config,
+    events: &mut impl Events,
+    locks: Option<super::workspace::CacheLocks>,
+) -> Result<Measured> {
     let started = Instant::now();
 
     let (memory, unbounded) = admit_memory_control(config)?;
@@ -481,7 +501,7 @@ pub fn measure(survey: &Survey, selection: &Selection, config: &Config, events: 
     // workspace can spend as much duplicating itself as compiling, and the aggregate cannot say
     // which.
     let copy_started = Instant::now();
-    let mut work = Workspace::prepare(&plan.root, config, events)?;
+    let mut work = Workspace::prepare_with_locks(&plan.root, config, events, locks)?;
     let copy = copy_started.elapsed();
 
     // Settled once, before anything is spawned, so the baseline and the sweep cannot disagree about

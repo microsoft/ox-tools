@@ -19,6 +19,10 @@ repository = "https://github.com/microsoft/ox-tools/tree/main/crates/cargo-gamma
 [package.metadata.docs.rs]
 all-features = true
 
+[package.metadata.ox-gen-readme]
+# This is an implementation detail of `cargo-gamma`; its README is an explicit stability warning.
+disable = true
+
 # Establish the cross-platform CI baseline for this new crate. Raise it as coverage improves.
 [package.metadata.coverage-gate]
 min-lines-percent = 99.2
@@ -36,6 +40,7 @@ syn = { workspace = true, features = ["full", "parsing", "printing", "visit", "e
 
 [dev-dependencies]
 bolero = { workspace = true }
+bolero-engine = { workspace = true, features = ["any"] }
 walkdir = { workspace = true }
 
 # >>> anvil-managed: anvil-lints

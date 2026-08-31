@@ -193,7 +193,7 @@ is supplied.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-heather">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjJhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbtpJMWoUHDG0bJGvg_sbiCH8b66-weBRIetcbfF7fD5ccBythZIGDbWNhcmdvLWhlYXRoZXJlMC4zLjBtY2FyZ29faGVhdGhlcg
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbtpJMWoUHDG0bJGvg_sbiCH8b66-weBRIetcbfF7fD5ccBythZIGDbWNhcmdvLWhlYXRoZXJlMC4zLjBtY2FyZ29faGVhdGhlcg
  [__link0]: https://doc.rust-lang.org/stable/std/?search=io::Read
  [__link1]: https://doc.rust-lang.org/stable/std/?search=io::Write
  [__link10]: https://docs.rs/cargo-heather/0.3.0/cargo_heather/?search=FileKind::detect

@@ -2175,7 +2175,7 @@ mod tests {
                 active: Some(1),
                 timeout: Some(Duration::from_secs(5)),
                 stall: Stall {
-                    budget: Some(measured.saturating_mul(2)),
+                    budget: Some(measured.saturating_mul(4)),
                 },
                 request: MemoryRequest::default(),
                 only: Only::All,

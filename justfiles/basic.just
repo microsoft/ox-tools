@@ -98,12 +98,10 @@ miri-example EXAMPLE_NAME:
     }
 
 # Update README.md files for all packages.
-readme:
-    cargo workspaces exec --ignore-private cargo doc2readme --lib --template ../README.j2
+readme: (_anvil-readme "generate")
 
 # Check that README.md files for all packages are up to date.
-readme-check:
-    cargo workspaces exec --ignore-private cargo doc2readme --check --lib --template ../README.j2
+readme-check: (_anvil-readme "check")
 
 # Runs unit and integration tests.
 [script]

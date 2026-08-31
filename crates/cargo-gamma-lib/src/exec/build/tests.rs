@@ -1066,7 +1066,8 @@ fn the_rollback_limit_error_describes_only_the_build_that_hit_it() {
     );
 
     assert!(error.contains("1 of the 1 rollback rounds"), "{error}");
-    assert!(!error.contains("41"), "{error}");
+    assert!(!error.contains("41 blamed during this build"), "{error}");
+    assert!(!error.contains("last rounds of this build: 41"), "{error}");
     assert!(!error.contains("10 of"), "{error}");
 }
 

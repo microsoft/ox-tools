@@ -500,7 +500,7 @@ impl<'ast> Visit<'ast> for Defaults {
         // because the alias's target is what names the error either way.
         if name_of(&node.ty).as_deref() == Some("Result") {
             let defaulted = node.generics.params.iter().find_map(|param| match param {
-                GenericParam::Type(ty) => ty.default.as_ref().and_then(|(_, default)| name_of(default)),
+                GenericParam::Type(ty) => ty.default.as_ref().and_then(|(_equals, ty)| name_of(ty)),
                 _ => None,
             });
 
