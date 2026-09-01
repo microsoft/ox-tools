@@ -901,6 +901,41 @@ Recommended root workflow shape:
 - All cargo-tool installs done by the catalog setup recipes use `--locked` (with
   `cargo install` or `cargo binstall` depending on `installer`).
 
+### Action pinning
+
+Third-party actions are pinned in one of two ways, and the split is deliberate rather
+than inconsistent.
+
+Actions whose publisher has enabled GitHub [immutable releases][immutable] are pinned
+by tag. In the generated workflows that is, at the time of writing,
+`codecov/codecov-action@v7.0.0`, `marocchino/sticky-pull-request-comment@v3.0.5` and
+`cargo-bins/cargo-binstall@v1.21.0`; a repository's own hand-maintained workflows apply
+the same rule to the actions they use, so the list a reader sees there may be longer.
+An immutable release locks its Git tag to one commit: the tag cannot be moved, and
+cannot be deleted while the release exists. The tag name cannot be reused even after
+the repository is deleted and recreated, and publishing generates a release
+attestation covering the tag, commit SHA and assets. The tag is a stable identifier
+under those rules, and unlike a SHA it stays readable in the diff when the pin is
+bumped. Generated files carry a
+`# immutable release, the tag cannot be moved` comment at each such pin, so the reason
+a tag appears where a SHA is otherwise expected is visible at the use site.
+
+Every other action is pinned by commit SHA with the version in a trailing comment, for
+example `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`.
+
+Immutability is a property of one published release, not a standing guarantee about
+the publisher. When bumping a tag-pinned action, confirm the new release still reports
+it:
+
+```console
+$ gh api repos/codecov/codecov-action/releases/tags/v7.0.0 --jq .immutable
+true
+```
+
+If that returns `false`, or the release is missing, pin the commit SHA instead.
+
+[immutable]: https://docs.github.com/en/code-security/concepts/supply-chain-security/immutable-releases
+
 ## 10. Coverage upload
 
 After `pr-test` (and `scheduled-test`) runs the `anvil-llvm-cov` recipe, the reusable
