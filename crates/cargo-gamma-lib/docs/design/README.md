@@ -33,6 +33,16 @@ configuration, reports, diagnostics, and exit codes. The Rust API is an
 implementation detail used by the thin executable crate. Its rustdoc is hidden,
 and its hand-written README warns downstream users not to depend on it.
 
+### Redirected cache security
+
+On Unix, cargo-gamma creates a previously absent redirected cache with
+permissions limited to the invoking user, independently of the process umask.
+It does not change permissions on a pre-existing directory: the directory and
+its physical ancestry must already be owned by the invoking user or root and
+must not permit another user to replace entries. Sticky shared ancestors such
+as `/tmp` are accepted, but the cache directory itself must not be writable by
+group or other.
+
 ## Concurrency model checking
 
 The dedicated Loom target verifies race-sensitive reader accounting without a

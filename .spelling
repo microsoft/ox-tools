@@ -42,6 +42,7 @@ autodetects
 memoizes
 Tarjan
 uncached
+umask
 B6
 backend
 backends
