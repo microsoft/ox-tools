@@ -35,7 +35,7 @@ _anvil-miri-test test_filter *package_args:
     $testFilter = '{{ replace(test_filter, "'", "''") }}'
     $packageArgs = @('{{ replace(package_args, "'", "''") }}' -split '\s+' | Where-Object { $_ })
 
-    $metadataJson = & cargo metadata --no-deps --format-version 1
+    $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil miri: cargo metadata failed'
         exit $LASTEXITCODE
@@ -98,7 +98,7 @@ _anvil-miri-test test_filter *package_args:
         $artifactManifest = Join-Path $logRoot 'artifacts.jsonl'
         $toolchain = '+{{ rust_nightly }}'
         $filter = @(if ($testFilter) { '--'; $testFilter })
-        & cargo $toolchain miri test --all-features --tests --no-run --message-format=json-render-diagnostics @packageArgs @filter 1> $artifactManifest
+        & cargo '+{{ rust_nightly }}' miri test --all-features --tests --no-run --message-format=json-render-diagnostics @packageArgs @filter 1> $artifactManifest
         $buildExitCode = $LASTEXITCODE
 
         $artifacts = [System.Collections.Generic.List[object]]::new()
@@ -138,7 +138,7 @@ _anvil-miri-test test_filter *package_args:
             exit 0
         }
 
-        $sysrootOutput = @(& cargo $toolchain miri setup --print-sysroot)
+        $sysrootOutput = @(& cargo '+{{ rust_nightly }}' miri setup --print-sysroot)
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
         if ($sysrootOutput.Count -eq 0 -or -not $sysrootOutput[-1]) {
             Write-Error 'anvil miri: cargo miri setup did not report a sysroot'
