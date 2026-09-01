@@ -250,7 +250,12 @@ _anvil-resolve-stable action="install":
 
     function Test-ToolchainInstalled([string] $toolchain) {
         $installed = Get-InstalledToolchains
-        return (($installed -join "`n") -match "(?m)^$([regex]::Escape($toolchain))(?:-|$)")
+        $pattern = if ($toolchain -match '^(\d+)\.(\d+)$') {
+            "(?m)^$([regex]::Escape($Matches[1]))\.$([regex]::Escape($Matches[2]))(?:\.0)?(?:-|$)"
+        } else {
+            "(?m)^$([regex]::Escape($toolchain))(?:-|$)"
+        }
+        return (($installed -join "`n") -match $pattern)
     }
 
     function Assert-WorkspaceMsrvCompatibility {
@@ -470,7 +475,7 @@ _install-tool name version installer source_prereq="": anvil-toolchain-stable-in
 # _check-tool: verify a cargo subcommand is installed at or above the
 # pinned version. Errors with an install hint on missing or too-old.
 [script("pwsh", "-NoProfile")]
-_check-tool name version:
+_check-tool name version: anvil-tool-rustc-validate-prereqs
     $ErrorActionPreference = 'Stop'
     $name = '{{name}}'
     $version = '{{version}}'

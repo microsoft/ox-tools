@@ -765,6 +765,10 @@ mod tests {
             !checks.contains("validate-prereqs: anvil-toolchain-stable-install"),
             "validate-prereqs recipes must never install stable"
         );
+        assert!(
+            TOOLS_JUST.contains("_check-tool name version: anvil-tool-rustc-validate-prereqs"),
+            "Cargo-tool validation must confirm the stable selection without provisioning it"
+        );
 
         let groups = all_group_bodies();
         assert!(
@@ -1448,6 +1452,24 @@ mod tests {
             assert!(
                 !rustup_calls.contains("toolchain install"),
                 "installed MSRV must not be reinstalled"
+            );
+            assert!(cargo_calls.is_empty(), "public MSRV availability is checked through rustup");
+
+            let (output, rustup_calls, cargo_calls) = run_install(
+                temp.path(),
+                None,
+                "nightly-2026-01-01-x86_64-pc-windows-msvc\n1.93.0-x86_64-pc-windows-msvc",
+                0,
+            );
+            assert!(
+                output.status.success(),
+                "a patch-normalized installed MSRV must satisfy an unpatched selection: {}",
+                normalized_diagnostic(&output)
+            );
+            assert!(rustup_calls.contains("toolchain list"));
+            assert!(
+                !rustup_calls.contains("toolchain install"),
+                "an equivalent patch-normalized MSRV must not be reinstalled"
             );
             assert!(cargo_calls.is_empty(), "public MSRV availability is checked through rustup");
 
