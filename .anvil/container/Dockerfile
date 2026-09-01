@@ -75,7 +75,6 @@ RUN curl -fsSLo /tmp/cargo-binstall.tgz \
     && tar -xzf /tmp/cargo-binstall.tgz -C "${CARGO_HOME}/bin" cargo-binstall \
     && chmod 755 "${CARGO_HOME}/bin/cargo-binstall" \
     && rm /tmp/cargo-binstall.tgz
-
 # <<< anvil-managed: anvil-container-tools
 
 # >>> anvil-managed: anvil-container-setup

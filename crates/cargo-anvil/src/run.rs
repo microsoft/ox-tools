@@ -1622,6 +1622,7 @@ mod tests {
             ".pipelines/anvil/steps/advisory-comments.yml",
             ".pipelines/anvil/steps/pr-fast.yml",
             ".pipelines/anvil/steps/pr-test.yml",
+            ".pipelines/anvil/steps/pr-msrv.yml",
             ".pipelines/anvil/steps/pr-runtime-analysis.yml",
             ".pipelines/anvil/steps/pr-mutants.yml",
             ".pipelines/anvil/steps/scheduled-test.yml",

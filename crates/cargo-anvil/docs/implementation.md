@@ -44,6 +44,59 @@ The canonical recipe owns this mapping, baseline availability checks, and
 per-package execution. Focused contract tests cover every publication form,
 while generated copies and snapshots detect drift from the template.
 
+## Stable toolchain selection and setup
+
+The stable selector has two canonical implementation sites because it must run
+before Cargo can parse the root manifest. `versions.just` owns the lazy
+per-command argument expression; `tools.just` owns provisioning, workspace-MSRV
+validation, and the dedicated MSRV-test selection. Their small line-oriented
+root-manifest scanners intentionally duplicate the same accepted syntax and
+`workspace.package`-before-`package` precedence. Changes to one scanner must
+update the other and their focused resolver tests in the same patch.
+
+Both implementations enforce the same ordinary-check decision table:
+
+1. a nonempty caller `RUSTUP_TOOLCHAIN` emits no explicit argument;
+2. the presence of either root toolchain-file spelling emits no explicit
+   argument;
+3. otherwise the root MSRV emits `+<MSRV>`;
+4. absence of every source fails.
+
+The empty argument in the first two cases is load-bearing. It preserves
+rustup's native environment and working-directory-sensitive toolchain-file
+behavior, including profiles, components, targets, and path channels, without
+Anvil parsing or replaying suppressed options.
+
+`_anvil-resolve-stable` owns the setup actions. The optional
+`ANVIL_MSRV_TOOLCHAIN` maps only the dedicated MSRV run and is rejected as an
+unpaired stable configuration when no ordinary stable selector exists.
+Workspace-MSRV validation is read-only: it confirms rustup is present and the
+exact root-MSRV toolchain is installed before invoking metadata, so Cargo
+cannot auto-install a compiler during validation. Installation uses the same
+anchored toolchain-list match and emits a dedicated rustup bootstrap diagnostic
+when the executable is absent.
+
+Setup dependencies, rather than the cloud templates, route provisioning.
+Cargo-tool installers, default-component installers, and stable-only setup
+leaves depend on `anvil-toolchain-stable-install`; group and tier fan-out lets
+Just deduplicate that prerequisite. GitHub and ADO setup restore Cargo home,
+bootstrap Just, and invoke the selected catalog setup recipe. Neither backend
+adds a duplicate standalone stable-provisioning step.
+
+Cloud Cargo-home keys include `.cargo/config.toml`, both repository
+toolchain-file spellings, and `versions.just`. They deliberately exclude
+`Cargo.toml`, `Cargo.lock`, and the resolved compiler version because cached
+Cargo-installed tools do not depend on routine workspace dependency changes,
+while toolchain files and catalog pins define the cache-pruning boundary.
+Rustup toolchains live outside Cargo home.
+
+Canonical recipes and workflow fragments live under `templates/`. The artifact
+registry embeds those files, renderer tests pin conditional substitutions such
+as ADO's `pr-fast`-only title lookup, and snapshot tests pin complete emitted
+backends. After a canonical change, run cargo-anvil against this repository to
+refresh owned mirrors and `.anvil.lock`; regenerate crate README content from
+`src/lib.rs`, never by editing `README.md`.
+
 ## Impact scoping and tier routing
 
 Impact scoping lets a clean PR run each check against only the cargo packages its committed

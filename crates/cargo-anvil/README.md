@@ -77,6 +77,14 @@ Flags:
 `catalog:` checksum — a `sha256` over the whole compiled-in catalog — so
 two builds at the same version but different catalogs are distinguishable.
 
+Before running ordinary checks, provide a deterministic Rust selection:
+a caller-set `RUSTUP_TOOLCHAIN`, either root `rust-toolchain` file spelling,
+or a root `[workspace.package].rust-version` / `[package].rust-version`.
+Anvil passes no explicit selector for the environment or file cases so
+rustup handles them natively; only the root MSRV becomes `+<version>`.
+Repositories with none of these sources fail instead of inheriting the
+runner’s ambient compiler.
+
 ### Daily driver
 
 After the first run, your daily workflow is plain `just`:
@@ -266,11 +274,11 @@ the tables below map each check to the group that runs it, link each
 check to its tool’s documentation, and note anything anvil-specific.
 
 **PR tier** (`anvil-pr`) — runs on every pull request, impact-scoped
-both locally and in cloud workflows. Two jobs: `pr-fast`, and `pr-slow` (whose three
-sub-groups run sequentially within the one job per OS leg):
+both locally and in cloud workflows. `pr-fast` is one job, while the
+`pr-slow` groups run as independent parallel jobs per OS leg:
 
 <table>
-  <thead><tr><th>Job</th><th>Sub-group</th><th>Check</th><th>Notes</th></tr></thead>
+  <thead><tr><th>Umbrella</th><th>Group</th><th>Check</th><th>Notes</th></tr></thead>
   <tbody>
     <tr><td rowspan="15"><code>pr-fast</code></td><td rowspan="15">—</td><td><a href="https://rust-lang.github.io/rustfmt/">fmt</a></td><td>predefined configuration with nightly features</td></tr>
     <tr><td><a href="https://doc.rust-lang.org/clippy/">clippy</a></td><td>predefined lints</td></tr>
@@ -287,9 +295,10 @@ sub-groups run sequentially within the one job per OS leg):
     <tr><td><a href="https://crates.io/crates/cargo-udeps">udeps</a></td><td>runs twice: with and without <code>--all-targets</code></td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-semver-checks">semver-check</a></td><td>findings and inconclusive comparisons are advisory (posts a PR comment); Anvil preflight failures remain enforcing</td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-check-external-types">external-types</a></td><td></td></tr>
-    <tr><td rowspan="8"><code>pr-slow</code></td><td rowspan="3"><code>pr-test</code></td><td><a href="https://crates.io/crates/cargo-llvm-cov">llvm-cov</a></td><td>dual feature-config; gated by <a href="https://crates.io/crates/cargo-coverage-gate">cargo-coverage-gate</a></td></tr>
+    <tr><td rowspan="9"><code>pr-slow</code></td><td rowspan="3"><code>pr-test</code></td><td><a href="https://crates.io/crates/cargo-llvm-cov">llvm-cov</a></td><td>dual feature-config; gated by <a href="https://crates.io/crates/cargo-coverage-gate">cargo-coverage-gate</a></td></tr>
     <tr><td><a href="https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html">doc-test</a></td><td>runs both feature configs</td></tr>
     <tr><td><a href="https://doc.rust-lang.org/cargo/commands/cargo-build.html">examples</a></td><td>compile-only</td></tr>
+    <tr><td><code>pr-msrv</code></td><td>msrv-test</td><td>dual feature-config, all-target tests under the declared MSRV</td></tr>
     <tr><td rowspan="4"><code>pr-runtime-analysis</code></td><td><a href="https://github.com/rust-lang/miri">miri</a></td><td>libtest, not nextest</td></tr>
     <tr><td><a href="https://crates.io/crates/cargo-careful">careful</a></td><td>self-cleans on a toolchain bump</td></tr>
     <tr><td><a href="https://crates.io/crates/loom">loom</a></td><td>opt-in targets only</td></tr>
@@ -482,7 +491,7 @@ And `docs/verification.md` for the continuous-validation strategy.
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQb0-jr0JbRf5oblTuBxsHXMUIbSWUr86twfxQbfGu3X0VHoephZIGDa2NhcmdvLWFudmlsZTAuNi4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQbFhzZ8rzWNNYbuRaDSGWynFgbH4PMdoT7GNcbVwNPtPjAhvFhYvRhcoQbLvVGTNtetQUbnp9vX0Ew7_gbkZEyxfXZXyMbltL72AXa-o1hZIGDa2NhcmdvLWFudmlsZTAuNi4wa2NhcmdvX2Fudmls
  [__link0]: https://crates.io/crates/cargo-delta
  [__link1]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=artifacts::container
  [__link10]: https://docs.rs/cargo-anvil/0.6.0/cargo_anvil/?search=artifacts
