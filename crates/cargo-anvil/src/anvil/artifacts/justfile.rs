@@ -870,7 +870,7 @@ mod tests {
     mod stable_toolchain_resolver_tests {
         #[cfg(unix)]
         use std::os::unix::fs::PermissionsExt;
-        use std::path::Path;
+        use std::path::{Path, PathBuf};
         use std::process::{Command, Output};
         use std::{env, fs};
 
@@ -928,8 +928,16 @@ mod tests {
             Command::new("just").arg("--version").output().is_ok() && Command::new("pwsh").arg("--version").output().is_ok()
         }
 
+        fn tool_path(name: &str) -> Option<PathBuf> {
+            let executable = format!("{name}{}", env::consts::EXE_SUFFIX);
+            env::split_paths(&env::var_os("PATH").unwrap_or_default())
+                .map(|directory| directory.join(&executable))
+                .find(|candidate| candidate.is_file())
+        }
+
         fn command(root: &Path) -> Command {
-            let mut command = Command::new("just");
+            let just = tool_path("just").expect("resolver tests call command only after tools_available confirms Just is on PATH");
+            let mut command = Command::new(just);
             command
                 .args(["--justfile"])
                 .arg(root.join("Justfile"))
