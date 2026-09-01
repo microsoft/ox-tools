@@ -45,7 +45,7 @@ repo/
 │   │                       `*-validate-prereqs` (anvil-pr-fast, anvil-pr-test,
 │   │                       anvil-pr-msrv, anvil-pr-runtime-analysis, anvil-pr-mutants,
 │   │                       anvil-scheduled-test, …). `anvil-pr-slow` is a
-│   │                       convenience umbrella over the four pr-slow sub-groups.
+│   │                       convenience umbrella over the pr-slow groups.
 │   ├── container.just      containerized execution (`anvil-container`). See containers.md.
 │   ├── tiers.just          tier aggregators (anvil-pr, anvil-scheduled, anvil-full).
 │   ├── tools.just          tool/component/toolchain install + validate-prereqs recipes,
@@ -132,10 +132,10 @@ namespaces are kept disjoint by naming choice: no check is named `<tier>-<group>
 any tier × group combination (e.g. the coverage-instrumented test check is named
 `llvm-cov`, not `test`, so that group names like `anvil-pr-test` unambiguously refer to a group recipe).
 
-The `pr-slow` work is split into four independent cloud-workflow-visible sub-groups
+The `pr-slow` work is split into independent cloud-workflow-visible groups
 (`pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-mutants`) so they run as parallel cloud-workflow jobs/stages.
 A convenience umbrella `anvil-pr-slow` recipe is also provided for local
-use; it invokes the four sub-recipes sequentially. `pr-mutants` (mutants) is
+use; it invokes those groups sequentially. `pr-mutants` (mutants) is
 diff-scoped against the PR base; `scheduled-exhaustive` runs the
 full-workspace mutants recipe:
 
@@ -394,58 +394,33 @@ ambient stable toolchain. The selection order is:
 3. The root package or `[workspace.package]` `rust-version`, treated as the
    repository MSRV.
 
-There is no runner-default fallback. A repository with neither a selecting toolchain
+There is no runner-default fallback. A repository with neither a root toolchain
 file nor a root MSRV fails with an actionable setup error rather than inheriting a
 compiler that can change with the machine image.
 
-This is a breaking migration for adopters that previously relied on the runner's
-ambient stable compiler. Before regenerating, a repository with one compatibility
-floor should declare root `[workspace.package].rust-version` (or package
+Repositories with one compatibility floor should declare root
+`[workspace.package].rust-version` (or package
 `rust-version`) and have every workspace member inherit it or declare an equal
-or lower minimum. A repository with missing package MSRVs, or a member minimum
-newer than the root, must instead correct the root floor or add a root toolchain
-file to select the single compiler used by catalog checks. Callers may set
-`RUSTUP_TOOLCHAIN` to an already provisioned toolchain rather than adding a
-repository compiler pin. Setting `ANVIL_MSRV_TOOLCHAIN` without that stable
-override (and without a selecting repository toolchain file) is rejected as
-incomplete configuration. An empty root toolchain file is invalid and produces
-an actionable error.
+or lower minimum. Repositories with missing package MSRVs, or a member minimum
+newer than the root, correct the root floor or add a root toolchain file to
+select one compiler for catalog checks. Callers can instead set
+`RUSTUP_TOOLCHAIN` to an already provisioned toolchain.
 
-`versions.just` holds the selector as the lazy, non-exported
-`_anvil_stable_toolchain_args` value. Its value is a multiline PowerShell array
-expression, not a command for Just's expression-time `shell()` function. Just
-interpolates the expression into an existing PowerShell recipe. A
-caller-provided `RUSTUP_TOOLCHAIN` or repository-root toolchain file evaluates
-to an empty array because rustup already consumes those inputs natively. Only
-the synthesized root MSRV fallback evaluates to one `+toolchain` string.
-`RUSTUP_TOOLCHAIN` is an input to selection, never a globally exported output.
-The expression embeds an escaped PowerShell literal produced from
-`justfile_directory()`, matching the setup resolver's repository root.
-Recipe-local `Set-Location` calls and Just's `--working-directory` option
-therefore cannot redirect selection to a nested manifest.
+A caller-provided `RUSTUP_TOOLCHAIN` and the presence of either root
+toolchain-file spelling both produce no explicit `+toolchain` argument. The
+environment value is inherited unchanged. In the file case, rustup owns all
+parsing and applies its native lookup from each Cargo or Rust command's actual
+working directory; Anvil does not parse the root file, replay options from it,
+or promise isolation from nested toolchain files. Only the root MSRV fallback
+produces an explicit `+<version>` argument.
 
-Each stable recipe executes Cargo or Rust directly in its current PowerShell
-recipe process, for example
-`& cargo {{_anvil_stable_toolchain_args}} clippy ...`. Repository toolchain-file
-provisioning runs `rustc` from the repository root, so rustup natively owns the
-file's channel, path, profile, components, and targets. Default Clippy and
-rustfmt setup likewise lets native selectors choose the component target,
-adding `--toolchain` only for the synthesized MSRV fallback. Nightly and
-MSRV-specific checks keep their own explicit `+toolchain` arguments. No nested
-Just wrapper sits on the main Cargo/Rust command path. Selection has no
-OS-specific branch or host-shell quoting and does not change the adopter's
-configured shell. Unrelated recipes and raw commands retain the caller's normal
-environment.
-
-The public setup primitive `anvil-toolchain-stable-install` owns stable
-provisioning. Rustup processes repository toolchain files directly; the private
-`_anvil-resolve-stable` implementation handles MSRV installation and an
-optional separately provisioned MSRV selector. Leaf setup recipes reach the primitive directly or through
-the shared Cargo-tool/default-component installers; group, tier, and
-`anvil-setup` recipes inherit and deduplicate that dependency. Workflows and
-container construction invoke setup operations rather than orchestrating
-`_anvil-resolve-stable` actions. The helper does not wrap a Cargo/Rust command
-that performs a check, and no standalone script is involved.
+Setup ensures that the selected stable compiler is available before stable
+Cargo or Rust use. Repository toolchain files are processed by rustup; a
+missing root-MSRV toolchain is installed explicitly. Prerequisite validation is
+read-only: before running workspace metadata under the root MSRV, it requires
+rustup and verifies that exact toolchain is already installed. A missing
+toolchain fails with the stable-setup recipe as the corrective action instead
+of allowing Cargo to auto-install it.
 
 When selection falls back to the root MSRV, Anvil reads the root manifest just
 far enough to bootstrap that compiler, then prerequisite validation reads
@@ -459,20 +434,21 @@ correct the declarations or choose a single catalog toolchain explicitly with
 a selecting toolchain file. Anvil does not build a per-package toolchain matrix
 for this uncommon case.
 
+Cargo-installed tools and stable analyzers use this same repository-selected
+compiler. Anvil does not provision a separate tooling compiler; checks that
+require nightly continue to use their catalog-pinned nightly.
+
 When the root manifest declares an MSRV, `anvil-msrv-test` runs affected-package
-unit and integration tests under that compiler with all features and with default
-features. A selecting toolchain file does not suppress this minimum-version run.
-`ANVIL_MSRV_TOOLCHAIN` optionally maps the declared MSRV to a separately
-provisioned toolchain. Without a root MSRV the recipe is a no-op.
+`cargo test --all-targets` in all-features and default-features configurations
+under that compiler. This includes library and binary unit tests, integration
+tests, examples, and benches as test targets. It does not add a
+`--no-default-features` pass. A root toolchain file does not suppress this
+minimum-version run. Without a root MSRV the recipe is a no-op.
 
 `anvil-tool-rustc-validate-prereqs` verifies that `rustc` is available and
-enforces the workspace MSRV compatibility rule. Stable setup separately
-provisions the selected compiler. Per-check toolchain requirements (for
-example, miri, careful, and udeps
-need nightly) remain enforced by the matching
-`anvil-toolchain-<name>-validate-prereqs` recipe. Explicit `cargo +toolchain`
-arguments retain rustup's higher precedence, so these checks continue to use the
-catalog's dated nightly pins.
+enforces the workspace MSRV compatibility rule. Per-check toolchain
+requirements (for example, miri, careful, and udeps need nightly) remain
+enforced by their matching prerequisite validation.
 
 ### 3.6 Nightly pinning
 
@@ -638,7 +614,7 @@ dependency. This is exactly how the **scheduled** and **full** tiers stay full-w
 `ANVIL_IMPACT=off` before invoking the private `_anvil-<tier>` recipe, so the whole
 dependency tree runs unscoped. The export lives in the wrapper because a
 dependency-only tier recipe cannot set env for its own dependencies — they run before its
-body. The four scheduled *groups* (`anvil-scheduled-test`, …) wrap the same way, so a
+body. The scheduled *groups* (`anvil-scheduled-test`, …) wrap the same way, so a
 scheduled group invoked directly is full-workspace too.
 
 `ANVIL_IMPACT` is a strict tri-state — `off`, `consume`, or unset. Any other value makes

@@ -108,26 +108,26 @@ flowchart LR
 
 (Tier nodes are the user-facing entry points; group nodes are the unit of cloud
 workflows parallelization; check nodes are the individual `anvil-<check>` recipes.
-The four `pr-slow` workloads run as parallel cloud-workflow jobs/stages rather
-than sequentially. Locally, `just anvil-pr-slow` invokes the four sub-recipes in
-order, and `just anvil` is an alias for `just anvil-pr`.)
+The groups collected by the `pr-slow` umbrella run as parallel cloud-workflow
+jobs/stages. Locally, `just anvil-pr-slow` invokes those groups in order, and
+`just anvil` is an alias for `just anvil-pr`.)
 
-### PR tier (5 groups)
+### PR tier
 
 | Group              | OS scope                              | Purpose                                                                                                              |
 |--------------------|---------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | `pr-fast`          | Linux x86_64 + Windows x86_64 + Linux aarch64 + Windows aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | All static analysis: clippy, `udeps`, `semver-check`, `external-types`, plus the text/metadata checks (fmt, license-headers, ...). Cross-OS because clippy, doc-build, udeps, semver-check, and external-types all compile per host target. Text/metadata checks run on every leg too; the redundancy cost is negligible compared to a separate job's setup overhead. |
 | `pr-test`         | Same default as `pr-fast`             | Tests + coverage: `llvm-cov` (instrumented `nextest`), `doc-test`, `examples`. Coverage is uploaded once from the canonical x86_64 Linux leg. |
-| `pr-msrv`         | Same default as `pr-test`             | Affected-package unit and integration tests under the declared MSRV, with all features and default features. The recipe is a no-op when no root MSRV is declared. |
+| `pr-msrv`         | Same default as `pr-test`             | Affected-package all-target tests under the declared MSRV, in all-features and default-features configurations. The recipe is a no-op when no root MSRV is declared. |
 | `pr-runtime-analysis`         | Same default as `pr-fast`             | Stricter-runtime correctness: `miri`, `careful`, `loom` (concurrency model checking), `bolero` (short-duration fuzzing smoke). Impact-scoped to the affected set so wall-clock is proportional to the PR's blast radius; the cheap checks (loom/bolero) self-skip when no affected crate ships their harness. |
 | `pr-mutants`         | Linux x86_64 + Windows x86_64 + Linux aarch64 (GH) / Linux x86_64 + Windows x86_64 (ADO) | Diff-scoped mutation testing (`mutants --in-diff`). The recipe self-skips on `aarch64-pc-windows-msvc` (cargo-mutants doesn't build there), so the GH windows-arm leg is a no-op rather than a job failure. |
 
-The four `pr-slow*` groups are independent: failures in `pr-test` don't block
+The `pr-slow` groups are independent: failures in `pr-test` don't block
 `pr-msrv`, `pr-runtime-analysis`, or `pr-mutants`, and overall PR wall-clock is
 their maximum rather than their sum. Locally, `just anvil-pr-slow` is an umbrella
-recipe that runs all four sub-recipes sequentially.
+recipe that invokes those groups sequentially.
 
-### scheduled tier (4 groups)
+### scheduled tier
 
 | Group                | OS scope                  | Purpose                                                                                                                                |
 |----------------------|---------------------------|----------------------------------------------------------------------------------------------------------------------------------------|
@@ -148,7 +148,7 @@ backend-specific knobs ([github.md §4](./github.md#4-owned-reusable-workflows) 
 the per-leg runner-label inputs and forking the workflow when the matrix shape itself
 needs to change, [ado.md §4](./ado.md#4-owned-stages-templates) for
 `linuxPool`/`windowsPool`).
-Locally there is no OS matrix; `just anvil-pr-slow` (the umbrella recipe) runs the four sub-recipes in sequence against whatever OS the
+Locally there is no OS matrix; `just anvil-pr-slow` (the umbrella recipe) invokes its groups in sequence against whatever OS the
 developer is on. See [README.md §8.3](./README.md#83-cross-os-test-matrices) for the
 overall rationale.
 
@@ -164,19 +164,13 @@ The cell format is `cargo invocation (short rationale)`. "Source" cites the surv
 that provided the strongest version of the check.
 
 Invocations shown without a pinned nightly or MSRV use the selected stable
-compiler. Their generated PowerShell recipes invoke Cargo directly with the
-lazy optional stable argument. Caller-provided `RUSTUP_TOOLCHAIN` and a
-repository-root toolchain file remain native rustup inputs and produce no
-argument; only the root MSRV fallback produces an explicit `+toolchain`. The
-shared inline PowerShell array expression evaluates in that same recipe process
-without a host-OS branch. Its repository root is fixed by
-`justfile_directory()`, so checks that enter crate directories retain the same
-selection as setup. They do not route the main command through a nested Just
-recipe.
-Their paired setup recipes reach `anvil-toolchain-stable-install` directly or
-through the shared Cargo-tool/default-component installer before any stable
-command runs. Paired `*-validate-prereqs` recipes remain read-only and never
-depend on installation.
+compiler. Caller-provided `RUSTUP_TOOLCHAIN` remains a native rustup input and
+is inherited unchanged by child commands. The presence of either root
+toolchain-file spelling suppresses an explicit selector so rustup can process
+the file natively at each command's working directory. Only the root MSRV
+fallback produces an explicit `+toolchain`; with no source, the command fails.
+Setup makes the selected compiler available before stable Cargo or Rust runs,
+while paired prerequisite validation remains read-only.
 
 ### `pr-fast`
 
@@ -198,12 +192,12 @@ depend on installation.
 | `semver-check`                 | `cargo semver-checks --baseline-rev <baseline>` per affected publishable library crate. Crates with `publish = false` and bin-only crates are skipped. The PR target is the baseline. Exit 100 is a completed check with deny-level findings; exit 101 or another nonzero status means the comparison was inconclusive. Both outcomes write `target/anvil/comments/semver.md` and remain advisory, matching the repository's native `semver` job (`continue-on-error: true`). Proven rename and bin→lib transitions with no comparable baseline, and dependencies proven to be yanked only in the checked-out baseline tree, are skipped without a comment. Anvil preflight failures such as invalid current-workspace metadata or an unavailable baseline ref still fail because the recipe cannot establish what to compare. | oxidizer-github |
 | `external-types`               | `cargo +<catalog-nightly-rustdoc-schema> check-external-types --manifest-path` per library crate (per-manifest because the tool has no `--workspace`/`--package`; bin-only crates have no public API surface and are skipped). Setup installs the catalog version but validation accepts newer installed tools. The selected nightly is tested with the catalog version; an incompatible newer tool fails closed with a tool/nightly compatibility diagnostic rather than silently selecting a different schema. | oxidizer-github |
 
-### `pr-slow`
+### `pr-slow` umbrella
 
-The PR-tier slow checks are split into four independent cloud-workflow-visible groups —
+The PR-tier slow checks are split into independent cloud-workflow-visible groups —
 `pr-test`, `pr-msrv`, `pr-runtime-analysis`, `pr-mutants` — that each run as their own job (GitHub) or
 stage (ADO) in parallel. An umbrella `anvil-pr-slow` recipe is also provided in
-`groups.just` for local use; it invokes the four sub-recipes sequentially so
+`groups.just` for local use; it invokes those groups sequentially so
 adopters can type one command to run "everything slow" without needing the cloud workflow
 matrix overhead.
 
@@ -215,29 +209,28 @@ matrix overhead.
 | `doc-test`   | Two cargo-test runs over the same affected set: `cargo test --doc --workspace --all-features --locked` and `cargo test --doc --workspace --locked` (default features). Running both catches doctests that only compile under one feature configuration (oxidizer-github runs both). nextest does not run doctests, so this stays a separate cargo-test invocation. | oxidizer, oxidizer-github |
 | `examples`   | `cargo build --workspace --examples --all-features --locked` -- verifies that example targets compile. Running each example is intentionally not part of the check (examples are not test scaffolding; their runtime behavior isn't part of what we gate on). | oxidizer, oxidizer-github |
 
-This is the same set of checks that used to live in the standalone `pr-test` group; merging into `pr-test` removes one cloud-workflow job from the matrix without changing what runs.
-
 #### `pr-msrv` (minimum-version tests)
 
-When the root manifest declares an MSRV, Anvil runs affected-package unit and
-integration tests under that compiler with both all features and default features.
-This is the ordinary test-suite execution at the minimum supported compiler;
+When the root manifest declares an MSRV, Anvil runs `cargo test --all-targets`
+for affected packages under that compiler. Cargo's all-target set covers
+library and binary unit tests, integration tests, examples, and benches as test
+targets. Anvil runs exactly two feature configurations: `--all-features` and
+the default features. It does not add a `--no-default-features` pass; such a
+pass can exercise feature-negative code, but it is outside the current policy.
+This is the all-target test execution at the minimum supported compiler;
 `pr-test` runs the same affected suite through coverage instrumentation on the
 catalog nightly. Other checks that use the selected stable compiler do not execute
-this unit/integration suite, so an MSRV fallback does not make `pr-msrv` a duplicate.
+this all-target suite, so an MSRV fallback does not make `pr-msrv` a duplicate.
 A selecting toolchain file does not suppress the MSRV run, even when it selects the
 same compiler, because the MSRV group is the authoritative minimum-version test
 result.
 
 The group uses the same OS/architecture matrix and per-OS impact sets as `pr-test`
 so cfg-gated targets and dependencies are exercised under the MSRV. It runs in
-parallel with the other PR groups. When no root MSRV exists, the recipe exits
-successfully without running tests.
-`ANVIL_MSRV_TOOLCHAIN` may map the declared MSRV to an already-provisioned
-toolchain. Callers pair it with `RUSTUP_TOOLCHAIN` (or a selecting repository
-toolchain file) for stable checks; a mapping by itself is rejected rather than
-allowing stable checks to select an unrelated compiler. When the mapping is
-unset, setup installs the declared MSRV through rustup.
+parallel with the other PR groups. When no root MSRV exists,
+`anvil-msrv-test` reports the skip and exits successfully without running tests.
+Setup installs the declared MSRV through rustup when it is not already
+available.
 
 #### `pr-runtime-analysis` (stricter-runtime correctness)
 

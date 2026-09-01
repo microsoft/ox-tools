@@ -58,11 +58,15 @@ missed, and onboarding new Rust repos requires copying-and-praying.
    full tier are all reproducible locally with a single `just` invocation, using the exact same
    arguments cloud workflows uses. The three commands `just anvil-pr`, `just anvil-scheduled`, and
    `just anvil-full` (= pr + scheduled) are first-class local entry points.
-6. **Plain-cargo fallback**: a developer with only `cargo` installed (no `just`, no
+6. **Deterministic ordinary-check compiler selection**: use the caller's
+   `RUSTUP_TOOLCHAIN`, otherwise defer to either root toolchain-file spelling,
+   otherwise use the root manifest MSRV explicitly. Never inherit a
+   runner-default compiler when none of those sources exists.
+7. **Plain-cargo fallback**: a developer with only `cargo` installed (no `just`, no
    `cargo-anvil`) can still build and run tests.
-7. **Friendly updates**: the tool detects, per file and per managed region, whether the user has
+8. **Friendly updates**: the tool detects, per file and per managed region, whether the user has
    modified it, and updates only the unmodified bits.
-8. **Open source**: the crate ships from `github.com/microsoft/ox-tools` and publishes to
+9. **Open source**: the crate ships from `github.com/microsoft/ox-tools` and publishes to
    crates.io. The binary contains no Microsoft-internal dependencies; everything it can install
    on the user's behalf comes from crates.io.
 
@@ -78,6 +82,9 @@ missed, and onboarding new Rust repos requires copying-and-praying.
   existing override, a repository toolchain file, or the repository MSRV. GitHub setup and
   container construction install a missing public channel through rustup; caller-provisioned
   and path toolchains remain the execution environment's responsibility.
+- Provisioning a separate compiler for Cargo-installed tools or stable analyzers. They use the
+  same repository-selected compiler as ordinary checks; nightly-only checks retain their
+  catalog pins.
 - Managing exact tool versions on the user's behalf — we enforce minimums only. See
   [local.md §3](./local.md#3-tool-versions-and-installation).
 - Hosting a service. The tool is a CLI binary; updates ship via crates.io.
@@ -307,12 +314,11 @@ Detail on each host:
   users add their own attribute rules outside the region.
 - **`rust-toolchain`**, **`rust-toolchain.toml`**, and **`.cargo/config.toml`** — never
   touched. Toolchain files are optional read-only inputs to stable-toolchain selection.
-  When neither selects a toolchain, Anvil selects the root manifest's
+  When neither root spelling exists, Anvil selects the root manifest's
   `[workspace.package].rust-version` or `[package].rust-version`. GitHub setup installs a
-  missing public selection through rustup. ADO pipelines provision their selected internal
-  toolchain before Anvil runs. The caller's `RUSTUP_TOOLCHAIN` is an input override only;
-  generated recipes apply resolved selection per stable command rather than exporting it
-  globally.
+  missing public selection through rustup. ADO callers provide their Rust bootstrap before
+  Anvil runs. The caller's `RUSTUP_TOOLCHAIN` is an input override only and is inherited by
+  child commands rather than rewritten or exported by Anvil.
 
 The tool's persistent state lives in `.anvil.lock` at the repo root — the sidecar
 manifest tracking last-rendered checksums per owned file and per managed region. See

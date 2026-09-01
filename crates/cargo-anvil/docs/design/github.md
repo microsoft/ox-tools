@@ -301,7 +301,8 @@ action in `consume` mode; which tiers a group's checks actually consume from tha
 is the catalog's concern, not the wiring layer's. Moving a check between groups never
 changes the reusable workflow.
 
-Approximate shape (anvil writes this verbatim; users never edit it):
+Representative emitted shape (the values shown are executable; repeated jobs
+and steps called out in comments are omitted for brevity):
 
 ```yaml
 # .github/workflows/anvil-pr-impl.yml   (owned by cargo-anvil)
@@ -321,13 +322,13 @@ jobs:
   impact-linux:
     runs-on: ${{ inputs.linux_runner }}
     steps:
-      - uses: actions/checkout
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
       - uses: ./.github/actions/anvil-impact   # runs `just anvil-impact` + upload-artifact anvil-impact-Linux
   impact-windows:
     runs-on: ${{ inputs.windows_runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }
       - uses: ./.github/actions/anvil-impact   # uploads anvil-impact-Windows
 
@@ -343,12 +344,12 @@ jobs:
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
     steps:
-      - uses: actions/checkout
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { fetch-depth: 0 }  # semver-check needs origin/<base> resolvable for --baseline-rev
       # Download the impact cache computed on this leg's OS into
       # target/anvil/impact/ (arm reuses its OS-family artifact). pr-test /
       # pr-runtime-analysis / pr-mutants do the identical download.
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
@@ -373,9 +374,9 @@ jobs:
       || matrix.os == 'linux-arm' && inputs.linux_arm_runner
       || inputs.windows_arm_runner }}
     steps:
-      - uses: actions/checkout
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # preceded by the same per-OS download-artifact step as pr-fast
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
@@ -392,10 +393,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [linux, windows, linux-arm, windows-arm]
-    runs-on: # selected from matrix.os and the runner-label inputs
+    runs-on: ${{ matrix.os == 'linux' && inputs.linux_runner
+      || matrix.os == 'windows' && inputs.windows_runner
+      || matrix.os == 'linux-arm' && inputs.linux_arm_runner
+      || inputs.windows_arm_runner }}
     steps:
-      - uses: actions/checkout
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: anvil-impact-${{ startsWith(matrix.os, 'linux') && 'Linux' || 'Windows' }}
           path: target/anvil/impact
@@ -403,6 +407,7 @@ jobs:
         with:
           group: pr-msrv
           impact_mode: consume
+          free-disk-space: true
 
   # pr-runtime-analysis (miri + careful) and pr-mutants (mutants) follow the
   # multi-OS shape; pr-mutants additionally sets `env: BASE_REF` for
@@ -422,9 +427,9 @@ the OS axis is almost certainly making other changes too.
 The MSRV group uses the same four-leg matrix as `pr-test`. Minimum-version breaks
 can be confined to cfg-gated OS or architecture code, so a single Linux execution
 would not establish the supported configuration contract. Running the group in
-parallel keeps the extra test pass from extending `pr-test` serially. The Linux
-impact job exposes whether the root manifest declares an MSRV, so GitHub skips the
-matrix before setup when no minimum version is declared.
+parallel keeps the extra test pass from extending `pr-test` serially. GitHub always
+creates the matrix; the generated recipe exits successfully at recipe level when no
+root MSRV is declared.
 
 The pr-* jobs gate on the impact jobs *succeeding*: their `needs: [impact-linux,
 impact-windows]` uses GitHub's default behavior, so if an impact job fails the pr-*
@@ -458,7 +463,7 @@ caller anvil-scheduled.yml
        ├─ scheduled-runtime-analysis (Linux/Windows × x64/ARM64)
        ├─ scheduled-exhaustive       (Linux/Windows x64)
        └─ publish-failure
-            needs: all four scheduled groups
+            needs: all scheduled groups
             condition: at least one failure and publication not disabled
             job override: issues:write only
 ```
@@ -734,10 +739,9 @@ result, and log link without check-suite attribution.
 
 ### `anvil-setup`
 
-`anvil-setup` is a composite action that installs `just`
-(`cargo install just --locked`), provisions the selected stable compiler
-through the setup dependency graph while capturing its cache-key version, and
-then invokes the requested catalog setup recipe. Its
+`anvil-setup` is a composite action that restores Cargo home, bootstraps
+cargo-binstall and Just, then invokes the requested catalog setup recipe, whose
+prerequisites provision the selected compiler and tools. Its
 `group` input controls which recipes run:
 
 - empty (default): runs `just anvil-setup binstall` -- the full catalog. Use
@@ -766,8 +770,8 @@ Its optional `free-disk-space` input defaults to `false`. When enabled on a
 GitHub-hosted runner, it removes pre-installed toolchains that anvil's Rust checks do
 not use: Android, Haskell/GHC, Swift and browser drivers on Linux; Android and
 Haskell/GHC on Windows. This reclaims approximately 18 GB on Linux and 17 GB on
-Windows. It is a no-op on macOS and self-hosted runners. The generated reusable 
-workflows explicitly enable this input only for `pr-test` and `scheduled-test`, 
+Windows. It is a no-op on macOS and self-hosted runners. The generated reusable
+workflows explicitly enable this input only for `pr-test`, `pr-msrv`, and `scheduled-test`,
 mirroring the testing-job integration in [microsoft/oxidizer#583](https://github.com/microsoft/oxidizer/pull/583).
 Other groups retain the action's disabled default.
 
@@ -842,28 +846,26 @@ The check → bucket mapping is in
 
 ## 7. Rust toolchain
 
-The setup action restores Cargo home, bootstraps cargo-binstall and Just, and
-then invokes the selected catalog setup recipe. That setup graph reaches
-`anvil-toolchain-stable-install` before stable Cargo or Rust is used, so it
-provisions a missing root MSRV or lets rustup process a repository toolchain
-file. The workflow never invokes `_anvil-resolve-stable` itself and does not
-publish a resolved `RUSTUP_TOOLCHAIN` through `GITHUB_ENV`.
-Each stable recipe lazily selects the same optional argument and invokes Cargo
-or Rust directly in its current PowerShell process. The selector is an inline
-PowerShell array expression rather than an expression-time shell subprocess, so
-it has no host-OS branch and does not alter the adopter's configured shell.
-Selecting toolchain files remain unoverridden so rustup processes them natively.
-All matrix legs therefore use the same repository selection instead of the
-different stable versions that runner images may carry, without changing
-unrelated recipe environments.
+Selection follows the shared local contract:
 
-Selection follows the shared local contract: an existing `RUSTUP_TOOLCHAIN`, then a
-root toolchain file with `channel` or `path`, then the root MSRV. There is no
-runner-default fallback. GH-hosted runners provide the rustup proxy used to install a
-selected public channel. A repository that supplies a path toolchain must provision
-that path before the Anvil action runs. A caller-provided environment override
-takes precedence over repository files. Anvil does not parse a repository
-toolchain file or reapply options from a file suppressed by that override.
+1. inherit an existing caller-provided `RUSTUP_TOOLCHAIN` unchanged;
+2. when either root `rust-toolchain` spelling exists, pass no explicit selector
+   and let rustup process toolchain files natively;
+3. otherwise pass the root manifest MSRV explicitly as `+<version>`.
+
+There is no runner-default fallback. With no environment override, root
+toolchain file, or root MSRV, setup and checks fail. Anvil never parses a
+toolchain file or replays options from a file suppressed by
+`RUSTUP_TOOLCHAIN`. Because file selection remains native, rustup applies its
+normal lookup from each Cargo or Rust command's working directory.
+
+The setup action restores Cargo home, bootstraps cargo-binstall and Just, and
+then invokes the selected catalog setup recipe. Setup ensures the selected
+compiler is available before stable Cargo or Rust runs. GH-hosted runners
+provide the rustup proxy used to install a missing public MSRV or process a
+repository toolchain file. A caller-provided or path toolchain remains the
+runner owner's provisioning responsibility. Setup does not publish a rewritten
+`RUSTUP_TOOLCHAIN` through `GITHUB_ENV`.
 
 On self-hosted runners or pre-baked images without rustup, the user provisions the
 selected toolchain before the `uses:` of the reusable workflow:
@@ -881,12 +883,10 @@ users that need additional preparation take ownership of the generated reusable
 implementation workflow and add the preparation there. The generated composite
 actions remain implementation details rather than a separately supported API.
 
-Setup recipes that need stable Rust depend on
-`anvil-toolchain-stable-install`; shared Cargo-tool installation and
-default-component installation carry the same prerequisite. Just deduplicates
-it across each group/full setup invocation.
-`anvil-tool-rustc-validate-prereqs` remains read-only and validates the
-installed `rustc` and workspace MSRV contract at check time.
+Prerequisite validation remains read-only. For the root-MSRV fallback, it
+requires rustup and verifies the exact MSRV toolchain is already installed
+before running Cargo metadata, preventing validation from auto-installing a
+compiler.
 
 ## 8. Caching
 

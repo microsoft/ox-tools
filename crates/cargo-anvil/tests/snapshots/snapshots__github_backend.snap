@@ -611,7 +611,7 @@ runs:
         fi
 
     # The catalog recipe `anvil-setup` (or `anvil-<group>-setup`
-    # when a group is specified via the `group` input) uses the Just
+    # when a group is specified via the `group` input) uses the Just executable
     # bootstrapped above, then handles everything else. The setup recipes are idempotent and
     # short-circuit on tools already installed at or above the pinned
     # version, so re-running on cache-hit runs is cheap.
@@ -2763,8 +2763,13 @@ anvil-miri-validate-prereqs: anvil-component-nightly-miri-validate-prereqs anvil
 anvil-msrv-test: anvil-msrv-test-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
+    $impactExit = $LASTEXITCODE
+    if ($impactExit -ne 0) { exit $impactExit }
     if ($include -eq '--skip') { Write-Host 'anvil-msrv-test: no affected packages; skipping'; exit 0 }
-    $toolchain = (& "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String).Trim()
+    $toolchainOutput = & "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String
+    $resolverExit = $LASTEXITCODE
+    if ($resolverExit -ne 0) { exit $resolverExit }
+    $toolchain = $toolchainOutput.Trim()
     if ([string]::IsNullOrWhiteSpace($toolchain)) {
         Write-Host 'anvil-msrv-test: no root MSRV declared; skipping'
         exit 0
@@ -2786,7 +2791,10 @@ anvil-msrv-test-setup installer="install":
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
 anvil-msrv-test-validate-prereqs:
-    $toolchain = (& "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String).Trim()
+    $toolchainOutput = & "{{ just_executable() }}" _anvil-resolve-stable msrv | Out-String
+    $resolverExit = $LASTEXITCODE
+    if ($resolverExit -ne 0) { exit $resolverExit }
+    $toolchain = $toolchainOutput.Trim()
     if ([string]::IsNullOrWhiteSpace($toolchain)) { exit 0 }
     & cargo "+$toolchain" --version
     if ($LASTEXITCODE -ne 0) {
@@ -3023,6 +3031,7 @@ anvil-pr-title-validate-prereqs: anvil-tool-pwsh-validate-prereqs
 [script("pwsh", "-NoProfile")]
 _anvil-readme mode: anvil-readme-check-validate-prereqs
     $ErrorActionPreference = 'Stop'
+    $stableArgs = {{_anvil_stable_toolchain_args}}
     $action = '{{ mode }}'
     if ($action -notin @('generate', 'check')) {
         [Console]::Error.WriteLine("anvil-readme: invalid mode '$action'; expected 'generate' or 'check'")
@@ -3041,7 +3050,7 @@ _anvil-readme mode: anvil-readme-check-validate-prereqs
     # Unscoped: a change to the workspace-level README template is a repo-level
     # input cargo-delta cannot map to a package, so this check always runs the
     # full eligible-crate set rather than an impact subset.
-    $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
+    $metadataJson = & cargo @stableArgs metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error "${prefix}: cargo metadata failed"
         exit $LASTEXITCODE
@@ -3087,7 +3096,7 @@ _anvil-readme mode: anvil-readme-check-validate-prereqs
             $args = @('doc2readme', $target)
             if ($check) { $args += '--check' }
             if ($relTemplate) { $args += @('--template', $relTemplate) }
-            & cargo {{_anvil_stable_toolchain_args}} @args
+            & cargo @stableArgs @args
             if ($LASTEXITCODE -ne 0) { $hadFailure = $true }
         } finally {
             Pop-Location
@@ -3158,6 +3167,7 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 [script("pwsh", "-NoProfile")]
 anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    $stableArgs = {{_anvil_stable_toolchain_args}}
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $commentFile = 'target/anvil/comments/semver.md'
     if ($include -eq '--skip') {
@@ -3177,7 +3187,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     # null, `publish = false` as an empty array, and named-registry restrictions
     # as a nonempty array. Only the empty array is non-publishable.
     $libPkgs = @{}
-    $metadataJson = & cargo {{_anvil_stable_toolchain_args}} metadata --no-deps --format-version 1
+    $metadataJson = & cargo @stableArgs metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil-semver-check: cargo metadata failed'
         exit $LASTEXITCODE
@@ -3255,7 +3265,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         }
 
         Write-Host "anvil-semver-check: $p (baseline $base)"
-        $outputLines = @(& cargo {{_anvil_stable_toolchain_args}} semver-checks --package $p --baseline-rev $base 2>&1)
+        $outputLines = @(& cargo @stableArgs semver-checks --package $p --baseline-rev $base 2>&1)
         $semverExit = $LASTEXITCODE
         $output = ($outputLines | Out-String)
         if ($semverExit -eq 100) {
@@ -4786,20 +4796,19 @@ anvil-pr-runtime-analysis-validate-prereqs: \
 # See https://github.com/microsoft/ox-tools/blob/main/crates/cargo-anvil/docs/design/checks.md
 
 # pr-slow is the local umbrella for everything that takes more than ~30s
-# per crate (tests, MSRV tests, stricter runtimes, mutation testing). It's
-# split into four sub-recipes so individual concerns can be invoked locally
-# without dragging the others along:
+# per crate (tests, MSRV tests, stricter runtimes, mutation testing). Its
+# groups can be invoked individually without invoking the other groups:
 #
 #   pr-test: tests + coverage
-#   pr-msrv: unit and integration tests under the declared MSRV
+#   pr-msrv: all-target tests under the declared MSRV
 #   pr-runtime-analysis: stricter-runtime correctness (miri, careful)
 #   pr-mutants: mutation testing
 #
-# Cloud workflows run the four sub-groups as independent parallel jobs.
+# Cloud workflows run these groups as independent parallel jobs.
 # The umbrella runs them sequentially only when invoked locally:
 #
 #   $ just anvil-pr-test   # tests + coverage only
-#   $ just anvil-pr-msrv   # MSRV unit and integration tests only
+#   $ just anvil-pr-msrv   # MSRV all-target tests only
 #   $ just anvil-pr-runtime-analysis   # miri + careful only
 #   $ just anvil-pr-mutants   # mutants only
 
@@ -6159,7 +6168,7 @@ anvil-tool-cargo-spellcheck-source-deps-check:
 # pwsh is installed via the platform's package manager. The validate recipes
 # are read-only and only surface a friendly error if a prerequisite is absent.
 
-# Validate that rustc is available.
+# Validate that rustc is available and workspace MSRVs are compatible.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
 anvil-tool-rustc-validate-prereqs:
@@ -6231,6 +6240,10 @@ _anvil-resolve-stable action="install":
             throw "anvil: Cargo.toml not found at repository root '$repoRoot'"
         }
 
+        # This bootstrap scan must choose Cargo before Cargo is available to
+        # parse the manifest. Keep its workspace.package-before-package
+        # precedence and accepted syntax synchronized with the selector in
+        # versions.just.
         $values = @{}
         $section = ''
         foreach ($line in (Get-Content -LiteralPath $manifestPath)) {
@@ -6257,9 +6270,28 @@ _anvil-resolve-stable action="install":
         throw 'anvil: no selecting rust-toolchain(.toml) and no root [workspace.package] or [package] rust-version; declare an MSRV or select a toolchain explicitly'
     }
 
+    function Get-InstalledToolchains {
+        if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            throw 'anvil: rustup not found. Install rustup from https://rustup.rs and ensure it is on PATH'
+        }
+        $installed = @(rustup toolchain list)
+        if ($LASTEXITCODE -ne 0) {
+            throw 'anvil: rustup toolchain list failed'
+        }
+        return $installed
+    }
+
+    function Test-ToolchainInstalled([string] $toolchain) {
+        $installed = Get-InstalledToolchains
+        return (($installed -join "`n") -match "(?m)^$([regex]::Escape($toolchain))(?:-|$)")
+    }
+
     function Assert-WorkspaceMsrvCompatibility {
         $manifestPath = Join-Path $repoRoot 'Cargo.toml'
         $rootMsrv = Get-RootMsrv
+        if (-not (Test-ToolchainInstalled $rootMsrv)) {
+            throw "anvil: root MSRV toolchain '$rootMsrv' is not installed; run 'just anvil-toolchain-stable-install' before validating prerequisites"
+        }
         $metadataText = (& cargo "+$rootMsrv" metadata --manifest-path $manifestPath --format-version 1 --no-deps 2>&1 | Out-String)
         if ($LASTEXITCODE -ne 0) {
             throw "anvil: cargo metadata failed while validating workspace MSRVs:`n$metadataText"
@@ -6279,6 +6311,8 @@ _anvil-resolve-stable action="install":
             if ($value -notmatch '^\s*(\d+)\.(\d+)(?:\.(\d+))?\s*$') {
                 throw "anvil: invalid resolved rust-version '$value'"
             }
+            # Cargo treats 1.x and 1.x.0 as the same floor, while
+            # System.Version sorts an unspecified build component differently.
             $patch = if ([string]::IsNullOrWhiteSpace($Matches[3])) { 0 } else { [int] $Matches[3] }
             return [version]::new([int] $Matches[1], [int] $Matches[2], $patch)
         }
@@ -6311,19 +6345,14 @@ _anvil-resolve-stable action="install":
         if (-not [string]::IsNullOrWhiteSpace($env:ANVIL_MSRV_TOOLCHAIN)) {
             return [pscustomobject]@{
                 Value = $env:ANVIL_MSRV_TOOLCHAIN
-                Source = 'mapped-msrv'
                 Mapped = $true
             }
         }
-        return [pscustomobject]@{ Value = $msrv; Source = 'msrv'; Mapped = $false }
+        return [pscustomobject]@{ Value = $msrv; Mapped = $false }
     }
 
     function Install-Toolchain([string] $toolchain, [string] $label) {
-        $installed = rustup toolchain list
-        if ($LASTEXITCODE -ne 0) {
-            throw 'anvil: rustup toolchain list failed'
-        }
-        if (($installed -join "`n") -notmatch "(?m)^$([regex]::Escape($toolchain))(?:-|$)") {
+        if (-not (Test-ToolchainInstalled $toolchain)) {
             Write-Host "anvil: installing $label toolchain '$toolchain'"
             rustup toolchain install $toolchain --profile minimal
             if ($LASTEXITCODE -ne 0) {
@@ -6361,10 +6390,6 @@ _anvil-resolve-stable action="install":
         exit 0
     }
 
-    if ($action -ne 'install') {
-        throw "anvil: unsupported stable resolver action '$action'"
-    }
-
     Assert-CompleteInternalToolchainConfiguration
     if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
         & cargo --version *> $null
@@ -6389,10 +6414,10 @@ _anvil-resolve-stable action="install":
 
     Install-Toolchain (Get-RootMsrv) 'stable'
 
-# Provision the selected stable toolchain. Repository toolchain files are
-# processed natively by rustup. This is the shared prerequisite for setup paths
-# that execute stable Cargo/Rust or install Cargo tools; Just deduplicates it
-# within each setup invocation.
+# Setup paths that execute stable Cargo/Rust or install Cargo tools share this
+# dependency, which Just deduplicates within one setup invocation.
+
+# Ensure the selected stable toolchain is available while preserving native repository toolchain-file behavior.
 [group("anvil-setup")]
 anvil-toolchain-stable-install: (_anvil-resolve-stable "install")
 
@@ -7081,6 +7106,9 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
     throw "anvil: Cargo.toml not found at repository root '$RepoRoot'"
 }
 
+# This bootstrap scan must choose Cargo before Cargo is available to parse the
+# manifest. Keep its workspace.package-before-package precedence and accepted
+# syntax synchronized with Get-RootMsrv in tools.just.
 $values = @{}
 $section = ''
 foreach ($line in (Get-Content -LiteralPath $manifestPath)) {

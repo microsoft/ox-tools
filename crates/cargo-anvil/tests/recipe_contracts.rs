@@ -23,6 +23,7 @@ const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.ju
 const FMT: &str = include_str!("../templates/justfiles/anvil/checks/fmt.just");
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
 const LOOM: &str = include_str!("../templates/justfiles/anvil/checks/loom.just");
+const MSRV_TEST: &str = include_str!("../templates/justfiles/anvil/checks/msrv-test.just");
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
 const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
@@ -79,6 +80,9 @@ if ($env:FAKE_CARGO_LOG) {
 }
 if ($env:FAKE_CARGO_CWD_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_CWD_LOG -Value (Get-Location).Path
+}
+if ($env:FAKE_CARGO_TOOLCHAIN_LOG) {
+    Add-Content -LiteralPath $env:FAKE_CARGO_TOOLCHAIN_LOG -Value $env:RUSTUP_TOOLCHAIN
 }
 if ($args -contains 'each') {
     exit [int]$env:FAKE_EACH_EXIT
@@ -253,16 +257,12 @@ fn path_with_fake_bin(root: &Path) -> OsString {
 }
 
 fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> Output {
-    run_just_from(root, root, arguments, environment)
-}
-
-fn run_just_from(root: &Path, current_dir: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> Output {
     let mut command = Command::new("just");
     command
         .arg("--justfile")
         .arg(root.join("Justfile"))
         .args(arguments)
-        .current_dir(current_dir);
+        .current_dir(root);
     command.env("PATH", path_with_fake_bin(root));
     command.env("FAKE_WORKSPACE_ROOT", root);
     // A fixture is a scratch workspace, so it must not inherit the impact
@@ -311,6 +311,7 @@ fn stable_command_leaves_environment_toolchain_selection_native() {
     write(&justfile_path, &justfile);
     let args_log = tmp.path().join("cargo-args.log");
     let cwd_log = tmp.path().join("cargo-cwd.log");
+    let toolchain_log = tmp.path().join("cargo-toolchain.log");
 
     let output = run_just(
         tmp.path(),
@@ -318,6 +319,7 @@ fn stable_command_leaves_environment_toolchain_selection_native() {
         &[
             ("FAKE_CARGO_LOG", args_log.as_os_str()),
             ("FAKE_CARGO_CWD_LOG", cwd_log.as_os_str()),
+            ("FAKE_CARGO_TOOLCHAIN_LOG", toolchain_log.as_os_str()),
             ("RUSTUP_TOOLCHAIN", OsStr::new("test-stable")),
         ],
     );
@@ -333,6 +335,73 @@ fn stable_command_leaves_environment_toolchain_selection_native() {
         fs::canonicalize(fs::read_to_string(cwd_log).unwrap().trim()).unwrap(),
         fs::canonicalize(tmp.path()).unwrap(),
         "the command must run directly in its recipe process"
+    );
+    assert_eq!(fs::read_to_string(toolchain_log).unwrap().trim(), "test-stable");
+}
+
+#[test]
+fn msrv_test_propagates_nested_just_failures() {
+    if !tools_available() {
+        return;
+    }
+    let helper_recipes = "\n[script(\"pwsh\", \"-NoProfile\")]\n\
+         _anvil-impact-include tier:\n\
+         \x20   if ($env:FAKE_IMPACT_HELPER_OUTPUT) { Write-Output $env:FAKE_IMPACT_HELPER_OUTPUT }\n\
+         \x20   exit [int]$env:FAKE_IMPACT_HELPER_EXIT\n\
+         \n[script(\"pwsh\", \"-NoProfile\")]\n\
+         _anvil-resolve-stable action:\n\
+         \x20   if ($env:FAKE_RESOLVER_OUTPUT) { Write-Output $env:FAKE_RESOLVER_OUTPUT }\n\
+         \x20   exit [int]$env:FAKE_RESOLVER_EXIT\n";
+
+    let validation_tmp = fixture(&[("msrv-test.just", MSRV_TEST)], &["anvil-impact"]);
+    let validation_justfile = validation_tmp.path().join("Justfile");
+    let mut validation_body = fs::read_to_string(&validation_justfile).unwrap();
+    validation_body.push_str(helper_recipes);
+    write(&validation_justfile, &validation_body);
+    let validation_failure = run_just(
+        validation_tmp.path(),
+        &["anvil-msrv-test-validate-prereqs"],
+        &[("FAKE_RESOLVER_EXIT", OsStr::new("30"))],
+    );
+    assert_failed(&validation_failure, "failed prerequisite MSRV resolver");
+
+    let tmp = fixture(
+        &[("msrv-test.just", MSRV_TEST)],
+        &["anvil-msrv-test-validate-prereqs", "anvil-impact"],
+    );
+    let justfile_path = tmp.path().join("Justfile");
+    let mut justfile = fs::read_to_string(&justfile_path).unwrap();
+    justfile.push_str(helper_recipes);
+    write(&justfile_path, &justfile);
+    let cargo_log = tmp.path().join("cargo.log");
+
+    let impact_failure = run_just(
+        tmp.path(),
+        &["anvil-msrv-test"],
+        &[
+            ("FAKE_IMPACT_HELPER_EXIT", OsStr::new("31")),
+            ("FAKE_CARGO_LOG", cargo_log.as_os_str()),
+        ],
+    );
+    assert_failed(&impact_failure, "failed impact helper");
+    assert!(
+        fs::read_to_string(&cargo_log).unwrap_or_default().is_empty(),
+        "Cargo must not run after impact helper failure"
+    );
+
+    let resolver_failure = run_just(
+        tmp.path(),
+        &["anvil-msrv-test"],
+        &[
+            ("FAKE_IMPACT_HELPER_EXIT", OsStr::new("0")),
+            ("FAKE_RESOLVER_EXIT", OsStr::new("32")),
+            ("FAKE_CARGO_LOG", cargo_log.as_os_str()),
+        ],
+    );
+    assert_failed(&resolver_failure, "failed MSRV resolver");
+    assert!(
+        fs::read_to_string(cargo_log).unwrap_or_default().is_empty(),
+        "Cargo must not run after resolver failure"
     );
 }
 

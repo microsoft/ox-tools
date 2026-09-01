@@ -119,7 +119,7 @@ runs:
         fi
 
     # The catalog recipe `anvil-setup` (or `anvil-<group>-setup`
-    # when a group is specified via the `group` input) uses the Just
+    # when a group is specified via the `group` input) uses the Just executable
     # bootstrapped above, then handles everything else. The setup recipes are idempotent and
     # short-circuit on tools already installed at or above the pinned
     # version, so re-running on cache-hit runs is cheap.

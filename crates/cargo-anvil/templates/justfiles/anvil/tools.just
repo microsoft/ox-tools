@@ -135,7 +135,7 @@ anvil-tool-cargo-spellcheck-source-deps-check:
 # pwsh is installed via the platform's package manager. The validate recipes
 # are read-only and only surface a friendly error if a prerequisite is absent.
 
-# Validate that rustc is available.
+# Validate that rustc is available and workspace MSRVs are compatible.
 [group("anvil-setup")]
 [script("pwsh", "-NoProfile")]
 anvil-tool-rustc-validate-prereqs:
@@ -207,6 +207,10 @@ _anvil-resolve-stable action="install":
             throw "anvil: Cargo.toml not found at repository root '$repoRoot'"
         }
 
+        # This bootstrap scan must choose Cargo before Cargo is available to
+        # parse the manifest. Keep its workspace.package-before-package
+        # precedence and accepted syntax synchronized with the selector in
+        # versions.just.
         $values = @{}
         $section = ''
         foreach ($line in (Get-Content -LiteralPath $manifestPath)) {
@@ -233,9 +237,28 @@ _anvil-resolve-stable action="install":
         throw 'anvil: no selecting rust-toolchain(.toml) and no root [workspace.package] or [package] rust-version; declare an MSRV or select a toolchain explicitly'
     }
 
+    function Get-InstalledToolchains {
+        if (-not (Get-Command rustup -ErrorAction SilentlyContinue)) {
+            throw 'anvil: rustup not found. Install rustup from https://rustup.rs and ensure it is on PATH'
+        }
+        $installed = @(rustup toolchain list)
+        if ($LASTEXITCODE -ne 0) {
+            throw 'anvil: rustup toolchain list failed'
+        }
+        return $installed
+    }
+
+    function Test-ToolchainInstalled([string] $toolchain) {
+        $installed = Get-InstalledToolchains
+        return (($installed -join "`n") -match "(?m)^$([regex]::Escape($toolchain))(?:-|$)")
+    }
+
     function Assert-WorkspaceMsrvCompatibility {
         $manifestPath = Join-Path $repoRoot 'Cargo.toml'
         $rootMsrv = Get-RootMsrv
+        if (-not (Test-ToolchainInstalled $rootMsrv)) {
+            throw "anvil: root MSRV toolchain '$rootMsrv' is not installed; run 'just anvil-toolchain-stable-install' before validating prerequisites"
+        }
         $metadataText = (& cargo "+$rootMsrv" metadata --manifest-path $manifestPath --format-version 1 --no-deps 2>&1 | Out-String)
         if ($LASTEXITCODE -ne 0) {
             throw "anvil: cargo metadata failed while validating workspace MSRVs:`n$metadataText"
@@ -255,6 +278,8 @@ _anvil-resolve-stable action="install":
             if ($value -notmatch '^\s*(\d+)\.(\d+)(?:\.(\d+))?\s*$') {
                 throw "anvil: invalid resolved rust-version '$value'"
             }
+            # Cargo treats 1.x and 1.x.0 as the same floor, while
+            # System.Version sorts an unspecified build component differently.
             $patch = if ([string]::IsNullOrWhiteSpace($Matches[3])) { 0 } else { [int] $Matches[3] }
             return [version]::new([int] $Matches[1], [int] $Matches[2], $patch)
         }
@@ -287,19 +312,14 @@ _anvil-resolve-stable action="install":
         if (-not [string]::IsNullOrWhiteSpace($env:ANVIL_MSRV_TOOLCHAIN)) {
             return [pscustomobject]@{
                 Value = $env:ANVIL_MSRV_TOOLCHAIN
-                Source = 'mapped-msrv'
                 Mapped = $true
             }
         }
-        return [pscustomobject]@{ Value = $msrv; Source = 'msrv'; Mapped = $false }
+        return [pscustomobject]@{ Value = $msrv; Mapped = $false }
     }
 
     function Install-Toolchain([string] $toolchain, [string] $label) {
-        $installed = rustup toolchain list
-        if ($LASTEXITCODE -ne 0) {
-            throw 'anvil: rustup toolchain list failed'
-        }
-        if (($installed -join "`n") -notmatch "(?m)^$([regex]::Escape($toolchain))(?:-|$)") {
+        if (-not (Test-ToolchainInstalled $toolchain)) {
             Write-Host "anvil: installing $label toolchain '$toolchain'"
             rustup toolchain install $toolchain --profile minimal
             if ($LASTEXITCODE -ne 0) {
@@ -337,10 +357,6 @@ _anvil-resolve-stable action="install":
         exit 0
     }
 
-    if ($action -ne 'install') {
-        throw "anvil: unsupported stable resolver action '$action'"
-    }
-
     Assert-CompleteInternalToolchainConfiguration
     if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
         & cargo --version *> $null
@@ -365,10 +381,10 @@ _anvil-resolve-stable action="install":
 
     Install-Toolchain (Get-RootMsrv) 'stable'
 
-# Provision the selected stable toolchain. Repository toolchain files are
-# processed natively by rustup. This is the shared prerequisite for setup paths
-# that execute stable Cargo/Rust or install Cargo tools; Just deduplicates it
-# within each setup invocation.
+# Setup paths that execute stable Cargo/Rust or install Cargo tools share this
+# dependency, which Just deduplicates within one setup invocation.
+
+# Ensure the selected stable toolchain is available while preserving native repository toolchain-file behavior.
 [group("anvil-setup")]
 anvil-toolchain-stable-install: (_anvil-resolve-stable "install")
 

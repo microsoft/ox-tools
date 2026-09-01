@@ -372,12 +372,10 @@ The PR template also contains a `pr_msrv` stage. It runs in parallel with
 x86_64 jobs and per-OS affected-package impact sets as `pr_test`, and invokes
 `anvil-pr-msrv`. The stage consumes the per-OS impact artifact like the other PR
 groups; when the root manifest declares no MSRV, the recipe exits successfully
-without running tests.
-Callers may set `RUSTUP_TOOLCHAIN` to an already-provisioned stable compiler and
-`ANVIL_MSRV_TOOLCHAIN` to an already-provisioned compiler for the dedicated
-MSRV run. Supplying only the MSRV mapping is rejected because stable checks
-would otherwise select an unrelated compiler. When the mapping is unset,
-Anvil installs the declared MSRV through rustup.
+after reporting that it skipped the test. Otherwise it runs affected-package
+`cargo test --all-targets` in all-features and default-features configurations.
+Ordinary stable checks honor a caller-provided `RUSTUP_TOOLCHAIN`. The dedicated
+MSRV setup ensures the declared root MSRV is available through rustup.
 
 ### 4.1 Per-job wrapper (`steps/job.yml`) — the 1ESPT extensibility point
 
@@ -674,13 +672,11 @@ steps:
     # probed from the cacheable impact.state marker. See §4.3.
 ```
 
-The only per-group parameters are the PR-context strings a group's checks consume:
-
-| Template                  | Parameters                                                             |
-|---------------------------|-------------------------------------------------------------------------|
-| `pr-fast.yml`             | `prTitle` (resolved from the REST API; ADO has no PR-title variable)     |
-| `pr-mutants.yml`            | `prBaseRef` (default `$(System.PullRequest.TargetBranch)`)              |
-| `pr-test.yml`, `pr-runtime-analysis.yml`, `scheduled-*.yml` | —                                                                       |
+The generated per-group step templates take no parameters. Only `pr-fast.yml`
+performs the PR-title REST lookup and injects `PR_TITLE`; groups that do not run
+`anvil-pr-title`, including `pr-msrv`, have no title API or OAuth-token
+dependency. The mutation recipe reads its base ref from ADO's predefined
+pull-request environment.
 
 `$(System.PullRequest.*)` are auto-populated by ADO on PR build-validation runs. No
 manual web-UI wiring is needed.
@@ -702,10 +698,9 @@ download to get scoping.
 
 ### `setup.yml` and `impact.yml`
 
-`setup.yml` is a step template that installs `just`
-(`cargo install just --locked`), provisions or prepares the selected stable
-compiler through the setup dependency graph while capturing its cache-key
-version, and then invokes the requested catalog setup recipe. It
+`setup.yml` is a step template that restores Cargo home, bootstraps Just, and
+then invokes the requested catalog setup recipe, whose prerequisites provision
+the selected compiler and tools. It
 takes a single `group` parameter that controls which recipes run:
 
 - empty (default): runs `just anvil-setup` -- the full catalog. Use for "give
@@ -745,35 +740,27 @@ mechanics are in [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact
 ## 6. Rust toolchain
 
 The user's root pipeline or compliance template installs the Rust/rustup
-bootstrap before the Anvil stages run. The generated setup step restores Cargo
-home before bootstrapping Just. Its selected catalog setup recipe reaches
-`anvil-toolchain-stable-install` before any stable Cargo or Rust use. The
-template never invokes `_anvil-resolve-stable` itself and does
-not publish a resolved `RUSTUP_TOOLCHAIN` to subsequent steps. Each stable recipe
-evaluates the inline PowerShell array expression and invokes Cargo or Rust
-directly in its current PowerShell process. Selection has no expression-time
-subprocess, host-OS branch, or change to the adopter's configured shell. A
-selecting toolchain file remains unoverridden so rustup processes the complete
-file.
+bootstrap before the Anvil stages run. Selection follows the shared local
+contract:
 
-Selection follows the shared local contract: an existing `RUSTUP_TOOLCHAIN`,
-then a root toolchain file with `channel` or `path`, then the root MSRV. A
-caller-provided override takes precedence over repository files and is treated
-as an externally provisioned selection. Anvil does not parse repository
-toolchain files or reapply options from a file suppressed by that override.
-Without an override, rustup processes the complete repository toolchain file
-natively. Without either native selector, Anvil installs the root MSRV.
+1. inherit an existing caller-provided `RUSTUP_TOOLCHAIN` unchanged;
+2. when either root `rust-toolchain` spelling exists, pass no explicit selector
+   and let rustup process toolchain files natively;
+3. otherwise pass the root manifest MSRV explicitly as `+<version>`.
 
-`ANVIL_MSRV_TOOLCHAIN` may map the dedicated MSRV run to a separately
-provisioned toolchain. It does not select the compiler used by ordinary stable
-checks and therefore must be paired with a stable selector.
+There is no agent-default fallback. With no environment override, root
+toolchain file, or root MSRV, setup and checks fail. Anvil does not parse
+repository toolchain files or replay options from a file suppressed by the
+environment override. Native file processing follows rustup's lookup from each
+Cargo or Rust command's working directory.
 
-Shared Cargo-tool/default-component setup and stable-only leaf setup all depend
-on `anvil-toolchain-stable-install`; Just deduplicates it for group/full
-fan-out. `anvil-tool-rustc-validate-prereqs` remains read-only and validates
-that `rustc` is available plus the workspace MSRV compatibility rule. For
-nightly-requiring checks, the matching toolchain-validate-prereqs recipe fails
-with a suggestion to ask the pipeline owner to provision that dated nightly.
+The generated setup step restores Cargo home before bootstrapping Just, then
+invokes the selected catalog setup recipe. Setup ensures the selected compiler
+is available before stable Cargo or Rust use and does not publish a rewritten
+`RUSTUP_TOOLCHAIN` to later steps. Prerequisite validation remains read-only:
+for a root-MSRV fallback, it requires rustup and verifies the exact toolchain is
+already installed before running Cargo metadata. Nightly-requiring checks still
+fail with a provisioning hint when their dated catalog toolchain is absent.
 
 ## 7. Caching
 

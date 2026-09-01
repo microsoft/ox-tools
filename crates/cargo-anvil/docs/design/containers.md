@@ -53,6 +53,10 @@ Both are addressed by executing the recipe unchanged inside an image built from 
 bodies are identical in either mode, and cloud workflows are unaffected: they run the same recipes natively on their
 own agents. The image is pinned to resemble that environment, not to reproduce it.
 
+Image construction has a deliberately stricter compiler contract than native execution: the repository must own
+`rust-toolchain.toml`. The build context admits that file but not `rust-toolchain`, and the build does not inherit the
+host's `RUSTUP_TOOLCHAIN`; rustup therefore selects the image compiler from the repository-owned TOML file.
+
 ## 2. Command surface
 
 `anvil-container` takes the argv to run inside the image; nothing is routed there automatically, so everything
@@ -74,7 +78,7 @@ through the environment instead.
 | `just anvil-container-status` | Print the engine, working directory, image reference, and whether it is present. Never builds or pulls. |
 | `just anvil-container-down` | Remove this repository's cache volumes. The image is retained. |
 
-All four are annotated `[group("anvil-container")]` and appear as one cluster in `just --groups`. Each repeats a
+These recipes are annotated `[group("anvil-container")]` and appear as one cluster in `just --groups`. Each repeats a
 one-line summary immediately above its attributes, because `just --list` takes the last comment line before them as the
 description and would otherwise print the tail of a rationale paragraph as a fragment.
 

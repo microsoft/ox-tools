@@ -59,6 +59,9 @@ if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
     throw "anvil: Cargo.toml not found at repository root '$RepoRoot'"
 }
 
+# This bootstrap scan must choose Cargo before Cargo is available to parse the
+# manifest. Keep its workspace.package-before-package precedence and accepted
+# syntax synchronized with Get-RootMsrv in tools.just.
 $values = @{}
 $section = ''
 foreach ($line in (Get-Content -LiteralPath $manifestPath)) {

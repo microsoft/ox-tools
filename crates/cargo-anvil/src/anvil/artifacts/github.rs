@@ -405,6 +405,8 @@ export -f just
             );
         }
         assert!(PR_IMPL_WORKFLOW.contains("needs: [impact-linux, impact-windows]"));
+        // The matrix is intentionally always present; the generated MSRV
+        // recipe owns the successful no-MSRV no-op.
         assert!(!PR_IMPL_WORKFLOW.contains("msrv_test_required"));
         assert!(PR_IMPL_WORKFLOW.contains("Check Group: MSRV Tests (${{ matrix.os }})"));
         assert!(PR_IMPL_WORKFLOW.contains("os: [linux, windows, linux-arm, windows-arm]"));
