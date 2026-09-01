@@ -486,7 +486,9 @@ _check-tool name version:
     try {
         # Validation must not let the rustup proxy provision a missing selection.
         $env:RUSTUP_AUTO_INSTALL = '0'
-        foreach ($line in (& cargo {{_anvil_stable_toolchain_args}} install --list 2>$null)) {
+        $listOutput = @(& cargo {{_anvil_stable_toolchain_args}} install --list 2>&1)
+        $cargoExit = $LASTEXITCODE
+        foreach ($line in $listOutput) {
             if ($line -match $pattern) { $installed = $Matches[1]; break }
         }
     } finally {
@@ -495,6 +497,11 @@ _check-tool name version:
         } else {
             $env:RUSTUP_AUTO_INSTALL = $previousAutoInstall
         }
+    }
+    if ($cargoExit -ne 0) {
+        $diagnostic = ($listOutput | Out-String).Trim()
+        Write-Error "anvil: selected stable Cargo is unavailable while checking '$name' (exit $cargoExit). Run: just anvil-toolchain-stable-install`n$diagnostic"
+        exit $cargoExit
     }
     if (-not $installed) {
         Write-Error "anvil: required tool '$name' not found. Install: cargo install --locked --version =$version $name"
@@ -690,7 +697,16 @@ _check-component toolchain component:
             & rustc "+$toolchain" --print sysroot 2>$null
         }
         if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($sysroot)) {
-            Write-Error "anvil: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain"
+            if ($toolchain -eq 'default') {
+                $selected = if ($null -ne $selectedStableToolchain) {
+                    "'$selectedStableToolchain'"
+                } else {
+                    'from RUSTUP_TOOLCHAIN or the repository toolchain file'
+                }
+                Write-Error "anvil: selected stable toolchain $selected is unavailable. Run: just anvil-toolchain-stable-install"
+            } else {
+                Write-Error "anvil: toolchain '$toolchain' not installed. Run: rustup toolchain install $toolchain"
+            }
             exit 1
         }
         $sysroot = $sysroot.Trim()

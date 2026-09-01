@@ -41,8 +41,8 @@ on:
           configured at Codecov; required for private repos.
         required: false
 
-# Event-specific callers select permissions because a called workflow cannot
-# elevate beyond its caller. This implementation declares no broader scopes.
+# The root caller selects permissions because a called workflow cannot elevate
+# beyond its caller. This implementation declares no broader scopes.
 
 # Note on matrices: every multi-OS job below hardcodes its OS axis as
 # an inline YAML array. Per-leg runner *labels* are inputs (so adopters
@@ -96,7 +96,7 @@ jobs:
           BASE_REF: ${{ inputs.base_ref }}
 
   # These job display names form repository-ruleset contexts. Treat cosmetic
-  # changes as compatibility changes and keep PR and merge-group callers aligned.
+  # changes as compatibility changes across PR and merge-group events.
   pr-fast:
     name: "Check Group: Fast Checks (${{ matrix.os }})"
     # Cross-OS / cross-arch because pr-fast contains compile-sensitive
