@@ -20,7 +20,7 @@ use crate::Verdict;
 use crate::aggregate::{LineTotals, aggregate};
 use crate::attribute::{AttributionOutcome, attribute};
 use crate::error::{CoverageGateError, UnknownPackageSelectorError};
-use crate::lcov_cov::CoverageReport;
+use crate::lcov_cov::{CoverageReport, FileReport};
 use crate::threshold::{Threshold, ThresholdSource};
 use crate::workspace::{Member, Workspace};
 
@@ -60,6 +60,14 @@ pub(crate) struct PackageOutcome {
     pub(crate) diagnostics: Vec<LineDiagnostic>,
 }
 
+impl PackageOutcome {
+    /// Measured line-coverage percentage for this package, or `None`
+    /// when no coverage data was attributed (status `NoData`).
+    pub(crate) fn percent(&self) -> Option<f64> {
+        self.totals.percent()
+    }
+}
+
 /// Relevant source lines from one file in a failing package.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LineDiagnostic {
@@ -68,14 +76,6 @@ pub(crate) struct LineDiagnostic {
     /// Uncovered lines for a numeric failure, or all coverable lines for
     /// an `expect-no-coverable-lines` failure.
     pub(crate) lines: Vec<u32>,
-}
-
-impl PackageOutcome {
-    /// Measured line-coverage percentage for this package, or `None`
-    /// when no coverage data was attributed (status `NoData`).
-    pub(crate) fn percent(&self) -> Option<f64> {
-        self.totals.percent()
-    }
 }
 
 /// Full verdict report — one row per gated package.
@@ -160,7 +160,7 @@ pub(crate) fn evaluate(report: &CoverageReport, workspace: &Workspace, gated_pac
     })
 }
 
-fn diagnostics(files: &[&crate::lcov_cov::FileReport], member: &Member, status: Status) -> Vec<LineDiagnostic> {
+fn diagnostics(files: &[&FileReport], member: &Member, status: Status) -> Vec<LineDiagnostic> {
     let mut diagnostics: Vec<LineDiagnostic> = files
         .iter()
         .filter_map(|file| {
@@ -320,7 +320,6 @@ fn classify_no_coverable_lines(totals: LineTotals) -> Status {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::lcov_cov::FileReport;
 
     fn make_file(path: &str, count: u32, covered: u32) -> FileReport {
         FileReport {

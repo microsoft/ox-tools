@@ -1,0 +1,8 @@
+# Prebuilt binaries installed by `anvil-setup binstall` link against this
+# image's glibc, so it tracks the Linux runner the generated workflows use.
+# Digest-pinned: a floating tag moves content under a reference that claims to
+# name fixed content.
+#
+# Re-declare BASE_IMAGE in the gap below to build on another base; a later ARG
+# wins, and the pins anvil maintains stay current.
+ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea

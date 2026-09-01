@@ -1,0 +1,66 @@
+{
+  "properties": {
+    "helpUri": "https://eng.ms/docs/microsoft-security/security/azure-security/cloudai-security-fundamentals-engineering/security-integration/guardian-wiki/microsoft-guardian/general/baselines"
+  },
+  "version": "1.0.0",
+  "baselines": {
+    "guardian-baseline": {
+      "name": "guardian-baseline",
+      "createdDate": "2026-08-29 01:01:08Z",
+      "lastUpdatedDate": "2026-08-29 01:01:08Z"
+    }
+  },
+  "results": {
+    "76fd7a25c28f9262a9374458b53900557205bd749d44fc487f5c5959f66ae373": {
+      "signature": "76fd7a25c28f9262a9374458b53900557205bd749d44fc487f5c5959f66ae373",
+      "alternativeSignatures": [
+        "d5579b003cf7281b08d85c890a30fc4c35a86b3f529ce49433b01e281d4b3135",
+        "70fa041a3c325fe39527255e4d9ba5be73545c59b593ac04560e0a38395f358e",
+        "a70c9324a6828d8ebbed3b533c86cd762dd13416d8e7fa0a5832f03ecd64f6d2"
+      ],
+      "target": "crates/cargo-gamma-lib/src/vendor/mutation-test-elements.js",
+      "line": 2,
+      "memberOf": [
+        "guardian-baseline"
+      ],
+      "tool": "eslint",
+      "ruleId": "@microsoft/sdl/no-inner-html",
+      "createdDate": "2026-08-29 01:01:08Z",
+      "justification": "Vendored, minified third-party bundle (mutation-testing-elements v3.9.0) inlined via include_str! for offline mutation-report rendering; not first-party code and edited only by re-vendoring."
+    },
+    "6c2296c115b4b8e065b919eac81644836d8995df35d788303693fc78d10b940d": {
+      "signature": "6c2296c115b4b8e065b919eac81644836d8995df35d788303693fc78d10b940d",
+      "alternativeSignatures": [
+        "a086649633e0807a3bf8b158f7bde6ff79f7c9f79137c39d73e9e1e491c2c478",
+        "9adc979fa9ea8c34cdf268569ca111efa8435638b4db7aec448e55250d5535b4",
+        "1e11790819e5e5fb85d0b633f931d36100b5841d3618b9aa67aca1781e578d0f"
+      ],
+      "target": "crates/cargo-gamma-lib/src/vendor/mutation-test-elements.js",
+      "line": 4,
+      "memberOf": [
+        "guardian-baseline"
+      ],
+      "tool": "eslint",
+      "ruleId": "@microsoft/sdl/no-inner-html",
+      "createdDate": "2026-08-29 01:01:08Z",
+      "justification": "Vendored, minified third-party bundle (mutation-testing-elements v3.9.0) inlined via include_str! for offline mutation-report rendering; not first-party code and edited only by re-vendoring."
+    },
+    "c4f9dd267f73ed656e10bef2a86d91248af954f913c1c22b01fb09c9a52af6c8": {
+      "signature": "c4f9dd267f73ed656e10bef2a86d91248af954f913c1c22b01fb09c9a52af6c8",
+      "alternativeSignatures": [
+        "551b2c218b40b608702491ef12fb494316a9a08a55c552327b9b8609df88988f",
+        "61b6972e757217738b718e807a998e49c3bb6211fc8ec36d313ed9316c1eec9c",
+        "8104abcdc875f7de72700d2fa22d4f59bb668d1b945ba72d7ff1a6f073171d6b"
+      ],
+      "target": "crates/cargo-gamma-lib/src/vendor/mutation-test-elements.js",
+      "line": 89,
+      "memberOf": [
+        "guardian-baseline"
+      ],
+      "tool": "eslint",
+      "ruleId": "@microsoft/sdl/no-inner-html",
+      "createdDate": "2026-08-29 01:01:08Z",
+      "justification": "Vendored, minified third-party bundle (mutation-testing-elements v3.9.0) inlined via include_str! for offline mutation-report rendering; not first-party code and edited only by re-vendoring."
+    }
+  }
+}

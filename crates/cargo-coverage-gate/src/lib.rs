@@ -12,9 +12,12 @@
 //! coverage lcov tracefile, resolves each package's threshold from a small
 //! three-layer lookup, and emits a verdict table to stdout (and,
 //! optionally, to a Markdown summary file for CI step summaries). A failing
-//! verdict includes exact covered/coverable counts and the uncovered source
-//! line ranges, so the output identifies what must be covered without relying
-//! on a later coverage-service upload.
+//! verdict includes actionable details without relying on a later
+//! coverage-service upload. A coverable line is a distinct LCOV `DA:` record.
+//! Numeric failures show exact covered/coverable counts and uncovered ranges;
+//! `expect-no-coverable-lines` failures show the unexpected coverable ranges;
+//! and `NO DATA` explains that no records were attributed. Location lists are
+//! bounded, with an exact count of omitted locations.
 //!
 //! ## Threshold resolution
 //!

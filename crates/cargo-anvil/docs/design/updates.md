@@ -170,9 +170,15 @@ the source of truth and pointing readers at the update workflow:
 This warning is informational only. Ownership remains path-based in `.anvil.lock`.
 If a repository edits an owned file, cargo-anvil preserves the edit and reports a
 proposal instead of overwriting it; `cargo anvil --dry-run` shows that decision.
-The ADO `steps/job.yml` extension wrapper is the deliberate exception to the
-"do not edit" wording: its header says it is emitted by cargo-anvil and explicitly
-invites repository customization because that file is the supported 1ESPT hook.
+Two files are deliberate exceptions to the "do not edit" wording, and both carry
+a weaker provenance marker instead. The ADO `steps/job.yml` extension wrapper
+says it is emitted by cargo-anvil and explicitly invites repository
+customization, because that file is the supported 1ESPT hook. The container
+`Dockerfile` and its ignore file (`.anvil/container/Dockerfile*`) are marked
+"Managed by cargo-anvil." for the same reason: a repository that needs a
+different base or extra packages edits them in place, and drift handling
+preserves the edit (see [containers.md](./containers.md#8-customization)). A
+"DO NOT EDIT" marker would contradict the customization path both are for.
 
 ## 3. Managed regions
 

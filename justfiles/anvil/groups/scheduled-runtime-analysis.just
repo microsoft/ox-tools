@@ -12,14 +12,14 @@
 # and adds the three stricter miri profiles (tree-borrows, strict-
 # provenance, race-coverage) which are too expensive for PR.
 
-# Full-workspace backstop: routed through _anvil-run with impact "off" so
+# Full-workspace backstop: routed through _anvil-unscoped so
 # ANVIL_IMPACT=off is set before the check dependencies run, regardless of how
 # the group is invoked. The group does not recompute impact and therefore does
 # not require cargo-delta.
 
 # Run the scheduled runtime analysis.
 [group("anvil")]
-anvil-scheduled-runtime-analysis: (_anvil-run "scheduled-runtime-analysis" anvil_runner "off")
+anvil-scheduled-runtime-analysis: (_anvil-unscoped "scheduled-runtime-analysis")
 
 [private]
 _anvil-scheduled-runtime-analysis: anvil-scheduled-runtime-analysis-validate-prereqs \

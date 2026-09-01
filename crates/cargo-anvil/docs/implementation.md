@@ -93,11 +93,10 @@ only affects local runs.
 `ANVIL_IMPACT` has three modes — producer (unset/compute), `consume` (read a downloaded cache),
 and `off` (full workspace). The critical invariant is that the mode must be established in the
 shell **before** `just` evaluates a recipe's dependencies, because scoped checks take a
-`: anvil-impact` dependency. `runner.just`'s `_anvil-run` therefore exports `ANVIL_IMPACT`
-before re-invoking the private tier, and it threads the same decision through container dispatch
-(`run-in-container.*`) without recursing. `tiers.just` routes scheduled/full tiers through an
-`ANVIL_IMPACT=off` wrapper so those tiers are never scoped. `tier_routing.rs` exercises the
-off-before-dependencies ordering and the container/native paths.
+`: anvil-impact` dependency. `helpers.just`'s `_anvil-unscoped` therefore exports
+`ANVIL_IMPACT=off` before re-invoking the private tier or group, so those recipes are
+never scoped. `container.just` sets the same variable through the engine's `-e` when a
+containerized run needs it. `justfile.rs` asserts the off-before-dependencies ordering.
 
 ### Cross-backend CI handoff
 
@@ -129,7 +128,7 @@ falls back to the group recipe when a tool exits without that diagnostic. The
 step writes the recipe and exit code as outputs, then returns the captured
 status itself. This is a correctness constraint for diagnostics: the GitHub
 step marked failed must be the step containing the complete recipe output.
-Moving propagation to a later synthetic step would make GitHub focus that
+Moving propagation to a later synthetic step would make GitHub focus on that
 empty step and hide the useful output behind a successful predecessor.
 
 The reporter uses `always()`, so GitHub runs it after the group step fails and

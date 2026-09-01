@@ -907,8 +907,9 @@ After `pr-test` (and `scheduled-test`) runs the `anvil-llvm-cov` recipe, the reu
 workflow uploads the resulting coverage files to Codecov from every leg of the matrix
 except `windows-11-arm`. The upload condition uses `always()` plus a file-existence
 guard: completed coverage reports are retained even when the coverage gate or a later
-group recipe fails, while failures before both feature configurations complete do not
-trigger an empty or partial upload. The windows-arm leg is excluded because its
+group recipe fails, while failures before both the all-features
+(`lcov-all-features.info`) and no-default-features (`lcov-no-default.info`)
+configurations complete do not trigger an empty or partial upload. The windows-arm leg is excluded because its
 LLVM-coverage instrumentation produces `malformed instrumentation profile data: symbol
 name is empty` errors that make the profile unusable. Coverage from every other leg is
 necessary because OS/arch-gated code (`cfg(target_os = ...)`, `cfg(target_arch = ...)`)

@@ -256,6 +256,8 @@ Markdown variant uses the same columns and a leading `### coverage-gate`
 header so it renders cleanly in GitHub job summaries and ADO build summaries.
 
 When the verdict is not a pass, both renderers append **failure details**.
+A **coverable line** is a distinct LCOV `DA:` record: a source line for which
+LLVM emitted line-coverage instrumentation, whether or not a test executed it.
 For a package below its numeric threshold, the details show exact
 covered/coverable line counts and the uncovered package-relative source
 locations. For a package that unexpectedly contains coverable lines, they
@@ -266,7 +268,15 @@ Locations are ordered by package, file, and line, and contiguous lines are
 rendered as ranges. To keep CI logs and summaries bounded, at most the first
 100 relevant line locations are shown per package; the renderer reports how
 many additional locations were omitted. The aggregate counts always describe
-the complete input, not the displayed subset.
+the complete input, not the displayed subset. One hundred locations is large
+enough to show several failure clusters while keeping a pathological package
+to a few kilobytes of diagnostic output; it should be reevaluated if typical
+failures routinely omit the first useful cluster or materially inflate CI
+summaries.
+
+The [implementation guide](../implementation.md) records the parser,
+attribution, status-selection, ordering, and rendering pipeline behind this
+contract.
 
 ```text
 Failure details:

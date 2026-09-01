@@ -194,7 +194,23 @@ mod tests {
             !RUN_GROUP_ACTION.contains("Failed Just recipe:"),
             "failure propagation must stay in the step containing the recipe output"
         );
-        assert!(RUN_GROUP_ACTION.contains("uses: ./.github/actions/anvil-report-status"));
+        let reporter = RUN_GROUP_ACTION
+            .split_once("- name: Publish supplemental Anvil commit status")
+            .expect("run-group action should contain the supplemental reporter step")
+            .1;
+        assert!(
+            reporter.contains("if: always()"),
+            "reporting must run after the authoritative recipe step fails"
+        );
+        assert!(reporter.contains("uses: ./.github/actions/anvil-report-status"));
+        assert!(
+            reporter.contains("exit_code: ${{ steps.run.outputs.exit_code }}"),
+            "the reporter must consume the exit code recorded before failure propagation"
+        );
+        assert!(
+            reporter.contains("failed_recipe: ${{ steps.run.outputs.failed_recipe }}"),
+            "the reporter must consume the recipe recorded before failure propagation"
+        );
         // Impact reaches scoped checks through the downloaded impact cache
         // (read via `_anvil-impact-include`), not threaded --package env vars;
         // the executor only fixes the mode.
@@ -422,11 +438,14 @@ export -f just
             1,
             "Codecov upload step should be declared exactly once (gated per-leg via `if:`)"
         );
-        assert!(PR_IMPL_WORKFLOW.contains(
-            "if: always() && matrix.os != 'windows-arm' && \
-             hashFiles('target/coverage/lcov-all-features.info') != '' && \
-             hashFiles('target/coverage/lcov-no-default.info') != ''"
-        ));
+        assert!(
+            PR_IMPL_WORKFLOW.contains(
+                "if: always() && matrix.os != 'windows-arm' && \
+                 hashFiles('target/coverage/lcov-all-features.info') != '' && \
+                 hashFiles('target/coverage/lcov-no-default.info') != ''"
+            ),
+            "`always()` preserves completed reports after failure, and separate predicates require the complete pair"
+        );
         assert!(PR_IMPL_WORKFLOW.contains("flags: ${{ matrix.os }}"));
         assert_eq!(
             PR_IMPL_WORKFLOW.matches("permissions:").count(),
@@ -455,14 +474,17 @@ export -f just
         }
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("publish-failure:"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("codecov/codecov-action"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains(
-            "if: always() && matrix.os != 'windows-arm' && \
-             hashFiles('target/coverage/lcov-all-features.info') != '' && \
-             hashFiles('target/coverage/lcov-no-default.info') != ''"
-        ));
+        assert!(
+            SCHEDULED_IMPL_WORKFLOW.contains(
+                "if: always() && matrix.os != 'windows-arm' && \
+                 hashFiles('target/coverage/lcov-all-features.info') != '' && \
+                 hashFiles('target/coverage/lcov-no-default.info') != ''"
+            ),
+            "`always()` preserves completed reports after failure, and separate predicates require the complete pair"
+        );
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("vars.ANVIL_PUBLISH_FAILURE_ISSUE != 'false'"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("contains(needs.*.result, 'failure')"));
-        assert!(SCHEDULED_IMPL_WORKFLOW.contains("actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd"));
+        assert!(SCHEDULED_IMPL_WORKFLOW.contains("actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("github.rest.search.issuesAndPullRequests"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("github.rest.issues.createComment"));
         assert!(SCHEDULED_IMPL_WORKFLOW.contains("github.rest.issues.create"));

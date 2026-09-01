@@ -1,0 +1,6 @@
+# Consumed by `anvil-container` itself: a nested invocation from inside the
+# image runs the recipe natively instead of launching another container.
+ENV ANVIL_IN_CONTAINER=1
+
+WORKDIR /workspace
+CMD ["bash"]
