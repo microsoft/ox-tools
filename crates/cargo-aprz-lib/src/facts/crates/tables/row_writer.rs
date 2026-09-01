@@ -179,9 +179,9 @@ mod tests {
     }
 
     /// The tables are a cache read back by later runs, so the integer encoding is an on-disk
-    /// contract rather than an implementation detail. These bytes pin one value from each of
-    /// the five `vu128` length classes, so replacing the encoder cannot silently invalidate
-    /// every table an older build wrote.
+    /// contract rather than an implementation detail. These bytes sample each of the four short
+    /// `vu128` prefix forms plus the shortest and longest `u64` cases of its binary-length form,
+    /// so replacing the encoder cannot silently invalidate every table an older build wrote.
     #[test]
     fn writes_the_documented_variable_length_encoding() {
         assert_eq!(encoded(0x7F), [0x7F]);
