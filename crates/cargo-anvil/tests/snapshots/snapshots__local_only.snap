@@ -5323,7 +5323,7 @@ _install-tool-core name version installer source_prereq="":
     $sourcePrereq = '{{source_prereq}}'
 
     if ($installer -ne 'install' -and $installer -ne 'binstall') {
-        Write-Error "_install-tool: unknown installer '$installer' (expected 'install' or 'binstall')"
+        Write-Error "_install-tool-core: unknown installer '$installer' (expected 'install' or 'binstall')"
         exit 2
     }
 
