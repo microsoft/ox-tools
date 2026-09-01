@@ -635,9 +635,8 @@ a full cache hit (`anvil-impact: impact set up to date`). To force a recompute, 
 Miri compiles the selected package scope once, then executes its independent
 libtest artifacts concurrently. `ANVIL_MIRI_JOBS` overrides the default of one
 worker per logical processor and must be a positive integer. The worker count is
-always clamped to the number of discovered artifacts. Memory-load telemetry is
-reported for calibration but does not silently reduce concurrency; use the
-override when a runner needs a lower memory footprint.
+always clamped to the number of discovered artifacts. Use the override when a
+runner needs a lower memory footprint.
 
 Packages whose own test targets are unsuitable or unproductive under Miri can
 declare:
