@@ -1486,13 +1486,12 @@ mod tests {
             );
             assert!(
                 output.status.success(),
-                "a patch-normalized installed MSRV must satisfy an unpatched selection: {}",
+                "distinct patch-qualified installation must not prevent provisioning the selected MSRV: {}",
                 normalized_diagnostic(&output)
             );
-            assert!(rustup_calls.contains("toolchain list"));
             assert!(
-                !rustup_calls.contains("toolchain install"),
-                "an equivalent patch-normalized MSRV must not be reinstalled"
+                rustup_calls.contains("toolchain install 1.93 --profile minimal"),
+                "the exact 1.93 selector must be installed when only 1.93.0 exists"
             );
             assert!(cargo_calls.is_empty(), "public MSRV availability is checked through rustup");
 

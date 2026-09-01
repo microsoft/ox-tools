@@ -250,12 +250,7 @@ _anvil-resolve-stable action="install":
 
     function Test-ToolchainInstalled([string] $toolchain) {
         $installed = Get-InstalledToolchains
-        $pattern = if ($toolchain -match '^(\d+)\.(\d+)$') {
-            "(?m)^$([regex]::Escape($Matches[1]))\.$([regex]::Escape($Matches[2]))(?:\.0)?(?:-|$)"
-        } else {
-            "(?m)^$([regex]::Escape($toolchain))(?:-|$)"
-        }
-        return (($installed -join "`n") -match $pattern)
+        return (($installed -join "`n") -match "(?m)^$([regex]::Escape($toolchain))(?:-|$)")
     }
 
     function Assert-WorkspaceMsrvCompatibility {
