@@ -13,8 +13,8 @@ user-visible shape of the tool. Detail lives in companion documents:
 - [extensibility.md](./extensibility.md) — how downstream tools ship their own brand + catalog.
 - [github.md](./github.md) — GitHub Actions emission, example workflows, impact wiring.
 - [ado.md](./ado.md) — Azure DevOps Pipelines emission and compliance-template composition.
-- [containers.md](./containers.md) — the opt-in, local-only container backend for running any
-  `anvil-*` recipe in a pinned Linux image (Linux-on-Windows parity, distro pinning).
+- [containers.md](./containers.md) — containerized execution: the explicit `anvil-container`
+  recipe, the content-addressed image, and the credential hook.
 - [../implementation.md](../implementation.md) — internal implementation guidance.
 - [../verification.md](../verification.md) — continuous-validation strategy: dogfooding,
   fixture tests, schema validation.
@@ -76,8 +76,8 @@ missed, and onboarding new Rust repos requires copying-and-praying.
   `Cargo.toml`.
 - Owning how private or path toolchains are provisioned. Anvil deterministically selects an
   existing override, a repository toolchain file, or the repository MSRV. GitHub setup and
-  container construction install a missing public channel through rustup; internal and path
-  toolchains remain the execution environment's responsibility.
+  container construction install a missing public channel through rustup; caller-provisioned
+  and path toolchains remain the execution environment's responsibility.
 - Managing exact tool versions on the user's behalf — we enforce minimums only. See
   [local.md §3](./local.md#3-tool-versions-and-installation).
 - Hosting a service. The tool is a CLI binary; updates ship via crates.io.
@@ -237,7 +237,7 @@ repo/
 ├── .anvil.lock                                    sidecar manifest tracking last-rendered checksums (see updates.md)
 ├── Justfile                                       managed-region: anvil-imports
 ├── justfiles/anvil/                               owned (see local.md)
-├── .anvil/container/                              owned, optional container assets (see containers.md)
+├── .anvil/container/                              owned — the container image definition (see containers.md)
 ├── Cargo.toml                                     managed-region: anvil-workspace-lints (or anvil-lints in single-crate)
 ├── crates/<member>/Cargo.toml                     managed-region: anvil-lints (one per workspace member)
 ├── deny.toml                                      managed-regions: anvil-deny-{advisories,licenses,bans,sources}
@@ -268,10 +268,10 @@ repo/
 Detail on each host:
 
 - **`Justfile` and `justfiles/anvil/*.just`** — see [local.md](./local.md).
-- **`.anvil/container/`** — the non-recipe container assets (Containerfile,
-  drivers, image-ID helpers, README) emitted only when the catalog includes the
-  optional container backend. `justfiles/` holds `.just` recipes and nothing
-  else, so these live in a tool-owned directory of their own; see
+- **`.anvil/container/`** — the container image definition: a `Dockerfile` and
+  its build-context ignore file, plus an optional `hooks.ps1` supplying
+  credentials. `justfiles/` holds `.just` recipes and nothing else, so these
+  live in a tool-owned directory of their own; see
   [containers.md](./containers.md).
 - **`Cargo.toml` lints regions** — workspace `Cargo.toml` carries the
   `anvil-workspace-lints` region containing a single `[workspace.lints]` table whose

@@ -1,39 +1,11 @@
 version = 1
 tool = "anvil"
-tool_version = "0.5.0"
-catalog_checksum = "sha256:e03fe02f75e271234fd24bb3a2d20536d1bb077845661e3547bee1270a8143d0"
+tool_version = "0.6.0"
+catalog_checksum = "sha256:2bc31e569ea3ac1bf82f45bdf75246cf80faecf2ffe3824c6e5eea659cd9454d"
 
 [[file]]
-path = ".anvil/container/Containerfile"
-checksum = "sha256:317a2bfede7c6679750dc37a5b9828419219a86e98f8568cb9106c1460677271"
-
-[[file]]
-path = ".anvil/container/Containerfile.dockerignore"
-checksum = "sha256:260bc557aadb7bec22525d5c98217bed2ebcac0e3252e6697f5d4a3ca629dc34"
-
-[[file]]
-path = ".anvil/container/README.md"
-checksum = "sha256:ea255c3659e17dee291ded4633394d080c5aae8bd6e3e87295f27ffab5f428bc"
-
-[[file]]
-path = ".anvil/container/entrypoint.sh"
-checksum = "sha256:09576bca317f5a413572f6626fc052214f885589f0547ed0b0c044b92cc402e7"
-
-[[file]]
-path = ".anvil/container/image-id.ps1"
-checksum = "sha256:ce553ba67b21ed670db307f7ac87c95941122ece1c0bd94b1e37b83227d1ace7"
-
-[[file]]
-path = ".anvil/container/image-id.sh"
-checksum = "sha256:f71671ec0f8c2ec2e17328a5aab8172744bed6f0b3a312df2bc2bd60d6460ef6"
-
-[[file]]
-path = ".anvil/container/run-in-container.ps1"
-checksum = "sha256:b29d0b7a362d204ce9da0739ae61a480b71239aed52e84c4e015e8ea074e5b06"
-
-[[file]]
-path = ".anvil/container/run-in-container.sh"
-checksum = "sha256:0f4fcf0fef43e4736260af771cae15b7eb8afc382e5290fabddc52894b09139d"
+path = ".anvil/container/Dockerfile.dockerignore"
+checksum = "sha256:9c7906c20415ca3b832afb075c21e79f191ef14ee2fb4b6a5a95394e8b2153c1"
 
 [[file]]
 path = ".github/actions/anvil-impact/action.yml"
@@ -73,7 +45,7 @@ checksum = "sha256:d4d3bd645a5586e9a1cc3a5fc27e38c93e59b1e29f83ede0ccd610273eec0
 
 [[file]]
 path = "justfiles/anvil/checks/aprz.just"
-checksum = "sha256:079b0bf8a3e97745d8ac1fd7986056b7787af778ef00e491786572ae5166d810"
+checksum = "sha256:e10edbbe60358ec930241cd5d4e681a84f30f9d5278e652696e2f149e112d066"
 
 [[file]]
 path = "justfiles/anvil/checks/audit.just"
@@ -97,7 +69,7 @@ checksum = "sha256:4eca78f197c2cf428b693c49cf0af4afb735b9c6caa8c83a71e5f5fd312a9
 
 [[file]]
 path = "justfiles/anvil/checks/cargo-sort.just"
-checksum = "sha256:ea48b494699b6d6a71acd7070c96e28ab8b8b8ee74049de82afe922540508d75"
+checksum = "sha256:ab342c014199ffb58a9346b7b9fcea88201b5b60a07b06cbc9c4e5ef03bd18f5"
 
 [[file]]
 path = "justfiles/anvil/checks/clippy.just"
@@ -133,7 +105,7 @@ checksum = "sha256:7e67d90a9d8bd8cd5c8adb68baf41fdd4625bff4d425b5bf18b75baee6289
 
 [[file]]
 path = "justfiles/anvil/checks/fmt.just"
-checksum = "sha256:967b68ef3ed3e0dcac2a1ea22ef92c66a7db802bda718f6e5ce39f529ed8e492"
+checksum = "sha256:0434e1a8720453a4bc635ea56af1d19875ac79e6fdd76349052cd57e70392eb8"
 
 [[file]]
 path = "justfiles/anvil/checks/license-headers.just"
@@ -145,7 +117,7 @@ checksum = "sha256:cb23283ac3d377b1219c904f4de93b05b437b48c93629fec617307914bba6
 
 [[file]]
 path = "justfiles/anvil/checks/loom.just"
-checksum = "sha256:7d7cb6e9845a97be18dbe93d8b04860386dc43a5f2033816c3224aa460c5aa63"
+checksum = "sha256:f4822a8f9cb282bc426790355ba83b63e778db9327e986ba3c86ae6205cfdabb"
 
 [[file]]
 path = "justfiles/anvil/checks/miri-race-coverage.just"
@@ -169,7 +141,7 @@ checksum = "sha256:968a0cf65a319626c3ed61f75e1d363608856664d105850be281e91f8ecf3
 
 [[file]]
 path = "justfiles/anvil/checks/mutants-diff.just"
-checksum = "sha256:7b7ae9b1c303d29cb26bc70d362b5c51e3f6fbde01bdbc442da27cf53f315018"
+checksum = "sha256:e8d23688dcb86f82bf537e82c35ab8af9296d5530898645ddfe95132f9192bd0"
 
 [[file]]
 path = "justfiles/anvil/checks/mutants-full.just"
@@ -185,7 +157,7 @@ checksum = "sha256:777b6b7594b299452dc97f949937fa1a521e06de5cebbe643267aabbb41fc
 
 [[file]]
 path = "justfiles/anvil/checks/semver-check.just"
-checksum = "sha256:5f9b44a480ceb85923a963c6770e18ae3276e1f9aaa4e24aa8846d57bb5e0f1b"
+checksum = "sha256:6fdb13161d3d0e6ac639472d1aa2087fd135634e7272276a501f1f946a555075"
 
 [[file]]
 path = "justfiles/anvil/checks/spellcheck.just"
@@ -197,7 +169,7 @@ checksum = "sha256:6efd7378a2cd0f5d86519bd32fd86f2055a60191187dd77a8842b374b8eb7
 
 [[file]]
 path = "justfiles/anvil/container.just"
-checksum = "sha256:cbec6450a64f800963ea5ba9d2eedfa4e90d91d441307f18d109629f849126ad"
+checksum = "sha256:3363992c6c006c649eae3732b2a7b04c2a4925eff369179b128d43380e2800d4"
 
 [[file]]
 path = "justfiles/anvil/groups/pr-fast.just"
@@ -225,23 +197,23 @@ checksum = "sha256:ea96d29e261b454a585c0ba3dc7954a35d0c726e9e94f6bb7c82f15261531
 
 [[file]]
 path = "justfiles/anvil/groups/scheduled-advisories.just"
-checksum = "sha256:55bba93aa828d6c3e2b72b637627511703dfb2d84262a2a8608bd5e247f56d2b"
+checksum = "sha256:4f9940bb54fd7cd1d622f3207f7c43f38f95232a370f7537b15546271d88805d"
 
 [[file]]
 path = "justfiles/anvil/groups/scheduled-exhaustive.just"
-checksum = "sha256:46699373120faccca1462d68b4184531375b557ea787958b7e63472dab038820"
+checksum = "sha256:0b9023c614ae400c30f7131fc939b318bf6ee2ba086b18d45491fa30691694e7"
 
 [[file]]
 path = "justfiles/anvil/groups/scheduled-runtime-analysis.just"
-checksum = "sha256:e0bc75b9aa950ac8f3bfd07a0e506260a48aa6e669da3c1feed69a1b29733ce2"
+checksum = "sha256:51d43ac7399183467cb137f655fa0f1f0c6cf4980aab019dc5898a40ad18259d"
 
 [[file]]
 path = "justfiles/anvil/groups/scheduled-test.just"
-checksum = "sha256:a00153eda6b55d4db33e8019fa74f4a905f9c80b10b0db10955179c0af3e9c05"
+checksum = "sha256:04679222579a090769403f5aae7c9ffabbf5bd559ddb1f17b5a0655152172846"
 
 [[file]]
 path = "justfiles/anvil/helpers.just"
-checksum = "sha256:6b71379310b986e9a44000ba9d072c3f8934397a0f7fb1bf27a31a7742ca7002"
+checksum = "sha256:dc42a4b2ed4a25e3a37b322dad209df34d7adca88bf3c4de60b2f8c1b396e23b"
 
 [[file]]
 path = "justfiles/anvil/impact.just"
@@ -249,23 +221,44 @@ checksum = "sha256:0b3a5c96dd33384b4c86ac02b17396bc1a9fe9c82edbc516a2ceea7f4fe38
 
 [[file]]
 path = "justfiles/anvil/mod.just"
-checksum = "sha256:c3f88aa70698bb7b9c911d395293f2d66cbb84bd2df0e9a04faec0a6cb183564"
-
-[[file]]
-path = "justfiles/anvil/runner.just"
-checksum = "sha256:a5fb128a307c72cbd31dccba8b7dc044a350522e692583423724f48f51b4580d"
+checksum = "sha256:4892e7a17d5f576241834041c89916708b23e88503156721af3048b2a358538f"
 
 [[file]]
 path = "justfiles/anvil/tiers.just"
-checksum = "sha256:5b2d91569f3fe87cd5f516623a01b5c7ae855ad587870ef9a2ae6d5619dd9d34"
+checksum = "sha256:00453a12cbb34811ee6a2c083dade5f6198575e3b0610f49e4743366326cdd18"
 
 [[file]]
 path = "justfiles/anvil/tools.just"
-checksum = "sha256:91f23677f01ef611cda076d8ceb58ee320d9a8827821b880c94a66456427a914"
+checksum = "sha256:e892e09dcedea51d0c62ab4ab2541e0d036ea15816782088d2f306b800de80ef"
 
 [[file]]
 path = "justfiles/anvil/versions.just"
-checksum = "sha256:ee50107325fc5d690c64d6ece566ec9cc82c196aaf8ebe70137a13ef21af4289"
+checksum = "sha256:13eccb8202ddc168717d090d57bcbb257b11084e6f47361b60f634c2c8185046"
+
+[[region]]
+host = ".anvil/container/Dockerfile"
+id = "anvil-container-base"
+checksum = "sha256:734e21d8ae8ce8c0a00f54a36a3a9f15a02b52eff11c27f3de4f7cd60bb95449"
+
+[[region]]
+host = ".anvil/container/Dockerfile"
+id = "anvil-container-base-image"
+checksum = "sha256:64fa253bd48baecd440ae02cb13d2626e17be6e2bb0e1b19e3345baeade04abb"
+
+[[region]]
+host = ".anvil/container/Dockerfile"
+id = "anvil-container-entry"
+checksum = "sha256:7b409a9b560c214e10b50f74330fb6f8c0c12c3d83494e0dcf016f2411b50365"
+
+[[region]]
+host = ".anvil/container/Dockerfile"
+id = "anvil-container-setup"
+checksum = "sha256:3788845ea3d4c483917954ddf9bccf918bf69ab7c64bbf559baf59d5781c444f"
+
+[[region]]
+host = ".anvil/container/Dockerfile"
+id = "anvil-container-tools"
+checksum = "sha256:ba7456ca88da39f72024dd0616e56d49d1aef7a5d26b81a8b33efccb13321379"
 
 [[region]]
 host = ".delta.toml"
@@ -286,11 +279,6 @@ checksum = "sha256:8257f8c96103501ef0af020ce686ffcd7333fa5704f701b33758468baa9cd
 host = "Justfile"
 id = "anvil-imports"
 checksum = "sha256:f8affd59b69c7083c2f3b6f593c63672116dda974c1e661dcb66a4412eb3eada"
-
-[[region]]
-host = "Justfile"
-id = "anvil-runner"
-checksum = "sha256:a31c6dd3fc8402e1e89fcf1948e03103e0dc66fbb988c34510eddeded5a67b0e"
 
 [[region]]
 host = "clippy.toml"

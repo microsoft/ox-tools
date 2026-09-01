@@ -20,9 +20,10 @@
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use ohno::{AppError, IntoAppError as _};
+use ohno::{AppError, IntoAppError as _, bail};
 
 use crate::decision::Decision;
+use crate::io::resolve_existing_case_insensitive;
 use crate::manifest::{Manifest, RegionKey};
 
 /// What is being changed by a single plan item.
@@ -238,6 +239,7 @@ pub struct Plan {
     items: Vec<PlanItem>,
     notes: Vec<String>,
     refusals: Vec<String>,
+    manifest_update_required: bool,
 }
 
 impl Plan {
@@ -284,10 +286,15 @@ impl Plan {
         &mut self.items
     }
 
+    /// Record whether applying this plan would change `.anvil.lock`.
+    pub(crate) fn set_manifest_update_required(&mut self, required: bool) {
+        self.manifest_update_required = required;
+    }
+
     /// Whether the plan would change anything on disk if applied.
     #[must_use]
     pub fn has_changes(&self) -> bool {
-        self.items.iter().any(|i| i.decision.writes())
+        self.manifest_update_required || self.items.iter().any(|i| i.decision.writes())
     }
 
     /// Exit code for `--dry-run`: 0 if everything is in sync and every
@@ -347,9 +354,13 @@ impl Plan {
         write_section(&mut out, "Will update", &updates);
         write_section(&mut out, "Will propose", &proposes);
         write_section(&mut out, "Will remove", &removes);
-        write_section(&mut out, "Orphaned (customized; transferring ownership)", &orphans_kept);
+        write_section(&mut out, "No longer managed (left in place; ownership transferred)", &orphans_kept);
         write_section(&mut out, "Will leave alone (silent)", &leave_alones);
 
+        if self.manifest_update_required {
+            let _ = writeln!(out, "Manifest update required: 1 item(s)");
+            let _ = writeln!(out, "  - .anvil.lock");
+        }
         if !in_syncs.is_empty() {
             let _ = writeln!(out, "Unchanged: {} item(s)", in_syncs.len());
         }
@@ -378,9 +389,9 @@ impl Plan {
     ///   bump the manifest entry to the new template checksum so
     ///   subsequent runs see the divergence as resolved
     ///   (`LeaveAlone`) until the template moves again — see
-    ///   [`updates.md §5`](../../docs/design/updates.md).
-    /// - `InSync`, `LeaveAlone` items preserve their existing
-    ///   manifest entries from `previous_manifest`.
+    ///   the [update protocol](../../docs/design/updates.md).
+    /// - `InSync` items refresh their manifest checksum; `LeaveAlone`
+    ///   items preserve their existing manifest entries.
     /// - Stale entries — items present in `previous_manifest` but not
     ///   in this plan (e.g. a removed workspace member, a backend the
     ///   user disabled) — are purged from the returned manifest.
@@ -396,12 +407,61 @@ impl Plan {
     /// items must carry a spliced host. These invariants are enforced
     /// by the `PlanItem::*` constructors, so violations only happen if
     /// callers build `PlanItem` directly with inconsistent fields.
-    #[expect(
-        clippy::too_many_lines,
-        clippy::expect_used,
-        reason = "single dispatch site covering every (target × decision) pair; the expects encode constructor-enforced invariants"
-    )]
     pub fn apply(&self, repo_root: &Path, previous_manifest: &Manifest) -> Result<Manifest, AppError> {
+        self.apply_files(repo_root)?;
+        Ok(self.projected_manifest(previous_manifest))
+    }
+
+    /// Apply only the owned-file and managed-region changes.
+    ///
+    /// Manifest projection is deliberately separate so dry-run and real
+    /// application calculate the same next `.anvil.lock`.
+    #[expect(
+        clippy::expect_used,
+        reason = "the expects encode invariants enforced by the PlanItem constructors"
+    )]
+    pub(crate) fn apply_files(&self, repo_root: &Path) -> Result<(), AppError> {
+        for item in &self.items {
+            match (&item.target, item.decision) {
+                (Target::File { path }, Decision::Write) => {
+                    let content = item.rendered.as_ref().expect("Write decision must carry rendered content");
+                    write_file(&contained_path(repo_root, path)?, content)?;
+                }
+                (Target::File { path }, Decision::Propose) => {
+                    let content = item.rendered.as_ref().expect("Propose decision must carry rendered content");
+                    write_file(&contained_path(repo_root, &format!("{path}.anvil-proposed"))?, content)?;
+                }
+                (Target::Region { host, .. }, Decision::Write) => {
+                    let spliced = item.spliced_host.as_ref().expect("region Write must carry spliced host");
+                    write_file(&contained_path(repo_root, host)?, spliced)?;
+                }
+                (Target::Region { host, .. }, Decision::Propose) => {
+                    let spliced = item.spliced_host.as_ref().expect("region Propose must carry spliced host");
+                    write_file(&contained_path(repo_root, &format!("{host}.anvil-proposed"))?, spliced)?;
+                }
+                (Target::File { path }, Decision::Remove) => {
+                    let actual_path = resolve_existing_case_insensitive(repo_root, path);
+                    let abs = contained_path(repo_root, &actual_path)?;
+                    if let Err(e) = std::fs::remove_file(&abs)
+                        && e.kind() != std::io::ErrorKind::NotFound
+                    {
+                        return Err::<(), _>(e).into_app_err_with(|| format!("failed to remove {}", abs.display()));
+                    }
+                }
+                (Target::Region { host, .. }, Decision::Remove) => {
+                    let spliced = item.spliced_host.as_ref().expect("region Remove must carry spliced host");
+                    let actual_host = resolve_existing_case_insensitive(repo_root, host);
+                    write_file(&contained_path(repo_root, &actual_host)?, spliced)?;
+                }
+                (_, Decision::InSync | Decision::LeaveAlone | Decision::OrphanedKept) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Calculate the manifest produced by this plan without touching disk.
+    #[must_use]
+    pub(crate) fn projected_manifest(&self, previous_manifest: &Manifest) -> Manifest {
         let mut next = Manifest {
             tool: previous_manifest.tool.clone(),
             tool_version: previous_manifest.tool_version.clone(),
@@ -411,105 +471,8 @@ impl Plan {
         };
 
         for item in &self.items {
-            match (&item.target, item.decision) {
-                (Target::File { path }, Decision::Write) => {
-                    let content = item.rendered.as_ref().expect("Write decision must carry rendered content");
-                    let abs = repo_root.join(path);
-                    write_file(&abs, content)?;
-                    if let Some(checksum) = &item.rendered_checksum {
-                        next.files.insert(path.clone(), checksum.clone());
-                    }
-                }
-                (Target::File { path }, Decision::Propose) => {
-                    let content = item.rendered.as_ref().expect("Propose decision must carry rendered content");
-                    let abs = repo_root.join(format!("{path}.anvil-proposed"));
-                    write_file(&abs, content)?;
-                    if let Some(checksum) = &item.rendered_checksum {
-                        // Bump L to the new T so subsequent runs see the
-                        // divergence as resolved (LeaveAlone). The user's
-                        // .anvil-proposed sibling stays on disk for
-                        // review; deleting or accepting it is the user's
-                        // job.
-                        next.files.insert(path.clone(), checksum.clone());
-                    }
-                }
-                (Target::Region { host, id }, Decision::Write) => {
-                    let spliced = item.spliced_host.as_ref().expect("region Write must carry spliced host");
-                    let abs = repo_root.join(host);
-                    write_file(&abs, spliced)?;
-                    if let Some(checksum) = &item.rendered_checksum {
-                        next.regions.insert(
-                            RegionKey {
-                                host: host.clone(),
-                                id: id.clone(),
-                            },
-                            checksum.clone(),
-                        );
-                    }
-                }
-                (Target::Region { host, id }, Decision::Propose) => {
-                    let spliced = item.spliced_host.as_ref().expect("region Propose must carry spliced host");
-                    let abs = repo_root.join(format!("{host}.anvil-proposed"));
-                    write_file(&abs, spliced)?;
-                    if let Some(checksum) = &item.rendered_checksum {
-                        // Same rationale as the File/Propose branch: bump
-                        // L = T so subsequent runs see LeaveAlone until
-                        // the template moves again.
-                        next.regions.insert(
-                            RegionKey {
-                                host: host.clone(),
-                                id: id.clone(),
-                            },
-                            checksum.clone(),
-                        );
-                    }
-                }
-                (Target::File { path }, Decision::Remove) => {
-                    // Untouched orphan file: delete and drop the
-                    // manifest entry. If the file is already missing
-                    // (race / external delete), absorb the error so
-                    // the result is idempotent.
-                    let abs = repo_root.join(path);
-                    if let Err(e) = std::fs::remove_file(&abs)
-                        && e.kind() != std::io::ErrorKind::NotFound
-                    {
-                        return Err::<Manifest, _>(e).into_app_err_with(|| format!("failed to remove {}", abs.display()));
-                    }
-                    next.files.remove(path);
-                }
-                (Target::Region { host, id }, Decision::Remove) => {
-                    // Untouched orphan region: splice the markers + body
-                    // out of the host file and drop the manifest entry.
-                    let spliced = item.spliced_host.as_ref().expect("region Remove must carry spliced host");
-                    let abs = repo_root.join(host);
-                    write_file(&abs, spliced)?;
-                    next.regions.remove(&RegionKey {
-                        host: host.clone(),
-                        id: id.clone(),
-                    });
-                }
-                (Target::File { path }, Decision::OrphanedKept) => {
-                    // Customized orphan: leave the file in place,
-                    // transfer ownership by dropping the manifest entry.
-                    next.files.remove(path);
-                }
-                (Target::Region { host, id }, Decision::OrphanedKept) => {
-                    // Customized orphan region: leave the host file
-                    // and the in-region content in place, transfer
-                    // ownership by dropping the manifest entry.
-                    next.regions.remove(&RegionKey {
-                        host: host.clone(),
-                        id: id.clone(),
-                    });
-                }
-                (_, Decision::InSync) => {
-                    // Disk content matches the current template. No
-                    // file write needed. We DO refresh the manifest L
-                    // to the current template checksum if the plan
-                    // item carries one — this self-heals stale-L
-                    // values left over from older binary versions
-                    // whose hash function differed (e.g. before
-                    // line-ending normalization).
+            match item.decision {
+                Decision::Write | Decision::Propose | Decision::InSync => {
                     if let Some(checksum) = &item.rendered_checksum {
                         match &item.target {
                             Target::File { path } => {
@@ -527,13 +490,22 @@ impl Plan {
                         }
                     }
                 }
-                (_, Decision::LeaveAlone) => {
-                    // No-op; manifest entry already preserved.
-                }
+                Decision::Remove | Decision::OrphanedKept => match &item.target {
+                    Target::File { path } => {
+                        next.files.remove(path);
+                    }
+                    Target::Region { host, id } => {
+                        next.regions.remove(&RegionKey {
+                            host: host.clone(),
+                            id: id.clone(),
+                        });
+                    }
+                },
+                Decision::LeaveAlone => {}
             }
         }
 
-        Ok(next)
+        next
     }
 }
 
@@ -547,12 +519,80 @@ fn write_section(out: &mut String, header: &str, items: &[&PlanItem]) {
     }
 }
 
+/// Join a repository-relative path to `repo_root` and verify that it resolves
+/// inside it.
+///
+/// `Manifest::ensure_contained` rejects a path that escapes lexically, but a
+/// path built entirely from ordinary components still lands outside the
+/// repository when one of those components is a symlink pointing out of it.
+/// The manifest is committed content, so a checkout can carry both the link and
+/// the entry that names it, and the write, delete or proposal below would
+/// follow it.
+///
+/// Resolution stops at the deepest ancestor that exists, because the path
+/// itself frequently does not: a file anvil is about to create has nothing on
+/// disk to resolve. That is sufficient, since a symlink can only be a component
+/// that exists.
+///
+/// # Errors
+///
+/// Returns an error if the repository root cannot be resolved, or if the path
+/// resolves outside it.
+fn contained_path(repo_root: &Path, relpath: &str) -> Result<PathBuf, AppError> {
+    let abs = repo_root.join(relpath);
+    let root = repo_root
+        .canonicalize()
+        .into_app_err_with(|| format!("failed to resolve the repository root {}", repo_root.display()))?;
+
+    let mut probe = abs.as_path();
+    loop {
+        match probe.canonicalize() {
+            Ok(resolved) => {
+                if !resolved.starts_with(&root) {
+                    bail!(
+                        "manifest path '{relpath}' resolves to {}, outside the repository at {}",
+                        resolved.display(),
+                        root.display()
+                    );
+                }
+                return Ok(abs);
+            }
+            // Absent is the ordinary case: the path is a file anvil is about to
+            // create, so the walk continues to whatever does exist above it.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            // Anything else -- a directory that cannot be traversed, most of
+            // all -- means the answer is unknown, not "absent". Treating it as
+            // absent would step over the component that could not be resolved
+            // and clear a path this function exists to check.
+            Err(error) => {
+                return Err(error).into_app_err_with(|| format!("failed to resolve {} while checking containment", probe.display()));
+            }
+        }
+        probe = probe
+            .parent()
+            .expect("the walk reaches a filesystem root, which always resolves, before running out of components");
+    }
+}
+
 fn write_file(path: &Path, content: &str) -> Result<(), AppError> {
     let parent = path
         .parent()
         .expect("write_file targets are always repo-root-joined paths, which always have a parent");
     std::fs::create_dir_all(parent).into_app_err_with(|| format!("failed to create parent directory {}", parent.display()))?;
     let tmp = make_temp_path(path);
+    // The destination was checked for containment, but the write lands on this
+    // sibling first and it never was. A checkout can carry `Justfile.anvil-tmp`
+    // as a link out of the tree just as easily as `Justfile`, and `fs::write`
+    // opens with create+truncate, which follows one. Removing it first turns a
+    // followed link into a replaced link; the name is anvil's own, so nothing
+    // that belongs to the repository is at stake.
+    match std::fs::remove_file(&tmp) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => {
+            return Err(e).into_app_err_with(|| format!("failed to clear the temporary file {}", tmp.display()));
+        }
+    }
     std::fs::write(&tmp, content).into_app_err_with(|| format!("failed to write {}", tmp.display()))?;
     std::fs::rename(&tmp, path).into_app_err_with(|| format!("failed to rename {} -> {}", tmp.display(), path.display()))?;
     Ok(())
@@ -570,6 +610,158 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn an_existing_temporary_sibling_is_cleared_and_the_write_proceeds() {
+        // The removal succeeding is its own case: an ordinary run finds nothing
+        // there and takes the NotFound arm instead. Only the unix symlink test
+        // reached this one, so it was uncovered on Windows and the coverage
+        // gate caught it.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("Justfile");
+        std::fs::write(tmp.path().join("Justfile.anvil-tmp"), "stale").unwrap();
+
+        write_file(&target, "written").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "written");
+        assert!(
+            !tmp.path().join("Justfile.anvil-tmp").exists(),
+            "the temporary file must not survive the rename"
+        );
+    }
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_temporary_sibling_that_cannot_be_cleared_stops_the_write() {
+        // Only a missing temporary file is absorbed. Anything else means the
+        // name is occupied by something the write cannot go through, and
+        // continuing would report the failure against the wrong path. A
+        // directory occupies it here because `remove_file` refuses one on every
+        // platform, without needing a permission the test may not have.
+        let tmp = TempDir::new().unwrap();
+        let target = tmp.path().join("Justfile");
+        std::fs::create_dir(tmp.path().join("Justfile.anvil-tmp")).unwrap();
+
+        let err = write_file(&target, "written").unwrap_err();
+
+        assert!(
+            format!("{err}").contains("failed to clear the temporary file"),
+            "the failure must name the step that could not proceed, got: {err}"
+        );
+        assert!(!target.exists(), "the destination must be left untouched");
+    }
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_linked_temporary_sibling_is_replaced_rather_than_followed() {
+        // The destination is containment-checked, but the write lands on
+        // `<path>.anvil-tmp` first. `fs::write` opens with create+truncate,
+        // which follows a link, so a checkout carrying that name as a link out
+        // of the tree would have the content written wherever it points.
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside.txt");
+        std::fs::write(&outside, "untouched").unwrap();
+        let target = tmp.path().join("Justfile");
+        std::os::unix::fs::symlink(&outside, tmp.path().join("Justfile.anvil-tmp")).unwrap();
+
+        write_file(&target, "written").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "written");
+        assert_eq!(
+            std::fs::read_to_string(&outside).unwrap(),
+            "untouched",
+            "the write followed the link out of the tree"
+        );
+    }
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_path_inside_the_repository_is_joined_as_given() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("a")).unwrap();
+        std::fs::write(tmp.path().join("a/b.txt"), "x").unwrap();
+
+        assert_eq!(contained_path(tmp.path(), "a/b.txt").unwrap(), tmp.path().join("a/b.txt"));
+        // A file anvil is about to create has nothing on disk to resolve, so
+        // the walk has to fall back to the deepest ancestor that does.
+        assert_eq!(
+            contained_path(tmp.path(), "a/new/deeper/c.txt").unwrap(),
+            tmp.path().join("a/new/deeper/c.txt")
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_path_that_resolves_outside_the_repository_is_refused() {
+        // The last line of defence, so it must hold on its own rather than
+        // assuming the manifest's lexical guard has already run.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(tmp.path().join("outside")).unwrap();
+
+        let err = contained_path(&root, "../outside").unwrap_err();
+        assert!(
+            format!("{err}").contains("outside the repository"),
+            "expected a containment error, got: {err}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_component_that_cannot_be_resolved_is_an_error_not_an_absence() {
+        // Absent means "keep walking up"; anything else means the answer is
+        // unknown. Treating a traversal failure as absence would step over the
+        // component that could not be resolved and clear a path this function
+        // exists to check. A regular file standing where a directory is
+        // expected produces that failure on every platform, and needs no
+        // permission the test may not have.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+
+        // The two platforms reach the same state by different routes: a regular
+        // file standing where a directory is expected on unix, which fails with
+        // ENOTDIR, and a name the filesystem rejects outright on Windows, where
+        // that same shape reports NotFound instead.
+        //
+        // Neither depends on a permission. An earlier version used a directory
+        // with no search bit, which root ignores -- so it passed for an ordinary
+        // user and failed inside the container, where the run is often root.
+        #[cfg(unix)]
+        let relative = {
+            std::fs::write(root.join("notadir"), "regular file").unwrap();
+            "notadir/inner/file.txt"
+        };
+        #[cfg(windows)]
+        let relative = "in|valid/file.txt";
+
+        let err = contained_path(&root, relative).expect_err("an unresolvable component must not read as absent");
+
+        assert!(
+            format!("{err}").contains("checking containment"),
+            "the failure must name what it was doing, got: {err}"
+        );
+    }
+    #[cfg(unix)]
+    #[cfg_attr(miri, ignore = "uses filesystem; miri isolation forbids it")]
+    #[test]
+    fn a_symlinked_component_cannot_carry_a_write_out_of_the_repository() {
+        // The manifest is committed content, so one commit can add both a link
+        // that leaves the tree and an entry naming a path through it. Every
+        // component here is ordinary, so the lexical guard passes it.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("repo");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+
+        let err = contained_path(&root, "escape/victim.txt").unwrap_err();
+        assert!(
+            format!("{err}").contains("outside the repository"),
+            "expected a containment error, got: {err}"
+        );
+    }
 
     #[test]
     fn empty_plan_is_in_sync() {
@@ -598,6 +790,16 @@ mod tests {
             Decision::LeaveAlone,
         ));
         assert!(!plan.has_changes());
+    }
+
+    #[test]
+    fn manifest_only_update_is_reported_as_a_change() {
+        let mut plan = Plan::default();
+        plan.set_manifest_update_required(true);
+
+        assert!(plan.has_changes());
+        assert_eq!(plan.dry_run_exit_code(), 1);
+        assert!(plan.summary(None).contains(".anvil.lock"));
     }
 
     #[test]
@@ -672,7 +874,7 @@ mod tests {
         let s = plan.summary(None);
         assert!(s.contains("Will remove: 1 item(s)"));
         assert!(s.contains("- dropped.txt"));
-        assert!(s.contains("Orphaned (customized; transferring ownership): 1 item(s)"));
+        assert!(s.contains("No longer managed (left in place; ownership transferred): 1 item(s)"));
         assert!(s.contains("- Justfile [anvil-old]"));
     }
 

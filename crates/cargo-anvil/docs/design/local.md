@@ -46,7 +46,7 @@ repo/
 │   │                       anvil-pr-msrv, anvil-pr-runtime-analysis, anvil-pr-mutants,
 │   │                       anvil-scheduled-test, …). `anvil-pr-slow` is a
 │   │                       convenience umbrella over the four pr-slow sub-groups.
-│   ├── container.just      optional container entry recipe (`anvil-container`).
+│   ├── container.just      containerized execution (`anvil-container`). See containers.md.
 │   ├── tiers.just          tier aggregators (anvil-pr, anvil-scheduled, anvil-full).
 │   ├── tools.just          tool/component/toolchain install + validate-prereqs recipes,
 │   │                       plus the cargo-spellcheck source-deps check and
@@ -55,25 +55,22 @@ repo/
 │                           plus the lazy stable-toolchain argument selector, as
 │                           non-exported just variables. See §3.
 │
-└── .anvil/container/                              optional non-recipe container assets
-    ├── Containerfile
-    ├── Containerfile.dockerignore
-    ├── README.md
-    ├── entrypoint.sh
-    ├── image-id.ps1
-    ├── image-id.sh
-    ├── run-in-container.ps1
-    └── run-in-container.sh
+└── .anvil/container/                              the container image definition
+    ├── Dockerfile                                 composed: anvil-managed regions, your content between
+    ├── Dockerfile.dockerignore
+    └── hooks.ps1                                  optional; credentials, not emitted by default
 ```
 
-The Justfile region is the only file anvil adds to that the user co-owns, and it's
-a single `import` line. Generated recipes live inside `justfiles/anvil/`;
-optional non-recipe container assets live inside `.anvil/container/`.
-Generated files in these directories are tool-owned
-(tracked by full-file checksum in the sidecar manifest). If the user wants to add
-project-specific recipes, they add them to the top-level `Justfile` outside the
-managed region, or to their own additional imported `.just` files. The alias
-`anvil := anvil-pr` lives in `mod.just`, not in
+The Justfile region is not the only file anvil adds to that the user co-owns: the
+container `Dockerfile` is composed the same way, from five managed regions with
+the repository's own instructions in the gaps between them (see
+[containers.md](./containers.md)). Generated recipes live inside `justfiles/anvil/`;
+the container image definition lives inside `.anvil/container/`. Generated files in
+both directories are tool-owned (tracked by full-file checksum in the sidecar
+manifest), except the composed `Dockerfile`, whose regions are tracked
+individually. If the user wants to add project-specific recipes, they add them to
+the top-level `Justfile` outside the managed region, or to their own additional
+imported `.just` files. The alias `anvil := anvil-pr` lives in `mod.just`, not in
 the user's `Justfile`, so renaming or retargeting the alias is a template update
 with no managed-region churn.
 
@@ -83,12 +80,13 @@ in `tools.just` (and the per-check/group/tier setup recipes colocated in the sam
 files) are annotated with `[group("anvil-setup")]`. `just --groups` therefore shows
 two clean clusters: one for "run checks", one for "install prereqs".
 
-> **Optional container backend.** When a catalog includes the opt-in container
-> backend, `justfiles/anvil/container.just` adds the
-> `anvil-container <recipe>` command and `.anvil/container/` contains its
-> non-recipe assets. It runs any recipe below inside a pinned Linux image
-> (Linux-on-Windows parity, distro pinning) instead of against the host
-> toolchain. The recipe bodies are unchanged; see [containers.md](./containers.md).
+> **Containerized execution.** `justfiles/anvil/container.just` adds the
+> `anvil-container <command…>` recipe, which runs the given argv inside a pinned
+> Linux image instead of against the host toolchain (Linux-on-Windows parity,
+> toolchain pinning). Anvil recipes are reached by naming `just`
+> (`just anvil-container just anvil-pr`); with no argument it opens a shell. It
+> is explicit: the tiers themselves always run natively.
+> The recipe bodies are unchanged; see [containers.md](./containers.md).
 
 ## 2. Recipe layers
 
@@ -579,7 +577,7 @@ Each check requests one cargo-delta **category** — the selector it passes to
 
 | Category   | What recipes do with it                                                                       |
 |------------|------------------------------------------------------------------------------------------------|
-| `modified` | `--skip` → recipe exits 0. Otherwise: run unconditionally (modified-category tools are workspace-wide). |
+| `modified` | `--skip` → recipe exits 0. Otherwise the recipe runs against the input domain defined by its own command; impact-selected package arguments are not forwarded. |
 | `affected` | `--skip` → recipe exits 0. Otherwise: splice the value into the cargo invocation, defaulting to `--workspace` when empty. |
 | `required` | Same semantics as affected, but consumed by recipes that need the transitive dep graph in scope (doc-build, cargo-hack, udeps). |
 
@@ -603,6 +601,13 @@ name signals a gap in this reverse-mapping — not a scoping decision — so the
 identifier '<name>'` to stderr and exits non-zero rather than guessing (and risking a
 silently under-scoped tier that skips a check). Failing hard surfaces the mapping gap so it
 gets fixed, instead of masking it behind a silently full-workspace run.
+
+Formatting illustrates the modified-tier contract. The tier decides only whether
+the recipe runs. Once admitted, the recipe validates its pinned tools and uses
+`cargo each --workspace` to launch one bounded rustfmt command per workspace
+member. The script propagates the aggregate child status, and unlike
+`cargo fmt --all`, it intentionally does not discover non-member local path
+dependencies.
 
 The mapping from check to bucket is fixed in the catalog (see
 [checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)). Unscoped checks —
@@ -628,12 +633,12 @@ Set `ANVIL_IMPACT=off` in the environment to disable scoping entirely: `anvil-im
 affected/required, empty for modified). Because `just` runs a recipe's dependencies in the
 same environment, the guard is honored even when `anvil-impact` fires as a check
 dependency. This is exactly how the **scheduled** and **full** tiers stay full-workspace:
-`anvil-scheduled` / `anvil-full` route through the `_anvil-run` tier router
-(`anvil-scheduled: (_anvil-run "scheduled" anvil_runner "off")`), which exports
+`anvil-scheduled` / `anvil-full` wrap their private recipe in `_anvil-unscoped`
+(`anvil-scheduled: (_anvil-unscoped "scheduled")`), which exports
 `ANVIL_IMPACT=off` before invoking the private `_anvil-<tier>` recipe, so the whole
-dependency tree runs unscoped. The export lives in the router because a
+dependency tree runs unscoped. The export lives in the wrapper because a
 dependency-only tier recipe cannot set env for its own dependencies — they run before its
-body. The four scheduled *groups* (`anvil-scheduled-test`, …) route the same way, so a
+body. The four scheduled *groups* (`anvil-scheduled-test`, …) wrap the same way, so a
 scheduled group invoked directly is full-workspace too.
 
 `ANVIL_IMPACT` is a strict tri-state — `off`, `consume`, or unset. Any other value makes
