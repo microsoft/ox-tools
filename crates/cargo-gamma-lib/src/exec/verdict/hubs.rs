@@ -218,18 +218,12 @@ mod loom_models {
     use core::time::Duration;
 
     use loom::sync::Arc;
+    use loom::sync::atomic::AtomicUsize;
 
     use super::{Pulse, Readers};
 
-    /// Two simultaneous binaries, each with stdout and stderr readers.
-    ///
-    /// This is the smallest production topology that exercises both contention between jobs and
-    /// contention between the two streams of one job. The atomic operations are identical for
-    /// additional jobs, so these four streams expose every distinct participant role while keeping
-    /// the state space tractable in CI.
-    const CONCURRENT_JOBS: usize = 2;
-    const STREAMS_PER_JOB: usize = 2;
-    const CONCURRENT_READER_STREAMS: usize = CONCURRENT_JOBS * STREAMS_PER_JOB;
+    /// The smallest topology that exercises a race between identical reader operations.
+    const CONCURRENT_READERS: usize = 2;
 
     /// A wakeup is never lost, whatever order the waiter and the notifier run in.
     ///
@@ -269,33 +263,27 @@ mod loom_models {
         });
     }
 
-    /// The live count returns to exactly zero after all four production reader roles finish.
+    /// The live count returns to exactly zero after concurrent readers finish.
     ///
-    /// The coordinator first establishes the four-reader high-water mark, then the two jobs finish
-    /// their two readers concurrently. Modeling each job as one thread preserves cross-job
-    /// contention and all four decrements without exploring equivalent permutations among four
-    /// symmetric finisher threads. The contended `live` observation also models diagnostics racing
-    /// abandoned readers as they finally close.
+    /// The model begins from the valid gauge state produced by prior successful starts, keeping the
+    /// decrement race separate from the start race covered below. The contended `live` observation
+    /// also models diagnostics racing abandoned readers as they finally close. Every prior
+    /// increment must still have exactly one decrement.
     pub(super) fn a_readers_gauge_returns_to_exactly_zero_under_any_interleaving() {
         loom::model(|| {
-            let readers = Arc::new(Readers::new());
-            let mut finishers = Vec::with_capacity(CONCURRENT_JOBS);
+            let readers = Arc::new(Readers {
+                live: AtomicUsize::new(CONCURRENT_READERS),
+                peak: AtomicUsize::new(CONCURRENT_READERS),
+            });
+            let mut finishers = Vec::with_capacity(CONCURRENT_READERS);
 
-            for _stream in 0..CONCURRENT_READER_STREAMS {
-                readers.started();
-            }
-
-            for _job in 0..CONCURRENT_JOBS {
+            for _reader in 0..CONCURRENT_READERS {
                 let readers = Arc::clone(&readers);
-                finishers.push(loom::thread::spawn(move || {
-                    for _stream in 0..STREAMS_PER_JOB {
-                        readers.finished();
-                    }
-                }));
+                finishers.push(loom::thread::spawn(move || readers.finished()));
             }
 
             assert!(
-                readers.live() <= CONCURRENT_READER_STREAMS,
+                readers.live() <= CONCURRENT_READERS,
                 "a contended live read exceeded the number of started readers"
             );
 
@@ -303,41 +291,31 @@ mod loom_models {
                 finisher.join().unwrap();
             }
 
-            assert_eq!(
-                readers.peak(),
-                CONCURRENT_READER_STREAMS,
-                "counting a started reader failed to raise the peak"
-            );
             assert_eq!(readers.live(), 0, "a decrement was lost or double-counted");
         });
     }
 
-    /// The peak never understates four readers started concurrently by two jobs.
+    /// The peak never understates readers started concurrently.
     ///
-    /// Two worker-side participants each start the stdout and stderr readers of one simultaneous
-    /// job. None finishes, so all four streams are genuinely live. The observations before the joins
-    /// race the `fetch_add` and `fetch_max` operations, exercising the production loads under
-    /// contention; the observations after the joins must see the exact final count and peak.
-    pub(super) fn a_readers_peak_never_understates_four_concurrent_starts() {
+    /// Participants start but do not finish, so each remains genuinely live. The observations
+    /// before the joins race the `fetch_add` and `fetch_max` operations, exercising the production
+    /// loads under contention; the observations after the joins must see the exact count and peak.
+    pub(super) fn a_readers_peak_never_understates_concurrent_starts() {
         loom::model(|| {
             let readers = Arc::new(Readers::new());
-            let mut workers = Vec::with_capacity(CONCURRENT_JOBS);
+            let mut workers = Vec::with_capacity(CONCURRENT_READERS);
 
-            for _job in 0..CONCURRENT_JOBS {
+            for _reader in 0..CONCURRENT_READERS {
                 let readers = Arc::clone(&readers);
-                workers.push(loom::thread::spawn(move || {
-                    for _stream in 0..STREAMS_PER_JOB {
-                        readers.started();
-                    }
-                }));
+                workers.push(loom::thread::spawn(move || readers.started()));
             }
 
             assert!(
-                readers.live() <= CONCURRENT_READER_STREAMS,
+                readers.live() <= CONCURRENT_READERS,
                 "a contended live read exceeded the number of starters"
             );
             assert!(
-                readers.peak() <= CONCURRENT_READER_STREAMS,
+                readers.peak() <= CONCURRENT_READERS,
                 "a contended peak read exceeded the number of starters"
             );
 
@@ -345,8 +323,8 @@ mod loom_models {
                 worker.join().unwrap();
             }
 
-            assert_eq!(readers.live(), CONCURRENT_READER_STREAMS, "a concurrent increment was lost");
-            assert_eq!(readers.peak(), CONCURRENT_READER_STREAMS, "the peak understated four live readers");
+            assert_eq!(readers.live(), CONCURRENT_READERS, "a concurrent increment was lost");
+            assert_eq!(readers.peak(), CONCURRENT_READERS, "the peak understated concurrent readers");
         });
     }
 }
@@ -355,5 +333,5 @@ mod loom_models {
 pub(crate) fn run_loom_models() {
     loom_models::a_pulse_wakeup_is_never_lost_under_any_interleaving();
     loom_models::a_readers_gauge_returns_to_exactly_zero_under_any_interleaving();
-    loom_models::a_readers_peak_never_understates_four_concurrent_starts();
+    loom_models::a_readers_peak_never_understates_concurrent_starts();
 }

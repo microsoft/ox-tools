@@ -6,7 +6,7 @@
 #
 # 1. Builds cargo-anvil from the PR branch.
 # 2. Runs `cargo anvil --dry-run` against the repo root.
-# 3. Fails iff the binary would write or propose anything.
+# 3. Fails iff the binary would change generated content or `.anvil.lock`.
 #
 # This is the primary dogfooding mechanism described in
 # crates/cargo-anvil/docs/verification.md.
@@ -17,10 +17,7 @@
 name: regenerate-check
 
 on:
-  pull_request:
-    paths:
-      - "crates/cargo-anvil/**"
-      - ".github/workflows/regenerate-check.yml"
+  pull_request: {}
   merge_group: {}
   workflow_dispatch: {}
 

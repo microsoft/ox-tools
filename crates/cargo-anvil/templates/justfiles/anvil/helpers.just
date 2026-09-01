@@ -10,10 +10,12 @@
 # Each check belongs to one of four buckets, which determines how it scopes
 # its work to the packages impacted by a change:
 #
-#   - "modified": only run when at least one package's source files changed
-#     in the diff. The check's underlying tool is workspace-wide or
-#     directory-scoped (cargo fmt --all, cargo heather), so
-#     it doesn't take --package; it short-circuits on the "--skip" sentinel.
+#   - "modified": only run when at least one package's source files
+#     changed in the diff. The tier only admits or skips the recipe; it
+#     does not forward package arguments. Each admitted tool owns its
+#     normal input domain. A recipe may invoke that tool once (cargo
+#     heather, cargo sort) or fan out one bounded child per workspace
+#     member (cargo each).
 #
 #   - "affected": run on the affected set (modified ∪ reverse-deps within the
 #     workspace). The tool takes --package; the recipe splices the resolved
@@ -54,9 +56,9 @@
 #   * "--skip" - the tier is empty for this change (recipe exits 0).
 #
 # This keeps the per-recipe boilerplate to a single capture, a one-line skip
-# guard, and the cargo invocation. Modified-tier recipes never splice
-# `$include` into cargo (their tools are workspace-wide); they only check the
-# skip sentinel.
+# guard, and the cargo invocation. Modified-tier recipes never forward
+# `$include`; they only check the skip sentinel and then let their command
+# determine its normal input domain.
 #
 # Every recipe whose body uses multi-line conditionals or array-splat
 # splicing is annotated with [script("pwsh", "-NoProfile")]. pwsh is preinstalled on

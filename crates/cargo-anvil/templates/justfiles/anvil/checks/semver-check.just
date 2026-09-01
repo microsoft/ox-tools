@@ -11,13 +11,14 @@
 #
 # Several real-world conditions aren't actually SemVer violations:
 #   - bin-only crates have no API to compare (reported as a missing lib target).
+#   - `publish = false` crates cannot be published.
 #   - crates newly added since the PR base have no manifest at their
 #     current workspace-relative path in that baseline.
 #   - crates renamed since the PR base have no matching package in that
 #     baseline ("package `<name>` not found in ...").
 #   - crates where the branch baseline lacks a lib target the
 #     current source has (bin -> bin+lib transition).
-# We pre-filter to library-bearing crates from cargo metadata, skip
+# We pre-filter to publishable library crates from cargo metadata, skip
 # packages whose current manifest path is absent from the baseline,
 # then run cargo-semver-checks per-package and tolerate the remaining
 # "no-comparable-baseline" failure modes.
@@ -37,8 +38,8 @@
 #
 # TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
 # skip/splat preamble, this recipe stays multi-step: cargo-metadata
-# filter to library crates (cargo-semver-checks --workspace fails on
-# bin-only workspaces), intersect the affected set ($include) with that
+# filter to publishable library crates (cargo-semver-checks --workspace
+# fails on bin-only workspaces), intersect the affected set ($include) with that
 # set, verify the PR branch baseline is present, skip newly-added
 # manifest paths, then invoke per-crate against that baseline with
 # special handling for renamed crates ("package `<name>` not found in
@@ -56,14 +57,16 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         exit 0
     }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
-    # Build the candidate package list. Keep each package's metadata so
+    # Build the publishable candidate package list. Keep each package's metadata so
     # its manifest path can also be checked in the baseline. Always
     # iterate per-package over library crates only -- cargo-semver-checks
     # --workspace would fail on workspaces that contain bin-only crates
     # (reported as a missing lib target), and we want the same tolerance for
     # new / renamed / bin->lib-transition crates regardless of whether
     # we got here via impact-scoping (cloud workflows) or full-workspace
-    # fallback (local).
+    # fallback (local). Cargo metadata represents unrestricted publication as
+    # null, `publish = false` as an empty array, and named-registry restrictions
+    # as a nonempty array. Only the empty array is non-publishable.
     $libPkgs = @{}
     $metadataJson = & cargo metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
@@ -77,7 +80,8 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         exit 1
     }
     foreach ($p in $meta.packages) {
-        if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
+        if (($p.targets | Where-Object { $_.kind -contains 'lib' }) -and
+            -not ($p.publish -is [array] -and $p.publish.Count -eq 0)) {
             $libPkgs[$p.name] = $p
         }
     }
@@ -96,7 +100,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         }
     }
     if ($packages.Count -eq 0) {
-        Write-Host 'anvil-semver-check: no affected library crates; skipping'
+        Write-Host 'anvil-semver-check: no affected publishable library crates; skipping'
         Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
         exit 0
     }

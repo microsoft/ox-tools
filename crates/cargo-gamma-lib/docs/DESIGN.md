@@ -26,3 +26,15 @@ The primary public contract is the `cargo gamma` command surface and its
 configuration, reports, diagnostics, and exit codes. The Rust API is an
 implementation detail used by the thin executable crate. Its rustdoc is hidden,
 and its hand-written README warns downstream users not to depend on it.
+
+## Concurrency model checking
+
+The dedicated Loom target verifies race-sensitive reader accounting without a
+runner-imposed exploration bound. Each model therefore uses the smallest set of
+interchangeable actors that creates contention, avoiding equivalent schedules
+that add cost without adding behavior.
+
+Start and finish races are modeled separately. Finish-only models begin from a
+valid state already produced by successful starts, including a peak no lower
+than the live count. This separation keeps exhaustive exploration tractable
+while preserving the production gauge invariants.

@@ -1855,16 +1855,12 @@ anvil-cargo-hack-validate-prereqs: anvil-tool-cargo-hack-validate-prereqs
 
 # Modified tier.
 #
-# `--check-format` makes the formatting diff fail the check, not just the
-# sort order. cargo-sort 2.1.2+ downgraded formatting-only diffs to
-# warnings by default (PR #129); without this flag cargo-sort 2.1.2+
-# would pass on formatting drift. The flag preserves the intended
-# check behavior across the supported range.
+# cargo-sort 2.1.2 and newer report formatting-only differences as warnings
+# unless `--check-format` is set. Keep it enabled so dependency ordering and
+# Cargo manifest style are both enforced.
 #
 # `--grouped` keeps the blank lines between groups of key/value pairs
-# (e.g. blank-line-separated dependency blocks) intact, matching
-# oxidizer-github's convention; without it cargo-sort would flag those
-# blank lines as a formatting diff and fail the check.
+# (e.g. blank-line-separated dependency blocks) intact.
 
 # Check that Cargo.toml dependency tables are sorted.
 [script("pwsh", "-NoProfile")]
@@ -2211,6 +2207,10 @@ anvil-external-types-validate-prereqs: anvil-toolchain-nightly-external-types-va
 # format_code_in_doc_comments). Floating nightly would mean
 # format-drift breaking cloud workflows on rustup updates — the same trap we
 # explicitly avoid for udeps/miri/careful/external-types.
+#
+# Iterate workspace members rather than every local path dependency that
+# `cargo fmt --all` discovers. `--keep-going` reports formatting failures from
+# every member while retaining a bounded rustfmt command line per invocation.
 
 # Check Rust source formatting.
 [script("pwsh", "-NoProfile")]
@@ -2218,7 +2218,7 @@ anvil-fmt: anvil-fmt-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
     $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
     if ($include -eq '--skip') { Write-Host 'anvil-fmt: no modified packages; skipping'; exit 0 }
-    cargo '+{{ rust_nightly }}' fmt --all --check
+    cargo each --workspace --keep-going '--' cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' --check
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # Per-check setup + validate-prereqs
@@ -2238,11 +2238,11 @@ anvil-fmt: anvil-fmt-validate-prereqs anvil-impact
 
 # Install prerequisites for the `anvil-fmt` recipe.
 [group("anvil-setup")]
-anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install
+anvil-fmt-setup installer="install": anvil-component-nightly-rustfmt-install (anvil-tool-cargo-each-install installer)
 
 # Validate prerequisites for the `anvil-fmt` recipe.
 [group("anvil-setup")]
-anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs
+anvil-fmt-validate-prereqs: anvil-component-nightly-rustfmt-validate-prereqs anvil-tool-cargo-each-validate-prereqs
 
 === justfiles/anvil/checks/license-headers.just ===
 # Copyright (c) Microsoft Corporation.
@@ -2492,6 +2492,8 @@ anvil-llvm-cov-validate-prereqs: anvil-component-nightly-llvm-tools-validate-pre
 # only through *other* members (e.g. concurrent-queue), and run
 # single-threaded (loom drives its own scheduling). --release per the
 # loom docs: permutation exploration is wall-clock dominated by the SUT.
+# Anvil does not impose a global exploration bound: each model owns its
+# topology and must remain tractable under exhaustive exploration.
 #
 # Fail-loud guard: a crate that *declares* loom support -- a `loom`
 # feature or a `cfg(loom)`-gated dependency -- but exposes no
@@ -3080,13 +3082,14 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 #
 # Several real-world conditions aren't actually SemVer violations:
 #   - bin-only crates have no API to compare (reported as a missing lib target).
+#   - `publish = false` crates cannot be published.
 #   - crates newly added since the PR base have no manifest at their
 #     current workspace-relative path in that baseline.
 #   - crates renamed since the PR base have no matching package in that
 #     baseline ("package `<name>` not found in ...").
 #   - crates where the branch baseline lacks a lib target the
 #     current source has (bin -> bin+lib transition).
-# We pre-filter to library-bearing crates from cargo metadata, skip
+# We pre-filter to publishable library crates from cargo metadata, skip
 # packages whose current manifest path is absent from the baseline,
 # then run cargo-semver-checks per-package and tolerate the remaining
 # "no-comparable-baseline" failure modes.
@@ -3106,8 +3109,8 @@ anvil-readme-check-validate-prereqs: anvil-tool-cargo-doc2readme-validate-prereq
 #
 # TODO(anvil-runner): even after a `cargo ox-run` helper absorbs the
 # skip/splat preamble, this recipe stays multi-step: cargo-metadata
-# filter to library crates (cargo-semver-checks --workspace fails on
-# bin-only workspaces), intersect the affected set ($include) with that
+# filter to publishable library crates (cargo-semver-checks --workspace
+# fails on bin-only workspaces), intersect the affected set ($include) with that
 # set, verify the PR branch baseline is present, skip newly-added
 # manifest paths, then invoke per-crate against that baseline with
 # special handling for renamed crates ("package `<name>` not found in
@@ -3125,14 +3128,16 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         exit 0
     }
     $pkg = @(if ($include) { -split $include } else { '--workspace' })
-    # Build the candidate package list. Keep each package's metadata so
+    # Build the publishable candidate package list. Keep each package's metadata so
     # its manifest path can also be checked in the baseline. Always
     # iterate per-package over library crates only -- cargo-semver-checks
     # --workspace would fail on workspaces that contain bin-only crates
     # (reported as a missing lib target), and we want the same tolerance for
     # new / renamed / bin->lib-transition crates regardless of whether
     # we got here via impact-scoping (cloud workflows) or full-workspace
-    # fallback (local).
+    # fallback (local). Cargo metadata represents unrestricted publication as
+    # null, `publish = false` as an empty array, and named-registry restrictions
+    # as a nonempty array. Only the empty array is non-publishable.
     $libPkgs = @{}
     $metadataJson = & cargo metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
@@ -3146,7 +3151,8 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         exit 1
     }
     foreach ($p in $meta.packages) {
-        if ($p.targets | Where-Object { $_.kind -contains 'lib' }) {
+        if (($p.targets | Where-Object { $_.kind -contains 'lib' }) -and
+            -not ($p.publish -is [array] -and $p.publish.Count -eq 0)) {
             $libPkgs[$p.name] = $p
         }
     }
@@ -3165,7 +3171,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         }
     }
     if ($packages.Count -eq 0) {
-        Write-Host 'anvil-semver-check: no affected library crates; skipping'
+        Write-Host 'anvil-semver-check: no affected publishable library crates; skipping'
         Remove-Item -LiteralPath $commentFile -ErrorAction SilentlyContinue
         exit 0
     }
@@ -4965,10 +4971,12 @@ anvil-scheduled-test-validate-prereqs: \
 # Each check belongs to one of four buckets, which determines how it scopes
 # its work to the packages impacted by a change:
 #
-#   - "modified": only run when at least one package's source files changed
-#     in the diff. The check's underlying tool is workspace-wide or
-#     directory-scoped (cargo fmt --all, cargo heather), so
-#     it doesn't take --package; it short-circuits on the "--skip" sentinel.
+#   - "modified": only run when at least one package's source files
+#     changed in the diff. The tier only admits or skips the recipe; it
+#     does not forward package arguments. Each admitted tool owns its
+#     normal input domain. A recipe may invoke that tool once (cargo
+#     heather, cargo sort) or fan out one bounded child per workspace
+#     member (cargo each).
 #
 #   - "affected": run on the affected set (modified ∪ reverse-deps within the
 #     workspace). The tool takes --package; the recipe splices the resolved
@@ -5009,9 +5017,9 @@ anvil-scheduled-test-validate-prereqs: \
 #   * "--skip" - the tier is empty for this change (recipe exits 0).
 #
 # This keeps the per-recipe boilerplate to a single capture, a one-line skip
-# guard, and the cargo invocation. Modified-tier recipes never splice
-# `$include` into cargo (their tools are workspace-wide); they only check the
-# skip sentinel.
+# guard, and the cargo invocation. Modified-tier recipes never forward
+# `$include`; they only check the skip sentinel and then let their command
+# determine its normal input domain.
 #
 # Every recipe whose body uses multi-line conditionals or array-splat
 # splicing is annotated with [script("pwsh", "-NoProfile")]. pwsh is preinstalled on
@@ -6577,6 +6585,14 @@ anvil-tool-cargo-doc2readme-install installer="install": (_install-tool "cargo-d
 [group("anvil-setup")]
 anvil-tool-cargo-doc2readme-validate-prereqs: (_check-tool "cargo-doc2readme" cargo_doc2readme_version)
 
+# Install the pinned `cargo-each` tool.
+[group("anvil-setup")]
+anvil-tool-cargo-each-install installer="install": (_install-tool "cargo-each" cargo_each_version installer)
+
+# Validate that the pinned `cargo-each` tool is available.
+[group("anvil-setup")]
+anvil-tool-cargo-each-validate-prereqs: (_check-tool "cargo-each" cargo_each_version)
+
 # Install the pinned `cargo-ensure-no-cyclic-deps` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-ensure-no-cyclic-deps-install installer="install": (_install-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version installer)
@@ -6747,6 +6763,7 @@ cargo_coverage_gate_version := "0.2.0"
 cargo_delta_version := "0.3.1"
 cargo_deny_version := "0.20.2"
 cargo_doc2readme_version := "0.7.3"
+cargo_each_version := "0.1.0"
 cargo_ensure_no_cyclic_deps_version := "0.2.0"
 cargo_ensure_no_default_features_version := "1.1.0"
 cargo_hack_version := "0.6.45"

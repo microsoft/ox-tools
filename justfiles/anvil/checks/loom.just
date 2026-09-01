@@ -33,6 +33,8 @@
 # only through *other* members (e.g. concurrent-queue), and run
 # single-threaded (loom drives its own scheduling). --release per the
 # loom docs: permutation exploration is wall-clock dominated by the SUT.
+# Anvil does not impose a global exploration bound: each model owns its
+# topology and must remain tractable under exhaustive exploration.
 #
 # Fail-loud guard: a crate that *declares* loom support -- a `loom`
 # feature or a `cfg(loom)`-gated dependency -- but exposes no

@@ -239,6 +239,7 @@ pub struct Plan {
     items: Vec<PlanItem>,
     notes: Vec<String>,
     refusals: Vec<String>,
+    manifest_update_required: bool,
 }
 
 impl Plan {
@@ -285,10 +286,15 @@ impl Plan {
         &mut self.items
     }
 
+    /// Record whether applying this plan would change `.anvil.lock`.
+    pub(crate) fn set_manifest_update_required(&mut self, required: bool) {
+        self.manifest_update_required = required;
+    }
+
     /// Whether the plan would change anything on disk if applied.
     #[must_use]
     pub fn has_changes(&self) -> bool {
-        self.items.iter().any(|i| i.decision.writes())
+        self.manifest_update_required || self.items.iter().any(|i| i.decision.writes())
     }
 
     /// Exit code for `--dry-run`: 0 if everything is in sync and every
@@ -351,6 +357,10 @@ impl Plan {
         write_section(&mut out, "No longer managed (left in place; ownership transferred)", &orphans_kept);
         write_section(&mut out, "Will leave alone (silent)", &leave_alones);
 
+        if self.manifest_update_required {
+            let _ = writeln!(out, "Manifest update required: 1 item(s)");
+            let _ = writeln!(out, "  - .anvil.lock");
+        }
         if !in_syncs.is_empty() {
             let _ = writeln!(out, "Unchanged: {} item(s)", in_syncs.len());
         }
@@ -379,9 +389,9 @@ impl Plan {
     ///   bump the manifest entry to the new template checksum so
     ///   subsequent runs see the divergence as resolved
     ///   (`LeaveAlone`) until the template moves again — see
-    ///   [`updates.md §5`](../../docs/design/updates.md).
-    /// - `InSync`, `LeaveAlone` items preserve their existing
-    ///   manifest entries from `previous_manifest`.
+    ///   the [update protocol](../../docs/design/updates.md).
+    /// - `InSync` items refresh their manifest checksum; `LeaveAlone`
+    ///   items preserve their existing manifest entries.
     /// - Stale entries — items present in `previous_manifest` but not
     ///   in this plan (e.g. a removed workspace member, a backend the
     ///   user disabled) — are purged from the returned manifest.
@@ -397,12 +407,61 @@ impl Plan {
     /// items must carry a spliced host. These invariants are enforced
     /// by the `PlanItem::*` constructors, so violations only happen if
     /// callers build `PlanItem` directly with inconsistent fields.
-    #[expect(
-        clippy::too_many_lines,
-        clippy::expect_used,
-        reason = "single dispatch site covering every (target × decision) pair; the expects encode constructor-enforced invariants"
-    )]
     pub fn apply(&self, repo_root: &Path, previous_manifest: &Manifest) -> Result<Manifest, AppError> {
+        self.apply_files(repo_root)?;
+        Ok(self.projected_manifest(previous_manifest))
+    }
+
+    /// Apply only the owned-file and managed-region changes.
+    ///
+    /// Manifest projection is deliberately separate so dry-run and real
+    /// application calculate the same next `.anvil.lock`.
+    #[expect(
+        clippy::expect_used,
+        reason = "the expects encode invariants enforced by the PlanItem constructors"
+    )]
+    pub(crate) fn apply_files(&self, repo_root: &Path) -> Result<(), AppError> {
+        for item in &self.items {
+            match (&item.target, item.decision) {
+                (Target::File { path }, Decision::Write) => {
+                    let content = item.rendered.as_ref().expect("Write decision must carry rendered content");
+                    write_file(&contained_path(repo_root, path)?, content)?;
+                }
+                (Target::File { path }, Decision::Propose) => {
+                    let content = item.rendered.as_ref().expect("Propose decision must carry rendered content");
+                    write_file(&contained_path(repo_root, &format!("{path}.anvil-proposed"))?, content)?;
+                }
+                (Target::Region { host, .. }, Decision::Write) => {
+                    let spliced = item.spliced_host.as_ref().expect("region Write must carry spliced host");
+                    write_file(&contained_path(repo_root, host)?, spliced)?;
+                }
+                (Target::Region { host, .. }, Decision::Propose) => {
+                    let spliced = item.spliced_host.as_ref().expect("region Propose must carry spliced host");
+                    write_file(&contained_path(repo_root, &format!("{host}.anvil-proposed"))?, spliced)?;
+                }
+                (Target::File { path }, Decision::Remove) => {
+                    let actual_path = resolve_existing_case_insensitive(repo_root, path);
+                    let abs = contained_path(repo_root, &actual_path)?;
+                    if let Err(e) = std::fs::remove_file(&abs)
+                        && e.kind() != std::io::ErrorKind::NotFound
+                    {
+                        return Err::<(), _>(e).into_app_err_with(|| format!("failed to remove {}", abs.display()));
+                    }
+                }
+                (Target::Region { host, .. }, Decision::Remove) => {
+                    let spliced = item.spliced_host.as_ref().expect("region Remove must carry spliced host");
+                    let actual_host = resolve_existing_case_insensitive(repo_root, host);
+                    write_file(&contained_path(repo_root, &actual_host)?, spliced)?;
+                }
+                (_, Decision::InSync | Decision::LeaveAlone | Decision::OrphanedKept) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Calculate the manifest produced by this plan without touching disk.
+    #[must_use]
+    pub(crate) fn projected_manifest(&self, previous_manifest: &Manifest) -> Manifest {
         let mut next = Manifest {
             tool: previous_manifest.tool.clone(),
             tool_version: previous_manifest.tool_version.clone(),
@@ -412,112 +471,8 @@ impl Plan {
         };
 
         for item in &self.items {
-            match (&item.target, item.decision) {
-                (Target::File { path }, Decision::Write) => {
-                    let content = item.rendered.as_ref().expect("Write decision must carry rendered content");
-                    let abs = contained_path(repo_root, path)?;
-                    write_file(&abs, content)?;
-                    if let Some(checksum) = &item.rendered_checksum {
-                        next.files.insert(path.clone(), checksum.clone());
-                    }
-                }
-                (Target::File { path }, Decision::Propose) => {
-                    let content = item.rendered.as_ref().expect("Propose decision must carry rendered content");
-                    let abs = contained_path(repo_root, &format!("{path}.anvil-proposed"))?;
-                    write_file(&abs, content)?;
-                    if let Some(checksum) = &item.rendered_checksum {
-                        // Bump L to the new T so subsequent runs see the
-                        // divergence as resolved (LeaveAlone). The user's
-                        // .anvil-proposed sibling stays on disk for
-                        // review; deleting or accepting it is the user's
-                        // job.
-                        next.files.insert(path.clone(), checksum.clone());
-                    }
-                }
-                (Target::Region { host, id }, Decision::Write) => {
-                    let spliced = item.spliced_host.as_ref().expect("region Write must carry spliced host");
-                    let abs = contained_path(repo_root, host)?;
-                    write_file(&abs, spliced)?;
-                    if let Some(checksum) = &item.rendered_checksum {
-                        next.regions.insert(
-                            RegionKey {
-                                host: host.clone(),
-                                id: id.clone(),
-                            },
-                            checksum.clone(),
-                        );
-                    }
-                }
-                (Target::Region { host, id }, Decision::Propose) => {
-                    let spliced = item.spliced_host.as_ref().expect("region Propose must carry spliced host");
-                    let abs = contained_path(repo_root, &format!("{host}.anvil-proposed"))?;
-                    write_file(&abs, spliced)?;
-                    if let Some(checksum) = &item.rendered_checksum {
-                        // Same rationale as the File/Propose branch: bump
-                        // L = T so subsequent runs see LeaveAlone until
-                        // the template moves again.
-                        next.regions.insert(
-                            RegionKey {
-                                host: host.clone(),
-                                id: id.clone(),
-                            },
-                            checksum.clone(),
-                        );
-                    }
-                }
-                (Target::File { path }, Decision::Remove) => {
-                    // Untouched orphan file: delete and drop the
-                    // manifest entry. The path is resolved to its on-disk
-                    // casing first, because the manifest key is whatever
-                    // casing was recorded and the file may since have been
-                    // renamed in case only; deleting the unresolved path
-                    // would leave the file behind with no lock entry.
-                    // If the file is already missing (race / external
-                    // delete), absorb the error so the result is idempotent.
-                    let abs = contained_path(repo_root, &resolve_existing_case_insensitive(repo_root, path))?;
-                    if let Err(e) = std::fs::remove_file(&abs)
-                        && e.kind() != std::io::ErrorKind::NotFound
-                    {
-                        return Err::<Manifest, _>(e).into_app_err_with(|| format!("failed to remove {}", abs.display()));
-                    }
-                    next.files.remove(path);
-                }
-                (Target::Region { host, id }, Decision::Remove) => {
-                    // Untouched orphan region: splice the markers + body
-                    // out of the host file and drop the manifest entry.
-                    // The host is resolved to its on-disk casing for the
-                    // write, for the reason the File arm above gives; the
-                    // manifest key stays as recorded so the entry is purged.
-                    let spliced = item.spliced_host.as_ref().expect("region Remove must carry spliced host");
-                    let abs = contained_path(repo_root, &resolve_existing_case_insensitive(repo_root, host))?;
-                    write_file(&abs, spliced)?;
-                    next.regions.remove(&RegionKey {
-                        host: host.clone(),
-                        id: id.clone(),
-                    });
-                }
-                (Target::File { path }, Decision::OrphanedKept) => {
-                    // Customized orphan: leave the file in place,
-                    // transfer ownership by dropping the manifest entry.
-                    next.files.remove(path);
-                }
-                (Target::Region { host, id }, Decision::OrphanedKept) => {
-                    // Customized orphan region: leave the host file
-                    // and the in-region content in place, transfer
-                    // ownership by dropping the manifest entry.
-                    next.regions.remove(&RegionKey {
-                        host: host.clone(),
-                        id: id.clone(),
-                    });
-                }
-                (_, Decision::InSync) => {
-                    // Disk content matches the current template. No
-                    // file write needed. We DO refresh the manifest L
-                    // to the current template checksum if the plan
-                    // item carries one — this self-heals stale-L
-                    // values left over from older binary versions
-                    // whose hash function differed (e.g. before
-                    // line-ending normalization).
+            match item.decision {
+                Decision::Write | Decision::Propose | Decision::InSync => {
                     if let Some(checksum) = &item.rendered_checksum {
                         match &item.target {
                             Target::File { path } => {
@@ -535,13 +490,22 @@ impl Plan {
                         }
                     }
                 }
-                (_, Decision::LeaveAlone) => {
-                    // No-op; manifest entry already preserved.
-                }
+                Decision::Remove | Decision::OrphanedKept => match &item.target {
+                    Target::File { path } => {
+                        next.files.remove(path);
+                    }
+                    Target::Region { host, id } => {
+                        next.regions.remove(&RegionKey {
+                            host: host.clone(),
+                            id: id.clone(),
+                        });
+                    }
+                },
+                Decision::LeaveAlone => {}
             }
         }
 
-        Ok(next)
+        next
     }
 }
 
@@ -826,6 +790,16 @@ mod tests {
             Decision::LeaveAlone,
         ));
         assert!(!plan.has_changes());
+    }
+
+    #[test]
+    fn manifest_only_update_is_reported_as_a_change() {
+        let mut plan = Plan::default();
+        plan.set_manifest_update_required(true);
+
+        assert!(plan.has_changes());
+        assert_eq!(plan.dry_run_exit_code(), 1);
+        assert!(plan.summary(None).contains(".anvil.lock"));
     }
 
     #[test]
