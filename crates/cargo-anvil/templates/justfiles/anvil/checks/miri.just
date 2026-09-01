@@ -27,7 +27,8 @@
 # `--package name@version` pairs before compilation.
 #
 # ANVIL_MIRI_JOBS overrides the default of one process per logical processor.
-# Memory telemetry is informational and never silently reduces concurrency.
+
+# Compile selected packages once and run their Miri test artifacts concurrently.
 [script("pwsh", "-NoProfile")]
 _anvil-miri-test *package_args:
     $ErrorActionPreference = 'Stop'
@@ -173,13 +174,6 @@ _anvil-miri-test *package_args:
         }
         $jobs = [Math]::Min($jobs, $artifacts.Count)
 
-        [GC]::Collect()
-        [GC]::WaitForPendingFinalizers()
-        $memoryInfo = [GC]::GetGCMemoryInfo()
-        $gcAvailableGiB = [Math]::Round($memoryInfo.TotalAvailableMemoryBytes / 1GB, 1)
-        $memoryLoadGiB = [Math]::Round($memoryInfo.MemoryLoadBytes / 1GB, 1)
-        $highMemoryLoadGiB = [Math]::Round($memoryInfo.HighMemoryLoadThresholdBytes / 1GB, 1)
-        Write-Host "anvil miri: $([Environment]::ProcessorCount) logical processor(s); GC reports $gcAvailableGiB GiB available, $memoryLoadGiB GiB load, $highMemoryLoadGiB GiB high-load threshold"
         Write-Host "anvil miri: running $($artifacts.Count) test artifacts with $jobs concurrent process(es)"
 
         $orderedArtifacts = @($artifacts | Sort-Object Name, Path)
@@ -194,22 +188,9 @@ _anvil-miri-test *package_args:
         $results = @(
             $work | ForEach-Object -Parallel {
                 $ErrorActionPreference = 'Stop'
-                function Get-MemoryTelemetry {
-                    [GC]::Collect()
-                    [GC]::WaitForPendingFinalizers()
-                    $info = [GC]::GetGCMemoryInfo()
-                    $capacityGiB = [Math]::Round($info.TotalAvailableMemoryBytes / 1GB, 1)
-                    $loadGiB = [Math]::Round($info.MemoryLoadBytes / 1GB, 1)
-                    $headroomGiB = [Math]::Round(
-                        [Math]::Max([long]0, $info.TotalAvailableMemoryBytes - $info.MemoryLoadBytes) / 1GB,
-                        1
-                    )
-                    "GC load $loadGiB/$capacityGiB GiB, estimated headroom $headroomGiB GiB"
-                }
-
                 $item = $_
                 $log = Join-Path $using:logRoot "$($item.Index).log"
-                Write-Host "anvil miri: starting $($item.Name) ($(Get-MemoryTelemetry))"
+                Write-Host "anvil miri: starting $($item.Name)"
                 Push-Location -LiteralPath $item.WorkingDirectory
                 try {
                     & $using:runner runner $item.Artifact *> $log
@@ -220,7 +201,7 @@ _anvil-miri-test *package_args:
                 } finally {
                     Pop-Location
                 }
-                Write-Host "anvil miri: completed $($item.Name) (exit $exitCode; $(Get-MemoryTelemetry))"
+                Write-Host "anvil miri: completed $($item.Name) (exit $exitCode)"
                 [pscustomobject]@{
                     Index = $item.Index
                     Name = $item.Name
