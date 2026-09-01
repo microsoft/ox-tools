@@ -263,6 +263,18 @@ unification, and runs the resulting Miri test executables concurrently.
 `--package` to override impact scope, `--test` to select libtest names, or
 `--example` with `--package` to run one example instead of the test suite.
 
+A package whose own test targets should not run under Miri can opt out while
+remaining available as a dependency:
+
+```toml
+[package.metadata.anvil.miri]
+exclude = true
+```
+
+Reserve this package-wide switch for constraints that apply to every test
+target. Prefer per-test ignores with reasons for narrower or temporary
+suppressions.
+
 Tests that cannot run in the interpreter can carry an ordinary ignore:
 
 ```text
@@ -383,7 +395,7 @@ More detailed design and operational guidance is available in the
 This crate was developed as part of <a href="../..">The Oxidizer Project</a>. Browse this crate's <a href="https://github.com/microsoft/ox-tools/tree/main/crates/cargo-anvil">source code</a>.
 </sub>
 
- [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbncfW5KwlVTsbtGSPiWwTsF0bACjCaMRiQQsba8KwEFpR_gBhZIGDa2NhcmdvLWFudmlsZTAuOC4wa2NhcmdvX2Fudmls
+ [__cargo_doc2readme_dependencies_info]: ggGmYW0CYXZlMC43LjNhdIQblRYhli3L8qob_NSi_WYo69wbWnMVqZw3jJwb3u56HnT6RDphYvRhcoQbuk0iAfDGqzwb5XXvlUTY0SgbT2ckSD3Vmssb0FRxdfKAARJhZIGDa2NhcmdvLWFudmlsZTAuOC4wa2NhcmdvX2Fudmls
  [__link0]: https://github.com/casey/just
  [__link1]: https://rust-lang.github.io/rustfmt/
  [__link10]: https://embarkstudios.github.io/cargo-deny/
