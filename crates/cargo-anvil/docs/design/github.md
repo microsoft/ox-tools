@@ -903,12 +903,14 @@ Recommended root workflow shape:
 
 ### Action pinning
 
-Third-party actions are pinned one of two ways, and the split is deliberate rather
+Third-party actions are pinned in one of two ways, and the split is deliberate rather
 than inconsistent.
 
 Actions whose publisher has enabled GitHub [immutable releases][immutable] are pinned
-by tag — `codecov/codecov-action@v7.0.0`,
-`marocchino/sticky-pull-request-comment@v3.0.5`, `cargo-bins/cargo-binstall@v1.21.0`.
+by tag. In the generated workflows that is, at the time of writing,
+`codecov/codecov-action@v7.0.0`, `marocchino/sticky-pull-request-comment@v3.0.5` and
+`cargo-bins/cargo-binstall@v1.21.0`; a repository's own hand-maintained workflows apply
+the same rule to the actions they use, so the list a reader sees there may be longer.
 An immutable release locks its Git tag to one commit: the tag cannot be moved, and
 cannot be deleted while the release exists. The tag name cannot be reused even after
 the repository is deleted and recreated, and publishing generates a release
