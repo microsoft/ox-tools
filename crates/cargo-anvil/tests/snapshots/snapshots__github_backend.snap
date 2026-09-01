@@ -6508,15 +6508,26 @@ _install-tool name version installer source_prereq="": anvil-toolchain-stable-in
 # _check-tool: verify a cargo subcommand is installed at or above the
 # pinned version. Errors with an install hint on missing or too-old.
 [script("pwsh", "-NoProfile")]
-_check-tool name version: anvil-tool-rustc-validate-prereqs
+_check-tool name version:
     $ErrorActionPreference = 'Stop'
     $name = '{{name}}'
     $version = '{{version}}'
 
     $installed = $null
     $pattern = '^' + [regex]::Escape($name) + ' v(\S+):'
-    foreach ($line in (& cargo {{_anvil_stable_toolchain_args}} install --list 2>$null)) {
-        if ($line -match $pattern) { $installed = $Matches[1]; break }
+    $previousAutoInstall = $env:RUSTUP_AUTO_INSTALL
+    try {
+        # Validation must not let the rustup proxy provision a missing selection.
+        $env:RUSTUP_AUTO_INSTALL = '0'
+        foreach ($line in (& cargo {{_anvil_stable_toolchain_args}} install --list 2>$null)) {
+            if ($line -match $pattern) { $installed = $Matches[1]; break }
+        }
+    } finally {
+        if ($null -eq $previousAutoInstall) {
+            Remove-Item Env:RUSTUP_AUTO_INSTALL -ErrorAction SilentlyContinue
+        } else {
+            $env:RUSTUP_AUTO_INSTALL = $previousAutoInstall
+        }
     }
     if (-not $installed) {
         Write-Error "anvil: required tool '$name' not found. Install: cargo install --locked --version =$version $name"

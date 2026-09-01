@@ -766,8 +766,8 @@ mod tests {
             "validate-prereqs recipes must never install stable"
         );
         assert!(
-            TOOLS_JUST.contains("_check-tool name version: anvil-tool-rustc-validate-prereqs"),
-            "Cargo-tool validation must confirm the stable selection without provisioning it"
+            TOOLS_JUST.contains("$env:RUSTUP_AUTO_INSTALL = '0'"),
+            "Cargo-tool validation must disable rustup auto-installation"
         );
 
         let groups = all_group_bodies();
