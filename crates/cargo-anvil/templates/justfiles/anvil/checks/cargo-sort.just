@@ -8,16 +8,12 @@
 
 # Modified tier.
 #
-# `--check-format` makes the formatting diff fail the check, not just the
-# sort order. cargo-sort 2.1.2+ downgraded formatting-only diffs to
-# warnings by default (PR #129); without this flag cargo-sort 2.1.2+
-# would pass on formatting drift. The flag preserves the intended
-# check behavior across the supported range.
+# cargo-sort 2.1.2 and newer report formatting-only differences as warnings
+# unless `--check-format` is set. Keep it enabled so dependency ordering and
+# Cargo manifest style are both enforced.
 #
 # `--grouped` keeps the blank lines between groups of key/value pairs
-# (e.g. blank-line-separated dependency blocks) intact, matching
-# oxidizer-github's convention; without it cargo-sort would flag those
-# blank lines as a formatting diff and fail the check.
+# (e.g. blank-line-separated dependency blocks) intact.
 
 # Check that Cargo.toml dependency tables are sorted.
 [script("pwsh", "-NoProfile")]

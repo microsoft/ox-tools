@@ -150,12 +150,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --locked -p cargo-anvil
-      - name: Regenerate emitted files
-        run: ./target/debug/cargo-anvil anvil
       - name: Assert no drift
         run: |
-          if ! git diff --exit-code; then
-            echo "::error::cargo-anvil changed files. Run 'cargo anvil' locally and commit the diff."
+          if ! ./target/debug/cargo-anvil anvil --dry-run; then
+            echo "::error::cargo-anvil would change generated files or .anvil.lock." \
+                 "Run 'cargo anvil' locally and commit the diff."
             exit 1
           fi
 
@@ -164,10 +163,10 @@ jobs:
     uses: ./.github/workflows/anvil-pr-impl.yml
 ```
 
-The `regenerate-check` job runs first. If a PR changes the catalog or emitter without
-also committing the regenerated output, this fails with an actionable message. After
-that, the standard `anvil-pr-impl.yml` reusable workflow runs every group, exactly as
-in any consumer repo.
+The `regenerate-check` job runs on every PR. If a change leaves either emitted
+content or `.anvil.lock` out of date, this fails with an actionable message.
+After that, the standard `anvil-pr-impl.yml` reusable workflow runs every group,
+exactly as in any consumer repo.
 
 The wrapper workflow above is the **one** hand-written workflow in ox-tools — it
 bootstraps the dogfood loop. Every other cloud workflows artifact is regenerated.

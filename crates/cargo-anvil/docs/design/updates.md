@@ -413,11 +413,11 @@ work — provided they hadn't customized it.
 
 ### Exit codes
 
-- `--dry-run` exit code 0: the run would change nothing on disk and every artifact was
-  safely inspected.
+- `--dry-run` exit code 0: the run would change nothing on disk, including
+  `.anvil.lock`, and every artifact was safely inspected.
 - `--dry-run` exit code 1: the run would change something on disk, including writing a
-  `.anvil-proposed` sibling, or Anvil refused to manage an artifact it could not safely
-  inspect.
+  `.anvil-proposed` sibling or refreshing manifest checksums and inventory, or Anvil
+  refused to manage an artifact it could not safely inspect.
 
 The same partitioning is printed at the end of every non-`--dry-run` `update`.
 

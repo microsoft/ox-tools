@@ -8,6 +8,7 @@
     reason = "panic-on-failure idioms are appropriate in tests"
 )]
 
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::fs;
@@ -18,20 +19,57 @@ use tempfile::TempDir;
 
 const HELPERS: &str = include_str!("../templates/justfiles/anvil/helpers.just");
 const IMPACT: &str = include_str!("../templates/justfiles/anvil/impact.just");
-#[cfg(target_os = "linux")]
 const BOLERO: &str = include_str!("../templates/justfiles/anvil/checks/bolero.just");
+const FMT: &str = include_str!("../templates/justfiles/anvil/checks/fmt.just");
 const LLVM_COV: &str = include_str!("../templates/justfiles/anvil/checks/llvm-cov.just");
+const LOOM: &str = include_str!("../templates/justfiles/anvil/checks/loom.just");
 const SEMVER: &str = include_str!("../templates/justfiles/anvil/checks/semver-check.just");
 const EXTERNAL_TYPES: &str = include_str!("../templates/justfiles/anvil/checks/external-types.just");
 const TOOLS: &str = include_str!("../templates/justfiles/anvil/tools.just");
 const APRZ: &str = include_str!("../templates/justfiles/anvil/checks/aprz.just");
 const MUTANTS_DIFF: &str = include_str!("../templates/justfiles/anvil/checks/mutants-diff.just");
 const VERSIONS: &str = include_str!("../templates/justfiles/anvil/versions.just");
+const REGENERATE_WORKFLOW: &str = include_str!("../../../.github/workflows/regenerate-check.yml");
 const CONTAINER: &str = include_str!("../templates/justfiles/anvil/container.just");
+// Any nonzero value works; naming it prevents tests from implying an external exit-code contract.
+const ARBITRARY_FAILURE_EXIT: &str = "23";
+
+#[test]
+fn regeneration_check_runs_on_every_pull_request() {
+    assert!(REGENERATE_WORKFLOW.contains("pull_request: {}"));
+    assert!(
+        !REGENERATE_WORKFLOW.contains("\n    paths:"),
+        "the dogfood drift gate must not be limited by changed paths"
+    );
+}
+
+#[test]
+fn loom_does_not_globally_limit_exploration() {
+    assert!(
+        !LOOM.contains("LOOM_MAX_PREEMPTIONS"),
+        "loom models must own their exploration scope rather than inheriting a global preemption cap"
+    );
+}
+
+#[test]
+fn bolero_uses_its_supported_release_profile_option() {
+    assert!(
+        BOLERO.contains("bolero test --profile release"),
+        "bolero execution must select the release profile with cargo-bolero's supported option"
+    );
+    assert!(
+        !BOLERO.contains("bolero test --release"),
+        "cargo-bolero 0.13.4 does not accept Cargo's --release shorthand"
+    );
+}
+
 const FAKE_CARGO_PS1: &str = r#"
 $joined = $args -join ' '
 if ($env:FAKE_CARGO_LOG) {
     Add-Content -LiteralPath $env:FAKE_CARGO_LOG -Value $joined
+}
+if ($args -contains 'each') {
+    exit [int]$env:FAKE_EACH_EXIT
 }
 if ($args -contains 'metadata') {
     if ($env:FAKE_METADATA_EXIT) { exit [int]$env:FAKE_METADATA_EXIT }
@@ -54,6 +92,12 @@ if ($args -contains 'metadata') {
             id = "$packageName 0.1.0"
             manifest_path = $manifestPath
             targets = @([pscustomobject]@{ name = $libName; kind = @('lib') })
+            publish = if ($env:FAKE_PUBLISH_FALSE) {
+                # Preserve the empty array through expression output so JSON emits [] rather than null.
+                Write-Output -NoEnumerate @()
+            } else {
+                $null
+            }
             metadata = [pscustomobject]@{
                 'coverage-gate' = [pscustomobject]@{ 'min-lines-percent' = 0 }
             }
@@ -71,6 +115,23 @@ if ($args -contains 'metadata') {
             id = "$($env:FAKE_SECOND_PACKAGE_NAME) 0.1.0"
             manifest_path = [System.IO.Path]::Combine($root, 'nested', $secondDirLeaf, 'Cargo.toml')
             targets = @([pscustomobject]@{ name = $env:FAKE_SECOND_PACKAGE_NAME; kind = @('lib') })
+            publish = $null
+            metadata = [pscustomobject]@{}
+        }
+    }
+    if ($env:FAKE_THIRD_PACKAGE_NAME) {
+        $packages += [pscustomobject]@{
+            name = $env:FAKE_THIRD_PACKAGE_NAME
+            version = '0.1.0'
+            id = "$($env:FAKE_THIRD_PACKAGE_NAME) 0.1.0"
+            manifest_path = [System.IO.Path]::Combine(
+                $root,
+                'nested',
+                $env:FAKE_THIRD_PACKAGE_NAME,
+                'Cargo.toml'
+            )
+            targets = @([pscustomobject]@{ name = $env:FAKE_THIRD_PACKAGE_NAME; kind = @('lib') })
+            publish = @('private-registry')
             metadata = [pscustomobject]@{}
         }
     }
@@ -145,6 +206,9 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
     // already defines it and Just rejects duplicate definitions.
     if !imports.iter().any(|(name, _)| *name == "versions.just") {
         justfile.push_str("rust_nightly := \"nightly-test\"\n\n");
+        justfile.push_str("rust_nightly_external_types := \"nightly-test\"\n\n");
+        // A visibly synthetic placeholder used only for recipe interpolation.
+        justfile.push_str("cargo_check_external_types_version := \"0.0.0-test\"\n\n");
     }
     for (name, contents) in imports {
         write(&tmp.path().join(name), contents);
@@ -295,7 +359,10 @@ fn impact_format_resolves_directory_aliases_and_fails_hard() {
     let metadata_error = run_just(
         tmp.path(),
         &["_anvil-impact-format", "affected", "impact.json"],
-        &[("FAKE_METADATA_EXIT", OsStr::new("23")), ("FAKE_CARGO_LOG", log.as_os_str())],
+        &[
+            ("FAKE_METADATA_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT)),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+        ],
     );
     assert_failed(&metadata_error, "cargo metadata failure");
 
@@ -693,21 +760,204 @@ fn public_api_checks_fail_when_metadata_discovery_fails() {
             "anvil-external-types",
             &[
                 "anvil-tool-cargo-check-external-types-validate-prereqs",
-                "anvil-toolchain-external-types-validate-prereqs",
+                "anvil-toolchain-nightly-external-types-validate-prereqs",
                 "anvil-tool-cargo-check-external-types-install installer",
-                "anvil-toolchain-external-types-install",
+                "anvil-toolchain-nightly-external-types-install",
                 "anvil-impact",
             ][..],
         ),
     ] {
         let tmp = fixture(&[(recipe_file, contents), ("impact.just", IMPACT)], dependencies);
         seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
-        let output = run_just(tmp.path(), &[recipe], &[("FAKE_METADATA_EXIT", OsStr::new("23"))]);
+        let output = run_just(tmp.path(), &[recipe], &[("FAKE_METADATA_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT))]);
         assert_failed(&output, &format!("{recipe} cargo metadata failure"));
 
         let malformed = run_just(tmp.path(), &[recipe], &[("FAKE_METADATA_INVALID", OsStr::new("1"))]);
         assert_failed(&malformed, &format!("{recipe} malformed cargo metadata"));
     }
+}
+
+#[test]
+fn fmt_delegates_workspace_iteration_to_cargo_each() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("fmt.just", FMT), ("impact.just", IMPACT)],
+        &[
+            "anvil-component-nightly-rustfmt-validate-prereqs",
+            "anvil-component-nightly-rustfmt-install",
+            "anvil-tool-cargo-each-validate-prereqs",
+            "anvil-tool-cargo-each-install installer",
+            "anvil-impact",
+        ],
+    );
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(tmp.path(), &["anvil-fmt"], &[("FAKE_CARGO_LOG", log.as_os_str())]);
+    assert!(
+        output.status.success(),
+        "per-package formatting failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commands = fs::read_to_string(&log).unwrap();
+    assert!(
+        commands.contains("each --workspace --keep-going -- cargo +nightly-test fmt --manifest-path {manifest} --check"),
+        "unexpected cargo invocation: {commands}"
+    );
+    assert!(!commands.contains("fmt --all"));
+}
+
+#[test]
+fn fmt_propagates_cargo_each_failure() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("fmt.just", FMT), ("impact.just", IMPACT)],
+        &[
+            "anvil-component-nightly-rustfmt-validate-prereqs",
+            "anvil-component-nightly-rustfmt-install",
+            "anvil-tool-cargo-each-validate-prereqs",
+            "anvil-tool-cargo-each-install installer",
+            "anvil-impact",
+        ],
+    );
+    let output = run_just(
+        tmp.path(),
+        &["anvil-fmt"],
+        &[("FAKE_EACH_EXIT", OsStr::new(ARBITRARY_FAILURE_EXIT))],
+    );
+    assert_failed(&output, "anvil-fmt cargo-each failure");
+}
+
+#[test]
+fn external_types_checks_every_library_including_non_publishable_ones() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("external-types.just", EXTERNAL_TYPES), ("impact.just", IMPACT)],
+        &[
+            "anvil-tool-cargo-check-external-types-validate-prereqs",
+            "anvil-toolchain-nightly-external-types-validate-prereqs",
+            "anvil-tool-cargo-check-external-types-install installer",
+            "anvil-toolchain-nightly-external-types-install",
+            "anvil-impact",
+        ],
+    );
+    seed_include(tmp.path(), "affected", "--workspace");
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-external-types"],
+        &[
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_PUBLISH_FALSE", OsStr::new("1")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("public-default")),
+            ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("public-default")),
+            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("named-registry")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "library selection failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let commands = fs::read_to_string(log).unwrap();
+    assert!(commands.contains("metadata --no-deps --format-version 1"));
+    let expected_manifests = [
+        tmp.path().join("Cargo.toml").to_string_lossy().into_owned(),
+        tmp.path()
+            .join("nested")
+            .join("public-default")
+            .join("Cargo.toml")
+            .to_string_lossy()
+            .into_owned(),
+        tmp.path()
+            .join("nested")
+            .join("named-registry")
+            .join("Cargo.toml")
+            .to_string_lossy()
+            .into_owned(),
+    ];
+    assert_eq!(
+        commands
+            .lines()
+            .filter_map(|command| { command.strip_prefix("+nightly-test check-external-types --manifest-path ") })
+            .map(str::to_owned)
+            .collect::<HashSet<_>>(),
+        expected_manifests.into_iter().collect()
+    );
+}
+
+#[test]
+fn semver_skips_non_publishable_libraries() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("helpers.just", HELPERS), ("semver.just", SEMVER), ("impact.just", IMPACT)],
+        &[
+            "anvil-tool-cargo-semver-checks-validate-prereqs",
+            "anvil-tool-cargo-semver-checks-install installer",
+            "anvil-impact",
+        ],
+    );
+    seed_include(tmp.path(), "affected", "--package fixture@0.1.0");
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-semver-check"],
+        &[("FAKE_CARGO_LOG", log.as_os_str()), ("FAKE_PUBLISH_FALSE", OsStr::new("1"))],
+    );
+    assert!(
+        output.status.success(),
+        "non-publishable semver filtering failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!fs::read_to_string(log).unwrap().contains("semver-checks"));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("no affected publishable library crates"));
+}
+
+#[test]
+fn semver_includes_libraries_restricted_to_named_registries() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("helpers.just", HELPERS), ("semver.just", SEMVER), ("impact.just", IMPACT)],
+        &[
+            "anvil-tool-cargo-semver-checks-validate-prereqs",
+            "anvil-tool-cargo-semver-checks-install installer",
+            "anvil-impact",
+        ],
+    );
+    seed_include(tmp.path(), "affected", "--package named-registry@0.1.0");
+    let log = tmp.path().join("cargo.log");
+    let output = run_just(
+        tmp.path(),
+        &["anvil-semver-check"],
+        &[
+            ("BASE_REF", OsStr::new("base")),
+            ("FAKE_CARGO_LOG", log.as_os_str()),
+            ("FAKE_THIRD_PACKAGE_NAME", OsStr::new("named-registry")),
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "named-registry SemVer selection failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        fs::read_to_string(log)
+            .unwrap()
+            .contains("semver-checks --package named-registry --baseline-rev base")
+    );
 }
 
 #[test]

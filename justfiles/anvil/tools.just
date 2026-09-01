@@ -631,6 +631,14 @@ anvil-tool-cargo-doc2readme-install installer="install": (_install-tool "cargo-d
 [group("anvil-setup")]
 anvil-tool-cargo-doc2readme-validate-prereqs: (_check-tool "cargo-doc2readme" cargo_doc2readme_version)
 
+# Install the pinned `cargo-each` tool.
+[group("anvil-setup")]
+anvil-tool-cargo-each-install installer="install": (_install-tool "cargo-each" cargo_each_version installer)
+
+# Validate that the pinned `cargo-each` tool is available.
+[group("anvil-setup")]
+anvil-tool-cargo-each-validate-prereqs: (_check-tool "cargo-each" cargo_each_version)
+
 # Install the pinned `cargo-ensure-no-cyclic-deps` tool.
 [group("anvil-setup")]
 anvil-tool-cargo-ensure-no-cyclic-deps-install installer="install": (_install-tool "cargo-ensure-no-cyclic-deps" cargo_ensure_no_cyclic_deps_version installer)
