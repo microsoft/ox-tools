@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.6.0] - 2026-09-01
+
+- ✨ Features
+
+  - containerized execution - simplified ([#83](https://github.com/microsoft/ox-tools/pull/83))
+  - local impact scoping via the anvil-impact recipe ([#47](https://github.com/microsoft/ox-tools/pull/47))
+
+- ✔️ Tasks
+
+  - update workspace dependencies and docs ([#111](https://github.com/microsoft/ox-tools/pull/111))
+
+- 🧩 Miscellaneous
+
+  - Introduce cargo-gamma ([#93](https://github.com/microsoft/ox-tools/pull/93))
+
 ## [0.5.0] - 2026-08-25
 
 - ✨ Features
