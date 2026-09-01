@@ -306,13 +306,13 @@ fn fixture(imports: &[(&str, &str)], dependency_recipes: &[&str]) -> TempDir {
     write(&bin.join("git.ps1"), "exit 0\n");
     write(
         &bin.join("rustc.ps1"),
-        r#"
+        r"
 if ($args -contains 'sysroot') {
     Write-Output ([System.IO.Path]::Combine($env:FAKE_WORKSPACE_ROOT, 'fake-toolchain'))
     exit 0
 }
 exit 1
-"#,
+",
     );
     let fake_toolchain_bin = tmp.path().join("fake-toolchain/bin");
     fs::create_dir_all(&fake_toolchain_bin).unwrap();
@@ -375,15 +375,12 @@ fn run_just(root: &Path, arguments: &[&str], environment: &[(&str, &OsStr)]) -> 
         .current_dir(root);
     command.env("PATH", path_with_fake_bin(root));
     command.env("FAKE_WORKSPACE_ROOT", root);
-    // A fixture is a scratch workspace, so it must not inherit the impact
-    // scoping of whatever invoked the test suite. A CI group job exports
-    // `ANVIL_IMPACT=consume` and downloads a cache into the real repository;
-    // inherited into a temp directory that has no cache, `anvil-impact` fails
-    // hard and takes the recipe under test with it. `ANVIL_INCLUDE_*` is the
-    // same hazard one level down: a leg whose scope resolved to `--skip` would
-    // silently short-circuit the recipe before it did anything. A test that
-    // cares about either value passes it explicitly below.
+    // A fixture is a scratch workspace, so it must not inherit impact scoping
+    // or output-backend markers from the process running the test suite. Tests
+    // that exercise those contracts pass the relevant values explicitly.
     command.env_remove("ANVIL_IMPACT");
+    command.env_remove("GITHUB_ACTIONS");
+    command.env_remove("TF_BUILD");
     for key in std::env::vars_os().map(|(key, _)| key) {
         if key.to_string_lossy().starts_with("ANVIL_INCLUDE_") {
             command.env_remove(key);
