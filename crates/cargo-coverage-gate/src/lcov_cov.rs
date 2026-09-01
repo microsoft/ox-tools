@@ -135,6 +135,8 @@ impl CoverageReport {
                     uncovered_lines.push(key.line);
                 }
             }
+            sort_line_numbers(&mut coverable_lines);
+            sort_line_numbers(&mut uncovered_lines);
             files.push(FileReport {
                 filename: key.source_file,
                 lines_total: total,
@@ -146,6 +148,10 @@ impl CoverageReport {
         files.sort_by(|a, b| a.filename.cmp(&b.filename));
         Self { files }
     }
+}
+
+fn sort_line_numbers(lines: &mut [u32]) {
+    lines.sort_unstable();
 }
 
 #[cfg(test)]
@@ -175,6 +181,13 @@ mod tests {
         assert_eq!(f.lines_covered, 3);
         assert_eq!(f.coverable_lines, vec![1, 2, 3, 4]);
         assert_eq!(f.uncovered_lines, vec![3]);
+    }
+
+    #[test]
+    fn line_numbers_are_sorted_explicitly() {
+        let mut lines = [8, 2, 5, 3];
+        sort_line_numbers(&mut lines);
+        assert_eq!(lines, [2, 3, 5, 8]);
     }
 
     #[test]
