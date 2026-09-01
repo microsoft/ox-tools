@@ -97,11 +97,11 @@ foreach ($pkg in $packages_to_process) {
                 $output = $result[0..($result.Length - 2)] -join "`n"  # All output except exit code
 
                 if ($exit_code -eq 0) {
-                    Write-Host "✓ Example '$example_name' in package '$pkg' completed successfully" -ForegroundColor Green
+                    Write-Host "PASS: Example '$example_name' in package '$pkg' completed successfully" -ForegroundColor Green
                     $success_count++
                 }
                 else {
-                    Write-Host "✗ Example '$example_name' in package '$pkg' failed with exit code $exit_code" -ForegroundColor Red
+                    Write-Host "FAIL: Example '$example_name' in package '$pkg' failed with exit code $exit_code" -ForegroundColor Red
                     if ($output.Trim() -ne "") {
                         Write-Host "Output:" -ForegroundColor Yellow
                         Write-Host $output -ForegroundColor DarkYellow
@@ -110,7 +110,7 @@ foreach ($pkg in $packages_to_process) {
                 }
             }
             else {
-                Write-Host "✗ Example '$example_name' in package '$pkg' timed out after $timeout_seconds seconds" -ForegroundColor Red
+                Write-Host "FAIL: Example '$example_name' in package '$pkg' timed out after $timeout_seconds seconds" -ForegroundColor Red
                 $failures += "$pkg::$example_name (timeout)"
                 Stop-Job -Job $job
             }
@@ -119,7 +119,7 @@ foreach ($pkg in $packages_to_process) {
 
         }
         catch {
-            Write-Host "✗ Example '$example_name' in package '$pkg' failed with exception: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "FAIL: Example '$example_name' in package '$pkg' failed with exception: $($_.Exception.Message)" -ForegroundColor Red
             $failures += "$pkg::$example_name (exception: $($_.Exception.Message))"
         }
     }
@@ -155,11 +155,11 @@ foreach ($pkg in $packages_to_process) {
                 $output = $result[0..($result.Length - 2)] -join "`n"  # All output except exit code
 
                 if ($exit_code -eq 0) {
-                    Write-Host "✓ Example '$example_name' in package '$pkg' completed successfully" -ForegroundColor Green
+                    Write-Host "PASS: Example '$example_name' in package '$pkg' completed successfully" -ForegroundColor Green
                     $success_count++
                 }
                 else {
-                    Write-Host "✗ Example '$example_name' in package '$pkg' failed with exit code $exit_code" -ForegroundColor Red
+                    Write-Host "FAIL: Example '$example_name' in package '$pkg' failed with exit code $exit_code" -ForegroundColor Red
                     if ($output.Trim() -ne "") {
                         Write-Host "Output:" -ForegroundColor Yellow
                         Write-Host $output -ForegroundColor DarkYellow
@@ -168,7 +168,7 @@ foreach ($pkg in $packages_to_process) {
                 }
             }
             else {
-                Write-Host "✗ Example '$example_name' in package '$pkg' timed out after $timeout_seconds seconds" -ForegroundColor Red
+                Write-Host "FAIL: Example '$example_name' in package '$pkg' timed out after $timeout_seconds seconds" -ForegroundColor Red
                 $failures += "$pkg::$example_name (timeout)"
                 Stop-Job -Job $job
             }
@@ -177,7 +177,7 @@ foreach ($pkg in $packages_to_process) {
 
         }
         catch {
-            Write-Host "✗ Example '$example_name' in package '$pkg' failed with exception: $($_.Exception.Message)" -ForegroundColor Red
+            Write-Host "FAIL: Example '$example_name' in package '$pkg' failed with exception: $($_.Exception.Message)" -ForegroundColor Red
             $failures += "$pkg::$example_name (exception: $($_.Exception.Message))"
         }
     }
