@@ -10,7 +10,7 @@ use compact_str::CompactString;
 
 use super::Candidate;
 use crate::HashMap;
-use crate::model::{Interner, MutantDefinition, MutationSite, mutant_id_with_discriminator, normalize_site_text, site_key};
+use crate::model::{Interner, MutantDefinition, MutationSite, SiteIndex, mutant_id_with_discriminator, normalize_site_text, site_key};
 use crate::parse::SourceFile;
 
 /// Turns candidates into source-level mutant definitions, assigning stable ids.
@@ -73,14 +73,14 @@ pub fn into_definitions(file: &SourceFile, candidates: Vec<Candidate>) -> Vec<Mu
                 &candidate.item_path,
                 candidate.mutator,
                 &normalized,
-                index,
-                candidate.replacement_index,
+                SiteIndex::new(index, candidate.replacement_index),
                 (candidate.mutator == "fn_value.err_with").then_some(candidate.replacement.as_str()),
             ),
             file: Arc::clone(&path),
             site,
             mutator: interner.text(candidate.mutator),
             item_path: interner.text(&candidate.item_path),
+            trait_impl: candidate.trait_impl.as_deref().map(|name| interner.text(name)),
             occurrence: index,
             replacement_index: candidate.replacement_index,
             replacement: candidate.replacement,

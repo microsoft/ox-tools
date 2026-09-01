@@ -19,9 +19,15 @@ mod text;
 mod timing;
 mod yield_;
 
+#[doc(inline)]
 pub use analysis::{analyze, analyze_run, yields};
+#[doc(inline)]
 pub use finding::Finding;
+#[doc(inline)]
 pub use render::{Layout, render_markdown};
+#[doc(inline)]
 pub use text::human;
+#[doc(inline)]
 pub use timing::Timing;
+#[doc(inline)]
 pub use yield_::Yield;

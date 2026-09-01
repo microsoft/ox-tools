@@ -14,8 +14,13 @@ mod mutator;
 mod preset;
 mod selection;
 
+#[doc(inline)]
 pub use catalog::{PRESETS, REGISTRY};
+#[doc(inline)]
 pub use lookup::{families, find, find_preset, resolve};
+#[doc(inline)]
 pub use mutator::Mutator;
+#[doc(inline)]
 pub use preset::Preset;
+#[doc(inline)]
 pub use selection::Selection;

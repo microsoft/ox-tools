@@ -118,6 +118,7 @@ fn survivor(file: &str, line: usize) -> Mutant {
         column: 1,
         mutator: ("relational.gt_to_ge".to_owned()).into(),
         item_path: ("subject::f".to_owned()).into(),
+        trait_impl: None,
         occurrence: 0,
         replacement_index: 0,
         original: "a > b".to_owned().into(),

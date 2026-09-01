@@ -24,7 +24,6 @@ with its default. For the command-line flags these mirror, see [CMDLINE.md](CMDL
 * [Run control](#run-control)
 * [`artifact-dir`](#artifact-dir)
 * [`[shard]`](#shard)
-* [`[reporters]`](#reporters)
 
 ## Where the file lives
 
@@ -102,6 +101,9 @@ packages = ["my-core", "my-api"]
 
 # Additional error values for the `fn_value.err_with` mutator.
 errors = ["MyError::Timeout"]
+
+# Debug output is diagnostic text without a stable formatting contract.
+exclude-trait-impls = ["Debug", "Display"]
 ```
 
 `mutators` is a list here but a comma-separated string on the command line. The entries are joined with
@@ -111,6 +113,19 @@ recording about a mutator you have switched off. See [MUTATORS.md](MUTATORS.md) 
 `@pedantic` contains valid but commonly low-yield mutations that are not enabled by default. Select
 it alone for a focused run, or add it to the normal selection with
 `mutators = ["@default", "@pedantic"]`.
+
+Each `exclude-trait-impls` entry is compared with the lexical terminal identifier written in an implementation path.
+Qualification does not matter: `impl Debug`, `impl fmt::Debug`, and `impl core::fmt::Debug` all
+have the terminal name `Debug`. An alias keeps its written name, so `impl Diagnostic` is matched by
+the `Diagnostic` entry.
+
+This is lexical matching, not Rust name resolution. Gamma cannot semantically distinguish two
+imported traits that are both written with the same terminal name, and it does not guess which
+declaration an alias denotes without rustc resolution. Every configured name must match at least
+one implementation in the discovered source population; an unmatched entry is a usage error rather
+than a silent no-op, so a misspelling cannot quietly change selection. These project-wide rules are
+for cross-cutting policy. Prefer a `#[gamma::skip(...)]` directive beside the source for a single
+equivalent mutant, where its reason can be reviewed with the code.
 
 ## Cargo features
 
@@ -299,6 +314,8 @@ build red on the day it lands, and a gate that is red by default gets switched o
 Only mutants rejected by a failing test assertion enter the score's numerator. Survivors,
 uncovered mutants, timeouts, and out-of-memory mutants remain in its denominator, so
 `min-score = 100.0` fails closed on any of those outcomes.
+If any selected mutant remains pending, the gate fails as incomplete rather than evaluating a
+score over only the completed subset.
 
 ## `[shard]`
 
@@ -324,14 +341,3 @@ Moves all five user-facing artifacts as one set. The directory is created when n
 the key writes `gamma-report.json`, `gamma-report.html`, `gamma-report.sarif`,
 `gamma-perf-advice.md`, and `gamma-diagnostics.json` under the original workspace's
 `target/cargo-gamma`.
-
-## `[reporters]`
-
-```toml
-[reporters]
-html-external = false
-```
-
-`html-external` loads the HTML viewer from a CDN instead of embedding it. The file is much smaller,
-at the cost of needing network access to read it — which a CI artifact opened from an air-gapped
-machine will not have, so the default embeds.

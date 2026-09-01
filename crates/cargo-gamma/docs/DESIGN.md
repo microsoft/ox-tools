@@ -126,6 +126,11 @@ The injected runtime is intentionally tiny, dependency-free, and independent of 
 dependency graph. Adding dependencies, features, or a build script to it could perturb feature
 unification in the workspace under test and change what the tests prove.
 
+Every instrumented package is linked to the same runtime vendored for the campaign. An existing
+dependency on cargo-gamma's implementation crate is redirected to that copy; an unrelated
+dependency occupying the `gamma_rt` crate name is refused. This keeps every guard in one test
+process on the same active-mutant and census state.
+
 ## A campaign from start to finish
 
 A campaign is an ordered evidence pipeline. Later stages depend on facts established by earlier
@@ -201,8 +206,17 @@ Selection narrows the population before expensive work:
 
 - package, file, mutator, and diff selection decide what may become a mutant;
 - conditional-compilation evidence excludes code absent from this build;
+- explicitly tagged project policy can exclude every implementation with a named lexical terminal
+  trait identifier without coupling selection to path qualification or human-readable report text;
 - suppressions withdraw explicitly accepted sites;
 - sharding assigns stable portions of the population to separate campaigns.
+
+Trait-name policy is deliberately lexical. `impl Debug`, `impl fmt::Debug`, and
+`impl core::fmt::Debug` share the terminal name `Debug`, while an imported alias retains the alias
+written in the implementation. Without rustc name resolution, discovery cannot semantically
+distinguish identically named imported traits. Each rule records whether it matched during
+discovery, and an unmatched rule is a usage error rather than a silent no-op; this makes a typo in
+selection policy visible before it can quietly change the mutation population.
 
 In-source suppression has two equivalent channels. Whole items can use the inert
 `#[gamma::skip]` attribute supplied by the `cargo-gamma-attrs` package. Statements and expressions,
@@ -215,6 +229,15 @@ a survivor the author believed suppressed.
 
 Every uncertainty fails toward **keeping** work. Running an unnecessary mutant costs time; silently
 dropping a valid mutant improves the score without evidence.
+
+A file cargo-gamma cannot analyze but `rustc` can build — one nested past the parser's recursion
+limit, for instance — is reported as an unanalyzable file rather than failing the campaign, and this
+holds whether the file was selected for mutation or read only for the module declarations it
+contributes. The reported set is keyed and ordered by absolute path, so narrowing a selection moves
+such a file between the two paths without moving it in the report, and two runs over one workspace
+name the same files in the same order regardless of which worker claimed which file. When a
+declaration-only file is skipped, the modules only it declares are treated as absent, exactly as if
+the selection had never mentioned it.
 
 ## Representing every mutant in one program
 
@@ -273,6 +296,17 @@ failure emits a fixed runtime marker and terminates startup. The parent recogniz
 before interpreting either libtest or nextest status and records the run as unmetered, so a mutant
 that was requested but never activated cannot become a phantom survivor or kill.
 
+That distinction covers the census request as well as the ordinal. An environment image that could
+not be read says nothing about whether a census was asked for, so it is never reported as a census
+that was not requested; the run fails at startup instead. A census file the coordinator asked for
+and never receives would otherwise look like a binary that reached no site at all, which is the one
+census answer that can wrongly exclude tests.
+
+Signal delivery interrupts a read without failing it, so the capture retries a bounded number of
+times. The budget is spent across the whole capture rather than per read, so a stream of
+interruptions cannot refill it between chunks; exhausting it is an acquisition failure like any
+other, never a silent absence and never an unbounded spin inside a constructor.
+
 ## Building a viable schema
 
 Some syntactically valid mutations are not well typed. A replacement may require a trait the
@@ -324,13 +358,44 @@ that workspace's default external cache applies even when `--cache-dir` redirect
 Conditional source, configuration, and hints publication uses this lock on every platform, so
 Windows never needs persistent sibling lock files in the checkout.
 
+The default cache base lives under the user cache directory as `cargo-gamma/<identity>`, where the
+identity is the first sixty-four bits of the BLAKE3 digest of the absolute workspace root, rendered
+as sixteen hex characters. The algorithm is pinned by cargo-gamma rather than borrowed from the
+standard library's default hasher, which is explicitly free to change between releases: this name is
+where the lock serializing every source-changing command for one workspace lives, so two binaries
+that derived different names for one workspace would rewrite one tree concurrently while each
+observed no contention. Sixty-four bits is a directory name a user reads, and a collision is caught
+rather than trusted — the default base also carries the ownership marker, and a second workspace
+landing on the same name is refused with a usage error naming both roots and suggesting
+`--cache-dir`. An unmarked cache containing anything other than the lock created while claiming it
+is refused rather than adopted.
+
 An explicit `--cache-dir` names the cache base itself and must be empty on first use. cargo-gamma
 writes an ownership marker tying it to the original workspace and takes a second process-held lock
 for that cache. An unmarked non-empty directory and a cache owned by another workspace are refused
-before migration, synchronization, or cleanup can alter their contents. The two lock domains
-prevent both collisions: commands sharing an original workspace cannot race publication, and
-different workspaces cannot race over redirected reusable state. The operating system releases
-both locks automatically when their owner exits.
+before synchronization or cleanup can alter their contents. The two lock domains prevent both
+collisions: commands sharing an original workspace cannot race publication, and different
+workspaces cannot race over redirected reusable state. The operating system releases both locks
+automatically when their owner exits.
+
+A redirected cache is somewhere the invoking user chose, which means it can be somewhere other
+people can reach — and its contents are executed: the synchronized tree is built and its tests are
+run. Three refusals apply before anything is written there. The base may not be a symbolic link or
+anything other than a directory, checked both before and after it is created, so a redirect cannot
+be aimed through a link at a target it does not name. On Unix, every directory on the path to the
+base must be owned by the invoking user or by root and must not be group- or world-writable unless
+it is sticky; this is the rule OpenSSH applies to a home directory, and it allows the shared
+temporary directories that are sticky by design. The ownership marker is created exclusively, so a
+marker planted in advance is a refusal rather than something to overwrite, and it is read through
+the same handle its identity was taken from.
+
+These are ownership checks, not a proof that nothing changed between the check and the use: a
+directory the operating system reports as private cannot be made public by an unprivileged
+stranger, but nothing here makes the sequence atomic, and none of it constrains a privileged user or
+the directory's own owner. On Windows the check does not exist. Its security model is per-object
+ACLs that the standard library does not expose, so cargo-gamma performs no ownership test there and
+claims none; a redirected cache on Windows is trusted exactly as far as the directory the user named
+is.
 
 Successful campaigns retain the synchronized tree and build artifacts. A later campaign performs a
 delta synchronization:
@@ -340,8 +405,11 @@ delta synchronization:
 - inputs removed from the checkout are removed from the cached workspace;
 - generated artifacts remain outside the synchronized source tree.
 
-`cargo gamma clean` takes the campaign lock and removes the workspace-specific cache contents. It
-does not remove published reports under `target/cargo-gamma`, durable hints, or source suppressions.
+`cargo gamma clean` takes the campaign lock and removes the current workspace-specific cache
+contents. It does not remove published reports under `target/cargo-gamma`, durable hints, or source
+suppressions. The cleaned directory is named in the output; a workspace with nothing cached is
+told so. There is no legacy cache-name migration because no cargo-gamma release predates the
+current stable naming scheme.
 
 Correct invalidation is more important than avoiding a copy. Preserving an old timestamp on changed
 bytes could let Cargo reuse an artifact compiled from stale source.
@@ -425,6 +493,20 @@ Each census file belongs to one process. A descendant that inherits `GAMMA_CENSU
 runtime appends a second census to the same file; the reader detects records after the first seal,
 discards the binary's census, and safely falls back to running its complete tests for every mutant.
 
+The runtime holds the census file name in a fixed-size buffer it terminates itself, rather than
+trusting the environment image to have supplied a terminator. A name too long for that buffer
+leaves the process in census mode with no file it can open: nothing is recorded and nothing is
+sealed, so the reader discards that binary's census exactly as it discards a truncated one. Census
+mode is never silently downgraded to a normal run, because a censused test that behaved like an
+uncensused one would be indistinguishable from a test that reached nothing.
+
+The censused test controls the file at that path for as long as it runs, and the coordinator that
+reads it back afterward outlives every mutant it judges. Reading is bounded, before anything is
+allocated from the file's contents, to the largest whole census the runtime protocol can ever
+produce — one record per possible site plus its overflow and seal markers. A file larger than that,
+sparse or not, is refused rather than trusted to be as small as it claims, and refusal discards that
+binary's census exactly as a malformed one does.
+
 Suites whose reachability is nondeterministic can disable census-based narrowing and use complete
 test binaries.
 
@@ -453,12 +535,50 @@ direct test binary.
 Platform containment uses the strongest suitable primitive:
 
 - Unix process groups provide descendant-directed signaling;
-- Linux cgroup v2 provides process-tree memory accounting and enforcement;
+- Linux cgroup v2 provides a boundary a descendant cannot leave, plus process-tree memory
+  accounting and enforcement;
 - Windows job objects provide descendant lifetime and memory control.
+
+A process group is escapable: one unprivileged `setsid` or `setpgid` call removes a descendant from
+it, and every later signal to the group misses that descendant. Containment is therefore not
+conditional on whether memory is being measured. Every launch enters a cgroup leaf on Linux and a
+job object on Windows, including launches that request no accounting at all, such as test listing
+and census; the memory request decides only whether that boundary's readings are reported.
+
+This yields exactly three outcomes, with no silent fourth:
+
+- **Sealed.** The launch is inside a boundary its descendants cannot renounce.
+- **Refused.** The host can seal a subtree but this launch could not be given one. The launch does
+  not happen; one mutant is recorded as unjudged rather than run unreachable.
+- **Best effort.** The host offers no unprivileged process-tree boundary at all — every Unix that
+  is not Linux, and any Linux without a usable delegated cgroup. Containment falls back to the
+  process group, and the run says so once, before it copies, builds, or executes anything the
+  repository controls, rather than leaving the absence to be discovered from an orphan holding the
+  scratch tree open.
 
 Containment is active before user code can escape into an untracked descendant. Cleanup follows an
 observe, terminate, release, and reap lifecycle so that slots and platform resources cannot be
-reused while an earlier process tree still exists.
+reused while an earlier process tree still exists. An observation that finds the leader already
+reaped by somebody else revokes every capability naming it by number — its process-group id and its
+retained child handle — before returning, since both may already name a replacement; the boundary
+named by directory or handle is swept first, while it can still only reach this run's descendants.
+
+Preparation happens once per launch, and ownership is what makes that true rather than a check that
+could be worked around. On Linux preparation appends a pre-exec step that moves the child into one
+specific leaf; a command prepared twice would walk its child through both leaves while only the last
+is reported as its boundary, or through one that has since been removed, failing the spawn outright.
+Preparation therefore consumes the command and yields a prepared launch, which is the only thing
+that can start the child and never surrenders the command again — so there is nothing left to
+prepare a second time, and no run-time mark that a caller could clear. Waiting out a transient spawn
+shortage re-spawns the prepared launch already in hand; only one of the children it produces is
+adopted.
+
+The terminal-signal boundary registered for a launch is owned by that launch's boundary itself, and
+released when the boundary is dropped. A signal handler must never be left holding a descriptor
+whose owner has closed it, since the number it names is one the kernel is free to reissue and the
+handler's next terminal signal would then act on whatever now answers to it. Tying the registration
+to the boundary's own lifetime removes the possibility of a caller releasing it late, twice, or not
+at all; the release waits for any handler sweep still using the descriptor before it returns.
 
 ### Timeouts and stalls
 
@@ -559,6 +679,7 @@ A verdict states what evidence the campaign obtained:
 | `ignored` | Explicit policy suppressed the mutant | Excluded |
 | `notbuilt` | The selected build did not compile that source | Excluded |
 | `flaky` | The observed failure was not repeatable | Excluded and retried |
+| `pending` | The run ended without judging the mutant | Excluded; makes a requested score gate incomplete |
 
 The mutation score is:
 
@@ -575,6 +696,8 @@ validly judged.
 
 An empty denominator is printable but not gradeable. A score gate must fail structurally when no
 mutant was judged; it must never pass by interpreting an empty campaign as 100 percent.
+Likewise, a requested score gate fails when any mutant remains pending: a score over only the
+completed subset is not a score over the selected population.
 
 The distinctions between `survived`, `uncovered`, `unviable`, and `notbuilt` are architectural:
 they may all involve no failing test, but they prescribe different action. Collapsing them would
@@ -586,13 +709,49 @@ One verdict model feeds every output surface:
 
 - the console emphasizes actionable survivors and exceptional resource outcomes;
 - the mutation-testing-elements JSON report is the interchange artifact;
-- the HTML report provides a browsable, optionally self-contained view;
+- the HTML report provides a browsable, self-contained view;
 - SARIF and CI annotations place survivors on changed source;
 - the diagnostics bundle records campaign phases and measurements;
 - the progress journal preserves completed verdict lines if a campaign is interrupted.
 
+Command help follows the workspace Cargo-tool convention: green bold headings and usage,
+cyan bold literals, cyan placeholders, and package author/version metadata.
+
+The JSON report is written straight from the verdict model rather than rebuilt through a generic
+tree first, and is validated in that form. Two consequences are visible to whoever reads the file.
+Object keys appear in the order the schema declares them rather than alphabetically, which is
+deterministic in the same way and byte-for-byte reproducible across runs, but is not the order a
+previous release emitted. Per-file entries are ordered by path. Nothing about the set of keys, their
+names, their nesting, or their values changed, so a consumer that parses the document sees exactly
+what it saw before; only a consumer diffing raw bytes against an old file will notice.
+
 Console guidance is labelled `Hint`; incomplete, truncated, or unsaved output is labelled
 `warning`. Routine internal adjustments are silent.
+
+Everything a rendered artifact shows that the repository controls — paths, source fragments, test
+names, mutator notes, and a build tool's own diagnostics — is control-character encoded before it
+reaches a terminal or a CI log. The campaign writes real escape sequences of its own to draw the
+progress display, so a filename able to write them too could erase the line above it, forge a
+verdict, or attach a terminal hyperlink to someone else's URL. Colour that a build tool emits is
+allowed through unchanged, because it moves nothing; everything else — cursor motion, erasure,
+operating-system commands, and the C0/C1 controls including newline — is rendered visibly as an
+escape rather than executed.
+
+The HTML report loads no code from anywhere: the viewer is embedded, always. A report carries the
+complete source of every file it describes, so a page that fetched its viewer would hand all of it
+to whatever that script happened to be on the day the file was opened. The viewer bundle is
+vendored, reviewed, and versioned in-tree; a remote artifact could only be trusted if it were
+pinned by an integrity digest established here, which the vendored build cannot establish for a
+published one. No external-viewer mode is exposed.
+
+A mutant's published reason is built from what the campaign observed about it — an outcome, a
+killing test, a memory ceiling — never from a child process's own captured output. When nextest
+cannot enumerate a binary's tests with a mutant active, the campaign confirms the mutant caused it
+before scoring a kill, but the raw enumeration output stays out of every published report: a test
+or a nextest extension inherits this run's environment, and repeating that output verbatim would
+extend a run's secret-retention boundary into every uploaded artifact. That output is still raised
+once, locally, as a console diagnostic, so an operator debugging the mutant can see it without it
+ever leaving this run.
 
 Reports are projections, not independent calculations. The console, JSON, HTML, merged report, and
 score gate must agree because they consume the same outcomes and scoring rules.
@@ -639,6 +798,19 @@ performance only.
 Unknown configuration, unmatched selectors, and impossible test filters are errors. A campaign that
 quietly ignores user intent can produce a precise score for the wrong population.
 
+### Coverage that a host cannot provide is reported, not skipped
+
+Containment, metering, and terminal-signal handling are the guarantees this tool makes about
+somebody else's machine, and the tests behind them need capabilities no host is obliged to offer.
+Such a test is marked ignored, so that every runner names it as missing coverage, and fails outright
+when it is asked for by name on a host that cannot supply what it needs. A test that returns early
+and reports success hides the absence of the coverage, not just the absence of the capability.
+
+Tests that change process-wide state which cannot be restored — an interrupt registry that has been
+told a run is ending, a fixed set of watch slots — run in a process of their own. Left in the shared
+one, they decide what unrelated tests are able to do next, and which tests those are depends on the
+harness's scheduling rather than on anything the suite states.
+
 ## Costs and limitations
 
 The mutant-schema design makes large campaigns practical, but it is not free.
@@ -661,7 +833,11 @@ The mutant-schema design makes large campaigns practical, but it is not free.
   layout, and may expose stack or compiler limits in unusually deep code.
 - **Resource containment depends on the host.** Linux and Windows provide strong process-tree
   facilities; other environments may provide less, and requested guarantees are refused when they
-  cannot be honored.
+  cannot be honored. Where no sealed boundary exists, containment is announced as best effort at
+  the start of the run rather than silently degraded, and a descendant that deliberately leaves its
+  process group can still outlive the run. Linux additionally treats the memory interface as part
+  of the same capability, so a kernel too old to expose it falls back to best effort even though
+  its cgroup could have held the subtree.
 - **The workspace environment must be sound on platforms without an immutable startup image.**
   Linux reads the environment snapshot captured by `exec`; other Unix targets rely on constructor-
   time capture and therefore cannot support an earlier native initializer concurrently mutating

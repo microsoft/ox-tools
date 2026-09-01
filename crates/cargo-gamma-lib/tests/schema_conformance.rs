@@ -23,7 +23,7 @@ use cargo_gamma_lib::internals::elements::{
 use serde_json::Value;
 
 /// The schema document, vendored beside the viewer it describes.
-const SCHEMA: &str = include_str!("../src/vendor/mutation-testing-report-schema.json");
+const SCHEMA: &str = include_str!("../src/vendor/mutation-testing-report-schema.json.vendored");
 
 /// Parses the vendored schema.
 fn schema() -> Value {

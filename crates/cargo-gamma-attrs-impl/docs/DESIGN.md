@@ -14,6 +14,18 @@ attributes exported by `cargo-gamma-attrs`.
   logic outside rustc makes it directly testable and mutation-testable.
 - It accepts exactly one Rust expression where an attribute promises an
   expression and rejects unsupported keys or malformed selectors.
+- A stated value is rejected on any function the tool would never mutate: a
+  declaration with no body, a `const fn`, or a function whose body is empty.
+  Accepting one there would leave a hint that reads as working and generates
+  nothing.
+- Argument lists are split on their top-level commas and each argument is then
+  classified on its own, so an attribute accepts exactly the text the equivalent
+  `// gamma:` comment directive accepts. A positional timeout multiplier
+  therefore carries no positional meaning: it may sit before, between, or after
+  selectors, a `reason`, a `tag`, or a trailing comma. What it may not do is
+  appear twice — a second multiplier, in any spelling and in either order, is
+  refused rather than silently overriding the first, and the tool's directive
+  parser refuses the same text.
 - It returns the original item unchanged after validation.
 
 ## Stability

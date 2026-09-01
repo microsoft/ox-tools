@@ -205,8 +205,18 @@ clippy.should_panic_without_expect = "allow"
 clippy.significant_drop_tightening = "allow"
 # Blocked by Clippy bug: https://github.com/rust-lang/rust-clippy/issues/15036
 clippy.wildcard_imports = "allow"
-
 # <<< anvil-managed: anvil-workspace-lints
+
+# --- clippy: catalog entries this project adds outside the managed region ---
+# The dotted-key form above keeps `[workspace.lints]` open, so these extend the
+# same scope without editing the anvil-managed block and provoking its drift
+# detector. They complete the `M-STATIC-VERIFICATION` catalog, which names all
+# three: https://microsoft.github.io/rust-guidelines/guidelines/universal/#M-STATIC-VERIFICATION
+clippy.empty_structs_with_brackets = "warn"
+clippy.too_long_first_doc_paragraph = "warn"
+# The guideline's own opt-out: a structured-logging call site legitimately
+# passes a literal holding `{field}` placeholders for the logger to expand.
+clippy.literal_string_with_formatting_args = "allow"
 
 # A bit of debugging support for release builds.
 [profile.release]

@@ -31,6 +31,9 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::SystemServices::JOB_OBJECT_MSG_JOB_MEMORY_LIMIT;
 use windows_sys::Win32::System::Threading::{CREATE_SUSPENDED, OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
 
+#[cfg(test)]
+use crate::native_faults::{self, NativeCall};
+
 /// Prevents this process and the children that inherit its error mode from opening system dialogs.
 ///
 /// A command-line supervisor cannot answer modal UI. Native faults and loader failures must become
@@ -69,10 +72,7 @@ pub fn start_suspended(command: &mut Command) {
 /// with anything else, since its id cannot be reused while this run still holds it open.
 #[must_use]
 pub fn release(process: u32) -> bool {
-    // SAFETY: the arguments are a flag word and a process id, and no memory is touched. A
-    // thread snapshot covers every process, so the process id is ignored. Failure is
-    // reported as `INVALID_HANDLE_VALUE`, which is checked below.
-    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, process) };
+    let snapshot = thread_snapshot(process);
 
     if snapshot.is_null() || snapshot == INVALID_HANDLE_VALUE {
         return false;
@@ -86,6 +86,23 @@ pub fn release(process: u32) -> bool {
     main_thread(&snapshot, process).is_some_and(resume)
 }
 
+/// Takes the thread snapshot [`release`] scans, or the failure a test asked for.
+///
+/// Separated from its one caller so the error arm below it — the one that must not leave a handle
+/// behind and must not report the child as resumed — can be reached without a machine that has
+/// actually run out of handles.
+fn thread_snapshot(process: u32) -> HANDLE {
+    #[cfg(test)]
+    if native_faults::fired(NativeCall::Snapshot) {
+        return INVALID_HANDLE_VALUE;
+    }
+
+    // SAFETY: the arguments are a flag word and a process id, and no memory is touched. A
+    // thread snapshot covers every process, so the process id is ignored. Failure is
+    // reported as `INVALID_HANDLE_VALUE`, which the caller checks.
+    unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, process) }
+}
+
 /// The id of the one thread a suspended child has, if the snapshot still lists it.
 fn main_thread(snapshot: &OwnedHandle, process: u32) -> Option<u32> {
     let mut entry = THREADENTRY32 {
@@ -94,6 +111,11 @@ fn main_thread(snapshot: &OwnedHandle, process: u32) -> Option<u32> {
         dwSize: u32::try_from(size_of::<THREADENTRY32>()).unwrap_or(0),
         ..Default::default()
     };
+
+    #[cfg(test)]
+    if native_faults::fired(NativeCall::ThreadEnumeration) {
+        return None;
+    }
 
     // SAFETY: the handle is a live thread snapshot, and the entry is a live, fully initialised
     // `THREADENTRY32` whose `dwSize` is its own size, which is what the API requires of it.
@@ -114,9 +136,7 @@ fn main_thread(snapshot: &OwnedHandle, process: u32) -> Option<u32> {
 
 /// Resumes one thread, reporting whether it actually came out of suspension.
 fn resume(thread: u32) -> bool {
-    // SAFETY: the arguments are an access mask, an inheritance flag and a thread id, and no
-    // memory is touched. Failure is reported as a null handle.
-    let handle = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread) };
+    let handle = open_thread(thread);
 
     if handle.is_null() {
         return false;
@@ -126,11 +146,34 @@ fn resume(thread: u32) -> bool {
     // owns it, so this is what closes it exactly once when the function returns.
     let handle = unsafe { OwnedHandle::from_raw_handle(handle) };
 
+    previous_suspension_count(&handle) != u32::MAX
+}
+
+/// Opens the child's one thread for resumption, or reports the failure a test asked for.
+fn open_thread(thread: u32) -> HANDLE {
+    #[cfg(test)]
+    if native_faults::fired(NativeCall::OpenThread) {
+        return core::ptr::null_mut();
+    }
+
+    // SAFETY: the arguments are an access mask, an inheritance flag and a thread id, and no
+    // memory is touched. Failure is reported as a null handle, which the caller checks.
+    unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, thread) }
+}
+
+/// Brings one thread out of suspension, reporting `u32::MAX` when it stayed suspended.
+///
+/// The handle is still owned by the caller, so the failure a test injects here leaves it to be
+/// closed on the way out exactly as a real failure would.
+fn previous_suspension_count(handle: &OwnedHandle) -> u32 {
+    #[cfg(test)]
+    if native_faults::fired(NativeCall::ResumeThread) {
+        return u32::MAX;
+    }
+
     // SAFETY: the handle is a live thread opened for exactly this right. The count it returns
     // is the suspension count before the call, and `u32::MAX` is how failure is spelled.
-    let previous = unsafe { ResumeThread(handle.as_raw_handle()) };
-
-    previous != u32::MAX
+    unsafe { ResumeThread(handle.as_raw_handle()) }
 }
 
 /// A Windows job object holding one child and everything it goes on to spawn.
@@ -175,20 +218,14 @@ impl Job {
     /// exists to bound is exactly the one that allocates immediately.
     #[must_use]
     pub fn create(limit: Option<u64>) -> Option<Self> {
-        // SAFETY: both arguments are null, which the API documents as "unnamed job with
-        // default security". A failure is reported as a null handle rather than by any other
-        // means.
-        let handle = unsafe { CreateJobObjectW(core::ptr::null(), core::ptr::null()) };
+        let handle = create_job_object();
 
         if handle.is_null() {
             return None;
         }
 
         let completion = if limit.is_some() {
-            // SAFETY: `INVALID_HANDLE_VALUE` asks for a new completion port; the null existing-port
-            // handle, zero key and one concurrent thread are valid creation arguments. Failure is
-            // a null handle.
-            let completion = unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, core::ptr::null_mut(), 0, 1) };
+            let completion = create_completion_port();
 
             if completion.is_null() {
                 // SAFETY: `handle` was just created above and has no other owner.
@@ -215,18 +252,7 @@ impl Job {
                 CompletionPort: completion.as_raw_handle(),
             };
 
-            // SAFETY: `job.handle` is live, the information class matches `association`, and the
-            // structure and its size describe initialized memory for the duration of the call.
-            let associated = unsafe {
-                SetInformationJobObject(
-                    job.handle,
-                    JobObjectAssociateCompletionPortInformation,
-                    core::ptr::from_mut(&mut association).cast::<c_void>(),
-                    u32::try_from(size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>()).unwrap_or(0),
-                )
-            };
-
-            if associated == 0 {
+            if !associate_completion_port(job.handle, &mut association) {
                 return None;
             }
         }
@@ -258,18 +284,7 @@ impl Job {
             limits.JobMemoryLimit = bytes;
         }
 
-        // SAFETY: the handle is a live job, the class matches the structure being passed, and
-        // the length is that structure's own size.
-        let set = unsafe {
-            SetInformationJobObject(
-                handle,
-                JobObjectExtendedLimitInformation,
-                core::ptr::from_mut(&mut limits).cast::<c_void>(),
-                u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).unwrap_or(0),
-            )
-        };
-
-        if set == 0 {
+        if !configure_job(job.handle, &mut limits) {
             return None;
         }
 
@@ -284,6 +299,11 @@ impl Job {
     /// whole of its life rather than for all of it but the beginning.
     #[must_use]
     pub fn assign(&self, child: &Child) -> bool {
+        #[cfg(test)]
+        if native_faults::fired(NativeCall::AssignProcess) {
+            return false;
+        }
+
         // SAFETY: the handle is a live job and the second argument is the child's own process
         // handle, which `Child` keeps open for as long as it lives.
         let assigned = unsafe { AssignProcessToJobObject(self.handle, child.as_raw_handle().cast::<c_void>()) };
@@ -355,6 +375,11 @@ impl Job {
 
     /// Kills everything in the job.
     pub fn terminate(&self) {
+        #[cfg(test)]
+        if native_faults::fired(NativeCall::TerminateJob) {
+            return;
+        }
+
         // SAFETY: the handle is a live job. The exit code is arbitrary and is never read, since
         // a killed mutant's status is decided by the run rather than by the process.
         let _terminated = unsafe { TerminateJobObject(self.handle, 1) };
@@ -369,6 +394,77 @@ impl Drop for Job {
     }
 }
 
+/// Creates the job object itself, or reports the failure a test asked for.
+///
+/// Each native step of creation is a function of its own so that the arm taken when it fails can be
+/// executed deliberately. Those arms are where a handle is leaked or a caller is handed a job that
+/// was never configured, and on a healthy machine none of them ever runs.
+fn create_job_object() -> HANDLE {
+    #[cfg(test)]
+    if native_faults::fired(NativeCall::CreateJob) {
+        return core::ptr::null_mut();
+    }
+
+    // SAFETY: both arguments are null, which the API documents as "unnamed job with default
+    // security". A failure is reported as a null handle rather than by any other means.
+    unsafe { CreateJobObjectW(core::ptr::null(), core::ptr::null()) }
+}
+
+/// Creates the completion port a memory ceiling reports violations through.
+fn create_completion_port() -> HANDLE {
+    #[cfg(test)]
+    if native_faults::fired(NativeCall::CompletionPort) {
+        return core::ptr::null_mut();
+    }
+
+    // SAFETY: `INVALID_HANDLE_VALUE` asks for a new completion port; the null existing-port
+    // handle, zero key and one concurrent thread are valid creation arguments. Failure is a null
+    // handle, which the caller checks.
+    unsafe { CreateIoCompletionPort(INVALID_HANDLE_VALUE, core::ptr::null_mut(), 0, 1) }
+}
+
+/// Points the job's notifications at the completion port created for it.
+fn associate_completion_port(job: HANDLE, association: &mut JOBOBJECT_ASSOCIATE_COMPLETION_PORT) -> bool {
+    #[cfg(test)]
+    if native_faults::fired(NativeCall::AssociatePort) {
+        return false;
+    }
+
+    // SAFETY: `job` is live, the information class matches `association`, and the structure and
+    // its size describe initialized memory for the duration of the call.
+    let associated = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectAssociateCompletionPortInformation,
+            core::ptr::from_mut(association).cast::<c_void>(),
+            u32::try_from(size_of::<JOBOBJECT_ASSOCIATE_COMPLETION_PORT>()).unwrap_or(0),
+        )
+    };
+
+    associated != 0
+}
+
+/// Installs the job's policy flags and, when there is one, its memory ceiling.
+fn configure_job(job: HANDLE, limits: &mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION) -> bool {
+    #[cfg(test)]
+    if native_faults::fired(NativeCall::ConfigureJob) {
+        return false;
+    }
+
+    // SAFETY: the handle is a live job, the class matches the structure being passed, and the
+    // length is that structure's own size.
+    let set = unsafe {
+        SetInformationJobObject(
+            job,
+            JobObjectExtendedLimitInformation,
+            core::ptr::from_mut(limits).cast::<c_void>(),
+            u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>()).unwrap_or(0),
+        )
+    };
+
+    set != 0
+}
+
 /// Combines the independently queried peak and limit-violation evidence.
 ///
 /// The peak remains useful for sizing later limits, but it is never proof that one stopped this
@@ -377,9 +473,11 @@ const fn usage_from(limit: Option<u64>, peak: Option<u64>, memory_limit_hit: boo
     (peak, limit.is_some() && memory_limit_hit)
 }
 
-/// Whether a process is inside any job object at all, or `None` if the question could not be put.
+/// Whether a process is inside any job object at all.
 ///
-/// Exposed for containment diagnostics and tests; assignment itself is performed through [`Job`].
+/// `None` means the question could not be put to the operating system, which is not the same
+/// answer as no. Exposed for containment diagnostics and tests; assignment itself is performed
+/// through [`Job`].
 #[must_use]
 pub fn in_any_job(child: &Child) -> Option<bool> {
     use windows_sys::Win32::System::JobObjects::IsProcessInJob;
@@ -629,7 +727,11 @@ mod tests {
         let mut command = Command::new(executable);
 
         let _ = command
-            .args(["--exact", "tests::the_child_attempts_to_pass_its_job_memory_limit", "--nocapture"])
+            .args([
+                "--exact",
+                "job::tests::the_child_attempts_to_pass_its_job_memory_limit",
+                "--nocapture",
+            ])
             .env("CARGO_GAMMA_JOB_LIMIT_REGRESSION_CHILD", "1")
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -685,5 +787,246 @@ mod tests {
         job.terminate();
 
         assert!(ended_soon(&mut child), "the child outlived the termination of its job");
+    }
+
+    /// The number of kernel handles this process currently holds.
+    ///
+    /// A handle leaked in an error arm is invisible in that arm's own result — the call reports
+    /// failure either way — so it is measured instead, across enough repetitions that one leak per
+    /// repetition cannot be mistaken for ordinary drift.
+    fn handle_count() -> u32 {
+        use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessHandleCount};
+
+        let mut count = 0_u32;
+
+        // SAFETY: `GetCurrentProcess` returns a pseudo-handle that needs no closing.
+        let process = unsafe { GetCurrentProcess() };
+        // SAFETY: the pseudo-handle remains valid for the duration of the call, and the output
+        // argument addresses a live, initialized `u32` this call writes through.
+        let queried = unsafe { GetProcessHandleCount(process, &raw mut count) };
+
+        assert_ne!(queried, 0, "the process handle count could not be read");
+
+        count
+    }
+
+    /// Runs a process-global handle-count assertion without concurrent tests changing the count.
+    fn delegate_handle_count_test(test: &str) -> bool {
+        const CHILD: &str = "CARGO_GAMMA_HANDLE_COUNT_CHILD";
+
+        if std::env::var_os(CHILD).is_some() {
+            return false;
+        }
+
+        let output = Command::new(std::env::current_exe().expect("the test binary knows its own path"))
+            .args(["--exact", test, "--nocapture"])
+            .env(CHILD, "1")
+            .output()
+            .expect("the isolated handle-count test starts");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        assert!(
+            output.status.success(),
+            "the isolated handle-count test failed: {}\n{stdout}\n{stderr}",
+            output.status
+        );
+        assert!(stdout.contains(test), "the exact filter did not run `{test}`\n{stdout}\n{stderr}");
+
+        true
+    }
+
+    /// A job that cannot be created is refused, rather than reported as containment.
+    ///
+    /// The one answer that must never be given here is a `Job` that holds nothing: the caller uses
+    /// its existence as the proof that a subtree can be terminated, and `prepare` refuses a launch
+    /// on the strength of this `None`.
+    #[test]
+    fn a_job_that_cannot_be_created_is_refused() {
+        let _armed = native_faults::arm(NativeCall::CreateJob);
+
+        assert!(Job::create(None).is_none(), "a job that was never created was handed out");
+    }
+
+    /// Every later step of creation is equally fatal to the job, and none of them degrades it.
+    ///
+    /// A limited job whose completion port is missing or unassociated cannot report a violation,
+    /// and a job whose limits never went in has neither ceiling nor kill-on-close. Each of those
+    /// would be a boundary the caller believes in and does not have.
+    #[test]
+    fn a_job_that_cannot_be_completely_configured_is_refused() {
+        const LIMIT: u64 = 1024 * 1024 * 1024;
+
+        for (call, limit) in [
+            (NativeCall::CompletionPort, Some(LIMIT)),
+            (NativeCall::AssociatePort, Some(LIMIT)),
+            (NativeCall::ConfigureJob, Some(LIMIT)),
+            (NativeCall::ConfigureJob, None),
+        ] {
+            let _armed = native_faults::arm(call);
+
+            assert!(
+                Job::create(limit).is_none(),
+                "a job whose {call:?} failed was handed out as a containment boundary"
+            );
+        }
+    }
+
+    /// A refused creation closes everything it had already opened.
+    ///
+    /// The arms above run only on a machine that has run out of something, which is exactly when a
+    /// leaked handle compounds. Measured rather than reasoned about, because the ownership here is
+    /// split between a raw `HANDLE` closed by `Drop` and an `OwnedHandle` closed by scope.
+    #[test]
+    fn a_refused_job_creation_closes_what_it_opened() {
+        const REPEATS: u32 = 200;
+        const LIMIT: u64 = 1024 * 1024 * 1024;
+
+        if delegate_handle_count_test("job::tests::a_refused_job_creation_closes_what_it_opened") {
+            return;
+        }
+
+        // The first few failures can still grow process-wide caches that never shrink, which would
+        // otherwise be counted as a leak.
+        for _warmup in 0..8 {
+            let _armed = native_faults::arm(NativeCall::ConfigureJob);
+            let _refused = Job::create(Some(LIMIT));
+        }
+
+        let before = handle_count();
+
+        for _repeat in 0..REPEATS {
+            for call in [NativeCall::CompletionPort, NativeCall::AssociatePort, NativeCall::ConfigureJob] {
+                let _armed = native_faults::arm(call);
+
+                assert!(Job::create(Some(LIMIT)).is_none());
+            }
+        }
+
+        let after = handle_count();
+
+        assert!(
+            after <= before + 8,
+            "{REPEATS} refused job creations grew the handle count from {before} to {after}"
+        );
+    }
+
+    /// A job that will not take its child says so, so the caller can end the child instead.
+    #[test]
+    fn a_job_that_refuses_its_child_reports_it_rather_than_claiming_containment() {
+        let job = Job::create(None).expect("a job is created");
+        let mut command = sleeper();
+        let mut child = command.spawn().expect("the child starts");
+
+        let _armed = native_faults::arm(NativeCall::AssignProcess);
+
+        assert!(!job.assign(&child), "a refused assignment was reported as containment");
+
+        // What the caller does with that answer, and what this test must not leave behind: the
+        // child is still suspended and is in no job, so nothing but this ends it.
+        let _killed = child.kill();
+        let _reaped = child.wait().expect("the unassigned child is reaped");
+    }
+
+    /// Every way the resume can fail is reported, and leaves the child suspended rather than lost.
+    ///
+    /// A `true` here from a child that never came out of suspension is the worst answer available:
+    /// the run would wait out the whole timeout on a process that has executed nothing, once per
+    /// mutant. The child must also still be killable afterwards, which is what the caller does.
+    #[test]
+    fn a_resume_that_fails_is_reported_and_leaves_the_child_killable() {
+        for call in [
+            NativeCall::Snapshot,
+            NativeCall::ThreadEnumeration,
+            NativeCall::OpenThread,
+            NativeCall::ResumeThread,
+        ] {
+            let job = Job::create(None).expect("a job is created");
+            let mut command = sleeper();
+            let mut child = command.spawn().expect("the child starts");
+
+            assert!(job.assign(&child), "the job refused the child");
+
+            let _armed = native_faults::arm(call);
+
+            assert!(!release(child.id()), "a failed {call:?} was reported as a successful resume");
+            assert!(
+                child.try_wait().expect("the child's status can be read").is_none(),
+                "a failed {call:?} did not leave the child suspended, so nothing was tested"
+            );
+
+            job.terminate();
+
+            assert!(ended_soon(&mut child), "a child abandoned after {call:?} outlived its job");
+
+            let _reaped = child.wait().expect("the abandoned child is reaped");
+        }
+    }
+
+    /// A failed resume closes the snapshot and thread handles it opened on the way to failing.
+    #[test]
+    fn a_failed_resume_closes_what_it_opened() {
+        const REPEATS: u32 = 200;
+
+        if delegate_handle_count_test("job::tests::a_failed_resume_closes_what_it_opened") {
+            return;
+        }
+
+        let mut command = sleeper();
+        let mut child = command.spawn().expect("the child starts");
+        let process = child.id();
+
+        for _warmup in 0..8 {
+            let _armed = native_faults::arm(NativeCall::ResumeThread);
+            let _refused = release(process);
+        }
+
+        let before = handle_count();
+
+        for _repeat in 0..REPEATS {
+            for call in [NativeCall::ThreadEnumeration, NativeCall::OpenThread, NativeCall::ResumeThread] {
+                let _armed = native_faults::arm(call);
+
+                assert!(!release(process), "a failed {call:?} was reported as a successful resume");
+            }
+        }
+
+        let after = handle_count();
+
+        assert!(
+            after <= before + 8,
+            "{REPEATS} failed resumes grew the handle count from {before} to {after}"
+        );
+
+        let _killed = child.kill();
+        let _reaped = child.wait().expect("the suspended child is reaped");
+    }
+
+    /// A termination that did not happen is not mistaken for one that did.
+    ///
+    /// `terminate` returns nothing, so the only way to see that it worked is the subtree. This
+    /// asserts the injected failure really does keep the child alive — otherwise the test above it
+    /// proves nothing — and that a real termination afterwards still reaches it.
+    #[test]
+    fn a_termination_that_fails_leaves_the_subtree_reachable() {
+        let job = Job::create(None).expect("a job is created");
+        let mut command = sleeper();
+        let mut child = running_in(&job, &mut command);
+
+        let _armed = native_faults::arm(NativeCall::TerminateJob);
+
+        job.terminate();
+
+        assert!(
+            child.try_wait().expect("the child's status can be read").is_none(),
+            "the injected failure did not prevent the termination, so nothing was tested"
+        );
+
+        job.terminate();
+
+        assert!(
+            ended_soon(&mut child),
+            "the child outlived a real termination that followed a failed one"
+        );
     }
 }

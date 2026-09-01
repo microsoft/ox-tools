@@ -12,20 +12,6 @@ use syn::{
 use super::super::defaults::DefaultPaths;
 use super::values::{Kind, resolve_type, strip};
 
-/// Returns a printable name for a type, used to build the enclosing item path for `impl` blocks.
-pub(super) fn type_name(ty: &Type) -> String {
-    match ty {
-        Type::Path(path) => path
-            .path
-            .segments
-            .last()
-            .map_or_else(|| "_".to_owned(), |segment| segment.ident.to_string()),
-
-        Type::Reference(reference) => type_name(&reference.elem),
-        _ => "_".to_owned(),
-    }
-}
-
 /// Returns whether borrowing an expression relies on it being promoted to static storage.
 ///
 /// Promotion is a property of const-evaluability, which cannot be decided from syntax alone. What

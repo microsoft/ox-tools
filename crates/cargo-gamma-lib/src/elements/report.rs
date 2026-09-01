@@ -59,7 +59,12 @@ pub struct Report {
     pub framework: Framework,
 
     /// One entry per mutated file, keyed by workspace-relative path.
-    pub files: HashMap<String, FileResult>,
+    ///
+    /// Ordered rather than hashed because this is the one map whose iteration order is observable:
+    /// the document is written straight from these types, so what the map yields is what the file
+    /// contains. Sorting at the write would answer the same question once per publication and leave
+    /// every other traversal — merging and digesting — free to differ between runs for no reason.
+    pub files: BTreeMap<String, FileResult>,
 
     /// Free-form run metadata.
     ///
@@ -438,8 +443,14 @@ fn reason_for(mutant: &Mutant) -> Option<String> {
 ///
 /// Every mutated file's full source is embedded, because a report that needs the repository beside
 /// it to be readable cannot be attached to a CI run or mailed to someone.
+///
+/// # Errors
+///
+/// Returns an error if a mutated file's source cannot be read back from disk, which is what
+/// embedding it requires. The read happens after the run rather than during it, so a file the
+/// repository deleted or made unreadable in the meantime fails here.
 pub fn build(plan: &Plan, thresholds: Thresholds, run: Option<RunInfo>) -> Result<Report> {
-    let mut files: HashMap<String, FileResult> = HashMap::default();
+    let mut files: BTreeMap<String, FileResult> = BTreeMap::new();
 
     // Grouped once rather than rescanned per file: a workspace with many files has many mutants
     // too, so the pairing is quadratic in exactly the case it needs not to be.
@@ -894,7 +905,7 @@ fn render_with_first_line_offset(mutant: &Mutant, source: &SourceFile, first_lin
     let (end_line, end_column) = source.location(mutant.span.end);
 
     MutantResult {
-        id: mutant.id.clone(),
+        id: CompactString::new(&mutant.id),
         mutator_name: CompactString::new(&mutant.mutator),
         location: Location {
             start: Position {
@@ -916,26 +927,99 @@ fn render_with_first_line_offset(mutant: &Mutant, source: &SourceFile, first_lin
 }
 
 /// Serializes the report as pretty-printed JSON.
+///
+/// # Errors
+///
+/// Returns an error if the report does not satisfy the schema, or if it cannot be serialized.
 pub fn to_json(report: &Report) -> Result<String> {
-    let document = serde_json::to_value(report).map_err(|cause| error!("could not serialize the report").caused_by(cause))?;
+    validate_report(report).map_err(|cause| error!("could not serialize the report: {cause}"))?;
 
-    validate_schema(&document).map_err(|cause| error!("could not serialize the report: {cause}"))?;
-
-    serde_json::to_string_pretty(&document).map_err(|cause| error!("could not serialize the report").caused_by(cause))
+    serde_json::to_string_pretty(report).map_err(|cause| error!("could not serialize the report").caused_by(cause))
 }
 
 /// Writes the report to `path` as pretty-printed JSON.
 ///
-/// Streams through a validated `serde_json::Value` for deterministic key ordering, then
-/// directly to the writer without building a full `String` in memory.
+/// Serialized straight from the typed report rather than through a `serde_json::Value`. The tree
+/// was a second complete copy of a document that embeds every mutated file's whole source, built
+/// only so that it could be validated and then thrown away; validating the types themselves asks
+/// the same questions of the same data without the copy. Key order is the declaration order of the
+/// types rather than the alphabetical order a `Value` imposed, which is just as deterministic —
+/// the field order of a `struct` does not vary between runs — and the one map whose order is
+/// observable is ordered for exactly this reason.
+///
+/// # Errors
+///
+/// Returns an error if the report does not satisfy the schema, or if it cannot be serialized or
+/// written to `path`.
 pub fn write_json(report: &Report, path: &Utf8Path) -> Result<()> {
-    let document = serde_json::to_value(report).map_err(|cause| error!("could not serialize the report").caused_by(cause))?;
+    validate_report(report).map_err(|cause| error!("could not serialize the report: {cause}"))?;
 
-    validate_schema(&document).map_err(|cause| error!("could not serialize the report: {cause}"))?;
+    crate::elements::write_streamed(path, |writer| serde_json::to_writer_pretty(writer, report).map_err(io::Error::from))
+}
 
-    crate::elements::write_streamed(path, |writer| {
-        serde_json::to_writer_pretty(writer, &document).map_err(io::Error::from)
-    })
+/// Validates a report this crate built, against the same rules as the untyped document check.
+///
+/// The typed form makes most of that check unnecessary: a field that the schema says must be a
+/// string is a `String`, one that must be a number is an `f64`, and one that is required is not an
+/// `Option`. What is left is everything the type system cannot state — the version pattern, the
+/// bounded thresholds, positions that must be at least one, the closed status vocabulary, and the
+/// uniqueness of mutants within a file — and those are checked here.
+///
+/// [`validate_schema`] stays, and is not implemented in terms of this: it is asked about documents
+/// this crate did not write, where the types have not yet been established and the answer must not
+/// depend on `serde` having accepted them.
+fn validate_report(report: &Report) -> SchemaResult<()> {
+    if !supported_schema_version(&report.schema_version) {
+        return Err(format!(
+            "schema version `{}` at report.schemaVersion must match the supported pattern",
+            report.schema_version
+        ));
+    }
+
+    for (name, threshold) in [("high", report.thresholds.high), ("low", report.thresholds.low)] {
+        if threshold > 100 {
+            return Err(format!("report.thresholds.{name} must be at most 100"));
+        }
+    }
+
+    for (name, file) in &report.files {
+        validate_file_result(file, &format!("report.files[{name:?}]"))?;
+    }
+
+    Ok(())
+}
+
+/// Validates one file's mutants, and that no two of them are the same mutant.
+fn validate_file_result(file: &FileResult, path: &str) -> SchemaResult<()> {
+    let mut unique = HashSet::default();
+
+    for (index, mutant) in file.mutants.iter().enumerate() {
+        let path = format!("{path}.mutants[{index}]");
+
+        if !unique.insert(mutant.id.as_str()) {
+            return Err(format!("{path} duplicates another mutant"));
+        }
+
+        if !matches!(
+            mutant.status.as_str(),
+            "Killed" | "Survived" | "NoCoverage" | "CompileError" | "RuntimeError" | "Timeout" | "Ignored" | "Pending"
+        ) {
+            return Err(format!(
+                "{path} mutant `{}` has unknown schema status `{}`",
+                mutant.id, mutant.status
+            ));
+        }
+
+        for (corner, position) in [("start", &mutant.location.start), ("end", &mutant.location.end)] {
+            for (axis, value) in [("line", position.line), ("column", position.column)] {
+                if value == 0 {
+                    return Err(format!("{path}.location.{corner}.{axis} must be at least 1"));
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1027,7 +1111,7 @@ mod tests {
     #[test]
     fn a_span_becomes_a_one_based_half_open_location() {
         let source = SourceFile::parse("src/lib.rs", "fn f() {\n    a < b\n}\n".to_owned()).expect("parses");
-        let start = source.text.find("a <").expect("present");
+        let start = source.text().find("a <").expect("present");
         let rendered = render(&mutant(Outcome::Survived, start..start + 5), &source);
 
         assert_eq!(rendered.location.start.line, 2);
@@ -1055,6 +1139,26 @@ mod tests {
         assert_eq!(json["mutatorName"], "relational.lt_to_le");
         assert_eq!(json["status"], "Survived");
         assert_eq!(json["replacement"], "(a) <= (b)");
+    }
+
+    #[test]
+    fn typed_reports_reject_two_results_for_one_mutant_id() {
+        let source = SourceFile::parse("src/lib.rs", "fn f() { a < b; }".to_owned()).expect("parses");
+        let first = render(&mutant(Outcome::Survived, 9..14), &source);
+        let mut second = first.clone();
+
+        second.status_reason = Some("a different observation".to_owned());
+
+        let file = FileResult {
+            source: source.text().to_owned(),
+            language: "rust".to_owned(),
+            mutants: vec![first, second],
+        };
+
+        assert_eq!(
+            validate_file_result(&file, "report.files[\"src/lib.rs\"]").unwrap_err(),
+            "report.files[\"src/lib.rs\"].mutants[1] duplicates another mutant"
+        );
     }
 
     #[test]
@@ -1629,7 +1733,7 @@ mod tests {
                 name: "cargo-gamma".to_owned(),
                 version: "0.1.0".to_owned(),
             },
-            files: HashMap::default(),
+            files: BTreeMap::new(),
             config: None,
         };
         let json = to_json(&report).expect("serializes");

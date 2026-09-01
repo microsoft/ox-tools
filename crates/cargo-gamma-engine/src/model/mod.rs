@@ -9,7 +9,11 @@ mod mutant_definition;
 mod mutation_site;
 
 pub(crate) use identity::mutant_id_with_discriminator;
-pub use identity::{MUTANT_ID_HEX_LEN, MUTANT_ID_VERSION, MutantId, mutant_id, normalize_site_text, site_key};
+#[doc(inline)]
+pub use identity::{MUTANT_ID_HEX_LEN, MUTANT_ID_VERSION, MutantId, SiteIndex, mutant_id, normalize_site_text, site_key};
+#[doc(inline)]
 pub use interner::Interner;
+#[doc(inline)]
 pub use mutant_definition::MutantDefinition;
+#[doc(inline)]
 pub use mutation_site::MutationSite;

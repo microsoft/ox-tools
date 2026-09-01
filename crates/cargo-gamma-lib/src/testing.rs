@@ -38,23 +38,25 @@ use crate::commands::Host;
 use crate::exec::Workspace;
 
 type PauseChannels = (mpsc::SyncSender<()>, mpsc::Receiver<()>);
+type Pauses = OnceLock<Mutex<crate::HashMap<Utf8PathBuf, PauseChannels>>>;
 
-static WORKSPACE_PREPARATION_PAUSES: OnceLock<Mutex<crate::HashMap<Utf8PathBuf, PauseChannels>>> = OnceLock::new();
+static CACHE_ADOPTION_PAUSES: Pauses = OnceLock::new();
+static WORKSPACE_PREPARATION_PAUSES: Pauses = OnceLock::new();
 
-/// A deterministic pause after workspace preparation receives a command's cache locks.
+/// A deterministic pause at a registered command boundary.
 #[derive(Debug)]
-pub struct WorkspacePreparationPause {
+pub struct CommandPause {
     reached: mpsc::Receiver<()>,
     release: Option<mpsc::SyncSender<()>>,
     waiting: bool,
 }
 
-impl WorkspacePreparationPause {
-    /// Waits until workspace preparation receives the cache locks.
+impl CommandPause {
+    /// Waits until the command reaches the registered boundary.
     pub fn wait(&mut self) {
         self.reached
             .recv_timeout(Duration::from_mins(2))
-            .expect("the registered command should reach workspace preparation before the test budget expires");
+            .expect("the command should reach its registered pause before the test budget expires");
         self.waiting = true;
     }
 
@@ -75,38 +77,47 @@ impl WorkspacePreparationPause {
     }
 }
 
-impl Drop for WorkspacePreparationPause {
+impl Drop for CommandPause {
     fn drop(&mut self) {
         self.release_waiter();
     }
 }
 
-/// Registers a workspace-preparation pause for one workspace root.
-pub fn hold_during_workspace_preparation(root: Utf8PathBuf) -> WorkspacePreparationPause {
+fn hold_at(pauses: &'static Pauses, root: Utf8PathBuf) -> CommandPause {
     let (reached_sender, reached) = mpsc::sync_channel(0);
     let (release, release_receiver) = mpsc::sync_channel(0);
-    let pauses = WORKSPACE_PREPARATION_PAUSES.get_or_init(|| Mutex::new(crate::HashMap::default()));
     let prior = pauses
+        .get_or_init(|| Mutex::new(crate::HashMap::default()))
         .lock()
-        .expect("a prior workspace-preparation test panicked while registering its pause")
+        .expect("a prior command-pause test panicked while registering its pause")
         .insert(root, (reached_sender, release_receiver));
 
-    assert!(prior.is_none(), "only one workspace-preparation pause may target a workspace");
+    assert!(prior.is_none(), "only one command pause may target a workspace boundary");
 
-    WorkspacePreparationPause {
+    CommandPause {
         reached,
         release: Some(release),
         waiting: false,
     }
 }
 
-pub(crate) fn pause_during_workspace_preparation(root: &Utf8Path) {
-    let Some(pauses) = WORKSPACE_PREPARATION_PAUSES.get() else {
+/// Registers a pause after cache adoption and before execution starts.
+pub fn hold_after_cache_adoption(root: Utf8PathBuf) -> CommandPause {
+    hold_at(&CACHE_ADOPTION_PAUSES, root)
+}
+
+/// Registers a workspace-preparation pause for one workspace root.
+pub fn hold_during_workspace_preparation(root: Utf8PathBuf) -> CommandPause {
+    hold_at(&WORKSPACE_PREPARATION_PAUSES, root)
+}
+
+fn pause_at(pauses: &Pauses, root: &Utf8Path) {
+    let Some(pauses) = pauses.get() else {
         return;
     };
     let pause = pauses
         .lock()
-        .expect("a prior workspace-preparation test panicked while taking its pause")
+        .expect("a prior command-pause test panicked while taking its pause")
         .remove(root);
 
     if let Some((reached, release)) = pause
@@ -114,6 +125,14 @@ pub(crate) fn pause_during_workspace_preparation(root: &Utf8Path) {
     {
         let _released = release.recv();
     }
+}
+
+pub(crate) fn pause_after_cache_adoption(root: &Utf8Path) {
+    pause_at(&CACHE_ADOPTION_PAUSES, root);
+}
+
+pub(crate) fn pause_during_workspace_preparation(root: &Utf8Path) {
+    pause_at(&WORKSPACE_PREPARATION_PAUSES, root);
 }
 
 /// A [`Host`] that captures both streams in memory.
@@ -632,7 +651,7 @@ static STOOD_DOWN: AtomicUsize = AtomicUsize::new(0);
 pub fn without_memory_support(what: &str) -> bool {
     match crate::exec::memory_support() {
         Ok(()) => false,
-        Err(reason) => standing_down(what, &reason),
+        Err(reason) => standing_down(what, &reason.to_string()),
     }
 }
 
@@ -1001,6 +1020,7 @@ pub mod ci_fixture {
             column: 5,
             mutator: (mutator.to_owned()).into(),
             item_path: ("subject::f".to_owned()).into(),
+            trait_impl: None,
             occurrence: 0,
             replacement_index: 0,
             original: "a > b".into(),
@@ -1044,6 +1064,7 @@ pub mod advise_fixture {
             column: 1,
             span: 0..1,
             item_path: ("f".to_owned()).into(),
+            trait_impl: None,
             occurrence: 0,
             replacement_index: 0,
             original: "a".into(),
@@ -1109,6 +1130,7 @@ pub mod discover_fixture {
             column: 1,
             mutator: ("relational.gt_to_ge".to_owned()).into(),
             item_path: ("f".to_owned()).into(),
+            trait_impl: None,
             occurrence: 0,
             replacement_index: 0,
             original: "a > b".into(),

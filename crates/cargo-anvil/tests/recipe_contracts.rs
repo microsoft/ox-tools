@@ -837,8 +837,6 @@ fn repository_constants_match_shared_anvil_versions() {
         // The legacy workflow's broad nightly follows rust-toolchain.toml,
         // while Anvil's general-purpose nightly has its own compatibility cadence.
         "rust_nightly",
-        // These bootstrap/repository-only tools are not managed by Anvil.
-        "cargo_workspaces_version",
         "just_version",
         "sccache_version",
     ];

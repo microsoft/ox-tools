@@ -68,6 +68,9 @@ impl Interner {
             mutation.file = self.path(&mutation.file);
             mutation.mutator = self.text(&mutation.mutator);
             mutation.item_path = self.text(&mutation.item_path);
+            if let Some(trait_impl) = mutation.trait_impl.as_deref() {
+                mutation.trait_impl = Some(self.text(trait_impl));
+            }
         }
     }
 }
@@ -113,6 +116,7 @@ mod tests {
             }),
             mutator: Arc::from("lit.true_to_false"),
             item_path: Arc::from("subject::f"),
+            trait_impl: None,
             occurrence: 0,
             replacement_index: 0,
             replacement: "false".to_owned().into(),

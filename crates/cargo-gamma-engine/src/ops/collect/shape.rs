@@ -3,10 +3,11 @@
 
 use serde::{Deserialize, Serialize};
 
-/// What kind of construct a mutation site is, which decides how a guard can be wrapped around it.
+/// What kind of construct a mutation site is.
 ///
-/// The three cases are not stylistic. Rust will not accept the same guard text in all three
-/// positions, so the shape has to travel with the mutant all the way to instrumentation.
+/// This decides how a guard can be wrapped around it: the three cases are not stylistic. Rust will
+/// not accept the same guard text in all three positions, so the shape has to travel with the
+/// mutant all the way to instrumentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Shape {
     /// An expression. Guarded by a parenthesized `if`/`else` yielding one of two values.

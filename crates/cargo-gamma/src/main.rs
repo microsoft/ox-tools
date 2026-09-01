@@ -788,6 +788,7 @@
 //! | --- | --- | --- | --- |
 //! | `#[gamma::skip]` | item, block, statement, expression | beside code | one specific site is equivalent or untested |
 //! | `// #[gamma::skip]` | the same syntax in a comment | beside code | site cannot carry an attribute or in clean source |
+//! | `exclude-trait-impls` | implementations of named traits | `gamma.toml` | one cross-cutting project policy covers every matching implementation |
 //! | `--mutators !fam` | the whole run | CLI or config | whole mutation class does not apply |
 //! | `--exclude-file` | all mutants in matching files | CLI or config | generated, vendored, or unowned files |
 //! | `--exclude-test` | tests that run, not mutants | CLI or config | slow or flaky test should not judge mutants |
@@ -795,6 +796,10 @@
 //! The first two are almost always the right answer. A directive next to the code says *this* mutant is
 //! equivalent and says why; a config-level exclusion says nothing about any individual site and quietly
 //! grows to cover code written years later that nobody ever considered.
+//! A trait exclusion list is the exception for a deliberate cross-cutting policy. It lists lexical
+//! terminal trait names, so `exclude-trait-impls = ["Debug", "Display"]` covers qualified and
+//! unqualified implementations of either trait without matching report prose. Put the reason in a
+//! comment beside the list, as with `exclude-files`.
 //!
 //! `--exclude-test` is the odd one out: it does not suppress a mutant at all, it narrows the test suite
 //! each mutant is run against. Excluding a test makes mutants *harder* to kill, not easier.
@@ -1001,9 +1006,9 @@
 //!
 //! ## Configuration
 //!
-//! Everything expressible on the command line is expressible in `gamma.toml`, so a project that
-//! has settled on a set of options does not have to repeat it in every CI job and every developer's
-//! shell history:
+//! Command-line campaign settings can be persisted in `gamma.toml`, so a project that has settled
+//! on a set of options does not have to repeat it in every CI job and every developer's shell
+//! history. The file also holds project policy such as trait implementation exclusions:
 //!
 //! ```toml
 //! mutators      = ["@arithmetic", "@relational", "stmt"]
@@ -1012,11 +1017,11 @@
 //! min-score     = 70.0
 //! artifact-dir  = "target/cargo-gamma"
 //!
+//! # Debug output is diagnostic text without a stable formatting contract.
+//! exclude-trait-impls = ["Debug", "Display"]
+//!
 //! [shard]
 //! count = 30
-//!
-//! [reporters]
-//! html-external = false
 //! ```
 //!
 //! **[docs/CONFIG.md](docs/CONFIG.md) documents every key.** [docs/gamma.toml](docs/gamma.toml) is a
@@ -1091,8 +1096,9 @@
 //! no translation step is needed.
 //!
 //! The HTML is a single self-contained file: the viewer and the results are both embedded, so it opens
-//! from a CI artifact, a file share, or a machine with no network at all. Pass `--html-external` to load
-//! the viewer from a CDN instead, which produces a much smaller file that needs network access to read.
+//! from a CI artifact, a file share, or a machine with no network at all. There is no mode that loads
+//! the viewer from elsewhere — a report carries the source of the code it describes, and a page that
+//! fetched its viewer would hand all of it to whatever that script turned out to be.
 //!
 //! ## Improving mutation performance
 //!

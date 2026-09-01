@@ -113,7 +113,9 @@ impl<'args> HarnessFilters<'args> {
     /// carried rather than an allowlist that would silently drop the next such option. The one
     /// exception is `--format`, which would fight with the one the listing asks for.
     pub(super) fn selecting(&self) -> Vec<&'args str> {
-        let mut args: Vec<&str> = Vec::new();
+        // Each stored argument is pushed at most once, and the tail appends every filter, so this
+        // sum is an upper bound available up front.
+        let mut args: Vec<&str> = Vec::with_capacity(self.flags.len() + self.filters.len());
         let mut index = 0;
 
         while let Some(flag) = self.flags.get(index) {

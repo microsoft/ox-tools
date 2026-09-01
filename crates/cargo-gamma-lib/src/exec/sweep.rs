@@ -5,7 +5,7 @@
 
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
-use std::sync::{Arc, Condvar, Mutex, OnceLock, mpsc};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError, mpsc};
 use std::thread;
 use std::time::Instant;
 
@@ -19,7 +19,7 @@ use super::stall::Stall;
 use super::test_binary::{Reachability, TestBinary};
 #[cfg(test)]
 use super::test_binary::{TestScope, order_reachable, reaches};
-use super::verdict::{Attempt, Only, Verdict, run_binary};
+use super::verdict::{Attempt, Only, Verdict, run_binary, tail};
 use super::workspace::Workspace;
 use crate::Result;
 use crate::discover::{Killer, Plan};
@@ -101,17 +101,30 @@ fn flaky_note(binary: &Utf8Path, test: Option<&str>) -> String {
 }
 
 /// Describes a mutant that prevents nextest from creating the selected test list.
+///
+/// The score-bearing note this returns deliberately never carries nextest's raw output. That
+/// output comes from a test process — and anything the test or a nextest extension inherited into
+/// its environment — running while a mutant is active, and this note is serialized verbatim into
+/// durable JSON, HTML, and SARIF reports. An accidental diagnostic in that output would otherwise
+/// extend a secret's retention from one process's stdout into every published artifact of the run.
+/// The raw text is still worth an operator's attention locally, so it is raised as a transient
+/// diagnostic through [`crate::notes`] — which the tool prints and a captured test can observe, but
+/// which is never written into a report — rather than being silently dropped.
 fn enumeration_note(binary: &Utf8Path, output: &str) -> String {
-    let mut note = format!(
-        "`cargo nextest` could not enumerate tests in `{binary}` with this mutant active; the same selection succeeded with no mutant active"
-    );
+    if !output.trim().is_empty() {
+        let binary = crate::report::encode_controls(binary.as_str());
+        let tail = tail(output, 20);
+        let output = crate::report::encode_preserving_color(&tail);
 
-    if !output.is_empty() {
-        note.push_str(":\n");
-        note.push_str(output);
+        crate::notes::note(format!(
+            "`cargo nextest` could not enumerate tests in `{binary}` with a mutant active; its \
+             output, kept out of every published report, was:\n{output}"
+        ));
     }
 
-    note
+    format!(
+        "`cargo nextest` could not enumerate tests in `{binary}` with this mutant active; the same selection succeeded with no mutant active"
+    )
 }
 
 /// One mutant's result: its index in the plan, what happened, how long it took and any detail.
@@ -714,6 +727,10 @@ fn judge_ordered(
 /// than immediately proceeding without the hint. This avoids redundantly launching the expensive
 /// cold path for siblings when a killer is about to be published. The bounded wait ensures
 /// workers are never idled indefinitely if no common killer exists.
+///
+/// Both publishing sites go through [`FileLearning::publish`], which never forgets a killer: the
+/// lock is not held across the test run, so a worker that started earlier and finished later can
+/// arrive here with nothing to report long after a sibling has already found the file's killer.
 #[expect(clippy::too_many_arguments, reason = "adds one file-local state cell to the verdict path")]
 fn judge_learning(
     work: &Workspace,
@@ -728,18 +745,13 @@ fn judge_learning(
     if hint.is_some() {
         let judged = judge_ordered(work, ordinal, reachable, hint, None, timeout_multiplier, sweep, tally);
 
-        if let Judgement::Reached(_outcome, Some(killer), _note) = &judged {
-            let mut state = observed.state.lock().expect("a file-local killer lock was poisoned");
-            *state = Learning::Learned(killer.clone());
-            drop(state);
-            observed.notify.notify_all();
-        }
+        observed.publish(&judged);
 
         return judged;
     }
 
     let state = {
-        let mut learned = observed.state.lock().expect("a file-local killer lock was poisoned");
+        let mut learned = observed.locked();
 
         match &*learned {
             Learning::Learned(killer) => Some(Ok(killer.clone())),
@@ -749,15 +761,17 @@ fn judge_learning(
             }
             Learning::InProgress => {
                 // Wait for the learner to finish, bounded so workers are never stuck.
-                let result = observed
+                let (guard, _timed_out) = observed
                     .notify
-                    .wait_timeout_while(learned, LEARNING_WAIT, |s| matches!(s, Learning::InProgress))
-                    .expect("a file-local killer lock was poisoned");
-                learned = result.0;
+                    .wait_timeout_while(learned, LEARNING_WAIT, |state| matches!(state, Learning::InProgress))
+                    .unwrap_or_else(PoisonError::into_inner);
+
+                learned = guard;
+
                 match &*learned {
                     Learning::Learned(killer) => Some(Ok(killer.clone())),
                     // Timed out or exhausted: proceed without hint.
-                    _ => Some(Err(())),
+                    _unlearned => Some(Err(())),
                 }
             }
             Learning::Exhausted => Some(Err(())),
@@ -773,15 +787,7 @@ fn judge_learning(
 
     let judged = judge_ordered(work, ordinal, reachable, None, None, timeout_multiplier, sweep, tally);
 
-    {
-        let mut state = observed.state.lock().expect("a file-local killer lock was poisoned");
-        *state = if let Judgement::Reached(_outcome, Some(killer), _note) = &judged {
-            Learning::Learned(killer.clone())
-        } else {
-            Learning::Exhausted
-        };
-        observed.notify.notify_all();
-    }
+    observed.publish(&judged);
 
     judged
 }
@@ -804,6 +810,54 @@ impl FileLearning {
             state: Mutex::new(Learning::Untried),
             notify: Condvar::new(),
         }
+    }
+
+    /// Takes the state, recovering from poisoning rather than refusing to go on.
+    ///
+    /// This lock guards a scheduling hint and nothing else. Every critical section under it is a
+    /// read or a whole-value assignment, so a panic in one leaves a `Learning` that is still one of
+    /// its four legal values, and the worst a stale one can cost is a cold test order for the rest
+    /// of one file. Propagating the poison instead would turn an optimization into a way for one
+    /// worker's panic to fail every remaining mutant in that file — and the panic that poisoned the
+    /// lock is already on its way to the caller on its own thread.
+    fn locked(&self) -> MutexGuard<'_, Learning> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Records what one judgement taught about this file, then releases anyone waiting on it.
+    ///
+    /// Both publishing branches run with the lock *released* over the test run that produced the
+    /// judgement, so two workers can reach here having judged different mutants of the same file.
+    /// A killer is therefore only ever added, never replaced or cleared: a worker that finished a
+    /// slower mutant without one would otherwise overwrite a killer a faster worker had just found,
+    /// and every remaining mutant in that file would go down the cold full-order path for no reason.
+    /// Verdicts do not depend on this either way — a kill is always established by a test that
+    /// actually failed — so the only thing at stake is how much work the rest of the file costs.
+    ///
+    /// Waiters are notified whatever the transition, including the ones this refuses to make: a
+    /// worker parked on `InProgress` is waiting to be told that the learner is done, and the answer
+    /// "someone else already learned a killer" ends its wait just as well as a new one would.
+    fn publish(&self, judged: &Judgement) {
+        let found = match judged {
+            Judgement::Reached(_outcome, Some(killer), _note) => Some(killer),
+            _nothing_learned => None,
+        };
+
+        {
+            let mut state = self.locked();
+
+            match (&*state, found) {
+                // The first killer observed for a file wins. A later one is just as valid a hint,
+                // so replacing it would buy nothing and would churn the value siblings are already
+                // running against.
+                (Learning::Learned(_known), _any) => {}
+                (_unknown, Some(killer)) => *state = Learning::Learned(killer.clone()),
+                (Learning::Untried | Learning::InProgress, None) => *state = Learning::Exhausted,
+                (Learning::Exhausted, None) => {}
+            }
+        }
+
+        self.notify.notify_all();
     }
 }
 
@@ -916,6 +970,7 @@ mod tests {
             column: 1,
             mutator: ("relational.gt_to_ge".to_owned()).into(),
             item_path: ("subject::f".to_owned()).into(),
+            trait_impl: None,
             occurrence: 0,
             replacement_index: 0,
             original: "a > b".to_owned().into(),
@@ -1464,6 +1519,59 @@ mod tests {
         assert!(note.contains("300.0 MB"), "{note}");
         assert!(note.contains("256.0 MB"), "{note}");
         assert!(note.contains("past the"), "{note}");
+    }
+
+    /// A sentinel a test or nextest extension printed while enumeration failed must never reach
+    /// the score-bearing note this feeds into `report.rs`'s serialized reason — that note is
+    /// published verbatim into JSON, HTML, and SARIF artifacts, so anything it carries has left
+    /// this run for good. It is still worth an operator's attention locally, so the same call
+    /// raises it through `crate::notes` instead of discarding it outright.
+    #[test]
+    fn enumeration_notes_never_carry_the_raw_output_that_produced_them() {
+        crate::notes::alone(|| {
+            const SENTINEL: &str = "super-secret-token-3f9a1c";
+            let output = format!("error: could not list tests\n{SENTINEL}\n");
+
+            let note = enumeration_note(Utf8Path::new("/workspace/target/debug/deps/unit-abc"), &output);
+
+            assert!(!note.contains(SENTINEL), "the sentinel leaked into the durable note: {note}");
+            assert!(note.contains("unit-abc"), "{note}");
+
+            let raised = crate::notes::drain();
+
+            assert!(
+                raised.iter().any(|line| line.contains(SENTINEL)),
+                "the raw output was dropped rather than raised as a local diagnostic: {raised:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn enumeration_diagnostics_encode_controls_but_preserve_color() {
+        crate::notes::alone(|| {
+            let _note = enumeration_note(Utf8Path::new("/workspace/\u{1b}[2Junit"), "\u{1b}[31mred\u{1b}[0m\u{1b}[2J\rforged");
+            let raised = crate::notes::drain().join("\n");
+
+            assert!(raised.contains("\u{1b}[31mred\u{1b}[0m"), "{raised:?}");
+            assert!(!raised.contains("\u{1b}[2J"), "{raised:?}");
+            assert!(!raised.contains('\r'), "{raised:?}");
+            assert!(raised.contains("/workspace/\\e[2Junit"), "{raised:?}");
+        });
+    }
+
+    /// Enumeration output that says nothing raises no diagnostic — there is nothing an operator
+    /// would be shown, and a note for an empty string would only be noise.
+    #[test]
+    fn an_empty_enumeration_output_raises_no_diagnostic() {
+        crate::notes::alone(|| {
+            let note = enumeration_note(Utf8Path::new("/workspace/target/debug/deps/unit-abc"), "");
+
+            assert!(note.contains("unit-abc"), "{note}");
+            assert!(
+                crate::notes::drain().is_empty(),
+                "an empty output should not have raised a diagnostic"
+            );
+        });
     }
 
     /// A run stopped exactly at its ceiling is described as being at it, not past it.
@@ -2548,5 +2656,110 @@ mod tests {
 
         // The timeout should be roughly 20ms, not blocking indefinitely.
         assert!(started.elapsed() < Duration::from_millis(100));
+    }
+
+    fn killer(test: &str) -> Killer {
+        Killer {
+            package: "subject".to_owned(),
+            target: "lib".to_owned(),
+            test: test.to_owned(),
+        }
+    }
+
+    /// A killer another worker found must survive a slower worker publishing nothing.
+    ///
+    /// Neither publishing branch holds the lock across the test run that produced its judgement, so
+    /// the order in which two workers reach the publication is decided by how long their mutants
+    /// took, not by which one started first. A survivor arriving last used to overwrite the file's
+    /// learned killer, sending every remaining mutant in that file down the cold full-order path.
+    /// No verdict was ever wrong — a kill is always established by a test that really failed — but
+    /// the file paid full price for the rest of the sweep.
+    #[test]
+    fn a_learned_killer_is_never_lost_to_a_later_worker_that_found_none() {
+        let learning = FileLearning::new();
+
+        // The plain ordering: the killer lands first and a survivor follows it.
+        learning.publish(&Judgement::Reached(Outcome::Killed, Some(killer("tests::found")), None));
+        learning.publish(&Judgement::Reached(Outcome::Survived, None, None));
+
+        match &*learning.locked() {
+            Learning::Learned(known) => assert_eq!(known.test, "tests::found"),
+            other => panic!("a survivor erased the file's killer: {other:?}"),
+        }
+
+        // And under real contention, whichever order the scheduler chooses.
+        let contended = FileLearning::new();
+
+        thread::scope(|scope| {
+            for worker in 0..8_u32 {
+                let contended = &contended;
+
+                let _publisher = scope.spawn(move || {
+                    let judged = if worker % 2 == 0 {
+                        Judgement::Reached(Outcome::Killed, Some(killer("tests::found")), None)
+                    } else {
+                        Judgement::Reached(Outcome::Survived, None, None)
+                    };
+
+                    contended.publish(&judged);
+                });
+            }
+        });
+
+        match &*contended.locked() {
+            Learning::Learned(known) => assert_eq!(known.test, "tests::found"),
+            other => panic!("a concurrent survivor erased the file's killer: {other:?}"),
+        }
+
+        // A file where nothing killed anything still settles on `Exhausted`, so its siblings stop
+        // waiting for a hint that is not coming.
+        let barren = FileLearning::new();
+
+        barren.publish(&Judgement::Reached(Outcome::Survived, None, None));
+
+        let settled = barren.locked();
+
+        assert!(matches!(&*settled, Learning::Exhausted), "{settled:?}");
+        drop(settled);
+    }
+
+    /// Poisoning this lock must not fail the mutants that had nothing to do with it.
+    ///
+    /// It guards a scheduling hint, every critical section under it assigns a whole value, and the
+    /// panic that poisoned it is already on its way to the caller on its own thread. Propagating
+    /// the poison here would take out every remaining mutant in the file as well.
+    #[test]
+    fn a_poisoned_file_local_killer_lock_is_recovered_rather_than_propagated() {
+        let learning = FileLearning::new();
+
+        let panicked = thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut state = learning.locked();
+
+                    *state = Learning::InProgress;
+
+                    panic!("a worker died holding the hint lock");
+                })
+                .join()
+                .is_err()
+        });
+
+        assert!(panicked, "the fixture must actually poison the lock");
+        assert!(learning.state.is_poisoned(), "the fixture must actually poison the lock");
+
+        // The state is still one of its legal values, and both the read and the publication go
+        // through rather than unwinding.
+        let recovered = learning.locked();
+
+        assert!(matches!(&*recovered, Learning::InProgress), "{recovered:?}");
+        drop(recovered);
+
+        learning.publish(&Judgement::Reached(Outcome::Killed, Some(killer("tests::after")), None));
+
+        match &*learning.locked() {
+            Learning::Learned(known) => assert_eq!(known.test, "tests::after"),
+            other => panic!("a poisoned lock swallowed the publication: {other:?}"),
+        }
     }
 }

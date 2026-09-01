@@ -44,9 +44,18 @@ mod identity {
     fn identifiers_are_stable_across_versions() {
         let path = Utf8Path::new("src/lib.rs");
 
-        assert_eq!(mutant_id(path, "foo", "arith.add_to_sub", "a + b", 0, 0), "97ac41aad8e4");
-        assert_eq!(mutant_id(path, "foo", "arith.add_to_sub", "a + b", 1, 0), "b06d54ae21d3");
-        assert_eq!(mutant_id(path, "foo", "arith.add_to_sub", "a + b", 0, 1), "4788ec1a4cbe");
+        assert_eq!(
+            mutant_id(path, "foo", "arith.add_to_sub", "a + b", SiteIndex::new(0, 0)),
+            "97ac41aad8e4"
+        );
+        assert_eq!(
+            mutant_id(path, "foo", "arith.add_to_sub", "a + b", SiteIndex::new(1, 0)),
+            "b06d54ae21d3"
+        );
+        assert_eq!(
+            mutant_id(path, "foo", "arith.add_to_sub", "a + b", SiteIndex::new(0, 1)),
+            "4788ec1a4cbe"
+        );
     }
 
     /// The identity of a site pins the whole normalization-plus-hash pipeline, not just the hash.
@@ -111,7 +120,7 @@ mod identity {
 
         for (item_path, mutator, raw_site_text, occurrence, replacement_index, expected) in golden {
             let normalized = normalize_site_text(raw_site_text);
-            let id = mutant_id(path, item_path, mutator, &normalized, occurrence, replacement_index);
+            let id = mutant_id(path, item_path, mutator, &normalized, SiteIndex::new(occurrence, replacement_index));
 
             assert_eq!(
                 id, expected,
@@ -120,9 +129,55 @@ mod identity {
         }
     }
 
+    /// The identity is a newtype now, and it has to keep behaving as the bare string every stored
+    /// record, report and suppression already holds — on the wire and at a comparison alike.
+    #[test]
+    fn an_identity_is_still_a_bare_string_on_the_wire() {
+        let id = mutant_id(
+            Utf8Path::new("src/lib.rs"),
+            "foo",
+            "arith.add_to_sub",
+            "a + b",
+            SiteIndex::new(0, 0),
+        );
+        let json = serde_json::to_string(&id).expect("an identity serializes");
+
+        assert_eq!(json, "\"97ac41aad8e4\"");
+        assert_eq!(serde_json::from_str::<MutantId>(&json).expect("an identity deserializes"), id);
+        assert_eq!(id, "97ac41aad8e4");
+        assert_eq!("97ac41aad8e4", id);
+        assert_eq!(id.as_str(), "97ac41aad8e4");
+        assert_eq!(id.to_string(), "97ac41aad8e4");
+        assert_eq!(MutantId::new("97ac41aad8e4"), id);
+        assert_eq!(MutantId::from("97ac41aad8e4".to_owned()), id);
+    }
+
+    /// The two site counts mean different things, and the type keeps them apart at the call site
+    /// rather than leaving two adjacent integers for a reader to get right.
+    #[test]
+    fn the_site_counts_are_not_interchangeable() {
+        let path = Utf8Path::new("src/lib.rs");
+
+        assert_ne!(
+            mutant_id(path, "foo", "arith.add_to_sub", "a + b", SiteIndex::new(1, 0)),
+            mutant_id(path, "foo", "arith.add_to_sub", "a + b", SiteIndex::new(0, 1))
+        );
+
+        let site = SiteIndex::new(4, 2);
+
+        assert_eq!(site.occurrence(), 4);
+        assert_eq!(site.replacement_index(), 2);
+    }
+
     #[test]
     fn ids_are_twelve_hex_characters() {
-        let id = mutant_id(Utf8Path::new("src/lib.rs"), "foo", "arith.add_to_sub", "a + b", 0, 0);
+        let id = mutant_id(
+            Utf8Path::new("src/lib.rs"),
+            "foo",
+            "arith.add_to_sub",
+            "a + b",
+            SiteIndex::new(0, 0),
+        );
 
         assert_eq!(id.len(), MUTANT_ID_HEX_LEN);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
@@ -142,15 +197,27 @@ mod identity {
             site_key("f", "fn_value.err_with", &second)
         );
         assert_ne!(
-            mutant_id(Utf8Path::new("src/lib.rs"), "f", "fn_value.err_with", &first, 0, 0),
-            mutant_id(Utf8Path::new("src/lib.rs"), "f", "fn_value.err_with", &second, 0, 0)
+            mutant_id(Utf8Path::new("src/lib.rs"), "f", "fn_value.err_with", &first, SiteIndex::new(0, 0)),
+            mutant_id(Utf8Path::new("src/lib.rs"), "f", "fn_value.err_with", &second, SiteIndex::new(0, 0))
         );
     }
 
     #[test]
     fn ids_are_stable_for_identical_input() {
-        let first = mutant_id(Utf8Path::new("src/lib.rs"), "foo", "arith.add_to_sub", "a + b", 0, 0);
-        let second = mutant_id(Utf8Path::new("src/lib.rs"), "foo", "arith.add_to_sub", "a + b", 0, 0);
+        let first = mutant_id(
+            Utf8Path::new("src/lib.rs"),
+            "foo",
+            "arith.add_to_sub",
+            "a + b",
+            SiteIndex::new(0, 0),
+        );
+        let second = mutant_id(
+            Utf8Path::new("src/lib.rs"),
+            "foo",
+            "arith.add_to_sub",
+            "a + b",
+            SiteIndex::new(0, 0),
+        );
 
         assert_eq!(first, second);
 
@@ -159,14 +226,19 @@ mod identity {
         // whitespace-bearing input and confirm two runs agree.
         let raw = "a /* c */  +\n\tb";
         let normalized = normalize_site_text(raw);
-        let third = mutant_id(Utf8Path::new("src/lib.rs"), "foo", "relational.gt_to_ge", &normalized, 0, 0);
+        let third = mutant_id(
+            Utf8Path::new("src/lib.rs"),
+            "foo",
+            "relational.gt_to_ge",
+            &normalized,
+            SiteIndex::new(0, 0),
+        );
         let fourth = mutant_id(
             Utf8Path::new("src/lib.rs"),
             "foo",
             "relational.gt_to_ge",
             &normalize_site_text(raw),
-            0,
-            0,
+            SiteIndex::new(0, 0),
         );
 
         assert_eq!(third, fourth);
@@ -174,15 +246,57 @@ mod identity {
 
     #[test]
     fn every_field_participates_in_identity() {
-        let base = mutant_id(Utf8Path::new("src/lib.rs"), "foo", "arith.add_to_sub", "a + b", 0, 0);
+        let base = mutant_id(
+            Utf8Path::new("src/lib.rs"),
+            "foo",
+            "arith.add_to_sub",
+            "a + b",
+            SiteIndex::new(0, 0),
+        );
 
         let variants = [
-            mutant_id(Utf8Path::new("src/other.rs"), "foo", "arith.add_to_sub", "a + b", 0, 0),
-            mutant_id(Utf8Path::new("src/lib.rs"), "bar", "arith.add_to_sub", "a + b", 0, 0),
-            mutant_id(Utf8Path::new("src/lib.rs"), "foo", "arith.add_to_mul", "a + b", 0, 0),
-            mutant_id(Utf8Path::new("src/lib.rs"), "foo", "arith.add_to_sub", "a + c", 0, 0),
-            mutant_id(Utf8Path::new("src/lib.rs"), "foo", "arith.add_to_sub", "a + b", 1, 0),
-            mutant_id(Utf8Path::new("src/lib.rs"), "foo", "arith.add_to_sub", "a + b", 0, 1),
+            mutant_id(
+                Utf8Path::new("src/other.rs"),
+                "foo",
+                "arith.add_to_sub",
+                "a + b",
+                SiteIndex::new(0, 0),
+            ),
+            mutant_id(
+                Utf8Path::new("src/lib.rs"),
+                "bar",
+                "arith.add_to_sub",
+                "a + b",
+                SiteIndex::new(0, 0),
+            ),
+            mutant_id(
+                Utf8Path::new("src/lib.rs"),
+                "foo",
+                "arith.add_to_mul",
+                "a + b",
+                SiteIndex::new(0, 0),
+            ),
+            mutant_id(
+                Utf8Path::new("src/lib.rs"),
+                "foo",
+                "arith.add_to_sub",
+                "a + c",
+                SiteIndex::new(0, 0),
+            ),
+            mutant_id(
+                Utf8Path::new("src/lib.rs"),
+                "foo",
+                "arith.add_to_sub",
+                "a + b",
+                SiteIndex::new(1, 0),
+            ),
+            mutant_id(
+                Utf8Path::new("src/lib.rs"),
+                "foo",
+                "arith.add_to_sub",
+                "a + b",
+                SiteIndex::new(0, 1),
+            ),
         ];
 
         for variant in variants {
@@ -193,8 +307,8 @@ mod identity {
     #[test]
     fn field_boundaries_cannot_be_confused() {
         // Without length prefixing these two would hash the same bytes in the same order.
-        let first = mutant_id(Utf8Path::new("ab"), "c", "d", "e", 0, 0);
-        let second = mutant_id(Utf8Path::new("a"), "bc", "d", "e", 0, 0);
+        let first = mutant_id(Utf8Path::new("ab"), "c", "d", "e", SiteIndex::new(0, 0));
+        let second = mutant_id(Utf8Path::new("a"), "bc", "d", "e", SiteIndex::new(0, 0));
 
         assert_ne!(first, second);
     }

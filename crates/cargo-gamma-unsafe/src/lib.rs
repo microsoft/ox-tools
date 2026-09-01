@@ -68,12 +68,23 @@ pub mod cgroup;
 #[cfg(unix)]
 pub mod group;
 #[cfg(unix)]
+pub mod identity;
+#[cfg(unix)]
 pub mod interrupt;
 #[cfg(windows)]
 pub mod job;
 
+#[cfg(all(windows, test))]
+mod native_faults;
+mod platform_error;
+mod situation;
 mod support;
 
+#[doc(inline)]
+pub use platform_error::PlatformError;
+#[doc(inline)]
+pub use situation::Situation;
+#[doc(inline)]
 pub use support::support;
 
 /// Runs the deterministic concurrency models selected by the dedicated Loom test target.
@@ -81,6 +92,9 @@ pub use support::support;
 #[doc(hidden)]
 pub fn run_loom_models() {
     interrupt::run_loom_models();
+
+    #[cfg(target_os = "linux")]
+    cgroup::loom_models::run();
 }
 
 /// There are no Unix signal-registry models on non-Unix targets.

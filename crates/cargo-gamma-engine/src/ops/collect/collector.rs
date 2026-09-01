@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use compact_str::{CompactString, format_compact};
 use proc_macro2::Span;
+use rustc_lexer::TokenKind;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned as _;
 use syn::token::Comma;
@@ -35,13 +36,13 @@ mod values;
 #[cfg(test)]
 mod tests;
 
-use indexes::{Indexes, NumericUses, indexes};
+use indexes::{Indexes, NumericUses, indexes_in};
 use noop::is_noop;
 use predicates::{
     binds_a_pattern, boolean_literal, callee_name, callee_type, declared_name, diverges, expr_attrs, is_assign_op, is_capacity_call,
     is_capacity_result, is_catch_all, is_constant_case, is_default_call, is_diagnostic_message, is_integer_zero_literal,
     is_numeric_binding, is_numeric_return, is_numeric_type, is_promotable, is_textual, loop_produces_value, returns_numeric,
-    returns_result, stmt_attrs, type_name,
+    returns_result, stmt_attrs,
 };
 use tables::{binary_replacements, in_place_reorder, method_renames};
 use types::{Types, returns_undefaultable_error, undefaulted_parameters};
@@ -89,6 +90,9 @@ pub(super) struct Collector<'a> {
 
     /// The path of a candidate outside any item, shared for the same reason.
     outermost: Arc<str>,
+
+    /// Terminal name of the enclosing implemented trait.
+    trait_impl: Option<Arc<str>>,
 
     candidates: Vec<Candidate>,
 
@@ -262,7 +266,7 @@ impl<'a> Collector<'a> {
         cfg: &'a CfgSet,
         defaults: &'a Defaults,
     ) -> Self {
-        Self::with_indexes(file, selection, errors, cfg, defaults, indexes(&file.ast, selection))
+        Self::with_indexes(file, selection, errors, cfg, defaults, indexes_in(&file.ast, selection, cfg))
     }
 
     /// Creates a collector from indexes a caller already built.
@@ -278,13 +282,14 @@ impl<'a> Collector<'a> {
         defaults: &'a Defaults,
         indexes: Indexes,
     ) -> Self {
-        let default_paths = DefaultPaths::of(&file.ast);
+        let default_paths = DefaultPaths::of_in(&file.ast, cfg);
 
         Self {
             file,
             selection,
             scope: Vec::new(),
             outermost: Arc::from(""),
+            trait_impl: None,
             candidates: Vec::new(),
             inert_depth: 0,
             in_default_impl: false,
@@ -395,6 +400,7 @@ impl<'a> Collector<'a> {
             replacement,
             replacement_index,
             item_path: self.scope.last().map_or_else(|| Arc::clone(&self.outermost), Arc::clone),
+            trait_impl: self.trait_impl.as_ref().map(Arc::clone),
             shape,
         });
 
@@ -449,8 +455,17 @@ impl<'a> Collector<'a> {
     }
 
     /// Returns the stable scope name of one inherent or trait implementation.
+    ///
+    /// The self type is read from its own source span and compacted rather than reduced to a bare
+    /// name: a name-only identity conflates `a::S`, `b::S`, `S<u8>`, `S<u16>`, `S`, and `&S`, so
+    /// same-named methods on differently qualified, instantiated, or referenced self types would
+    /// share an item path and fall back to source-order occurrence to tell their mutants apart —
+    /// which reordering the impl blocks would then silently reassign. Reading the exact source span
+    /// keeps qualification, generic arguments, and reference syntax intact, the same way the trait
+    /// path just below is read.
     fn impl_scope(&self, node: &ItemImpl) -> String {
-        let self_type = type_name(&node.self_ty);
+        let self_type = compact_path(self.text_of(node.self_ty.span()));
+        let self_type = if self_type.is_empty() { "_".to_owned() } else { self_type };
 
         let Some((trait_path, _for)) = &node.trait_ else {
             return self_type;
@@ -760,14 +775,6 @@ impl<'a> Collector<'a> {
         }
     }
 
-    /// Offers `+ 1` and `- 1` for one expression, in a position where a boundary is being decided.
-    ///
-    /// Deliberately not applied to every expression. Doing so would double the population of a
-    /// large project, duplicate the literal and arithmetic families wherever they already apply,
-    /// and produce type errors anywhere the expression is generic or not numeric at all. The
-    /// positions it is applied to are the ones that carry a postcondition somebody could get
-    /// wrong by one: what a function is handed, what it gives back, what is indexed, and where a
-    /// range stops.
     /// Offers a mutant for each element of a `vec!` literal, with that element removed.
     ///
     /// The removal sweeps up the separating comma along with the element, so the list that is left
@@ -857,6 +864,14 @@ impl<'a> Collector<'a> {
         }
     }
 
+    /// Offers `+ 1` and `- 1` for one expression, in a position where a boundary is being decided.
+    ///
+    /// Deliberately not applied to every expression. Doing so would double the population of a
+    /// large project, duplicate the literal and arithmetic families wherever they already apply,
+    /// and produce type errors anywhere the expression is generic or not numeric at all. The
+    /// positions it is applied to are the ones that carry a postcondition somebody could get
+    /// wrong by one: what a function is handed, what it gives back, what is indexed, and where a
+    /// range stops.
     fn perturb(&mut self, expression: &Expr) {
         // The veto outranks the proof. Both are read off the source, but only one of them can be
         // wrong in a way that costs a rollback round: nothing in the allowlist proves an expression
@@ -1009,7 +1024,7 @@ impl<'a> Collector<'a> {
     /// predicate that does not hold for this build. Both mean the same thing to the collector —
     /// do not descend — so they are asked together at every place that can be entered.
     fn skipped(&self, attrs: &[Attribute]) -> bool {
-        is_excluded(self.cfg, attrs) || !self.cfg.holds_for(attrs)
+        self.cfg.skip_gate(attrs)
     }
 
     /// Runs `body`, treating everything it visits as inert when `constant` holds.
@@ -1175,53 +1190,47 @@ impl<'a> Collector<'a> {
     }
 }
 
-/// Returns whether any attribute suppresses mutation of the whole item.
-fn is_excluded(cfg: &CfgSet, attrs: &[Attribute]) -> bool {
-    // `#[cfg(test)]` — and any compound gate that implies it, such as `all(test, unix)` — marks
-    // code that exists only to test other code. Mutating it measures the tests' tests, which
-    // nobody has. Read by the cfg subsystem's own classifier, so conditional `cfg_attr` gates are
-    // evaluated under the same target as ordinary `cfg` gates.
-    cfg.test_gated(attrs)
-}
-
-/// Removes trivia from a trait path without changing literal contents.
+/// Removes trivia from a type or trait path without joining word-like tokens.
 ///
 /// An item path feeds a stable mutant identity, so formatting `impl Trait < T > for S` must not
-/// change it. A simple whitespace filter would also rewrite a literal in a const generic, so
-/// literals and comments are stepped over with the source parser's lexer instead.
+/// change it. Token boundaries still matter: stripping the space from `&'a T` would turn lifetime
+/// `'a` and type `T` into the different lifetime `'aT`. The Rust lexer identifies both trivia and
+/// boundaries while preserving literal text byte-for-byte.
 fn compact_path(text: &str) -> String {
-    let comments = crate::parse::comment_spans(text);
-    let mut comments = comments.iter().peekable();
     let mut at = 0;
     let mut compact = String::with_capacity(text.len());
+    let mut previous = None;
 
-    while at < text.len() {
-        if let Some(comment) = comments.peek()
-            && comment.start == at
-        {
-            at = comment.end;
-            let _next = comments.next();
+    for token in rustc_lexer::tokenize(text) {
+        let start = at;
+        at += token.len;
+
+        if matches!(
+            token.kind,
+            TokenKind::Whitespace | TokenKind::LineComment | TokenKind::BlockComment { terminated: true }
+        ) {
             continue;
         }
 
-        if let Some(end) = crate::parse::literal_end(text, at) {
-            compact.push_str(text.get(at..end).unwrap_or_default());
-            at = end;
-            continue;
+        if previous.is_some_and(|kind| word_like(kind) && word_like(token.kind)) {
+            compact.push(' ');
         }
 
-        let character = text
-            .get(at..)
-            .and_then(|rest| rest.chars().next())
-            .expect("the loop keeps the UTF-8 boundary below the text length");
-        at += character.len_utf8();
-
-        if !character.is_whitespace() {
-            compact.push(character);
-        }
+        compact.push_str(
+            text.get(start..at)
+                .expect("rustc_lexer token lengths preserve source byte boundaries"),
+        );
+        previous = Some(token.kind);
     }
 
     compact
+}
+
+const fn word_like(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Ident | TokenKind::RawIdent | TokenKind::Literal { .. } | TokenKind::Lifetime { .. }
+    )
 }
 
 #[expect(
@@ -1326,6 +1335,13 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         let depth = self.generics.len();
         let defaulted_depth = self.defaulted.len();
         let outer = self.in_default_impl;
+        let outer_trait_impl = core::mem::replace(
+            &mut self.trait_impl,
+            node.trait_
+                .as_ref()
+                .and_then(|(path, _for)| path.segments.last())
+                .map(|segment| Arc::from(segment.ident.to_string())),
+        );
         let outer_self_type = self.impl_self_type.replace((*node.self_ty).clone());
         let outer_associated = core::mem::replace(
             &mut self.impl_self_associated,
@@ -1352,6 +1368,7 @@ impl<'ast> Visit<'ast> for Collector<'_> {
         self.generics.truncate(depth);
         self.defaulted.truncate(defaulted_depth);
         self.in_default_impl = outer;
+        self.trait_impl = outer_trait_impl;
         self.impl_self_type = outer_self_type;
         self.impl_self_associated = outer_associated;
     }
