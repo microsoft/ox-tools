@@ -11,10 +11,11 @@
 # its work to the packages impacted by a change:
 #
 #   - "modified": only run when at least one package's source files
-#     changed in the diff. The tier is only a skip gate: once admitted,
-#     the check runs its complete selected scope rather than splicing
-#     package arguments. That scope may be workspace members (cargo each)
-#     or the whole workspace (cargo heather, cargo sort).
+#     changed in the diff. The tier only admits or skips the recipe; it
+#     does not forward package arguments. Each admitted tool owns its
+#     normal input domain. A recipe may invoke that tool once (cargo
+#     heather, cargo sort) or fan out one bounded child per workspace
+#     member (cargo each).
 #
 #   - "affected": run on the affected set (modified ∪ reverse-deps within the
 #     workspace). The tool takes --package; the recipe splices the resolved
@@ -55,9 +56,9 @@
 #   * "--skip" - the tier is empty for this change (recipe exits 0).
 #
 # This keeps the per-recipe boilerplate to a single capture, a one-line skip
-# guard, and the cargo invocation. Modified-tier recipes never splice
-# `$include` into their command; they only check the skip sentinel and then run
-# the check's complete selected scope.
+# guard, and the cargo invocation. Modified-tier recipes never forward
+# `$include`; they only check the skip sentinel and then let their command
+# determine its normal input domain.
 #
 # Every recipe whose body uses multi-line conditionals or array-splat
 # splicing is annotated with [script("pwsh", "-NoProfile")]. pwsh is preinstalled on

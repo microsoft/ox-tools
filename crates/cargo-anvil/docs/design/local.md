@@ -488,7 +488,7 @@ Each check requests one cargo-delta **category** — the selector it passes to
 
 | Category   | What recipes do with it                                                                       |
 |------------|------------------------------------------------------------------------------------------------|
-| `modified` | `--skip` → recipe exits 0. Otherwise: run the check's complete selected scope without package splicing. |
+| `modified` | `--skip` → recipe exits 0. Otherwise the recipe runs against the input domain defined by its own command; impact-selected package arguments are not forwarded. |
 | `affected` | `--skip` → recipe exits 0. Otherwise: splice the value into the cargo invocation, defaulting to `--workspace` when empty. |
 | `required` | Same semantics as affected, but consumed by recipes that need the transitive dep graph in scope (doc-build, cargo-hack, udeps). |
 
@@ -513,17 +513,12 @@ identifier '<name>'` to stderr and exits non-zero rather than guessing (and risk
 silently under-scoped tier that skips a check). Failing hard surfaces the mapping gap so it
 gets fixed, instead of masking it behind a silently full-workspace run.
 
-A typical modified-tier recipe checks every workspace member while keeping each
-rustfmt child command bounded. Unlike `cargo fmt --all`, this intentionally does
-not discover non-member local path dependencies:
-
-```just
-anvil-fmt:
-    $include = (& "{{ just_executable() }}" _anvil-impact-include modified)
-    if ($include -eq '--skip') { exit 0 }
-    cargo each --workspace --keep-going '--' \
-        cargo '+{{ rust_nightly }}' fmt --manifest-path '{manifest}' --check
-```
+Formatting illustrates the modified-tier contract. The tier decides only whether
+the recipe runs. Once admitted, the recipe validates its pinned tools and uses
+`cargo each --workspace` to launch one bounded rustfmt command per workspace
+member. The script propagates the aggregate child status, and unlike
+`cargo fmt --all`, it intentionally does not discover non-member local path
+dependencies.
 
 The mapping from check to bucket is fixed in the catalog (see
 [checks.md §5](./checks.md#5-impact-scoping-check--include-mapping)). Unscoped checks —

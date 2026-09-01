@@ -20,6 +20,30 @@ publish an empty value outside a pull request context. Snapshot tests pin the em
 while the focused integration test executes the generated recipe and verifies accepted titles,
 rejected titles, both skip cases, and corrective output.
 
+## Workspace formatting
+
+Formatting uses the catalog-pinned cargo-each release to fan out one rustfmt
+child per workspace member. The canonical recipe owns the `{manifest}`
+substitution and aggregate failure propagation; generated prerequisite recipes
+own installation and version validation. Generated copies and snapshots keep
+those pieces synchronized.
+
+The modified impact category is only a run-or-skip gate. It never supplies
+package arguments to the formatter, so cargo-each's workspace-member selection
+remains the formatter's input boundary.
+
+## Semantic-version candidate selection
+
+The SemVer recipe builds candidates from Cargo metadata before intersecting them
+with the affected package set. Cargo serializes unrestricted publication as
+`null`, forbidden publication as an empty array, and named-registry restrictions
+as a nonempty array. Only the empty-array form is excluded; library targets in
+the other two forms remain candidates.
+
+The canonical recipe owns this mapping, baseline availability checks, and
+per-package execution. Focused contract tests cover every publication form,
+while generated copies and snapshots detect drift from the template.
+
 ## Impact scoping and tier routing
 
 Impact scoping lets a clean PR run each check against only the cargo packages its committed

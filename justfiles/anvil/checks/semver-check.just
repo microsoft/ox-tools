@@ -11,14 +11,14 @@
 #
 # Several real-world conditions aren't actually SemVer violations:
 #   - bin-only crates have no API to compare (reported as a missing lib target).
-#   - `publish = false` crates have no registry consumer contract.
+#   - `publish = false` crates cannot be published.
 #   - crates newly added since the PR base have no manifest at their
 #     current workspace-relative path in that baseline.
 #   - crates renamed since the PR base have no matching package in that
 #     baseline ("package `<name>` not found in ...").
 #   - crates where the branch baseline lacks a lib target the
 #     current source has (bin -> bin+lib transition).
-# We pre-filter to publishable library-bearing crates from cargo metadata, skip
+# We pre-filter to publishable library crates from cargo metadata, skip
 # packages whose current manifest path is absent from the baseline,
 # then run cargo-semver-checks per-package and tolerate the remaining
 # "no-comparable-baseline" failure modes.
@@ -64,7 +64,9 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     # (reported as a missing lib target), and we want the same tolerance for
     # new / renamed / bin->lib-transition crates regardless of whether
     # we got here via impact-scoping (cloud workflows) or full-workspace
-    # fallback (local). Crates with `publish = false` have no registry consumer contract.
+    # fallback (local). Cargo metadata represents unrestricted publication as
+    # null, `publish = false` as an empty array, and named-registry restrictions
+    # as a nonempty array. Only the empty array is non-publishable.
     $libPkgs = @{}
     $metadataJson = & cargo metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {

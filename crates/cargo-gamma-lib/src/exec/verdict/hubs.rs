@@ -265,10 +265,10 @@ mod loom_models {
 
     /// The live count returns to exactly zero after concurrent readers finish.
     ///
-    /// Two participants are the smallest topology that exercises the decrement race. Additional
-    /// reader streams perform the same atomic operation and only multiply equivalent permutations.
-    /// The contended `live` observation also models diagnostics racing abandoned readers as they
-    /// finally close. Every increment must still have exactly one decrement.
+    /// The model begins from the valid gauge state produced by prior successful starts, keeping the
+    /// decrement race separate from the start race covered below. The contended `live` observation
+    /// also models diagnostics racing abandoned readers as they finally close. Every prior
+    /// increment must still have exactly one decrement.
     pub(super) fn a_readers_gauge_returns_to_exactly_zero_under_any_interleaving() {
         loom::model(|| {
             let readers = Arc::new(Readers {
@@ -297,9 +297,7 @@ mod loom_models {
 
     /// The peak never understates readers started concurrently.
     ///
-    /// Two participants are the smallest topology that exercises the increment and peak-update
-    /// races. Additional readers perform the same atomic operations and only multiply equivalent
-    /// permutations. Neither participant finishes, so both are genuinely live. The observations
+    /// Participants start but do not finish, so each remains genuinely live. The observations
     /// before the joins race the `fetch_add` and `fetch_max` operations, exercising the production
     /// loads under contention; the observations after the joins must see the exact count and peak.
     pub(super) fn a_readers_peak_never_understates_concurrent_starts() {

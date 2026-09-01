@@ -389,7 +389,7 @@ impl Plan {
     ///   bump the manifest entry to the new template checksum so
     ///   subsequent runs see the divergence as resolved
     ///   (`LeaveAlone`) until the template moves again — see
-    ///   [`updates.md §5`](../../docs/design/updates.md).
+    ///   the [update protocol](../../docs/design/updates.md).
     /// - `InSync` items refresh their manifest checksum; `LeaveAlone`
     ///   items preserve their existing manifest entries.
     /// - Stale entries — items present in `previous_manifest` but not
