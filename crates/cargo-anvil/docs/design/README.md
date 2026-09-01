@@ -12,7 +12,7 @@ user-visible shape of the tool. Detail lives in companion documents:
 - [updates.md](./updates.md) — the drift-detection and update algorithm; opt-out semantics.
 - [extensibility.md](./extensibility.md) — how downstream tools ship their own brand + catalog.
 - [github.md](./github.md) — GitHub Actions emission, example workflows, impact wiring.
-- [ado.md](./ado.md) — Azure DevOps Pipelines emission, 1ESPT/msrustup composition.
+- [ado.md](./ado.md) — Azure DevOps Pipelines emission and compliance-template composition.
 - [containers.md](./containers.md) — the opt-in, local-only container backend for running any
   `anvil-*` recipe in a pinned Linux image (Linux-on-Windows parity, distro pinning).
 - [../implementation.md](../implementation.md) — internal implementation guidance.
@@ -27,12 +27,12 @@ implemented six different ways:
 
 | Repo | cloud workflows | Justfile shape | Toolchain | Notable specifics |
 |------|----|----------------|-----------|-------------------|
-| `oxidizer`         | ADO 1ESPT (`SubstratePT`) | 500-line monolith + `just_mutants.just` | `ms-prod-1.93` | Stage flags (`enableStages`), `cargo-aprz`, stable-API checks |
+| `oxidizer`         | ADO 1ESPT (`SubstratePT`) | 500-line monolith + `just_mutants.just` | caller-provisioned | Stage flags (`enableStages`), `cargo-aprz`, stable-API checks |
 | `oxidizer-github`  | GitHub Actions            | Modular `justfiles/{basic,coverage,format,setup,spelling}.just` + `constants.env` | `1.93` | `cargo-delta` impact-scoped builds, sticky semver comments, composite `setup` action |
-| `ox-tools`         | ADO (CloudBuild + classic) | none in worktree                       | `ms-prod-1.92` | NuGet/MSBuild scaffolding, internal templates |
+| `ox-tools`         | ADO (CloudBuild + classic) | none in worktree                       | caller-provisioned | NuGet/MSBuild scaffolding, internal templates |
 | `ox-tools-gh`      | GitHub Actions            | Same modular shape as `oxidizer-github` | `1.93` | Mirror surface to OSS oxidizer |
-| `assistants-oxide` | ADO 1ESPT (custom `rust/`) | Monolith + `.just/tds.just`            | `ms-prod-1.93` | Symcrypt setup steps, NuGet publish stage |
-| `ox-docs`          | ADO classic               | Monolith                                | `ms-prod-1.88` | Mixed C#/.NET + Rust, mdbook/docfx |
+| `assistants-oxide` | ADO 1ESPT (custom `rust/`) | Monolith + `.just/tds.just`            | caller-provisioned | Symcrypt setup steps, NuGet publish stage |
+| `ox-docs`          | ADO classic               | Monolith                                | caller-provisioned | Mixed C#/.NET + Rust, mdbook/docfx |
 
 The same logical checks (clippy, fmt, deny, miri, mutants, coverage, hack feature-powerset, udeps,
 semver, spellcheck, license headers, doc/doctest, careful, audit, ensure-no-cyclic-deps,

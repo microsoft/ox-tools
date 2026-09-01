@@ -233,12 +233,11 @@ The group uses the same OS/architecture matrix and per-OS impact sets as `pr-tes
 so cfg-gated targets and dependencies are exercised under the MSRV. It runs in
 parallel with the other PR groups. When no root MSRV exists, the recipe exits
 successfully without running tests.
-`ANVIL_MSRV_TOOLCHAIN` may map the public MSRV to an already-provisioned
-internal toolchain. Internal environments pair it with `RUSTUP_TOOLCHAIN` (or a
-selecting repository toolchain file) for stable checks; a mapping by itself is
-rejected rather than allowing stable checks to fall through to a public
-channel. When the mapping is unset, setup installs the declared MSRV through
-rustup.
+`ANVIL_MSRV_TOOLCHAIN` may map the declared MSRV to an already-provisioned
+toolchain. Callers pair it with `RUSTUP_TOOLCHAIN` (or a selecting repository
+toolchain file) for stable checks; a mapping by itself is rejected rather than
+allowing stable checks to select an unrelated compiler. When the mapping is
+unset, setup installs the declared MSRV through rustup.
 
 #### `pr-runtime-analysis` (stricter-runtime correctness)
 
@@ -281,9 +280,9 @@ publish a full-coverage snapshot for the current state of `main`.
 These checks share a property: their outcome can change without a commit to this repo.
 `deny`/`audit`/`aprz` consult external databases (RustSec advisory DB, license registries,
 Azure risk indices). `clippy` reflects whatever lint set ships with the currently-installed
-toolchain -- even when `rust-toolchain.toml` is pinned, repos using floating channels
-(`stable`, or msrustup channel pointers like `ms-prod-1.93`) can pick up new lints when the
-pointer is bumped upstream. Re-running these on the scheduled tier turns "something landed
+toolchain -- even when `rust-toolchain.toml` is pinned, repositories using a
+floating channel such as `stable` can pick up new lints when the channel moves.
+Re-running these on the scheduled tier turns "something landed
 upstream yesterday" into a tracked failure rather than an invisible regression discovered
 next time someone opens an unrelated PR.
 

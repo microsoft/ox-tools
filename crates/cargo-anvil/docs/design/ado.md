@@ -373,11 +373,11 @@ x86_64 jobs and per-OS affected-package impact sets as `pr_test`, and invokes
 `anvil-pr-msrv`. The stage consumes the per-OS impact artifact like the other PR
 groups; when the root manifest declares no MSRV, the recipe exits successfully
 without running tests.
-Internal pipelines set `RUSTUP_TOOLCHAIN` to their provisioned stable compiler
-and `ANVIL_MSRV_TOOLCHAIN` to the provisioned `ms-prod-*` equivalent of the
-declared MSRV. Supplying only the MSRV mapping is rejected because stable checks
-would otherwise fall through to a public channel. Public pipelines leave both
-unset and let Anvil install the declared MSRV through rustup.
+Callers may set `RUSTUP_TOOLCHAIN` to an already-provisioned stable compiler and
+`ANVIL_MSRV_TOOLCHAIN` to an already-provisioned compiler for the dedicated
+MSRV run. Supplying only the MSRV mapping is rejected because stable checks
+would otherwise select an unrelated compiler. When the mapping is unset,
+Anvil installs the declared MSRV through rustup.
 
 ### 4.1 Per-job wrapper (`steps/job.yml`) — the 1ESPT extensibility point
 
@@ -710,19 +710,17 @@ takes a single `group` parameter that controls which recipes run:
 
 - empty (default): runs `just anvil-setup` -- the full catalog. Use for "give
   me everything" flows.
-- `none`: skips the group/full tool fan-out after stable provisioning. Used by
-  `impact.yml`, which only needs `cargo-delta` and installs it itself
-  afterwards.
+- `none`: skips the group/full tool fan-out. Used by `impact.yml`, which only
+  needs `cargo-delta` and installs it itself afterwards.
 - any other value (e.g. `pr-fast`, `scheduled-advisories`): runs
   `just anvil-<group>-setup` -- only the tools, components, and toolchains
   that group actually needs. Every per-group step template
   (`.pipelines/anvil/steps/<group>.yml`) passes its own group name here, so a
   `pr-fast` matrix leg never installs cargo-mutants.
 
-The template does not install Rust; it expects `cargo` on PATH -- provided by the
-user's msrustup step in 1ESPT pipelines or by a previous step in OSS pipelines
-(see §6). ADO uses the default `install` backend (source builds) because
-`cargo-binstall` has unresolved compliance issues for internal ADO pipelines.
+The template expects the caller to provide the Rust/rustup bootstrap and
+`cargo` on PATH (see §6). ADO uses the default `install` backend (source
+builds) so adopters do not need to approve a binary-installation service.
 
 `impact.yml` invokes `setup.yml` with `group: none`, then installs `cargo-delta`
 via `anvil-tool-cargo-delta-install` and runs the shared **`just anvil-impact`**
@@ -748,9 +746,9 @@ mechanics are in [local.md §4](./local.md#4-impact-scoping-via-the-anvil-impact
 
 The user's root pipeline or compliance template installs the Rust/rustup
 bootstrap before the Anvil stages run. The generated setup step restores Cargo
-home before bootstrapping Just, then calls `anvil-toolchain-stable-install` to
-provision a public selection or prepare an externally provisioned internal
-selection. The template never invokes `_anvil-resolve-stable` itself and does
+home before bootstrapping Just. Its selected catalog setup recipe reaches
+`anvil-toolchain-stable-install` before any stable Cargo or Rust use. The
+template never invokes `_anvil-resolve-stable` itself and does
 not publish a resolved `RUSTUP_TOOLCHAIN` to subsequent steps. Each stable recipe
 evaluates the inline PowerShell array expression and invokes Cargo or Rust
 directly in its current PowerShell process. Selection has no expression-time
@@ -758,38 +756,34 @@ subprocess, host-OS branch, or change to the adopter's configured shell. A
 selecting toolchain file remains unoverridden so rustup processes the complete
 file.
 
-Selection follows the shared local contract: an existing `RUSTUP_TOOLCHAIN`, then a
-root toolchain file with `channel` or `path`, then the root MSRV. Internal pipelines
-set `RUSTUP_TOOLCHAIN=ms-prod-*` so it overrides a public toolchain file or MSRV,
-while their existing installer-specific setting continues to tell msrustup which
-toolchain to provision. Current msrustup honors the standard override precedence.
-Setup reapplies explicit components and targets from a suppressed root toolchain
-file to the provisioned compiler. Unavailable options warn and are skipped, matching
-rustup's native toolchain-file behavior.
+Selection follows the shared local contract: an existing `RUSTUP_TOOLCHAIN`,
+then a root toolchain file with `channel` or `path`, then the root MSRV. A
+caller-provided override takes precedence over repository files and is treated
+as an externally provisioned selection. Anvil does not parse repository
+toolchain files or reapply options from a file suppressed by that override.
+Without an override, rustup processes the complete repository toolchain file
+natively. Without either native selector, Anvil installs the root MSRV.
 
-In 1ESPT compliance pipelines, msrustup still provisions the selected
-`RUSTUP_TOOLCHAIN`; the Anvil setup primitive treats that caller override as
-external and only reapplies applicable repository file options. Mapping a
-public MSRV to an internal `ms-prod-*` channel remains a root-pipeline policy.
-In OSS/non-1ESPT pipelines, the user provides rustup (for example with
-`RustInstaller@1`) and Anvil installs a missing public MSRV selection through
-the same setup primitive.
+`ANVIL_MSRV_TOOLCHAIN` may map the dedicated MSRV run to a separately
+provisioned toolchain. It does not select the compiler used by ordinary stable
+checks and therefore must be paired with a stable selector.
 
 Shared Cargo-tool/default-component setup and stable-only leaf setup all depend
 on `anvil-toolchain-stable-install`; Just deduplicates it for group/full
 fan-out. `anvil-tool-rustc-validate-prereqs` remains read-only and validates
 that `rustc` is available plus the workspace MSRV compatibility rule. For
 nightly-requiring checks, the matching toolchain-validate-prereqs recipe fails
-with a suggestion to ask the team's pipeline owner to add that dated nightly
-to msrustup.
+with a suggestion to ask the pipeline owner to provision that dated nightly.
 
 ## 7. Caching
 
 `setup.yml` restores Cargo home before bootstrapping Just so a warm job does not
 compile Just before reaching the cache. The ADO `Cache@2` key uses agent OS and
-architecture plus hashes of the root Cargo manifests, Cargo configuration,
-toolchain files, and `versions.just`. The selected compiler version is omitted
-because rustup toolchains are outside Cargo home.
+architecture plus Cargo configuration, the repository toolchain-file
+fingerprint, and `versions.just`. Toolchain-file changes deliberately start a
+fresh cache generation to bound registry growth. Routine `Cargo.toml`,
+`Cargo.lock`, and compiler-version changes do not invalidate standalone cached
+tools. Rustup toolchains themselves are outside Cargo home.
 
 The cache covers:
 
@@ -847,7 +841,7 @@ For repos with an existing 1ESPT-extending pipeline, adopting anvil is increment
 
 anvil's owned templates compose cleanly with the 1ESPT `enableStages` flag system: each
 group is its own job inside the `ANVIL_pr` stage, so 1ESPT can gate or split them as
-needed. The pre-existing repo-specific compliance steps (msrustup, NuGet pushes, signing,
+needed. The pre-existing repo-specific compliance steps (provisioning, signing,
 …) keep running alongside the anvil stage. anvil does not own the pipeline's shape —
 it just contributes a stage.
 

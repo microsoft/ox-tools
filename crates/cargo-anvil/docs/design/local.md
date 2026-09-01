@@ -342,8 +342,8 @@ install recipe can run:
 Trade-off acknowledged: `cargo install --locked` is slow on a cold cache (several
 minutes for the full catalog). It is also the most reliable mechanism in restricted
 networks. Caching (via the GH cache action and the ADO pipeline workspace cache) is
-configured by the setup action/template to key on repository manifests,
-toolchain configuration, and `versions.just`. See
+configured by the setup action/template to key on platform, toolchain
+configuration, Cargo configuration, and `versions.just`. See
 [github.md](./github.md#caching) and [ado.md](./ado.md#caching).
 
 #### 3.3.1 System-level prerequisites
@@ -389,8 +389,8 @@ predates the catalog minimum, with a one-line hint pointing at the matching
 Anvil selects one deterministic toolchain for every check that otherwise uses the
 ambient stable toolchain. The selection order is:
 
-1. `RUSTUP_TOOLCHAIN`, when the caller already set it. This is the standard rustup
-   override and lets internal pipelines select an installed `ms-prod-*` toolchain.
+1. `RUSTUP_TOOLCHAIN`, when the caller already set it. This is rustup's standard
+   override for selecting an already available toolchain.
 2. A root `rust-toolchain` or `rust-toolchain.toml`, delegated to rustup without
    Anvil parsing or modifying the file.
 3. The root package or `[workspace.package]` `rust-version`, treated as the
@@ -406,12 +406,12 @@ floor should declare root `[workspace.package].rust-version` (or package
 `rust-version`) and have every workspace member inherit it or declare an equal
 or lower minimum. A repository with missing package MSRVs, or a member minimum
 newer than the root, must instead correct the root floor or add a root toolchain
-file to select the single compiler used by catalog checks. Internal builds may
-set `RUSTUP_TOOLCHAIN` to a provisioned toolchain
-rather than adding a public compiler pin. Setting `ANVIL_MSRV_TOOLCHAIN`
-without that stable override (and without a selecting repository toolchain
-file) is rejected as incomplete internal configuration. An empty root
-toolchain file is invalid and produces an actionable error.
+file to select the single compiler used by catalog checks. Callers may set
+`RUSTUP_TOOLCHAIN` to an already provisioned toolchain rather than adding a
+repository compiler pin. Setting `ANVIL_MSRV_TOOLCHAIN` without that stable
+override (and without a selecting repository toolchain file) is rejected as
+incomplete configuration. An empty root toolchain file is invalid and produces
+an actionable error.
 
 `versions.just` holds the selector as the lazy, non-exported
 `_anvil_stable_toolchain_args` value. Its value is a multiline PowerShell array
@@ -441,15 +441,13 @@ environment.
 
 The public setup primitive `anvil-toolchain-stable-install` owns stable
 provisioning. Rustup processes repository toolchain files directly; the private
-`_anvil-resolve-stable` implementation handles public MSRV installation and
-internal mapping. Leaf setup recipes reach the primitive directly or through
+`_anvil-resolve-stable` implementation handles MSRV installation and an
+optional separately provisioned MSRV selector. Leaf setup recipes reach the primitive directly or through
 the shared Cargo-tool/default-component installers; group, tier, and
-`anvil-setup` recipes inherit and deduplicate that dependency. GitHub version
-capture uses the private `_anvil-stable-rustc-version` recipe, whose dependency
-provisions stable before it invokes `rustc` directly with the lazy argument.
-Workflows and container construction therefore invoke setup operations rather
-than orchestrating `_anvil-resolve-stable` actions. Neither helper wraps a
-Cargo/Rust command that performs a check, and no standalone script is involved.
+`anvil-setup` recipes inherit and deduplicate that dependency. Workflows and
+container construction invoke setup operations rather than orchestrating
+`_anvil-resolve-stable` actions. The helper does not wrap a Cargo/Rust command
+that performs a check, and no standalone script is involved.
 
 When selection falls back to the root MSRV, Anvil reads the root manifest just
 far enough to bootstrap that compiler, then prerequisite validation reads
@@ -466,8 +464,8 @@ for this uncommon case.
 When the root manifest declares an MSRV, `anvil-msrv-test` runs affected-package
 unit and integration tests under that compiler with all features and with default
 features. A selecting toolchain file does not suppress this minimum-version run.
-`ANVIL_MSRV_TOOLCHAIN` optionally maps the declared MSRV to a provisioned internal
-toolchain. Without a root MSRV the recipe is a no-op.
+`ANVIL_MSRV_TOOLCHAIN` optionally maps the declared MSRV to a separately
+provisioned toolchain. Without a root MSRV the recipe is a no-op.
 
 `anvil-tool-rustc-validate-prereqs` verifies that `rustc` is available and
 enforces the workspace MSRV compatibility rule. Stable setup separately

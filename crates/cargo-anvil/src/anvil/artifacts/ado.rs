@@ -214,24 +214,28 @@ mod tests {
     fn setup_step_takes_group_parameter_and_dispatches() {
         assert!(SETUP_STEP.contains("name: group"));
         assert!(SETUP_STEP.contains("just anvil-setup"));
-        assert!(SETUP_STEP.contains("just anvil-toolchain-stable-install"));
+        assert!(!SETUP_STEP.contains("just anvil-toolchain-stable-install"));
         assert!(!SETUP_STEP.contains("_anvil-resolve-stable"));
         assert!(SETUP_STEP.contains("just anvil-${{ parameters.group }}-setup"));
         assert!(SETUP_STEP.contains("eq(parameters.group, 'none')"));
+        assert!(SETUP_STEP.contains("anvil_toolchain_fingerprint"));
+        assert!(!SETUP_STEP.contains("Cargo.toml | Cargo.lock"));
+        assert!(SETUP_STEP.contains("'rust-toolchain.toml'"));
+        assert!(!SETUP_STEP.contains("restoreKeys:"));
+        let fingerprint = SETUP_STEP
+            .find("anvil setup (fingerprint repository toolchain)")
+            .expect("setup must fingerprint optional repository toolchain files");
         let cache_restore = SETUP_STEP
             .find("anvil setup (cache cargo home)")
             .expect("setup must restore Cargo home");
         let just_bootstrap = SETUP_STEP.find("anvil setup (install just)").expect("setup must bootstrap Just");
-        let stable_provisioning = SETUP_STEP
-            .find("just anvil-toolchain-stable-install")
-            .expect("setup must provision the selected stable compiler");
+        assert!(
+            fingerprint < cache_restore,
+            "optional toolchain files must be fingerprinted before cache restore"
+        );
         assert!(
             cache_restore < just_bootstrap,
             "Cargo home must be restored before Just is bootstrapped"
-        );
-        assert!(
-            just_bootstrap < stable_provisioning,
-            "Just must be bootstrapped before setup-driven stable provisioning"
         );
     }
 

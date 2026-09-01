@@ -742,9 +742,8 @@ then invokes the requested catalog setup recipe. Its
 
 - empty (default): runs `just anvil-setup binstall` -- the full catalog. Use
   for local "give me everything" flows.
-- `none`: skips the group/full tool fan-out after stable provisioning. Used by
-  `anvil-impact`, which only needs `cargo-delta` and installs it itself
-  afterwards.
+- `none`: skips the group/full tool fan-out. Used by `anvil-impact`, which only
+  needs `cargo-delta` and installs it itself afterwards.
 - any other value (e.g. `pr-fast`, `scheduled-advisories`): runs
   `just anvil-<group>-setup binstall` -- only the tools, components, and
   toolchains that group actually needs. Ordinary group names contain only
@@ -843,15 +842,12 @@ The check → bucket mapping is in
 
 ## 7. Rust toolchain
 
-The setup action bootstraps cargo-binstall and Just using the runner
-environment, then calls `_anvil-stable-rustc-version`. That helper depends on
-`anvil-toolchain-stable-install`, so the setup graph provisions a missing
-public MSRV or lets rustup process a repository toolchain file before invoking
-`rustc` directly with the lazy optional `+toolchain` argument. Native rustup
-selectors produce no argument; only the root MSRV fallback is explicit. The
-resulting version keys the cache; the workflow never invokes
-`_anvil-resolve-stable` itself and does not publish a resolved
-`RUSTUP_TOOLCHAIN` through `GITHUB_ENV`.
+The setup action restores Cargo home, bootstraps cargo-binstall and Just, and
+then invokes the selected catalog setup recipe. That setup graph reaches
+`anvil-toolchain-stable-install` before stable Cargo or Rust is used, so it
+provisions a missing root MSRV or lets rustup process a repository toolchain
+file. The workflow never invokes `_anvil-resolve-stable` itself and does not
+publish a resolved `RUSTUP_TOOLCHAIN` through `GITHUB_ENV`.
 Each stable recipe lazily selects the same optional argument and invokes Cargo
 or Rust directly in its current PowerShell process. The selector is an inline
 PowerShell array expression rather than an expression-time shell subprocess, so
@@ -865,10 +861,9 @@ Selection follows the shared local contract: an existing `RUSTUP_TOOLCHAIN`, the
 root toolchain file with `channel` or `path`, then the root MSRV. There is no
 runner-default fallback. GH-hosted runners provide the rustup proxy used to install a
 selected public channel. A repository that supplies a path toolchain must provision
-that path before the Anvil action runs. When an environment override or MSRV fallback
-suppresses a root toolchain file, setup reapplies its explicit components and targets
-to the selected compiler; unavailable options produce warnings as they do when rustup
-processes the file natively.
+that path before the Anvil action runs. A caller-provided environment override
+takes precedence over repository files. Anvil does not parse a repository
+toolchain file or reapply options from a file suppressed by that override.
 
 On self-hosted runners or pre-baked images without rustup, the user provisions the
 selected toolchain before the `uses:` of the reusable workflow:
@@ -896,10 +891,14 @@ installed `rustc` and workspace MSRV contract at check time.
 ## 8. Caching
 
 The `anvil-setup` composite action computes a cache key from runner OS and
-architecture, the actual `rustc --version`, hashes of `Cargo.lock`,
-`.cargo/config.toml`, `rust-toolchain.toml`, and `versions.just`, plus the workflow
-job ID. Job discrimination prevents concurrent jobs from racing to save one key;
-prefix restore keys still share prior installs across jobs.
+architecture plus hashes of `.cargo/config.toml`, either supported repository
+toolchain file, and `versions.just`, followed by the workflow job ID.
+Toolchain-file or catalog changes deliberately start a fresh cache generation
+to bound registry growth; there is no restore fallback across those boundaries.
+Routine `Cargo.toml`, `Cargo.lock`, and compiler-version changes do not
+invalidate standalone cached tools. Job discrimination prevents concurrent
+jobs from racing to save one key, while the fingerprint prefix shares prior
+installs across jobs within the same cache generation.
 
 The cache covers:
 

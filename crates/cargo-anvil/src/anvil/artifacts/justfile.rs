@@ -787,11 +787,6 @@ mod tests {
                 "default component '{component}' must provision stable first"
             );
         }
-        assert!(
-            TOOLS_JUST.contains("_anvil-stable-rustc-version: anvil-toolchain-stable-install"),
-            "cloud version capture must use the setup dependency graph"
-        );
-
         let checks = all_check_bodies();
         for check in ["bench", "doc-build", "doc-test", "examples", "loom"] {
             let setup = format!("anvil-{check}-setup installer=\"install\": anvil-toolchain-stable-install");

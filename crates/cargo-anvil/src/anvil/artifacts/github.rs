@@ -165,9 +165,24 @@ mod tests {
     fn setup_action_takes_group_input_and_dispatches() {
         assert!(SETUP_ACTION.contains("group:"));
         assert!(SETUP_ACTION.contains("just anvil-setup binstall"));
-        assert!(SETUP_ACTION.contains("just _anvil-stable-rustc-version"));
         assert!(!SETUP_ACTION.contains("_anvil-resolve-stable"));
         assert!(!SETUP_ACTION.contains("just anvil-toolchain-stable-install"));
+        assert!(!SETUP_ACTION.contains("rustc-version"));
+        assert!(!SETUP_ACTION.contains("hashFiles('Cargo.toml'"));
+        assert!(!SETUP_ACTION.contains("'Cargo.lock'"));
+        assert!(SETUP_ACTION.contains("'rust-toolchain.toml'"));
+        let cache_restore = SETUP_ACTION
+            .find("name: Restore cargo cache")
+            .expect("setup must restore Cargo home");
+        let just_bootstrap = SETUP_ACTION.find("name: Install just").expect("setup must bootstrap Just");
+        let catalog_setup = SETUP_ACTION
+            .find("name: Install anvil toolchains + tools")
+            .expect("setup must dispatch catalog setup");
+        assert!(
+            cache_restore < just_bootstrap,
+            "Cargo home must be restored before Just is bootstrapped"
+        );
+        assert!(just_bootstrap < catalog_setup, "Just must be bootstrapped before catalog setup");
         assert!(SETUP_ACTION.contains("ANVIL_GROUP: ${{ inputs.group }}"));
         assert!(SETUP_ACTION.contains("just \"anvil-$ANVIL_GROUP-setup\" binstall"));
         assert!(SETUP_ACTION.contains(r"^[a-z0-9-]+$"));

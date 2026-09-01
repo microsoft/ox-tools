@@ -372,24 +372,6 @@ _anvil-resolve-stable action="install":
 [group("anvil-setup")]
 anvil-toolchain-stable-install: (_anvil-resolve-stable "install")
 
-# Report the selected stable rustc version for GitHub cache keys. Provisioning
-# is a dependency so workflow surfaces invoke one setup-aware operation rather
-# than orchestrating the resolver directly.
-[private]
-[script("pwsh", "-NoProfile")]
-_anvil-stable-rustc-version: anvil-toolchain-stable-install
-    $versionLine = (& rustc {{_anvil_stable_toolchain_args}} --version | Select-Object -Last 1)
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($versionLine)) {
-        Write-Error 'anvil: failed to read the selected stable rustc version'
-        exit 1
-    }
-    $parts = ([string] $versionLine).Split()
-    if ($parts.Count -lt 2) {
-        Write-Error "anvil: unexpected rustc version output: $versionLine"
-        exit 1
-    }
-    Write-Output $parts[1]
-
 # _install-tool-core: install a cargo subcommand at the catalog version,
 # or no-op if it is already installed at or above that version. The
 # `installer` parameter selects between:

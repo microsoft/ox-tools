@@ -2456,9 +2456,9 @@ steps:
 #   group: which anvil group to install setup for. Special values:
 #     - "" (default): install the full catalog via
 #       `just anvil-setup` -- use for "give me everything" flows.
-#     - "none": skip tool installation entirely; just bootstrap the
-#       rust cache + libclang + just. Used by impact.yml, which installs
-#       only cargo-delta afterwards.
+#     - "none": skip tool installation entirely; just restore the
+#       Cargo cache and bootstrap libclang + just. Used by impact.yml,
+#       which installs only cargo-delta afterwards.
 #     - anything else (e.g. "pr-fast"): install only that group's
 #       prerequisites via `just anvil-<group>-setup`.
 parameters:
@@ -2466,15 +2466,30 @@ parameters:
     type: string
     default: ''
 steps:
+  # Toolchain changes deliberately start a fresh Cargo-home cache. Besides
+  # bounding registry growth, this gives repositories a predictable cache
+  # reset point without coupling cache identity to routine manifest edits.
+  # Compute the digest explicitly because either supported toolchain file is
+  # optional and Cache@2 rejects missing file-path key segments.
+  - pwsh: |
+      $parts = @(
+        foreach ($name in @('rust-toolchain', 'rust-toolchain.toml')) {
+          if (Test-Path -LiteralPath $name -PathType Leaf) {
+            "$name=$((Get-FileHash -LiteralPath $name -Algorithm SHA256).Hash.ToLowerInvariant())"
+          }
+        }
+      )
+      $fingerprint = if ($parts.Count -eq 0) { 'none' } else { $parts -join '-' }
+      Write-Host "##vso[task.setvariable variable=anvil_toolchain_fingerprint]$fingerprint"
+    displayName: anvil setup (fingerprint repository toolchain)
+
   # Restore Cargo's registry and installed binaries before bootstrapping Just,
   # so warm ADO jobs do not compile Just again before reaching the cache.
   # Rustup toolchains are not stored under Cargo home, so the selected compiler
   # version does not affect this cache's contents.
   - task: Cache@2
     inputs:
-      key: 'anvil-v2 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | Cargo.toml | Cargo.lock | .cargo/config.toml | rust-toolchain | rust-toolchain.toml | justfiles/anvil/versions.just'
-      restoreKeys: |
-        anvil-v2 | "$(Agent.OS)" | "$(Agent.OSArchitecture)"
+      key: 'anvil-v3 | "$(Agent.OS)" | "$(Agent.OSArchitecture)" | "$(anvil_toolchain_fingerprint)" | .cargo/config.toml | justfiles/anvil/versions.just'
       path: |
         $(HOME)/.cargo/registry/cache/
         $(HOME)/.cargo/registry/index/
@@ -2488,13 +2503,6 @@ steps:
         cargo install --locked just
       fi
     displayName: anvil setup (install just)
-
-  - pwsh: |
-      & just anvil-toolchain-stable-install
-      if ($LASTEXITCODE -ne 0) {
-        throw 'anvil: failed to provision the selected stable toolchain'
-      }
-    displayName: anvil setup (provision stable toolchain)
 
   # Hand everything else off to the catalog recipe. Idempotent. ADO
   # uses the default `install` backend (source builds) because
@@ -6570,24 +6578,6 @@ _anvil-resolve-stable action="install":
 # within each setup invocation.
 [group("anvil-setup")]
 anvil-toolchain-stable-install: (_anvil-resolve-stable "install")
-
-# Report the selected stable rustc version for GitHub cache keys. Provisioning
-# is a dependency so workflow surfaces invoke one setup-aware operation rather
-# than orchestrating the resolver directly.
-[private]
-[script("pwsh", "-NoProfile")]
-_anvil-stable-rustc-version: anvil-toolchain-stable-install
-    $versionLine = (& rustc {{_anvil_stable_toolchain_args}} --version | Select-Object -Last 1)
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($versionLine)) {
-        Write-Error 'anvil: failed to read the selected stable rustc version'
-        exit 1
-    }
-    $parts = ([string] $versionLine).Split()
-    if ($parts.Count -lt 2) {
-        Write-Error "anvil: unexpected rustc version output: $versionLine"
-        exit 1
-    }
-    Write-Output $parts[1]
 
 # _install-tool-core: install a cargo subcommand at the catalog version,
 # or no-op if it is already installed at or above that version. The
