@@ -497,10 +497,9 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
     assert!(!run_log.with_extension("ordinary-bin.start").exists());
     assert!(!run_log.with_extension("excluded-test.start").exists());
 
-    assert_eq!(
-        fs::read_to_string(run_log.with_extension("alpha-test.cwd")).unwrap().trim(),
-        tmp.path().to_str().unwrap()
-    );
+    let recorded_cwd = fs::read_to_string(run_log.with_extension("alpha-test.cwd")).unwrap();
+    let expected_cwd = fs::canonicalize(tmp.path()).unwrap();
+    assert_eq!(fs::canonicalize(recorded_cwd.trim()).unwrap(), expected_cwd);
     assert_eq!(
         fs::read_to_string(run_log.with_extension("alpha-test.sysroot")).unwrap().trim(),
         tmp.path().join("fake-miri-sysroot").to_str().unwrap()
@@ -537,8 +536,8 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let alpha_group = stdout.find("test alpha (alpha-test)").unwrap();
-    let zeta_group = stdout.find("test zeta (zeta-test)").unwrap();
+    let alpha_group = stdout.find("=== Miri artifact fixture 0.1.0 :: test alpha").unwrap();
+    let zeta_group = stdout.find("=== Miri artifact fixture 0.1.0 :: test zeta").unwrap();
     assert!(alpha_group < zeta_group, "artifact logs must replay deterministically");
 }
 
