@@ -26,7 +26,8 @@
       "tool": "eslint",
       "ruleId": "@microsoft/sdl/no-inner-html",
       "createdDate": "2026-08-29 01:01:08Z",
-      "justification": "Vendored, minified third-party bundle (mutation-testing-elements v3.9.0) inlined via include_str! for offline mutation-report rendering; not first-party code and edited only by re-vendoring."
+      "expirationDate": "2026-11-27 00:00:00Z",
+      "justification": "Vendored, minified third-party bundle (mutation-testing-elements v3.9.0) inlined via include_str! for offline mutation-report rendering; not first-party code and edited only by re-vendoring. The M365 policy requires an expiration date for @microsoft/sdl/no-inner-html, so this baseline lapses on 2026-11-27 and must be renewed or replaced by an ESLint path exclusion before then."
     },
     "6c2296c115b4b8e065b919eac81644836d8995df35d788303693fc78d10b940d": {
       "signature": "6c2296c115b4b8e065b919eac81644836d8995df35d788303693fc78d10b940d",
@@ -43,7 +44,8 @@
       "tool": "eslint",
       "ruleId": "@microsoft/sdl/no-inner-html",
       "createdDate": "2026-08-29 01:01:08Z",
-      "justification": "Vendored, minified third-party bundle (mutation-testing-elements v3.9.0) inlined via include_str! for offline mutation-report rendering; not first-party code and edited only by re-vendoring."
+      "expirationDate": "2026-11-27 00:00:00Z",
+      "justification": "Vendored, minified third-party bundle (mutation-testing-elements v3.9.0) inlined via include_str! for offline mutation-report rendering; not first-party code and edited only by re-vendoring. The M365 policy requires an expiration date for @microsoft/sdl/no-inner-html, so this baseline lapses on 2026-11-27 and must be renewed or replaced by an ESLint path exclusion before then."
     },
     "c4f9dd267f73ed656e10bef2a86d91248af954f913c1c22b01fb09c9a52af6c8": {
       "signature": "c4f9dd267f73ed656e10bef2a86d91248af954f913c1c22b01fb09c9a52af6c8",
@@ -60,7 +62,8 @@
       "tool": "eslint",
       "ruleId": "@microsoft/sdl/no-inner-html",
       "createdDate": "2026-08-29 01:01:08Z",
-      "justification": "Vendored, minified third-party bundle (mutation-testing-elements v3.9.0) inlined via include_str! for offline mutation-report rendering; not first-party code and edited only by re-vendoring."
+      "expirationDate": "2026-11-27 00:00:00Z",
+      "justification": "Vendored, minified third-party bundle (mutation-testing-elements v3.9.0) inlined via include_str! for offline mutation-report rendering; not first-party code and edited only by re-vendoring. The M365 policy requires an expiration date for @microsoft/sdl/no-inner-html, so this baseline lapses on 2026-11-27 and must be renewed or replaced by an ESLint path exclusion before then."
     }
   }
 }
