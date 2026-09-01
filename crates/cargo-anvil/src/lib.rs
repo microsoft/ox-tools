@@ -411,6 +411,10 @@
 //! exclude = true
 //! ```
 //!
+//! Reserve this package-wide switch for constraints that apply to every test
+//! target. Prefer per-test ignores with reasons for narrower or temporary
+//! suppressions.
+//!
 //! ### Concurrency model checking (`loom`)
 //!
 //! The `loom` check runs only the test targets that opt in, detected

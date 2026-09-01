@@ -412,7 +412,8 @@ mod tests {
             "ForEach-Object -Parallel",
             "-ThrottleLimit $jobs",
             "rustc $toolchain --print sysroot",
-            "ANVIL_MIRI_JOBS must be a positive integer",
+            "anvil miri: ANVIL_MIRI_JOBS must be a positive integer",
+            "Sort-Object PackageId, TargetKind, TargetName, Path",
             "##[group]Miri artifact",
             "::group::Miri artifact",
         ] {

@@ -39,6 +39,10 @@ const CONTAINER_DOCKERIGNORE: &str = include_str!("../templates/anvil/container/
 // Any nonzero value works; naming it prevents tests from implying an external exit-code contract.
 const ARBITRARY_FAILURE_EXIT: &str = "23";
 
+// The Miri fixture mirrors the production protocol rather than executing Rust:
+// fake Cargo supplies workspace metadata and compiler-artifact JSON, fake rustc
+// identifies the pinned toolchain sysroot, and cargo-miri under that sysroot
+// records the environment and working directory restored by the direct runner.
 #[test]
 fn regeneration_check_runs_on_every_pull_request() {
     assert!(REGENERATE_WORKFLOW.contains("pull_request: {}"));
@@ -206,13 +210,31 @@ if ($args -contains 'miri') {
             $definitions = @($env:FAKE_MIRI_ARTIFACTS | ConvertFrom-Json)
         }
         foreach ($definition in $definitions) {
-            $path = [System.IO.Path]::Combine($artifactRoot, [string]$definition.name)
+            $artifactDirectory = if ($definition.artifact_dir) {
+                [System.IO.Path]::Combine($artifactRoot, [string]$definition.artifact_dir)
+            } else {
+                $artifactRoot
+            }
+            [System.IO.Directory]::CreateDirectory($artifactDirectory) | Out-Null
+            $path = [System.IO.Path]::Combine($artifactDirectory, [string]$definition.name)
             Set-Content -LiteralPath $path -Value '{}'
             [pscustomobject]@{
                 reason = 'compiler-artifact'
                 package_id = [string]$definition.package_id
                 executable = $path
                 profile = [pscustomobject]@{ test = [bool]$definition.test }
+                target = [pscustomobject]@{
+                    name = if ($definition.target_name) {
+                        [string]$definition.target_name
+                    } else {
+                        [string]$definition.name
+                    }
+                    kind = @(if ($definition.target_kind) {
+                        [string]$definition.target_kind
+                    } else {
+                        'test'
+                    })
+                }
             } | ConvertTo-Json -Depth 4 -Compress
             if ($definition.duplicate) {
                 [pscustomobject]@{
@@ -220,6 +242,18 @@ if ($args -contains 'miri') {
                     package_id = [string]$definition.package_id
                     executable = $path
                     profile = [pscustomobject]@{ test = [bool]$definition.test }
+                    target = [pscustomobject]@{
+                        name = if ($definition.target_name) {
+                            [string]$definition.target_name
+                        } else {
+                            [string]$definition.name
+                        }
+                        kind = @(if ($definition.target_kind) {
+                            [string]$definition.target_kind
+                        } else {
+                            'test'
+                        })
+                    }
                 } | ConvertTo-Json -Depth 4 -Compress
             }
         }
@@ -425,8 +459,8 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
     let cargo_log = tmp.path().join("cargo.log");
     let run_log = tmp.path().join("miri-run");
     let artifacts = r#"[
-        {"name":"zeta-test","package_id":"fixture 0.1.0","test":true},
-        {"name":"alpha-test","package_id":"fixture 0.1.0","test":true,"duplicate":true},
+        {"name":"zeta-test","package_id":"fixture 0.1.0","target_name":"zeta","target_kind":"test","test":true},
+        {"name":"alpha-test","package_id":"fixture 0.1.0","target_name":"alpha","target_kind":"test","test":true,"duplicate":true},
         {"name":"ordinary-bin","package_id":"fixture 0.1.0","test":false},
         {"name":"excluded-test","package_id":"other-package 0.1.0","test":true}
     ]"#;
@@ -503,9 +537,58 @@ fn miri_runner_filters_artifacts_and_runs_in_parallel() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let alpha_group = stdout.find("=== Miri artifact alpha-test ===").unwrap();
-    let zeta_group = stdout.find("=== Miri artifact zeta-test ===").unwrap();
+    let alpha_group = stdout.find("test alpha (alpha-test)").unwrap();
+    let zeta_group = stdout.find("test zeta (zeta-test)").unwrap();
     assert!(alpha_group < zeta_group, "artifact logs must replay deterministically");
+}
+
+#[test]
+fn miri_runner_labels_same_named_artifacts_with_package_identity() {
+    if !tools_available() {
+        return;
+    }
+    let tmp = fixture(
+        &[("miri.just", MIRI)],
+        &[
+            "anvil-component-nightly-miri-validate-prereqs",
+            "anvil-component-nightly-rust-src-validate-prereqs",
+            "anvil-component-nightly-miri-install",
+            "anvil-component-nightly-rust-src-install",
+            "anvil-impact",
+        ],
+    );
+    let other_package = tmp.path().join("nested/other-package");
+    fs::create_dir_all(&other_package).unwrap();
+    write(
+        &other_package.join("Cargo.toml"),
+        "[package]\nname = \"other-package\"\nversion = \"0.1.0\"\n",
+    );
+    let run_log = tmp.path().join("same-name");
+    let artifacts = r#"[
+        {"name":"shared-test","artifact_dir":"fixture","package_id":"fixture 0.1.0","target_name":"shared","target_kind":"test","test":true},
+        {"name":"shared-test","artifact_dir":"other","package_id":"other-package 0.1.0","target_name":"shared","target_kind":"test","test":true}
+    ]"#;
+    let output = run_just(
+        tmp.path(),
+        &["_anvil-miri-test", "--workspace"],
+        &[
+            ("FAKE_MIRI_ARTIFACTS", OsStr::new(artifacts)),
+            ("FAKE_MIRI_RUN_LOG", run_log.as_os_str()),
+            ("ANVIL_MIRI_JOBS", OsStr::new("1")),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("other-package")),
+            ("FAKE_SECOND_PACKAGE_DIR_LEAF", OsStr::new("other-package")),
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "same-named Miri artifacts should both run:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("Miri artifact fixture 0.1.0 :: test shared (shared-test)"));
+    assert!(stdout.contains("Miri artifact other-package 0.1.0 :: test shared (shared-test)"));
 }
 
 #[test]
@@ -534,14 +617,18 @@ _anvil-impact-include tier:
     );
     write(&justfile_path, &justfile);
     let run_log = tmp.path().join("miri-profile");
+    let cargo_log = tmp.path().join("miri-profile-cargo.log");
     let artifacts = r#"[{"name":"profile-test","package_id":"fixture 0.1.0","test":true}]"#;
     let output = run_just(
         tmp.path(),
         &["anvil-miri-tree-borrows"],
         &[
-            ("FAKE_INCLUDE", OsStr::new("--package fixture@0.1.0")),
+            ("FAKE_INCLUDE", OsStr::new("--package fixture@0.1.0 --package excluded@0.1.0")),
+            ("FAKE_CARGO_LOG", cargo_log.as_os_str()),
             ("FAKE_MIRI_ARTIFACTS", OsStr::new(artifacts)),
             ("FAKE_MIRI_RUN_LOG", run_log.as_os_str()),
+            ("FAKE_SECOND_PACKAGE_NAME", OsStr::new("excluded")),
+            ("FAKE_SECOND_MIRI_EXCLUDE", OsStr::new("1")),
         ],
     );
 
@@ -560,6 +647,19 @@ _anvil-impact-include tier:
         fs::read_to_string(run_log.with_extension("profile-test.rustflags"))
             .unwrap()
             .contains("--cfg miri_tree_borrows")
+    );
+    let cargo_calls = fs::read_to_string(cargo_log).unwrap();
+    let build_call = cargo_calls
+        .lines()
+        .find(|call| call.contains("miri test"))
+        .expect("the profile must compile its selected Miri targets");
+    assert!(
+        build_call.contains("--package fixture@0.1.0"),
+        "impact-selected included packages must be forwarded:\n{build_call}"
+    );
+    assert!(
+        !build_call.contains("excluded@0.1.0"),
+        "impact-selected opted-out packages must be filtered:\n{build_call}"
     );
 }
 
@@ -594,6 +694,22 @@ fn miri_runner_handles_no_work_and_aggregates_failures() {
     assert!(all_excluded.status.success());
     assert!(String::from_utf8_lossy(&all_excluded.stdout).contains("all selected packages are excluded"));
 
+    let workspace_cargo_log = tmp.path().join("all-excluded-workspace-cargo.log");
+    let all_workspace_excluded = run_just(
+        tmp.path(),
+        &["_anvil-miri-test", "--workspace"],
+        &[
+            ("FAKE_CARGO_LOG", workspace_cargo_log.as_os_str()),
+            ("FAKE_MIRI_EXCLUDE", OsStr::new("1")),
+        ],
+    );
+    assert!(all_workspace_excluded.status.success());
+    assert!(String::from_utf8_lossy(&all_workspace_excluded.stdout).contains("all selected packages are excluded"));
+    assert!(
+        !fs::read_to_string(workspace_cargo_log).unwrap().contains("miri test"),
+        "an all-excluded workspace must stop before asking Cargo to select no packages"
+    );
+
     let run_log = tmp.path().join("miri-failure");
     let artifacts = r#"[
         {"name":"fail-test","package_id":"fixture 0.1.0","test":true},
@@ -614,9 +730,9 @@ fn miri_runner_handles_no_work_and_aggregates_failures() {
     let stderr = String::from_utf8_lossy(&failed.stderr);
     assert!(stdout.contains("miri output: fail-test"));
     assert!(stdout.contains("miri output: pass-test"));
-    assert!(stdout.contains("##[group]Miri artifact fail-test"));
+    assert!(stdout.contains("##[group]Miri artifact fixture 0.1.0 :: test fail-test (fail-test)"));
     assert!(stdout.contains("##[endgroup]"));
-    assert!(stderr.contains("failed artifacts: fail-test"));
+    assert!(stderr.contains("failed artifacts: fixture 0.1.0 :: test fail-test (fail-test)"));
 
     let invalid_jobs = run_just(
         tmp.path(),
@@ -631,7 +747,7 @@ fn miri_runner_handles_no_work_and_aggregates_failures() {
         ],
     );
     assert_failed(&invalid_jobs, "invalid ANVIL_MIRI_JOBS");
-    assert!(String::from_utf8_lossy(&invalid_jobs.stderr).contains("must be a positive integer"));
+    assert!(String::from_utf8_lossy(&invalid_jobs.stderr).contains("anvil miri: ANVIL_MIRI_JOBS must be a positive integer"));
 
     let invalid_json = run_just(
         tmp.path(),

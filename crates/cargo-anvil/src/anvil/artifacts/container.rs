@@ -831,6 +831,7 @@ mod tests {
             "GITHUB_BASE_REF",
             "SYSTEM_PULLREQUEST_TARGETBRANCH",
             "ANVIL_IMPACT",
+            "ANVIL_MIRI_JOBS",
         ] {
             assert!(RECIPE.contains(name), "{name} must be forwarded");
         }
@@ -839,8 +840,8 @@ mod tests {
         // container that did not inherit it would recompute from a diff instead
         // of trusting the artifact the group downloaded.
         assert!(
-            RECIPE.contains("'ANVIL_IMPACT')) {"),
-            "ANVIL_IMPACT must be in the forwarded set, not merely mentioned"
+            RECIPE.contains("'ANVIL_IMPACT', 'ANVIL_MIRI_JOBS')) {"),
+            "ANVIL_IMPACT and ANVIL_MIRI_JOBS must be in the forwarded set, not merely mentioned"
         );
         // Nothing reads these; forwarding them only implied a contract that
         // does not exist. See justfile.rs, which asserts they stay removed.

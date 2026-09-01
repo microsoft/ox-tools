@@ -2878,8 +2878,8 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 
 # Compile all selected packages together, then run their Miri test artifacts in
 # parallel. The single Cargo invocation preserves workspace feature unification,
-# while artifact-level parallelism uses runner CPUs that `cargo miri test`
-# otherwise leaves idle.
+# while artifact-level parallelism uses host logical processors that
+# `cargo miri test` otherwise leaves idle.
 #
 # Packages can opt their own test targets out through:
 #
@@ -2890,7 +2890,7 @@ anvil-miri-tree-borrows-validate-prereqs: anvil-component-nightly-miri-validate-
 # translate the metadata to `--exclude`; impact-scoped runs remove matching
 # `--package name@version` pairs before compilation.
 #
-# ANVIL_MIRI_JOBS overrides the default of one process per logical processor.
+# ANVIL_MIRI_JOBS overrides the default of one artifact worker per logical processor.
 
 # Compile selected packages once and run their Miri test artifacts concurrently.
 [script("pwsh", "-NoProfile")]
@@ -2928,6 +2928,10 @@ _anvil-miri-test *package_args:
     }
 
     if ($packageArgs -contains '--workspace') {
+        if ($workspaceMembers.Count -gt 0 -and $excludedPackageIds.Count -eq $workspaceMembers.Count) {
+            Write-Host 'anvil miri: all selected packages are excluded; nothing to test'
+            exit 0
+        }
         foreach ($packageName in $excludedPackages) {
             $packageArgs += @('--exclude', $packageName)
         }
@@ -2987,9 +2991,20 @@ _anvil-miri-test *package_args:
                 Write-Error "anvil miri: package metadata not found for artifact package '$packageId'"
                 exit 1
             }
+            $targetName = [string]$message.target.name
+            $targetKinds = @($message.target.kind | ForEach-Object { [string]$_ })
+            if ([string]::IsNullOrWhiteSpace($targetName) -or $targetKinds.Count -eq 0) {
+                Write-Error "anvil miri: target metadata not found for artifact '$artifactPath'"
+                exit 1
+            }
+            $targetKind = $targetKinds -join '/'
+            $artifactFileName = Split-Path -Leaf $artifactPath
             $artifacts.Add([pscustomobject]@{
                 Path = $artifactPath
-                Name = Split-Path -Leaf $artifactPath
+                PackageId = $packageId
+                TargetName = $targetName
+                TargetKind = $targetKind
+                Label = "$packageId :: $targetKind $targetName ($artifactFileName)"
                 WorkingDirectory = $packageDirectories[$packageId]
             })
         }
@@ -3030,7 +3045,7 @@ _anvil-miri-test *package_args:
         $jobs = 0
         if ($env:ANVIL_MIRI_JOBS) {
             if (-not [int]::TryParse($env:ANVIL_MIRI_JOBS, [ref]$jobs) -or $jobs -lt 1) {
-                Write-Error "ANVIL_MIRI_JOBS must be a positive integer, got '$($env:ANVIL_MIRI_JOBS)'"
+                Write-Error "anvil miri: ANVIL_MIRI_JOBS must be a positive integer, got '$($env:ANVIL_MIRI_JOBS)'"
                 exit 1
             }
         } else {
@@ -3040,12 +3055,14 @@ _anvil-miri-test *package_args:
 
         Write-Host "anvil miri: running $($artifacts.Count) test artifacts with $jobs concurrent process(es)"
 
-        $orderedArtifacts = @($artifacts | Sort-Object Name, Path)
+        # Cargo normally runs each test executable from its owning package root.
+        # The direct cargo-miri invocation below restores that working directory.
+        $orderedArtifacts = @($artifacts | Sort-Object PackageId, TargetKind, TargetName, Path)
         $work = for ($i = 0; $i -lt $orderedArtifacts.Count; $i++) {
             [pscustomobject]@{
                 Index = $i
                 Artifact = $orderedArtifacts[$i].Path
-                Name = $orderedArtifacts[$i].Name
+                Label = $orderedArtifacts[$i].Label
                 WorkingDirectory = $orderedArtifacts[$i].WorkingDirectory
             }
         }
@@ -3054,7 +3071,7 @@ _anvil-miri-test *package_args:
                 $ErrorActionPreference = 'Stop'
                 $item = $_
                 $log = Join-Path $using:logRoot "$($item.Index).log"
-                Write-Host "anvil miri: starting $($item.Name)"
+                Write-Host "anvil miri: starting $($item.Label)"
                 Push-Location -LiteralPath $item.WorkingDirectory
                 try {
                     & $using:runner runner $item.Artifact *> $log
@@ -3065,23 +3082,25 @@ _anvil-miri-test *package_args:
                 } finally {
                     Pop-Location
                 }
-                Write-Host "anvil miri: completed $($item.Name) (exit $exitCode)"
+                Write-Host "anvil miri: completed $($item.Label) (exit $exitCode)"
                 [pscustomobject]@{
                     Index = $item.Index
-                    Name = $item.Name
+                    Label = $item.Label
                     ExitCode = $exitCode
                     Log = $log
                 }
             } -ThrottleLimit $jobs
         )
 
+        # Parallel workers buffer into separate logs. Replaying those logs by
+        # stable artifact index keeps diagnostics isolated and deterministic.
         foreach ($result in $results | Sort-Object Index) {
             if ($env:GITHUB_ACTIONS -eq 'true') {
-                Write-Host "::group::Miri artifact $($result.Name)"
+                Write-Host "::group::Miri artifact $($result.Label)"
             } elseif ($env:TF_BUILD -eq 'True') {
-                Write-Host "##[group]Miri artifact $($result.Name)"
+                Write-Host "##[group]Miri artifact $($result.Label)"
             } else {
-                Write-Host "`n=== Miri artifact $($result.Name) ==="
+                Write-Host "`n=== Miri artifact $($result.Label) ==="
             }
             Get-Content -LiteralPath $result.Log | ForEach-Object { Write-Host $_ }
             if ($env:GITHUB_ACTIONS -eq 'true') {
@@ -3093,7 +3112,7 @@ _anvil-miri-test *package_args:
 
         $failed = @($results | Where-Object ExitCode -ne 0)
         if ($failed.Count -ne 0) {
-            [Console]::Error.WriteLine("anvil miri: failed artifacts: $($failed.Name -join ', ')")
+            [Console]::Error.WriteLine("anvil miri: failed artifacts: $($failed.Label -join ', ')")
             exit 1
         }
     } finally {
@@ -4867,9 +4886,10 @@ anvil-container *command:
 
     # The recipe contract's own inputs. These are read by generated checks --
     # `anvil-pr-title` reads PR_TITLE, `_anvil-base-ref` reads BASE_REF and its
-    # CI equivalents, and `anvil-impact` reads ANVIL_IMPACT to decide whether to
-    # compute scoping, consume a downloaded cache, or skip -- so dropping them at
-    # the boundary makes the same command mean different things inside and out.
+    # CI equivalents, `anvil-impact` reads ANVIL_IMPACT to decide whether to
+    # compute scoping, consume a downloaded cache, or skip, and the Miri runner
+    # reads ANVIL_MIRI_JOBS to cap artifact workers -- so dropping them at the
+    # boundary makes the same command mean different things inside and out.
     # anvil-pr-title is the sharp case: with PR_TITLE unset it exits 0 with a
     # skip notice, so a title a native run rejects passes in a container and the
     # tier still reports green. ANVIL_IMPACT is the other: a CI group job exports
@@ -4882,7 +4902,7 @@ anvil-container *command:
     foreach ($name in @(
         'PR_TITLE',
         'BASE_REF', 'GITHUB_BASE_REF', 'SYSTEM_PULLREQUEST_TARGETBRANCH',
-        'ANVIL_IMPACT')) {
+        'ANVIL_IMPACT', 'ANVIL_MIRI_JOBS')) {
         if ((Test-Path -LiteralPath "Env:$name") -and -not [string]::IsNullOrEmpty((Get-Item -LiteralPath "Env:$name").Value)) {
             $forwardedEnv += $name
             $runArgs += @('-e', $name)

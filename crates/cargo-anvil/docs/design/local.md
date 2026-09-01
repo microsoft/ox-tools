@@ -630,27 +630,7 @@ moves, and the working-tree snapshot only when the tree changes; an unchanged re
 a full cache hit (`anvil-impact: impact set up to date`). To force a recompute, delete
 `target/anvil/impact/`.
 
-### 4.4 Miri artifact concurrency
-
-Miri compiles the selected package scope once, then executes its independent
-libtest artifacts concurrently. `ANVIL_MIRI_JOBS` overrides the default of one
-worker per logical processor and must be a positive integer. The worker count is
-always clamped to the number of discovered artifacts. Use the override when a
-runner needs a lower memory footprint.
-
-Packages whose own test targets are unsuitable or unproductive under Miri can
-declare:
-
-```toml
-[package.metadata.anvil.miri]
-exclude = true
-```
-
-The package can still be compiled as a dependency of another selected package.
-Prefer per-test `cfg_attr(miri, ignore = "...")` or the profile-specific cfgs
-when only individual tests need suppression.
-
-### 4.5 Uncommitted changes widen to the full workspace
+### 4.4 Uncommitted changes widen to the full workspace
 
 cargo-delta scopes on the **committed** diff of `HEAD` against the base ref, so an
 uncommitted change — a crate you are actively editing but have not committed — is invisible
@@ -665,7 +645,7 @@ so CI always gets the scoped, committed-diff result. It is deliberately conserva
 fast — a dirty tree runs everything. Commit to scope by impact, or use `ANVIL_IMPACT=off`
 (which also runs the full workspace, and additionally skips cargo-delta entirely).
 
-### 4.6 Base-ref resolution and failure modes
+### 4.5 Base-ref resolution and failure modes
 
 `anvil-impact` resolves the base ref through `_anvil-base-ref` and computes the committed
 diff of `HEAD` against it. It deliberately **does not** run `git fetch`: mutating git state
@@ -692,7 +672,31 @@ baseline — so an environment without the base ref must either provide it, run 
 `ANVIL_IMPACT=off`, or (in CI) download the cache and set `ANVIL_IMPACT=consume`.
 
 
-## 5. Daily driver
+## 5. Miri execution customization
+
+Miri compiles the selected package scope once, then executes each compiled Miri
+test executable concurrently. `ANVIL_MIRI_JOBS` overrides the default of one
+artifact worker per logical processor and must be a positive integer. The worker
+count is always clamped to the number of discovered executables. Use the override
+when a runner needs a lower memory footprint; containerized runs forward the
+setting unchanged.
+
+Packages whose own test targets are inherently unsuitable or unproductive under
+Miri can declare:
+
+```toml
+[package.metadata.anvil.miri]
+exclude = true
+```
+
+This Boolean disables every Miri test target owned by the package, in both
+impact-scoped and full-workspace runs, although the package can still compile as
+a dependency of another selected package. Because the metadata has no place to
+record a reason, reserve it for package-wide constraints. Prefer per-test
+`cfg_attr(miri, ignore = "<reason>")` or the profile-specific cfgs when a narrower
+or temporary suppression can keep its rationale beside the affected test.
+
+## 6. Daily driver
 
 ```text
 $ just anvil
@@ -706,7 +710,7 @@ anvil OK
 (`anvil-pr`, `anvil-scheduled`, `anvil-full`) are first-class -- locally reproducible with
 exactly the same arguments cloud workflows uses, because cloud workflows invokes the same `just` recipes.
 
-## 6. No-tooling fallback
+## 7. No-tooling fallback
 
 A user with only `cargo` (no `just`, no `cargo-anvil`) can still run the basics:
 
@@ -721,7 +725,7 @@ The same commands appear as the body of the corresponding `just` recipes under
 covers core hygiene only — coverage, miri, mutants, etc. still require their respective
 tools.
 
-## 7. Customization at the recipe level
+## 8. Customization at the recipe level
 
 Per the four customization tiers in [README.md §7](./README.md#7-customization):
 
