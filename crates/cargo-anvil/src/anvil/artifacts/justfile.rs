@@ -1360,6 +1360,29 @@ mod tests {
                     && diagnostic.contains("ensure it is on PATH"),
                 "unexpected missing-rustup diagnostic: {diagnostic}"
             );
+
+            let output = command_for_operation(temp.path(), ResolverOperation::InstallIfMissing)
+                .env("RUSTUP_TOOLCHAIN", "selected-stable")
+                .env("PATH", path_without_rustup())
+                .output()
+                .expect("environment-selected setup must diagnose missing rustup");
+            assert!(!output.status.success(), "environment selection without rustup must fail");
+            assert!(
+                normalized_diagnostic(&output).contains("rustup not found"),
+                "environment selection must require rustup"
+            );
+
+            fs::write(temp.path().join("rust-toolchain.toml"), "[toolchain]\nchannel = \"1.93\"\n")
+                .expect("toolchain fixture must be writable");
+            let output = command_for_operation(temp.path(), ResolverOperation::InstallIfMissing)
+                .env("PATH", path_without_rustup())
+                .output()
+                .expect("file-selected setup must diagnose missing rustup");
+            assert!(!output.status.success(), "toolchain-file selection without rustup must fail");
+            assert!(
+                normalized_diagnostic(&output).contains("rustup not found"),
+                "toolchain-file selection must require rustup"
+            );
         }
 
         #[test]

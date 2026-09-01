@@ -336,7 +336,10 @@ _anvil-resolve-stable action="install":
     if ($action -eq 'validate-workspace-msrv') {
         Assert-CompleteInternalToolchainConfiguration
         $skipWorkspaceMsrvValidation = -not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)
-        if (-not $skipWorkspaceMsrvValidation -and -not (Test-RootToolchainFile)) {
+        $hasRootToolchainFile = Test-RootToolchainFile
+        if ($skipWorkspaceMsrvValidation -or $hasRootToolchainFile) {
+            Get-InstalledToolchains | Out-Null
+        } else {
             Assert-WorkspaceMsrvCompatibility
         }
         exit 0
@@ -364,6 +367,7 @@ _anvil-resolve-stable action="install":
 
     Assert-CompleteInternalToolchainConfiguration
     if (-not [string]::IsNullOrWhiteSpace($env:RUSTUP_TOOLCHAIN)) {
+        Get-InstalledToolchains | Out-Null
         & cargo --version *> $null
         if ($LASTEXITCODE -ne 0) {
             throw "anvil: selected stable toolchain '$($env:RUSTUP_TOOLCHAIN)' is unavailable; provision RUSTUP_TOOLCHAIN or unset it"
@@ -372,6 +376,7 @@ _anvil-resolve-stable action="install":
     }
 
     if (Test-RootToolchainFile) {
+        Get-InstalledToolchains | Out-Null
         Push-Location -LiteralPath $repoRoot
         try {
             & rustc --version
