@@ -12,7 +12,7 @@ user-visible shape of the tool. Detail lives in companion documents:
 - [updates.md](./updates.md) — the drift-detection and update algorithm; opt-out semantics.
 - [extensibility.md](./extensibility.md) — how downstream tools ship their own brand + catalog.
 - [github.md](./github.md) — GitHub Actions emission, example workflows, impact wiring.
-- [ado.md](./ado.md) — Azure DevOps Pipelines emission, 1ESPT/msrustup composition.
+- [ado.md](./ado.md) — Azure DevOps Pipelines emission and compliance-template composition.
 - [containers.md](./containers.md) — containerized execution: the explicit `anvil-container`
   recipe, the content-addressed image, and the credential hook.
 - [../implementation.md](../implementation.md) — internal implementation guidance.
@@ -27,12 +27,12 @@ implemented six different ways:
 
 | Repo | cloud workflows | Justfile shape | Toolchain | Notable specifics |
 |------|----|----------------|-----------|-------------------|
-| `oxidizer`         | ADO 1ESPT (`SubstratePT`) | 500-line monolith + `just_mutants.just` | `ms-prod-1.93` | Stage flags (`enableStages`), `cargo-aprz`, stable-API checks |
+| `oxidizer`         | ADO 1ESPT (`SubstratePT`) | 500-line monolith + `just_mutants.just` | caller-provisioned | Stage flags (`enableStages`), `cargo-aprz`, stable-API checks |
 | `oxidizer-github`  | GitHub Actions            | Modular `justfiles/{basic,coverage,format,setup,spelling}.just` + `constants.env` | `1.93` | `cargo-delta` impact-scoped builds, sticky semver comments, composite `setup` action |
-| `ox-tools`         | ADO (CloudBuild + classic) | none in worktree                       | `ms-prod-1.92` | NuGet/MSBuild scaffolding, internal templates |
+| `ox-tools`         | ADO (CloudBuild + classic) | none in worktree                       | caller-provisioned | NuGet/MSBuild scaffolding, internal templates |
 | `ox-tools-gh`      | GitHub Actions            | Same modular shape as `oxidizer-github` | `1.93` | Mirror surface to OSS oxidizer |
-| `assistants-oxide` | ADO 1ESPT (custom `rust/`) | Monolith + `.just/tds.just`            | `ms-prod-1.93` | Symcrypt setup steps, NuGet publish stage |
-| `ox-docs`          | ADO classic               | Monolith                                | `ms-prod-1.88` | Mixed C#/.NET + Rust, mdbook/docfx |
+| `assistants-oxide` | ADO 1ESPT (custom `rust/`) | Monolith + `.just/tds.just`            | caller-provisioned | Symcrypt setup steps, NuGet publish stage |
+| `ox-docs`          | ADO classic               | Monolith                                | caller-provisioned | Mixed C#/.NET + Rust, mdbook/docfx |
 
 The same logical checks (clippy, fmt, deny, miri, mutants, coverage, hack feature-powerset, udeps,
 semver, spellcheck, license headers, doc/doctest, careful, audit, ensure-no-cyclic-deps,
@@ -58,11 +58,15 @@ missed, and onboarding new Rust repos requires copying-and-praying.
    full tier are all reproducible locally with a single `just` invocation, using the exact same
    arguments cloud workflows uses. The three commands `just anvil-pr`, `just anvil-scheduled`, and
    `just anvil-full` (= pr + scheduled) are first-class local entry points.
-6. **Plain-cargo fallback**: a developer with only `cargo` installed (no `just`, no
+6. **Deterministic ordinary-check compiler selection**: use the caller's
+   `RUSTUP_TOOLCHAIN`, otherwise defer to either root toolchain-file spelling,
+   otherwise use the root manifest MSRV explicitly. Never inherit a
+   runner-default compiler when none of those sources exists.
+7. **Plain-cargo fallback**: a developer with only `cargo` installed (no `just`, no
    `cargo-anvil`) can still build and run tests.
-7. **Friendly updates**: the tool detects, per file and per managed region, whether the user has
+8. **Friendly updates**: the tool detects, per file and per managed region, whether the user has
    modified it, and updates only the unmodified bits.
-8. **Open source**: the crate ships from `github.com/microsoft/ox-tools` and publishes to
+9. **Open source**: the crate ships from `github.com/microsoft/ox-tools` and publishes to
    crates.io. The binary contains no Microsoft-internal dependencies; everything it can install
    on the user's behalf comes from crates.io.
 
@@ -72,12 +76,15 @@ missed, and onboarding new Rust repos requires copying-and-praying.
   emitted templates contain no references to those harnesses; users wrap anvil's stages
   template in their compliance-extending pipeline themselves. See [ado.md](./ado.md).
 - Building a general-purpose cloud workflows compiler/IR. We share **check semantics**, not cloud workflows features.
-- Owning `.cargo/config.toml`, `rust-toolchain.toml`, or workspace layout in `Cargo.toml`.
-- Installing the Rust toolchain. msrustup owns it on 1ESPT; the runner image owns it on
-  GitHub-hosted runners; the user owns it locally. The tool validates `rustc` version at
-  recipe time and produces a clean failure when it doesn't meet the catalog minimum.
-  Future work: warn (not fail) when the locally-installed toolchain drifts materially
-  from the version the catalog targets, so local results stay predictive of cloud workflows.
+- Owning `.cargo/config.toml`, `rust-toolchain`, `rust-toolchain.toml`, or workspace layout in
+  `Cargo.toml`.
+- Owning how private or path toolchains are provisioned. Anvil deterministically selects an
+  existing override, a repository toolchain file, or the repository MSRV. GitHub setup and
+  container construction install a missing public channel through rustup; caller-provisioned
+  and path toolchains remain the execution environment's responsibility.
+- Provisioning a separate compiler for Cargo-installed tools or stable analyzers. They use the
+  same repository-selected compiler as ordinary checks; nightly-only checks retain their
+  catalog pins.
 - Managing exact tool versions on the user's behalf — we enforce minimums only. See
   [local.md §3](./local.md#3-tool-versions-and-installation).
 - Hosting a service. The tool is a CLI binary; updates ship via crates.io.
@@ -244,7 +251,7 @@ repo/
 ├── rustfmt.toml                                   managed-region: anvil-rustfmt (opt out with empty stub)
 ├── .delta.toml                                    managed-region: anvil-delta (points to owned cloud config)
 ├── .gitattributes                                 managed-region: anvil-gitattributes (pins *.rs to LF)
-├── rust-toolchain.toml                            user-authored (read only)
+├── rust-toolchain[.toml]                          optional, user-authored (read only)
 ├── .cargo/config.toml                             user-authored (read only)
 │
 ├── .github/                                       only if --backend github (or autodetected) — see github.md
@@ -305,11 +312,13 @@ Detail on each host:
 - **`.gitattributes`** — managed region pinning `*.rs text eol=lf` so Rust sources keep LF
   line endings on every platform (rustfmt and other tools assume LF). Created if absent;
   users add their own attribute rules outside the region.
-- **`rust-toolchain.toml`** and **`.cargo/config.toml`** — never touched. Read-only inputs
-  used by `anvil-tool-rustc-validate-prereqs` to validate the user's `rustc` version
-  against the catalog minimum. the cloud workflow building blocks do not install Rust; that is the
-  user's pipeline's job
-  (msrustup in 1ESPT, rustup on GH runners).
+- **`rust-toolchain`**, **`rust-toolchain.toml`**, and **`.cargo/config.toml`** — never
+  touched. Toolchain files are optional read-only inputs to stable-toolchain selection.
+  When neither root spelling exists, Anvil selects the root manifest's
+  `[workspace.package].rust-version` or `[package].rust-version`. GitHub setup installs a
+  missing public selection through rustup. ADO callers provide their Rust bootstrap before
+  Anvil runs. The caller's `RUSTUP_TOOLCHAIN` is an input override only and is inherited by
+  child commands rather than rewritten or exported by Anvil.
 
 The tool's persistent state lives in `.anvil.lock` at the repo root — the sidecar
 manifest tracking last-rendered checksums per owned file and per managed region. See
@@ -400,7 +409,7 @@ pipeline.
 | Group                                                       | OS / arch scope (default)              | Rationale                                                                                                                                          |
 |-------------------------------------------------------------|----------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
 | `pr-fast`, `scheduled-advisories`                             | All legs above                         | Contain compile-sensitive checks (clippy, doc-build, udeps, semver-check, external-types) that only see the host's compiled crate graph -- cfg-gated code is invisible to a single-leg run. Text/metadata checks running redundantly is cheaper than splitting jobs. |
-| `pr-test`, `pr-runtime-analysis`, `scheduled-test`                     | All legs above                         | Where compile-time and runtime OS / arch bugs actually surface. The three `pr-slow*` groups run as parallel cloud-workflow jobs (split out from a former single `pr-slow`) for shorter wall-clock per leg. |
+| `pr-test`, `pr-msrv`, `pr-runtime-analysis`, `scheduled-test`          | All legs above                         | Where compile-time and runtime OS / arch bugs actually surface. `pr-msrv` runs the affected test suite under the minimum supported compiler. The slow PR groups run as parallel cloud-workflow jobs for shorter wall-clock per leg. |
 | `pr-mutants`                                                    | GH: Linux x86_64 + Windows x86_64 + Linux aarch64 (windows-arm self-skips). ADO: Linux x86_64 + Windows x86_64 | Diff-scoped mutation testing. cargo-mutants doesn't build on `aarch64-pc-windows-msvc`; the recipe self-skips so the windows-arm leg is a no-op. |
 | `scheduled-exhaustive`                                       | Linux x86_64 + Windows x86_64 | Full `cargo-mutants` / `cargo-hack` / `bench`. cargo-mutants doesn't build on `aarch64-pc-windows-msvc`; rather than splitting the matrix to add an ARM-Linux leg for cargo-hack and bench, the whole group is x86-only. Adopters with ARM-specific concerns extend the matrix in their root workflow. |
 

@@ -53,6 +53,10 @@ Both are addressed by executing the recipe unchanged inside an image built from 
 bodies are identical in either mode, and cloud workflows are unaffected: they run the same recipes natively on their
 own agents. The image is pinned to resemble that environment, not to reproduce it.
 
+Image construction has a deliberately stricter compiler contract than native execution: the repository must own
+`rust-toolchain.toml`. The build context admits that file but not `rust-toolchain`, and the build does not inherit the
+host's `RUSTUP_TOOLCHAIN`; rustup therefore selects the image compiler from the repository-owned TOML file.
+
 ## 2. Command surface
 
 `anvil-container` takes the argv to run inside the image; nothing is routed there automatically, so everything
@@ -74,7 +78,7 @@ through the environment instead.
 | `just anvil-container-status` | Print the engine, working directory, image reference, and whether it is present. Never builds or pulls. |
 | `just anvil-container-down` | Remove this repository's cache volumes. The image is retained. |
 
-All four are annotated `[group("anvil-container")]` and appear as one cluster in `just --groups`. Each repeats a
+These recipes are annotated `[group("anvil-container")]` and appear as one cluster in `just --groups`. Each repeats a
 one-line summary immediately above its attributes, because `just --list` takes the last comment line before them as the
 description and would otherwise print the tail of a rationale paragraph as a fragment.
 
@@ -604,7 +608,7 @@ belongs everywhere is still better made in a catalog, where every consumer gets 
 
 Replacing a *region* rather than the whole file is what makes a downstream catalog cheap to keep current:
 `dockerfile_setup()` and `dockerfile_entry()` are the contract with the driver and are inherited, so an Azure Linux or
-msrustup catalog rewrites the base and tool layers and nothing else. Replacing `dockerfile_setup()` reintroduces the
+private-environment catalog rewrites the base and tool layers and nothing else. Replacing `dockerfile_setup()` reintroduces the
 second tool list the design exists to avoid, and is almost never right.
 
 **A replacement must keep the ignore file in step.** A region that `COPY`s anything outside `justfiles/anvil/`,

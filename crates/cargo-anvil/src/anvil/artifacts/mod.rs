@@ -42,7 +42,7 @@ use crate::catalog::{Artifact, ComposedHost};
 #[must_use]
 pub(crate) fn impact_mode(group: &str) -> &'static str {
     match group {
-        "pr-fast" | "pr-test" | "pr-runtime-analysis" | "pr-mutants" => "consume",
+        "pr-fast" | "pr-test" | "pr-msrv" | "pr-runtime-analysis" | "pr-mutants" => "consume",
         "scheduled-test" | "scheduled-advisories" | "scheduled-runtime-analysis" | "scheduled-exhaustive" => "off",
         other => {
             panic!("impact_mode: unclassified group '{other}'; add it to the pr/scheduled arms in artifacts::impact_mode")
@@ -139,6 +139,7 @@ mod tests {
     #[test]
     fn impact_mode_classifies_pr_and_scheduled_groups() {
         assert_eq!(impact_mode("pr-fast"), "consume");
+        assert_eq!(impact_mode("pr-msrv"), "consume");
         assert_eq!(impact_mode("pr-mutants"), "consume");
         assert_eq!(impact_mode("scheduled-test"), "off");
         assert_eq!(impact_mode("scheduled-exhaustive"), "off");

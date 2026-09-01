@@ -49,6 +49,7 @@ const SCHEDULED_ROOT_PIPELINE: &str = include_str!("../../../templates/ado/sched
 const GROUPS: &[&str] = &[
     "pr-fast",
     "pr-test",
+    "pr-msrv",
     "pr-runtime-analysis",
     "pr-mutants",
     "scheduled-test",
@@ -61,22 +62,36 @@ const GROUPS: &[&str] = &[
 /// the group name at emit time.
 const GROUP_STEP_TEMPLATE: &str = include_str!("../../../templates/ado/steps/group.yml");
 
+/// Optional ADO title lookup inserted only into the `pr-fast` group.
+const PR_TITLE_STEP_TEMPLATE: &str = include_str!("../../../templates/ado/steps/pr-title-step.yml");
+
+/// Optional `PR_TITLE` environment entry inserted only into `pr-fast`.
+const PR_TITLE_ENV_TEMPLATE: &str = include_str!("../../../templates/ado/steps/pr-title-env.yml");
+
 /// Placeholder token the per-group template uses for the group name.
 const GROUP_PLACEHOLDER: &str = "__GROUP__";
 
 /// Placeholder token the per-group template uses for the impact-mode selection.
 const IMPACT_MODE_PLACEHOLDER: &str = "__IMPACT_MODE__";
 
+/// Placeholder token for the optional PR-title lookup step.
+const PR_TITLE_STEP_PLACEHOLDER: &str = "__PR_TITLE_STEP__";
+
+/// Placeholder token for the optional `PR_TITLE` environment entry.
+const PR_TITLE_ENV_PLACEHOLDER: &str = "__PR_TITLE_ENV__";
+
 /// Render the step template for one group.
 #[must_use]
 fn render_group_step(group: &str) -> String {
-    // Substitute the group name first, then replace the single impact-mode
-    // token in place -- reusing the already-allocated buffer instead of
-    // allocating a second full-template String for the second substitution.
     let mut rendered = GROUP_STEP_TEMPLATE.replace(GROUP_PLACEHOLDER, group);
-    if let Some(pos) = rendered.find(IMPACT_MODE_PLACEHOLDER) {
-        rendered.replace_range(pos..pos + IMPACT_MODE_PLACEHOLDER.len(), impact_mode(group));
-    }
+    rendered = rendered.replace(IMPACT_MODE_PLACEHOLDER, impact_mode(group));
+    let (title_step, title_env) = if group == "pr-fast" {
+        (PR_TITLE_STEP_TEMPLATE.trim_end(), PR_TITLE_ENV_TEMPLATE.trim_end())
+    } else {
+        ("", "")
+    };
+    rendered = rendered.replace(PR_TITLE_STEP_PLACEHOLDER, title_step);
+    rendered = rendered.replace(PR_TITLE_ENV_PLACEHOLDER, title_env);
     rendered
 }
 
@@ -166,6 +181,7 @@ pub fn scheduled_root_pipeline() -> Artifact {
 pub(crate) const GROUP_STEPS: &[(&str, &str)] = &[
     ("pr-fast", ".pipelines/anvil/steps/pr-fast.yml"),
     ("pr-test", ".pipelines/anvil/steps/pr-test.yml"),
+    ("pr-msrv", ".pipelines/anvil/steps/pr-msrv.yml"),
     ("pr-runtime-analysis", ".pipelines/anvil/steps/pr-runtime-analysis.yml"),
     ("pr-mutants", ".pipelines/anvil/steps/pr-mutants.yml"),
     ("scheduled-test", ".pipelines/anvil/steps/scheduled-test.yml"),
@@ -212,8 +228,29 @@ mod tests {
     fn setup_step_takes_group_parameter_and_dispatches() {
         assert!(SETUP_STEP.contains("name: group"));
         assert!(SETUP_STEP.contains("just anvil-setup"));
+        assert!(!SETUP_STEP.contains("just anvil-toolchain-stable-install"));
+        assert!(!SETUP_STEP.contains("_anvil-resolve-stable"));
         assert!(SETUP_STEP.contains("just anvil-${{ parameters.group }}-setup"));
         assert!(SETUP_STEP.contains("eq(parameters.group, 'none')"));
+        assert!(SETUP_STEP.contains("anvil_toolchain_fingerprint"));
+        assert!(!SETUP_STEP.contains("Cargo.toml | Cargo.lock"));
+        assert!(SETUP_STEP.contains("'rust-toolchain.toml'"));
+        assert!(!SETUP_STEP.contains("restoreKeys:"));
+        let fingerprint = SETUP_STEP
+            .find("anvil setup (fingerprint repository toolchain)")
+            .expect("setup must fingerprint optional repository toolchain files");
+        let cache_restore = SETUP_STEP
+            .find("anvil setup (cache cargo home)")
+            .expect("setup must restore Cargo home");
+        let just_bootstrap = SETUP_STEP.find("anvil setup (install just)").expect("setup must bootstrap Just");
+        assert!(
+            fingerprint < cache_restore,
+            "optional toolchain files must be fingerprinted before cache restore"
+        );
+        assert!(
+            cache_restore < just_bootstrap,
+            "Cargo home must be restored before Just is bootstrapped"
+        );
     }
 
     #[test]
@@ -281,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn render_group_step_shares_impact_via_cache_not_env() {
+    fn render_pr_fast_group_shares_impact_and_resolves_title() {
         let body = render_group_step("pr-fast");
         assert!(body.contains("just anvil-pr-fast"));
         // The impact set is shared as a downloaded artifact, so the group step
@@ -302,11 +339,20 @@ mod tests {
             !body.contains("[ -f target/anvil/impact/impact.state ]"),
             "PR group must not gate its mode on a runtime marker-file probe"
         );
-        // PR_TITLE is resolved from the REST API (ADO has no PR-title
-        // predefined variable) and threaded via the PR_TITLE pipeline var.
+        // Only pr-fast needs the PR title, which ADO does not expose as a
+        // predefined variable.
         assert!(body.contains("PR_TITLE: $(PR_TITLE)"));
         assert!(body.contains("setvariable variable=PR_TITLE"));
+        assert!(body.contains("Invoke-RestMethod"));
         assert!(!body.contains("PR_TITLE: $(System.PullRequest.Title)"));
+    }
+
+    #[test]
+    fn render_pr_msrv_group_has_no_title_api_or_token_dependency() {
+        let body = render_group_step("pr-msrv");
+        for needle in ["PR_TITLE", "Invoke-RestMethod", "SYSTEM_ACCESSTOKEN", "System.AccessToken"] {
+            assert!(!body.contains(needle), "pr-msrv must not contain '{needle}'");
+        }
     }
 
     #[test]
@@ -381,8 +427,8 @@ mod tests {
         // Every pr-* stage depends on the single impact stage.
         assert_eq!(
             PR_STAGES.matches("dependsOn: [impact]").count(),
-            4,
-            "each of the four pr-* stages must depend on the single impact stage"
+            5,
+            "each of the five pr-* stages must depend on the single impact stage"
         );
     }
 

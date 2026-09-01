@@ -49,6 +49,7 @@
 [script("pwsh", "-NoProfile")]
 anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     $ErrorActionPreference = 'Stop'
+    $stableArgs = {{_anvil_stable_toolchain_args}}
     $include = (& "{{ just_executable() }}" _anvil-impact-include affected)
     $commentFile = 'target/anvil/comments/semver.md'
     if ($include -eq '--skip') {
@@ -68,7 +69,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
     # null, `publish = false` as an empty array, and named-registry restrictions
     # as a nonempty array. Only the empty array is non-publishable.
     $libPkgs = @{}
-    $metadataJson = & cargo metadata --no-deps --format-version 1
+    $metadataJson = & cargo @stableArgs metadata --no-deps --format-version 1
     if ($LASTEXITCODE -ne 0) {
         Write-Error 'anvil-semver-check: cargo metadata failed'
         exit $LASTEXITCODE
@@ -146,7 +147,7 @@ anvil-semver-check: anvil-semver-check-validate-prereqs anvil-impact
         }
 
         Write-Host "anvil-semver-check: $p (baseline $base)"
-        $outputLines = @(& cargo semver-checks --package $p --baseline-rev $base 2>&1)
+        $outputLines = @(& cargo @stableArgs semver-checks --package $p --baseline-rev $base 2>&1)
         $semverExit = $LASTEXITCODE
         $output = ($outputLines | Out-String)
         if ($semverExit -eq 100) {
