@@ -846,8 +846,8 @@ jobs:
       # only so the matrix doesn't race on the same comment, and we use
       # `always()` so the comment is updated even when an unrelated
       # check in pr-fast failed. The `head.repo.full_name ==
-      # github.repository` guard skips fork PRs (which can't be granted
-      # write tokens).
+      # github.repository` guard skips fork PRs even when an administrator
+      # has opted into sending write tokens to fork workflows.
       - name: Upsert anvil-semver advisory
         if: always() && github.event_name == 'pull_request' && matrix.os == 'linux' && github.event.pull_request.head.repo.full_name == github.repository && hashFiles('target/anvil/comments/semver.md') != ''
         uses: marocchino/sticky-pull-request-comment@v3.0.5 # immutable release, the tag cannot be moved

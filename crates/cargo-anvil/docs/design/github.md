@@ -697,9 +697,10 @@ invoked directly from an unsupported event.
 The reusable workflow input defaults to `false`. The generated pull-request
 caller opts in and grants `statuses: write`; a customized root that has not
 accepted the permission continues without supplemental statuses. Publication
-is guarded to same-repository `pull_request` events. Fork PR tokens are
-read-only, so forks retain the annotation and dynamically named step but skip
-the status call.
+is guarded to same-repository `pull_request` events. GitHub makes fork-PR
+tokens read-only by default, but administrators can opt into sending write
+tokens; the repository-origin guard skips the status call in either case.
+Forks retain the annotation and dynamically named step.
 
 Merge-group runs use the same `PR Job` caller as pull-request runs. They retain
 the normal Anvil jobs, annotations, and dynamically named steps but do not
@@ -1118,7 +1119,9 @@ Permissions: the reusable workflow's caller (`anvil-pr.yml`) declares
 `anvil-pr-impl.yml`. The called workflow declares no permission overrides, so all
 of its jobs inherit that caller ceiling. Only the guarded sticky-comment steps
 use `pull-requests: write`. Merge-group executions share this caller but cannot
-reach the pull-request-only write steps, and fork-PR tokens remain read-only.
+reach the pull-request-only write steps. Fork PRs cannot reach them either,
+regardless of whether an administrator has enabled write tokens for fork
+workflows.
 
 Adding a new advisory check is a two-step change: the recipe writes
 `target/anvil/comments/<NEW>.md` (and removes it on a clean run); the workflow gains
