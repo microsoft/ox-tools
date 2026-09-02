@@ -1,7 +1,7 @@
 version = 1
 tool = "anvil"
 tool_version = "0.6.0"
-catalog_checksum = "sha256:88e449f0c37963a26628d00274c09e03ec29e8c262f65a694930f180851b7fc2"
+catalog_checksum = "sha256:1211a67cb575cd26d52862ac4b5405129659ecf63a0e668131502c59e912ce1d"
 
 [[file]]
 path = ".anvil/container/Dockerfile.dockerignore"
@@ -378,7 +378,7 @@ checksum = "sha256:33c41d1b48567b929fc485915ba8465be2a0fc7186b321fcd55dda2330572
 [[region]]
 host = "deny.toml"
 id = "anvil-deny-bans"
-checksum = "sha256:bd5763f09562715dcdeaf0b5c11c24c8c4e214cc14f6d0ddfe13d30a7ea03880"
+checksum = "sha256:3d1fae3bd4be3e549900528b40d2bff38ac1539a6b4647f18ba46a440350e199"
 
 [[region]]
 host = "deny.toml"
