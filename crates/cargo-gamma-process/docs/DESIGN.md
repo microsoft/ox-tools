@@ -48,7 +48,10 @@ therefore covers the complete descendant tree.
   stdin and captures stdout and stderr. Both pipes are drained concurrently
   while the child runs, avoiding pipe-capacity deadlocks. When the leader exits,
   descendants are swept before their inherited pipe handles are drained to end
-  of file.
+  of file. A process-group sweep failure is propagated after the leader is
+  reaped. If subsequent cleanup cannot prove that descendants released their
+  pipe handles, the reader threads are detached rather than joined indefinitely
+  while returning that failure.
 - On Windows, each child receives a dedicated job. If an enclosing job refuses
   nested assignment, the spawn is rejected: an inherited job does not provide a
   handle through which this process can later terminate the child's descendants.

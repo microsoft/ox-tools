@@ -3,11 +3,14 @@
 
 //! Restricting a run to the lines a unified diff touches.
 
+#[cfg(test)]
 use std::fs;
+use std::fs::File;
 use std::io::{Read, stdin};
 
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 
+use super::input;
 use crate::error::error;
 use crate::{HashMap, HashSet, Result};
 
@@ -42,18 +45,19 @@ impl Diff {
     /// # Errors
     ///
     /// Returns an error when `path` is `-` and reading `input` fails or its bytes are not UTF-8, or
-    /// when another path cannot be opened, read, or decoded as UTF-8.
+    /// when another path cannot be opened, read, or decoded as UTF-8. Inputs larger than 256 MiB
+    /// are refused before they can exhaust the process's memory.
     pub fn read_from(path: &Utf8Path, mut input: impl Read) -> Result<Self> {
         let text = if path == "-" {
-            let mut buffer = String::new();
-
-            let _read = input
-                .read_to_string(&mut buffer)
-                .map_err(|cause| error!("could not read a diff from standard input").caused_by(cause))?;
-
-            buffer
+            input::text(&mut input).map_err(|cause| error!("could not read a diff from standard input").caused_by(cause))?
         } else {
-            fs::read_to_string(path).map_err(|cause| error!("could not read the diff `{path}`").caused_by(cause))?
+            let file = File::open(path).map_err(|cause| error!("could not read the diff `{path}`").caused_by(cause))?;
+
+            input::text(file).map_err(|cause| error!("could not read the diff `{path}`").caused_by(cause))?
+        };
+
+        let Some(text) = text else {
+            return Err(error!("the diff is larger than the {} bytes cargo-gamma will retain", input::MAX_BYTES).usage());
         };
 
         Ok(Self::parse(&text))
@@ -346,13 +350,26 @@ fn split_first_segment(path: &str) -> Option<(&str, &str)> {
 
 /// Finds the workspace file a diff path refers to, if any.
 fn locate(path: &Utf8Path, raw: &Utf8Path, root: &Utf8Path, known: &HashSet<&Utf8Path>, candidates: &[Utf8PathBuf]) -> Option<Utf8PathBuf> {
-    // The set answers first, so the filesystem probe is paid only for a path the workspace file
-    // list does not already hold — which is what makes a miss cost one syscall rather than one
-    // syscall per candidate spelling per peeled segment.
-    let known = |candidate: &Utf8Path| known.contains(candidate) || root.join(candidate).exists();
-
     for candidate in [path, raw] {
-        if known(candidate) {
+        if candidate.is_absolute() {
+            if let Ok(relative) = candidate.strip_prefix(root) {
+                if known.contains(relative) {
+                    return Some(relative.to_owned());
+                }
+
+                if safe_relative(relative) && relative.extension() != Some("rs") && root.join(relative).exists() {
+                    return Some(relative.to_owned());
+                }
+            }
+
+            continue;
+        }
+
+        if !safe_relative(candidate) {
+            continue;
+        }
+
+        if known.contains(candidate) {
             return Some(candidate.to_owned());
         }
 
@@ -368,7 +385,7 @@ fn locate(path: &Utf8Path, raw: &Utf8Path, root: &Utf8Path, known: &HashSet<&Utf
                 break;
             }
 
-            if known(Utf8Path::new(rest)) {
+            if known.contains(Utf8Path::new(rest)) {
                 return Some(Utf8PathBuf::from(rest));
             }
         }
@@ -379,12 +396,25 @@ fn locate(path: &Utf8Path, raw: &Utf8Path, root: &Utf8Path, known: &HashSet<&Utf
     //
     // This one stays a scan, and has to: a suffix match is not a lookup, and there is no key to
     // hash. It is reached only when every exact spelling has already failed.
-    let mut matched = candidates
-        .iter()
-        .filter(|file| ends_with_path(path, file) || ends_with_path(raw, file));
-    let found = matched.next()?;
+    let mut matched = candidates.iter().filter(|file| {
+        [path, raw]
+            .into_iter()
+            .any(|candidate| (candidate.is_absolute() || safe_relative(candidate)) && ends_with_path(candidate, file))
+    });
 
-    matched.next().is_none().then(|| found.clone())
+    match (matched.next(), matched.next()) {
+        (Some(found), None) => Some(found.clone()),
+        (Some(_ambiguous), Some(_)) => None,
+        (None, _) => [path, raw]
+            .into_iter()
+            .find(|candidate| safe_relative(candidate) && candidate.extension() != Some("rs") && root.join(candidate).exists())
+            .map(ToOwned::to_owned),
+    }
+}
+
+/// Whether a path can be interpreted relative to the workspace without escaping it.
+fn safe_relative(path: &Utf8Path) -> bool {
+    !path.is_absolute() && !path.components().any(|component| component == Utf8Component::ParentDir)
 }
 
 /// Whether `path` ends with `suffix` at a segment boundary.
@@ -581,6 +611,55 @@ index 1234567..89abcde 100644
         assert!(diff.touches(Utf8Path::new("src/lib.rs"), 12, 12));
     }
 
+    #[test]
+    fn an_absolute_workspace_path_resolves_to_its_relative_candidate() {
+        let directory = tempfile::tempdir().expect("could not create a temporary directory");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the temporary path is not UTF-8");
+        let source = root.join("src/lib.rs");
+
+        fs::create_dir_all(source.parent().expect("source parent")).expect("source directory");
+        fs::write(&source, "one\ntwo\n").expect("source");
+
+        let text = format!("--- {source}\n+++ {source}\n@@ -1 +1,2 @@\n one\n+two\n");
+        let mut diff = Diff::parse(&text);
+
+        diff.resolve(&root, &[Utf8PathBuf::from("src/lib.rs")])
+            .expect("an absolute path inside the workspace resolves");
+
+        assert!(diff.touches(Utf8Path::new("src/lib.rs"), 2, 2));
+        assert!(!diff.touches_file(&source), "the absolute spelling must not survive resolution");
+    }
+
+    #[test]
+    fn an_absolute_path_from_another_checkout_resolves_by_unique_suffix() {
+        let text = "--- /other/checkout/src/lib.rs\n+++ /other/checkout/src/lib.rs\n@@ -1 +1,2 @@\n one\n+two\n";
+        let mut diff = Diff::parse(text);
+
+        diff.resolve(Utf8Path::new("/this/checkout"), &[Utf8PathBuf::from("src/lib.rs")])
+            .expect("the absolute path uniquely names a workspace candidate");
+
+        assert!(diff.touches(Utf8Path::new("src/lib.rs"), 2, 2));
+    }
+
+    #[test]
+    fn a_traversal_to_an_existing_external_source_is_refused() {
+        let directory = tempfile::tempdir().expect("could not create a temporary directory");
+        let base = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the temporary path is not UTF-8");
+        let root = base.join("workspace");
+
+        fs::create_dir(&root).expect("workspace");
+        fs::write(base.join("outside.rs"), "one\ntwo\n").expect("external source");
+
+        let text = "--- ../outside.rs\n+++ ../outside.rs\n@@ -1 +1,2 @@\n one\n+two\n";
+        let mut diff = Diff::parse(text);
+        let error = diff
+            .resolve(&root, &[Utf8PathBuf::from("src/lib.rs")])
+            .expect_err("a path outside the workspace is not a workspace candidate");
+
+        assert!(error.is_usage(), "{error}");
+        assert!(error.to_string().contains("../outside.rs"), "{error}");
+    }
+
     // A diff produced from a subdirectory, or with a prefix nothing recognized, names the file with
     // leading directories the workspace does not have. The workspace file it uniquely ends with is
     // the file meant, and matching it is the difference between running the change and running
@@ -652,6 +731,23 @@ index 1234567..89abcde 100644
         let mut diff = Diff::parse(text);
 
         diff.resolve(&root, &[]).expect("a file that exists is a file this diff understood");
+
+        assert!(diff.touches_file(Utf8Path::new("README.md")));
+    }
+
+    #[test]
+    fn an_absolute_non_source_path_inside_the_workspace_counts_as_understood() {
+        let directory = tempfile::tempdir().expect("could not create a temporary directory");
+        let root = Utf8PathBuf::from_path_buf(directory.path().to_path_buf()).expect("the temporary path is not UTF-8");
+        let readme = root.join("README.md");
+
+        fs::write(&readme, "hello").expect("could not write the file");
+
+        let text = format!("--- {readme}\n+++ {readme}\n@@ -1 +1,2 @@\n one\n+two\n");
+        let mut diff = Diff::parse(&text);
+
+        diff.resolve(&root, &[])
+            .expect("an absolute non-source path inside the workspace is understood");
 
         assert!(diff.touches_file(Utf8Path::new("README.md")));
     }

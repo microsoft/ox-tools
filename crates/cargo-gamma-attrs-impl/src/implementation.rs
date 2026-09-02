@@ -95,11 +95,10 @@ pub fn value(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[doc(hidden)]
 pub(super) const NESTING_LIMIT: usize = 64;
 
-/// How many postfix links are allowed per delimiter nesting level.
+/// How many expression-path links are allowed per delimiter nesting level.
 ///
-/// This stays in step with `cargo_gamma_lib::parse::nesting`: a run of calls or indexes is a
-/// recursive expression tree even though each delimiter closes before the next one opens; field,
-/// method, and try links add the same recursive shape.
+/// This stays in step with `cargo_gamma_lib::parse::nesting`: operators, casts, calls, indexes,
+/// field and method access, try links, and `else` arms all add recursive expression shape.
 ///
 /// Exposed (hidden from docs) so `cargo-gamma-lib`'s agreement test can pin this copy against the
 /// library's own `CHAIN_FACTOR`.
@@ -117,15 +116,19 @@ enum Previous {
 struct Frame {
     iter: proc_macro2::token_stream::IntoIter,
     depth: usize,
-    postfix: usize,
-    casts: usize,
-    operators: usize,
+    links: usize,
     ladders: usize,
     awaiting_else: bool,
     previous: Previous,
 }
 
-/// Returns whether a token stream exceeds its delimiter or postfix-expression limits.
+impl Frame {
+    fn exceeds_chain_limit(&self, limit: usize) -> bool {
+        self.links > limit || self.ladders > limit
+    }
+}
+
+/// Returns whether a token stream exceeds its delimiter or expression-path limits.
 ///
 /// Nested groups are walked with an explicit stack rather than recursion, because this code runs
 /// inside `rustc` while compiling user code: a proc macro that exhausts the stack takes the
@@ -136,7 +139,7 @@ struct Frame {
 /// `else`, and drops that chain the same way. Delimiter depth alone would let a long enough ladder
 /// through to overflow the stack instead of producing this guard's diagnostic. `ladders` counts
 /// every `else` that follows a completed group at the same level, mirroring
-/// `cargo_gamma_engine::parse::nesting`'s `ladders` counter and bounded by the same `postfix_limit`
+/// `cargo_gamma_engine::parse::nesting`'s `ladders` counter and bounded by the same chain limit
 /// as every other expression-path chain this walk already tracks.
 ///
 /// Exposed (hidden from docs) so `cargo-gamma-lib`'s agreement test can drive this scanner with
@@ -150,13 +153,11 @@ struct Frame {
     reason = "delimiter and expression-path state must advance together through one token walk"
 )]
 pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool {
-    let postfix_limit = limit.saturating_mul(CHAIN_FACTOR);
+    let chain_limit = limit.saturating_mul(CHAIN_FACTOR);
     let mut frames = vec![Frame {
         iter: stream.clone().into_iter(),
         depth: 0,
-        postfix: 0,
-        casts: 0,
-        operators: 0,
+        links: 0,
         ladders: 0,
         awaiting_else: false,
         previous: Previous::Other,
@@ -174,13 +175,11 @@ pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool 
                         matches!(group.delimiter(), Delimiter::Parenthesis | Delimiter::Bracket) && frame.previous == Previous::Expression;
 
                     if postfix {
-                        frame.postfix += 1;
+                        frame.links += 1;
 
-                        if frame.postfix > postfix_limit {
+                        if frame.exceeds_chain_limit(chain_limit) {
                             return true;
                         }
-                    } else {
-                        frame.postfix = 0;
                     }
 
                     let next_depth = frame.depth + 1;
@@ -190,17 +189,15 @@ pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool 
                     }
 
                     // A complete group can be the receiver of the next call or index, or the `{ }`
-                    // block an `else` ladder continues from. The child gets a fresh postfix chain
-                    // because only adjacent links share one expression.
+                    // block an `else` ladder continues from. The child gets a fresh expression
+                    // path because only links at the same token-stream level share one chain.
                     frame.awaiting_else = group.delimiter() == Delimiter::Brace;
                     frame.previous = Previous::Expression;
                     frames.push(frame);
                     frames.push(Frame {
                         iter: group.stream().into_iter(),
                         depth: next_depth,
-                        postfix: 0,
-                        casts: 0,
-                        operators: 0,
+                        links: 0,
                         ladders: 0,
                         awaiting_else: false,
                         previous: Previous::Other,
@@ -213,10 +210,9 @@ pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool 
                         frame.ladders = 0;
                         frame.awaiting_else = false;
                     }
-                    frame.postfix = 0;
-                    frame.casts += 1;
+                    frame.links += 1;
 
-                    if frame.casts > postfix_limit {
+                    if frame.exceeds_chain_limit(chain_limit) {
                         return true;
                     }
 
@@ -226,10 +222,10 @@ pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool 
                 TokenTree::Ident(ident) if ident == "else" && frame.awaiting_else => {
                     // Reached only right after a completed group, which is what an `else` following
                     // an `if`'s or a prior arm's `{ }` block looks like at the token-stream level.
-                    frame.postfix = 0;
                     frame.ladders += 1;
+                    frame.links += 1;
 
-                    if frame.ladders > postfix_limit {
+                    if frame.exceeds_chain_limit(chain_limit) {
                         return true;
                     }
 
@@ -242,6 +238,11 @@ pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool 
                         frame.ladders = 0;
                         frame.awaiting_else = false;
                     }
+
+                    if frame.previous == Previous::Expression {
+                        frame.links = 0;
+                    }
+
                     frame.previous = Previous::Expression;
                 }
 
@@ -254,9 +255,9 @@ pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool 
                         punct.as_char(),
                         '+' | '-' | '*' | '/' | '%' | '&' | '|' | '^' | '!' | '<' | '>' | '='
                     ) {
-                        frame.operators += 1;
+                        frame.links += 1;
 
-                        if frame.operators > postfix_limit {
+                        if frame.exceeds_chain_limit(chain_limit) {
                             return true;
                         }
                     }
@@ -264,18 +265,15 @@ pub(super) fn exceeds_nesting_limit(stream: &TokenStream, limit: usize) -> bool 
                     let postfix = matches!(punct.as_char(), '.' | '?') && frame.previous == Previous::Expression;
 
                     if postfix {
-                        frame.postfix += 1;
+                        frame.links += 1;
 
-                        if frame.postfix > postfix_limit {
+                        if frame.exceeds_chain_limit(chain_limit) {
                             return true;
                         }
-                    } else {
-                        frame.postfix = 0;
                     }
 
                     if matches!(punct.as_char(), ',' | ';') {
-                        frame.casts = 0;
-                        frame.operators = 0;
+                        frame.links = 0;
                         frame.ladders = 0;
                     }
 
@@ -1622,6 +1620,16 @@ mod tests {
         let err = validate_value(stream(&expression), &stream("fn f() -> u32 { 1 }")).expect_err("cast chain rejected");
 
         assert_eq!(err, "expression nests too deeply to be safely parsed");
+    }
+
+    #[test]
+    fn mixed_operator_and_cast_chains_share_one_nesting_budget() {
+        let links = NESTING_LIMIT * CHAIN_FACTOR / 2 + 1;
+        let expression = format!("1{}{}", " + 1".repeat(links), " as u64".repeat(links));
+        let error = validate_value(stream(&expression), &stream("fn f() -> u64 { 1 }"))
+            .expect_err("the combined expression chain must be rejected");
+
+        assert_eq!(error, "expression nests too deeply to be safely parsed");
     }
 
     #[test]

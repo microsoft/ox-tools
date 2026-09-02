@@ -4,7 +4,7 @@
 [package]
 name = "cargo-gamma-rt"
 description = "Runtime support library injected into crates under mutation test by cargo-gamma"
-version = "0.1.0"
+version = "0.2.0"
 readme = "README.md"
 keywords = ["cargo", "mutation-testing", "testing"]
 categories = ["development-tools::testing"]

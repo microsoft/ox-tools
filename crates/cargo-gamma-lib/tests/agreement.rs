@@ -215,6 +215,20 @@ fn the_two_nesting_guards_agree_on_cast_chains() {
 }
 
 #[test]
+fn the_two_nesting_guards_agree_on_mixed_operator_and_cast_chains() {
+    nesting_guards(
+        "mixed operator and cast chains",
+        CHAIN_CEILING,
+        corpus::mixed_operator_and_cast_chain,
+    );
+}
+
+#[test]
+fn the_engine_guards_mixed_postfix_and_cast_chains_no_later_than_the_proc_macro() {
+    nesting_guards_are_ordered("mixed postfix and cast chains", CHAIN_CEILING, corpus::mixed_postfix_and_cast_chain);
+}
+
+#[test]
 fn the_two_nesting_guards_agree_on_else_if_ladders() {
     nesting_guards("else if ladders", CHAIN_CEILING, corpus::else_if_ladder);
 }
@@ -404,6 +418,16 @@ mod corpus {
         }
 
         text
+    }
+
+    /// `n` additions followed by `n` casts, so neither family owns the combined depth alone.
+    pub(super) fn mixed_operator_and_cast_chain(n: usize) -> String {
+        format!("{}{}", binary_chain(n), " as i64".repeat(n))
+    }
+
+    /// `n` method calls followed by `n` casts, crossing from postfix to cast nesting.
+    pub(super) fn mixed_postfix_and_cast_chain(n: usize) -> String {
+        format!("{}{}", postfix_methods(n), " as i64".repeat(n))
     }
 
     /// An `else if` ladder with `n` middle arms.

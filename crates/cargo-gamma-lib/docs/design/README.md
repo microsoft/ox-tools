@@ -52,6 +52,19 @@ includes both failure to acquire the startup environment and a guard reached
 before the runtime constructor installed its selection; either fixed marker
 disqualifies the process as mutation-score evidence.
 
+Diff paths are resolved to the workspace-relative Rust files discovered by the
+survey. Absolute paths inside the workspace are normalized to those candidates;
+absolute paths outside it and paths that traverse outside it are never accepted
+as source selections. Diffs, checked-in hints, and incremental records are read
+under a 256 MiB bound. An oversized diff is a usage error, while oversized
+optimization artifacts are ignored under the same fail-open contract as corrupt
+or foreign-version artifacts.
+
+Reports use the same source generation from which their mutant spans were
+derived. If an analyzed source changes before report construction, the run
+refuses to publish reports that would combine the completed verdicts with the
+new source.
+
 ### Redirected cache security
 
 On Unix, cargo-gamma creates a previously absent redirected cache with

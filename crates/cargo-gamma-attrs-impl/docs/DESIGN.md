@@ -23,6 +23,10 @@ metadata.
   logic outside rustc makes it directly testable and mutation-testable.
 - It accepts exactly one Rust expression where an attribute promises an
   expression and rejects unsupported keys or malformed selectors.
+- Delimiter depth and the combined chain of operators, casts, postfix links,
+  and `else` arms are bounded before input reaches `syn`. The chain categories
+  share one budget, matching the engine guard rather than allowing mixed syntax
+  to evade each independent limit.
 - A stated value is rejected on any function the tool would never mutate: a
   declaration with no body, a `const fn`, or a function whose body is empty.
   Accepting one there would leave a hint that reads as working and generates
