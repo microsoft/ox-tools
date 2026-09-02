@@ -25,8 +25,9 @@ failure diagnostics. The user-visible behavior is defined by the
 
 ## Invariants
 
-- Coverable line numbers are unique and ascending because they originate from
-  the parser's ordered line map.
+- Coverable line numbers are unique because the parser merges records by line
+  number, and ascending because `FileReport` construction explicitly sorts
+  them.
 - Uncovered lines are a subset of coverable lines.
 - Package counters describe the complete attributed input, independent of the
   rendered location limit.
