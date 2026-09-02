@@ -74,8 +74,9 @@ libc = { workspace = true, features = ["std"] }
 bolero = { workspace = true }
 bolero-engine = { workspace = true, features = ["any"] }
 # Only the integration test that pins the proc-macro's hand-copied limit constants against this
-# library's own needs it; it is never used outside `#[cfg(test)]`/`tests/`.
-cargo-gamma-attrs-impl = { workspace = true }
+# library's own needs it; the path-only dev-dependency is omitted from published packages so it
+# does not create a release-order edge that cargo-release cannot see.
+cargo-gamma-attrs-impl = { path = "../cargo-gamma-attrs-impl" }
 cargo-gamma-process = { workspace = true, features = ["fault-injection"] }
 tempfile = { workspace = true }
 
