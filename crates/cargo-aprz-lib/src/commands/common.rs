@@ -14,10 +14,10 @@ use camino::{Utf8Path, Utf8PathBuf};
 use cargo_metadata::MetadataCommand;
 use chrono::Local;
 use clap::{Args, ValueEnum};
-use directories::BaseDirs;
 use ohno::IntoAppError;
 
 use super::ProgressReporter;
+use super::cache_dir::platform_cache_dir;
 use super::config::Config;
 use crate::Result;
 use crate::expr::{ExpressionDisposition, ExpressionOutcome, Risk, evaluate};
@@ -306,9 +306,8 @@ impl<'a, H: super::Host> Common<'a, H> {
         if let Some(cache_path) = cache_dir {
             Ok(cache_path.as_std_path().to_path_buf())
         } else {
-            Ok(BaseDirs::new()
+            Ok(platform_cache_dir()
                 .into_app_err("could not determine cache directory")?
-                .cache_dir()
                 .join("cargo-aprz"))
         }
     }
@@ -694,7 +693,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg_attr(miri, ignore = "directories queries the system user database")]
+    #[cfg_attr(miri, ignore = "platform cache discovery reads the process environment")]
     fn cache_directory_uses_the_override_or_platform_default() {
         let override_path = Utf8Path::new("custom-cache");
         assert_eq!(
@@ -703,9 +702,8 @@ mod tests {
             override_path.as_std_path()
         );
 
-        let expected_default = BaseDirs::new()
-            .expect("the test environment has a home directory")
-            .cache_dir()
+        let expected_default = platform_cache_dir()
+            .expect("the test environment has a platform cache directory")
             .join("cargo-aprz");
         assert_eq!(
             Common::<crate::commands::host::TestHost>::resolve_cache_dir(None)

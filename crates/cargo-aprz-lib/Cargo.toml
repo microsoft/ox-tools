@@ -75,12 +75,10 @@ clap = { workspace = true, features = [
 ] }
 compact_str = { workspace = true, features = ["std", "serde"] }
 csv = { workspace = true }
-directories = { workspace = true }
 env_logger = { workspace = true }
 flate2 = { workspace = true, features = ["zlib-rs"] }
 futures = { workspace = true }
 futures-util = { workspace = true }
-humantime-serde = { workspace = true }
 indicatif = { workspace = true }
 layered = { workspace = true }
 log = { workspace = true }
