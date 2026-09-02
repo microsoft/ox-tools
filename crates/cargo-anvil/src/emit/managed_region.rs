@@ -246,14 +246,18 @@ mod tests {
 
     /// A non-TOML host is untouched by adoption — a bracketed line in a
     /// Justfile or YAML file is not a table header and must not be dropped.
+    /// The fixture is deliberately one that adoption *would* claim in a TOML
+    /// host: the bracketed block matches the body exactly, so only the
+    /// host-type restriction keeps it, and weakening that restriction fails
+    /// this test rather than passing it by accident.
     #[test]
     fn a_non_toml_host_is_not_subject_to_table_adoption() {
-        let host = "[not-a-table]\nkeep me\n";
+        let host = "[not-a-table]\nbody\n";
         let item = plan_managed_region(&Manifest::default(), Some(host), request("Justfile", "r", "[not-a-table]\nbody\n")).unwrap();
 
         let spliced = item.spliced_host.as_deref().unwrap();
         assert!(
-            spliced.starts_with("[not-a-table]\nkeep me\n"),
+            spliced.starts_with("[not-a-table]\nbody\n"),
             "host content is preserved verbatim:\n{spliced}"
         );
     }

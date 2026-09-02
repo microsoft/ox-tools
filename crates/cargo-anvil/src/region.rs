@@ -354,7 +354,7 @@ fn iterate_lines(text: &str) -> LineIter<'_> {
 
 /// Drop an outside-region copy of a TOML table that the region body already
 /// declares **identically**, so introducing the region adopts a hand-written
-/// table instead of appending a duplicate TOML will not parse.
+/// table instead of appending a duplicate that TOML will not parse.
 ///
 /// A managed region body such as `[lints]\nworkspace = true` is a whole table,
 /// and TOML rejects a duplicate table header outright — so appending it beside
@@ -559,6 +559,46 @@ mod tests {
     #[test]
     fn missing_region_returns_none() {
         assert_eq!(find_region("user content\n", "anvil-x", SYN).unwrap(), None);
+    }
+
+    /// The quote tracking in `strip_trailing_comment` decides whether a `#` is
+    /// a comment or data. Getting it wrong in either direction is harmful: a
+    /// `#` treated as a comment truncates a value, which can make two
+    /// genuinely different keys compare equal and adopt -- delete -- a table
+    /// that differs; a comment treated as data leaves it attached and defeats
+    /// adoption, leaving the duplicate table this module exists to remove.
+    /// Each case below is a distinct piece of that state machine.
+    #[test]
+    fn strip_trailing_comment_tracks_quoting() {
+        // A plain trailing comment goes, with its leading whitespace.
+        assert_eq!(strip_trailing_comment("a = 1 # note"), "a = 1");
+        // No comment at all: the line is returned whole.
+        assert_eq!(strip_trailing_comment("a = 1"), "a = 1");
+        // A `#` inside a quoted value is data, under either quote style.
+        assert_eq!(strip_trailing_comment("a = \"x#y\""), "a = \"x#y\"");
+        assert_eq!(strip_trailing_comment("a = 'x#y'"), "a = 'x#y'");
+        // A quote closes, so a comment after a quoted value is still a comment.
+        assert_eq!(strip_trailing_comment("a = \"x\" # note"), "a = \"x\"");
+        // Only the matching quote character closes: an apostrophe inside a
+        // double-quoted value must not end it and expose the `#`.
+        assert_eq!(strip_trailing_comment("a = \"it's #1\""), "a = \"it's #1\"");
+        // An escaped quote does not close the value either.
+        assert_eq!(strip_trailing_comment("a = \"x\\\"#y\""), "a = \"x\\\"#y\"");
+        // ...but an escaped backslash is not itself an escape, so the quote
+        // that follows it does close, and the comment after it is a comment.
+        assert_eq!(strip_trailing_comment("a = \"x\\\\\" # note"), "a = \"x\\\\\"");
+    }
+
+    /// The consequence of that tracking, at the level that matters: two values
+    /// differing only inside a quoted `#` must not be judged equal. Were the
+    /// `#` treated as a comment, both would truncate to the same prefix and
+    /// the hand-written table would be dropped -- deleting a real setting.
+    #[test]
+    fn a_quoted_hash_keeps_two_differing_values_distinct() {
+        let text = "[advisories]\nignore = [\"a#b\"]\n";
+        let adopted = adopt_unmanaged_toml_tables(text, "[advisories]\nignore = [\"a#c\"]\n", SYN);
+
+        assert_eq!(adopted, text, "the differing table is preserved:\n{adopted}");
     }
 
     /// A trailing comment on a key line carries no configuration, so it must
