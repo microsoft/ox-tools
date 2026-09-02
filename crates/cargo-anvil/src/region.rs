@@ -399,7 +399,8 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
     let mut out = String::with_capacity(text.len());
     let mut in_managed = false;
     // Set while skipping an adopted table's body; cleared by the next table
-    // header, so only that table is dropped and what follows survives.
+    // header or by a managed region's opener, so only that table is dropped
+    // and what follows survives.
     let mut dropping = false;
 
     for line in iterate_lines(text) {
@@ -407,6 +408,10 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
         let trimmed = raw.trim();
         if trimmed.starts_with(&open) {
             in_managed = true;
+            // An adopted table's body ends here: whatever a managed region
+            // holds is the region's, and whatever follows its closer is the
+            // user's. Leaving the skip set would swallow both.
+            dropping = false;
         }
 
         if !in_managed {
@@ -527,6 +532,25 @@ mod tests {
     #[test]
     fn missing_region_returns_none() {
         assert_eq!(find_region("user content\n", "anvil-x", SYN).unwrap(), None);
+    }
+
+    /// An adopted table's body ends where a managed region begins. If the
+    /// skip were allowed to survive that boundary it would swallow whatever
+    /// follows the region's closing sentinel, up to the next table header --
+    /// silently deleting user content that adoption never examined.
+    #[test]
+    fn adoption_stops_at_a_managed_region_that_follows_the_adopted_table() {
+        let text = "[lints]\nworkspace = true\n\n\
+                    # >>> anvil-managed: other\n\
+                    other = true\n\
+                    # <<< anvil-managed: other\n\
+                    # a user comment\n";
+        let adopted = adopt_unmanaged_toml_tables(text, "[lints]\nworkspace = true\n", SYN);
+
+        assert!(
+            adopted.contains("# a user comment"),
+            "content after the region survives:\n{adopted}"
+        );
     }
 
     #[test]
