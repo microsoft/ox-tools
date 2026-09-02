@@ -352,7 +352,7 @@ fn iterate_lines(text: &str) -> LineIter<'_> {
     LineIter { text, pos: 0 }
 }
 
-/// Drop an unmanaged copy of a TOML table that the region body already
+/// Drop an outside-region copy of a TOML table that the region body already
 /// declares **identically**, so introducing the region adopts a hand-written
 /// table instead of appending a duplicate TOML will not parse.
 ///
@@ -365,7 +365,7 @@ fn iterate_lines(text: &str) -> LineIter<'_> {
 /// **already contains**. A hand-written table carrying anything extra is left
 /// exactly where it is: dropping it would silently delete a user's
 /// configuration, which is a worse failure than the duplicate this function
-/// exists to prevent — a `deny.toml` whose `[advisories]` lists the repo's own
+/// exists to prevent — a `deny.toml` whose `[advisories]` lists the repository's own
 /// `ignore` entries is the case that matters, and it is covered by a fixture.
 /// Comments and blank lines are ignored when comparing, since neither carries
 /// configuration.
@@ -410,8 +410,8 @@ pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax
         }
 
         if !in_managed {
-            if is_toml_table_header(trimmed) {
-                dropping = adoptable.contains(&trimmed);
+            if let Some(header) = toml_table_header(trimmed) {
+                dropping = adoptable.contains(&header);
             }
             if dropping {
                 continue;
@@ -452,8 +452,8 @@ fn toml_tables(text: &str, syntax: CommentSyntax) -> Vec<(&str, Vec<&str>)> {
         if in_managed || trimmed.is_empty() || trimmed.starts_with(prefix) {
             continue;
         }
-        if is_toml_table_header(trimmed) {
-            tables.push((trimmed, Vec::new()));
+        if let Some(header) = toml_table_header(trimmed) {
+            tables.push((header, Vec::new()));
         } else if let Some((_, keys)) = tables.last_mut() {
             keys.push(trimmed);
         }
@@ -462,9 +462,31 @@ fn toml_tables(text: &str, syntax: CommentSyntax) -> Vec<(&str, Vec<&str>)> {
     tables
 }
 
-/// Whether a trimmed line is a TOML table (or array-of-tables) header.
-fn is_toml_table_header(line: &str) -> bool {
-    line.starts_with('[') && line.ends_with(']')
+/// Return a trimmed TOML table header without its trailing comment.
+fn toml_table_header(line: &str) -> Option<&str> {
+    let mut quote = None;
+    let mut escaped = false;
+    let comment = line.char_indices().find_map(|(index, character)| match (quote, character) {
+        (None, '#') => Some(index),
+        (None, '\'' | '"') => {
+            quote = Some(character);
+            None
+        }
+        (Some('"'), '\\') if !escaped => {
+            escaped = true;
+            None
+        }
+        (Some(active), character) if character == active && !escaped => {
+            quote = None;
+            None
+        }
+        _ => {
+            escaped = false;
+            None
+        }
+    });
+    let header = line[..comment.unwrap_or(line.len())].trim_end();
+    (header.starts_with('[') && header.ends_with(']')).then_some(header)
 }
 
 struct LineIter<'a> {

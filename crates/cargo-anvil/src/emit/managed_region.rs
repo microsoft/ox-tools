@@ -204,6 +204,28 @@ mod tests {
         assert!(spliced.contains("[package]"), "unrelated content is preserved");
     }
 
+    #[test]
+    fn a_table_header_with_a_trailing_comment_is_adopted() {
+        let host = "[package]\nname = \"demo\"\n\n[lints] # configured by hand\nworkspace = true\n";
+        let item = plan_managed_region(
+            &Manifest::default(),
+            Some(host),
+            request("crates/demo/Cargo.toml", "anvil-lints", "[lints]\nworkspace = true\n"),
+        )
+        .unwrap();
+
+        let spliced = item.spliced_host.as_deref().unwrap();
+        assert_eq!(
+            spliced.matches("[lints]").count(),
+            1,
+            "exactly one [lints] table survives:\n{spliced}"
+        );
+        assert!(
+            !spliced.contains("configured by hand"),
+            "the adopted table's comment is removed:\n{spliced}"
+        );
+    }
+
     /// Adoption must drop the duplicated table and nothing else: a table that
     /// merely follows the adopted one is unrelated and must survive intact.
     #[test]
