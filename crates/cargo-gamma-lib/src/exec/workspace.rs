@@ -1595,8 +1595,18 @@ mod tests {
     /// containerized build agents may mount that checkout under a non-sticky shared directory,
     /// which is exactly an unsafe cache ancestry the production check must reject.
     fn redirected_cache_dir(prefix: &str) -> tempfile::TempDir {
-        tempfile::Builder::new()
-            .prefix(prefix)
+        let mut builder = tempfile::Builder::new();
+
+        builder.prefix(prefix);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            builder.permissions(fs::Permissions::from_mode(0o700));
+        }
+
+        builder
             .tempdir()
             .expect("the redirected-cache fixture should be creatable in the system temporary directory")
     }
@@ -1800,9 +1810,7 @@ mod tests {
             assert!(output.status.success(), "child stdout:\n{stdout}\nchild stderr:\n{stderr}");
             return;
         }
-
         let directory = redirected_cache_dir("private-cache-");
-        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700)).expect("the fixture ancestor is private");
         let source = Utf8PathBuf::from_path_buf(directory.path().join("source")).expect("the source path is UTF-8");
         let base = Utf8PathBuf::from_path_buf(directory.path().join("cache")).expect("the cache path is UTF-8");
 
