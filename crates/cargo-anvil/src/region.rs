@@ -352,6 +352,121 @@ fn iterate_lines(text: &str) -> LineIter<'_> {
     LineIter { text, pos: 0 }
 }
 
+/// Drop an unmanaged copy of a TOML table that the region body already
+/// declares **identically**, so introducing the region adopts a hand-written
+/// table instead of appending a duplicate TOML will not parse.
+///
+/// A managed region body such as `[lints]\nworkspace = true` is a whole table,
+/// and TOML rejects a duplicate table header outright — so appending it beside
+/// an identical hand-written `[lints]` does not produce redundant text, it
+/// produces a manifest that will not parse and takes the workspace with it.
+///
+/// Adoption is deliberately limited to a table whose keys the managed body
+/// **already contains**. A hand-written table carrying anything extra is left
+/// exactly where it is: dropping it would silently delete a user's
+/// configuration, which is a worse failure than the duplicate this function
+/// exists to prevent — a `deny.toml` whose `[advisories]` lists the repo's own
+/// `ignore` entries is the case that matters, and it is covered by a fixture.
+/// Comments and blank lines are ignored when comparing, since neither carries
+/// configuration.
+///
+/// Text inside an existing managed region is never examined, so a region that
+/// legitimately owns the same table elsewhere in the file is untouched.
+#[must_use]
+pub fn adopt_unmanaged_toml_tables(text: &str, body: &str, syntax: CommentSyntax) -> String {
+    let managed = toml_tables(body, syntax);
+    if managed.is_empty() {
+        return text.to_owned();
+    }
+
+    let open = syntax.prefix().to_owned() + " >>> anvil-managed:";
+    let close = syntax.prefix().to_owned() + " <<< anvil-managed:";
+
+    // Which unmanaged tables are safe to drop, decided up front so the rewrite
+    // below is a single pass with no lookahead.
+    let mut adoptable: Vec<&str> = Vec::new();
+    for (header, keys) in toml_tables(text, syntax) {
+        if let Some(managed_keys) = managed.iter().find(|(name, _)| *name == header).map(|(_, keys)| keys)
+            && keys.iter().all(|key| managed_keys.contains(key))
+        {
+            adoptable.push(header);
+        }
+    }
+    if adoptable.is_empty() {
+        return text.to_owned();
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut in_managed = false;
+    // Set while skipping an adopted table's body; cleared by the next table
+    // header, so only that table is dropped and what follows survives.
+    let mut dropping = false;
+
+    for line in iterate_lines(text) {
+        let raw = &text[line.start..line.end];
+        let trimmed = raw.trim();
+        if trimmed.starts_with(&open) {
+            in_managed = true;
+        }
+
+        if !in_managed {
+            if is_toml_table_header(trimmed) {
+                dropping = adoptable.contains(&trimmed);
+            }
+            if dropping {
+                continue;
+            }
+        }
+
+        out.push_str(raw);
+
+        if trimmed.starts_with(&close) {
+            in_managed = false;
+        }
+    }
+
+    out
+}
+
+/// Collect each top-level TOML table outside any managed region, as its header
+/// and the trimmed key lines beneath it. Comments and blank lines are dropped,
+/// since neither carries configuration.
+fn toml_tables(text: &str, syntax: CommentSyntax) -> Vec<(&str, Vec<&str>)> {
+    let prefix = syntax.prefix();
+    let open = prefix.to_owned() + " >>> anvil-managed:";
+    let close = prefix.to_owned() + " <<< anvil-managed:";
+
+    let mut tables: Vec<(&str, Vec<&str>)> = Vec::new();
+    let mut in_managed = false;
+
+    for line in iterate_lines(text) {
+        let trimmed = text[line.start..line.end].trim();
+        if trimmed.starts_with(&open) {
+            in_managed = true;
+            continue;
+        }
+        if trimmed.starts_with(&close) {
+            in_managed = false;
+            continue;
+        }
+        if in_managed || trimmed.is_empty() || trimmed.starts_with(prefix) {
+            continue;
+        }
+        if is_toml_table_header(trimmed) {
+            tables.push((trimmed, Vec::new()));
+        } else if let Some((_, keys)) = tables.last_mut() {
+            keys.push(trimmed);
+        }
+    }
+
+    tables
+}
+
+/// Whether a trimmed line is a TOML table (or array-of-tables) header.
+fn is_toml_table_header(line: &str) -> bool {
+    line.starts_with('[') && line.ends_with(']')
+}
+
 struct LineIter<'a> {
     text: &'a str,
     pos: usize,

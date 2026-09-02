@@ -21,7 +21,7 @@ use crate::checksum::checksum_str;
 use crate::decision::{Decision, DecisionInputs, UpdateDecision, decide};
 use crate::manifest::{Manifest, RegionKey};
 use crate::plan::{PlanItem, Target};
-use crate::region::{CommentSyntax, RegionPlacement, find_region, upsert_region_with_placement};
+use crate::region::{CommentSyntax, RegionPlacement, adopt_unmanaged_toml_tables, find_region, upsert_region_with_placement};
 
 /// Inputs that identify and render one managed region.
 #[derive(Clone, Copy)]
@@ -106,11 +106,11 @@ pub fn plan_managed_region(manifest: &Manifest, host_text: Option<&str>, request
         UpdateDecision::InSync => PlanItem::insync(target, template_checksum),
         UpdateDecision::LeaveAlone => PlanItem::noop(target, Decision::LeaveAlone),
         UpdateDecision::Write => {
-            let spliced = splice(host_text, region_id, rendered_body, syntax, placement)?;
+            let spliced = splice(host_relpath, host_text, region_id, rendered_body, syntax, placement)?;
             PlanItem::write_region(host_relpath, region_id, rendered_body.to_owned(), spliced, template_checksum)
         }
         UpdateDecision::Propose => {
-            let spliced = splice(host_text, region_id, rendered_body, syntax, placement)?;
+            let spliced = splice(host_relpath, host_text, region_id, rendered_body, syntax, placement)?;
             PlanItem::propose_region(host_relpath, region_id, rendered_body.to_owned(), spliced, template_checksum)
         }
     };
@@ -119,6 +119,7 @@ pub fn plan_managed_region(manifest: &Manifest, host_text: Option<&str>, request
 }
 
 fn splice(
+    host_relpath: &str,
     host_text: Option<&str>,
     region_id: &str,
     rendered_body: &str,
@@ -126,6 +127,23 @@ fn splice(
     placement: RegionPlacement,
 ) -> Result<String, AppError> {
     let base = host_text.unwrap_or("");
+
+    // Introducing a region into a TOML host: adopt any hand-written copy of the
+    // tables the body declares, rather than appending a duplicate that TOML
+    // will refuse to parse. Only on introduction — once the region exists,
+    // `upsert_region_with_placement` replaces it in place and there is nothing
+    // to adopt.
+    let adopted;
+    let is_toml_host = std::path::Path::new(host_relpath)
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("toml"));
+    let base = if is_toml_host && find_region(base, region_id, syntax)?.is_none() {
+        adopted = adopt_unmanaged_toml_tables(base, rendered_body, syntax);
+        adopted.as_str()
+    } else {
+        base
+    };
+
     upsert_region_with_placement(base, region_id, rendered_body, syntax, placement)
 }
 
@@ -156,6 +174,84 @@ mod tests {
         let spliced = item.spliced_host.as_deref().unwrap();
         assert!(spliced.starts_with("user content\n"));
         assert!(spliced.contains("# >>> anvil-managed: r"));
+    }
+
+    /// A member manifest that already declares `[lints] workspace = true` by
+    /// hand must not gain a second `[lints]` table when the managed region is
+    /// first introduced. TOML rejects a duplicate table outright, so appending
+    /// blindly does not merely produce redundant text — it makes the manifest
+    /// unparseable and takes the whole workspace down with it.
+    #[test]
+    fn an_unmanaged_lints_table_is_adopted_rather_than_duplicated() {
+        let host = "[package]\nname = \"demo\"\n\n[lints]\nworkspace = true\n";
+        let item = plan_managed_region(
+            &Manifest::default(),
+            Some(host),
+            request("crates/demo/Cargo.toml", "anvil-lints", "[lints]\nworkspace = true\n"),
+        )
+        .unwrap();
+
+        let spliced = item.spliced_host.as_deref().unwrap();
+        assert_eq!(
+            spliced.matches("\n[lints]").count() + usize::from(spliced.starts_with("[lints]")),
+            1,
+            "exactly one [lints] table survives:\n{spliced}"
+        );
+        assert!(
+            spliced.contains("# >>> anvil-managed: anvil-lints"),
+            "the surviving table is the managed one"
+        );
+        assert!(spliced.contains("[package]"), "unrelated content is preserved");
+    }
+
+    /// Adoption must drop the duplicated table and nothing else: a table that
+    /// merely follows the adopted one is unrelated and must survive intact.
+    #[test]
+    fn adoption_stops_at_the_next_table_header() {
+        let host = "[package]\nname = \"demo\"\n\n[lints]\nworkspace = true\n\n[dependencies]\nserde = \"1\"\n";
+        let item = plan_managed_region(
+            &Manifest::default(),
+            Some(host),
+            request("crates/demo/Cargo.toml", "anvil-lints", "[lints]\nworkspace = true\n"),
+        )
+        .unwrap();
+
+        let spliced = item.spliced_host.as_deref().unwrap();
+        assert!(spliced.contains("[dependencies]"), "the following table survives:\n{spliced}");
+        assert!(spliced.contains("serde = \"1\""), "its keys survive too:\n{spliced}");
+        assert_eq!(spliced.matches("\n[lints]").count(), 1, "still exactly one [lints]:\n{spliced}");
+    }
+
+    /// A non-TOML host is untouched by adoption — a bracketed line in a
+    /// Justfile or YAML file is not a table header and must not be dropped.
+    #[test]
+    fn a_non_toml_host_is_not_subject_to_table_adoption() {
+        let host = "[not-a-table]\nkeep me\n";
+        let item = plan_managed_region(&Manifest::default(), Some(host), request("Justfile", "r", "[not-a-table]\nbody\n")).unwrap();
+
+        let spliced = item.spliced_host.as_deref().unwrap();
+        assert!(
+            spliced.starts_with("[not-a-table]\nkeep me\n"),
+            "host content is preserved verbatim:\n{spliced}"
+        );
+    }
+
+    /// The limit on adoption, and the more important half of it: a hand-written
+    /// table carrying a key the managed body does not have is configuration,
+    /// not a duplicate. Dropping it would silently delete a user's settings —
+    /// a worse outcome than the duplicate table adoption exists to prevent.
+    #[test]
+    fn a_table_with_extra_user_keys_is_never_dropped() {
+        let host = "[advisories]\nignore = [\"RUSTSEC-9999-0001\"]\n";
+        let item = plan_managed_region(
+            &Manifest::default(),
+            Some(host),
+            request("deny.toml", "anvil-deny-advisories", "[advisories]\nyanked = \"deny\"\n"),
+        )
+        .unwrap();
+
+        let spliced = item.spliced_host.as_deref().unwrap();
+        assert!(spliced.contains("RUSTSEC-9999-0001"), "user-authored keys survive:\n{spliced}");
     }
 
     #[test]
