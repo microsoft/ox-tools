@@ -196,13 +196,13 @@ pub(super) enum Verdict {
     /// that test, not to write a new one.
     Flaky(Option<String>),
 
-    /// The run could not be measured as this run was configured, so nothing about the mutant was
-    /// learned.
+    /// The run-wide machinery could not continue producing trustworthy verdicts.
     ///
-    /// Two shapes reach this: the accounting the run asked for could not be installed, so nothing
-    /// was started at all, and a run that started but could not be followed to a conclusion — a
-    /// wait on the child that failed, which leaves the one question that would have settled the
-    /// mutant unanswerable.
+    /// Three shapes reach this: the accounting the run asked for could not be installed, so nothing
+    /// was started at all; a run that started but could not be followed to a conclusion; and a run
+    /// whose process-tree cleanup failed, leaving containment unproven. The last shape may occur
+    /// after this mutant's verdict was settled, but later mutants cannot safely run beside
+    /// descendants that may still hold scratch-tree locks or inherited pipes.
     ///
     /// Not a verdict about the mutant either way. It exists so that a failure of the machinery
     /// stops the run and says why, instead of quietly becoming an unprotected run or, worse, a
@@ -749,6 +749,15 @@ fn configure(
 fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progress: &Arc<Mutex<Progress>>) -> (Verdict, MemoryUsage) {
     let (active, timeout, stall, request) = (attempt.active, attempt.timeout, attempt.stall, attempt.request);
 
+    macro_rules! cut_short {
+        ($subtree:expr, $verdict_settled:expr) => {
+            match cut_short($subtree, request, binary, $verdict_settled) {
+                Ok(stopped) => stopped,
+                Err(unjudged) => return unjudged,
+            }
+        };
+    }
+
     let mut command = match launcher(work, binary, attempt.only) {
         Ok(command) => command,
         Err(reason) => return (Verdict::Unmetered(reason), MemoryUsage::default()),
@@ -788,7 +797,7 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
     let drained = match readers(&mut subtree, progress, &pulse, under_nextest) {
         Ok(drained) => drained,
         Err(cause) => {
-            let (usage, _ceiling) = cut_short(&mut subtree, request);
+            let (usage, _ceiling) = cut_short!(&mut subtree, false);
 
             return (
                 Verdict::Unjudged(format!("`{}` output could not be supervised: {cause}", binary.path)),
@@ -842,7 +851,7 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
 
             Ok(None) => {
                 if let Some(verdict) = environment_verdict(progress) {
-                    let (usage, _ceiling) = cut_short(&mut subtree, request);
+                    let (usage, _ceiling) = cut_short!(&mut subtree, true);
 
                     return (verdict, usage);
                 }
@@ -853,7 +862,7 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
                 // environment-error marker. Cutting there would convict a mutant before the
                 // evidence that the test never started was available.
                 if let Some(name) = failure_to_cut_short(under_nextest, progress) {
-                    let (usage, ceiling) = cut_short(&mut subtree, request);
+                    let (usage, ceiling) = cut_short!(&mut subtree, true);
 
                     return (cut_by_named_failure(name, usage.peak, ceiling), usage);
                 }
@@ -861,7 +870,7 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
                 let stalled = stall.exceeded(progress);
 
                 if stalled || deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-                    let (usage, ceiling) = cut_short(&mut subtree, request);
+                    let (usage, ceiling) = cut_short!(&mut subtree, true);
 
                     if let Some(verdict) = unfinished_nextest_failure(under_nextest, progress) {
                         return (verdict, usage);
@@ -900,7 +909,7 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
             // ended and reaped first, since an orphan holds scratch-tree locks and the pipes the
             // readers below are waiting on, and both outlive this function into the next mutant.
             Err(cause) => {
-                let (usage, _ceiling) = cut_short(&mut subtree, request);
+                let stopped = cut_short(&mut subtree, request, binary, false);
 
                 debug_assert!(subtree.released(), "the containment is released before the output is drained");
 
@@ -909,6 +918,11 @@ fn run_with(work: &Workspace, binary: &TestBinary, attempt: Attempt<'_>, progres
                 // for the rest of the run. Whether it was complete is discarded with it — nothing
                 // was going to be concluded from the text either way.
                 let _discarded = collected(&drained, DRAIN_GRACE);
+
+                let (usage, _ceiling) = match stopped {
+                    Ok(stopped) => stopped,
+                    Err(unmetered) => return unmetered,
+                };
 
                 return (
                     Verdict::Unjudged(format!("`{}` could not be asked whether it had finished: {cause}", binary.path)),
@@ -1034,7 +1048,7 @@ fn cut_by_named_failure(name: String, peak: Option<u64>, ceiling: Option<u64>) -
     prefer_named(Verdict::Failed(Some(name)), peak, ceiling)
 }
 
-/// Ends a run whose verdict is already settled, and reports the ceiling when one fired.
+/// Ends a run early, whether before or after its verdict is settled.
 ///
 /// Everything the workload spawned goes with it. An orphan holds locks in the scratch tree, which
 /// fails the next run, and an inherited pipe handle, which keeps whoever is reading this run's
@@ -1045,8 +1059,14 @@ fn cut_by_named_failure(name: String, peak: Option<u64>, ceiling: Option<u64>) -
 /// test already named has two true facts and prefers the name; a run cut short by silence or by its
 /// budget has only the ceiling, and the memory is the cause of the overrun rather than a second
 /// symptom of it — reporting the stall instead would send the reader looking for a hang that is not
-/// there.
-fn cut_short(subtree: &mut ProcessTree, request: MemoryRequest) -> (MemoryUsage, Option<u64>) {
+/// there. `verdict_settled` affects only the cleanup-failure diagnostic: pre-verdict reader and
+/// observation failures must not claim that a verdict existed.
+fn cut_short(
+    subtree: &mut ProcessTree,
+    request: MemoryRequest,
+    binary: &TestBinary,
+    verdict_settled: bool,
+) -> Result<(MemoryUsage, Option<u64>), (Verdict, MemoryUsage)> {
     // Only Unix has a numeric watch slot that can be released too early. On Windows `released`
     // necessarily returns true because the job handle itself remains the authority over the child.
     #[cfg(unix)]
@@ -1055,12 +1075,28 @@ fn cut_short(subtree: &mut ProcessTree, request: MemoryRequest) -> (MemoryUsage,
         "the subtree is signalled while it still holds its leader and its watch slot"
     );
 
-    let _reaped = subtree.terminate();
-
+    let stopped = subtree.terminate();
     let usage = subtree.usage();
+
+    if let Err(cause) = stopped {
+        let point = if verdict_settled {
+            "after its verdict was settled"
+        } else {
+            "after execution began"
+        };
+
+        return Err((
+            Verdict::Unmetered(format!(
+                "`{}` and its descendants could not be terminated {point}; containment is unproven: {cause}",
+                binary.path,
+            )),
+            usage,
+        ));
+    }
+
     let ceiling = request.limit.filter(|_limit| exhausted(&usage, false));
 
-    (usage, ceiling)
+    Ok((usage, ceiling))
 }
 
 /// Whether a finished run should be read as having been stopped by its memory ceiling.
@@ -2344,6 +2380,32 @@ mod tests {
                 true
             ),
             Verdict::TimedOut
+        );
+    }
+
+    #[test]
+    fn a_termination_failure_abandons_the_run() {
+        let (_directory, work) = scripted(&["sleep:30000"]);
+        let sleeper = crate::testing::helper();
+        let _failed = process_faults::arm(ProcessFault::Terminate);
+
+        let (verdict, _usage) = run_with(
+            &work,
+            &sleeper,
+            Attempt {
+                active: Some(1),
+                timeout: Some(Duration::from_millis(50)),
+                stall: Stall::NONE,
+                request: MemoryRequest { meter: false, limit: None },
+                only: Only::All,
+                census: None,
+            },
+            &Arc::new(Mutex::new(Progress::new(Watch::Off))),
+        );
+
+        assert!(
+            matches!(verdict, Verdict::Unmetered(ref reason) if reason.contains("could not be terminated")),
+            "{verdict:?}"
         );
     }
 

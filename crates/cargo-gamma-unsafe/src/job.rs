@@ -10,6 +10,7 @@
 
 use core::ffi::c_void;
 use core::mem;
+use std::io;
 use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _, OwnedHandle};
 use std::process::{Child, Command};
 use std::sync::{Mutex, Once};
@@ -512,8 +513,16 @@ impl Job {
     }
 
     /// Kills everything in the job.
-    pub fn terminate(&self) {
-        let _terminated = NATIVE_CALLS.terminate_job(self.handle);
+    ///
+    /// # Errors
+    ///
+    /// Returns the operating system's reason when the job could not be terminated.
+    pub fn terminate(&self) -> io::Result<()> {
+        if NATIVE_CALLS.terminate_job(self.handle) {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
     }
 }
 
@@ -867,7 +876,7 @@ mod tests {
             "the child was not running to begin with, so its death proves nothing"
         );
 
-        job.terminate();
+        job.terminate().expect("the live test job can be terminated");
 
         wait_for_end(&mut child);
     }
@@ -1029,7 +1038,7 @@ mod tests {
                 "a failed {call:?} did not leave the child suspended, so nothing was tested"
             );
 
-            job.terminate();
+            job.terminate().expect("the suspended test child remains reachable through its job");
 
             wait_for_end(&mut child);
 
@@ -1095,9 +1104,8 @@ mod tests {
 
     /// A termination that did not happen is not mistaken for one that did.
     ///
-    /// `terminate` returns nothing, so the only way to see that it worked is the subtree. This
-    /// asserts the injected failure really does keep the child alive — otherwise the test above it
-    /// proves nothing — and that a real termination afterwards still reaches it.
+    /// The error and the still-live child both show that the injected call did not terminate the
+    /// job; a later successful call proves the subtree remains reachable for cleanup.
     #[test]
     fn a_termination_that_fails_leaves_the_subtree_reachable() {
         let job = Job::create(None).expect("a job is created");
@@ -1106,14 +1114,15 @@ mod tests {
 
         let _armed = native_faults::arm(NativeCall::TerminateJob);
 
-        job.terminate();
+        job.terminate().expect_err("the injected termination failure is reported");
 
         assert!(
             child.try_wait().expect("the child's status can be read").is_none(),
             "the injected failure did not prevent the termination, so nothing was tested"
         );
 
-        job.terminate();
+        job.terminate()
+            .expect("the live test job remains terminable after the injected failure");
 
         wait_for_end(&mut child);
     }
