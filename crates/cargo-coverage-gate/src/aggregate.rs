@@ -60,6 +60,8 @@ mod tests {
             filename: PathBuf::from(path),
             lines_total: count,
             lines_covered: covered,
+            coverable_lines: (1..=count).collect(),
+            uncovered_lines: ((covered + 1)..=count).collect(),
         }
     }
 

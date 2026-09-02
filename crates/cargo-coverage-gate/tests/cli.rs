@@ -145,7 +145,9 @@ fn one_crate_below_threshold_exits_1() {
         .assert()
         .code(1)
         .stdout(predicate::str::contains("FAIL"))
-        .stdout(predicate::str::contains("1 package below threshold"));
+        .stdout(predicate::str::contains("1 package below threshold"))
+        .stdout(predicate::str::contains("beta: 60/100 lines covered; 40 uncovered."))
+        .stdout(predicate::str::contains("src/lib.rs: 61-100"));
 }
 
 #[test]

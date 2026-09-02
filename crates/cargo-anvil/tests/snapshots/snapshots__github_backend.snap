@@ -471,6 +471,7 @@ runs:
         failed_recipe="$(sed -n 's/^error: recipe `\([^`]*\)` failed\( on line [0-9][0-9]*\)\{0,1\} with exit code [0-9][0-9]*$/\1/p' "$log" | tail -n 1)"
         echo "failed_recipe=${failed_recipe:-anvil-$ANVIL_GROUP}" >> "$GITHUB_OUTPUT"
         echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+        exit "$status"
 
     # Reporting is supplemental: run after success or failure, but never let
     # an API outage determine the authoritative workflow-job result.
@@ -483,11 +484,6 @@ runs:
         setup_outcome: ${{ steps.setup.outcome }}
         exit_code: ${{ steps.run.outputs.exit_code }}
         failed_recipe: ${{ steps.run.outputs.failed_recipe }}
-
-    - name: "Failed Just recipe: ${{ steps.run.outputs.failed_recipe }}"
-      if: always() && steps.run.outputs.exit_code != '' && steps.run.outputs.exit_code != '0'
-      shell: bash
-      run: exit 1
 
 === .github/actions/anvil-setup/action.yml ===
 # Copyright (c) Microsoft Corporation.
@@ -907,10 +903,11 @@ jobs:
         # Codecov UI without changing the union total.
         # lcov-*.info are produced by the anvil-llvm-cov recipe inside
         # anvil-pr-test (one per feature config); if the affected set was
-        # empty the recipe no-ops and there is no file to upload, so we gate
-        # on the files existing (impact scoping lives in the downloaded cache
-        # now, not a job output). Codecov coalesces the two per-config files.
-        if: matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info', 'target/coverage/lcov-no-default.info') != ''
+        # empty the recipe no-ops and there are no files to upload. `always()`
+        # keeps completed reports publishable after the gate or a later recipe
+        # fails. The separate hashFiles predicates require both feature
+        # configurations; one multi-pattern call would accept a partial pair.
+        if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info') != '' && hashFiles('target/coverage/lcov-no-default.info') != ''
         uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
         with:
           files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
@@ -1136,11 +1133,14 @@ jobs:
           free-disk-space: true
       - name: Upload coverage to Codecov
         # Upload from every leg except windows-11-arm (see the matching
-        # comment in pr-impl-workflow.yml for the rationale).
+        # comment in pr-impl-workflow.yml for the platform rationale).
+        # `always()` preserves completed reports after a later failure, while
+        # separate hashFiles predicates require both feature configurations;
+        # a multi-pattern call would accept either file by itself.
         # Multi-flag tag combines the OS with a "scheduled" marker so
         # the Codecov UI can distinguish PR-tier uploads from scheduled
         # uploads while still tracking each platform separately.
-        if: matrix.os != 'windows-arm'
+        if: always() && matrix.os != 'windows-arm' && hashFiles('target/coverage/lcov-all-features.info') != '' && hashFiles('target/coverage/lcov-no-default.info') != ''
         uses: codecov/codecov-action@v7.0.0 # immutable release, the tag cannot be moved
         with:
           files: target/coverage/lcov-all-features.info,target/coverage/lcov-no-default.info
@@ -1226,7 +1226,7 @@ jobs:
       issues: write
     steps:
       - name: Create or update failure issue
-        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           ANVIL_JOB_RESULTS: ${{ toJSON(needs) }}
         with:
