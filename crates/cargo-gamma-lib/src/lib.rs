@@ -266,8 +266,8 @@ pub fn run_loom_models() {
 /// at, with no `pub(crate)` escape hatches and no `#[cfg(test)]` re-exports widening the API
 /// surface. They compile as separate crates and so cannot see a private module; this facade opens
 /// exactly the same paths for them, under `internals::`, and nothing else. The `internals` feature
-/// is enabled by this crate's own dev-dependency on itself, so it is on for test builds and off for
-/// everything else.
+/// is a required feature of those test targets, so Cargo skips them unless the test command
+/// explicitly enables it.
 ///
 /// Each module is named individually rather than glob-re-exported. A glob would take on whatever
 /// the module gains next, silently and without review; naming the module itself re-exports the same
