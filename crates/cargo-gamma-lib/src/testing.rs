@@ -619,6 +619,36 @@ pub fn workdir(prefix: &str) -> tempfile::TempDir {
         .expect("the temporary directory should be creatable")
 }
 
+/// Creates a temporary directory a redirected cache can be claimed inside.
+///
+/// [`workdir`] puts scratch space under the workspace target directory, which is right for tests
+/// that shell out to cargo and wrong for the ones that hand a path to the redirected-cache checks.
+/// Those refuse a cache whose directory, or any directory above it, another local user can write
+/// to — and on a build agent everything under the checkout is created group-writable, whether by a
+/// permissive umask or by an inherited default ACL. A fixture there reports the agent's filesystem
+/// rather than the behaviour under test: on the Linux agents that publish this repository, six such
+/// tests failed on the fixture's own ancestry while the end-to-end `--cache-dir` tests, whose
+/// scratch space is the system temporary directory, passed on the same run.
+///
+/// The directory itself is created private, so a permissive umask cannot make the terminal
+/// component group- or world-writable either. It is removed when the returned handle is dropped;
+/// `cargo clean` does not reach it, which is the price of putting it somewhere the check accepts.
+#[must_use]
+pub fn cache_workdir(prefix: &str) -> tempfile::TempDir {
+    let mut builder = tempfile::Builder::new();
+
+    builder.prefix(prefix);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        builder.permissions(fs::Permissions::from_mode(0o700));
+    }
+
+    builder.tempdir().expect("the temporary cache directory should be creatable")
+}
+
 /// Announces that a test is standing down, and says why.
 ///
 /// A test that returns early because the host cannot support it is indistinguishable, in the run
@@ -946,6 +976,24 @@ mod tests {
 
         assert!(dir.path().is_dir());
         assert!(dir.path().to_string_lossy().contains("test-work"));
+    }
+
+    /// A cache work directory is private, and is not under the checkout the agent made writable.
+    #[test]
+    fn a_cache_work_directory_is_private_and_outside_the_target_directory() {
+        let dir = cache_workdir("testing-cache-workdir-");
+
+        assert!(dir.path().is_dir());
+        assert!(!dir.path().to_string_lossy().contains("test-work"));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let mode = fs::metadata(dir.path()).expect("the work directory metadata").permissions().mode();
+
+            assert_eq!(mode & 0o077, 0, "the work directory mode {mode:o} grants group or other access");
+        }
     }
 
     /// The portable helper compiles, runs, and does what its directives say — on every platform.
