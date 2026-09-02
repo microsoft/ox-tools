@@ -24,6 +24,9 @@ verdicts, incremental reuse, reporting, and command dispatch.
   `cargo-gamma-rt`.
 - The `internals` feature exists only for this crate's integration tests and
   is not a supported downstream API.
+- The agreement tests use `cargo-gamma-attrs-impl` through a versionless path
+  dev-dependency. Cargo omits that test-only edge from published packages, so
+  it adds no downstream dependency or release-order constraint.
 - The crate forbids unsafe code.
 
 ## Public contract

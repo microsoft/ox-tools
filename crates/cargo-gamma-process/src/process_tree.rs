@@ -1965,12 +1965,11 @@ mod tests {
     fn an_unkilled_grandchild_outlives_its_parent_and_finishes() {
         let work = testing::workdir("gamma-grandchild-control");
         let base = Utf8Path::from_path(work.path()).expect("the temporary path is UTF-8");
-        let (started, finished) = (base.join("started"), base.join("finished"));
+        let (started, release, finished) = (base.join("started"), base.join("release"), base.join("finished"));
 
-        let began = std::time::Instant::now();
         let mut child = Command::new(testing::helper_binary_path().as_std_path())
             .arg(testing::directive(format_args!(
-                "spawn:touch:{started}|sleep:2000|touch:{finished}"
+                "spawn:touch:{started}|wait:{release}|touch:{finished}"
             )))
             .arg(testing::directive("exit:0"))
             .spawn()
@@ -1978,16 +1977,19 @@ mod tests {
 
         assert!(child.wait().expect("wait").success());
 
-        // The parent is gone well before the grandchild's work is done, which is what makes the
-        // grandchild an orphan rather than a child, and this test a fixture check rather than a
-        // restatement of "a process this run waited for had finished".
-        let waited = began.elapsed();
+        let mut grandchild_started = false;
+        for _attempt in 0..600 {
+            if started.exists() {
+                grandchild_started = true;
+                break;
+            }
 
-        assert!(
-            waited < Duration::from_millis(1500),
-            "the parent outlived the grandchild: {waited:?}"
-        );
-        assert!(!finished.exists(), "the grandchild finished before its parent did");
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        assert!(!finished.exists(), "the grandchild ignored the release gate");
+        fs::write(release.as_std_path(), "").expect("release the orphaned grandchild");
+        assert!(grandchild_started, "the grandchild never started after its parent exited");
 
         for _attempt in 0..600 {
             if finished.exists() {

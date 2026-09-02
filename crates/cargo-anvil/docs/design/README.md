@@ -294,9 +294,11 @@ Detail on each host:
   becomes `anvil-lints` and contains a single `[lints]` table with the same
   dotted-key layout.
 - **`deny.toml`** — one managed region per top-level section (`[advisories]`, `[licenses]`,
-  `[bans]`, `[sources]`) carrying the tool's baseline license/advisory rules. Splitting the
-  sections into separate regions lets users add their own keys in the gaps between them
-  (the engine composes the co-hosted regions into one file). Users may also add keys
+  `[bans]`, `[sources]`) carrying the tool's baseline license/advisory rules. The bans baseline
+  rejects wildcard registry requirements while allowing versionless path or Git
+  dev-dependencies, which Cargo omits from published packages. Splitting the sections into
+  separate regions lets users add their own keys in the gaps between them (the engine composes
+  the co-hosted regions into one file). Users may also add keys
   outside the regions. Created if absent. Content detailed in [checks.md](./checks.md).
 - **`rustfmt.toml`** — created with the opinionated baseline if absent; managed region at the
   end of the file. The most contested opinion in the catalog; users who want to keep their own
